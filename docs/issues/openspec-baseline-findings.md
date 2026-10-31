@@ -326,3 +326,7 @@ three times in a row. Both pick local ports that another test running in paralle
 - `splitty-server` `hub::forwards::tests::ipv6_occupation_blocks_saved_open_and_supervisor_rebuild_without_moving`:
   binding `[::1]` on the port the forward had just used again failed (seen 2026-10-31 under the same load; passed
   in the next run).
+- `splitty-core` unit tests for `x86_64-unknown-linux-musl` in release mode (the payload job of the release
+  workflow): the test process sometimes dies with SIGSEGV while the `keeper::process` and `pty::session` tests
+  spawn processes, in about 1 of 15 runs, already at v0.1.29. The v0.1.30 release run needed a rerun of that job.
+  Not seen with the glibc target.
