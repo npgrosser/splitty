@@ -39,8 +39,8 @@ importers:
         specifier: ^6.0.0
         version: 6.0.0
       dockview-core:
-        specifier: ^5.2.0
-        version: 5.2.0
+        specifier: ^8.7.1
+        version: 8.7.1
       ghostty-web:
         specifier: ^0.4.0
         version: 0.4.0
@@ -513,8 +513,8 @@ packages:
   devalue@5.9.4:
     resolution: {integrity: sha512-sPAT4pztbu6586/hrhOnMKS17IJrvg12mXiSPSS3W5qDeN2RGgvZ0diZCm31dBbnevfVmujNO3IM2wrS4Y2Rhg==}
 
-  dockview-core@5.2.0:
-    resolution: {integrity: sha512-Gib8yhK2Ng7w47ASvbUZ7GdhBYbeXEflbIDxf/vobdQBMrN/QXmPaouSsSSkEx5YH0N8ap8GYljfvqjug7h5Fg==}
+  dockview-core@8.7.1:
+    resolution: {integrity: sha512-4+Z7GYsRMAyZYeIS4CaM5f0nloJtvpvri15xKbpNJnlR8+QEhJGjz8F/syMbTUsbWB0X2bQAWEx/I9Rh2vmGIQ==}
 
   enhanced-resolve@5.26.0:
     resolution: {integrity: sha512-9vhedylFonb2YGogzUKX6+Ja72gOJbN1QHAqdrvqLwhdl/QWbKopzoUC9EbQNVsAns/bx/4uyqalrQAoy1IByw==}
@@ -1273,7 +1273,7 @@ snapshots:
 
   devalue@5.9.4: {}
 
-  dockview-core@5.2.0: {}
+  dockview-core@8.7.1: {}
 
   enhanced-resolve@5.26.0:
     dependencies:
