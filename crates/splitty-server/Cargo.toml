@@ -26,7 +26,7 @@ clap = { version = "4", features = ["derive", "env"] }
 rand = "0.8"
 hex = "0.4"
 # The chunks of offered files (`ws::files`).
-base64 = "0.22"
+base64 = "0.23"
 # Plain HTTP only: the CLI talks to 127.0.0.1, never over TLS, so no TLS stack
 # is compiled in (security review SR-29, see docs/security/findings.md).
 reqwest = { version = "0.12", features = ["json"], default-features = false }

@@ -25,7 +25,7 @@ serde_yaml = "0.9"
 glob = "0.3"
 tokio-util = { version = "0.7.18", features = ["rt"] }
 dirs = "6.0.0"
-base64 = "0.22"
+base64 = "0.23"
 vte = { version = "0.15", default-features = false }
 
 [target.'cfg(unix)'.dependencies]
