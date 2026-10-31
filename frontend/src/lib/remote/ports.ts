@@ -66,14 +66,19 @@ export function parseSavedForward(value: unknown): SavedForward | null {
   if (typeof target !== "string" || validateTarget(target) !== target || !isPort(remote) || !isPort(local)
     || typeof label !== "string" || typeof enabled !== "boolean") return null;
   const saved: SavedForward = { target, remote, local, label: forwardLabel(label), enabled };
-  if (typeof lastError === "object" && lastError !== null) {
-    const { code, message, hint } = lastError as Record<string, unknown>;
-    if (typeof code === "string" && typeof message === "string") {
-      saved.lastError = { code: plainText(code, MAX_NAME), message: plainLines(message, MAX_TEXT) };
-      if (typeof hint === "string") saved.lastError.hint = plainText(hint, MAX_TEXT);
-    }
-  }
+  const failure = parseFailure(lastError);
+  if (failure) saved.lastError = failure;
   return saved;
+}
+
+/** A saved rule's `lastError` as plain text, or undefined when it has not the shape. */
+export function parseFailure(value: unknown): ForwardFailure | undefined {
+  if (typeof value !== "object" || value === null) return undefined;
+  const { code, message, hint } = value as Record<string, unknown>;
+  if (typeof code !== "string" || typeof message !== "string") return undefined;
+  const failure: ForwardFailure = { code: plainText(code, MAX_NAME), message: plainLines(message, MAX_TEXT) };
+  if (typeof hint === "string") failure.hint = plainText(hint, MAX_TEXT);
+  return failure;
 }
 
 /** Null means an invalid read, not an empty preference list. */
@@ -178,7 +183,7 @@ export function parseForwards(value: unknown): RemoteForward[] {
   return forwards.sort(byTargetAndPort);
 }
 
-function byTargetAndPort(a: { target: string; remote: number }, b: { target: string; remote: number }): number {
+export function byTargetAndPort(a: { target: string; remote: number }, b: { target: string; remote: number }): number {
   if (a.target !== b.target) return a.target < b.target ? -1 : 1;
   return a.remote - b.remote;
 }

@@ -323,3 +323,6 @@ three times in a row. Both pick local ports that another test running in paralle
 - `splitty-server` `http::tests::a_host_has_at_most_32_forwards`: one of the fixed ports 41001–41032 got no `200`.
 - `splitty-remote` `tunnel::supervisor::tests::forwards_take_the_asked_port_or_any_free_one`: `connect` returned
   fewer than two forwards (`free_port()` releases its reservation before the forward binds).
+- `splitty-server` `hub::forwards::tests::ipv6_occupation_blocks_saved_open_and_supervisor_rebuild_without_moving`:
+  binding `[::1]` on the port the forward had just used again failed (seen 2026-10-31 under the same load; passed
+  in the next run).

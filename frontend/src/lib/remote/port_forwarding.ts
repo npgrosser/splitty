@@ -530,12 +530,12 @@ export class PortForwarding {
   }
 }
 
-function jsonRequest(method: string, body: unknown): RequestInit {
+export function jsonRequest(method: string, body: unknown): RequestInit {
   return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
 }
 
 /** The local server's error answer (`{ error, code?, hint? }`) as plain text. */
-async function failure(res: Response): Promise<ForwardError> {
+export async function failure(res: Response): Promise<ForwardError> {
   let body: unknown;
   try {
     body = await res.json();

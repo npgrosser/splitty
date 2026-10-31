@@ -299,6 +299,17 @@ enum Commands {
     #[command(name = "remote-bridge", hide = true)]
     RemoteBridge,
 
+    /// Serve the host side of a reverse forward (internal)
+    ///
+    /// `prepare` prints the private relay directory as one JSON line; `serve`
+    /// listens on loopback for this user's programs and relays them to the
+    /// socket of the client's `ssh -R`.
+    #[command(name = "remote-relay", hide = true)]
+    RemoteRelay {
+        #[command(subcommand)]
+        action: RelayAction,
+    },
+
     /// Keep one daemon session's PTY and program alive (internal)
     ///
     /// A daemon starts one per session, with the spawn spec on standard input.
@@ -349,6 +360,20 @@ enum Commands {
         /// Target screen ID (defaults to $SPLITTY_SCREEN_ID)
         #[arg(long)]
         screen: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum RelayAction {
+    /// Make the relay directory and print it
+    Prepare,
+    /// Listen on 127.0.0.1:<port> and [::1]:<port> and relay to <socket>
+    Serve {
+        #[arg(long)]
+        port: u16,
+
+        #[arg(long)]
+        socket: std::path::PathBuf,
     },
 }
 
@@ -1109,6 +1134,21 @@ async fn async_main() {
                 std::process::exit(1);
             }
         }
+        Commands::RemoteRelay { action } => match action {
+            RelayAction::Prepare => match splitty_server::host::relay::prepare() {
+                Ok(line) => emit_line!("{line}"),
+                Err(reason) => {
+                    eprintln!("{reason}");
+                    std::process::exit(1);
+                }
+            },
+            RelayAction::Serve { port, socket } => {
+                let status = splitty_server::host::relay::serve(port, &socket).await;
+                if status != 0 {
+                    std::process::exit(status);
+                }
+            }
+        },
         Commands::IssueBootstrap { ctl } => {
             handle_ctl(async {
                 // Reaches the server over TCP with the process token rather than

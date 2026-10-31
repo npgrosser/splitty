@@ -57,6 +57,12 @@ pub(crate) fn api_routes_with(hub: Arc<Hub>) -> Router<AppState> {
     let preferences_hub = hub.clone();
     let saving_forward_hub = hub.clone();
     let forgetting_forward_hub = hub.clone();
+    let listing_reverse_hub = hub.clone();
+    let reversing_hub = hub.clone();
+    let stopping_reverse_hub = hub.clone();
+    let reverse_preferences_hub = hub.clone();
+    let saving_reverse_hub = hub.clone();
+    let forgetting_reverse_hub = hub.clone();
     Router::new()
         // Health (no auth required — middleware skips /health)
         .route("/health", get(health))
@@ -151,6 +157,48 @@ pub(crate) fn api_routes_with(hub: Arc<Hub>) -> Router<AppState> {
                 .delete(move |body: Result<Json<Value>, JsonRejection>| async move {
                     match body {
                         Ok(Json(body)) => forget_forward(&forgetting_forward_hub, body).await,
+                        Err(error) => preference_rejected(error),
+                    }
+                }),
+        )
+        // Reverse forwards: ports of this machine shared with hosts. The
+        // local server's own port is never shared.
+        .route(
+            "/api/remote/reverse-forwards",
+            get(move || async move { Json(listing_reverse_hub.reverses()) })
+                .post(
+                    move |State(state): State<AppState>,
+                          body: Result<Json<Value>, JsonRejection>| async move {
+                        reserve_own_port(&reversing_hub, &state);
+                        match body {
+                            Ok(Json(body)) => open_reverse(&reversing_hub, body).await,
+                            Err(error) => preference_rejected(error),
+                        }
+                    },
+                )
+                .delete(move |body: Result<Json<Value>, JsonRejection>| async move {
+                    match body {
+                        Ok(Json(body)) => stop_reverse(&stopping_reverse_hub, body).await,
+                        Err(error) => preference_rejected(error),
+                    }
+                }),
+        )
+        .route(
+            "/api/remote/reverse-forward-preferences",
+            get(move || async move { Json(reverse_preferences_hub.reverse_preferences()) })
+                .put(
+                    move |State(state): State<AppState>,
+                          body: Result<Json<Value>, JsonRejection>| async move {
+                        reserve_own_port(&saving_reverse_hub, &state);
+                        match body {
+                            Ok(Json(body)) => save_reverse(&saving_reverse_hub, body).await,
+                            Err(error) => preference_rejected(error),
+                        }
+                    },
+                )
+                .delete(move |body: Result<Json<Value>, JsonRejection>| async move {
+                    match body {
+                        Ok(Json(body)) => forget_reverse(&forgetting_reverse_hub, body).await,
                         Err(error) => preference_rejected(error),
                     }
                 }),
@@ -316,6 +364,8 @@ async fn remote_upgrade(
     if let Some(refused) = refuse_upgrade(&state, &params, &request) {
         return refused;
     }
+    // Saved reverse forwards are restored on this socket's readiness.
+    reserve_own_port(&hub, &state);
 
     let ws = match request.extract::<WebSocketUpgrade, _>().await {
         Ok(ws) => ws,
@@ -530,6 +580,109 @@ async fn stop_forward(hub: &Hub, body: Value) -> Response {
     }
 }
 
+/// Tell the hub which local port this server listens on, so that it is
+/// never shared with a host.
+fn reserve_own_port(hub: &Hub, state: &AppState) {
+    if let Some(port) = state
+        .listen_addr
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.parse::<u16>().ok())
+    {
+        hub.reserve_local_port(port);
+    }
+}
+
+/// The body of `POST /api/remote/reverse-forwards`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenReverseRequest {
+    target: String,
+    port: i64,
+    local: i64,
+}
+
+/// The body of `DELETE` on both reverse-forward APIs.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ReverseKey {
+    target: String,
+    port: i64,
+}
+
+/// The body of `PUT /api/remote/reverse-forward-preferences`.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SaveReverseRequest {
+    target: String,
+    port: i64,
+    #[serde(default, deserialize_with = "supplied")]
+    local: Option<i64>,
+}
+
+/// The 400 for a reverse-forward body without the expected fields.
+fn refuse_reverse_request(expected: &str, error: &serde_json::Error) -> Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({"error": format!("expected {expected}: {error}")})),
+    )
+        .into_response()
+}
+
+/// `POST /api/remote/reverse-forwards`: 200 with the reverse forward once the
+/// host's relay listens, or the one that exists.
+async fn open_reverse(hub: &Hub, body: Value) -> Response {
+    let request: OpenReverseRequest = match serde_json::from_value(body) {
+        Ok(request) => request,
+        Err(error) => return refuse_reverse_request(r#"{"target", "port", "local"}"#, &error),
+    };
+    match hub
+        .open_reverse(&request.target, request.port, request.local)
+        .await
+    {
+        Ok(reverse) => Json(reverse).into_response(),
+        Err(error) => forward_failed(&request.target, error),
+    }
+}
+
+/// `DELETE /api/remote/reverse-forwards`: 204 once the reverse forward's
+/// `ssh` has ended.
+async fn stop_reverse(hub: &Hub, body: Value) -> Response {
+    let request: ReverseKey = match serde_json::from_value(body) {
+        Ok(request) => request,
+        Err(error) => return refuse_reverse_request(r#"{"target", "port"}"#, &error),
+    };
+    match hub.stop_reverse(&request.target, request.port).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => forward_failed(&request.target, error),
+    }
+}
+
+async fn save_reverse(hub: &Hub, body: Value) -> Response {
+    let request: SaveReverseRequest = match serde_json::from_value(body) {
+        Ok(request) => request,
+        Err(error) => return refuse_reverse_request(r#"{"target", "port", "local"?}"#, &error),
+    };
+    match hub
+        .save_reverse(&request.target, request.port, request.local)
+        .await
+    {
+        Ok(row) => Json(row).into_response(),
+        Err(error) => forward_failed(&request.target, error),
+    }
+}
+
+async fn forget_reverse(hub: &Hub, body: Value) -> Response {
+    let request: ReverseKey = match serde_json::from_value(body) {
+        Ok(request) => request,
+        Err(error) => return refuse_reverse_request(r#"{"target", "port"}"#, &error),
+    };
+    match hub.forget_reverse(&request.target, request.port).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(error) => forward_failed(&request.target, error),
+    }
+}
+
 /// A failed forward request: 400 for an invalid target or port, 404 for a
 /// forward that does not exist, 409 for a host at its limit, and for a
 /// forward that could not be opened 502 (500 for a local problem) with the
@@ -546,7 +699,9 @@ fn forward_failed(target: &str, error: crate::hub::ForwardError) -> Response {
         | ForwardError::PreferenceLimit
         | ForwardError::LocalConflict { .. }
         | ForwardError::ActiveConflict { .. }
-        | ForwardError::Paused => StatusCode::CONFLICT,
+        | ForwardError::Paused
+        | ForwardError::HostPortConflict { .. }
+        | ForwardError::LocalPortReserved { .. } => StatusCode::CONFLICT,
         ForwardError::Storage(_) | ForwardError::OperationEnded => {
             StatusCode::INTERNAL_SERVER_ERROR
         }

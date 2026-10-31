@@ -1,5 +1,6 @@
 import type { HostGroup } from "../../lib/remote/on_hosts.ts";
 import type { PortRow } from "../../lib/remote/ports.ts";
+import type { ShareRow } from "../../lib/remote/reverse_forwards.ts";
 
 /** Presentation only: never infer tunnel health from a screen connection. */
 export function hostSummary(group: HostGroup): string {
@@ -15,7 +16,8 @@ export function hostSummary(group: HostGroup): string {
   return [status, ...counts].join(" · ");
 }
 
-export function portsSummary(rows: readonly PortRow[]): string {
+/** The heading note of a host's forwarded ports, or of the local ports shared with it. */
+export function portsSummary(rows: readonly (PortRow | ShareRow)[]): string {
   if (rows.some((row) => row.pending)) return "Updating…";
   const errors = rows.filter((row) => row.error).length;
   if (errors) return `${errors} ${errors === 1 ? "needs" : "need"} attention`;
@@ -60,6 +62,46 @@ export function portMenu(row: PortRow): { action: PortMenuAction; label: string;
   }
   if (row.saved) {
     items.push({ action: "forget", label: "Forget", detail: row.forward ? "Keeps this forward running; Stop pauses it" : "Removes the saved mapping" });
+  }
+  return items;
+}
+
+// ── Shared Local Ports ──
+
+export function shareStatus(row: ShareRow): string {
+  if (row.pending) return { share: "Sharing…", stop: "Stopping…", save: "Saving…", forget: "Forgetting…" }[row.pending];
+  if (row.forward) return row.forward.state === "up" ? "Shared" : "Reconnecting…";
+  if (row.error) {
+    return row.error.code === "host_port_conflict" ? "Port in use on the host"
+      : row.error.code === "unsupported_host" ? "Not supported on this host"
+      : row.saved?.lastError ? "Share failed" : "Action failed";
+  }
+  if (row.saved?.enabled === false) return "Paused";
+  return "Starts when host connects";
+}
+
+/**
+ * The one action a share row shows. Start, Resume and Retry share a listed
+ * rule again; it was consented to when it was shared, so they do not warn.
+ */
+export function sharePrimary(row: ShareRow): "Stop" | "Resume" | "Retry" | "Start" {
+  if (row.forward) return "Stop";
+  if (row.error) return "Retry";
+  return row.saved?.enabled === false ? "Resume" : "Start";
+}
+
+export type ShareMenuAction = "stop" | "remember" | "forget";
+
+/** What a share row's "⋯" menu offers, with what each does where it is not obvious. */
+export function shareMenu(row: ShareRow): { action: ShareMenuAction; label: string; detail?: string }[] {
+  const items: { action: ShareMenuAction; label: string; detail?: string }[] = [];
+  if (!row.forward && row.saved?.enabled) {
+    items.push({ action: "stop", label: "Stop", detail: "Pauses the saved share until you resume it" });
+  }
+  if (row.saved) {
+    items.push({ action: "forget", label: "Forget", detail: row.forward ? "Keeps sharing now; Stop ends it" : "Removes the saved share" });
+  } else {
+    items.push({ action: "remember", label: "Remember", detail: "Share it again when this host connects" });
   }
   return items;
 }

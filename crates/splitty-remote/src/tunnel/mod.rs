@@ -8,14 +8,20 @@
 //! long-lived credential crossing the link. The same `ssh` forwards the ports
 //! of [`open_forwarding`] (`splitty connect --forward`). [`supervise`] rebuilds
 //! the tunnel when it drops. A [`PortTunnel`] forwards one port of a host by
-//! an `ssh` of its own.
+//! an `ssh` of its own, and a [`ReverseTunnel`] shares one port of this
+//! machine with a host the same way.
 
 mod forward;
+mod reverse;
 mod supervisor;
 
 pub use forward::{
     check_forward_address, parse_forwards, reserve, reserve_exact, Forward, ForwardError,
     PortForward, PortTunnel, PortTunnelError,
+};
+pub use reverse::{
+    parse_prepared, prepare_command, socket_path, ReverseTunnel, ReverseTunnelError, HEARTBEAT,
+    MAX_SOCKET_PATH, RELAY_FAILED, RELAY_READY,
 };
 pub use supervisor::{
     backoff, connect, supervise, Connected, Event, Progress, Remote, Step, Tunnel, GIVE_UP_AFTER,

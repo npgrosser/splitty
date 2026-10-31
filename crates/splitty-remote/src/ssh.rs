@@ -196,6 +196,16 @@ pub fn forward_only_options() -> Vec<String> {
         .collect()
 }
 
+/// Options for a connection that carries the one remote forward named on
+/// its command line and the command that serves it on the host, with its
+/// standard input and output: no terminal, no agent or X11 forwarding. As
+/// for [`forward_only_options`], the configuration's forwards cannot be
+/// switched off without clearing the command line's; a caller checks them
+/// with [`Ssh::configured_forwards`].
+pub fn relay_only_options() -> Vec<String> {
+    ["-T", "-a", "-x"].iter().map(|s| s.to_string()).collect()
+}
+
 /// The keywords of `ssh -G` that name a forward.
 const FORWARD_KEYWORDS: [&str; 3] = ["localforward", "remoteforward", "dynamicforward"];
 
@@ -358,6 +368,15 @@ impl Ssh {
     pub fn forward_only(target: SshTarget) -> Self {
         Self {
             options: forward_only_options(),
+            ..Self::new(target)
+        }
+    }
+
+    /// The host, for one remote forward named on the command line and the
+    /// command that serves it ([`relay_only_options`]).
+    pub fn relay_only(target: SshTarget) -> Self {
+        Self {
+            options: relay_only_options(),
             ..Self::new(target)
         }
     }

@@ -58,6 +58,12 @@ pub enum ForwardError {
     Storage(#[from] std::io::Error),
     #[error("Forward operation ended before completion.")]
     OperationEnded,
+    /// A reverse forward's port is in use on the host.
+    #[error("Port {port} is already in use on {host}; choose another port on the host.")]
+    HostPortConflict { host: String, port: u16 },
+    /// A reverse forward would share the local server's own port.
+    #[error("Port {port} is this Splitty's own port; it is never shared.")]
+    LocalPortReserved { port: u16 },
     #[error(transparent)]
     Failed(HubError),
 }
@@ -72,11 +78,13 @@ impl ForwardError {
             Self::ActiveConflict { .. } => Some("active_mapping_conflict"),
             Self::Storage(_) => Some("storage_failure"),
             Self::OperationEnded => Some("internal"),
+            Self::HostPortConflict { .. } => Some("host_port_conflict"),
+            Self::LocalPortReserved { .. } => Some("local_port_reserved"),
             _ => None,
         }
     }
 
-    fn saved_error(&self, target: &str) -> SavedError {
+    pub(super) fn saved_error(&self, target: &str) -> SavedError {
         if let Self::Failed(error) = self {
             let failure = error.failure(target);
             return SavedError {

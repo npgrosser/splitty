@@ -31,7 +31,7 @@
   import type { HostScreen } from "../../lib/remote/remote_socket.ts";
   import { hostOf, type ConnKey } from "../../lib/connection/server_connection.ts";
   import { getLocalVersion, hostViews } from "../../stores/connections.svelte.ts";
-  import { hostPortLists, portForwarding } from "../../stores/ports.svelte.ts";
+  import { hostPortLists, hostShareLists, portForwarding, reverseForwarding } from "../../stores/ports.svelte.ts";
   import HostsPanel from "./HostsPanel.svelte";
   import { remoteWindows } from "../../lib/remoteWindows.ts";
   import { unclaimedEscape } from "./inline_focus.ts";
@@ -83,10 +83,11 @@
       ? drawerState : null
   );
   const portLists = $derived(hostPortLists());
+  const shareLists = $derived(hostShareLists());
   // Host groups outlive their connections and include last-seen directories.
   // The screen list shows a host only while the window shows its screens;
   // every host is in the Hosts panel.
-  const groups = $derived(hostGroups(screens, hostViews(), recentHosts, catalog, portLists, preferences, getHostOrder()));
+  const groups = $derived(hostGroups(screens, hostViews(), recentHosts, catalog, [...portLists, ...shareLists], preferences, getHostOrder()));
   const openGroups = $derived(groups.filter((group) => group.open.length > 0));
   const localScreens = $derived(screens.filter((s) => s.conn === "local"));
   // "Ports": per host its listed ports and the local server's forwards
@@ -94,8 +95,10 @@
   const portTargets = $derived([...new Set([...groups.map((g) => g.target), ...recentHosts.map((h) => h.target)])]);
   $effect(() => {
     const controller = portForwarding();
+    const shared = reverseForwarding();
     controller?.setViewOpen(isOpen);
-    return () => controller?.setViewOpen(false);
+    shared?.setViewOpen(isOpen);
+    return () => { controller?.setViewOpen(false); shared?.setViewOpen(false); };
   });
 
   // ── Hosts ──
@@ -681,6 +684,7 @@
             {onSetHostAlias}
             {onForgetHost}
             {portLists}
+            {shareLists}
             {portTargets}
             focus={hostFocus}
             {activeScreenId}

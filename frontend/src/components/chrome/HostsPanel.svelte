@@ -1,7 +1,8 @@
 <!--
   The drawer's Hosts panel: every host the window knows, connected or not,
-  with the screens it runs and its ports. The screen list itself shows only
-  the screens open in the window; whatever else a host has lives here.
+  with the screens it runs, its ports and the local ports shared with it.
+  The screen list itself shows only the screens open in the window; whatever
+  else a host has lives here.
 -->
 <script lang="ts">
   import { onDestroy, tick, untrack } from "svelte";
@@ -9,6 +10,7 @@
   import type { HostGroup } from "../../lib/remote/on_hosts.ts";
   import type { HostScreen } from "../../lib/remote/remote_socket.ts";
   import type { PortRow } from "../../lib/remote/ports.ts";
+  import type { ShareRow } from "../../lib/remote/reverse_forwards.ts";
   import type { ConnKey } from "../../lib/connection/server_connection.ts";
   import { describeFailure, hostIndicator, hostTooltip } from "../../lib/remote/screen_status.ts";
   import { updateNote } from "../../lib/remote/update.ts";
@@ -17,12 +19,15 @@
   import { MAX_HOST_ALIAS } from "../../lib/remote/host_preferences.ts";
   import { focusInlineForm } from "./inline_focus.ts";
   import HostPorts from "./HostPorts.svelte";
+  import HostShares from "./HostShares.svelte";
   import ManualPortForm from "./ManualPortForm.svelte";
   import { hostSummary } from "./remote_view.ts";
 
   interface Props {
     groups: readonly HostGroup<Screen>[];
     portLists: readonly { target: string; rows: readonly PortRow[] }[];
+    /** Per host the local ports shared with it. */
+    shareLists?: readonly { target: string; rows: readonly ShareRow[] }[];
     portTargets: readonly string[];
     /** The host to unfold and scroll to; a new `seq` asks again. */
     focus: { key: ConnKey; seq: number } | null;
@@ -43,7 +48,7 @@
   }
 
   let {
-    groups, portLists, portTargets, focus, activeScreenId,
+    groups, portLists, shareLists = [], portTargets, focus, activeScreenId,
     onShowScreen, onOpenHostScreen, onConnectHost, onBrowseHost, onNewHostScreen, onConnectNew, onOpenWindow, onUpdateHost, onSetHostAlias, onForgetHost,
   }: Props = $props();
   const id = $props.id();
@@ -257,6 +262,7 @@
           </div>
 
           <HostPorts target={group.target} rows={ports} targets={portTargets} />
+          <HostShares target={group.target} rows={shareLists.find((host) => host.target === group.target)?.rows ?? []} />
         </div>
         {/if}
       </div>

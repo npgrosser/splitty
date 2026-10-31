@@ -6,7 +6,7 @@ model {
   extend splitty.remote {
 
     ssh = component 'ssh' {
-      description 'Reaching a host with the system ssh (on Windows the system\'s OpenSSH, without a console window): the validated target (SR-13), the hardened command, stdio-only connections (no terminal, no agent, X11 or configured forwards), forward-only connections (-N, no terminal, agent or X11) and the forwards a host\'s configuration adds (ssh -G), POSIX quoting and allowlists for the one command line the host\'s login shell parses, the Executor trait and what a failure means (127, host keys, refused logins).'
+      description 'Reaching a host with the system ssh (on Windows the system\'s OpenSSH, without a console window): the validated target (SR-13), the hardened command, stdio-only connections (no terminal, no agent, X11 or configured forwards), forward-only connections (-N, no terminal, agent or X11), relay-only connections (a command, no terminal, agent or X11) and the forwards a host\'s configuration adds (ssh -G), POSIX quoting and allowlists for the one command line the host\'s login shell parses, the Executor trait and what a failure means (127, host keys, refused logins).'
       metadata {
         module 'splitty_remote::ssh'
       }
@@ -35,7 +35,7 @@ model {
     }
 
     tunnel = component 'tunnel' {
-      description 'A tunnel to a host\'s daemon, for splitty connect and the desktop apps: open runs install, the handshake (starting a missing daemon on a port free on both ends), the forward bound to 127.0.0.1 and the first single-use bootstrap code, reporting each step; its supervisor rebuilds a dropped tunnel, keeping the port reserved, mints a new URL only for a restarted daemon and gives up after a time the caller sets. Also the failures\' messages and hints, the events of connect --json, and PortTunnel: one port forwarded by a forward-only ssh of its own (refused for a host whose configuration forwards ports), verified through a bounded fixed local-command marker after OpenSSH binds, then TCP/liveness and IPv6 checks; no multiplex reuse or backgrounding. Saved/explicit local ports and every automatically chosen candidate must be free on both supported loopback families, with checks repeated across handoff and rebuild.'
+      description 'A tunnel to a host\'s daemon, for splitty connect and the desktop apps: open runs install, the handshake (starting a missing daemon on a port free on both ends), the forward bound to 127.0.0.1 and the first single-use bootstrap code, reporting each step; its supervisor rebuilds a dropped tunnel, keeping the port reserved, mints a new URL only for a restarted daemon and gives up after a time the caller sets. Also the failures\' messages and hints, the events of connect --json, and PortTunnel: one port forwarded by a forward-only ssh of its own (refused for a host whose configuration forwards ports), verified through a bounded fixed local-command marker after OpenSSH binds, then TCP/liveness and IPv6 checks; no multiplex reuse or backgrounding. Saved/explicit local ports and every automatically chosen candidate must be free on both supported loopback families, with checks repeated across handoff and rebuild. ReverseTunnel: one local port shared with a Linux host by a relay-only ssh of its own (-R to a Unix socket in the host\'s relay directory, the command remote-relay serve), established on the relay\'s ready line and kept alive by a heartbeat line every 10 seconds.'
       metadata {
         module 'splitty_remote::tunnel'
         spec 'cli'

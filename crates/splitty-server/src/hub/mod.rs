@@ -20,9 +20,10 @@
 //! bridge and the client's relayed messages: no cookie, ticket or token.
 //!
 //! The hub also keeps the client's list of remote screens across restarts
-//! (`remembered`), their last observed directories (`catalog`), and forwards
-//! ports of hosts on request (`forwards`), each
-//! with an `ssh` of its own that lives until the forward is stopped.
+//! (`remembered`), their last observed directories (`catalog`), forwards
+//! ports of hosts on request (`forwards`) and shares ports of this machine
+//! with hosts on request (`reverse`), each with an `ssh` of its own that
+//! lives until the forward is stopped.
 
 mod catalog;
 mod connector;
@@ -30,6 +31,7 @@ mod failure;
 mod forwards;
 mod preferences;
 mod remembered;
+mod reverse;
 #[cfg(all(test, unix))]
 pub(crate) mod testing;
 
@@ -58,6 +60,7 @@ pub use failure::{compatible, Code, Failure, HubError};
 pub use forwards::{ForwardError, ForwardInfo, ForwardState, MAX_PER_HOST};
 pub use preferences::{Preferences, SavedForward};
 pub use remembered::{RememberError, Remembered};
+pub use reverse::{ReverseInfo, ReversePreferences, SavedReverse};
 
 /// This server's version: the one it installs on hosts, and the one
 /// `update=1` brings a host's daemon to.
@@ -120,10 +123,21 @@ pub trait Connector: Send + Sync {
         local: PortReservation,
         remote: u16,
     ) -> BoxFuture<'a, Result<Box<dyn Forwarding>, HubError>>;
+
+    /// Share `localhost:<local>` here as `localhost:<port>` on `target`
+    /// (a reverse forward), once the host's relay listens: the install's
+    /// prepare, `remote-relay prepare`, then `ssh -R` with `remote-relay
+    /// serve`.
+    fn reverse<'a>(
+        &'a self,
+        target: &'a SshTarget,
+        local: u16,
+        port: u16,
+    ) -> BoxFuture<'a, Result<Box<dyn Forwarding>, HubError>>;
 }
 
-/// A forward the hub holds: an `ssh -N` with the system `ssh`, a listener of
-/// the test in tests. Dropping it ends it.
+/// A forward the hub holds, in either direction: an `ssh` with the system
+/// `ssh`, a listener of the test in tests. Dropping it ends it.
 pub trait Forwarding: Send {
     /// Resolves when the forward has ended, with why. Cancel-safe.
     fn ended(&mut self) -> BoxFuture<'_, String>;
@@ -224,6 +238,7 @@ pub struct Hub {
     /// answers with is the one in the file.
     remembering: Mutex<()>,
     forwards: forwards::Forwards,
+    reverses: reverse::Reverses,
 }
 
 impl Hub {
@@ -235,6 +250,7 @@ impl Hub {
         let connector: Arc<dyn Connector> = Arc::from(connector);
         Self {
             forwards: forwards::Forwards::new(connector.clone(), config_dir.clone()),
+            reverses: reverse::Reverses::new(connector.clone(), config_dir.clone()),
             connector,
             config_dir,
             ssh_dir,
@@ -377,6 +393,50 @@ impl Hub {
         self.forwards.stop(target, port).await
     }
 
+    /// The local server listens on `port`, which is never shared with a
+    /// host.
+    pub fn reserve_local_port(&self, port: u16) {
+        self.reverses.reserve(port);
+    }
+
+    /// Share local port `local` as `port` of `target`, for `POST
+    /// /api/remote/reverse-forwards`, or return the one that exists.
+    pub async fn open_reverse(
+        &self,
+        target: &str,
+        port: i64,
+        local: i64,
+    ) -> Result<ReverseInfo, ForwardError> {
+        self.reverses.open(target, port, local).await
+    }
+
+    /// Every reverse forward, for `GET /api/remote/reverse-forwards`.
+    pub fn reverses(&self) -> Vec<ReverseInfo> {
+        self.reverses.list()
+    }
+
+    /// Stop a reverse forward, for `DELETE /api/remote/reverse-forwards`.
+    pub async fn stop_reverse(&self, target: &str, port: i64) -> Result<(), ForwardError> {
+        self.reverses.stop(target, port).await
+    }
+
+    pub fn reverse_preferences(&self) -> ReversePreferences {
+        self.reverses.preferences()
+    }
+
+    pub async fn save_reverse(
+        &self,
+        target: &str,
+        port: i64,
+        local: Option<i64>,
+    ) -> Result<SavedReverse, ForwardError> {
+        self.reverses.save(target, port, local).await
+    }
+
+    pub async fn forget_reverse(&self, target: &str, port: i64) -> Result<(), ForwardError> {
+        self.reverses.forget(target, port).await
+    }
+
     /// Serve one upgraded `/ws/remote` socket for `target`, as the client
     /// sent it, until either side ends. With `update`, a daemon of another
     /// version is replaced by one of this version first.
@@ -439,6 +499,7 @@ impl Hub {
                     );
                 }
                 self.forwards.restore(target.as_str());
+                self.reverses.restore(target.as_str());
                 relay(target.as_str(), sink, stream, bridge, first, early).await;
             }
         }

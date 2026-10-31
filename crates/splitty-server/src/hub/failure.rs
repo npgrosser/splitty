@@ -11,7 +11,7 @@ use serde::Serialize;
 use splitty_remote::handshake::{HandshakeError, Screen};
 use splitty_remote::install::InstallError;
 use splitty_remote::ssh::{self, SshError, TargetError};
-use splitty_remote::tunnel::PortTunnelError;
+use splitty_remote::tunnel::{PortTunnelError, ReverseTunnelError};
 
 /// Why a socket failed before the relay.
 #[derive(Debug, thiserror::Error)]
@@ -90,6 +90,22 @@ pub enum HubError {
 
     #[error("No local port is free for the forward ({0}).")]
     ForwardPort(io::Error),
+
+    /// The host cannot tell which user a connection comes from.
+    #[error("Sharing a port needs a Linux host; {host} runs {kernel}.")]
+    ReverseUnsupported { host: String, kernel: String },
+
+    /// `remote-relay prepare` failed on the host.
+    #[error(transparent)]
+    RelayPrepare(SshError),
+
+    /// `remote-relay prepare` answered something unusable.
+    #[error("The relay on {host} answered: {detail}")]
+    RelayAnswer { host: String, detail: String },
+
+    /// A reverse forward's `ssh` or the host's relay failed.
+    #[error(transparent)]
+    Reverse(ReverseTunnelError),
 }
 
 /// The `code` of a `remote.error`.
@@ -217,6 +233,18 @@ fn connection_failure(host: &str, error: &SshError) -> Option<Failure> {
 
 /// A `splitty` on the host's `PATH` older than `remote-handshake`: clap
 /// rejects the subcommand or the flag.
+/// The host's `splitty` does not know `remote-relay`.
+fn relay_unknown(error: &SshError) -> bool {
+    matches!(error, SshError::Failed { status, stderr, .. }
+        if *status != Some(255) && stderr.contains("'remote-relay'"))
+}
+
+/// The host's `sshd` refused the remote forward.
+fn remote_forward_refused(error: &SshError) -> bool {
+    matches!(error, SshError::Failed { stderr, .. }
+        if stderr.contains("remote port forwarding failed"))
+}
+
 fn too_old(error: &SshError) -> bool {
     matches!(error, SshError::Failed { status, stderr, .. }
         if *status != Some(255)
@@ -232,7 +260,13 @@ impl HubError {
             | HubError::Handshake(HandshakeError::Ssh(error))
             | HubError::Stop(error)
             | HubError::Bridge(error)
-            | HubError::Forward(PortTunnelError::Ssh(error)) => Some(error),
+            | HubError::Forward(PortTunnelError::Ssh(error))
+            | HubError::RelayPrepare(error) => Some(error),
+            // `ssh` exits with 255 when the host refuses the forward too,
+            // which is no failure to reach the host.
+            HubError::Reverse(ReverseTunnelError::Ssh(error)) if !remote_forward_refused(error) => {
+                Some(error)
+            }
             _ => None,
         };
         if let Some(failure) = ssh_error.and_then(|error| connection_failure(host, error)) {
@@ -334,6 +368,46 @@ impl HubError {
                 None,
             ),
             HubError::ForwardPort(_) => Failure::new(Code::Internal, self.to_string(), None),
+            HubError::ReverseUnsupported { .. } => {
+                Failure::new(Code::UnsupportedHost, self.to_string(), None)
+            }
+            HubError::RelayPrepare(error) if relay_unknown(error) => Failure::new(
+                Code::UnsupportedHost,
+                format!("The splitty on {host} is too old to share ports with."),
+                Some(format!("Update splitty on {host}.")),
+            ),
+            HubError::RelayPrepare(error) => Failure::new(
+                Code::Forward,
+                format!("Failed to prepare {host} for a shared port: {error}"),
+                None,
+            ),
+            HubError::RelayAnswer { .. } => Failure::new(Code::Forward, self.to_string(), None),
+            HubError::Reverse(ReverseTunnelError::ConfiguredForwards { .. }) => Failure::new(
+                Code::Forward,
+                format!("Splitty does not share ports with {host}: {self}."),
+                Some(format!(
+                    "Move the forwards to a Host entry of their own for the same machine in the \
+                     SSH configuration, and keep {host} without forwards."
+                )),
+            ),
+            HubError::Reverse(ReverseTunnelError::Relay { code, .. }) if code == "unsupported" => {
+                Failure::new(Code::UnsupportedHost, self.to_string(), None)
+            }
+            HubError::Reverse(ReverseTunnelError::Ssh(error)) if remote_forward_refused(error) => {
+                Failure::new(
+                    Code::Forward,
+                    format!("{host} refused the forward of a shared port: {error}"),
+                    Some(format!(
+                        "The SSH server of {host} must allow forwarding to Unix sockets \
+                         (AllowStreamLocalForwarding)."
+                    )),
+                )
+            }
+            HubError::Reverse(error) => Failure::new(
+                Code::Forward,
+                format!("Failed to share a port with {host}: {error}"),
+                None,
+            ),
         }
     }
 }

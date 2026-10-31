@@ -3,9 +3,10 @@
 //! script, so the relay runs against a real process and real pipes. Its
 //! forwards are listeners of the test process on the forward's local port,
 //! which answer every connection with `forwarded <port>` and end when the
-//! test says their `ssh` exited.
+//! test says their `ssh` exited. Its reverse forwards are listeners on the
+//! host's port that relay to the local port, as the host's relay would.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -17,7 +18,7 @@ use splitty_remote::bridge::{encode, Bridge, Frame};
 use splitty_remote::handshake::{self, Handshake};
 use splitty_remote::install::{Prepared, Probe, Server};
 use splitty_remote::ssh::{SshError, SshTarget};
-use splitty_remote::tunnel::{PortReservation, PortTunnelError};
+use splitty_remote::tunnel::{PortReservation, PortTunnelError, ReverseTunnelError};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -74,6 +75,15 @@ pub struct ScriptedHost {
     forwards: Arc<Mutex<HashMap<u16, Arc<Notify>>>>,
     forward_gates: Arc<Mutex<HashMap<u16, Arc<ForwardGate>>>>,
     stop_gates: Arc<Mutex<HashMap<u16, Arc<ForwardGate>>>>,
+    /// The kernel the probe reports.
+    kernel: &'static str,
+    /// The host's ports in use there.
+    busy: Arc<Mutex<HashSet<u16>>>,
+    /// How many of the next reverse forwards fail as if the host were
+    /// unreachable.
+    failing_reverses: Arc<AtomicUsize>,
+    /// What ends the running reverse forward of each port of the host.
+    reverses: Arc<Mutex<HashMap<u16, Arc<Notify>>>>,
 }
 
 impl ScriptedHost {
@@ -102,6 +112,39 @@ impl ScriptedHost {
             forwards: Arc::default(),
             forward_gates: Arc::default(),
             stop_gates: Arc::default(),
+            kernel: "Linux",
+            busy: Arc::default(),
+            failing_reverses: Arc::default(),
+            reverses: Arc::default(),
+        }
+    }
+
+    /// The probe reports `kernel`, such as `Darwin`.
+    pub fn with_kernel(mut self, kernel: &'static str) -> Self {
+        self.kernel = kernel;
+        self
+    }
+
+    /// Port `port` of the host is in use there, or free again.
+    pub fn set_busy(&self, port: u16, busy: bool) {
+        let mut ports = self.busy.lock().expect("busy");
+        if busy {
+            ports.insert(port);
+        } else {
+            ports.remove(&port);
+        }
+    }
+
+    /// The next `count` reverse forwards fail, as if the host were
+    /// unreachable.
+    pub fn fail_next_reverses(&self, count: usize) {
+        self.failing_reverses.store(count, Ordering::SeqCst);
+    }
+
+    /// The `ssh` of the reverse forward to the host's `port` exits.
+    pub fn end_reverse(&self, port: u16) {
+        if let Some(ended) = self.reverses.lock().expect("reverses").get(&port) {
+            ended.notify_one();
         }
     }
 
@@ -197,7 +240,7 @@ impl ScriptedHost {
 
     /// What the hub asked the host, in order: `prepare <target>`,
     /// `handshake <port hint>`, `stop`, `bridge`, `forward <port> at <local
-    /// port>`.
+    /// port>`, `reverse <target> <port> from <local port>`.
     pub fn asked(&self) -> Vec<String> {
         self.asked.lock().expect("asked").clone()
     }
@@ -243,7 +286,7 @@ impl Connector for ScriptedHost {
                     config_dir: None,
                 },
                 probe: Probe {
-                    kernel: "Linux".into(),
+                    kernel: self.kernel.into(),
                     arch: arch.into(),
                     home: "/home/u".into(),
                     marker: None,
@@ -371,6 +414,84 @@ impl Connector for ScriptedHost {
                 stop_gates: self.stop_gates.clone(),
             }) as Box<dyn Forwarding>)
         })
+    }
+
+    fn reverse<'a>(
+        &'a self,
+        target: &'a SshTarget,
+        local: u16,
+        port: u16,
+    ) -> BoxFuture<'a, Result<Box<dyn Forwarding>, HubError>> {
+        Box::pin(self.scripted_reverse(target, local, port))
+    }
+}
+
+impl ScriptedHost {
+    async fn scripted_reverse(
+        &self,
+        target: &SshTarget,
+        local: u16,
+        port: u16,
+    ) -> Result<Box<dyn Forwarding>, HubError> {
+        self.ask(format!("reverse {} {port} from {local}", target.as_str()));
+        // As long as `ssh` takes to log in, so requests can overlap.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        if self.kernel != "Linux" {
+            return Err(HubError::ReverseUnsupported {
+                host: target.as_str().to_owned(),
+                kernel: self.kernel.to_owned(),
+            });
+        }
+        let failing = self
+            .failing_reverses
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |count| {
+                count.checked_sub(1)
+            })
+            .is_ok();
+        if failing {
+            let error = splitty_remote::ssh::classify(
+                target.as_str(),
+                exit_status(255),
+                "ssh: connect to host vm port 22: Connection refused",
+            );
+            return Err(HubError::Reverse(ReverseTunnelError::Ssh(error)));
+        }
+        if self.busy.lock().expect("busy").contains(&port) {
+            return Err(HubError::Reverse(ReverseTunnelError::HostPortConflict {
+                port,
+                detail: format!("port {port} is already in use on this host (127.0.0.1)"),
+            }));
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+            .await
+            .map_err(|error| {
+                HubError::Reverse(ReverseTunnelError::HostPortConflict {
+                    port,
+                    detail: error.to_string(),
+                })
+            })?;
+        let listener = tokio::spawn(async move {
+            while let Ok((mut stream, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    if let Ok(mut upstream) =
+                        tokio::net::TcpStream::connect(("127.0.0.1", local)).await
+                    {
+                        let _ = tokio::io::copy_bidirectional(&mut stream, &mut upstream).await;
+                    }
+                });
+            }
+        });
+        let ended = Arc::new(Notify::new());
+        self.reverses
+            .lock()
+            .expect("reverses")
+            .insert(port, ended.clone());
+        Ok(Box::new(ScriptedForward {
+            ended,
+            listener,
+            remote: port,
+            stop_gates: Arc::default(),
+        }) as Box<dyn Forwarding>)
     }
 }
 
