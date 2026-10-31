@@ -1,0 +1,13 @@
+allowBuilds:
+  # esbuild's postinstall only verifies its binary; the platform package provides it.
+  esbuild: false
+
+auditConfig:
+  ignoreGhsas:
+    # braces: stack exhaustion on deeply nested patterns. Reaches us only through
+    # likec4 > vite-plugin-singlefile > micromatch, used by LikeC4's single-file
+    # HTML export, which the architecture check never runs; its patterns would
+    # come from this repository. 3.0.3 is the newest release, the advertised fix
+    # (>= 3.0.4) is not published on npm. Development tooling only, never
+    # shipped. Remove once a fixed version exists (checked 2026-10-12).
+    - GHSA-vfj7-8cjw-p6xm

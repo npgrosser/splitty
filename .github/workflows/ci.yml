@@ -1,0 +1,230 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Weekly, so that a new advisory against unchanged code still fails a run.
+  schedule:
+    - cron: "17 5 * * 1"
+  workflow_dispatch:
+
+# Third-party actions are pinned to commit SHAs; Dependabot keeps the pins and
+# their version comments current. No job needs write access.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust tests
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            frontend/pnpm-lock.yaml
+            architecture/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: rust
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      # The server embeds and serves frontend/dist; the HTTP surface tests check
+      # the headers of the real app document.
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      # The architecture check (architecture/check) runs LikeC4 inside cargo test.
+      - name: Install architecture tooling
+        run: pnpm install --frozen-lockfile --dir architecture
+
+      - name: Lint server, core and architecture check
+        run: cargo clippy --locked --workspace --exclude splitty-gui --all-targets -- -D warnings
+
+      - name: Test server, core and architecture check
+        run: cargo test --locked --workspace --exclude splitty-gui
+
+  aarch64:
+    name: Static server (aarch64)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          targets: aarch64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: aarch64
+
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      # The release builds this server for aarch64 hosts (remote-aarch64);
+      # a debug build catches compile and link errors at a fraction of the time.
+      - name: Build the server for aarch64-unknown-linux-musl
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_LINKER: rust-lld
+        run: cargo build --locked -p splitty-server --target aarch64-unknown-linux-musl
+
+  tauri-linux:
+    name: Tauri shell (Linux)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Install WebKitGTK
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev libayatana-appindicator3-dev
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: tauri-linux
+
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      # Lints the Linux build only; the Windows bridge (windows_wsl::platform)
+      # and the macOS window code are compiled on their own platforms.
+      - name: Lint Tauri shell
+        run: cargo clippy --locked -p splitty-gui --all-targets -- -D warnings
+
+      # Also validates the capabilities against the app manifest (build.rs) and
+      # runs the navigation guard tests.
+      - name: Test Tauri shell
+        run: cargo test --locked -p splitty-gui --lib
+
+  frontend:
+    name: Frontend
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - name: Check, test and build
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm check && pnpm test && pnpm build
+
+  electron:
+    name: Electron shell
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend-electron/pnpm-lock.yaml
+
+      - name: Type-check the main process
+        working-directory: frontend-electron
+        run: pnpm install --frozen-lockfile && pnpm build
+
+  audit:
+    name: Dependency audit
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      # Policy and documented exceptions: deny.toml.
+      - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+        with:
+          command: check
+          command-arguments: advisories bans sources
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+
+      # Documented exceptions: auditConfig in each pnpm-workspace.yaml.
+      - name: npm advisories (frontend)
+        working-directory: frontend
+        run: pnpm audit
+
+      - name: npm advisories (Electron shell)
+        working-directory: frontend-electron
+        run: pnpm audit
+
+      - name: npm advisories (architecture tooling)
+        working-directory: architecture
+        run: pnpm audit

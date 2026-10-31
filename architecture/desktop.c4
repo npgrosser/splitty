@@ -1,0 +1,118 @@
+// The components of splitty-gui (the Tauri desktop app) and their dependencies, also into
+// splitty-core and splitty-server, which it links on macOS and Linux only, and into
+// splitty-remote, which it links on every platform. A relationship between two components with a
+// `module` means that code of the source may name the target's modules; architecture/check checks
+// both directions.
+
+model {
+  extend splitty.desktop {
+
+    app_main = component 'app_main' {
+      description 'Binary entry point (main.rs): sets the WebKitGTK workaround on Linux and calls run.'
+      metadata {
+        module 'splitty_gui'
+      }
+    }
+
+    app = component 'app' {
+      description 'Composition root of the desktop app (lib.rs): windows, navigation, capabilities and remote commands; on macOS/Linux a daemon (the running one, or one started for kept sessions with the executable their keepers run) or an embedded server with explicit managed-job shutdown; on Windows the WSL bridge.'
+      metadata {
+        module 'splitty_tauri_lib'
+      }
+    }
+
+    editor = component 'editor' {
+      description 'Explicit local/SSH file and folder handoff to VS Code or Zed, and of SSH folders to an SFTP client: validates editor choice, target, absolute path, file/folder kind and optional WSL distribution, constructs a fixed URI and dispatches it to the OS. Never a terminal-link opener.'
+      metadata {
+        module 'splitty_tauri_lib::editor'
+        spec 'desktop-remote'
+      }
+    }
+
+    downloads = component 'downloads' {
+      description 'The main window\'s downloads by their blob: URL, with where each was saved (the destination asked for where the webview reports no path, as on macOS), the most recent 32; reveal_download shows a finished one in the file manager, never a path the page names, and never tells the page the path.'
+      metadata {
+        module 'splitty_tauri_lib::downloads'
+        spec 'access-control'
+      }
+    }
+
+    login_path = component 'login_path' {
+      description 'On macOS and Linux, when the desktop and not a terminal started the app: asks the user\'s login shell ($SHELL -l -i) once for its PATH, within 5 seconds and up to a marker, and puts its entries in front of the inherited ones before anything else starts, so ssh and the ProxyCommand of the SSH configuration find what the shell startup adds. Only PATH is taken.'
+      metadata {
+        module 'splitty_tauri_lib::login_path'
+        spec 'server-modes'
+      }
+    }
+
+    navigation = component 'navigation' {
+      description 'Where the windows may navigate and what they open externally: never foreign content in the privileged main window, and a remote window pinned to its tunnel origin, without the bundled pages or new windows.'
+      metadata {
+        module 'splitty_tauri_lib::navigation'
+      }
+    }
+
+    capability = component 'capability' {
+      description 'The main window\'s capability, added at runtime once the backend\'s port is known: exactly the commands the UI invokes (window controls, its own webview zoom for the zoom shortcuts, title bar color, WSL, remote windows, editors, showing a saved download), for the window main on the exact origin http://127.0.0.1:<port> only, one per port.'
+      metadata {
+        module 'splitty_tauri_lib::capability'
+        spec 'access-control'
+      }
+    }
+
+    remote = component 'remote' {
+      description 'Remote windows: the commands remote_hosts, remote_open and remote_cancel with progress to the calling window; the registry of one window per target with one shared attempt; the window remote-<n> (no capability, incognito, pinned navigation, native decorations, title by connection state) and the task that runs the connect flow and supervises its tunnel until the window is destroyed.'
+      metadata {
+        module 'splitty_tauri_lib::remote'
+        spec 'desktop-remote'
+      }
+    }
+
+    windows_wsl = component 'windows_wsl' {
+      description 'Windows bridge: picks the WSL 2 distribution, installs the bundled static server per version with a checksum, starts it with --desktop-stdio and binds its lifetime to the app.'
+      metadata {
+        module 'splitty_tauri_lib::windows_wsl'
+        spec 'server-modes'
+      }
+    }
+
+    app_main -> app 'run'
+    app -> navigation 'navigation, new_window, follow, backend_origins'
+    app -> login_path 'adopt'
+    app -> capability 'main_window'
+    app -> editor 'open_remote_editor, open_local_editor'
+    app -> downloads 'Downloads, reveal_download'
+    editor -> splitty.remote.ssh 'SshTarget'
+    app -> remote 'Remotes, remote_hosts, remote_open, remote_cancel'
+    app -> windows_wsl 'WindowsWslState, distribution list, start and switch'
+    windows_wsl -> navigation 'backend_origins'
+    windows_wsl -> capability 'main_window'
+    remote -> navigation 'remote_navigation, remote_new_window, tunnel_origin, follow'
+
+    // Into splitty-remote (every platform)
+
+    remote -> splitty.remote.tunnel 'open, supervise, Connected, Event, Failure, Progress, GIVE_UP_AFTER'
+    remote -> splitty.remote.hosts 'known, record_recent, default_ssh_dir, KnownHost'
+    remote -> splitty.remote.ssh 'Ssh, SshTarget'
+    remote -> splitty.remote.install 'payload_for'
+
+    // Into the core and the server (macOS and Linux)
+
+    app -> splitty.core.auth 'resolve'
+    app -> splitty.core.config 'HomeConfig, load, load_server, config_dir, themes_dir'
+    app -> splitty.core.daemon 'read_info, is_running, remove_info'
+    app -> splitty.core.keeper 'client::find, dir::keepers_dir: a daemon for kept sessions, with the executable their keepers run'
+    app -> splitty.core.effect_runner 'EffectRunner, EnvContext'
+    app -> splitty.core.mux 'Store'
+    app -> splitty.core.protocol 'Dispatcher, NotificationEngine, SizeConfig'
+    app -> splitty.core.pty 'Backend, Manager'
+    app -> splitty.core.shell_profiles 'state_from_settings'
+    app -> splitty.core.template 'FileStore'
+    app -> splitty.core.theme 'resolve_theme'
+    app -> splitty.server.cli 'ServerInfo, api_post (bootstrap from a running daemon)'
+    app -> splitty.server.control 'socket_path, spawn'
+    app -> splitty.server.http 'AppState, SessionStore, allowed_origins, build_router_with_frontend'
+    app -> splitty.server.ws 'WsState'
+    remote -> splitty.core.config 'config_dir (recent hosts, shared with the CLI)'
+  }
+}

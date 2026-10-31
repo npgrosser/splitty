@@ -1,0 +1,168 @@
+// The components of splitty-server (the splitty binary) and their dependencies, also into
+// splitty-core. A relationship between two components with a `module` means that code of the
+// source may name the target's modules; architecture/check checks both directions.
+
+model {
+  extend splitty.server {
+
+    main = component 'main' {
+      description 'Entry point and composition root of the splitty binary (main.rs): the clap command line, serve, daemon start/stop (--end-sessions)/restart/status and the internal daemon run with the adoption of kept sessions, the session-keeper subcommand before the runtime starts, connect (text, or JSON events with --json) and remote-hosts, and the control commands, including confirmed client editor requests and file downloads to a window. Wires the PTY manager, dispatcher, notification engine, effect runner, store, WebSocket and HTTP state and the control socket.'
+      metadata {
+        module 'splitty'
+      }
+    }
+
+    http = component 'http' {
+      description 'Axum router and AppState: loopback, Host, Origin and Fetch Metadata guards, authentication, browser sessions and bootstrap codes, the REST and control API, guarded saved-forward metadata and explicit forwarding intents, the WebSocket upgrades (/ws, and /ws/remote handed to the hub after the same checks), the embedded app, the control-socket router and bounded editor open endpoint.'
+      metadata {
+        module 'splitty_server::http'
+      }
+    }
+
+    ws = component 'ws' {
+      description 'WebSocket connections: binary output frames and JSON codec, the per-connection mux handler (welcome, resync, ops and their effects), broadcasting to clients, and ports.changed: the listening ports of the sessions after each welcome and on change, scanned every 2 seconds while clients are connected. Ephemeral editor requests target one registered attached client, expire and cancel on disconnect; never authorize desktop launches. File offers go to every registered attached client; the first to accept reads the file in chunks, the others drop it; offers expire and end on disconnect.'
+      metadata {
+        module 'splitty_server::ws'
+        spec 'mux-protocol'
+      }
+    }
+
+    embed = component 'embed' {
+      description 'The built frontend (frontend/dist) embedded into the binary; index.html with the theme colors injected.'
+      metadata {
+        module 'splitty_server::embed'
+      }
+    }
+
+    control = component 'control' {
+      description 'The owner-only Unix control socket for processes running in panes, serving a reduced route set: a daemon\'s at a fixed path in the run directory (daemon.sock), any other server\'s by pid.'
+      metadata {
+        module 'splitty_server::control'
+        spec 'control-api'
+      }
+    }
+
+    cli = component 'cli' {
+      description 'Client side of the control commands: offline version-matched agent guide, server discovery (environment, daemon.json, flags), calls to the API over TCP or the control socket, scoped agent exec with CLI PATH inheritance, external editor path requests, and file downloads to a window, packing a folder into a zip first. The server\'s WebSocket for local clients (socket: token, ticket, own origin), and attach: a session of the daemon in this terminal as a session protocol client (targets and the pick list, raw mode and the mode reset, the detach key, the replay without report requests, size reports).'
+      metadata {
+        module 'splitty_server::cli'
+        spec 'cli'
+      }
+    }
+
+    host = component 'host' {
+      description 'What the binary does on a remote host for a client over SSH: remote-handshake (this server, the daemon with whether it keeps its sessions, started on request with daemon start, and its screens) and remote-bridge (the daemon\'s WebSocket over stdio, authenticated on the host with the token file and a ticket, so no credential crosses SSH).'
+      metadata {
+        module 'splitty_server::host'
+      }
+    }
+
+    hub = component 'hub' {
+      description 'The remote screen hub (/ws/remote, /api/remote/hosts, /api/remote/screens, /api/remote/catalog, /api/remote/host-preferences, /api/remote/host-order): for each socket its own ssh connections, carrying only stdio, which install the server, run the handshake with --ensure-daemon and a port hint free on this side, with update=1 stop a daemon of another version (daemon stop) and run the handshake again, check the daemon\'s protocol (the same version or the one before) and start remote-bridge on the host; remote.progress, one remote.ready (with the daemon\'s keepsSessions) or a remote.error with a code, message and hint, then a verbatim relay both ways, closed with 4001 when the host side ends. Records visible ready targets as recent hosts, lists the known hosts with display aliases, saves host preferences and the arranged order of the host groups, and forgets recent/alias/order/catalog metadata without ending connections or forwards, and keeps the client\'s remembered remote screens in remote-screens.json (checked, owner-only). Caches the last observed screen directories of 20 hosts in remote-catalog.json, separately from open screens, with validated per-host merges under a mutex and atomic private writes; reading or updating the cache never contacts a host. Forwards ports of hosts on request (/api/remote/forwards): one owned forward-only ssh -N each on 127.0.0.1, positively verified, supervised and rebuilt on the same port until stopped, at most 32 active/opening per host. hub::preferences stores opt-in mappings, labels and enabled state in private atomic remote-forwards.json (32 per host, 256 total); /api/remote/forward-preferences merges metadata without SSH. Successful remote.ready schedules only that host\'s enabled inactive mappings without delaying relay. Per-key ordered operations include cancelled-request cleanup, while short map/storage locks merge independent entries. Stop durably disables before closing; successful explicit Resume commits after verification; Forget keeps live supervision. Saved/explicit ports are strict on both loopback families and initial failures remain queryable only in runtime lastError.'
+      metadata {
+        module 'splitty_server::hub'
+        spec 'remote-screens'
+      }
+    }
+
+    // Within the server
+
+    jobs = component 'jobs' {
+      description 'Server-owned managed jobs: scoped authorization, idempotent admission, live lifecycle and bounded log queries; shares the mux store and effect runner.'
+      metadata { module 'splitty_server::jobs' spec 'managed-jobs' }
+    }
+
+    jobs -> splitty.core.ids 'JobId, AgentId, PaneId, ScreenId'
+    jobs -> splitty.core.mux 'Store, job records and lifecycle operations'
+    jobs -> splitty.core.effect_runner 'EffectRunner, EnvContext'
+    jobs -> splitty.core.pty 'Backend, session handles, bounded output and process results'
+    jobs -> splitty.core.protocol 'ServerEvent'
+    ws -> jobs 'Shared job coordinator'
+    main -> jobs 'Await managed-job shutdown'
+    http -> jobs 'Job routes, actor scopes, grant administration'
+    http -> cli 'Bounded control-socket transport and splitty download in tests'
+    http -> control 'Provision private grant sockets'
+    control -> jobs 'Grant listeners and their lifetime'
+    control -> splitty.core.ids 'AgentId'
+
+    http -> embed 'FrontendAssets, themed_index_html'
+    http -> ws 'WebSocket upgrade, WsState; PortWatch in tests'
+    http -> hub 'Hub, serve, known_hosts, remembered_screens, remember_screens, open_forward_with, forwards, stop_forward, forward_preferences, save_forward, forget_forward, ForwardError, Code, MAX_MESSAGE; a scripted host, HOST_LOST and VERSION in tests'
+    control -> http 'AppState, build_control_router'
+
+    // Into the core
+
+    http -> splitty.core.auth 'token validation, single-use codes'
+    http -> splitty.core.config 'HomeConfig, ServerConfig, save, update'
+    http -> splitty.core.ids 'ids'
+    http -> splitty.core.mux 'Store, ScreenOp, Direction, Effect'
+    http -> splitty.core.protocol 'ClientCommand, ServerEvent, SizeConfig (settings updates); sizing types in tests'
+    http -> splitty.core.shell_profiles 'ShellProfilesState, detection, updates'
+    http -> splitty.core.template 'TemplateStore, FileStore, Template'
+    http -> splitty.core.theme 'list_themes, resolve_theme'
+    http -> splitty.core.effect_runner 'EffectRunner, EnvContext in tests'
+    http -> splitty.core.pty 'pty::manager::Manager, ListeningPort and CreateSessionOpts in tests'
+    ws -> splitty.core.ids 'ids'
+    ws -> splitty.core.mux 'Store, Op, ScreenOp, Effect'
+    ws -> splitty.core.effect_runner 'EffectRunner, EnvContext'
+    ws -> splitty.core.protocol 'Dispatcher, Request, ServerEvent, message types, the pty-size-v1 capability'
+    ws -> splitty.core.pty 'Backend, ports (the scan, ListeningPort)'
+    ws -> splitty.core.shell_profiles 'ShellProfilesState'
+    embed -> splitty.core.config 'load, themes_dir'
+    embed -> splitty.core.theme 'resolve_theme'
+    control -> splitty.core.config 'config_dir_override, ensure_private_dir'
+    cli -> splitty.core.daemon 'read_info, is_running'
+    cli -> splitty.core.ids 'JobId for request identifiers'
+    cli -> splitty.core.pty 'Available CLI directory and OS-native PATH composition for agent exec; the replay filter for attach; pty::testing in tests'
+    cli -> splitty.core.auth 'resolve (the token file) for attach'
+    cli -> splitty.core.config 'ensure_private_dir for the folder archive store'
+    cli -> splitty.core.protocol 'Session protocol message types for attach; the offer size limit and civil_from_days for folder archives'
+    cli -> ws 'decode_binary_frame for attach; encode_binary_frame in tests'
+
+    // The host side of remote clients
+
+    host -> cli 'ServerInfo, Transport, api_get (screens), socket::open (the daemon\'s WebSocket for the bridge)'
+    host -> splitty.core.auth 'resolve (the token file)'
+    host -> splitty.core.daemon 'read_info, is_running'
+    host -> splitty.core.protocol 'PROTOCOL_VERSION'
+    host -> splitty.remote.handshake 'Handshake and its parts'
+    host -> splitty.remote.bridge 'read_frame, write_frame'
+    main -> host 'remote-handshake, remote-bridge'
+
+    // The client side of remote screens
+
+    hub -> splitty.core.config 'config_dir, CONFIG_DIR_VARIABLE'
+    hub -> splitty.core.protocol 'PROTOCOL_VERSION'
+    hub -> splitty.remote.ssh 'SshTarget, Ssh (stdio-only, forward-only), run_checked, classify, host key and login failures'
+    hub -> splitty.remote.install 'prepare, payload_for, Prepared, Server, CONFIG_DIR_VARIABLE'
+    hub -> splitty.remote.handshake 'handshake, Handshake, RunningDaemon, Screen'
+    hub -> splitty.remote.bridge 'Bridge, Frame, MAX_FRAME'
+    hub -> splitty.remote.hosts 'known, record_recent_if_visible, preferences, update_preference, host_order, set_host_order, forget_locked, lock, default_ssh_dir, write_private (atomic private catalog/screens/forward preferences)'
+    hub -> splitty.remote.tunnel 'PortReservation, reserve, reserve_exact, check_forward_address, backoff, PortTunnel, PortTunnelError'
+
+    // Into splitty-remote
+
+    main -> splitty.remote.ssh 'SshTarget, Ssh'
+    main -> splitty.remote.install 'payload_for'
+    main -> splitty.remote.tunnel 'open, supervise, GIVE_UP_AFTER, ConnectEvent'
+    main -> splitty.remote.hosts 'record_recent, known, default_ssh_dir'
+
+    // Composition root
+
+    main -> cli 'discover, api calls'
+    main -> control 'socket_path, spawn'
+    main -> http 'AppState, routers'
+    main -> ws 'WsState'
+    main -> splitty.core.auth 'load_or_create, resolve'
+    main -> splitty.core.config 'config_dir, load, load_server, themes_dir'
+    main -> splitty.core.daemon 'daemon.json, PID checks, save_state, restore'
+    main -> splitty.core.effect_runner 'EffectRunner, EnvContext'
+    main -> splitty.core.mux 'Store, WorkspaceState'
+    main -> splitty.core.protocol 'Dispatcher, NotificationEngine, SizeConfig'
+    main -> splitty.core.pty 'Backend, Manager, publish_stable_cli'
+    main -> splitty.core.shell_profiles 'state_from_settings'
+    main -> splitty.core.template 'FileStore'
+    main -> splitty.core.keeper 'process::run (the session-keeper subcommand), client::Keepers and ProcessLauncher (the daemon\'s terminals), find and take_over (adoption at start, --end-sessions), dir::keepers_dir'
+    cli -> splitty.core.keeper 'client::find and Found, wire frames, dir::keepers_dir: attach to a keeper while no daemon runs'
+  }
+}

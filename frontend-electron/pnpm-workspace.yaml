@@ -1,0 +1,28 @@
+allowBuilds:
+  electron: true
+  electron-winstaller: false
+
+auditConfig:
+  ignoreGhsas:
+    # http-cache-semantics: max-stale handling can disclose cross-user cached
+    # responses. Reaches us only through electron-builder's download of the
+    # Electron zip (got > cacheable-request), a single-user cache on a build
+    # machine, and the advertised fix (>= 4.2.1) is not published on npm yet;
+    # 4.2.0 is the newest release. Build tooling only, never shipped. Remove
+    # once a fixed version exists (checked 2026-10-03, security review SR-29).
+    - GHSA-ch52-4w7c-c8xp
+    # sprintf-js: unbounded precision specifiers can exhaust memory. Reaches
+    # us only through electron-builder's download of Electron (@electron/get >
+    # global-agent > roarr), which formats its own log messages, on a build
+    # machine; no fixed version is published (<= 1.1.3 is affected, 1.1.3 is
+    # the newest). Build tooling only, never shipped. Remove once a fixed
+    # version exists (checked 2026-10-15).
+    - GHSA-hp3w-g68c-fv3c
+    # minimatch: crafted glob patterns can amplify into a denial of service.
+    # Reaches us only through electron-builder (@electron/asar, glob,
+    # electron-winstaller), whose patterns come from this repository's build
+    # configuration, on a build machine. The fix exists only in minimatch 11,
+    # which none of them accept (they require 3, 5, 9 or 10). Build tooling
+    # only, never shipped. Remove once electron-builder accepts minimatch
+    # >= 11.0.1 (checked 2026-10-31).
+    - GHSA-g3hv-75wg-m249

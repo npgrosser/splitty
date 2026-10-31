@@ -1,0 +1,20 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "setup",
+  "description": "The bundled Windows setup page, which provisions and starts the WSL backend and opens hosts in remote windows without WSL. The only context allowed to call wsl_start_backend, which hands out a bootstrap URL (security review SR-03, see docs/security/findings.md). The UI served by the backend gets its commands from the capability the app adds at runtime for the backend's exact origin (src/capability.rs).",
+  "windows": ["main"],
+  "platforms": ["windows"],
+  "permissions": [
+    "core:event:default",
+    "core:window:allow-minimize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
+    "core:window:allow-internal-toggle-maximize",
+    "allow-wsl-setup-state",
+    "allow-wsl-list-distributions",
+    "allow-wsl-start-backend",
+    "allow-remote-hosts",
+    "allow-remote-open",
+    "allow-remote-cancel"
+  ]
+}

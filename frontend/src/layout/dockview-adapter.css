@@ -1,0 +1,132 @@
+/*
+ * Dockview Adapter — the ONLY file that maps --splitty-* → --dv-*.
+ * If dockview is replaced, delete this file.
+ */
+
+.splitty-theme {
+  /* Panel backgrounds */
+  --dv-group-view-background-color: var(--splitty-surface-base);
+  --dv-tabs-and-actions-container-background-color: var(--splitty-surface-raised);
+
+  /* Active group tabs */
+  --dv-activegroup-visiblepanel-tab-background-color: var(--splitty-surface-base);
+  --dv-activegroup-hiddenpanel-tab-background-color: var(--splitty-surface-raised);
+  --dv-activegroup-visiblepanel-tab-color: var(--splitty-text-primary);
+  --dv-activegroup-hiddenpanel-tab-color: var(--splitty-text-secondary);
+
+  /* Inactive group tabs */
+  --dv-inactivegroup-visiblepanel-tab-background-color: var(--splitty-surface-raised);
+  --dv-inactivegroup-hiddenpanel-tab-background-color: var(--splitty-surface-raised);
+  --dv-inactivegroup-visiblepanel-tab-color: var(--splitty-text-secondary);
+  --dv-inactivegroup-hiddenpanel-tab-color: var(--splitty-text-muted);
+
+  /* Borders & separators */
+  --dv-separator-border: var(--splitty-border-subtle);
+  --dv-tab-divider-color: var(--splitty-border-subtle);
+  --dv-paneview-header-border-color: var(--splitty-tab-bar-border);
+  --dv-paneview-active-outline-color: var(--splitty-border-default);
+
+  /* Interactive */
+  --dv-drag-over-background-color: var(--splitty-hover-bg);
+  --dv-drag-over-border-color: var(--splitty-hover-bg);
+  --dv-icon-hover-background-color: var(--splitty-hover-bg);
+  --dv-tabs-container-scrollbar-color: var(--splitty-scrollbar);
+
+  /* Sash (resize handles) */
+  --dv-sash-color: var(--splitty-sash-color);
+  --dv-active-sash-color: var(--splitty-sash-hover-color);
+  --dv-active-sash-transition-duration: 0.1s;
+  --dv-active-sash-transition-delay: 0.15s;
+
+  /* Sizing & layout */
+  --dv-tabs-and-actions-container-height: var(--splitty-tab-height);
+  --dv-tabs-and-actions-container-font-size: var(--splitty-tab-font-size);
+  --dv-tab-font-size: inherit;
+  --dv-tab-margin: var(--splitty-tab-margin);
+  --dv-tab-border-radius: var(--splitty-tab-border-radius);
+  --dv-border-radius: var(--splitty-pane-border-radius);
+  --dv-overlay-z-index: 999;
+  --dv-gap: var(--splitty-pane-gap);
+  --dv-spacing-padding: var(--splitty-pane-padding);
+  --dv-sash-border-radius: var(--splitty-sash-border-radius);
+  --dv-dropdown-border-radius: var(--splitty-dropdown-border-radius);
+
+  /* Drag feedback — themes can set --splitty-drag-over-border to opt in */
+  --dv-drag-over-border: var(--splitty-drag-over-border, none);
+
+  /* Floating groups */
+  --dv-floating-box-shadow: 0 12px 48px var(--splitty-shadow), 0 0 0 1px var(--splitty-hover-bg);
+  --dv-floating-group-border: 1px solid var(--splitty-border-default);
+  --dv-floating-group-dragging-opacity: 0.5;
+}
+
+/* ---------------------------------------------------------------------------
+ * Structural rules for pane border-radius (spaced mode).
+ * When --splitty-pane-border-radius is 0px these are visual no-ops.
+ * ------------------------------------------------------------------------- */
+
+.splitty-theme .dv-groupview {
+  border-radius: var(--splitty-pane-border-radius);
+  overflow: hidden;
+}
+
+.splitty-theme .dv-resize-container:has(> .dv-groupview) {
+  border-radius: var(--splitty-pane-border-radius);
+}
+
+.splitty-theme .dv-drop-target-anchor {
+  border-radius: calc(var(--splitty-pane-border-radius) / 4);
+}
+
+.splitty-theme .dv-drop-target-anchor .dv-drop-target-content {
+  border-radius: var(--splitty-pane-border-radius);
+}
+
+.splitty-theme .dv-groupview > .dv-tabs-and-actions-container {
+  padding-left: calc(var(--splitty-pane-border-radius) / 2);
+  padding-right: calc(var(--splitty-pane-border-radius) / 2);
+}
+
+/* Dropdown overflow menus */
+.splitty-theme .dv-tabs-overflow-container,
+.splitty-theme .dv-tabs-overflow-dropdown-default {
+  border-radius: var(--splitty-dropdown-border-radius);
+}
+
+/* ---------------------------------------------------------------------------
+ * Tab accent line — coloured indicator on the active tab.
+ * Driven by --splitty-tab-accent-color, --splitty-tab-accent-thickness.
+ * Position (top/bottom) is controlled by data-tab-accent-position on <html>.
+ * When tab-accent-color is transparent this is invisible (no-op).
+ * ------------------------------------------------------------------------- */
+
+/* Active group — full opacity accent */
+.splitty-theme .dv-groupview.dv-active-group .dv-tab.dv-active-tab::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: var(--splitty-tab-accent-thickness);
+  background-color: var(--splitty-tab-accent-color);
+  pointer-events: none;
+}
+
+/* Inactive group — dimmed accent */
+.splitty-theme .dv-groupview.dv-inactive-group .dv-tab.dv-active-tab::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 0;
+  height: var(--splitty-tab-accent-thickness);
+  background-color: var(--splitty-tab-accent-color);
+  opacity: 0.4;
+  pointer-events: none;
+}
+
+/* Bottom-positioned variant */
+[data-tab-accent-position="bottom"] .splitty-theme .dv-tab.dv-active-tab::after {
+  top: auto !important;
+  bottom: 0;
+}

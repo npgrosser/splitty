@@ -1,0 +1,520 @@
+{
+  "valid": [
+    {
+      "editor": "zed",
+      "target": "devbox",
+      "cwd": "/home/user/project",
+      "uri": "zed://ssh/devbox/home/user/project/"
+    },
+    {
+      "editor": "zed",
+      "target": "user@192.0.2.10",
+      "cwd": "/srv/My App",
+      "uri": "zed://ssh/user@192.0.2.10/srv/My%20App/"
+    },
+    {
+      "editor": "zed",
+      "target": "User@My-VPS",
+      "cwd": "/工作/Grüße #?%+&=",
+      "uri": "zed://ssh/User@My-VPS/%E5%B7%A5%E4%BD%9C/Gr%C3%BC%C3%9Fe%20%23%3F%25%2B%26%3D/"
+    },
+    {
+      "editor": "zed",
+      "target": "build.bot@vm1.example",
+      "cwd": "/",
+      "uri": "zed://ssh/build.bot@vm1.example/"
+    },
+    {
+      "editor": "zed",
+      "target": "vm1",
+      "cwd": "/folder.code-workspace",
+      "uri": "zed://ssh/vm1/folder.code-workspace/"
+    },
+    {
+      "editor": "zed",
+      "target": "vm1",
+      "cwd": "/project:123",
+      "uri": "zed://ssh/vm1/project%3A123/"
+    },
+    {
+      "editor": "zed",
+      "target": "vm1",
+      "cwd": "/folder/",
+      "uri": "zed://ssh/vm1/folder/"
+    },
+    {
+      "editor": "zed",
+      "target": "vm1",
+      "cwd": "/$(touch nope)/'quoted'`!()*/%2F%23",
+      "uri": "zed://ssh/vm1/%24%28touch%20nope%29/%27quoted%27%60%21%28%29%2A/%252F%2523/"
+    },
+    {
+      "editor": "zed",
+      "target": "abc",
+      "cwd": "/srv",
+      "uri": "zed://ssh/abc/srv/"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/srv/My App",
+      "uri": "vscode://file/srv/My%20App/"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/工作/Grüße #?%+&=",
+      "uri": "vscode://file/%E5%B7%A5%E4%BD%9C/Gr%C3%BC%C3%9Fe%20%23%3F%25%2B%26%3D/"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/project:123",
+      "uri": "vscode://file/project%3A123/"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/folder.code-workspace",
+      "uri": "vscode://file/folder.code-workspace/"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/",
+      "uri": "vscode://file/"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/%2F%23",
+      "uri": "vscode://file/%252F%2523/"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/srv/My App",
+      "uri": "zed://file/srv/My%20App/"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/工作/Grüße #?%+&=",
+      "uri": "zed://file/%E5%B7%A5%E4%BD%9C/Gr%C3%BC%C3%9Fe%20%23%3F%25%2B%26%3D/"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/project:123",
+      "uri": "zed://file/project%3A123/"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/folder.code-workspace",
+      "uri": "zed://file/folder.code-workspace/"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/",
+      "uri": "zed://file/"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/%2F%23",
+      "uri": "zed://file/%252F%2523/"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/srv/My App",
+      "wslDistro": "Ubuntu-24.04",
+      "uri": "vscode://vscode-remote/wsl+Ubuntu-24.04/srv/My%20App/"
+    },
+    {
+      "editor": "zed",
+      "target": "7b22686f73744e616d65223a226576696c227d",
+      "cwd": "/srv",
+      "uri": "zed://ssh/7b22686f73744e616d65223a226576696c227d/srv/"
+    },
+    {
+      "editor": "sftp",
+      "target": "devbox",
+      "cwd": "/home/user/project",
+      "uri": "sftp://devbox/home/user/project/"
+    },
+    {
+      "editor": "sftp",
+      "target": "me@vm1:2222",
+      "cwd": "/srv/My App",
+      "uri": "sftp://me@vm1:2222/srv/My%20App/"
+    },
+    {
+      "editor": "sftp",
+      "target": "user@[2001:db8::1]:2222",
+      "cwd": "/工作/Grüße #?%+&=",
+      "uri": "sftp://user@[2001:db8::1]:2222/%E5%B7%A5%E4%BD%9C/Gr%C3%BC%C3%9Fe%20%23%3F%25%2B%26%3D/"
+    },
+    {
+      "editor": "sftp",
+      "target": "[::ffff:192.0.2.10]",
+      "cwd": "/",
+      "uri": "sftp://[::ffff:192.0.2.10]/"
+    },
+    {
+      "editor": "sftp",
+      "target": "user@192.0.2.10",
+      "cwd": "/project:123",
+      "uri": "sftp://user@192.0.2.10/project%3A123/"
+    },
+    {
+      "editor": "sftp",
+      "target": "abc",
+      "cwd": "/$(touch nope)/%2F%23",
+      "uri": "sftp://abc/%24%28touch%20nope%29/%252F%2523/"
+    }
+  ],
+  "invalid": [
+    {
+      "target": "vm1:2222",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "user@vm1:22",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "[2001:db8::1]",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "user@[2001:db8::1]:2222",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "::1",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": " vm1",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1 ",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "-oProxyCommand=x",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "user@-vm1",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "user@@vm1",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "user@vm1\n",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1/other",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1?x",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1#x",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1%2fother",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "ssh://vm1",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "vscode://file",
+      "cwd": "/srv",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1",
+      "cwd": "",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1",
+      "cwd": "relative/path",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1",
+      "cwd": "C:/Users/user",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1",
+      "cwd": "file:///tmp",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1",
+      "cwd": "//other/path",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1",
+      "cwd": "/srv/../other",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1",
+      "cwd": "/srv/./other",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1",
+      "cwd": "/path\\other",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1",
+      "cwd": "/path\nother",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1",
+      "cwd": "/path\u0000other",
+      "editor": "zed"
+    },
+    {
+      "target": "vm1",
+      "cwd": "/pathother",
+      "editor": "zed"
+    },
+    {
+      "editor": "vscode",
+      "cwd": ""
+    },
+    {
+      "editor": "vscode",
+      "cwd": "relative"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "//host/path"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/bad\\path"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/a/../b"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/a/./b"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/a\nb"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/ab"
+    },
+    {
+      "editor": "zed",
+      "cwd": ""
+    },
+    {
+      "editor": "zed",
+      "cwd": "relative"
+    },
+    {
+      "editor": "zed",
+      "cwd": "//host/path"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/bad\\path"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/a/../b"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/a/./b"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/a\nb"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/ab"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/srv",
+      "wslDistro": "Ubuntu"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/srv",
+      "wslDistro": "Ubuntu/evil"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/srv",
+      "wslDistro": ""
+    },
+    {
+      "editor": "shell",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "shell",
+      "target": "vm1",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "vm1:0",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "vm1:65536",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "vm1:+22",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "vm1:",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "vm1:22:33",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "::1",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "[::1",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "[::1]:",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "[::1]x",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "[fe80::1%eth0]",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "[1::2::3]",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "user:pw@vm1",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "user@@vm1",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "-oProxyCommand=x",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": " vm1",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "vm1/other",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "vm1?x",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "vm1#x",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "vm1%2fother",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "sftp://vm1",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "",
+      "cwd": "/srv"
+    },
+    {
+      "editor": "sftp",
+      "target": "vm1",
+      "cwd": "relative"
+    },
+    {
+      "editor": "sftp",
+      "target": "vm1",
+      "cwd": "/srv/../other"
+    },
+    {
+      "editor": "sftp",
+      "cwd": "/srv"
+    }
+  ]
+}

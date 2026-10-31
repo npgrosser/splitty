@@ -1,0 +1,17 @@
+[package]
+name = "splitty-architecture"
+description = "Checks the architecture model (architecture/*.c4) against the module dependencies of the workspace"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Parses the workspace's sources; span locations give the line of each reference.
+syn = { version = "2", default-features = false, features = ["full", "parsing", "visit"] }
+proc-macro2 = { version = "1", default-features = false, features = ["span-locations"] }
+
+[dev-dependencies]
+tempfile = "3"

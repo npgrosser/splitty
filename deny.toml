@@ -1,0 +1,35 @@
+# cargo-deny policy. CI runs `cargo deny check advisories bans sources`; see
+# .github/workflows/ci.yml and docs/security/findings.md (SR-29).
+
+[graph]
+# The platforms Splitty ships for. Dependencies that only exist for other
+# targets are not part of any release and are left out of the checks.
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-unknown-linux-musl",
+    "x86_64-pc-windows-msvc",
+    "x86_64-apple-darwin",
+    "aarch64-apple-darwin",
+]
+
+[advisories]
+version = 2
+# A known vulnerability fails the check; there is no severity threshold.
+# Exceptions go into `ignore` with a reason and a date to revisit.
+yanked = "deny"
+# Unmaintained crates are reported for direct dependencies only. Tauri's Linux
+# backend pulls in the GTK3 bindings, which are unmaintained upstream; that is
+# Tauri's dependency to replace, not one Splitty can act on.
+unmaintained = "workspace"
+ignore = []
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+# Workspace crates depend on each other by path.
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

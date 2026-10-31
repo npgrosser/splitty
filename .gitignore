@@ -1,0 +1,41 @@
+# Build
+/build/
+/target/
+
+# Frontend
+frontend/dist/
+frontend/.build-stamp
+node_modules/
+
+# Tauri generated
+crates/splitty-tauri/gen/
+
+# IDE / Editor / AI
+.idea/
+.vscode/
+.claude/*
+!.claude/skills/
+.claude/skills/*
+!.claude/skills/release/
+.claude/skills/release/*
+!.claude/skills/release/SKILL.md
+.worktrees/
+
+# OpenSpec: archived changes stay local; openspec/specs/ is the record
+openspec/changes/archive/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.*
+
+# Debug
+*.log
+crates/splitty-tauri/resources/splitty-wsl-x86_64.tar.gz
+crates/splitty-tauri/resources/splitty-wsl-x86_64.tar.gz.sha256

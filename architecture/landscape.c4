@@ -1,0 +1,104 @@
+// People, external systems, and the system splitty with its containers and stores.
+
+model {
+  user = actor 'User' {
+    description 'Developer working in terminals: splits panes, switches screens, runs shells and agents, locally or on a remote host.'
+  }
+
+  agent = actor 'AI agent' {
+    #external
+    description 'Claude Code and other coding agents. They run as programs in panes today; later they also use Splitty as a tool through the MCP server.'
+  }
+
+  remote_host = system 'Remote host' {
+    #external
+    description 'A VM or DevPod workspace reached over SSH (system OpenSSH client, the user\'s config and agent). Runs a Splitty daemon of its own, bound to its loopback interface.'
+  }
+
+  wsl = system 'WSL 2' {
+    #external
+    description 'On Windows, the Linux distribution in which the server, the PTYs and the shells run; the desktop app itself stays native.'
+  }
+
+  splitty = system 'Splitty' {
+    description 'Terminal multiplexer: the Rust server is the source of truth for screens, layouts and terminal sessions; the web frontend and the desktop shells are its clients.'
+
+    core = container 'splitty-core' {
+      technology 'Rust library, crates/splitty-core'
+      description 'Workspace model and its reducer, PTY sessions, the session protocol and notifications, daemon state, configuration, themes and templates. Transport-agnostic; linked into the splitty binary and, on macOS and Linux, into the desktop app.'
+    }
+
+    server = container 'splitty binary' {
+      technology 'Rust, Tokio, Axum, crates/splitty-server'
+      description 'The `splitty` command: the HTTP and WebSocket server in embedded or daemon mode, bound to loopback; the CLI with its control commands; the control socket for processes in panes; the SSH tunnel of `splitty connect`.'
+    }
+
+    desktop = container 'Desktop app' {
+      technology 'Rust, Tauri 2, crates/splitty-tauri (splitty-gui)'
+      description 'Native window around the web frontend. On macOS and Linux it connects to a running daemon or embeds the server; on Windows it starts the server inside WSL 2 and binds its lifetime through a stdio bridge. Opens hosts in remote windows through an SSH tunnel it holds itself, on Windows also without WSL.'
+    }
+
+    web = container 'Web frontend' {
+      technology 'Svelte 5, dockview, frontend/'
+      description 'The UI: screens, panes and terminals. Built into frontend/dist and embedded into the splitty binary, which serves it; runs in a browser or in a desktop shell\'s WebView. Applies layout changes optimistically and sends them as ops. Shows each terminal at the PTY size its server decides, reports the sizes of shown panes and its user\'s activity, and marks a size set by another client. The Ports controller joins discovered, active and saved mappings, supports manual Save without SSH and opt-in Remember, and refreshes both APIs across windows; Stop pauses saved consent, Resume is explicit, and Forget leaves live forwarding running.'
+    }
+
+    electron = container 'Electron shell' {
+      technology 'Electron, frontend-electron/'
+      description 'Alternative desktop shell: starts the splitty binary and shows the web frontend it serves; its preload allows the window controls, the page zoom of the zoom shortcuts, the editor and remote channels and download:reveal, which shows a download the main window finished in the file manager.'
+    }
+
+    remote = container 'splitty-remote' {
+      technology 'Rust library, crates/splitty-remote'
+      description 'Reaching a remote host over SSH, installing the client\'s server there and keeping a tunnel to its daemon; the hosts the user knows. Platform-neutral and free of the server crates: linked into the splitty binary for splitty connect, and into the desktop app for remote windows (remote-window).'
+    }
+
+    mcp = container 'MCP server' {
+      #planned
+      technology 'Rust'
+      description 'From mcp-server: lets AI agents read terminals and drive the workspace through the control API.'
+    }
+
+    config_files = store 'Configuration' {
+      technology 'TOML, YAML and JSON files, ~/.config/splitty'
+      description 'config.toml with settings and shell profiles, custom themes, saved layout templates, recent-hosts.json, remote-host-preferences.json with display aliases and hidden markers, remote-host-order.json with the arranged order of the host groups, remembered remote screens and host catalogs, and remote-forwards.json with opt-in target/remote/local mappings, labels and enabled state (private atomic writes; no credentials or runtime errors).'
+    }
+
+    daemon_files = store 'Daemon files' {
+      technology 'Files, ~/.config/splitty (mode 0700)'
+      description 'daemon.json (discovery: pid, port, control socket), state.json (the persisted workspace), auth-token (owner-only) and daemon.log.'
+    }
+  }
+
+  user -> splitty.web 'works in screens, panes and terminals'
+  user -> splitty.server.main 'runs splitty commands'
+  agent -> splitty.mcp 'reads terminals, drives the workspace' {
+    technology 'MCP'
+  }
+  splitty.web -> splitty.server.http 'loads the app, signs in with a bootstrap code, calls the API, including passive forward preferences and explicit forward/Stop intents' {
+    technology 'HTTP'
+  }
+  splitty.web -> splitty.server.ws 'session and mux protocols' {
+    technology 'WebSocket'
+  }
+  splitty.desktop -> splitty.web 'shows'
+  splitty.electron -> splitty.server 'starts and reads the startup output of' {
+    technology 'child process'
+  }
+  splitty.electron -> splitty.web 'shows'
+  splitty.desktop -> wsl 'starts the server in' {
+    technology 'wsl.exe, stdio'
+  }
+  splitty.remote.tunnel -> remote_host 'asks for the daemon, forwards its port to 127.0.0.1, mints a bootstrap code' {
+    technology 'SSH'
+  }
+  splitty.remote.install -> remote_host 'probes, uploads and installs the server in ~/.local/share/splitty/remote' {
+    technology 'SSH, sh -c'
+  }
+  splitty.mcp -> splitty.server.http 'uses the control API'
+  splitty.core.config -> splitty.config_files 'reads and writes'
+  splitty.core.template -> splitty.config_files 'reads and writes templates'
+  splitty.core.daemon -> splitty.daemon_files 'writes daemon.json and state.json'
+  splitty.core.auth -> splitty.daemon_files 'creates and reads auth-token'
+  splitty.remote.hosts -> splitty.config_files 'records recent hosts'
+}

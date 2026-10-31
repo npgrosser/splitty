@@ -1,0 +1,274 @@
+name: Release
+
+# Builds every artifact for a `v*` tag and publishes them as a GitHub release
+# with SHA256SUMS and, for a public repository, build provenance attestations.
+# The release is published only once every platform has built; a tag with a
+# suffix (`v0.2.0-rc.1`) becomes a prerelease. The binaries are not code-signed
+# (macOS builds are ad-hoc signed so they run on Apple Silicon); the README
+# explains how to verify downloads.
+# cleanup-release-artifacts.yml removes the run's artifacts after success.
+# Failed builds retain their artifacts for three days for investigation.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+# Third-party actions are pinned to commit SHAs; Dependabot keeps the pins and
+# their version comments current. Only the publish job can write.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # A tag must name the version the sources carry (scripts/release.sh sets
+  # both): hosts and the WSL backend install a server per version, so a
+  # release under an old version would leave its older server in place.
+  # A run started by hand on a branch has no tag to check.
+  version:
+    name: Version matches the tag
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: github.ref_type == 'tag'
+        with:
+          persist-credentials: false
+
+      - name: Check the version files
+        if: github.ref_type == 'tag'
+        run: scripts/release.sh --check "$GITHUB_REF_NAME"
+
+  windows:
+    name: Windows
+    needs: version
+    uses: ./.github/workflows/windows-tauri.yml
+    permissions:
+      contents: read
+
+  linux:
+    name: Linux
+    # Waits for the Windows workflow, whose first job builds the static
+    # servers that every desktop app carries for remote hosts.
+    needs: windows
+    # The oldest supported runner, so the packages work on older glibc too.
+    runs-on: ubuntu-22.04
+    env:
+      SPLITTY_REMOTE_PAYLOAD_X86_64: ${{ github.workspace }}/payloads/splitty-wsl-x86_64.tar.gz
+      SPLITTY_REMOTE_PAYLOAD_AARCH64: ${{ github.workspace }}/payloads/splitty-wsl-aarch64.tar.gz
+      SPLITTY_REMOTE_PAYLOAD_DARWIN_AARCH64: ${{ github.workspace }}/payloads/splitty-darwin-aarch64.tar.gz
+      SPLITTY_REMOTE_PAYLOAD_DARWIN_X86_64: ${{ github.workspace }}/payloads/splitty-darwin-x86_64.tar.gz
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wsl-payload
+          path: payloads
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: remote-payload-aarch64
+          path: payloads
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: remote-payload-darwin
+          path: payloads
+
+      - name: Verify payloads
+        working-directory: payloads
+        run: >-
+          sha256sum -c splitty-wsl-x86_64.tar.gz.sha256 splitty-wsl-aarch64.tar.gz.sha256
+          splitty-darwin-aarch64.tar.gz.sha256 splitty-darwin-x86_64.tar.gz.sha256
+
+      - name: Install WebKitGTK and bundling tools
+        run: >-
+          sudo apt-get update && sudo apt-get install --yes
+          libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev libayatana-appindicator3-dev
+          patchelf file
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            frontend/pnpm-lock.yaml
+            frontend-electron/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      - name: Build Tauri packages (deb, AppImage)
+        working-directory: crates/splitty-tauri
+        env:
+          # linuxdeploy's bundled strip cannot handle newer ELF sections.
+          NO_STRIP: "true"
+        run: ../../frontend/node_modules/.bin/tauri build --bundles deb,appimage
+
+      # The AppImage runs the static x86_64 server: a fine local backend, and
+      # as a client it installs itself on x86_64 hosts and the servers it
+      # carries on aarch64 and macOS hosts.
+      - name: Build Electron AppImage
+        run: |
+          mkdir -p target/release payloads/x86_64
+          tar -xzf payloads/splitty-wsl-x86_64.tar.gz -C payloads/x86_64
+          install -m 0755 payloads/x86_64/splitty target/release/splitty
+          cd frontend-electron
+          pnpm install --frozen-lockfile
+          # The publish job owns the release; electron-builder must not
+          # upload anything itself when it sees a tag in CI.
+          pnpm run dist --publish never
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p out
+          cp target/release/bundle/deb/*.deb out/
+          cp target/release/bundle/appimage/*.AppImage out/
+          for image in frontend-electron/dist/*.AppImage; do
+            cp "$image" "out/$(basename "$image" .AppImage | sed 's/^Splitty-/Splitty-Electron-/')-x86_64.AppImage"
+          done
+          ls -l out
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-linux
+          path: out/*
+          if-no-files-found: error
+          retention-days: 3
+
+  macos:
+    name: macOS
+    # Waits for the static servers of the Windows workflow, like the Linux job.
+    needs: windows
+    runs-on: macos-15
+    env:
+      SPLITTY_REMOTE_PAYLOAD_X86_64: ${{ github.workspace }}/payloads/splitty-wsl-x86_64.tar.gz
+      SPLITTY_REMOTE_PAYLOAD_AARCH64: ${{ github.workspace }}/payloads/splitty-wsl-aarch64.tar.gz
+      SPLITTY_REMOTE_PAYLOAD_DARWIN_AARCH64: ${{ github.workspace }}/payloads/splitty-darwin-aarch64.tar.gz
+      SPLITTY_REMOTE_PAYLOAD_DARWIN_X86_64: ${{ github.workspace }}/payloads/splitty-darwin-x86_64.tar.gz
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wsl-payload
+          path: payloads
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: remote-payload-aarch64
+          path: payloads
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: remote-payload-darwin
+          path: payloads
+
+      - name: Verify payloads
+        working-directory: payloads
+        run: >-
+          shasum -a 256 -c splitty-wsl-x86_64.tar.gz.sha256 splitty-wsl-aarch64.tar.gz.sha256
+          splitty-darwin-aarch64.tar.gz.sha256 splitty-darwin-x86_64.tar.gz.sha256
+
+      # The cross-built server for macOS hosts must run on a real Mac before
+      # any client carries it.
+      - name: Run the macOS arm64 server
+        working-directory: payloads
+        run: |
+          mkdir darwin-aarch64
+          tar -xzf splitty-darwin-aarch64.tar.gz -C darwin-aarch64
+          darwin-aarch64/splitty --version
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          targets: aarch64-apple-darwin,x86_64-apple-darwin
+
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      # Ad-hoc signed through tauri.macos.conf.json.
+      - name: Build universal dmg
+        working-directory: crates/splitty-tauri
+        run: ../../frontend/node_modules/.bin/tauri build --target universal-apple-darwin --bundles dmg
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-macos
+          path: target/universal-apple-darwin/release/bundle/dmg/*.dmg
+          if-no-files-found: error
+          retention-days: 3
+
+  publish:
+    name: Publish release
+    needs: [windows, linux, macos]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: downloads
+
+      - name: Assemble release files
+        run: |
+          mkdir -p release
+          cp downloads/splitty-windows-x64-nsis/*.exe release/
+          # The static Linux servers and CLIs: x86_64 (the Windows installer's
+          # WSL backend, carrying the others for remote hosts) and aarch64;
+          # and the servers for macOS hosts.
+          cp downloads/wsl-payload/splitty-wsl-x86_64.tar.gz release/
+          cp downloads/remote-payload-aarch64/splitty-wsl-aarch64.tar.gz release/
+          cp downloads/remote-payload-darwin/splitty-darwin-*.tar.gz release/
+          cp downloads/release-linux/* release/
+          cp downloads/release-macos/* release/
+          cd release
+          sha256sum -- * > SHA256SUMS
+          cat SHA256SUMS
+
+      # Attestations need a public repository on GitHub's free plans.
+      - name: Attest build provenance
+        if: ${{ !github.event.repository.private }}
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: release/*
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          kind=()
+          case "$TAG" in *-*) kind=(--prerelease) ;; esac
+          gh release create "$TAG" release/* \
+            --repo "$GITHUB_REPOSITORY" \
+            --generate-notes --verify-tag "${kind[@]}" \
+            --title "Splitty $TAG"

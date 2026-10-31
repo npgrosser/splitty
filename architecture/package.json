@@ -1,0 +1,14 @@
+{
+  "name": "splitty-architecture",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Architecture model of Splitty (LikeC4)",
+  "packageManager": "pnpm@11.18.0",
+  "scripts": {
+    "dev": "likec4 start",
+    "validate": "likec4 validate --no-layout"
+  },
+  "devDependencies": {
+    "likec4": "1.59.4"
+  }
+}

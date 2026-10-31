@@ -1,0 +1,127 @@
+// The components of splitty-core and the dependencies between them.
+// A relationship between two components with a `module` means that code of the source may
+// name the target's modules; architecture/check checks both directions.
+
+model {
+  extend splitty.core {
+
+    // Foundations, without dependencies
+
+    ids = component 'ids' {
+      description 'Strongly typed identifiers: pane, screen, session, node, client, floating, job and agent ids.'
+      metadata {
+        module 'splitty_core::ids'
+      }
+    }
+
+    shell_profiles = component 'shell_profiles' {
+      description 'Shell profile detection, reconciliation with the stored settings, validation and lookup; executable and argv kept apart, never a command string.'
+      metadata {
+        module 'splitty_core::shell_profiles'
+      }
+    }
+
+    theme = component 'theme' {
+      description 'Themes: palette-based derivation of UI tokens and terminal colors, bundled and custom themes.'
+      metadata {
+        module 'splitty_core::theme'
+      }
+    }
+
+    // Configuration and files
+
+    config = component 'config' {
+      description 'User and server settings (config.toml, camelCase on the wire), the config directory (or the absolute one SPLITTY_CONFIG_DIR names) and the owner-only file helpers every writer of it uses.'
+      metadata {
+        module 'splitty_core::config'
+      }
+    }
+
+    auth = component 'auth' {
+      description 'The process token: generation, owner-only persistence, constant-time validation, single-use codes.'
+      metadata {
+        module 'splitty_core::auth'
+        spec 'access-control'
+      }
+    }
+
+    template = component 'template' {
+      description 'Saved layout templates as YAML files.'
+      metadata {
+        module 'splitty_core::template'
+      }
+    }
+
+    // The mux: pure model, and the effect runner at its edge
+
+    mux = component 'mux' {
+      description 'The workspace model: state, ops, validation, the pure reducer (state, op) -> (state, effects), the grid projection and the store. Managed-job launch, ownership, result and never-respawn records live with the layout. No I/O.'
+      metadata {
+        module 'splitty_core::mux'
+        spec 'workspace-model'
+      }
+    }
+
+    effect_runner = component 'effect_runner' {
+      description 'Runs the effects the reducer returns: spawns shells or direct managed-job programs, kills sessions and builds their owner/scoped socket environment. Returns target-preserving typed outcomes, including spawn failures. The only part of the mux that touches the PTY layer.'
+      metadata {
+        module 'splitty_core::mux::effect_runner'
+        spec 'terminal-sessions'
+      }
+    }
+
+    // Sessions
+
+    pty = component 'pty' {
+      description 'PTY sessions: the session layer (the spec of a session with installation-local CLI discovery and child PATH, scrollback, subscriptions, OSC parsing, job log text, process info) over a terminal (terminal: the trait, its factory, the PTY in this process with its reader thread and lifecycle; a daemon\'s terminals are keepers), the replay filter for terminal clients, and the scan of the TCP ports the processes of sessions listen on (/proc on Linux: loopback and wildcard listeners of each shell\'s process tree).'
+      metadata {
+        module 'splitty_core::pty'
+        spec 'terminal-sessions'
+      }
+    }
+
+    protocol = component 'protocol' {
+      description 'The session protocol (create, attach, input, output, resize, close, image and chunked file uploads, activity, idle, hide, size) with its dispatcher, the message types of both protocols, the notification engine, the stores of pasted images and uploaded files (owner-only files in the cache directory), and the arbiter of the PTY size of sessions several connections show (sizing: reports, activity, the size policy, an idle tick).'
+      metadata {
+        module 'splitty_core::protocol'
+        spec 'terminal-sessions'
+      }
+    }
+
+    daemon = component 'daemon' {
+      description 'Daemon helpers: daemon.json (keepsSessions), PID checks, state persistence, and on restart the effects that respawn the sessions no adopted keeper holds and the job records, which stay running where a keeper was adopted.'
+      metadata {
+        module 'splitty_core::daemon'
+        spec 'server-modes'
+      }
+    }
+
+    keeper = component 'keeper' {
+      description 'Session keepers: the keeper process that owns one daemon session\'s PTY and program and outlives the daemon (blocking threads, an offset ring, one controller at a time with takeover, exit retention), its framed protocol over a private Unix socket (wire), the keepers directory with the peer checks of both sides (dir), and the controller side (client): the process launcher, the daemon\'s terminal factory with the fallback to a local terminal, the kept terminal with reconnect, finding and taking over running keepers.'
+      metadata {
+        module 'splitty_core::keeper'
+        spec 'session-keepers'
+      }
+    }
+
+    auth -> config 'config_dir_override, ensure_private_dir, write_private_file'
+    config -> shell_profiles 'ShellSettings, detection and reconciliation'
+    template -> config 'config_dir, ensure_private_dir'
+    mux -> ids 'PaneId, ScreenId, SessionId, …'
+    effect_runner -> ids 'PaneId, ScreenId, SessionId'
+    effect_runner -> mux 'Effect'
+    effect_runner -> pty 'Backend, SessionHandle, CreateSessionOpts, subscriptions and events'
+    pty -> shell_profiles 'ShellProfilesState, ShellSettings'
+    pty -> config 'run_dir and ensure_private_dir for the stable CLI link'
+    protocol -> config 'ensure_private_dir'
+    protocol -> mux 'ScreenInfo, ScreenState'
+    protocol -> effect_runner 'EnvContext'
+    protocol -> pty 'Backend, SessionHandle, Session, OSC events, ListeningPort; pty::testing in tests'
+    daemon -> config 'config_dir, owner-only files'
+    daemon -> mux 'WorkspaceState, Effect, SessionStatus'
+    daemon -> ids 'JobId in persistence and no-replay fixtures'
+    keeper -> pty 'The terminal trait and factory, spawn, read_output, foreground_of, the lifecycle, the ring buffer, process results; the manager and pty::testing in tests'
+    keeper -> config 'run_dir, socket_dir_supported, ensure_private_dir'
+    keeper -> shell_profiles 'state_from_settings, ShellSettings in tests'
+  }
+}

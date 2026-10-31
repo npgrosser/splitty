@@ -1,0 +1,9 @@
+auditConfig:
+  ignoreGhsas:
+    # deepmerge: mergeObject() allows prototype poisoning of the merged result.
+    # Reaches us only through @sveltejs/vite-plugin-svelte, which merges this
+    # repository's own Svelte and Vite configuration at build time. The
+    # advertised fix (>= 4.3.2) is not published on npm; 4.3.1 is the newest
+    # release. Development tooling only, never shipped. Remove once a fixed
+    # version exists (checked 2026-10-31).
+    - GHSA-gcqx-w48m-w2h4

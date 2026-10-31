@@ -1,0 +1,58 @@
+[package]
+name = "splitty-gui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "splitty_tauri_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+# DevTools are OFF in the shipped build (security review SR-11).
+#
+# They were previously enabled unconditionally, which meant every distributed
+# binary shipped an inspection and manipulation surface for the privileged
+# WebView — reachable by anyone with local access to an unlocked machine.
+#
+# Build a support binary with `--features devtools` when you need to debug a
+# release; such builds must be clearly labelled and not distributed generally.
+devtools = ["tauri/devtools"]
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+# Remote windows: the connect flow, the tunnel's supervisor and the known
+# hosts, on every platform (Windows included, where no local server exists).
+splitty-remote = { path = "../splitty-remote" }
+tokio = { workspace = true }
+
+[target.'cfg(not(target_os = "windows"))'.dependencies]
+splitty-core = { path = "../splitty-core" }
+splitty-server = { path = "../splitty-server" }
+rand = { workspace = true }
+hex = { workspace = true }
+axum = { version = "0.8", features = ["ws"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+cocoa = "0.26"
+
+[target.'cfg(not(target_os = "windows"))'.dev-dependencies]
+tempfile = "3"
+splitty-core = { path = "../splitty-core", features = ["testing"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+sha2 = "0.10"
+tauri-plugin-single-instance = "2"
+windows-sys = { version = "0.61", features = [
+    "Win32_Storage_FileSystem",
+    "Win32_System_Threading",
+] }

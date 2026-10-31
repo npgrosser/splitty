@@ -1,0 +1,28 @@
+// Element kinds and tags of the architecture model. Conventions: README.md.
+
+specification {
+  element actor {
+    style {
+      shape person
+    }
+  }
+
+  element system
+
+  element container
+
+  element store {
+    style {
+      shape storage
+    }
+  }
+
+  // A Rust module, named in `metadata { module '…' }` by its path (`splitty_core::mux`).
+  element component
+
+  // Not built yet: names a module that does not exist; its relationships are not checked.
+  tag planned
+
+  // Outside the project.
+  tag external
+}

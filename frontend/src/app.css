@@ -1,0 +1,819 @@
+@import "dockview-core/dist/styles/dockview.css";
+@import "@xterm/xterm/css/xterm.css";
+@import "./layout/dockview-adapter.css";
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body,
+#app {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  font-family: var(--splitty-font-family, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif);
+  font-size: var(--splitty-font-size, 12px);
+  font-weight: 500;
+}
+
+/* Scrollbar fade: hidden by default, visible via JS-managed class.
+   !important overrides VS Code scrollbar component's inline styles. */
+.xterm-scrollbar-fade .xterm-scrollable-element > .scrollbar {
+  opacity: 0 !important;
+  transition: opacity 0.3s !important;
+  pointer-events: none !important;
+}
+.xterm-scrollbar-fade.xterm-scrollbar-active
+  .xterm-scrollable-element
+  > .scrollbar {
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+
+/* ── Tab sizing (all themes) ── */
+
+.dv-tab {
+  min-width: var(--splitty-tab-min-width, 0);
+  max-width: 200px;
+}
+
+.dv-tabs-and-actions-container.dv-single-tab.dv-full-width-single-tab .dv-scrollable,
+.dv-tabs-and-actions-container.dv-single-tab.dv-full-width-single-tab .dv-tabs-container {
+  flex-grow: 0;
+}
+
+.dv-tabs-and-actions-container.dv-single-tab.dv-full-width-single-tab .dv-tabs-container .dv-tab {
+  flex: 0 1 auto;
+}
+
+.dv-default-tab-content {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* ── Linked sashes ── */
+
+.dv-sash.sash-link-source {
+  background: var(--splitty-accent-muted) !important;
+}
+.dv-sash.sash-link-source::after {
+  background: var(--splitty-accent) !important;
+  animation: sash-pulse 1s ease-in-out infinite alternate !important;
+  top: 0 !important; bottom: 0 !important;
+  left: 0 !important; right: 0 !important;
+  width: auto !important; height: auto !important;
+  transform: none !important; border-radius: 0 !important;
+}
+
+.dv-sash.sash-link-candidate {
+  background: var(--splitty-accent-muted) !important;
+}
+.dv-sash.sash-link-candidate:hover {
+  background: var(--splitty-accent-muted) !important;
+}
+.dv-sash.sash-link-candidate::after {
+  background: var(--splitty-accent-muted) !important;
+  top: 0 !important; bottom: 0 !important;
+  left: 0 !important; right: 0 !important;
+  width: auto !important; height: auto !important;
+  transform: none !important; border-radius: 0 !important;
+}
+.dv-sash.sash-link-candidate:hover::after {
+  background: var(--splitty-accent) !important;
+}
+
+.dv-sash.sash-link-partner {
+  background: var(--splitty-accent-muted) !important;
+}
+.dv-sash.sash-link-partner:hover {
+  background: var(--splitty-danger-hover) !important;
+}
+.dv-sash.sash-link-partner::after {
+  background: var(--splitty-accent) !important;
+  top: 0 !important; bottom: 0 !important;
+  left: 0 !important; right: 0 !important;
+  width: auto !important; height: auto !important;
+  transform: none !important; border-radius: 0 !important;
+}
+.dv-sash.sash-link-partner:hover::after {
+  background: var(--splitty-danger) !important;
+}
+.dv-sash.sash-link-partner::before {
+  content: "";
+  position: absolute;
+  z-index: 5;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--splitty-accent);
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  pointer-events: none;
+}
+.dv-sash.sash-link-partner:hover::before {
+  background: var(--splitty-danger);
+}
+
+@keyframes sash-pulse {
+  from { opacity: 0.4; }
+  to   { opacity: 1; }
+}
+
+/* ── Context Menu ── */
+
+.splitty-context-menu-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1200;
+}
+
+.splitty-context-menu {
+  position: fixed;
+  min-width: 200px;
+  padding: 4px;
+  border-radius: var(--splitty-border-radius);
+  border: 1px solid var(--splitty-border-default);
+  background: var(--splitty-surface-overlay);
+  box-shadow: 0 8px 24px var(--splitty-shadow);
+  z-index: 1201;
+}
+
+.splitty-context-submenu {
+  z-index: 1202;
+}
+
+.splitty-context-menu-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+  width: 100%;
+  padding: 8px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--splitty-text-primary);
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.01em;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+}
+
+.splitty-context-menu-shortcut {
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 10px;
+  font-weight: 400;
+  color: var(--splitty-text-muted);
+  letter-spacing: 0;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: color 120ms ease;
+}
+
+.splitty-context-menu-copy,
+.splitty-context-menu-meta {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+}
+
+.splitty-context-menu-copy {
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.splitty-context-menu-detail {
+  max-width: 260px;
+  overflow: hidden;
+  color: var(--splitty-text-muted);
+  font-size: 10px;
+  font-weight: 400;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.splitty-context-menu-badge {
+  padding: 1px 4px;
+  border: 1px solid var(--splitty-border-default);
+  border-radius: 3px;
+  color: var(--splitty-text-muted);
+  font-size: 9px;
+  font-weight: 500;
+  white-space: nowrap;
+}
+
+.splitty-context-menu-item:hover .splitty-context-menu-shortcut {
+  color: var(--splitty-text-secondary);
+}
+
+.splitty-context-menu-item.danger:hover .splitty-context-menu-shortcut {
+  color: var(--splitty-danger);
+}
+
+.splitty-context-menu-item:hover,
+.splitty-context-menu-item:focus-visible,
+.splitty-context-menu-item.expanded {
+  background: var(--splitty-hover-bg);
+}
+
+.splitty-context-menu-group.separator-before {
+  margin-top: 4px;
+  position: relative;
+  padding-top: 4px;
+}
+
+.splitty-context-menu-group.separator-before::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: 6px;
+  right: 6px;
+  height: 1px;
+  background: var(--splitty-border-subtle);
+}
+
+.splitty-context-menu-item.danger {
+  color: var(--splitty-text-primary);
+}
+
+.splitty-context-menu-item.danger:hover {
+  background: var(--splitty-danger-hover);
+  color: var(--splitty-danger);
+}
+
+.splitty-context-menu-item:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.splitty-context-menu-item:disabled:hover {
+  background: transparent;
+}
+
+/* ── Group Action Buttons ── */
+
+.group-action-btn {
+  background: none;
+  border: none;
+  color: var(--splitty-text-secondary);
+  cursor: pointer;
+  padding: 4px;
+  font-size: 14px;
+  line-height: 1;
+  border-radius: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  scale: 0.9;
+  opacity: 0;
+  transition: opacity 0.12s ease, background 0.12s ease, color 0.12s ease;
+}
+
+.dv-tabs-and-actions-container:hover .group-action-btn {
+  opacity: 1;
+}
+
+.group-action-btn.new-tab-btn {
+  scale: 1;
+  opacity: 1;
+  padding: 5px;
+}
+
+.group-action-btn.new-tab-main {
+  border-radius: 4px 0 0 4px;
+  padding-right: 4px;
+}
+
+.group-action-btn.new-tab-arrow {
+  border-left: 1px solid var(--splitty-border-subtle);
+  border-radius: 0 4px 4px 0;
+  padding-left: 3px;
+  padding-right: 3px;
+}
+
+.group-action-btn:hover {
+  background: var(--splitty-hover-bg);
+  color: var(--splitty-text-primary);
+}
+
+.group-action-btn:disabled {
+  opacity: 0.3;
+  cursor: default;
+}
+
+/* ── Tab close button ── */
+
+.dv-tab.dv-inactive-tab .dv-default-tab .dv-default-tab-action {
+  visibility: visible !important;
+}
+
+[data-close-btn-active] .dv-tab.dv-inactive-tab .dv-default-tab .dv-default-tab-action {
+  display: none !important;
+}
+
+.dv-tab .dv-default-tab .dv-default-tab-action:hover {
+  background: var(--splitty-hover-bg);
+  border-radius: 4px;
+}
+
+.dv-default-tab-action svg {
+  width: var(--splitty-tab-close-size, 9px);
+  height: var(--splitty-tab-close-size, 9px);
+}
+
+/* ── Empty State / Watermark ── */
+
+.empty-state {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  background: var(--splitty-surface-raised);
+  user-select: none;
+  font-family: "JetBrains Mono", "Fira Code", "SF Mono", "Cascadia Code", ui-monospace, monospace;
+  position: relative;
+  overflow: hidden;
+}
+
+.empty-state::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 2px,
+    rgba(0, 0, 0, 0.08) 2px,
+    rgba(0, 0, 0, 0.08) 4px
+  );
+  pointer-events: none;
+}
+
+.empty-state-content {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  animation: empty-state-fade-in 0.5s ease;
+}
+
+@keyframes empty-state-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.empty-state-title {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 400;
+  color: var(--splitty-text-muted);
+  letter-spacing: 0.15em;
+  text-transform: uppercase;
+}
+
+.empty-state-subtitle {
+  margin: 0 0 20px;
+  font-size: 11px;
+  color: var(--splitty-text-muted);
+  letter-spacing: 0.05em;
+}
+
+.empty-state-actions {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 28px;
+}
+
+.empty-state-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 14px;
+  border: 1px solid var(--splitty-border-subtle);
+  border-radius: 2px;
+  background: transparent;
+  color: var(--splitty-text-secondary);
+  font-size: 11px;
+  font-family: inherit;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.empty-state-btn:hover {
+  background: var(--splitty-hover-bg);
+  border-color: var(--splitty-border-default);
+  color: var(--splitty-text-primary);
+}
+
+.empty-state-btn.primary {
+  border-color: var(--splitty-border-default);
+  color: var(--splitty-text-secondary);
+}
+
+.empty-state-btn.primary:hover {
+  background: var(--splitty-hover-bg);
+  border-color: var(--splitty-border-default);
+  color: var(--splitty-text-primary);
+}
+
+/* ── Auto-hide tab bar: overlay instead of pushing content ── */
+
+[data-single-tab] {
+  position: relative;
+}
+
+[data-single-tab] > .dv-tabs-and-actions-container {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: 10;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.15s ease;
+}
+
+[data-single-tab][data-tab-reveal] > .dv-tabs-and-actions-container,
+[data-single-tab] > .dv-tabs-and-actions-container:hover,
+[data-modifier-reveal] [data-single-tab] > .dv-tabs-and-actions-container {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Lock tab bar: suppress hover and mousemove reveal on auto-hidden tabs.
+   Modifier-reveal (hold Alt) still works for drag-and-drop. */
+[data-lock-tabs] [data-single-tab][data-tab-reveal] > .dv-tabs-and-actions-container,
+[data-lock-tabs] [data-single-tab] > .dv-tabs-and-actions-container:hover {
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* Hold (Cmd+Ctrl+X on Mac / Alt+Ctrl+X) overrides lock — overlay peek for drag-and-drop */
+[data-lock-tabs][data-modifier-reveal] [data-single-tab] > .dv-tabs-and-actions-container {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+/* Toggle (Cmd+Shift+X on Mac / Alt+Shift+X) — show tabs inline, terminal resizes.
+   Must beat all lock/hover rules so we use high specificity. */
+[data-tabs-inline] [data-single-tab] > .dv-tabs-and-actions-container,
+[data-tabs-inline][data-lock-tabs] [data-single-tab] > .dv-tabs-and-actions-container,
+[data-tabs-inline][data-lock-tabs] [data-single-tab][data-tab-reveal] > .dv-tabs-and-actions-container {
+  position: static !important;
+  opacity: 1 !important;
+  pointer-events: auto !important;
+}
+
+/* ── Scroll to bottom ── */
+
+.scroll-to-bottom {
+  position: absolute;
+  bottom: 8px;
+  right: 20px;
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin: 0;
+  padding: 3px 10px 3px 8px;
+  border: 1px solid var(--splitty-border-subtle);
+  border-radius: 4px;
+  background: var(--splitty-hover-bg);
+  backdrop-filter: blur(8px);
+  color: var(--splitty-text-secondary);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  line-height: 1;
+  cursor: pointer;
+  white-space: nowrap;
+  opacity: 1;
+  transform: translateY(0);
+  transition: opacity 150ms ease, transform 150ms ease, background 100ms ease, color 100ms ease, border-color 100ms ease;
+  animation: scroll-to-bottom-in 150ms ease both;
+}
+
+.scroll-to-bottom:hover {
+  background: var(--splitty-active-bg);
+  color: var(--splitty-text-primary);
+  border-color: var(--splitty-border-default);
+}
+
+.scroll-to-bottom:active {
+  background: var(--splitty-active-bg);
+  color: var(--splitty-text-primary);
+  transform: translateY(1px);
+}
+
+.scroll-to-bottom-exit {
+  opacity: 0;
+  transform: translateY(6px);
+  pointer-events: none;
+}
+
+.scroll-to-bottom-count {
+  font-variant-numeric: tabular-nums;
+}
+
+@keyframes scroll-to-bottom-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── PTY size set by another client ── */
+
+.pty-size-marker {
+  position: absolute;
+  inset: 0;
+  z-index: 9;
+  pointer-events: none;
+}
+
+.pty-size-marker[hidden],
+.pty-size-marker-area[hidden] {
+  display: none;
+}
+
+.pty-size-marker-area {
+  position: absolute;
+  background: repeating-linear-gradient(
+    135deg,
+    transparent 0 7px,
+    var(--splitty-border-subtle) 7px 8px
+  );
+  opacity: 0.7;
+}
+
+.pty-size-marker-right {
+  border-left: 1px dashed var(--splitty-border-default);
+}
+
+.pty-size-marker-bottom {
+  border-top: 1px dashed var(--splitty-border-default);
+}
+
+.pty-size-marker-badge {
+  position: absolute;
+  top: 6px;
+  right: 20px;
+  margin: 0;
+  padding: 3px 8px;
+  border: 1px dashed var(--splitty-border-default);
+  border-radius: 4px;
+  background: var(--splitty-hover-bg);
+  backdrop-filter: blur(8px);
+  color: var(--splitty-text-muted);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  white-space: nowrap;
+  cursor: pointer;
+  pointer-events: auto;
+  transition: background 100ms ease, color 100ms ease, border-color 100ms ease;
+}
+
+.pty-size-marker-badge:hover {
+  background: var(--splitty-active-bg);
+  color: var(--splitty-text-primary);
+  border-color: var(--splitty-accent);
+}
+
+.pty-size-marker-badge-static,
+.pty-size-marker-badge-static:hover {
+  cursor: default;
+  background: var(--splitty-hover-bg);
+  color: var(--splitty-text-muted);
+  border-color: var(--splitty-border-default);
+}
+
+/* ── Terminal Search ── */
+
+.terminal-search {
+  position: absolute;
+  top: 4px;
+  right: 20px;
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 0;
+  padding: 3px 4px;
+  border: 1px solid var(--splitty-border-subtle);
+  border-radius: 5px;
+  background: var(--splitty-surface-overlay);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 12px;
+  animation: terminal-search-in 120ms ease both;
+}
+
+.terminal-search-input {
+  width: 160px;
+  padding: 3px 6px;
+  border: 1px solid var(--splitty-border-subtle);
+  border-radius: 3px;
+  background: var(--splitty-surface-base);
+  color: var(--splitty-text-primary);
+  font: inherit;
+  font-size: 12px;
+  outline: none;
+}
+
+.terminal-search-input:focus {
+  border-color: var(--splitty-accent);
+}
+
+.terminal-search-input::placeholder {
+  color: var(--splitty-text-muted);
+}
+
+.terminal-search-toggles {
+  display: inline-flex;
+  gap: 1px;
+}
+
+.terminal-search-toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: none;
+  color: var(--splitty-text-muted);
+  cursor: pointer;
+}
+
+.terminal-search-toggle:hover {
+  color: var(--splitty-text-secondary);
+  background: var(--splitty-hover-bg);
+}
+
+.terminal-search-toggle.active {
+  color: var(--splitty-accent);
+  border-color: var(--splitty-accent-muted);
+  background: var(--splitty-hover-bg);
+}
+
+.terminal-search-count {
+  min-width: 56px;
+  padding: 0 4px;
+  color: var(--splitty-text-secondary);
+  font-size: 11px;
+  text-align: center;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.terminal-search-count.no-results {
+  color: var(--splitty-danger);
+}
+
+.terminal-search-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 22px;
+  height: 22px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  border-radius: 3px;
+  background: none;
+  color: var(--splitty-text-secondary);
+  cursor: pointer;
+}
+
+.terminal-search-btn:hover {
+  background: var(--splitty-active-bg);
+  color: var(--splitty-text-primary);
+}
+
+@keyframes terminal-search-in {
+  from {
+    opacity: 0;
+    transform: translateY(-6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* ── Screen Layouts & Slide Animations ── */
+
+.screen-layouts {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  z-index: 0;
+  margin-left: 0;
+  transition: margin-left 220ms cubic-bezier(0.25, 0.1, 0.25, 1);
+}
+
+.screen-layouts.drawer-pinned {
+  margin-left: var(--drawer-sidebar-width, 200px);
+}
+
+.screen-layout {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  transition: transform 200ms ease;
+}
+
+.screen-dockview {
+  position: absolute;
+  inset: 0;
+  display: flex;
+}
+
+.screen-layout[data-active="true"] {
+  transform: translateY(0);
+  z-index: 1;
+}
+
+.screen-layout[data-active="false"] {
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Screens slide along the drawer's list: earlier ones wait above, later ones below. */
+.screen-layout[data-slide="up"] {
+  transform: translateY(-100%);
+}
+
+.screen-layout[data-slide="down"] {
+  transform: translateY(100%);
+}
+
+.screen-layout-entering {
+  transition: none !important;
+  visibility: hidden;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .screen-layout { transition: none; }
+}
+
+/* ── Theme Effects ── */
+
+/* Glow: accent-colored glow on active tab indicator and cursor */
+[data-effect-glow="true"] .dv-tab.dv-active-tab {
+  box-shadow: inset 0 -1px 0 var(--splitty-effect-glow-color, var(--splitty-accent)),
+              0 1px var(--splitty-effect-glow-strength, 8px) var(--splitty-effect-glow-color, var(--splitty-accent));
+}
+
+[data-effect-glow="true"] .dv-tabs-and-actions-container {
+  box-shadow: 0 1px 0 color-mix(in srgb, var(--splitty-effect-glow-color, var(--splitty-accent)) 30%, transparent);
+}
+
+[data-effect-glow="true"] .sash-link-source::after,
+[data-effect-glow="true"] .sash-link-partner::after {
+  box-shadow: 0 0 var(--splitty-effect-glow-strength, 8px) var(--splitty-effect-glow-color, var(--splitty-accent));
+}
+
+[data-effect-glow="true"] .empty-state-btn:hover {
+  box-shadow: 0 0 12px color-mix(in srgb, var(--splitty-effect-glow-color, var(--splitty-accent)) 25%, transparent);
+}
+
+/* Scanlines: CRT-style overlay on terminal panes */
+[data-effect-scanlines="true"] .xterm-screen::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(
+    0deg,
+    transparent,
+    transparent 1px,
+    rgba(0, 0, 0, var(--splitty-effect-scanline-opacity, 0.06)) 1px,
+    rgba(0, 0, 0, var(--splitty-effect-scanline-opacity, 0.06)) 2px
+  );
+  pointer-events: none;
+  z-index: 1;
+}

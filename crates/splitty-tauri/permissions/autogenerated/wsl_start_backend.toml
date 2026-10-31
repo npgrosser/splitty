@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wsl-start-backend"
+description = "Enables the wsl_start_backend command without any pre-configured scope."
+commands.allow = ["wsl_start_backend"]
+
+[[permission]]
+identifier = "deny-wsl-start-backend"
+description = "Denies the wsl_start_backend command without any pre-configured scope."
+commands.deny = ["wsl_start_backend"]

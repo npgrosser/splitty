@@ -1,0 +1,64 @@
+[package]
+name = "splitty-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "splitty_server"
+path = "src/lib.rs"
+
+[[bin]]
+name = "splitty"
+path = "src/main.rs"
+
+[dependencies]
+splitty-core = { path = "../splitty-core" }
+splitty-remote = { path = "../splitty-remote" }
+axum = { version = "0.8", features = ["ws"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = "0.3"
+clap = { version = "4", features = ["derive", "env"] }
+rand = "0.8"
+hex = "0.4"
+# The chunks of offered files (`ws::files`).
+base64 = "0.22"
+# Plain HTTP only: the CLI talks to 127.0.0.1, never over TLS, so no TLS stack
+# is compiled in (security review SR-29, see docs/security/findings.md).
+reqwest = { version = "0.12", features = ["json"], default-features = false }
+thiserror = "2"
+futures = "0.3"
+# The bridge's client side of the daemon's WebSocket (plain ws:// to loopback,
+# no TLS); already in the tree through axum.
+tokio-tungstenite = "0.29"
+http = "1"
+rust-embed = { version = "8", features = ["interpolate-folder-path"] }
+mime_guess = "2"
+open = "5"
+# `splitty download` of a folder: deflate only, through flate2's pure-Rust
+# backend (already in the tree), and the archive's own directory.
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+tempfile = "3"
+
+[target.'cfg(unix)'.dependencies]
+# `socket` provides SO_PEERCRED and `user` provides geteuid, used by the control
+# channel to verify that a connecting process belongs to the same user. `term`
+# (termios) and `ioctl` (the window size) are for `splitty attach`'s terminal.
+nix = { version = "0.29", features = ["fs", "ioctl", "process", "signal", "socket", "term", "user"] }
+dirs = "6"
+
+[dev-dependencies]
+async-trait = { workspace = true }
+splitty-core = { path = "../splitty-core", features = ["testing"] }
+tokio = { workspace = true, features = ["test-util"] }
+# `ServiceExt::oneshot` for in-process requests through the router; already in
+# the tree through axum.
+tower = { version = "0.5", features = ["util"] }
+# `cookies` is needed so integration tests can hold the HttpOnly session cookie
+# the way a browser does.
+reqwest = { version = "0.12", features = ["json", "cookies"], default-features = false }

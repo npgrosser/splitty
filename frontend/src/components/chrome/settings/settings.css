@@ -1,0 +1,462 @@
+.settings-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  padding: 4px 0;
+  overflow: hidden;
+}
+
+/* -- Section Header -- */
+
+.section-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 8px 12px;
+  margin: 0;
+  border: none;
+  border-bottom: 1px solid var(--splitty-border-subtle);
+  background: var(--splitty-hover-bg);
+  color: var(--splitty-text-primary);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease;
+  user-select: none;
+}
+
+.section-header:hover {
+  background: var(--splitty-active-bg);
+}
+
+.section-chevron {
+  display: inline-block;
+  width: 0;
+  height: 0;
+  border-left: 4px solid currentColor;
+  border-top: 3px solid transparent;
+  border-bottom: 3px solid transparent;
+  transition: transform 150ms ease;
+  transform: rotate(90deg);
+}
+
+.section-chevron.collapsed {
+  transform: rotate(0deg);
+}
+
+/* -- Section Body -- */
+
+.section-body {
+  padding: 4px 0;
+}
+
+/* -- Setting Row -- */
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 14px;
+  min-height: 32px;
+  transition: background 100ms ease;
+}
+
+.setting-row:hover {
+  background: var(--splitty-hover-bg);
+}
+
+.setting-row-disabled {
+  opacity: 0.4;
+}
+
+.setting-row-disabled .setting-control {
+  pointer-events: none;
+}
+
+.setting-info {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  flex: 1;
+}
+
+.setting-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--splitty-text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.setting-hint {
+  font-size: 10px;
+  color: var(--splitty-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.setting-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+/* -- Select -- */
+
+.setting-control select {
+  appearance: none;
+  padding: 3px 22px 3px 8px;
+  border: 1px solid var(--splitty-border-default);
+  border-radius: 4px;
+  background: var(--splitty-hover-bg);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M0 0l5 6 5-6z' fill='currentColor'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 6px center;
+  color: var(--splitty-text-primary);
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+  max-width: 140px;
+  outline: none;
+  transition: border-color 120ms ease;
+}
+
+.setting-control select:hover {
+  border-color: var(--splitty-text-secondary);
+}
+
+.setting-control select:focus-visible {
+  border-color: var(--splitty-accent);
+}
+
+.setting-control select option {
+  background: var(--splitty-surface-overlay);
+  color: var(--splitty-text-primary);
+}
+
+/* -- Range / Slider -- */
+
+.setting-control input[type="range"] {
+  width: 90px;
+  height: 4px;
+  appearance: none;
+  background: var(--splitty-border-default);
+  border-radius: 2px;
+  outline: none;
+  cursor: pointer;
+}
+
+.setting-control input[type="range"]::-webkit-slider-thumb {
+  appearance: none;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--splitty-text-secondary);
+  border: none;
+  cursor: pointer;
+  transition: background 120ms ease;
+}
+
+.setting-control input[type="range"]::-webkit-slider-thumb:hover {
+  background: var(--splitty-text-primary);
+}
+
+.setting-control input[type="range"]::-moz-range-thumb {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--splitty-text-secondary);
+  border: none;
+  cursor: pointer;
+}
+
+/* -- Toggle Switch -- */
+
+.toggle {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 18px;
+  cursor: pointer;
+}
+
+.toggle input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+  position: absolute;
+}
+
+.toggle-slider {
+  position: absolute;
+  inset: 0;
+  background: var(--splitty-border-default);
+  border-radius: 9px;
+  transition: background 200ms ease;
+}
+
+.toggle-slider::before {
+  content: "";
+  position: absolute;
+  left: 2px;
+  top: 2px;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--splitty-text-secondary);
+  transition: transform 200ms ease, background 200ms ease;
+}
+
+.toggle input:checked + .toggle-slider {
+  background: var(--splitty-accent-muted);
+}
+
+.toggle input:checked + .toggle-slider::before {
+  transform: translateX(14px);
+  background: var(--splitty-accent);
+}
+
+/* -- Reset Button -- */
+
+.reset-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: var(--splitty-hover-bg);
+  color: var(--splitty-text-muted);
+  font-size: 13px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease;
+  flex-shrink: 0;
+}
+
+.reset-btn:hover {
+  background: var(--splitty-danger-hover);
+  color: var(--splitty-danger);
+}
+
+/* -- Build Info -- */
+
+.build-info {
+  padding: 4px 14px;
+}
+
+.build-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 3px 0;
+}
+
+.build-label {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--splitty-text-secondary);
+}
+
+.build-value {
+  font-size: 11px;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  color: var(--splitty-text-primary);
+}
+
+.build-loading {
+  font-size: 11px;
+  color: var(--splitty-text-muted);
+  font-style: italic;
+}
+
+/* -- Shell Profiles -- */
+
+.shell-settings-toolbar,
+.shell-settings-footer {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 12px;
+}
+
+.shell-settings-toolbar label {
+  flex: 1;
+  color: var(--splitty-text-secondary);
+  font-size: 11px;
+}
+
+.shell-settings-toolbar select,
+.shell-profile-editor select,
+.shell-profile-editor input,
+.shell-profile-editor textarea {
+  border: 1px solid var(--splitty-border-default);
+  border-radius: 4px;
+  background: var(--splitty-hover-bg);
+  color: var(--splitty-text-primary);
+  font: inherit;
+  font-size: 11px;
+}
+
+.shell-settings-toolbar select,
+.shell-profile-editor select,
+.shell-profile-editor input {
+  padding: 4px 7px;
+}
+
+.shell-profile-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 2px 8px;
+}
+
+.shell-profile-card {
+  padding: 7px;
+  border: 1px solid var(--splitty-border-subtle);
+  border-radius: 5px;
+  background: var(--splitty-surface-base);
+}
+
+.shell-profile-card.unavailable {
+  opacity: 0.65;
+}
+
+.shell-profile-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.shell-profile-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--splitty-text-primary);
+  font-size: 11px;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-profile-icon,
+.shell-profile-command {
+  color: var(--splitty-text-muted);
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+  font-size: 10px;
+}
+
+.shell-profile-command {
+  margin: 4px 0 0 44px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shell-profile-badge {
+  padding: 1px 3px;
+  border-radius: 3px;
+  background: var(--splitty-accent-muted);
+  color: var(--splitty-accent);
+  font-size: 8px;
+  letter-spacing: 0.04em;
+}
+
+.shell-profile-badge.experimental {
+  background: var(--splitty-hover-bg);
+  color: var(--splitty-text-muted);
+}
+
+.shell-profile-actions {
+  display: flex;
+  gap: 3px;
+  margin-left: auto;
+}
+
+.shell-profile-actions button,
+.shell-settings-footer button,
+.shell-editor-actions button,
+.shell-enable-btn {
+  padding: 3px 6px;
+  border: 1px solid var(--splitty-border-default);
+  border-radius: 3px;
+  background: transparent;
+  color: var(--splitty-text-secondary);
+  font: inherit;
+  font-size: 9px;
+  cursor: pointer;
+}
+
+.shell-enable-btn {
+  padding: 0;
+  border: 0;
+  color: var(--splitty-text-muted);
+}
+
+.shell-enable-btn.enabled {
+  color: var(--splitty-accent);
+}
+
+.shell-profile-actions button:disabled,
+.shell-settings-footer button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+.shell-profile-actions button.danger,
+.shell-profile-error,
+.shell-settings-error {
+  color: var(--splitty-danger);
+}
+
+.shell-profile-error,
+.shell-settings-error {
+  margin: 4px 8px 0 44px;
+  font-size: 9px;
+}
+
+.shell-profile-editor {
+  display: grid;
+  gap: 6px;
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--splitty-border-subtle);
+}
+
+.shell-profile-editor label {
+  display: grid;
+  grid-template-columns: 92px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  color: var(--splitty-text-secondary);
+  font-size: 10px;
+}
+
+.shell-profile-editor textarea {
+  padding: 5px 7px;
+  resize: vertical;
+  font-family: ui-monospace, "JetBrains Mono", monospace;
+}
+
+.shell-editor-actions,
+.shell-settings-footer {
+  display: grid;
+  grid-template-columns: auto 1fr auto auto;
+  gap: 5px;
+}
+
+.shell-settings-footer button.primary,
+.shell-editor-actions button.primary {
+  border-color: var(--splitty-accent);
+  background: var(--splitty-accent-muted);
+  color: var(--splitty-accent);
+}

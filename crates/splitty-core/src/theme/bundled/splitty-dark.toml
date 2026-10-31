@@ -1,0 +1,23 @@
+name = "Splitty Dark"
+variant = "dark"
+
+[palette]
+gray-0 = "#fafafa"
+gray-50 = "#f0f0f0"
+gray-100 = "#c8c8c8"
+gray-200 = "#a0a0a0"
+gray-300 = "#808080"
+gray-400 = "#6b6b6b"
+gray-500 = "#505050"
+gray-600 = "#3b3b3b"
+gray-700 = "#2a2a2a"
+gray-800 = "#1e1e1e"
+gray-850 = "#1a1a1a"
+gray-900 = "#0f0f0f"
+accent = "#63a0ff"
+danger = "#e06c75"
+warning = "#e5c07b"
+success = "#98c379"
+
+[overrides]
+tab-height = "32px"

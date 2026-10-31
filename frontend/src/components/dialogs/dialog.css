@@ -1,0 +1,468 @@
+/* Shared dialog / overlay styles
+ *
+ * Theme colours are set via CSS custom properties on the .dialog-backdrop:
+ *   --dialog-bg, --dialog-fg, --dialog-border, --dialog-danger
+ * Children reference these vars so individual elements need no inline styles.
+ */
+
+/* ── Backdrop ── */
+
+.dialog-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+}
+
+/* ── Panel ── */
+
+.dialog-panel {
+  background: var(--dialog-bg);
+  border: 1px solid var(--dialog-border);
+  border-radius: 8px;
+  padding: 32px;
+  width: 420px;
+  max-width: 90vw;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.dialog-panel-compact {
+  padding: 24px;
+  gap: 12px;
+  max-height: 70vh;
+}
+
+/* ── Typography ── */
+
+.dialog-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--dialog-fg);
+}
+
+.dialog-title-sm {
+  font-size: 16px;
+}
+
+.dialog-text {
+  margin: 0;
+  font-size: 13px;
+  color: color-mix(in srgb, var(--dialog-fg) 67%, transparent);
+  line-height: 1.5;
+}
+
+.dialog-text strong {
+  color: var(--dialog-fg);
+}
+
+.dialog-text-center {
+  text-align: center;
+  padding: 12px;
+}
+
+.dialog-text-muted {
+  color: color-mix(in srgb, var(--dialog-fg) 53%, transparent);
+}
+
+/* ── Code ── */
+
+.dialog-code {
+  background: color-mix(in srgb, var(--dialog-fg) 8%, transparent);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* ── Error / warning ── */
+
+.dialog-error {
+  margin: 0;
+  font-size: 13px;
+  color: #f44747;
+}
+
+.dialog-warning {
+  margin: 0;
+  font-size: 13px;
+  color: #e0a030;
+}
+
+/* ── Input ── */
+
+.dialog-input {
+  background: color-mix(in srgb, var(--dialog-fg) 6%, transparent);
+  border: 1px solid var(--dialog-border);
+  border-radius: 4px;
+  padding: 10px 12px;
+  font-size: 14px;
+  font-family: monospace;
+  color: var(--dialog-fg);
+  outline: none;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.dialog-input-sm {
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+/* ── Actions row ── */
+
+.dialog-actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* ── Buttons ── */
+
+.dialog-btn {
+  background: transparent;
+  border: 1px solid var(--dialog-border);
+  border-radius: 4px;
+  padding: 8px 16px;
+  font-size: 14px;
+  color: var(--dialog-fg);
+  cursor: pointer;
+}
+
+.dialog-btn-primary {
+  background: color-mix(in srgb, var(--dialog-fg) 12%, transparent);
+  border: 1px solid var(--dialog-border);
+  border-radius: 4px;
+  padding: 8px 16px;
+  font-size: 14px;
+  color: var(--dialog-fg);
+  cursor: pointer;
+  align-self: flex-end;
+}
+
+.dialog-btn-danger {
+  background: color-mix(in srgb, var(--dialog-danger) 20%, transparent);
+  border: 1px solid color-mix(in srgb, var(--dialog-danger) 40%, transparent);
+  border-radius: 4px;
+  padding: 8px 16px;
+  font-size: 14px;
+  color: var(--dialog-danger);
+  cursor: pointer;
+}
+
+/* ── Shortcuts overlay (used by ShortcutsOverlay.svelte) ── */
+
+.shortcuts-panel {
+  background: var(--dialog-bg);
+  border: 1px solid color-mix(in srgb, var(--dialog-fg) 13%, transparent);
+  border-radius: 10px;
+  padding: 28px 32px;
+  width: 480px;
+  max-width: 90vw;
+  max-height: 80vh;
+  overflow: auto;
+}
+
+.shortcuts-title {
+  margin: 0 0 20px;
+  font-size: 15px;
+  font-weight: 600;
+  color: color-mix(in srgb, var(--dialog-fg) 80%, transparent);
+}
+
+.shortcuts-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.shortcuts-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 5px 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--dialog-fg) 4%, transparent);
+}
+
+.shortcuts-item-last {
+  border-bottom: none;
+}
+
+.shortcuts-label {
+  font-size: 13px;
+  color: color-mix(in srgb, var(--dialog-fg) 60%, transparent);
+}
+
+.shortcuts-kbd {
+  font-size: 12px;
+  color: color-mix(in srgb, var(--dialog-fg) 80%, transparent);
+  background: color-mix(in srgb, var(--dialog-fg) 6%, transparent);
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-family: inherit;
+}
+
+/* ── Template dialog specifics ── */
+
+.template-list {
+  outline: none;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-height: 40px;
+  max-height: 50vh;
+}
+
+.template-item {
+  padding: 8px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  background: transparent;
+}
+
+.template-item-selected {
+  background: color-mix(in srgb, var(--dialog-fg) 9%, transparent);
+}
+
+.template-item-confirm {
+  background: color-mix(in srgb, var(--dialog-fg) 6%, transparent);
+  border: 1px solid #f4474744;
+}
+
+.template-item-name {
+  font-size: 13px;
+  color: var(--dialog-fg);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  flex: 1;
+}
+
+.template-item-actions {
+  display: flex;
+  gap: 4px;
+  align-items: center;
+  flex-shrink: 0;
+}
+
+.template-btn-screen {
+  background: none;
+  border: 1px solid color-mix(in srgb, var(--dialog-fg) 13%, transparent);
+  border-radius: 3px;
+  color: color-mix(in srgb, var(--dialog-fg) 40%, transparent);
+  cursor: pointer;
+  font-size: 11px;
+  padding: 2px 6px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.template-btn-delete {
+  background: none;
+  border: none;
+  color: color-mix(in srgb, var(--dialog-fg) 33%, transparent);
+  cursor: pointer;
+  font-size: 14px;
+  padding: 2px 4px;
+  line-height: 1;
+}
+
+.template-btn-sm {
+  border: none;
+  border-radius: 4px;
+  padding: 6px 14px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.template-btn-ghost {
+  background: color-mix(in srgb, var(--dialog-fg) 9%, transparent);
+  color: var(--dialog-fg);
+}
+
+.template-btn-fill {
+  background: color-mix(in srgb, var(--dialog-fg) 12%, transparent);
+  color: var(--dialog-fg);
+}
+
+.template-btn-danger-sm {
+  background: #f4474730;
+  color: #f44747;
+}
+
+.template-btn-save {
+  background: transparent;
+  border: 1px dashed var(--dialog-border);
+  border-radius: 4px;
+  padding: 10px;
+  font-size: 13px;
+  color: color-mix(in srgb, var(--dialog-fg) 53%, transparent);
+  cursor: pointer;
+  width: 100%;
+}
+
+.template-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.template-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.template-label {
+  font-size: 12px;
+  color: color-mix(in srgb, var(--dialog-fg) 53%, transparent);
+}
+
+.template-checkbox-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.template-checkbox-label {
+  font-size: 13px;
+  color: var(--dialog-fg);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+/* ── Segmented toggle (absolute / relative) ── */
+
+.template-segmented {
+  display: flex;
+  gap: 4px;
+}
+
+.template-segmented-btn {
+  flex: 1;
+  padding: 6px 12px;
+  font-size: 13px;
+  border: 1px solid color-mix(in srgb, var(--dialog-fg) 13%, transparent);
+  border-radius: 6px;
+  background: transparent;
+  color: color-mix(in srgb, var(--dialog-fg) 40%, transparent);
+  cursor: pointer;
+  text-transform: capitalize;
+  transition: background 0.1s, color 0.1s, border-color 0.1s;
+}
+
+.template-segmented-btn-active {
+  border-color: color-mix(in srgb, var(--dialog-fg) 27%, transparent);
+  background: color-mix(in srgb, var(--dialog-fg) 9%, transparent);
+  color: var(--dialog-fg);
+}
+
+.template-commands-section {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin-top: 4px;
+}
+
+.template-commands-heading {
+  color: color-mix(in srgb, var(--dialog-fg) 40%, transparent);
+  font-size: 11px;
+  margin: 0 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.template-command-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+  transition: background 0.1s, color 0.1s;
+}
+
+.template-command-toggle-on {
+  color: var(--dialog-fg);
+  background: color-mix(in srgb, var(--dialog-fg) 3%, transparent);
+}
+
+.template-command-toggle-off {
+  color: color-mix(in srgb, var(--dialog-fg) 33%, transparent);
+  background: transparent;
+}
+
+.template-command-toggle input[type="checkbox"] {
+  accent-color: var(--dialog-fg);
+}
+
+.template-command-text {
+  font-family: monospace;
+  font-size: 12px;
+}
+
+.template-command-dir {
+  color: color-mix(in srgb, var(--dialog-fg) 27%, transparent);
+  margin-left: 6px;
+  font-size: 11px;
+}
+
+.template-confirm-text {
+  font-size: 13px;
+  color: var(--dialog-fg);
+}
+
+.template-confirm-actions {
+  display: flex;
+  gap: 6px;
+}
+
+/* ── Host picker (HostPickerDialog.svelte) ── */
+
+.host-picker {
+  width: 460px;
+  outline: none;
+}
+
+.host-picker-detail {
+  flex-shrink: 0;
+  font-size: 11px;
+  color: color-mix(in srgb, var(--dialog-fg) 45%, transparent);
+}
+
+.host-picker-progress {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  color: color-mix(in srgb, var(--dialog-fg) 53%, transparent);
+}
+
+.host-picker-progress-current {
+  color: var(--dialog-fg);
+}
+
+.host-picker-message {
+  white-space: pre-wrap;
+  user-select: text;
+}
+
+.host-picker-identity { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; overflow: hidden; }
+.host-picker-identity > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.host-picker-address { font-size: 11px; color: color-mix(in srgb, var(--dialog-fg) 53%, transparent); }

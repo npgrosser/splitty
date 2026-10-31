@@ -1,0 +1,252 @@
+name: Windows Tauri (WSL backend)
+
+on:
+  workflow_dispatch:
+  # Called by release.yml for tagged releases.
+  workflow_call:
+
+# Third-party actions are pinned to commit SHAs; Dependabot keeps the pins and
+# their version comments current.
+# Artifacts expire after three days; successful releases clean them up sooner.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  SOURCE_DATE_EPOCH: "0"
+  SPLITTY_COMMIT: ${{ github.sha }}
+  SPLITTY_BUILD_TIME: "1970-01-01T00:00:00Z"
+
+jobs:
+  payload:
+    name: Build Linux musl payload
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: |
+            frontend/pnpm-lock.yaml
+            architecture/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl,aarch64-unknown-linux-musl,aarch64-apple-darwin,x86_64-apple-darwin
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: windows-wsl-payload
+
+      - name: Install musl toolchain
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
+
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm check && pnpm build
+
+      # cargo test runs the architecture check (architecture/check).
+      - name: Install architecture tooling
+        run: pnpm install --frozen-lockfile --dir architecture
+
+      - name: Test server and core
+        run: >-
+          cargo test --locked --release --workspace --exclude splitty-gui
+          --target x86_64-unknown-linux-musl
+
+      # Built first, so the x86_64 server can carry it for aarch64 hosts.
+      - name: Build reproducible static aarch64 server
+        run: >-
+          packaging/windows/build-wsl-payload.sh
+          "$GITHUB_WORKSPACE"
+          "$GITHUB_WORKSPACE/artifacts"
+          "$GITHUB_SHA"
+          aarch64
+
+      # macOS hosts, cross-linked by zig (packaging/zig-toolchain.sh); built
+      # before the x86_64 server, which carries them.
+      - name: Build macOS servers
+        run: |
+          for arch in darwin-aarch64 darwin-x86_64; do
+            packaging/windows/build-wsl-payload.sh \
+              "$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/artifacts" "$GITHUB_SHA" "$arch"
+          done
+
+      # The WSL backend and the static Linux CLI; it installs itself on
+      # x86_64 hosts and the built-in servers on aarch64 and macOS hosts.
+      - name: Build reproducible static backend payload
+        env:
+          SPLITTY_REMOTE_PAYLOAD_AARCH64: ${{ github.workspace }}/artifacts/splitty-wsl-aarch64.tar.gz
+          SPLITTY_REMOTE_PAYLOAD_DARWIN_AARCH64: ${{ github.workspace }}/artifacts/splitty-darwin-aarch64.tar.gz
+          SPLITTY_REMOTE_PAYLOAD_DARWIN_X86_64: ${{ github.workspace }}/artifacts/splitty-darwin-x86_64.tar.gz
+        run: >-
+          packaging/windows/build-wsl-payload.sh
+          "$GITHUB_WORKSPACE"
+          "$GITHUB_WORKSPACE/artifacts"
+          "$GITHUB_SHA"
+          x86_64
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: wsl-payload
+          path: artifacts/splitty-wsl-x86_64.tar.gz*
+          if-no-files-found: error
+          retention-days: 3
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: remote-payload-aarch64
+          path: artifacts/splitty-wsl-aarch64.tar.gz*
+          if-no-files-found: error
+          retention-days: 3
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: remote-payload-darwin
+          path: artifacts/splitty-darwin-*.tar.gz*
+          if-no-files-found: error
+          retention-days: 3
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
+          retention-days: 3
+
+  smoke:
+    name: Payload smoke (${{ matrix.image }})
+    needs: payload
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [ubuntu:24.04, debian:12]
+    container: ${{ matrix.image }}
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wsl-payload
+          path: /tmp/payload
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: remote-payload-aarch64
+          path: /tmp/payload
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: remote-payload-darwin
+          path: /tmp/payload
+      - name: Verify payload
+        shell: sh
+        run: |
+          cd /tmp/payload
+          sha256sum -c splitty-wsl-x86_64.tar.gz.sha256
+          mkdir unpacked
+          tar -xzf splitty-wsl-x86_64.tar.gz -C unpacked
+          test -d unpacked/shell-integration
+          unpacked/splitty --version
+      # Cannot run here (x86_64); its contents and checksum must be right.
+      - name: Verify aarch64 payload
+        shell: sh
+        run: |
+          cd /tmp/payload
+          sha256sum -c splitty-wsl-aarch64.tar.gz.sha256
+          mkdir unpacked-aarch64
+          tar -xzf splitty-wsl-aarch64.tar.gz -C unpacked-aarch64
+          test -x unpacked-aarch64/splitty
+          test -d unpacked-aarch64/shell-integration
+      # The release runs the arm64 one on its macOS runner.
+      - name: Verify macOS payloads
+        shell: sh
+        run: |
+          cd /tmp/payload
+          for arch in aarch64 x86_64; do
+            sha256sum -c "splitty-darwin-$arch.tar.gz.sha256"
+            mkdir "unpacked-darwin-$arch"
+            tar -xzf "splitty-darwin-$arch.tar.gz" -C "unpacked-darwin-$arch"
+            test -x "unpacked-darwin-$arch/splitty"
+            test -d "unpacked-darwin-$arch/shell-integration"
+          done
+
+  windows:
+    name: Build unsigned per-user NSIS installer
+    needs: [payload, smoke]
+    runs-on: windows-2025
+    # Remote windows install these on hosts without WSL too: the x86_64
+    # archive (also the WSL backend), the aarch64 one and the macOS ones,
+    # built into the app.
+    env:
+      SPLITTY_REMOTE_PAYLOAD_X86_64: ${{ github.workspace }}/crates/splitty-tauri/resources/splitty-wsl-x86_64.tar.gz
+      SPLITTY_REMOTE_PAYLOAD_AARCH64: ${{ github.workspace }}/payloads/splitty-wsl-aarch64.tar.gz
+      SPLITTY_REMOTE_PAYLOAD_DARWIN_AARCH64: ${{ github.workspace }}/payloads/splitty-darwin-aarch64.tar.gz
+      SPLITTY_REMOTE_PAYLOAD_DARWIN_X86_64: ${{ github.workspace }}/payloads/splitty-darwin-x86_64.tar.gz
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: windows-tauri
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wsl-payload
+          path: crates/splitty-tauri/resources
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: remote-payload-aarch64
+          path: payloads
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: remote-payload-darwin
+          path: payloads
+
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: frontend-dist
+          path: frontend/dist
+
+      - name: Install frontend tooling
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile
+
+      - name: Test Windows launcher and navigation guard
+        run: cargo test --locked --release --package splitty-gui --target x86_64-pc-windows-msvc --lib
+
+      - name: Build NSIS installer
+        working-directory: crates/splitty-tauri
+        run: '& "../../frontend/node_modules/.bin/tauri.cmd" build --target x86_64-pc-windows-msvc --bundles nsis'
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: splitty-windows-x64-nsis
+          path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          if-no-files-found: error
+          retention-days: 3

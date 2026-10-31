@@ -1,0 +1,4 @@
+interface:
+  display_name: "Splitty Release"
+  short_description: "Tag, push and build Splitty into host Downloads"
+  default_prompt: "Use $release to release Splitty and put the local desktop package in my Downloads folder."

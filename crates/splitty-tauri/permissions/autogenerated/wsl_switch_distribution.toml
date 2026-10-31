@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-wsl-switch-distribution"
+description = "Enables the wsl_switch_distribution command without any pre-configured scope."
+commands.allow = ["wsl_switch_distribution"]
+
+[[permission]]
+identifier = "deny-wsl-switch-distribution"
+description = "Denies the wsl_switch_distribution command without any pre-configured scope."
+commands.deny = ["wsl_switch_distribution"]

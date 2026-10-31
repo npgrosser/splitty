@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Splitty
+Exec=splitty-gui
+Icon=splitty
+Type=Application
+Categories=Development;
+Comment=Multi-session terminal manager
+StartupWMClass=splitty-gui
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=splitty-gui

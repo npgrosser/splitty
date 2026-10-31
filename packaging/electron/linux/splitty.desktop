@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Splitty
+Exec=Splitty-Electron.AppImage %U
+Icon=splitty
+Type=Application
+Categories=Development;
+Comment=Multi-session terminal manager
+StartupWMClass=splitty-electron
+Actions=new-window;
+
+[Desktop Action new-window]
+Name=New Window
+Exec=Splitty-Electron.AppImage %U

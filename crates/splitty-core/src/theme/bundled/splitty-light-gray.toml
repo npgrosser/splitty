@@ -1,0 +1,27 @@
+name = "Splitty Light Gray"
+variant = "light"
+
+[palette]
+gray-0 = "#e4e4e4"
+gray-50 = "#dadada"
+gray-100 = "#cacaca"
+gray-200 = "#aeaeae"
+gray-300 = "#8e8e8e"
+gray-400 = "#686868"
+gray-500 = "#555555"
+gray-600 = "#454545"
+gray-700 = "#353535"
+gray-800 = "#252525"
+gray-850 = "#1c1c1c"
+gray-900 = "#121212"
+accent = "#3589d6"
+danger = "#c24a53"
+warning = "#ad7a35"
+success = "#588c39"
+
+[overrides]
+tab-height = "32px"
+
+[terminal]
+bg = "#eeeeee"
+cursor-accent = "#eeeeee"

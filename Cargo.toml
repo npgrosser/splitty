@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/splitty-core",
+    "crates/splitty-server",
+    "crates/splitty-tauri",
+    "crates/splitty-remote",
+    "architecture/check",
+]
+
+[workspace.package]
+version = "0.1.29"
+edition = "2021"
+license = "MIT"
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+thiserror = "2"
+tracing = "0.1"
+tokio = { version = "1", features = ["full"] }
+async-trait = "0.1"
+rand = "0.8"
+hex = "0.4"

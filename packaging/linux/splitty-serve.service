@@ -1,0 +1,13 @@
+[Unit]
+Description=Splitty terminal multiplexer server
+After=network.target
+
+[Service]
+Type=simple
+Environment=SPLITTY_ADDR=127.0.0.1:9801
+ExecStart=%h/.local/bin/splitty serve
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target

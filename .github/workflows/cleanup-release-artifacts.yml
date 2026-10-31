@@ -1,0 +1,42 @@
+name: Cleanup release artifacts
+
+# Runs from the default branch, including after successful reruns of old tags.
+# A successful Release run has copied all distributable files into its release.
+on:
+  workflow_run:
+    workflows: ["Release"]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  cleanup:
+    if: >-
+      github.event.workflow_run.conclusion == 'success' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: write
+    steps:
+      # No checkout or execution of code/artifacts from the triggering run.
+      - name: Delete artifacts from the successful release run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_RUN_ID: ${{ github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Snapshot every page before deleting, so pagination cannot skip files.
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/actions/runs/$RELEASE_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[].id' > "$RUNNER_TEMP/release-artifact-ids"
+
+          deleted=0
+          while IFS= read -r artifact_id; do
+            gh api --method DELETE \
+              "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
+            deleted=$((deleted + 1))
+          done < "$RUNNER_TEMP/release-artifact-ids"
+
+          echo "Deleted $deleted Actions artifacts from release run $RELEASE_RUN_ID." \
+            >> "$GITHUB_STEP_SUMMARY"

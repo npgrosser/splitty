@@ -1,0 +1,27 @@
+name = "Splitty Light"
+variant = "light"
+
+[palette]
+gray-0 = "#f0f0f0"
+gray-50 = "#e6e6e6"
+gray-100 = "#d4d4d4"
+gray-200 = "#b8b8b8"
+gray-300 = "#969696"
+gray-400 = "#707070"
+gray-500 = "#555555"
+gray-600 = "#454545"
+gray-700 = "#353535"
+gray-800 = "#252525"
+gray-850 = "#1c1c1c"
+gray-900 = "#121212"
+accent = "#3589d6"
+danger = "#c24a53"
+warning = "#ad7a35"
+success = "#588c39"
+
+[overrides]
+tab-height = "32px"
+
+[terminal]
+bg = "#ffffff"
+cursor-accent = "#ffffff"

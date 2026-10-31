@@ -1,0 +1,47 @@
+{
+  "name": "splitty-electron",
+  "version": "0.1.29",
+  "license": "MIT",
+  "private": true,
+  "main": "compiled/main.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "tsc && electron .",
+    "dev": "tsc && electron .",
+    "pack": "tsc && electron-builder --dir",
+    "dist": "tsc && electron-builder"
+  },
+  "devDependencies": {
+    "electron": "^44.10.0",
+    "electron-builder": "^26.18.0",
+    "typescript": "^5.9.0"
+  },
+  "build": {
+    "appId": "com.splitty.electron",
+    "productName": "Splitty",
+    "linux": {
+      "target": "AppImage",
+      "icon": "../packaging/electron/icon.png",
+      "category": "Development"
+    },
+    "extraResources": [
+      {
+        "from": "../target/release/splitty",
+        "to": "splitty"
+      }
+    ],
+    "files": [
+      "compiled/**/*"
+    ],
+    "electronFuses": {
+      "runAsNode": false,
+      "enableCookieEncryption": true,
+      "enableNodeOptionsEnvironmentVariable": false,
+      "enableNodeCliInspectArguments": false,
+      "enableEmbeddedAsarIntegrityValidation": true,
+      "onlyLoadAppFromAsar": true,
+      "loadBrowserProcessSpecificV8Snapshot": false,
+      "grantFileProtocolExtraPrivileges": false
+    }
+  }
+}

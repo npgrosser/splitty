@@ -1,0 +1,108 @@
+{
+  "valid": [
+    {
+      "editor": "vscode",
+      "cwd": "/srv/a #?%界.rs",
+      "kind": "file",
+      "target": "me@vm1",
+      "uri": "vscode://vscode-remote/ssh-remote+me%40vm1/srv/a%20%23%3F%25%E7%95%8C.rs"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/srv/main.rs",
+      "kind": "file",
+      "target": "vm1",
+      "uri": "zed://ssh/vm1/srv/main.rs"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/home/me/main.rs",
+      "kind": "file",
+      "wslDistro": "Ubuntu",
+      "uri": "vscode://vscode-remote/wsl+Ubuntu/home/me/main.rs"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/home/me/a #?.rs",
+      "kind": "file",
+      "uri": "vscode://file/home/me/a%20%23%3F.rs"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/home/me/main.rs",
+      "kind": "file",
+      "uri": "zed://file/home/me/main.rs"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/srv/folder.rs",
+      "kind": "folder",
+      "target": "vm1",
+      "uri": "zed://ssh/vm1/srv/folder.rs/"
+    }
+  ],
+  "invalid": [
+    {
+      "editor": "vscode",
+      "cwd": "/srv/file:123",
+      "kind": "file"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/srv/file:abc",
+      "kind": "file"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/srv/file/",
+      "kind": "file"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/srv/a‮b",
+      "kind": "file"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/srv/a​b",
+      "kind": "file"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/srv/../etc/passwd",
+      "kind": "file"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "file:///tmp/x",
+      "kind": "file"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "//host/a",
+      "kind": "file"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/srv/a\\b",
+      "kind": "file"
+    },
+    {
+      "editor": "zed",
+      "cwd": "/home/me/a",
+      "kind": "file",
+      "wslDistro": "Ubuntu"
+    },
+    {
+      "editor": "sftp",
+      "cwd": "/srv/file",
+      "target": "vm1",
+      "kind": "file"
+    },
+    {
+      "editor": "vscode",
+      "cwd": "/srv/file",
+      "kind": "url"
+    }
+  ]
+}

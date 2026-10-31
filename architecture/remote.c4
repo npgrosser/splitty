@@ -1,0 +1,63 @@
+// The components of splitty-remote and their dependencies.
+// A relationship between two components with a `module` means that code of the source may
+// name the target's modules; architecture/check checks both directions.
+
+model {
+  extend splitty.remote {
+
+    ssh = component 'ssh' {
+      description 'Reaching a host with the system ssh (on Windows the system\'s OpenSSH, without a console window): the validated target (SR-13), the hardened command, stdio-only connections (no terminal, no agent, X11 or configured forwards), forward-only connections (-N, no terminal, agent or X11) and the forwards a host\'s configuration adds (ssh -G), POSIX quoting and allowlists for the one command line the host\'s login shell parses, the Executor trait and what a failure means (127, host keys, refused logins).'
+      metadata {
+        module 'splitty_remote::ssh'
+      }
+    }
+
+    install = component 'install' {
+      description 'Installing the client\'s own server on a Linux or macOS host: one probe (kernel, architecture, $HOME, installed marker), payload sources (SPLITTY_REMOTE_PAYLOAD, archives per kernel and architecture built into the client by build.rs with build-time checksums, a static client itself for Linux hosts; uname -m aliases for x86_64 and aarch64), upload over stdin with the checksum verified on the host (sha256sum or shasum), ~/.local/share/splitty/remote/<version>/, removal of versions no process runs (/proc or ps); on macOS the server runs with SPLITTY_CONFIG_DIR=~/.config/splitty.'
+      metadata {
+        module 'splitty_remote::install'
+        spec 'remote-hosts'
+      }
+    }
+
+    handshake = component 'handshake' {
+      description 'The handshake of format 1: what remote-handshake --json reports (server version, protocol and path; the daemon, started on request; the screens), and the client function that runs it through an installed server.'
+      metadata {
+        module 'splitty_remote::handshake'
+      }
+    }
+
+    bridge = component 'bridge' {
+      description 'The frames of remote-bridge: one WebSocket message each, a kind byte, a big-endian length and the payload, at most 16 MiB. Both ends of the bridge use it. The client end runs remote-bridge on a host by the installed server\'s path over a stdio-only ssh: frames to its stdin and from its stdout, the end of its stderr kept for a message, killed when dropped.'
+      metadata {
+        module 'splitty_remote::bridge'
+      }
+    }
+
+    tunnel = component 'tunnel' {
+      description 'A tunnel to a host\'s daemon, for splitty connect and the desktop apps: open runs install, the handshake (starting a missing daemon on a port free on both ends), the forward bound to 127.0.0.1 and the first single-use bootstrap code, reporting each step; its supervisor rebuilds a dropped tunnel, keeping the port reserved, mints a new URL only for a restarted daemon and gives up after a time the caller sets. Also the failures\' messages and hints, the events of connect --json, and PortTunnel: one port forwarded by a forward-only ssh of its own (refused for a host whose configuration forwards ports), verified through a bounded fixed local-command marker after OpenSSH binds, then TCP/liveness and IPv6 checks; no multiplex reuse or backgrounding. Saved/explicit local ports and every automatically chosen candidate must be free on both supported loopback families, with checks repeated across handoff and rebuild.'
+      metadata {
+        module 'splitty_remote::tunnel'
+        spec 'cli'
+      }
+    }
+
+    hosts = component 'hosts' {
+      description 'The hosts a user knows: recent-hosts.json in the client\'s configuration directory (most recent first, at most 20, replaced atomically, owner-only) and the concrete Host names of ~/.ssh/config and the files it includes; the merged list for a host picker. Private remote-host-preferences.json stores optional display aliases and persistent hidden markers, remote-host-order.json the arranged order of the host groups (a file of its own, so older readers of the preferences keep their aliases); a cross-process file lock serializes recent, preference and catalog changes. Explicit connections reveal forgotten targets; hub reconnects preserve hiding.'
+      metadata {
+        module 'splitty_remote::hosts'
+        spec 'remote-hosts'
+      }
+    }
+
+    install -> ssh 'CommandLine, Executor, run_checked, allowlists'
+    handshake -> ssh 'Executor, run_checked, SshError'
+    handshake -> install 'Server'
+    tunnel -> ssh 'Ssh, run_checked, classify, SshError, the end of stderr'
+    tunnel -> install 'Server, InstallError, prepare, Payload'
+    tunnel -> handshake 'handshake, HandshakeError, RunningDaemon'
+    hosts -> ssh 'SshTarget'
+    bridge -> ssh 'Ssh, SshTarget, stdio-only options, the end of stderr'
+    bridge -> install 'Server'
+  }
+}

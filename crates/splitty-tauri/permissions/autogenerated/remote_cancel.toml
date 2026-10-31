@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-cancel"
+description = "Enables the remote_cancel command without any pre-configured scope."
+commands.allow = ["remote_cancel"]
+
+[[permission]]
+identifier = "deny-remote-cancel"
+description = "Denies the remote_cancel command without any pre-configured scope."
+commands.deny = ["remote_cancel"]
