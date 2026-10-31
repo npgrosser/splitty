@@ -212,3 +212,26 @@ The client SHALL keep the order in which the user arranged its host groups in `r
 #### Scenario: Corrupt order file
 - **WHEN** `remote-host-order.json` holds something that is not the format above
 - **THEN** the order is empty, and the aliases in `remote-host-preferences.json` are unaffected
+
+### Requirement: Remote Relay
+`splitty remote-relay` SHALL serve the host side of a reverse forward for a client that reaches the host over SSH, on Linux hosts:
+- `splitty remote-relay prepare` SHALL create the directory `relay` in the server's run directory owner-only (or make an existing one owner-only, refusing a symbolic link or a directory of another owner), check that `/proc/net/tcp` is readable, remove socket files there that refuse connections and are older than one minute, print exactly one JSON line `{"version":1,"dir":"<absolute path>"}` and exit with status 0. Without `/proc/net/tcp` it SHALL print the reason to standard error and exit with status 1.
+- `splitty remote-relay serve --port <port> --socket <path>` SHALL accept only a socket path directly inside that directory, named by 16 lowercase hex characters and `.sock`. It SHALL wait up to 10 seconds for the socket to exist, refuse it unless it is a socket owned by its own user, make it owner-only, listen on `127.0.0.1:<port>` and, where the host has IPv6 loopback, `[::1]:<port>`, and then print the line `SPLITTY_RELAY_READY_V1` on standard output. When it cannot, it SHALL print one line `SPLITTY_RELAY_FAILED_V1 <code> <message>` with the code `host_port_conflict` (a listener address in use), `listen` (another failure to listen), `socket` or `unsupported`, and exit with status 1.
+- For each accepted connection whose client socket belongs to its own user, the relay SHALL connect to the socket and relay bytes both ways until either side closes. Other connections SHALL be closed at once.
+- The relay SHALL end when its standard input ends or nothing arrives on it for 45 seconds, and SHALL remove its socket when it ends.
+
+#### Scenario: Prepare
+- **WHEN** a client runs `splitty remote-relay prepare` on a Linux host
+- **THEN** it prints one JSON line with version 1 and an absolute directory that exists with mode `0700`
+
+#### Scenario: Port in use on the host
+- **WHEN** a program on the host listens on `127.0.0.1:11434` and a client starts `remote-relay serve --port 11434` with a valid socket
+- **THEN** the relay prints `SPLITTY_RELAY_FAILED_V1 host_port_conflict` and a message, and exits with status 1
+
+#### Scenario: Socket outside the relay directory
+- **WHEN** a client starts `remote-relay serve` with a socket path outside the relay directory
+- **THEN** the relay refuses it with code `socket` and listens on nothing
+
+#### Scenario: Heartbeat lost
+- **WHEN** a relay is serving and nothing arrives on its standard input for 45 seconds
+- **THEN** it closes its listeners, removes its socket and exits

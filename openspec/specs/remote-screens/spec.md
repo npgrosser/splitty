@@ -395,3 +395,47 @@ The client SHALL support entering a target, remote port and optional explicit lo
 #### Scenario: Manual save while disconnected
 - **WHEN** the user saves a manual mapping without asking to start its forward
 - **THEN** it is listed as saved without any SSH connection and can later be started explicitly or restored when the host connects
+
+### Requirement: Reverse Forwards Through The Hub
+The server SHALL offer reverse forwards, from a port of a host to a port of this machine (shapes in `docs/protocol.ts`):
+- `POST /api/remote/reverse-forwards` with `{"target", "port", "local"}` opens one, with `port` the host's port and `local` the port here, and answers `{"target", "remote", "local", "state"}` once the host's relay reported that it listens;
+- `GET /api/remote/reverse-forwards` lists all active reverse forwards with their `state`, `up` or `down`; saved inactive rules SHALL NOT appear in it;
+- `DELETE /api/remote/reverse-forwards` with `{"target", "port"}` stops one, and disables its saved rule if present; it answers 404 only for an absent forward without a saved rule.
+
+A reverse forward SHALL live until it is stopped or the server exits, independently of host-screen connections. When its `ssh` exits, the server SHALL rebuild it with the same ports and growing waits up to 10 seconds, reporting it as `down` meanwhile. A second request for the same target and port SHALL return the existing reverse forward when `local` matches, and 409 `active_mapping_conflict` otherwise. A port in use on the host SHALL yield 409 `host_port_conflict`. More than 32 active or opening reverse forwards for one host SHALL be refused with 409 `forward_limit`; forwards and reverse forwards are counted separately. POST SHALL NOT accept `automatic`, and SHALL NOT create a saved rule; an explicit successful POST SHALL enable an existing saved rule and save its `local`.
+
+#### Scenario: Share a local model server
+- **WHEN** the UI requests a reverse forward of local port 11434 to port 11434 on `vm1`, and a service listens on `localhost:11434` here
+- **THEN** the answer reports it `up`, and a program of the user on `vm1` reaches that service at `localhost:11434`
+
+#### Scenario: Reverse forward rebuilt
+- **WHEN** the `ssh` of a reverse forward is killed
+- **THEN** it is reported `down` and rebuilt with the same ports
+
+#### Scenario: Port taken on the host
+- **WHEN** port 8080 of `vm1` is in use there and the UI requests a reverse forward to it
+- **THEN** the answer is 409 with `host_port_conflict`, and no reverse forward remains
+
+### Requirement: Saved Reverse Forwards
+`/api/remote/reverse-forward-preferences` SHALL provide GET, PUT and DELETE for rules keyed by validated target and host port, separate from forward preferences: GET answers `{"version": 1, "forwards": [...]}` with `target`, `remote`, `local`, `enabled` and a runtime `lastError` when the last restore failed; PUT `{"target", "port", "local"?}` creates an enabled rule (with `local` from the request, else the active reverse forward's, else `port`) or changes `local`; DELETE removes a rule and leaves an active reverse forward running. These operations SHALL NOT contact a host or start anything. Rules SHALL persist in `remote-reverse-forwards.json`, at most 32 per host and 256 in total (409 `preference_limit` beyond).
+
+When a host's screen connection reaches `remote.ready`, the server SHALL open the enabled rules of that host that are not active, in the background, recording a failure as `lastError`. Stop SHALL disable a saved rule durably; only an explicit POST enables it again. A restore SHALL never enable a disabled rule.
+
+#### Scenario: Remembered share restored
+- **WHEN** a rule for `vm1` port 11434 is saved and enabled, the server restarts and the user opens a screen of `vm1`
+- **THEN** the reverse forward is opened after `remote.ready`, without a further request
+
+#### Scenario: Stopped share stays paused
+- **WHEN** the user stops a saved reverse forward and later connects its host again
+- **THEN** it is not restored until the user resumes it explicitly
+
+### Requirement: Sharing Local Ports In The Window
+The window SHALL offer sharing a local port with a host only as the user's own action for a chosen host, with the local port and the host's port (by default the same number), and SHALL list each host's reverse forwards and saved rules with Stop, Resume and Forget, apart from that host's forwarded ports. Wherever the user starts sharing, the window SHALL state that programs running as the user on that host can use the local service, and SHALL warn more strongly for ports of administrative services (22, 2375, 2376, 3389, 5900, 6443 and 10250). Resuming a saved rule and restoring it on connect SHALL NOT ask again. Nothing a host sends, and no link in a pane, SHALL offer or start a reverse forward.
+
+#### Scenario: Share from the Hosts panel
+- **WHEN** the user shares local port 11434 with `vm1` and checks Remember
+- **THEN** the window posts the reverse forward and then saves the rule, and lists it under `vm1` as shared
+
+#### Scenario: Administrative port
+- **WHEN** the user enters local port 2375 to share
+- **THEN** the window shows the stronger warning before the user can share it
