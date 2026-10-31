@@ -4010,7 +4010,7 @@ name = "splitty-core"
 version = "0.1.30"
 dependencies = [
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "dirs 6.0.0",
  "glob",
  "hex",
@@ -4075,7 +4075,7 @@ version = "0.1.30"
 dependencies = [
  "async-trait",
  "axum",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "dirs 6.0.0",
  "flate2",
