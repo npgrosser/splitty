@@ -13,7 +13,7 @@ sha2 = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
 # The home directory, for the user's ~/.ssh (known hosts).
-dirs = "6"
+dirs = "7"
 
 [build-dependencies]
 sha2 = "0.10"

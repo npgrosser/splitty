@@ -50,7 +50,7 @@ tempfile = "3"
 # channel to verify that a connecting process belongs to the same user. `term`
 # (termios) and `ioctl` (the window size) are for `splitty attach`'s terminal.
 nix = { version = "0.29", features = ["fs", "ioctl", "process", "signal", "socket", "term", "user"] }
-dirs = "6"
+dirs = "7"
 
 [dev-dependencies]
 async-trait = { workspace = true }
