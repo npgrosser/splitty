@@ -6,15 +6,14 @@ A graphical terminal multiplexer for Linux, macOS and Windows.
 
 ## The idea
 
-Splitty works like tmux: a server owns the terminals, and the window is a
-client attached to it. The difference is the client: a graphical app that
-attaches to several servers at once, the one on your machine and one on each
-SSH host you open. So a host's screens sit in the same window as your local
-ones, and they keep running on the host when you close the app or lose the
-connection.
+Splitty brings local and remote terminals into one graphical workspace.
+Like tmux, it uses a server to manage the terminals and a client to display
+them. The app can connect to the server on your machine and to servers on
+several SSH hosts at once. Remote sessions keep running when you close the
+app or lose the connection, so you can pick up where you left off.
 
-It was built for working with coding agents: several Claude Code or Codex
-sessions at once, a dev server and tests next to them, often on a remote VM.
+Working with coding agents helped shape Splitty: running Claude Code or
+Codex alongside dev servers and tests, often on a remote VM.
 
 > **Status:** a personal project in active development (0.1.x), used daily on
 > all three systems. Expect rough edges and changes between versions.
