@@ -12,8 +12,9 @@ them. The app can connect to the server on your machine and to servers on
 several SSH hosts at once. Remote sessions keep running when you close the
 app or lose the connection, so you can pick up where you left off.
 
-Working with coding agents helped shape Splitty: running Claude Code or
-Codex alongside dev servers and tests, often on a remote VM.
+Working with coding agents helped shape Splitty: keeping track of many
+Claude Code or Codex sessions running in parallel, sometimes across several
+projects, with dev servers and tests alongside them, locally or on remote VMs.
 
 > **Status:** a personal project in active development (0.1.x), used daily on
 > all three systems. Expect rough edges and changes between versions.
