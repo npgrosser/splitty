@@ -1,13 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "svelte/server";
 import HostPorts from "./HostPorts.svelte";
+import HostShares from "./HostShares.svelte";
 import ManualPortForm from "./ManualPortForm.svelte";
 import Port from "./PortRow.svelte";
-import { portForwarding } from "../../stores/ports.svelte.ts";
-import { hostSummary, portMenu, portPrimary, portsSummary } from "./remote_view.ts";
+import ShareForm from "./ShareForm.svelte";
+import Share from "./ShareRow.svelte";
+import { portForwarding, reverseForwarding } from "../../stores/ports.svelte.ts";
+import {
+  hostSummary, portMenu, portPrimary, portsSummary, shareMenu, sharePrimary, shareStatus,
+} from "./remote_view.ts";
 import type { PortAction } from "../../lib/remote/ports.ts";
+import type { ShareAction } from "../../lib/remote/reverse_forwards.ts";
 
-vi.mock("../../stores/ports.svelte.ts", () => ({ portForwarding: vi.fn() }));
+vi.mock("../../stores/ports.svelte.ts", () => ({ portForwarding: vi.fn(), reverseForwarding: vi.fn() }));
 vi.mock("../../stores/ui.svelte.ts", () => ({ showContextMenu: vi.fn() }));
 
 describe("drawer port controls", () => {
@@ -109,5 +115,80 @@ describe("drawer port controls", () => {
     expect(portsSummary([{ port: 5173, forward }])).toBe("1 active");
     expect(portsSummary([{ port: 5173, forward: { ...forward, state: "down" } }])).toBe("Reconnecting…");
     expect(portsSummary([{ port: 5173, forward, error: { code: "storage_failure", message: "Could not save" } }])).toBe("1 needs attention");
+  });
+});
+
+describe("drawer share controls", () => {
+  beforeEach(() => vi.clearAllMocks());
+  const shared = { target: "vm1", remote: 11434, local: 21434, state: "up" as const };
+  const saved = { target: "vm1", remote: 11434, local: 21434, enabled: true };
+
+  it("lists a host's shares apart from its ports, with one way to share another", () => {
+    const { body } = render(HostShares, { props: { target: "vm1", rows: [{ remote: 11434, local: 21434, forward: shared }] } });
+    expect(body).toMatch(/<section[^>]*aria-label="Shared with vm1"/);
+    expect(body).toContain("localhost:21434 → vm1:11434");
+    expect(body).toMatch(/role="status">Shared</);
+    expect(body).toMatch(/>Stop</);
+    expect(body).toContain("Share a local port");
+    // The form opens only on the user's click.
+    expect(body).not.toContain("<form");
+    expect(reverseForwarding).not.toHaveBeenCalled();
+  });
+
+  it("states who can use the port before Share, with Remember unchecked and no stronger warning yet", () => {
+    const { body } = render(ShareForm, { props: { target: "vm1", onclose: vi.fn() } });
+    expect(body).toContain('aria-label="Share a local port with vm1"');
+    expect(body).toContain("Local port");
+    expect(body).toContain("Port on host");
+    expect(body).toContain("Programs running as you on vm1 can use the local port you share. Most local services ask for no password.");
+    expect(body.indexOf("Most local services ask for no password")).toBeLessThan(body.indexOf(">Share<"));
+    expect(body).not.toContain("control of this machine");
+    expect(body).not.toMatch(/\schecked(?:\s|=|>)/);
+    expect(reverseForwarding).not.toHaveBeenCalled();
+  });
+
+  it("shows a paused share with Resume and a failed restore with its error, hint and Retry", () => {
+    const paused = render(Share, { props: { target: "vm1", row: { remote: 11434, local: 21434, saved: { ...saved, enabled: false } } } }).body;
+    expect(paused).toContain("Paused");
+    expect(paused).toMatch(/>Resume</);
+    const error = { code: "host_port_conflict", message: "Port 11434 is in use on vm1.", hint: "Stop the program using it there." };
+    const failed = render(Share, { props: { target: "vm1", row: { remote: 11434, local: 21434, saved: { ...saved, lastError: error }, error } } }).body;
+    expect(failed).toContain("Port in use on the host");
+    expect(failed).toContain("Port 11434 is in use on vm1. Stop the program using it there.");
+    expect(failed).toMatch(/>Retry</);
+  });
+
+  it.each<ShareAction>(["share", "stop", "save", "forget"])("disables every share action while %s is pending", (pending) => {
+    const { body } = render(Share, { props: { target: "vm1", row: { remote: 11434, local: 21434, saved, pending } } });
+    expect(body).toContain('aria-busy="true"');
+    const buttons = body.match(/<button\b[^>]*>/g)!;
+    expect(buttons.length).toBe(2);
+    expect(buttons.every((button) => /\sdisabled(?:\s|=|>)/.test(button))).toBe(true);
+  });
+
+  it("offers Stop, Resume, Start or Retry as the primary action, Remember and Forget in the menu", () => {
+    expect(sharePrimary({ remote: 1, local: 1, forward: shared })).toBe("Stop");
+    expect(sharePrimary({ remote: 1, local: 1, saved: { ...saved, enabled: false } })).toBe("Resume");
+    expect(sharePrimary({ remote: 1, local: 1, saved })).toBe("Start");
+    expect(sharePrimary({ remote: 1, local: 1, saved, error: { code: "forward", message: "x" } })).toBe("Retry");
+
+    expect(shareMenu({ remote: 1, local: 1, forward: shared })).toEqual([
+      { action: "remember", label: "Remember", detail: "Share it again when this host connects" },
+    ]);
+    expect(shareMenu({ remote: 1, local: 1, forward: shared, saved })).toEqual([
+      { action: "forget", label: "Forget", detail: "Keeps sharing now; Stop ends it" },
+    ]);
+    expect(shareMenu({ remote: 1, local: 1, saved }).map((item) => item.action)).toEqual(["stop", "forget"]);
+    expect(shareMenu({ remote: 1, local: 1, saved: { ...saved, enabled: false } }).map((item) => item.action)).toEqual(["forget"]);
+  });
+
+  it("reports state: shared, reconnecting, paused, waiting for the host, or failed", () => {
+    expect(shareStatus({ remote: 1, local: 1, forward: shared })).toBe("Shared");
+    expect(shareStatus({ remote: 1, local: 1, forward: { ...shared, state: "down" } })).toBe("Reconnecting…");
+    expect(shareStatus({ remote: 1, local: 1, saved: { ...saved, enabled: false } })).toBe("Paused");
+    expect(shareStatus({ remote: 1, local: 1, saved })).toBe("Starts when host connects");
+    expect(shareStatus({ remote: 1, local: 1, saved, error: { code: "unsupported_host", message: "x" } })).toBe("Not supported on this host");
+    expect(portsSummary([{ remote: 1, local: 1, forward: shared }, { remote: 2, local: 2, saved: { ...saved, enabled: false } }])).toBe("1 active");
+    expect(portsSummary([{ remote: 1, local: 1, saved: { ...saved, enabled: false } }])).toBe("1 paused");
   });
 });

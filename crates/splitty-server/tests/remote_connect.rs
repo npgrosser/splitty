@@ -12,7 +12,10 @@
 //! hub's port forwards are covered in-process the same way; only real `ssh`
 //! shows that their arguments forward on `127.0.0.1` alone, that the
 //! configuration's forwards are not cleared at their expense, and that a
-//! killed one comes back.
+//! killed one comes back. Reverse forwards likewise: only real `ssh -R` and
+//! `sshd` show that the remote end is an owner-only Unix socket, that the
+//! host's `GatewayPorts yes` opens nothing beyond loopback, and that the
+//! host's relay reaches a local service and ends with its connection.
 //!
 //! The SSH lab gives each test a host of its own without root:
 //! - an unprivileged user and network namespace, so the host has its own
@@ -22,9 +25,9 @@
 //! - a `ForceCommand` that gives the host its own `HOME` and XDG directories and
 //!   runs the command through `sh -c`, as a login shell would;
 //! - a wrapper `ssh` first in `PATH` that adds `-F <lab config>`, so `connect`
-//!   runs the plain `ssh` it always runs. The lab config sets `GatewayPorts yes`,
-//!   and names two hosts that fail: one nothing listens for, and one whose host
-//!   key is unknown;
+//!   runs the plain `ssh` it always runs. The lab config sets `GatewayPorts yes`
+//!   (and so does the host's `sshd_config`), and names two hosts that fail: one
+//!   nothing listens for, and one whose host key is unknown;
 //! - a configuration directory of the client's own, so `connect` records its
 //!   recent hosts there and never in the user's;
 //! - servers the test starts on the host's loopback with `nsenter`, which only
@@ -145,7 +148,7 @@ impl Lab {
             "HostKey {d_str}/hostkey\nAuthorizedKeysFile {d_str}/authorized_keys\nUsePAM no\n\
              StrictModes no\nPidFile none\nPasswordAuthentication no\n\
              KbdInteractiveAuthentication no\nPubkeyAuthentication yes\nAllowTcpForwarding yes\n\
-             ForceCommand {d_str}/host-env.sh\nLogLevel ERROR\n"
+             GatewayPorts yes\nForceCommand {d_str}/host-env.sh\nLogLevel ERROR\n"
         );
         let mut libraries = Vec::new();
         if root != Path::new("/") {
@@ -2782,4 +2785,149 @@ async fn the_hub_forwards_a_port_a_host_pane_listens_on() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert_eq!(listeners(port), Vec::<String>::new());
+}
+
+// ── Reverse forwards ────────────────────────────────────────────────────────
+
+/// The hub's `ssh` processes that hold a reverse forward.
+fn reverse_ssh(hub: &HubServer) -> Vec<i32> {
+    hub.ssh()
+        .into_iter()
+        .filter(|pid| {
+            fs::read(format!("/proc/{pid}/cmdline"))
+                .is_ok_and(|cmdline| cmdline.split(|b| *b == 0).any(|arg| arg == b"-R"))
+        })
+        .collect()
+}
+
+fn reverses(hub: &HubServer, method: &str, body: Option<&str>) -> (u16, serde_json::Value) {
+    hub_json(hub, method, "/api/remote/reverse-forwards", body)
+}
+
+/// What a program on the host gets from `address:port` there: the first
+/// line, or why it got none.
+fn from_host(lab: &Lab, address: &str, port: u16) -> String {
+    // `ssh` joins the words into one line for the host's shell: the script
+    // is one single-quoted word, without single quotes of its own.
+    let script = format!(
+        "'import socket\n\
+         try:\n s = socket.create_connection((\"{address}\", {port}), timeout=10)\n \
+         print(s.makefile().readline().strip() or \"closed\")\n\
+         except OSError as e:\n print(\"failed:\", e)\n'"
+    );
+    let out = lab.on_host(&["python3", "-c", &script]);
+    assert!(out.status.success(), "{}", describe(&out));
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// The host's listeners on `port`, as its `/proc/net/tcp` and `tcp6` list
+/// them.
+fn host_listeners(lab: &Lab, port: u16) -> Vec<String> {
+    let out = lab.on_host(&["cat", "/proc/net/tcp", "/proc/net/tcp6"]);
+    let suffix = format!(":{port:04X}");
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|line| {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let (local, state) = (fields.get(1)?, fields.get(3)?);
+            (local.ends_with(&suffix) && *state == "0A").then(|| local.to_string())
+        })
+        .collect()
+}
+
+/// access-control, Hub Reverse Forwards; remote-screens, Reverse Forwards
+/// Through The Hub: a local service shared with a host through real `ssh -R`
+/// and the host's relay, on loopback only although the host's `sshd` says
+/// `GatewayPorts yes`, rebuilt when its `ssh` dies, and gone after Stop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shared_port_reaches_a_local_service_from_the_host_through_real_ssh() {
+    let Some(lab) = lab() else { return };
+    if which("python3").is_none() {
+        eprintln!("skipping: no python3 to connect from the host");
+        return;
+    }
+    let payload = lab.payload();
+    let hub = HubServer::start(&lab, &payload);
+    let service = TcpListener::bind(("127.0.0.1", 0)).expect("local service");
+    let local = service.local_addr().expect("address").port();
+    std::thread::spawn(move || {
+        for mut stream in service.incoming().flatten() {
+            let _ = stream.write_all(b"local-service\n");
+        }
+    });
+    let port = 18431;
+    let share = serde_json::json!({"target": HOST, "port": port, "local": local}).to_string();
+
+    let (status, shared) = reverses(&hub, "POST", Some(&share));
+    assert_eq!(status, 200, "{shared}");
+    assert_eq!(
+        shared,
+        serde_json::json!({"target": HOST, "remote": port, "local": local, "state": "up"})
+    );
+    assert_eq!(from_host(&lab, "127.0.0.1", port), "local-service");
+    let listening = host_listeners(&lab, port);
+    assert!(!listening.is_empty(), "the relay listens");
+    for address in &listening {
+        assert!(
+            address.starts_with("0100007F:")
+                || address.starts_with("00000000000000000000000001000000:"),
+            "only loopback, whatever GatewayPorts says: {listening:?}"
+        );
+    }
+    if listening.len() == 2 {
+        assert_eq!(from_host(&lab, "::1", port), "local-service");
+    }
+    let relay_dir = lab.dir.path().join("home/.local/share/splitty/run/relay");
+    let mode = fs::metadata(&relay_dir)
+        .expect("relay directory")
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o700);
+    let sockets: Vec<_> = fs::read_dir(&relay_dir)
+        .expect("relay directory")
+        .flatten()
+        .map(|entry| entry.path())
+        .collect();
+    assert_eq!(sockets.len(), 1, "{sockets:?}");
+    let socket_mode = fs::symlink_metadata(&sockets[0])
+        .expect("socket")
+        .permissions()
+        .mode();
+    assert_eq!(socket_mode & 0o077, 0, "owner-only socket");
+
+    // A killed `ssh` ends the relay with its session, and the hub shares the
+    // port again.
+    let ssh = reverse_ssh(&hub);
+    assert_eq!(ssh.len(), 1, "one ssh per shared port");
+    kill(Pid::from_raw(ssh[0]), Signal::SIGKILL).expect("kill ssh");
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let (_, list) = reverses(&hub, "GET", None);
+        let pids = reverse_ssh(&hub);
+        if list[0]["state"] == "up" && !pids.is_empty() && pids != ssh {
+            break;
+        }
+        assert!(Instant::now() < deadline, "rebuilt: {list}");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert_eq!(from_host(&lab, "127.0.0.1", port), "local-service");
+
+    let key = serde_json::json!({"target": HOST, "port": port}).to_string();
+    assert_eq!(reverses(&hub, "DELETE", Some(&key)).0, 204);
+    let deadline = Instant::now() + WAIT;
+    while !host_listeners(&lab, port).is_empty() {
+        assert!(Instant::now() < deadline, "the relay ends after Stop");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    assert!(from_host(&lab, "127.0.0.1", port).starts_with("failed:"));
+    let deadline = Instant::now() + WAIT;
+    while fs::read_dir(&relay_dir)
+        .expect("relay directory")
+        .next()
+        .is_some()
+    {
+        assert!(Instant::now() < deadline, "the relay removes its socket");
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    hub.wait_without_ssh();
 }

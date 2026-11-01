@@ -201,6 +201,12 @@ async fn the_hubs_routes_are_not_on_the_control_socket() {
         ("GET", FORWARDS),
         ("POST", FORWARDS),
         ("DELETE", FORWARDS),
+        ("GET", REVERSE),
+        ("POST", REVERSE),
+        ("DELETE", REVERSE),
+        ("GET", REVERSE_PREFERENCES),
+        ("PUT", REVERSE_PREFERENCES),
+        ("DELETE", REVERSE_PREFERENCES),
     ] {
         let request = Request::builder()
             .method(method)
@@ -2588,4 +2594,221 @@ fn build_info_names_the_wsl_distribution_only_inside_wsl() {
         routes::build_body("0.1.0", "abc", "unknown", Some("Ubuntu"))["wslDistro"],
         "Ubuntu"
     );
+}
+
+// ── Reverse forwards through the hub ────────────────────────────────────────
+
+const REVERSE: &str = "/api/remote/reverse-forwards";
+const REVERSE_PREFERENCES: &str = "/api/remote/reverse-forward-preferences";
+
+/// A local service that answers `local` to every connection, and its port.
+async fn local_service() -> u16 {
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .expect("service");
+    let port = listener.local_addr().expect("address").port();
+    tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, b"local\n").await;
+        }
+    });
+    port
+}
+
+/// remote-screens, Reverse Forwards Through The Hub and Saved Reverse
+/// Forwards; access-control, Hub Reverse Forwards (Own port refused).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reverse_forwards_are_shared_listed_remembered_and_stopped() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let router = router(&state(ADDR, dir.path()), hub(&host, dir.path()));
+    let local = local_service().await;
+    let port = free_port();
+    let share = json!({"target": "vm1", "port": port, "local": local});
+
+    let shared = json!({"target": "vm1", "remote": port, "local": local, "state": "up"});
+    assert_eq!(
+        exchange(&router, api("POST", REVERSE, Some(&share))).await,
+        (StatusCode::OK, shared.clone())
+    );
+    // The scripted host's port stands in for the host's relay.
+    assert_eq!(through(port), "local");
+    assert_eq!(
+        exchange(&router, api("GET", REVERSE, None)).await,
+        (StatusCode::OK, json!([shared.clone()]))
+    );
+    assert_eq!(
+        exchange(&router, api("GET", REVERSE_PREFERENCES, None)).await,
+        (StatusCode::OK, json!({"version": 1, "forwards": []})),
+        "sharing remembers nothing"
+    );
+
+    for (body, expected) in [
+        (
+            json!({"target": "vm1", "port": port, "local": local, "automatic": true}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"target": "vm1", "port": port}),
+            StatusCode::BAD_REQUEST,
+        ),
+        (
+            json!({"target": "vm1", "port": port, "local": 0}),
+            StatusCode::BAD_REQUEST,
+        ),
+    ] {
+        let (status, answer) = exchange(&router, api("POST", REVERSE, Some(&body))).await;
+        assert_eq!(status, expected, "{body} {answer}");
+    }
+    let (status, answer) = exchange(
+        &router,
+        api(
+            "POST",
+            REVERSE,
+            Some(&json!({"target": "vm1", "port": 18080, "local": 45299})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    assert_eq!(answer["code"], "local_port_reserved");
+    host.set_busy(18081, true);
+    let (status, answer) = exchange(
+        &router,
+        api(
+            "POST",
+            REVERSE,
+            Some(&json!({"target": "vm1", "port": 18081, "local": local})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    assert_eq!(answer["code"], "host_port_conflict");
+
+    let remembered = json!({"target": "vm1", "remote": port, "local": local, "enabled": true});
+    assert_eq!(
+        exchange(
+            &router,
+            api(
+                "PUT",
+                REVERSE_PREFERENCES,
+                Some(&json!({"target": "vm1", "port": port}))
+            )
+        )
+        .await,
+        (StatusCode::OK, remembered.clone())
+    );
+    let (status, answer) = exchange(
+        &router,
+        api(
+            "PUT",
+            REVERSE_PREFERENCES,
+            Some(&json!({"target": "vm1", "port": port, "label": "x"})),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{answer}");
+
+    let key = json!({"target": "vm1", "port": port});
+    let (status, _) = exchange(&router, api("DELETE", REVERSE, Some(&key))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        exchange(&router, api("GET", REVERSE, None)).await,
+        (StatusCode::OK, json!([]))
+    );
+    assert!(!held(port), "the host's port is free again");
+    assert_eq!(
+        exchange(&router, api("GET", REVERSE_PREFERENCES, None))
+            .await
+            .1["forwards"][0]["enabled"],
+        false,
+        "Stop pauses the rule"
+    );
+    let (status, _) = exchange(&router, api("DELETE", REVERSE_PREFERENCES, Some(&key))).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(
+        exchange(&router, api("GET", REVERSE_PREFERENCES, None)).await,
+        (StatusCode::OK, json!({"version": 1, "forwards": []}))
+    );
+    let (status, answer) = exchange(&router, api("DELETE", REVERSE, Some(&key))).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{answer}");
+}
+
+/// remote-screens, Saved Reverse Forwards (Remembered share restored):
+/// `remote.ready` opens the host's enabled rules, never a paused one, and
+/// never one that would share the server's own port.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn successful_ready_restores_saved_reverse_forwards() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let hub = hub(&host, dir.path());
+    let local = local_service().await;
+    let (enabled, paused, own) = (free_port(), free_port(), free_port());
+    hub.save_reverse("vm1", enabled.into(), Some(local.into()))
+        .await
+        .expect("save");
+    hub.save_reverse("vm1", paused.into(), Some(local.into()))
+        .await
+        .expect("save");
+    hub.stop_reverse("vm1", paused.into()).await.expect("pause");
+    assert!(host.asked().is_empty());
+
+    let served = Served::start(hub, dir.path()).await;
+    // Saved before this server knew its own port, as by an older server on
+    // another port.
+    served
+        .hub
+        .save_reverse("vm1", own.into(), Some(served.port.into()))
+        .await
+        .expect("save");
+    let mut socket = served.open("vm1").await;
+    assert_eq!(until_outcome(&mut socket).await.1["type"], "remote.ready");
+    tokio::time::timeout(WAIT, async {
+        while served.hub.reverses().is_empty() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("restored");
+    assert_eq!(through(enabled), "local");
+    tokio::time::timeout(WAIT, async {
+        while !served
+            .hub
+            .reverse_preferences()
+            .forwards
+            .iter()
+            .any(|row| row.remote == own && row.last_error.is_some())
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the own port is refused");
+    let reverses = served.hub.reverses();
+    assert_eq!(reverses.len(), 1, "{reverses:?}");
+    assert_eq!(reverses[0].remote, enabled);
+    assert!(host
+        .asked()
+        .iter()
+        .all(|call| !call.starts_with(&format!("reverse vm1 {paused} "))
+            && !call.starts_with(&format!("reverse vm1 {own} "))));
+    socket.close(None).await.expect("close");
+}
+
+#[tokio::test]
+async fn failed_host_setup_never_restores_saved_reverse_forwards() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host =
+        ScriptedHost::new(dir.path()).preparing(Prepare::SshFails("Host key verification failed."));
+    let hub = hub(&host, dir.path());
+    hub.save_reverse("vm1", 11434, Some(11434))
+        .await
+        .expect("save");
+    let served = Served::start(hub, dir.path()).await;
+    let mut socket = served.open("vm1").await;
+    assert_eq!(until_outcome(&mut socket).await.1["type"], "remote.error");
+    assert!(host
+        .asked()
+        .iter()
+        .all(|call| !call.starts_with("reverse ")));
+    assert!(served.hub.reverses().is_empty());
 }

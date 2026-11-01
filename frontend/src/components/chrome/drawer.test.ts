@@ -40,6 +40,8 @@ vi.mock("../../stores/connections.svelte.ts", () => ({
 vi.mock("../../stores/ports.svelte.ts", () => ({
   portForwarding: vi.fn(),
   hostPortLists: () => PORTS,
+  reverseForwarding: vi.fn(),
+  hostShareLists: () => [],
 }));
 
 const PORTS = [

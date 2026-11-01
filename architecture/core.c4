@@ -73,7 +73,7 @@ model {
     // Sessions
 
     pty = component 'pty' {
-      description 'PTY sessions: the session layer (the spec of a session with installation-local CLI discovery and child PATH, scrollback, subscriptions, OSC parsing, job log text, process info) over a terminal (terminal: the trait, its factory, the PTY in this process with its reader thread and lifecycle; a daemon\'s terminals are keepers), the replay filter for terminal clients, and the scan of the TCP ports the processes of sessions listen on (/proc on Linux: loopback and wildcard listeners of each shell\'s process tree).'
+      description 'PTY sessions: the session layer (the spec of a session with installation-local CLI discovery and child PATH, scrollback, subscriptions, OSC parsing, job log text, process info) over a terminal (terminal: the trait, its factory, the PTY in this process with its reader thread and lifecycle; a daemon\'s terminals are keepers), the replay filter for terminal clients, and the scan of the TCP ports the processes of sessions listen on (/proc on Linux: loopback and wildcard listeners of each shell\'s process tree), and the owner of a TCP connection by its addresses (connection_owner, for the relay on a host).'
       metadata {
         module 'splitty_core::pty'
         spec 'terminal-sessions'

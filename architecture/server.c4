@@ -51,14 +51,14 @@ model {
     }
 
     host = component 'host' {
-      description 'What the binary does on a remote host for a client over SSH: remote-handshake (this server, the daemon with whether it keeps its sessions, started on request with daemon start, and its screens) and remote-bridge (the daemon\'s WebSocket over stdio, authenticated on the host with the token file and a ticket, so no credential crosses SSH).'
+      description 'What the binary does on a remote host for a client over SSH: remote-handshake (this server, the daemon with whether it keeps its sessions, started on request with daemon start, and its screens) and remote-bridge (the daemon\'s WebSocket over stdio, authenticated on the host with the token file and a ticket, so no credential crosses SSH) and, Linux only, remote-relay (prepare: the owner-only relay directory in the run directory; serve: one shared port on 127.0.0.1 and ::1 of the host, relayed to the Unix socket sshd binds for the client\'s remote forward, only for connections whose socket the /proc owner check finds to be of its own user, ended at end of input or after 45 seconds without a heartbeat).'
       metadata {
         module 'splitty_server::host'
       }
     }
 
     hub = component 'hub' {
-      description 'The remote screen hub (/ws/remote, /api/remote/hosts, /api/remote/screens, /api/remote/catalog, /api/remote/host-preferences, /api/remote/host-order): for each socket its own ssh connections, carrying only stdio, which install the server, run the handshake with --ensure-daemon and a port hint free on this side, with update=1 stop a daemon of another version (daemon stop) and run the handshake again, check the daemon\'s protocol (the same version or the one before) and start remote-bridge on the host; remote.progress, one remote.ready (with the daemon\'s keepsSessions) or a remote.error with a code, message and hint, then a verbatim relay both ways, closed with 4001 when the host side ends. Records visible ready targets as recent hosts, lists the known hosts with display aliases, saves host preferences and the arranged order of the host groups, and forgets recent/alias/order/catalog metadata without ending connections or forwards, and keeps the client\'s remembered remote screens in remote-screens.json (checked, owner-only). Caches the last observed screen directories of 20 hosts in remote-catalog.json, separately from open screens, with validated per-host merges under a mutex and atomic private writes; reading or updating the cache never contacts a host. Forwards ports of hosts on request (/api/remote/forwards): one owned forward-only ssh -N each on 127.0.0.1, positively verified, supervised and rebuilt on the same port until stopped, at most 32 active/opening per host. hub::preferences stores opt-in mappings, labels and enabled state in private atomic remote-forwards.json (32 per host, 256 total); /api/remote/forward-preferences merges metadata without SSH. Successful remote.ready schedules only that host\'s enabled inactive mappings without delaying relay. Per-key ordered operations include cancelled-request cleanup, while short map/storage locks merge independent entries. Stop durably disables before closing; successful explicit Resume commits after verification; Forget keeps live supervision. Saved/explicit ports are strict on both loopback families and initial failures remain queryable only in runtime lastError.'
+      description 'The remote screen hub (/ws/remote, /api/remote/hosts, /api/remote/screens, /api/remote/catalog, /api/remote/host-preferences, /api/remote/host-order): for each socket its own ssh connections, carrying only stdio, which install the server, run the handshake with --ensure-daemon and a port hint free on this side, with update=1 stop a daemon of another version (daemon stop) and run the handshake again, check the daemon\'s protocol (the same version or the one before) and start remote-bridge on the host; remote.progress, one remote.ready (with the daemon\'s keepsSessions) or a remote.error with a code, message and hint, then a verbatim relay both ways, closed with 4001 when the host side ends. Records visible ready targets as recent hosts, lists the known hosts with display aliases, saves host preferences and the arranged order of the host groups, and forgets recent/alias/order/catalog metadata without ending connections or forwards, and keeps the client\'s remembered remote screens in remote-screens.json (checked, owner-only). Caches the last observed screen directories of 20 hosts in remote-catalog.json, separately from open screens, with validated per-host merges under a mutex and atomic private writes; reading or updating the cache never contacts a host. Forwards ports of hosts on request (/api/remote/forwards): one owned forward-only ssh -N each on 127.0.0.1, positively verified, supervised and rebuilt on the same port until stopped, at most 32 active/opening per host. hub::preferences stores opt-in mappings, labels and enabled state in private atomic remote-forwards.json (32 per host, 256 total); /api/remote/forward-preferences merges metadata without SSH. Successful remote.ready schedules only that host\'s enabled inactive mappings without delaying relay. Per-key ordered operations include cancelled-request cleanup, while short map/storage locks merge independent entries. Stop durably disables before closing; successful explicit Resume commits after verification; Forget keeps live supervision. Saved/explicit ports are strict on both loopback families and initial failures remain queryable only in runtime lastError. hub::reverse shares local ports with hosts on request (/api/remote/reverse-forwards, /api/remote/reverse-forward-preferences): one relay-only ssh -R to a Unix socket in the host\'s relay directory plus remote-relay serve each, Linux hosts only, never the server\'s own port, the same lanes, supervision, limits and opt-in restore after remote.ready as forwards, saved in remote-reverse-forwards.json.'
       metadata {
         module 'splitty_server::hub'
         spec 'remote-screens'
@@ -87,7 +87,7 @@ model {
 
     http -> embed 'FrontendAssets, themed_index_html'
     http -> ws 'WebSocket upgrade, WsState; PortWatch in tests'
-    http -> hub 'Hub, serve, known_hosts, remembered_screens, remember_screens, open_forward_with, forwards, stop_forward, forward_preferences, save_forward, forget_forward, ForwardError, Code, MAX_MESSAGE; a scripted host, HOST_LOST and VERSION in tests'
+    http -> hub 'Hub, serve, known_hosts, remembered_screens, remember_screens, open_forward_with, forwards, stop_forward, forward_preferences, save_forward, forget_forward, reserve_local_port, open_reverse, reverses, stop_reverse, reverse_preferences, save_reverse, forget_reverse, ForwardError, Code, MAX_MESSAGE; a scripted host, HOST_LOST and VERSION in tests'
     control -> http 'AppState, build_control_router'
 
     // Into the core
@@ -127,18 +127,20 @@ model {
     host -> splitty.core.protocol 'PROTOCOL_VERSION'
     host -> splitty.remote.handshake 'Handshake and its parts'
     host -> splitty.remote.bridge 'read_frame, write_frame'
-    main -> host 'remote-handshake, remote-bridge'
+    host -> splitty.core.config 'run_dir, ensure_private_dir (the relay directory)'
+    host -> splitty.core.pty 'ports::connection_owner (the relay\'s owner check)'
+    main -> host 'remote-handshake, remote-bridge, remote-relay'
 
     // The client side of remote screens
 
     hub -> splitty.core.config 'config_dir, CONFIG_DIR_VARIABLE'
     hub -> splitty.core.protocol 'PROTOCOL_VERSION'
-    hub -> splitty.remote.ssh 'SshTarget, Ssh (stdio-only, forward-only), run_checked, classify, host key and login failures'
+    hub -> splitty.remote.ssh 'SshTarget, Ssh (stdio-only, forward-only, relay-only), run_checked, classify, host key and login failures'
     hub -> splitty.remote.install 'prepare, payload_for, Prepared, Server, CONFIG_DIR_VARIABLE'
     hub -> splitty.remote.handshake 'handshake, Handshake, RunningDaemon, Screen'
     hub -> splitty.remote.bridge 'Bridge, Frame, MAX_FRAME'
     hub -> splitty.remote.hosts 'known, record_recent_if_visible, preferences, update_preference, host_order, set_host_order, forget_locked, lock, default_ssh_dir, write_private (atomic private catalog/screens/forward preferences)'
-    hub -> splitty.remote.tunnel 'PortReservation, reserve, reserve_exact, check_forward_address, backoff, PortTunnel, PortTunnelError'
+    hub -> splitty.remote.tunnel 'PortReservation, reserve, reserve_exact, check_forward_address, backoff, PortTunnel, PortTunnelError, ReverseTunnel, ReverseTunnelError, prepare_command, parse_prepared'
 
     // Into splitty-remote
 

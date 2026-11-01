@@ -1878,10 +1878,102 @@ type RemoteForwardConflictCode =
 
 interface RemoteForwardFailure {
   error: string;
-  code?: RemoteForwardConflictCode | "storage_failure" | "internal"
-    | "host_key" | "auth" | "unreachable" | "forward";
+  code?: RemoteForwardConflictCode | ReverseForwardConflictCode
+    | "storage_failure" | "internal"
+    | "host_key" | "auth" | "unreachable" | "unsupported_host" | "forward";
   hint?: string;
 }
+
+/**
+ * Reverse forwards: a port of this machine shared with a host.
+ *
+ * GET    /api/remote/reverse-forwards -> 200 ReverseForward[] (active up/down only)
+ * POST   /api/remote/reverse-forwards OpenReverseForward -> 200 ReverseForward
+ * DELETE /api/remote/reverse-forwards ReverseForwardKey -> 204
+ * GET    /api/remote/reverse-forward-preferences -> 200 ReverseForwardPreferences
+ * PUT    /api/remote/reverse-forward-preferences SaveReverseForward -> 200 SavedReverseForward
+ * DELETE /api/remote/reverse-forward-preferences ReverseForwardKey -> 204 (idempotent Forget)
+ *
+ * Authentication and guards as the forward APIs; none is on the control
+ * socket. Unknown fields and null values are refused (400) on every body;
+ * there is no `automatic`.
+ *
+ * Per start, the hub runs the install's prepare (a Darwin host is refused
+ * with unsupported_host), `<server> remote-relay prepare` over a stdio-only
+ * ssh (one JSON line {version:1, dir}), then one owned `ssh -T -a -x` with
+ * the hardening options, no multiplex reuse or backgrounding,
+ * `-R <dir>/<16 hex>.sock:localhost:<local>` and the command
+ * `<server> remote-relay serve --port <port> --socket <that path>`. The
+ * relay prints SPLITTY_RELAY_READY_V1, or SPLITTY_RELAY_FAILED_V1 <code>
+ * <message> (host_port_conflict, listen, socket, unsupported), within 20 s.
+ * It listens on 127.0.0.1:<port> and [::1]:<port> (when the host has it)
+ * and relays only connections whose client socket has its own uid in
+ * /proc/net/tcp(6). This side writes a newline to its stdin every 10 s; it
+ * ends after 45 s without one, or at end of input, and removes its socket.
+ * Configured LocalForward/RemoteForward/DynamicForward are refused (code
+ * "forward"), as for forwards.
+ *
+ * POST returns an active mapping when `local` matches (active_mapping_conflict
+ * otherwise), enables an existing saved rule and saves its local on success,
+ * and never creates a rule. The local server's own port is refused with
+ * local_port_reserved. DELETE persists enabled:false of a saved rule first,
+ * then ends the ssh; 404 only for an absent unsaved mapping. A reverse forward
+ * whose ssh ends is `down` while it is rebuilt with the same ports (backoff 1,
+ * 2, 4, 8, then 10 s). At most 32 active/opening per target, apart from
+ * forwards.
+ *
+ * Preferences are metadata only: PUT creates an enabled rule (local from the
+ * request, else the active mapping's, else port) or changes local; DELETE
+ * removes it and leaves an active mapping running. Persisted atomically as
+ * remote-reverse-forwards.json in the private config directory:
+ * {version:1,forwards:[{target,remote,local,enabled}]}; 32 per target, 256
+ * in total (preference_limit); invalid files read empty without rewrite.
+ * After remote.ready the hub opens that target's enabled inactive rules;
+ * failures are the runtime lastError.
+ *
+ * Error bodies are RemoteForwardFailure, with the forward APIs' statuses.
+ */
+interface ReverseForwardKey {
+  target: string;
+  /** The host's port, integer 1..65535. */
+  port: number;
+}
+
+interface OpenReverseForward extends ReverseForwardKey {
+  /** The port here, integer 1..65535; only localhost here is reached. */
+  local: number;
+}
+
+interface ReverseForward {
+  target: string;
+  /** The host's port. */
+  remote: number;
+  /** The port here. */
+  local: number;
+  state: "up" | "down";
+}
+
+interface SaveReverseForward extends ReverseForwardKey {
+  local?: number;
+}
+
+interface SavedReverseForward {
+  target: string;
+  remote: number;
+  local: number;
+  enabled: boolean;
+  /** Runtime only, as for saved forwards. */
+  lastError?: { code: string; message: string; hint?: string };
+}
+
+interface ReverseForwardPreferences {
+  version: 1;
+  forwards: SavedReverseForward[];
+}
+
+type ReverseForwardConflictCode =
+  | "host_port_conflict"    // The host's port is in use there.
+  | "local_port_reserved";  // The local server's own port is never shared.
 
 // ============================================================================
 // 11. LOCAL EDITOR HANDOFF (desktop IPC, not a host/server command)

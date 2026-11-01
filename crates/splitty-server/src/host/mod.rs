@@ -1,10 +1,13 @@
 //! What the `splitty` binary does on a remote host for a client that reaches
-//! it over SSH: the handshake (`remote-handshake`) and the bridge
-//! (`remote-bridge`). Both run as the SSH user and touch only that user's
-//! daemon, over loopback or its owner-only control socket.
+//! it over SSH: the handshake (`remote-handshake`), the bridge
+//! (`remote-bridge`) and the relay of a reverse forward (`remote-relay`).
+//! They run as the SSH user; the first two touch only that user's daemon,
+//! over loopback or its owner-only control socket, and the relay only that
+//! user's connections and its own socket.
 
 pub mod bridge;
 pub mod handshake;
+pub mod relay;
 
 use splitty_core::daemon::{self, DaemonInfo};
 

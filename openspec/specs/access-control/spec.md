@@ -375,7 +375,7 @@ A page on any other loopback port SHALL be able to call none of them, even in th
 - **THEN** its calls of native commands are rejected
 
 ### Requirement: Remote Screen Hub Access
-`/ws/remote` SHALL require the same origin check, same-origin fetch rule and single-use WebSocket ticket as `/ws`, and `/ws/remote` and `/api/remote/*` SHALL NOT be served on the control socket. The hub SHALL run `ssh` only to a target that passed the target validation of Remote Access Through SSH Tunnel, non-interactively, without agent forwarding or remote forwards. The hub SHALL send nothing to the host but the client's relayed messages and the commands of the install, the handshake and the bridge, and, for a socket opened with `update=1` (see `remote-screens`, Host Update), `daemon stop` of its installed server. In particular, it SHALL NOT forward the local session cookie, a ticket or the process token.
+`/ws/remote` SHALL require the same origin check, same-origin fetch rule and single-use WebSocket ticket as `/ws`, and `/ws/remote` and `/api/remote/*` SHALL NOT be served on the control socket. The hub SHALL run `ssh` only to a target that passed the target validation of Remote Access Through SSH Tunnel, non-interactively, without agent forwarding, and without remote forwards except the single remote forward of a reverse forward the user requested (see Hub Reverse Forwards). The hub SHALL send nothing to the host but the client's relayed messages and the commands of the install, the handshake and the bridge, `remote-relay prepare` and `remote-relay serve` for a reverse forward, and, for a socket opened with `update=1` (see `remote-screens`, Host Update), `daemon stop` of its installed server. In particular, it SHALL NOT forward the local session cookie, a ticket or the process token.
 
 #### Scenario: Missing ticket
 - **WHEN** a client opens `/ws/remote?target=vm1` without a valid ticket
@@ -388,6 +388,10 @@ A page on any other loopback port SHALL be able to call none of them, even in th
 #### Scenario: Update stops only the daemon
 - **WHEN** a client opens `/ws/remote` with `update=1` for a host whose daemon runs another version
 - **THEN** the only command the hub sends beyond the install, the handshake and the bridge is `daemon stop` of its installed server
+
+#### Scenario: Remote forwards only for reverse forwards
+- **WHEN** the hub opens screens of `vm1`, forwards a port of `vm1` and shares a local port with `vm1`
+- **THEN** only the `ssh` of the shared port carries a remote forward, and it names a Unix socket on the host
 
 ### Requirement: Hosts Cannot Reach Local Objects
 A client showing screens of several servers SHALL resolve every screen, pane and session id, every attach, spawn notification and notification, and every server command only against the objects of the connection it arrived on. A host SHALL NOT be able to change, focus, attach to, send input to or close a local pane or another host's pane, whatever ids it sends. A server command from a host SHALL NOT paste the local clipboard. Names, titles and notifications from a host SHALL be shown as plain text, and a host's notification SHALL name the host.
@@ -590,3 +594,38 @@ A desktop shell SHALL show a file in the system file manager only for a download
 #### Scenario: A URL the shell did not save
 - **WHEN** the page asks the shell to show a URL that is not one of its finished downloads
 - **THEN** the shell refuses and shows nothing
+
+### Requirement: Hub Reverse Forwards
+A reverse forward SHALL make `localhost:<local>` of this machine reachable on the host, and SHALL NOT make any other local address reachable: the API takes only a local port, and the forward's `ssh` SHALL name `localhost:<local>` as its destination. The local server's own HTTP port SHALL be refused with 409 `local_port_reserved`.
+
+The remote end of the forward MUST be a Unix socket in an owner-only directory of the host's server, and the host side MUST listen for programs only through `splitty remote-relay serve` (see `remote-hosts`, Remote Relay), bound to `127.0.0.1` and, where available, `::1`. The relay MUST admit a TCP connection only when the connecting socket belongs to the user the relay runs as, and MUST close every other connection without passing it on, including one whose owner it cannot determine. A host where the owner cannot be determined (no `/proc/net/tcp`, such as macOS) SHALL be refused with code `unsupported_host` before anything listens there.
+
+A reverse forward MUST NOT be opened without the user's explicit request, unless the user previously remembered it as an enabled rule and now connects its host successfully. Detected ports, link clicks in panes, `remote.autoForwardPorts`, messages from a host and remote windows SHALL NOT open one. The forward's `ssh` MUST run non-interactively, with no agent forwarding and no terminal, to a validated target; a host whose SSH configuration adds forwards SHALL be refused as for forwards. Ports MUST be integers from 1 to 65535. `/api/remote/reverse-forwards` and `/api/remote/reverse-forward-preferences` MUST NOT be served on the control socket and SHALL have the authentication and guards of the other `/api` routes; reverse-forward preferences SHALL be stored owner-only like forward preferences.
+
+#### Scenario: Another user on the host
+- **WHEN** the user shares local port 11434 with `vm1` as port 11434, and another user of `vm1` connects to `127.0.0.1:11434` there
+- **THEN** the connection is closed and nothing reaches this machine
+
+#### Scenario: The user's own program on the host
+- **WHEN** a program running as the user on `vm1` connects to `localhost:11434` there
+- **THEN** it reaches the service on `localhost:11434` of this machine
+
+#### Scenario: GatewayPorts on the host
+- **WHEN** the host's `sshd_config` sets `GatewayPorts yes` and the user shares a local port with it
+- **THEN** nothing listens for the shared port on an address of the host other than loopback
+
+#### Scenario: Own port refused
+- **WHEN** a request asks to share the port of the local server itself
+- **THEN** it is refused with 409 `local_port_reserved` and no `ssh` is started
+
+#### Scenario: No automatic reverse forward
+- **WHEN** a host has detected ports, `remote.autoForwardPorts` is on, and a remote pane prints a `localhost` link that the user clicks
+- **THEN** no reverse forward is opened
+
+#### Scenario: macOS host
+- **WHEN** the user shares a local port with a host whose kernel is `Darwin`
+- **THEN** the request is refused with code `unsupported_host` and no remote forward is requested
+
+#### Scenario: Control socket
+- **WHEN** a process requests `/api/remote/reverse-forwards` or `/api/remote/reverse-forward-preferences` over the control socket
+- **THEN** the request is not served

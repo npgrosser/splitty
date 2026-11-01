@@ -59,7 +59,7 @@
     availableScreens, forgetScreenFlags, getLocalVersion, hostState, remoteScreenFlags, setHostScreens,
     setLocalVersion, setLocalWslDistro, trackHost,
   } from "../../stores/connections.svelte.ts";
-  import { startPortForwarding, stopPortForwarding } from "../../stores/ports.svelte.ts";
+  import { reverseForwarding, startPortForwarding, stopPortForwarding } from "../../stores/ports.svelte.ts";
   import { NOTICE_DURATION, type PortNotice } from "../../lib/remote/port_forwarding.ts";
   import { openExternalTarget, reserveExternalOpen } from "../../lib/window.ts";
   import { newScreenId } from "../../lib/ids.ts";
@@ -731,8 +731,8 @@
     // Rename, switch and reorder go to each screen's own connection.
     setScreenMuxHooks(screenMuxHooks(connectionFor));
 
-    // The hosts' ports and the local server's forwards; a host's connection
-    // is watched below.
+    // The hosts' ports, the local server's forwards and the local ports
+    // shared with hosts; a host's connection is watched below.
     const ports = startPortForwarding({
       fetch: apiFetch,
       open: (url) => openExternalTarget({ url }),
@@ -741,7 +741,7 @@
       notify: showPortNotice,
     });
 
-    const refreshPorts = () => { void ports.refresh(); };
+    const refreshPorts = () => { void ports.refresh(); void reverseForwarding()?.refresh(); };
     window.addEventListener("focus", refreshPorts);
 
     // The pane the user looks at: what happens there is seen, and coming back

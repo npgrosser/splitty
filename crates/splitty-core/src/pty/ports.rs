@@ -12,6 +12,11 @@
 //!
 //! Only listeners a forward to `localhost` on the host can reach count:
 //! loopback and wildcard addresses. Elsewhere the list is always empty.
+//!
+//! [`connection_owner`] reads the same tables for the user a loopback
+//! connection comes from, for the relay of a reverse forward.
+
+use std::net::SocketAddr;
 
 use serde::Serialize;
 
@@ -58,11 +63,29 @@ pub fn listening_under(shells: &[(String, u32)]) -> Vec<ListeningPort> {
     }
 }
 
+/// The uid of the user whose process opened the client end of a TCP
+/// connection on this machine, seen from the accepting side: `peer` is the
+/// address the connection came from, `local` the address it was accepted on.
+/// `None` when no open socket of that connection is found (the client may
+/// have closed it already), and always off Linux. Reads `/proc`, so it
+/// blocks.
+pub fn connection_owner(peer: SocketAddr, local: SocketAddr) -> Option<u32> {
+    #[cfg(target_os = "linux")]
+    {
+        linux::connection_owner(std::path::Path::new("/proc"), peer, local)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (peer, local);
+        None
+    }
+}
+
 #[cfg(target_os = "linux")]
 mod linux {
     use std::collections::{HashMap, HashSet, VecDeque};
     use std::fs;
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
     use std::path::Path;
 
     use super::ListeningPort;
@@ -156,6 +179,69 @@ mod linux {
                 })
             })
             .collect()
+    }
+
+    /// A socket in state TIME_WAIT: its uid is always 0.
+    const TIME_WAIT: &str = "06";
+
+    /// [`super::connection_owner`] over the `/proc` at `root`.
+    pub(super) fn connection_owner(
+        root: &Path,
+        peer: SocketAddr,
+        local: SocketAddr,
+    ) -> Option<u32> {
+        let table = if peer.is_ipv6() {
+            "net/tcp6"
+        } else {
+            "net/tcp"
+        };
+        owner_in(&fs::read_to_string(root.join(table)).ok()?, peer, local)
+    }
+
+    /// The uid of the socket whose local address is `peer` and whose remote
+    /// address is `local`: the client end of that connection. Sockets in
+    /// TIME_WAIT are no client any more; rows that disagree name no owner.
+    pub(super) fn owner_in(table: &str, peer: SocketAddr, local: SocketAddr) -> Option<u32> {
+        let v6 = peer.is_ipv6();
+        let mut owner = None;
+        for line in table.lines().skip(1) {
+            let fields: Vec<&str> = line.split_whitespace().collect();
+            let (Some(from), Some(to), Some(state), Some(uid)) =
+                (fields.get(1), fields.get(2), fields.get(3), fields.get(7))
+            else {
+                continue;
+            };
+            if *state == TIME_WAIT
+                || !same(socket_address(from, v6), peer)
+                || !same(socket_address(to, v6), local)
+            {
+                continue;
+            }
+            let uid: u32 = uid.parse().ok()?;
+            match owner {
+                Some(known) if known != uid => return None,
+                _ => owner = Some(uid),
+            }
+        }
+        owner
+    }
+
+    fn same(parsed: Option<SocketAddr>, address: SocketAddr) -> bool {
+        parsed.is_some_and(|parsed| parsed.ip() == address.ip() && parsed.port() == address.port())
+    }
+
+    /// `<hex address>:<hex port>` as the tables print it.
+    fn socket_address(text: &str, v6: bool) -> Option<SocketAddr> {
+        let (address, port) = text.split_once(':')?;
+        let address = if v6 {
+            IpAddr::V6(ipv6(address)?)
+        } else {
+            IpAddr::V4(ipv4(address)?)
+        };
+        Some(SocketAddr::new(
+            address,
+            u16::from_str_radix(port, 16).ok()?,
+        ))
     }
 
     /// An IPv4 address as the kernel prints it: the 32-bit word of the
@@ -276,7 +362,7 @@ mod tests {
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, TcpListener};
     use std::path::Path;
 
-    use super::linux::{listeners, parent, reachable, scan, tree, Listener};
+    use super::linux::{listeners, owner_in, parent, reachable, scan, tree, Listener};
     use super::*;
 
     const HEADER: &str = "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode";
@@ -497,5 +583,88 @@ mod tests {
                 .any(|found| found.port == port),
             "{port} is closed"
         );
+    }
+
+    /// A connection row of `/proc/net/tcp`: from `local`, to `remote`, in
+    /// `state`, opened by `uid`.
+    fn connection(local: &str, remote: &str, state: &str, uid: u32) -> String {
+        format!(
+            "   0: {local} {remote} {state} 00000000:00000000 00:00000000 00000000 {uid:>5}        \
+             0 4242 1 0000000000000000 20 4 30 10 -1\n"
+        )
+    }
+
+    #[test]
+    fn the_owner_of_a_connection_is_the_uid_of_its_client_socket() {
+        let listener: SocketAddr = "127.0.0.1:11434".parse().expect("address");
+        let peer: SocketAddr = "127.0.0.1:40000".parse().expect("address");
+        // 127.0.0.1 is 0100007F; 11434 is 2CAA and 40000 is 9C40. The
+        // server's row (uid 1000) runs the other way and does not count.
+        let rows = [
+            connection("0100007F:2CAA", "00000000:0000", "0A", 1000),
+            connection("0100007F:2CAA", "0100007F:9C40", "01", 1000),
+            connection("0100007F:9C40", "0100007F:2CAA", "01", 1001),
+        ];
+        let table = format!("{HEADER}\n{}", rows.concat());
+        assert_eq!(owner_in(&table, peer, listener), Some(1001));
+
+        // Another connection's client, or none at all, names no owner.
+        let other: SocketAddr = "127.0.0.1:40001".parse().expect("address");
+        assert_eq!(owner_in(&table, other, listener), None);
+        assert_eq!(owner_in(HEADER, peer, listener), None);
+    }
+
+    #[test]
+    fn time_wait_and_disagreeing_rows_name_no_owner() {
+        let listener: SocketAddr = "127.0.0.1:11434".parse().expect("address");
+        let peer: SocketAddr = "127.0.0.1:40000".parse().expect("address");
+        let closed = format!(
+            "{HEADER}\n{}",
+            connection("0100007F:9C40", "0100007F:2CAA", "06", 0)
+        );
+        assert_eq!(owner_in(&closed, peer, listener), None);
+
+        let disagreeing = format!(
+            "{HEADER}\n{}{}",
+            connection("0100007F:9C40", "0100007F:2CAA", "01", 1000),
+            connection("0100007F:9C40", "0100007F:2CAA", "01", 1001),
+        );
+        assert_eq!(owner_in(&disagreeing, peer, listener), None);
+    }
+
+    #[test]
+    fn the_owner_of_an_ipv6_connection_is_read_from_tcp6() {
+        let listener: SocketAddr = "[::1]:11434".parse().expect("address");
+        let peer: SocketAddr = "[::1]:40000".parse().expect("address");
+        let loopback = format!("{:032X}", 0);
+        let mut loopback6 = loopback[..24].to_owned();
+        loopback6.push_str(&format!("{:08X}", u32::from_ne_bytes([0, 0, 0, 1])));
+        let table = format!(
+            "{HEADER}\n{}",
+            connection(
+                &format!("{loopback6}:9C40"),
+                &format!("{loopback6}:2CAA"),
+                "01",
+                1000
+            )
+        );
+        assert_eq!(owner_in(&table, peer, listener), Some(1000));
+    }
+
+    /// The real `/proc`: a connection this process opens to itself belongs
+    /// to this process's user.
+    #[test]
+    fn the_owner_of_a_real_loopback_connection_is_this_user() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
+        let client =
+            std::net::TcpStream::connect(listener.local_addr().expect("address")).expect("connect");
+        let (accepted, peer) = listener.accept().expect("accept");
+        let local = accepted.local_addr().expect("address");
+        let uid = std::fs::metadata("/proc/self").map(|meta| {
+            use std::os::unix::fs::MetadataExt;
+            meta.uid()
+        });
+        assert_eq!(connection_owner(peer, local), uid.ok());
+        drop(client);
     }
 }
