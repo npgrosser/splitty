@@ -109,6 +109,26 @@ make uninstall-no-gui     # remove server binary
 make uninstall-config     # remove ~/.config/splitty (separate step)
 ```
 
+## Continuous integration
+
+[CI](../.github/workflows/ci.yml) and [CodeQL](../.github/workflows/codeql.yml)
+run on pushes to `main` and pull requests. Changes limited to README files,
+project instructions, documentation pages and images, roadmaps or OpenSpec
+change drafts skip both workflows. A mixed documentation and code change runs
+the checks normally. The ignore lists deliberately keep `docs/protocol.ts`,
+the CLI's embedded `agent_guide.md`, and `openspec/specs/` covered; architecture
+tests verify that the referenced spec directories exist.
+
+The weekly schedule runs the dependency audit and CodeQL, so new advisories
+and analysis queries are checked without rebuilding unchanged code. Both
+workflows can also be started manually; a manual CI run includes all tests
+and build checks. CodeQL uses the repository workflow for Actions,
+JavaScript/TypeScript, Python and Rust; GitHub's default setup must remain
+disabled because it overrides custom CodeQL workflows.
+
+Release packages are built on `v*` tags or by manually starting the release
+workflow. Ordinary pushes do not publish packages.
+
 ## Releases
 
 The shared [release skill](../.agents/skills/release/SKILL.md) is available
