@@ -47,8 +47,8 @@ remote, with what runs in it.
 - **Remote screens.** Pick a host from your `~/.ssh/config` or type one in,
   and its screens open next to your local ones. Splitty installs itself on the
   host over SSH, so Linux and macOS hosts need no setup.
-- **Reconnect where you left off.** After a closed laptop or a network change,
-  the window reconnects, with everything printed in the meantime.
+- **Reconnect where you left off.** Your remote sessions keep running when
+  you close your laptop or switch networks. Reconnect and carry on.
 - **Ports.** Splitty notices when a program in a remote terminal listens on a
   port, such as a dev server. Forward it with a click; `localhost` links in
   remote terminals then open through the forward.
@@ -72,15 +72,17 @@ More in [Files and editors](docs/files-and-editors.md).
 
 ### For coding agents
 
+- **Let your coding agent use Splitty.** It can start dev servers, run tests
+  or launch other agents in tabs and splits alongside your own terminals.
+  You can follow along and interact with them directly.
 - **Scratchpad.** Each terminal has one (Cmd/Alt+J) for drafting the next
   prompt while the agent works. It stays with the session, and the agent
   can't read it.
-- **Visible background processes.** With `splitty run`, an agent starts a dev
-  server or a watcher in a tab of its own. You both see the output, and the
-  process outlives the agent.
-- **Setup** is one line in `CLAUDE.md` or `AGENTS.md`: *Use Splitty for
-  visible terminals and background processes; first read
-  `splitty agent guide`.*
+
+To get started, add this to your `CLAUDE.md` or `AGENTS.md`:
+
+> Use Splitty to run commands and launch other agents in tabs and splits;
+> first read `splitty agent guide`.
 
 More in [Managed terminal jobs](docs/cli-jobs.md).
 
