@@ -2,10 +2,6 @@
 
 A graphical terminal multiplexer for Linux, macOS and Windows.
 
-Splitty is a desktop app that puts the terminals on your machine and on your
-SSH hosts into one window, in screens, splits and tabs. On Windows, local
-terminals run in WSL 2.
-
 ![Splitty with a test run, a dev server and a git log on one screen, the scratchpad of the left terminal open below it, and the drawer listing two local screens and a screen on the host devbox](docs/images/workspace.png)
 
 ## The idea
