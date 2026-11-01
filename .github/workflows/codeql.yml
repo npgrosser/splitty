@@ -1,0 +1,71 @@
+name: CodeQL
+
+# This workflow replaces GitHub's default setup, which must remain disabled
+# so it neither scans documentation-only pushes nor overrides this workflow.
+on:
+  push:
+    branches: [main]
+    # Keep the documentation-only exclusions in sync with ci.yml.
+    paths-ignore:
+      - '*.md'
+      - '**/README.md'
+      - 'docs/**/*.md'
+      - 'docs/images/**'
+      - 'roadmap/**'
+      - 'openspec/changes/**'
+      - 'openspec/open-decisions.md'
+      - '.agents/**/*.md'
+      - '.claude/**/*.md'
+  pull_request:
+    paths-ignore:
+      - '*.md'
+      - '**/README.md'
+      - 'docs/**/*.md'
+      - 'docs/images/**'
+      - 'roadmap/**'
+      - 'openspec/changes/**'
+      - 'openspec/open-decisions.md'
+      - '.agents/**/*.md'
+      - '.claude/**/*.md'
+  # New queries can find issues even when the source has not changed.
+  schedule:
+    - cron: '37 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, javascript-typescript, python, rust]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          languages: ${{ matrix.language }}
+          # These four languages support extraction without a build, as in
+          # default setup. Compilation and tests remain in the CI workflow.
+          build-mode: none
+
+      - name: Analyze
+        uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4.39.1
+        with:
+          category: '/language:${{ matrix.language }}'

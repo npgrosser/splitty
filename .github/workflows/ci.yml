@@ -3,8 +3,31 @@ name: CI
 on:
   push:
     branches: [main]
+    # Keep these documentation-only exclusions in sync with codeql.yml.
+    # Do not skip all Markdown: agent_guide.md is compiled into the CLI,
+    # and architecture tests check the directories under openspec/specs/.
+    paths-ignore:
+      - '*.md'
+      - '**/README.md'
+      - 'docs/**/*.md'
+      - 'docs/images/**'
+      - 'roadmap/**'
+      - 'openspec/changes/**'
+      - 'openspec/open-decisions.md'
+      - '.agents/**/*.md'
+      - '.claude/**/*.md'
   pull_request:
-  # Weekly, so that a new advisory against unchanged code still fails a run.
+    paths-ignore:
+      - '*.md'
+      - '**/README.md'
+      - 'docs/**/*.md'
+      - 'docs/images/**'
+      - 'roadmap/**'
+      - 'openspec/changes/**'
+      - 'openspec/open-decisions.md'
+      - '.agents/**/*.md'
+      - '.claude/**/*.md'
+  # Only the dependency audit runs weekly: advisories can change without code.
   schedule:
     - cron: "17 5 * * 1"
   workflow_dispatch:
@@ -15,7 +38,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.ref }}
+  group: ci-${{ github.event_name }}-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -24,6 +47,7 @@ env:
 jobs:
   rust:
     name: Rust tests
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -73,6 +97,7 @@ jobs:
 
   aarch64:
     name: Static server (aarch64)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -112,6 +137,7 @@ jobs:
 
   tauri-linux:
     name: Tauri shell (Linux)
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
@@ -160,6 +186,7 @@ jobs:
 
   frontend:
     name: Frontend
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -183,6 +210,7 @@ jobs:
 
   electron:
     name: Electron shell
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
