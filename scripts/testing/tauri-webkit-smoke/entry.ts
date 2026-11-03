@@ -5,8 +5,13 @@ declare const __SPLITTY_FULL_UI__: boolean;
 declare const __SPLITTY_SMOKE_RELOADS__: number;
 import { openTauriChannel } from '../../../frontend/src/lib/protocol/tauri_channel.ts';
 
+import { isProbeDocument, probeDocumentMetadata } from './document.mjs';
+
+// A popout may inherit this initialization script, but only the actual top
+// packaged workspace document owns the smoke. Keep its capsule assertion hard.
+if (isProbeDocument(window)) {
 const state = window as any;
-const report = (value: unknown) => state.__TAURI_INTERNALS__.invoke('smoke_report', { value });
+const report = (value: object) => state.__TAURI_INTERNALS__.invoke('smoke_report', { value: { ...value, probeDocument: probeDocumentMetadata(window) } });
 const assert = (condition: unknown, message: string) => { if (!condition) throw Error(message); };
 let stage = 'initialization';
 let nativeInstance: string | undefined;
@@ -143,3 +148,5 @@ void (async () => {
     await report(result);
   }
 })().catch(error => { clearTimeout(timeout); void report({ error: String(error), stage, epoch: currentEpoch, instance: nativeInstance, stack: error?.stack, network, assetFetches, uiConnectionErrors, securityViolations, dom: document.body?.innerText.slice(0, 2000) }); });
+
+}

@@ -5,6 +5,7 @@ import importlib.util
 from pathlib import Path
 import unittest
 import tempfile
+import subprocess
 
 spec = importlib.util.spec_from_file_location('wkwebview_smoke', Path(__file__).with_name('tauri-wkwebview-smoke.py'))
 smoke = importlib.util.module_from_spec(spec)
@@ -48,6 +49,12 @@ class ObserverTests(unittest.TestCase):
                 endpoint.parent.mkdir(parents=True)
                 self.assertTrue(all(not ancestor.is_symlink() for ancestor in endpoint.parents))
                 self.assertTrue(alias.is_symlink(), 'fixture canonicalization must not alter the alias')
+
+    def test_shared_probe_document_guard_and_main_capsule_assertion(self):
+        regression = Path(__file__).parent/'tauri-webkit-smoke/document.test.cjs'
+        result = subprocess.run(['node', '--test', str(regression)], text=True,
+                                stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+        self.assertEqual(result.returncode, 0, result.stdout)
 
     def test_darwin_start_identity_layout_includes_microseconds(self):
         self.assertEqual(ctypes.sizeof(smoke.ProcBsdInfo), 136)

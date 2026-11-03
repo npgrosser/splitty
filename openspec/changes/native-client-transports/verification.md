@@ -60,11 +60,15 @@ and retains cancellation and generation semantics across the transport change.
   background-writer PTY fixture) reproduce on exact baseline `cc66e97`; they
   remain failing checks and are recorded in the baseline findings. The earlier
   managed-stop failure did not recur in this run, so its diagnostic remains.
-  WKWebView startup was blocked before UI execution by the fixture using the
-  symlink `/tmp`; its home now resolves to the canonical private directory,
-  preserving production endpoint rejection. Five portable tests pass; actual
-  WKWebView execution after this correction remains open. Independent runtime
-  evidence does not waive the mandatory core failure gate.
+  Resolving the fixture home to its canonical private path allows WKWebView
+  startup. The next run reaches the actual UI and popout, where WKWebView
+  inherits the test initialization script into the child: the child correctly
+  lacks native authority but incorrectly reports the parent-only capsule
+  assertion. The probe now gates on the top packaged index document and adds
+  document metadata to reports. Three Node regressions and six portable
+  checks pass; the full actual rerun remains open. Production bootstrap and
+  endpoint rejection are unchanged. Independent runtime evidence does not
+  waive the mandatory core failure gate.
 
 These results describe the runs performed, not proof that every requirement is
 complete. Final source checks and platform results must be reconciled before
@@ -84,8 +88,19 @@ marking the change ready.
 
 The catalog/role audit found no remaining native HTTP/token fallback. Static
 classification and native/browser conformance tests cover enumerated operations,
-credential-route refusal and assigned-host restrictions. This does not close
-unchecked platform conformance cells.
+credential-route refusal and assigned-host restrictions. The expanded framed
+Remote-role test rejects all 22 LocalHub operations with 403, verifies nine
+management-state views after each refusal and observes zero connector calls.
+Allowed backend reads, a real template mutation and missing-object errors
+match browser results on that same Remote stream; all 15 conformance cases
+pass. This does not close unchecked platform conformance cells.
+
+Retained SSH diagnostics now keep source-byte charges through missing-command,
+old-CLI, installation-status, invalid-probe and unsupported-kernel conversions.
+Drop/exhaustion tests pass with 149 remote unit tests and 11 hub failure tests;
+remote/server all-target clippy passes. Fixed-size setup metadata is separately
+bounded by length and setup admission; the transport ledger is not a total
+process RSS or trusted deployment-archive bound.
 
 ## Open merge gates
 
