@@ -215,18 +215,31 @@ remote/server all-target clippy passes. Fixed-size setup metadata is separately
 bounded by length and setup admission; the transport ledger is not a total
 process RSS or trusted deployment-archive bound.
 
-## Hosted Windows forwarding preflight
+## Native Windows app with localhost forwarding disabled
 
-A separate diagnostic branch at `6acdbdd` passes GitHub run
-[41709278261](https://github.com/npgrosser/splitty/actions/runs/41709278261).
-On a fresh hosted Windows VM, actual WSL 2 guest execution and matching guest/
-Windows nonce responses establish the forwarding-enabled positive control.
-After disabling localhost forwarding and restarting WSL, the guest still
-answers before and after the refused Windows connection. The private distro
-is removed, the original configuration is restored, cleanup reports no errors
-and owned Windows handles return to zero. This proves the availability of a
-disposable test environment; it does not yet prove Splitty's native app works
-with forwarding disabled. That application run remains part of task 7.6.
+The separate diagnostic branch at `dfe1996`, including production revision
+`6464f3b`, passes GitHub [run 41712473304](https://github.com/npgrosser/splitty/actions/runs/41712473304).
+Linux builds the production assets, backend and private rootfs from the same
+revision; the Windows runner verifies their digests and lockfile provenance.
+The existing full-UI fixture runs under NAT with `localhostForwarding=false`.
+Matching guest/Windows nonce responses first prove forwarding works when
+enabled. Guest-positive/Windows-blocked controls then enclose the actual app
+run, while configuration bytes remain unchanged.
+
+The actual WebView2 app loads production CSS, font and WASM, renders the Ghostty
+canvas, persists settings and passes the bounded shared-popout checks. Binary
+PTY traffic and a 1,048,833-byte transfer pass; its independently checked SHA256
+is `2863365348a5ef27b6035a51ff1783a1303e28f78045001face85bee49b8caae`.
+Duplicate start retains the first owner; distribution switching performs a real
+app restart. Both app instances exit naturally, owned helpers/PTYs exit, sampled
+app and guest listener inventories are empty, independent fixture workers
+survive, and owned handles return to zero. Both app distributions and the
+control distribution are removed; configuration restoration and cleanup pass.
+
+This establishes the disabled-forwarding application case of task 7.6. It does
+not establish sibling-remote isolation, the remaining consumer-pressure cases,
+whole-framework memory bounds or continuous TCP-listener absence. The separate
+local SSH listener observation remains unresolved and is not waived by this run.
 
 ## Open merge gates
 
