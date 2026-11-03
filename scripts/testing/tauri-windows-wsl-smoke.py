@@ -25,9 +25,24 @@ def registrations():
     value=common.powershell('ConvertTo-Json -InputObject @(Get-ChildItem HKCU:\\Software\\Microsoft\\Windows\\CurrentVersion\\Lxss | ForEach-Object { Get-ItemProperty $_.PSPath | Select-Object DistributionName,BasePath }) -Compress')
     return {row['DistributionName']:row['BasePath'] for row in json.loads(value)}
 
-def wsl(name, arguments, log=None):
-    command='& wsl.exe -d '+common.quote(name)+' --exec '+' '.join(common.quote(argument) for argument in arguments)+'\nexit $LASTEXITCODE'
-    return common.powershell(command, log)
+WSL_EXECUTION_APPROVED=False
+OWNED_TARGETS={}
+OWNED_ROOTS={}
+GUEST_GUARD=(HERE/'tauri-windows-native-smoke/fixture-guest-guard.sh').read_text().strip()
+
+def guarded_guest_arguments(name,arguments):
+    if not re.fullmatch(r'splitty-native-fixture-[0-9a-f]{12}-[ab]',name):raise RuntimeError('not a private fixture name')
+    return ['--distribution',name,'--exec','/bin/sh','-c',GUEST_GUARD,'splitty-fixture-guard',name,*arguments]
+
+def wsl(name, arguments, log=None, user=None):
+    if not WSL_EXECUTION_APPROVED:raise RuntimeError('explicit --disposable-distros scoped approval required')
+    if name not in OWNED_TARGETS:raise RuntimeError('unowned fixture target')
+    found=registrations().get(name,'').removeprefix('\\\\?\\').rstrip('\\/').casefold()
+    if found!=OWNED_TARGETS[name].rstrip('\\/').casefold():raise RuntimeError('fixture registration changed')
+    if user not in [None,'root']:raise RuntimeError('unsupported fixture user')
+    root=OWNED_ROOTS[name]
+    source='$ErrorActionPreference="Stop"\n$RootDir='+common.quote(common.windows(root))+'\n$ownership=Get-Content (Join-Path $RootDir "owned-distros.json") -Raw|ConvertFrom-Json\nAdd-Type -Path (Join-Path $RootDir "fixture-job.cs")\n. (Join-Path $RootDir "fixture-sentinel.ps1")\n$guestArgs=[string[]](ConvertFrom-Json '+common.quote(json.dumps(arguments))+')\nInvoke-FixtureGuest -Name '+common.quote(name)+' -Arguments $guestArgs'+(' -User '+common.quote(user) if user else '')
+    return common.powershell(source,log)
 
 def rootfs(path):
     files={}
@@ -78,8 +93,12 @@ def rootfs(path):
             data=value.encode(); info=tarfile.TarInfo(name); info.size=len(data); info.mode=0o644; archive.addfile(info,io.BytesIO(data))
 
 @contextlib.contextmanager
-def fixtures(root):
-    names=['splitty-native-fixture-'+uuid.uuid4().hex[:12]+suffix for suffix in ['-a','-b']]
+def fixtures(root,count=2):
+    if not WSL_EXECUTION_APPROVED:raise RuntimeError('explicit --disposable-distros scoped approval required')
+    if count not in [1,2]:raise RuntimeError('fixture count must be one or two')
+    for filename in ['fixture-job.cs','fixture-sentinel.ps1','fixture-guest-guard.sh']:
+        shutil.copyfile(HERE/'tauri-windows-native-smoke'/filename,root/filename)
+    names=['splitty-native-fixture-'+uuid.uuid4().hex[:12]+suffix for suffix in ['-a','-b'][:count]]
     before=registrations(); owned={}; archive=root/'fixture-rootfs.tar'; rootfs(archive)
     (root/'owned-distros.json').write_text(json.dumps({'before':before,'created':owned,'names':names},indent=2))
     try:
@@ -87,6 +106,8 @@ def fixtures(root):
             if name in registrations() or name in before: raise RuntimeError('fixture name already registered')
             location=root/'distributions'/name; location.mkdir(parents=True)
             owned[name]=common.windows(location)
+            OWNED_TARGETS[name]=owned[name]
+            OWNED_ROOTS[name]=root
             # Persist ownership before invoking import; finally also handles a partial import.
             (root/'owned-distros.json').write_text(json.dumps({'before':before,'created':owned,'names':names},indent=2))
             common.powershell('& wsl.exe --import '+common.quote(name)+' '+common.quote(common.windows(location))+' '+common.quote(common.windows(archive))+' --version 2\nexit $LASTEXITCODE',root/(name+'-import.log'))
@@ -96,8 +117,6 @@ def fixtures(root):
             if home!='/home/splitty-fixture': raise RuntimeError('fixture HOME not isolated: '+repr(home))
         yield names
     finally:
-        sentinel_file=root/'sentinels.json'
-        if sentinel_file.exists(): stop_sentinels(json.loads(sentinel_file.read_text()))
         cleanup=[]
         for name,location in owned.items():
             found=registrations()
@@ -110,28 +129,10 @@ def fixtures(root):
                 common.powershell('& wsl.exe --unregister '+common.quote(name)+'\nexit $LASTEXITCODE',root/(name+'-unregister.log'))
                 cleanup.append({'name':name,'unregistered':name not in registrations()})
             except Exception as error: cleanup.append({'name':name,'error':str(error)})
+        for name in owned:
+            OWNED_TARGETS.pop(name,None);OWNED_ROOTS.pop(name,None)
         (root/'distro-cleanup.json').write_text(json.dumps(cleanup,indent=2))
         if any(row.get('error') or not row.get('unregistered') for row in cleanup): raise RuntimeError('fixture cleanup needs inspection: '+str(root/'distro-cleanup.json'))
-
-def sentinels(root,names):
-    records=[]
-    for index,name in enumerate(names):
-        command='wsl.exe -d '+name+' --exec sleep 600'
-        source='$startup=New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ShowWindow=[uint16]0}; $created=Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{CommandLine='+common.quote(command)+';ProcessStartupInformation=$startup}; if($created.ReturnValue -ne 0){throw "fixture sentinel creation failed"}; $p=Get-CimInstance Win32_Process -Filter ("ProcessId="+$created.ProcessId); [ordered]@{Id=$p.ProcessId;Creation=$p.CreationDate.ToUniversalTime().ToString("o");Distro='+common.quote(name)+'} | ConvertTo-Json -Compress'
-        records.append(json.loads(common.powershell(source)))
-        (root/'sentinels.json').write_text(json.dumps(records,indent=2))
-    return records
-
-def verify_sentinels(records):
-    for record in records:
-        source='$p=Get-CimInstance Win32_Process -Filter '+common.quote('ProcessId='+str(record['Id']))+'; if(-not $p -or $p.CreationDate.ToUniversalTime().ToString("o") -ne '+common.quote(record['Creation'])+' -or $p.CommandLine -notlike '+common.quote('*'+record['Distro']+'*')+'){throw "independent fixture work did not survive"}'
-        common.powershell(source)
-
-def stop_sentinels(records):
-    raise RuntimeError("Windows fixture process cleanup disabled pending independent ownership review")
-    for record in records:
-        source='$p=Get-CimInstance Win32_Process -Filter '+common.quote('ProcessId='+str(record['Id']))+'; if($p -and $p.CreationDate.ToUniversalTime().ToString("o") -eq '+common.quote(record['Creation'])+' -and $p.CommandLine -like '+common.quote('*'+record['Distro']+'*')+'){Stop-Process -Id '+str(record['Id'])+' -Force}'
-        common.powershell(source)
 
 def instrument(root,names,repo):
     common.instrument(root)
@@ -140,16 +141,27 @@ def instrument(root,names,repo):
     anchor='''            self.check_cancelled()?;
             let mut command = wsl_command();'''
     shim='''            self.check_cancelled()?;
-            if let Some(names) = std::env::var_os("SPLITTY_SMOKE_DISTROS") {
-                let names: Vec<String> = serde_json::from_str(&names.to_string_lossy()).map_err(|e| e.to_string())?;
-                if arguments == [OsString::from("--list"), OsString::from("--verbose")] {
-                    return Ok(ProcessOutput { success:true, stdout:names.iter().map(|name| format!("  {name} Running 2\\n")).collect::<String>().into_bytes(), stderr:Vec::new() });
-                }
-                if arguments.first().map(|value| value == "-d") != Some(true) || !arguments.get(1).is_some_and(|value| names.iter().any(|name| value == name.as_str())) { return Err("fixture guard rejected an unowned WSL target".into()); }
+            let names_data = std::env::var_os("SPLITTY_SMOKE_DISTROS").ok_or("fixture target list absent")?;
+            let names: Vec<String> = serde_json::from_str(&names_data.to_string_lossy()).map_err(|e| e.to_string())?;
+            if arguments == [OsString::from("--list"), OsString::from("--verbose")] {
+                return Ok(ProcessOutput { success:true, stdout:names.iter().map(|name| format!("  {name} Running 2\\n")).collect::<String>().into_bytes(), stderr:Vec::new() });
             }
-            let mut command = wsl_command();'''
+            if arguments.len() < 4 || arguments[0] != "-d" || arguments[2] != "--exec" || !names.iter().any(|name| arguments[1] == name.as_str()) { return Err("fixture guard rejected an unowned WSL target".into()); }
+            let mut fixture_arguments = arguments[..3].to_vec();
+            fixture_arguments[0] = OsString::from("--distribution");
+            fixture_arguments.extend([OsString::from("/bin/sh"), OsString::from("-c"), OsString::from(GUEST_GUARD_LITERAL), OsString::from("splitty-fixture-guard"), arguments[1].clone()]);
+            fixture_arguments.extend_from_slice(&arguments[3..]);
+            let arguments = &fixture_arguments;
+            let mut command = wsl_command();'''.replace('GUEST_GUARD_LITERAL',json.dumps(GUEST_GUARD))
     if source.count(anchor)!=1: raise RuntimeError('WSL executor instrumentation anchor changed')
-    source=source.replace(anchor,shim,1); path.write_text(source)
+    source=source.replace(anchor,shim,1)
+    owner_start=source.index("fn native_backend_arguments<'a>");owner_end=source.index('\n}\n',owner_start)+2
+    owner_guard='''fn native_backend_arguments(distro: &str, binary: &str) -> Vec<String> {
+    let names: Vec<String> = serde_json::from_str(&std::env::var("SPLITTY_SMOKE_DISTROS").expect("fixture target list absent")).expect("fixture target list malformed");
+    assert!(names.iter().any(|name| name == distro), "unowned fixture backend target");
+    vec!["--distribution".into(), distro.into(), "--exec".into(), "/bin/sh".into(), "-c".into(), GUEST_GUARD_LITERAL.into(), "splitty-fixture-guard".into(), distro.into(), binary.into(), "desktop-backend".into(), "--transport".into(), "native-v1".into(), "--backend".into(), "embedded".into(), "--owner".into()]
+}'''.replace('GUEST_GUARD_LITERAL',json.dumps(GUEST_GUARD))
+    source=source[:owner_start]+owner_guard+source[owner_end:];path.write_text(source)
     path=crate/'src/lib.rs'; source=path.read_text(); start=source.rindex('#[cfg(target_os = "windows")]\n#[tauri::command]\nfn windows_smoke_report')
     source=source[:start]+'''
 #[cfg(target_os = "windows")]
@@ -178,9 +190,26 @@ fn windows_smoke_report(app: AppHandle, webview: tauri::Webview, native: tauri::
         subprocess.run([str(repo/'frontend/node_modules/.bin/vite'),'build','--config',str(config)],cwd=repo,stdout=output,stderr=subprocess.STDOUT,check=True)
     (root/'runtime-source-hashes.json').write_text(json.dumps(common.hashes(root),indent=2))
 
-def main():
-    raise RuntimeError("Windows WSL GUI fixture disabled pending independent process-ownership cleanup review")
-    parser=argparse.ArgumentParser(description=__doc__); parser.add_argument('--cache-workspace',type=Path); parser.add_argument('--disposable-distros',action='store_true',required=True,help='explicitly enable creation of two guarded temporary distributions'); args=parser.parse_args()
+@contextlib.contextmanager
+def approved_private_wsl(permit):
+    """CLI opt-in only; direct/imported fixture helpers remain denied by default."""
+    global WSL_EXECUTION_APPROVED
+    if permit is not True:raise RuntimeError('explicit --disposable-distros opt-in required')
+    if WSL_EXECUTION_APPROVED:raise RuntimeError('private WSL run already active')
+    WSL_EXECUTION_APPROVED=True
+    try:yield
+    finally:WSL_EXECUTION_APPROVED=False
+
+def main(argv=None):
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--cache-workspace',type=Path,help='marked TEMP Cargo target artifacts only; fresh source/driver always copied')
+    parser.add_argument('--disposable-distros',action='store_true',required=True,help='explicitly create, run and clean two isolated temporary distributions')
+    args=parser.parse_args(argv)
+    with approved_private_wsl(args.disposable_distros):
+        _run_full(args)
+
+def _run_full(args):
+    if not WSL_EXECUTION_APPROVED:raise RuntimeError('explicit --disposable-distros scoped approval required')
     repo=HERE.parents[1]
     # Strip only the copied test payload to keep fixture provisioning bounded in
     # time; source/build provenance remains the current debug executable.
@@ -196,7 +225,6 @@ def main():
     global_config=common.powershell('$p=Join-Path $env:USERPROFILE ".wslconfig"; if(Test-Path $p){Get-Content $p}else{"<absent>"}')
     (root/'global-wslconfig-readonly.txt').write_text(global_config)
     with fixtures(root) as names:
-        workers=sentinels(root,names)
         instrument(root,names,repo)
         (appdata/'windows.json').write_text(json.dumps({'selectedDistro':names[0]}))
         # Only the current Windows child process receives these fixture guards.
@@ -209,10 +237,15 @@ def main():
             common.cargo(root,'build --locked -p splitty-gui --bin splitty-gui','windows-wsl-build.log')
             evidence=root/'runtime-evidence'
             driver=root/'wsl-runtime.ps1'; shutil.copyfile(HERE/'tauri-windows-native-smoke/wsl-runtime.ps1',driver)
+            shutil.copyfile(HERE/'tauri-windows-native-smoke/fixture-job.cs',root/'fixture-job.cs')
+            shutil.copyfile(HERE/'tauri-windows-native-smoke/fixture-sentinel.ps1',root/'fixture-sentinel.ps1')
+            shutil.copyfile(HERE/'tauri-windows-native-smoke/fixture-guest-guard.sh',root/'fixture-guest-guard.sh')
+            shutil.copyfile(HERE/'tauri-windows-native-smoke/fixture-registration.ps1',root/'fixture-registration.ps1')
             other=args.cache_workspace.resolve()/'target/debug/splitty-gui.exe' if args.cache_workspace else root/'target/debug/splitty-gui.exe'
-            command='& '+common.quote(common.windows(driver))+' -Executable '+common.quote(common.windows(root/'target/debug/splitty-gui.exe'))+' -OtherExecutable '+common.quote(common.windows(other))+' -RootDir '+common.quote(common.windows(root))+' -FixtureB '+common.quote(names[1])+'\nexit $LASTEXITCODE'
+            command='& '+common.quote(common.windows(driver))+' -Executable '+common.quote(common.windows(root/'target/debug/splitty-gui.exe'))+' -OtherExecutable '+common.quote(common.windows(other))+' -RootDir '+common.quote(common.windows(root))+' -FixtureB '+common.quote(names[1])+' -PermitIsolatedFullRun\nexit $LASTEXITCODE'
             common.powershell(command,root/'windows-wsl-driver.log')
-            verify_sentinels(workers)
+            process_evidence=json.loads((evidence/'processes.json').read_text(encoding='utf-8-sig'))
+            if not process_evidence.get('IndependentFixturePreserved'):raise RuntimeError('independent fixture work did not survive app exit')
             guest=(evidence/'guest-live.txt').read_text(encoding='utf-8-sig')
             if 'PID:' not in guest or 'LISTEN:' in guest: raise RuntimeError('guest native owner TCP inventory failed')
             value=json.loads((evidence/'runtime-result.json').read_text()); path=value['savedPath']
@@ -228,6 +261,5 @@ def main():
             print(evidence,flush=True)
         finally:
             common.powershell=original
-            stop_sentinels(workers)
 
 if __name__=='__main__': main()

@@ -55,7 +55,7 @@ def host_rootfs(path,base,keys,port):
             data=text.encode();info=tarfile.TarInfo(name);info.size=len(data);info.mode=0o755 if name.startswith('usr/bin/') else 0o600;archive.addfile(info,io.BytesIO(data))
 
 def gui(root,config,names,repo,cache):
-    raise RuntimeError("Windows remote GUI fixture disabled pending independent process-ownership cleanup review")
+    raise RuntimeError("GUI disabled pending independent STARTUPINFOEX stdio review")
     common.instrument(root)
     crate=root/'crates/splitty-tauri'
     path=crate/'src/lib.rs';source=path.read_text().replace('.window("main").local(true).permission("allow-windows-smoke-report")','.window("*").local(true).permission("allow-windows-smoke-report")')
@@ -63,6 +63,7 @@ def gui(root,config,names,repo,cache):
     source=source.replace('.join("runtime-result.json"), serde_json::to_vec_pretty(&value)', '.join(if value["phase"] == "restart" { "checkpoint-restart.json" } else { "runtime-result.json" }), serde_json::to_vec_pretty(&value)')
     path.write_text(source)
     path=crate/'src/remote.rs';source=path.read_text().replace('    let _ = window.show();','    // Fixture only: keep remote window hidden.').replace('    let _ = window.set_focus();','    // Fixture only: never take user focus.')
+    source=source.replace('builder.data_directory(webview_data_dir(app, label)?)','builder.data_directory(PathBuf::from('+json.dumps(common.windows(root/'runtime-evidence/remote-webview-data'))+').join(label))')
     source=source.replace('    app.path()\n        .app_config_dir()\n        .map_err(|error| format!("could not resolve the configuration directory: {error}"))','    Ok(PathBuf::from('+json.dumps(common.windows(root/'appdata'))+'))')
     path.write_text(source)
     path=crate/'src/windows_wsl.rs';source=path.read_text().replace('fn config_path(app: &AppHandle) -> Result<PathBuf, String> {','fn config_path(app: &AppHandle) -> Result<PathBuf, String> { return Ok(PathBuf::from('+json.dumps(common.windows(root/'appdata/windows.json'))+')); #[allow(unreachable_code)]',1);path.write_text(source)
@@ -114,10 +115,9 @@ def main():
     original=fixture.rootfs;fixture.rootfs=lambda path:host_rootfs(path,original,keys,port)
     with fixture.fixtures(root) as names:
         # The launcher, never the app, addresses only its recorded private host.
-        command='& wsl.exe -d '+common.quote(names[0])+' --user root --exec /bin/sh -c '+common.quote('mkdir -p /run/sshd; exec /usr/sbin/sshd -f /etc/sshd_config -E /tmp/fixture-sshd.log')+'\nexit $LASTEXITCODE'
-        common.powershell(command,root/'fixture-sshd-start.log')
+        fixture.wsl(names[0],['/bin/sh','-c','mkdir -p /run/sshd; exec /usr/sbin/sshd -f /etc/sshd_config -E /tmp/fixture-sshd.log'],root/'fixture-sshd-start.log',user='root')
         result=subprocess.run([str(SSH),'-F',common.windows(config),alias,'printf "HOST_HOME=%s\\n" "$HOME"; id -u'],capture_output=True,text=True)
-        (root/'fixture-sshd.log').write_text(common.powershell('& wsl.exe -d '+common.quote(names[0])+' --user root --exec cat /tmp/fixture-sshd.log'))
+        (root/'fixture-sshd.log').write_text(fixture.wsl(names[0],['cat','/tmp/fixture-sshd.log'],user='root'))
         (root/'native-ssh-preflight.json').write_text(json.dumps({'stdout':result.stdout,'stderr':result.stderr,'exitCode':result.returncode,'target':alias,'port':port,'host':names[0]},indent=2))
         if result.returncode or 'HOST_HOME=/home/splitty-fixture' not in result.stdout or '1000' not in result.stdout:raise RuntimeError('native Windows SSH host preflight failed: '+result.stderr)
         print(root/'native-ssh-preflight.json',flush=True)

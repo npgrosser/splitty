@@ -34,7 +34,7 @@ void(async()=>{
  stage='host daemon restart';await report({phase:'restart',terminalPid:Number(pid![1]),session});
  end=Date.now()+40000;while((!states.includes('reconnecting')||socket.connectionState!=='connected')&&Date.now()<end)await wait(100);
  assert(states.includes('reconnecting')&&socket.connectionState==='connected','remote did not reconnect after host restart');assert(lostInputRejected,'disconnected mutation did not reject');
- await request('home.get');await request('session.send',{id:session,body:{data:"printf 'REMOTE_AFTER_RESTART_%s\\n' \"$$\"\n"}});
+ await request('home.get');await sessions.attach(session!,80,24);await request('session.send',{id:session,body:{data:"printf 'REMOTE_AFTER_RESTART_%s\\n' \"$$\"\n"}});
  end=Date.now()+15000;while(!new TextDecoder().decode(new Uint8Array(bytes)).includes('REMOTE_AFTER_RESTART_'+pid![1])&&Date.now()<end)await wait(50);
  assert(new TextDecoder().decode(new Uint8Array(bytes)).includes('REMOTE_AFTER_RESTART_'+pid![1]),'original PTY did not survive host restart');
  stage='heartbeat';await wait(17000);assert(socket.connectionState==='connected','heartbeat lost connection');sessions.dispose();socket.dispose();clearTimeout(timer);

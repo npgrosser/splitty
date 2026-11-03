@@ -17,6 +17,8 @@ import subprocess
 import tarfile
 import uuid
 
+HERE=Path(__file__).resolve().parent
+
 PS = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
 
 def powershell(source, log=None):
@@ -126,36 +128,35 @@ void (async () => {
     (root/'runtime-source-hashes.json').write_text(json.dumps(hashes(root), indent=2))
 
 def runtime(root, allow_wsl=False, max_seconds=35):
-    raise RuntimeError("Windows GUI runtime disabled pending independent process-ownership cleanup review")
+    raise RuntimeError("GUI disabled pending independent STARTUPINFOEX stdio review")
     evidence = root/'runtime-evidence'; evidence.mkdir(exist_ok=True)
     for name in ['runtime-result.json', 'processes.json', 'stdout.log', 'stderr.log']: (evidence/name).unlink(missing_ok=True)
-    source = f'''$ErrorActionPreference='Continue'
+    shutil.copyfile(HERE/'tauri-windows-native-smoke/fixture-job.cs',root/'fixture-job.cs')
+    source = f'''$ErrorActionPreference='Stop'
 $env:SPLITTY_SMOKE_EVIDENCE={quote(windows(evidence))}
 $env:SPLITTY_SMOKE_WEBVIEW_DATA={quote(windows(evidence/'webview-data'))}
-$application=Start-Process -FilePath {quote(windows(root/'target/debug/splitty-gui.exe'))} -WorkingDirectory {quote(windows(root))} -PassThru -RedirectStandardOutput {quote(windows(evidence/'stdout.log'))} -RedirectStandardError {quote(windows(evidence/'stderr.log'))}
-$null=$application.Handle
-$observed=@{{}}; $listeners=@(); $deadline=(Get-Date).AddSeconds({max_seconds})
-do {{
-  $all=@(Get-CimInstance Win32_Process)
-  $owned=@($application.Id); $changed=$true
-  while($changed) {{ $changed=$false; foreach($item in $all) {{ if($owned -contains [int]$item.ParentProcessId -and $owned -notcontains [int]$item.ProcessId) {{ $owned += [int]$item.ProcessId; $changed=$true }} }} }}
-  foreach($item in $all) {{ if($owned -contains [int]$item.ProcessId) {{ $observed[[string]$item.ProcessId]=@{{Id=[int]$item.ProcessId;Parent=[int]$item.ParentProcessId;Name=$item.Name;Creation=$item.CreationDate.ToUniversalTime().ToString('o')}} }} }}
-  $listeners += @(Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object {{$owned -contains [int]$_.OwningProcess}} | Select-Object LocalAddress,LocalPort,OwningProcess)
-  Start-Sleep -Milliseconds 250; $application.Refresh()
-}} while(-not $application.HasExited -and (Get-Date) -lt $deadline)
-$timedOut=-not $application.HasExited
-if($timedOut) {{ & taskkill.exe /PID $application.Id /T /F | Out-Null; $application.WaitForExit() }}
-$application.WaitForExit()
-Start-Sleep -Seconds 3
-$remaining=@(); foreach($entry in $observed.Values) {{ $current=Get-CimInstance Win32_Process -Filter "ProcessId=$($entry.Id)" -ErrorAction SilentlyContinue; if($current -and $current.CreationDate.ToUniversalTime().ToString('o') -eq $entry.Creation) {{ $remaining += $entry }} }}
-$result=[ordered]@{{ExitCode=$application.ExitCode;TimedOut=$timedOut;Processes=@($observed.Values);Listeners=$listeners;WslWorkers=@($observed.Values | Where-Object {{$_.Name -match '^wsl([.]exe|host[.]exe)$'}});RemainingOwned=$remaining}}
-$result | ConvertTo-Json -Depth 5 | Out-File -Encoding utf8 {quote(windows(evidence/'processes.json'))}
-# Stop only exact owned process generations observed under this fresh fixture.
-foreach($entry in $remaining) {{ $current=Get-CimInstance Win32_Process -Filter "ProcessId=$($entry.Id)" -ErrorAction SilentlyContinue; if($current -and $current.CreationDate.ToUniversalTime().ToString('o') -eq $entry.Creation) {{ Stop-Process -Id $entry.Id -Force -ErrorAction SilentlyContinue }} }}
-if($timedOut -or $application.ExitCode -ne 0 -or $listeners.Count -or (($result.WslWorkers.Count -gt 0) -ne ${str(allow_wsl).lower()})) {{ exit 1 }}
+Add-Type -Path {quote(windows(root/'fixture-job.cs'))}
+$job=$null; $listeners=@(); $remaining=@(); $members=@(); $timedOut=$false; $exitCode=$null; $zero=$false; $launch=$null; $stdoutPath=$null; $stderrPath=$null
+try {{
+  $job=[SplittyFixtureJob]::new({quote(windows(root/'target/debug/splitty-gui.exe'))},[string[]]@(),{quote(windows(root))},$false)
+  $launch=$job.LaunchedCommandLine; $stdoutPath=$job.StandardOutputPath; $stderrPath=$job.StandardErrorPath
+  $deadline=(Get-Date).AddSeconds({max_seconds})
+  do {{
+    $members=@($job.Snapshot()); $ids=@($members | ForEach-Object {{$_.Id}})
+    if($ids.Count){{$listeners += @(Get-NetTCPConnection -State Listen -OwningProcess $ids -ErrorAction SilentlyContinue | Select-Object LocalAddress,LocalPort,OwningProcess)}}
+    if($job.ActiveProcesses -eq 0){{break}}
+    Start-Sleep -Milliseconds 100
+  }} while((Get-Date) -lt $deadline)
+  $timedOut=$job.ActiveProcesses -ne 0; $exitCode=$job.RootExitCode; $remaining=@($job.Snapshot())
+}} finally {{
+  if($job){{try{{$zero=$job.Stop(5000);$members=@($job.History())}}finally{{$job.Dispose()}}}}
+  $result=[ordered]@{{ExitCode=$exitCode;TimedOut=$timedOut;LaunchedCommandLine=$launch;StdOutPath=$stdoutPath;StdErrPath=$stderrPath;Processes=$members;Listeners=$listeners;WslWorkers=@($members|Where-Object{{[System.IO.Path]::GetFileName($_.ExecutablePath)-match '^wsl([.]exe|host[.]exe)$'}});RemainingOwned=$remaining;JobEmptyAfterCleanup=$zero;OwnedHandlesAfterCleanup=[SplittyFixtureJob]::LiveHandleCount}}
+  $result|ConvertTo-Json -Depth 5|Out-File -Encoding utf8 {quote(windows(evidence/'processes.json'))}
+}}
+if($timedOut -or $exitCode -ne 0 -or $listeners.Count -or -not $zero -or [SplittyFixtureJob]::LiveHandleCount -ne 0 -or (($result.WslWorkers.Count -gt 0) -ne ${str(allow_wsl).lower()})){{exit 1}}
 '''
-    powershell(source, evidence/'driver.log')
-    result = json.loads((evidence/'runtime-result.json').read_text())
+    powershell(source,evidence/'driver.log')
+    result=json.loads((evidence/'runtime-result.json').read_text())
     if result.get('error') or result.get('wslOwnerStarted') != allow_wsl or not result.get('nativeDocumentCommitted'):
         raise RuntimeError('native WebView2 probe failed: '+json.dumps(result))
     return evidence
