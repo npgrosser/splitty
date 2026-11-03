@@ -20,9 +20,15 @@ and retains cancellation and generation semantics across the transport change.
 
 ## Evidence collected
 
-- Workspace tests excluding the GUI: 1,020 tests passed. Workspace clippy passed.
-  Subsequent shared-budget CAS changes passed their targeted tests.
-- Frontend: 1,502 tests passed; check completed with zero errors and eight existing
+- Linux CI workspace tests excluding the GUI: 1,024 reported passing; optional
+  OS tests can skip at runtime, so individual platform evidence is listed
+  separately below. Workspace clippy passed.
+  Subsequent shared-budget CAS changes passed their targeted tests. Rust 1.99
+  workspace and GUI all-target clippy also pass after constant-chunk lint fixes.
+  The dependency audit passes after updating yanked async-executor 1.14.0 to
+  1.14.1.
+- Frontend: 1,502 tests passed (also repeated from a fresh checkout with both frontend
+  and Electron adapter dependencies installed); check completed with zero errors and eight existing
   warnings; production build passed. Electron build, packaged-asset execution and
   real IPC smoke passed, including frozen-client quotas and final zero counters.
 - Final Linux GUI source checks: 89 library tests, all-target clippy, 19 private
@@ -36,29 +42,55 @@ and retains cancellation and generation semantics across the transport change.
   fixtures passed binary PTY/API/file traffic, distribution switch, restart and
   independent guest-worker preservation. Fixtures override configuration and
   distribution discovery; they do not establish ordinary host inventory.
-- macOS harness preparation and portable tests passed. The new CI job is intended
-  to run the actual WKWebView, endpoint and lifecycle checks. It has not yet
-  established macOS runtime results.
+  Fresh setup and remote-only runs using the reviewed kernel Job driver now pass:
+  fixed remote authority, actual Windows OpenSSH, binary PTY/API traffic, daemon
+  replacement/reconnect, reattachment to the same shell, rejected offline input
+  and shell survival after app exit. Both runs end naturally with zero remaining
+  Job members before cleanup and zero owned handles afterward. Listener checks
+  are sampled, not proof of continuous absence. The WSL switch scenario is being
+  revalidated separately with the new driver and exact guest-identity guards.
+- Actual macOS CI passes GUI all-target clippy and all 89 GUI library tests.
+  Three core tests fail (shell startup PATH, final PTY bytes, and managed input
+  shutdown); the WKWebView/endpoint checks have not yet run. The CI steps now
+  collect independent runtime evidence after a core failure while retaining a
+  mandatory final failure gate. No failing assertion is waived.
 
 These results describe the runs performed, not proof that every requirement is
 complete. Final source checks and platform results must be reconciled before
 marking the change ready.
+
+## Migration evidence
+
+| Case | Evidence | Limit |
+| --- | --- | --- |
+| Compatible native daemon | Private endpoint/negotiation tests and actual daemon client smoke | Remaining desktop platform cells are tracked separately. |
+| Older kept daemon update | `the_hub_updates_a_host_daemon_of_another_version` passed through actual isolated OpenSSH and real daemon replacement, preserving keeper socket identity | The old version/protocol is simulated in discovery metadata; this is not execution of a historical release binary. |
+| Incompatible non-kept/newer daemon | Supervisor and HTTP policy tests plus the extended real-SSH `the_hub_updates_a_host_daemon_of_another_version`: explicit updates refuse both cases without replacing discovery, daemon PID or keeper sockets | Version/protocol differences are simulated in valid discovery metadata; remaining desktop platform checks stay open. |
+| Supported client downgrade | The same real-SSH test connects to a compatible newer-version daemon without restarting it or changing discovery/keepers | Version metadata simulation, not execution of a historical client binary. |
+| Stale/corrupt/legacy discovery | Daemon lifecycle `native_discovery_loss_corruption_and_concurrent_start_cannot_replace_a_live_daemon` and `a_live_legacy_record_is_diagnostic_and_never_selects_its_tcp_port` | Legacy ownership uncertainty refuses implicit replacement. |
+| Explicit restart and keeper adoption | `a_shell_outlives_stop_restart_update_and_crash_of_its_daemon` and explicit daemon gateway replacement smoke | Keepers are real processes; historical release binaries are not covered. |
+| Local app with independent daemon | Actual Linux Tauri and Electron coexistence smokes; owned-child pipe lifecycle smoke | macOS and the complete Windows matrix remain separate gates. |
+
+The catalog/role audit found no remaining native HTTP/token fallback. Static
+classification and native/browser conformance tests cover enumerated operations,
+credential-route refusal and assigned-host restrictions. This does not close
+unchecked platform conformance cells.
 
 ## Open merge gates
 
 - Whole-path resource limits: Wry allocates inbound IPC request bodies before
   application validation. Application-owned quotas do not establish a bound on
   framework allocation, generic invoke replies, JavaScript engine memory or RSS.
-- Native macOS endpoint identity, WKWebView runtime, and the complete Windows
-  remote-only/reconnect/isolation matrix remain unverified.
-- Native Linux/macOS durable forwarding reservation positive cases and the full
-  listener/resource inventory remain open. WSL refusal checks are not positive
-  native-platform coverage.
+- Native macOS endpoint identity, WKWebView runtime, and the complete platform
+  isolation matrix remain unverified. Windows remote-only/reconnect now passes
+  its fresh kernel Job fixture; that does not fill every platform matrix cell.
+- The strict native Linux reservation test passed with an actual surviving
+  worker after coordinator SIGKILL, IPv4/IPv6 gateway exclusion and reuse only
+  after observed worker exit. The real SSH/hostile-peer crash variant, macOS
+  positive case and full listener/resource inventory remain open. WSL refusal
+  checks are not positive native-platform coverage.
 - Disabled WSL localhost forwarding has not been exercised; the pipe tests ran
   with the existing host networking configuration unchanged.
-- Windows remote SSH smoke reached daemon replacement/reconnect but failed the
-  PTY reattach assertion. Whether this is fixture subscription logic or product
-  behavior remains unresolved.
 - Migration, conformance and security review must reconcile the remaining task
   checks, including framework-bound scope, before cutover is approved.
 
@@ -71,11 +103,43 @@ them. All 28 recorded Firefox/crash-helper PIDs were subsequently absent.
 Individual termination results were not captured, so direct termination cannot
 be distinguished from descendants exiting with their parent.
 
-Windows GUI drivers are disabled. Prior Windows process-tree cleanup inventories
-are not evidence of safe isolation. Pure snapshot regressions cover the original
-PID reuse case, but a mixed-time process enumeration also needs a proven parent
-lifetime: matching a child's creation time and executable at termination does
-not establish ownership. Any replacement cleanup must establish ownership and
-bind termination to that exact OS process identity. No PID-only or recursive
-`taskkill /T` cleanup is acceptable. Runtime verification remains blocked until
-the ownership implementation receives independent review.
+Prior Windows process-tree cleanup inventories are not evidence of safe
+isolation. The first replacement candidate was rejected: even birth-time checks
+cannot prove parent ownership from a mixed-time process enumeration. It was
+removed before use.
+
+The reviewed replacement creates private kernel Jobs, launches each fixture root
+suspended, assigns its exact handle before resuming, and disables breakaway.
+Cleanup uses only retained Job handles or the exact newly created suspended
+process handle on assignment failure. No PID-only or recursive `taskkill /T`
+cleanup remains. Fresh console tests cover descendants, unrelated fixture
+preservation, breakaway refusal, assignment failure and zero retained handles.
+Fresh setup and remote-only GUI runs then passed with natural exit before cleanup;
+WSL switch verification remains separate. Old TEMP driver copies must not be
+executed. Socket inventories remain sampled observations.
+
+The earlier Windows SSH PTY assertion failure was a fixture omission: it did not
+reattach its SessionClient after reconnect. Adding the same explicit attach used
+by the client restored the assertion for the original shell, without a product
+behavior change or weaker assertion.
+
+## Fixture target and cleanup hardening
+
+A subsequent Windows sentinel preflight exposed unconditional quoting of WSL
+flags: WSL attempted the literal `-d` command in the default distribution and
+failed before the intended script ran. This invalidates that preflight; it is
+not a successful guest lifecycle check. Conditional Windows argument quoting
+and first-action exact `WSL_DISTRO_NAME` checks now guard every guest command,
+including the copied app's deployment and backend launch paths. Independent
+source review and eight pure guard regressions pass. A fresh single-distribution sentinel then passed actual WSL argument parsing
+and exact guest identity/nonce checks. Its retained Job was intentionally
+stopped, with no remaining members or handles, and its sole temporary
+distribution was removed. The guarded full WSL fixture has been independently cleared for one
+bounded rerun; its result remains open and the sentinel does not replace it.
+
+The Linux SSH fixture now pins its private network namespace and resolves each
+cleanup candidate to a pidfd before checking namespace membership. Signals use
+that same process handle, never a numeric PID fallback. Its regression passes:
+an unrelated owned process survives, while a detached fixture process exits
+even after the original namespace holder is gone. Independent source review
+found no stale-PID signaling path.

@@ -105,10 +105,12 @@ validation. Application bounds therefore do not prove a bound on every framework
 allocation. The actual Linux WebKit full UI run covers assets, native traffic,
 heartbeat, reload, popouts, independent daemon lifetime and final zero resource
 counters. Native MSVC tests, WebView2 setup-role checks and actual WSL pipe
-traffic/switch checks pass. Windows GUI harnesses are disabled after a PID-reuse
-bug in their process-cleanup inventory; their prior process-tree cleanup claims
-are not isolation evidence. Remote-window recovery, the full platform matrix
-and framework allocation bounds remain open. See the
+traffic/switch checks pass. Following a PID-reuse bug in the Windows harness,
+cleanup now uses private kernel Jobs with assignment before process start.
+Fresh setup and remote-only SSH recovery runs pass. A later WSL quoting
+failure prompted exact guest-identity guards. Their isolated runtime preflight
+passes; full-fixture revalidation remains open. Prior process-tree cleanup claims remain invalid. The complete platform matrix and framework
+allocation bounds remain open. See the
 [verification status](../../openspec/changes/native-client-transports/verification.md).
 
 **SR-10.** CI runs `cargo deny check advisories bans sources` and `pnpm audit`

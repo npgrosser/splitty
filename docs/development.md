@@ -109,9 +109,12 @@ WebView2 runs have exercised the setup role and app-owned WSL pipes, including
 binary traffic, a distribution switch and app restart. The fixtures isolate
 configuration and distribution discovery, so they do not prove normal host
 inventory or disabled localhost-forwarding behavior. Windows GUI runs are
-currently disabled: their process-cleanup inventory could mistake unrelated
-processes for descendants after PID reuse. Earlier process-tree cleanup claims
-must not be used as evidence of isolation. See the
+being revalidated after their process-cleanup inventory mistook unrelated
+processes for descendants after PID reuse. The replacement uses private kernel
+Jobs with assignment before process start. Fresh setup and remote-only SSH runs
+pass. An isolated target-identity preflight passes after a WSL argument-quoting
+fix; a bounded full-fixture rerun remains outstanding. Earlier
+process-tree cleanup claims must not be used as evidence of isolation. See the
 [verification status](../openspec/changes/native-client-transports/verification.md).
 
 The macOS WKWebView harness and CI job are prepared. Runtime results remain a
