@@ -43,11 +43,42 @@ control, timeout or cleanup error fails: none is a skipped proof. Cleanup on
 abrupt hosted-job cancellation is ultimately the disposable VM teardown; this
 script does not claim Windows Job membership owns Linux guest processes.
 
-Passing proves hosted WSL2 and effective NAT localhost forwarding on/off. It
-**does not** prove Splitty's native transport under the false setting. The
-existing full Windows application fixture is currently orchestrated from WSL
-(`wslpath`, Linux `ldd`, `/mnt/c` PowerShell); its guarded PowerShell drivers and
-ownership checks can be reused in a subsequent native-Windows adaptation.
+Without `-RunNativeApplication`, passing proves only hosted WSL2 and effective
+NAT localhost forwarding on/off. It does not prove the application transport.
+
+## Optional actual application proof (prepared, not yet executed)
+
+The diagnostic workflow now incorporates the committed product snapshot
+`6464f3b9a0e35347d6f02309c523b148dd5aaee4` and builds its production frontend and Linux backend from the same
+workflow source revision. The additional application manifest pins Cargo.lock,
+raw/stripped backend, existing full fixture rootfs, and production asset archive.
+Windows verifies every prepared digest before extracting assets into its fresh
+hosted checkout. No Linux tools execute on Windows.
+
+The existing `tauri-windows-wsl-smoke.py --disposable-distros --full-ui` remains
+the only app fixture: same Rust instrumentation, TypeScript assertions,
+PowerShell runtime driver, kernel Jobs and exact registry/guest guards. Its host
+path/PowerShell utilities and Vite invocation now support native Windows. Two
+optional entrypoints reuse that flow: `--build-only` warms MSVC dependencies and
+cleans its temporary distributions without starting GUI; prepared artifact input
+replaces only Linux `strip`/`ldd` preparation. The subsequent run copies fresh
+source and reuses only the marked build target cache.
+
+The full-UI run occurs after the true positive and false negative TCP controls,
+while the false config bytes remain unchanged. Fresh false controls run again
+after its two distro contexts finish. Actual success additionally requires the
+production UI report, binary PTY bytes, 1,048,833-byte file transfer, app restart,
+owned backend/session cleanup and no guest TCP listener. Source/runtime hashes,
+probe bundle, app reports and private distro cleanup are retained separately.
+`NativeApplicationPassed` stays false until both app and post-run controls pass.
+
+The Windows job reserves up to 25 minutes for a cold MSVC prebuild. The actual
+controlled-runtime step still has a 20-minute cap (15-minute work deadline plus
+cleanup reserve). On timeout the exact parent Job is stopped, and the existing
+fixture's recorded-only cleanup entrypoint handles any remaining private distro
+registrations. A bad/missing ownership record fails closed; abrupt VM teardown
+remains the final boundary on hosted cancellation. No installer, remote SSH
+isolation, or hard OS-failure shutdown guarantee is added by this fixture.
 
 Portable preparation (no WSL/configuration operations):
 

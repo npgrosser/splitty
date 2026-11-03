@@ -10,6 +10,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path, PureWindowsPath
 import re
 import shutil
@@ -93,13 +94,13 @@ def rootfs(path):
             data=value.encode(); info=tarfile.TarInfo(name); info.size=len(data); info.mode=0o644; archive.addfile(info,io.BytesIO(data))
 
 @contextlib.contextmanager
-def fixtures(root,count=2):
+def fixtures(root,count=2,rootfs_builder=None):
     if not WSL_EXECUTION_APPROVED:raise RuntimeError('explicit --disposable-distros scoped approval required')
     if count not in [1,2]:raise RuntimeError('fixture count must be one or two')
     for filename in ['fixture-job.cs','fixture-sentinel.ps1','fixture-guest-guard.sh']:
         shutil.copyfile(HERE/'tauri-windows-native-smoke'/filename,root/filename)
     names=['splitty-native-fixture-'+uuid.uuid4().hex[:12]+suffix for suffix in ['-a','-b'][:count]]
-    before=registrations(); owned={}; archive=root/'fixture-rootfs.tar'; rootfs(archive)
+    before=registrations(); owned={}; archive=root/'fixture-rootfs.tar'; (rootfs_builder or rootfs)(archive)
     (root/'owned-distros.json').write_text(json.dumps({'before':before,'created':owned,'names':names},indent=2))
     try:
         for name in names:
@@ -117,22 +118,30 @@ def fixtures(root,count=2):
             if home!='/home/splitty-fixture': raise RuntimeError('fixture HOME not isolated: '+repr(home))
         yield names
     finally:
-        cleanup=[]
-        for name,location in owned.items():
-            found=registrations()
-            if name not in found: continue
-            actual=found[name].removeprefix('\\\\?\\').rstrip('\\/').casefold()
-            if name in before or actual!=location.rstrip('\\/').casefold():
-                cleanup.append({'name':name,'error':'ownership guard refused cleanup'}); continue
-            try:
-                common.powershell('& wsl.exe --terminate '+common.quote(name),root/(name+'-terminate.log'))
-                common.powershell('& wsl.exe --unregister '+common.quote(name)+'\nexit $LASTEXITCODE',root/(name+'-unregister.log'))
-                cleanup.append({'name':name,'unregistered':name not in registrations()})
-            except Exception as error: cleanup.append({'name':name,'error':str(error)})
-        for name in owned:
-            OWNED_TARGETS.pop(name,None);OWNED_ROOTS.pop(name,None)
-        (root/'distro-cleanup.json').write_text(json.dumps(cleanup,indent=2))
-        if any(row.get('error') or not row.get('unregistered') for row in cleanup): raise RuntimeError('fixture cleanup needs inspection: '+str(root/'distro-cleanup.json'))
+        cleanup_owned_records(root,before,owned)
+
+def cleanup_owned_records(root,before,owned):
+    if not WSL_EXECUTION_APPROVED: raise RuntimeError('explicit private fixture cleanup permit required')
+    for name,location in owned.items():
+        expected=common.windows(root/'distributions'/name)
+        if not re.fullmatch(r'splitty-native-fixture-[0-9a-f]{12}-[ab]',name) or name in before or location.rstrip('\\/').casefold()!=expected.rstrip('\\/').casefold():
+            raise RuntimeError('invalid recorded cleanup ownership')
+    cleanup=[]
+    for name,location in owned.items():
+        found=registrations()
+        if name not in found: continue
+        actual=found[name].removeprefix('\\\\?\\').rstrip('\\/').casefold()
+        if name in before or actual!=location.rstrip('\\/').casefold():
+            cleanup.append({'name':name,'error':'ownership guard refused cleanup'}); continue
+        try:
+            common.powershell('& wsl.exe --terminate '+common.quote(name),root/(name+'-terminate.log'))
+            common.powershell('& wsl.exe --unregister '+common.quote(name)+'\nexit $LASTEXITCODE',root/(name+'-unregister.log'))
+            cleanup.append({'name':name,'unregistered':name not in registrations()})
+        except Exception as error: cleanup.append({'name':name,'error':str(error)})
+    for name in owned:
+        OWNED_TARGETS.pop(name,None);OWNED_ROOTS.pop(name,None)
+    (root/'distro-cleanup.json').write_text(json.dumps(cleanup,indent=2))
+    if any(row.get('error') or not row.get('unregistered') for row in cleanup): raise RuntimeError('fixture cleanup needs inspection: '+str(root/'distro-cleanup.json'))
 
 def instrument(root,names,repo,full_ui=False):
     common.instrument(root)
@@ -187,9 +196,9 @@ fn windows_smoke_report(app: AppHandle, webview: tauri::Webview, native: tauri::
     if full_ui:
         prepare_full_ui(crate,assets,repo,root)
     config=root/'wsl-vite.config.mjs'
-    config.write_text('import {defineConfig} from '+json.dumps(str(repo/'frontend/node_modules/vite/dist/node/index.js'))+'; export default defineConfig({build:{outDir:'+json.dumps(str(assets))+',emptyOutDir:false,minify:false,lib:{entry:'+json.dumps(str(HERE/'tauri-windows-native-smoke/wsl-entry.ts'))+',name:"WslNativeProbe",formats:["iife"],fileName:()=>"probe.js"},target:"es2022"},define:{__FIXTURES__:'+json.dumps(json.dumps(names))+',__WINDOWS_FULL_UI__:'+json.dumps(full_ui)+'}});')
+    config.write_text('import {defineConfig} from '+json.dumps((repo/'frontend/node_modules/vite/dist/node/index.js').resolve().as_uri())+'; export default defineConfig({build:{outDir:'+json.dumps(str(assets))+',emptyOutDir:false,minify:false,lib:{entry:'+json.dumps(str(HERE/'tauri-windows-native-smoke/wsl-entry.ts'))+',name:"WslNativeProbe",formats:["iife"],fileName:()=>"probe.js"},target:"es2022"},define:{__FIXTURES__:'+json.dumps(json.dumps(names))+',__WINDOWS_FULL_UI__:'+json.dumps(full_ui)+'}});')
     with (root/'wsl-probe-bundle.log').open('w') as output:
-        subprocess.run([str(repo/'frontend/node_modules/.bin/vite'),'build','--config',str(config)],cwd=repo,stdout=output,stderr=subprocess.STDOUT,check=True)
+        subprocess.run(['node',str(repo/'frontend/node_modules/vite/bin/vite.js'),'build','--config',str(config)],cwd=repo,stdout=output,stderr=subprocess.STDOUT,check=True)
     (root/'runtime-source-hashes.json').write_text(json.dumps(common.hashes(root),indent=2))
 
 def prepare_full_ui(crate,assets,repo,root):
@@ -248,12 +257,45 @@ def approved_private_wsl(permit):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--prepared-hosted-artifacts',type=Path,help='digest-verified Linux payload/rootfs/frontend artifact; hosted Windows only')
+    parser.add_argument('--result-root',type=Path,help='write the fresh marked fixture root for evidence/cache collection')
+    parser.add_argument('--cleanup-root',type=Path,help='clean only recorded private distributions of a marked TEMP fixture')
+    parser.add_argument('--build-only',action='store_true',help='build the fresh guarded fixture, clean its distros, and return without launching GUI')
     parser.add_argument('--cache-workspace',type=Path,help='marked TEMP Cargo target artifacts only; fresh source/driver always copied')
     parser.add_argument('--full-ui',action='store_true',help='exercise real packaged frontend assets and bounded shared UI/popout checks')
     parser.add_argument('--disposable-distros',action='store_true',required=True,help='explicitly create, run and clean two isolated temporary distributions')
     args=parser.parse_args(argv)
     with approved_private_wsl(args.disposable_distros):
-        _run_full(args)
+        if args.cleanup_root:
+            root=args.cleanup_root.resolve()
+            if not re.fullmatch(r'splitty-native-windows-[0-9a-f]{12}',root.name) or root.parent!=common.host_path(common.powershell('$env:TEMP')).resolve() or not (root/'TEST-ONLY.txt').is_file():
+                raise RuntimeError('cleanup requires exact marked TEMP fixture')
+            value=json.loads((root/'owned-distros.json').read_text())
+            cleanup_owned_records(root,value['before'],value['created'])
+        else: _run_full(args)
+
+def load_hosted_artifacts(directory, repo):
+    """No Linux tool execution on Windows: verify the same-run prepared inputs."""
+    if not common.NATIVE_WINDOWS or os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted' or os.environ.get('RUNNER_OS') != 'Windows':
+        raise RuntimeError('prepared artifacts require GitHub-hosted native Windows')
+    if repo.resolve() != Path(os.environ.get('GITHUB_WORKSPACE','')).resolve():
+        raise RuntimeError('prepared artifacts may modify only the fresh hosted checkout')
+    value=json.loads((directory/'app-manifest.json').read_text())
+    if not os.environ.get('GITHUB_SHA') or value['sourceSha'] != os.environ['GITHUB_SHA']:
+        raise RuntimeError('prepared artifact source revision mismatch')
+    if value['cargoLockSha256'] != hashlib.sha256((repo/'Cargo.lock').read_bytes().replace(b'\r\n',b'\n')).hexdigest():
+        raise RuntimeError('prepared Cargo.lock mismatch')
+    if set(value['files']) != {'splitty','app-rootfs.tar','frontend-dist.tar'}:
+        raise RuntimeError('unexpected prepared artifact file catalog')
+    for name,digest in value['files'].items():
+        if hashlib.sha256((directory/name).read_bytes()).hexdigest() != digest:
+            raise RuntimeError('prepared artifact digest mismatch: '+name)
+    dist=repo/'frontend/dist'
+    if dist.exists(): shutil.rmtree(dist)
+    dist.mkdir(parents=True)
+    with tarfile.open(directory/'frontend-dist.tar') as archive:
+        archive.extractall(dist,filter='data')
+    return value
 
 def fixture_executable_path(root):
     # Convert only the fresh root: wslpath on the child path resolves the Cargo
@@ -263,12 +305,18 @@ def fixture_executable_path(root):
 def _run_full(args):
     if not WSL_EXECUTION_APPROVED:raise RuntimeError('explicit --disposable-distros scoped approval required')
     repo=HERE.parents[1]
-    # Strip only the copied test payload to keep fixture provisioning bounded in
-    # time; source/build provenance remains the current debug executable.
-    temp=Path(subprocess.check_output(['wslpath','-u',common.powershell('$env:TEMP')],text=True).strip())/('splitty-native-windows-payload-'+uuid.uuid4().hex[:12]);temp.mkdir()
-    payload=temp/'splitty'; subprocess.run(['strip','--strip-debug','-o',str(payload),str(repo/'target/debug/splitty')],check=True)
+    prepared = load_hosted_artifacts(args.prepared_hosted_artifacts, repo) if args.prepared_hosted_artifacts else None
+    if prepared:
+        payload = args.prepared_hosted_artifacts/'splitty'
+        provenance = prepared
+    else:
+        # Strip only the copied test payload; never the original debug binary.
+        temp=common.host_path(common.powershell('$env:TEMP'))/('splitty-native-windows-payload-'+uuid.uuid4().hex[:12]);temp.mkdir()
+        payload=temp/'splitty'; subprocess.run(['strip','--strip-debug','-o',str(payload),str(repo/'target/debug/splitty')],check=True)
+        provenance={'sourceDebugSha256':hashlib.sha256((repo/'target/debug/splitty').read_bytes()).hexdigest(),'strippedTestSha256':hashlib.sha256(payload.read_bytes()).hexdigest()}
     root=common.copy_workspace(repo,payload);print(root,flush=True)
-    (root/'payload-provenance.json').write_text(json.dumps({'sourceDebugSha256':hashlib.sha256((repo/'target/debug/splitty').read_bytes()).hexdigest(),'strippedTestSha256':hashlib.sha256(payload.read_bytes()).hexdigest()},indent=2))
+    if args.result_root: args.result_root.write_text(str(root))
+    (root/'payload-provenance.json').write_text(json.dumps(provenance,indent=2))
     if args.cache_workspace:
         if not (args.cache_workspace/'TEST-ONLY.txt').is_file() or not args.cache_workspace.name.startswith('splitty-native-windows-'): raise RuntimeError('cache must be a marked temporary Windows fixture')
         common.powershell('New-Item -ItemType Junction -Path '+common.quote(common.windows(root/'target'))+' -Target '+common.quote(common.windows(args.cache_workspace.resolve()/'target'))+' | Out-Null')
@@ -276,7 +324,8 @@ def _run_full(args):
     # Snapshot global networking configuration read-only; never edit it.
     global_config=common.powershell('$p=Join-Path $env:USERPROFILE ".wslconfig"; if(Test-Path $p){Get-Content $p}else{"<absent>"}')
     (root/'global-wslconfig-readonly.txt').write_text(global_config)
-    with fixtures(root) as names:
+    prepared_rootfs = (lambda path: shutil.copyfile(args.prepared_hosted_artifacts/'app-rootfs.tar', path)) if prepared else None
+    with fixtures(root,rootfs_builder=prepared_rootfs) as names:
         instrument(root,names,repo,full_ui=args.full_ui)
         (appdata/'windows.json').write_text(json.dumps({'selectedDistro':names[0]}))
         # Only the current Windows child process receives these fixture guards.
@@ -287,6 +336,7 @@ def _run_full(args):
         common.powershell=scoped
         try:
             common.cargo(root,'build --locked -p splitty-gui --bin splitty-gui','windows-wsl-build.log')
+            if args.build_only: return
             evidence=root/'runtime-evidence'
             driver=root/'wsl-runtime.ps1'; shutil.copyfile(HERE/'tauri-windows-native-smoke/wsl-runtime.ps1',driver)
             shutil.copyfile(HERE/'tauri-windows-native-smoke/fixture-job.cs',root/'fixture-job.cs')

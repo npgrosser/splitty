@@ -3,6 +3,7 @@
 import argparse
 import hashlib
 import io
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -54,6 +55,27 @@ def build(output):
                 'tools': {name: hashlib.sha256(path.read_bytes()).hexdigest() for name, path in files.items()}}
     (output / 'manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
 
+def build_application(output):
+    """Reuse the existing full fixture's rootfs, preserving its exact tool set."""
+    here = Path(__file__).resolve().parent
+    repo = here.parents[2]
+    spec = importlib.util.spec_from_file_location('wsl_fixture', here.parent/'tauri-windows-wsl-smoke.py')
+    fixture = importlib.util.module_from_spec(spec); spec.loader.exec_module(fixture)
+    binary = repo/'target/debug/splitty'
+    subprocess.run(['strip','--strip-debug','-o',str(output/'splitty'),str(binary)],check=True)
+    fixture.rootfs(output/'app-rootfs.tar')
+    with tarfile.open(output/'frontend-dist.tar','w') as archive:
+        for path in sorted((repo/'frontend/dist').rglob('*')):
+            if path.is_file(): archive.add(path,arcname=str(path.relative_to(repo/'frontend/dist')),recursive=False)
+    value = {'sourceSha':os.environ['GITHUB_SHA'],
+             'productBase':'6464f3b9a0e35347d6f02309c523b148dd5aaee4', 'runnerImage':os.environ.get('ImageVersion'),
+             'cargoLockSha256':hashlib.sha256((repo/'Cargo.lock').read_bytes()).hexdigest(),
+             'sourceDebugSha256':hashlib.sha256(binary.read_bytes()).hexdigest(),
+             'files':{name:hashlib.sha256((output/name).read_bytes()).hexdigest()
+                      for name in ['splitty','app-rootfs.tar','frontend-dist.tar']}}
+    (output/'app-manifest.json').write_text(json.dumps(value,indent=2)+'\n')
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument('output', type=Path)
-    build(parser.parse_args().output)
+    parser = argparse.ArgumentParser(description=__doc__); parser.add_argument('output', type=Path); parser.add_argument('--application',action='store_true')
+    args=parser.parse_args(); build(args.output)
+    if args.application: build_application(args.output)

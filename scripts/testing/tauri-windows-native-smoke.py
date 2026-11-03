@@ -11,6 +11,7 @@ import argparse
 import base64
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -19,7 +20,8 @@ import uuid
 
 HERE=Path(__file__).resolve().parent
 
-PS = '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
+NATIVE_WINDOWS = os.name == 'nt'
+PS = str(Path(os.environ.get('SystemRoot', r'C:\Windows'))/'System32/WindowsPowerShell/v1.0/powershell.exe') if NATIVE_WINDOWS else '/mnt/c/Windows/System32/WindowsPowerShell/v1.0/powershell.exe'
 
 def powershell(source, log=None):
     source = "$ProgressPreference='SilentlyContinue'\n" + source
@@ -36,7 +38,12 @@ def quote(value):
     return "'" + str(value).replace("'", "''") + "'"
 
 def windows(path):
+    if NATIVE_WINDOWS: return str(Path(path).absolute())
     return subprocess.check_output(['wslpath', '-w', str(path)], text=True).strip()
+
+def host_path(path):
+    if NATIVE_WINDOWS: return Path(path)
+    return Path(subprocess.check_output(['wslpath', '-u', str(path)], text=True).strip())
 
 def hashes(root):
     return {str(path.relative_to(root)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -46,7 +53,7 @@ def hashes(root):
 
 def copy_workspace(repo, payload):
     temp = powershell('$env:TEMP')
-    root = Path(subprocess.check_output(['wslpath', '-u', temp], text=True).strip()) / ('splitty-native-windows-' + uuid.uuid4().hex[:12])
+    root = host_path(temp) / ('splitty-native-windows-' + uuid.uuid4().hex[:12])
     root.mkdir()
     for name in ['crates', 'docs', 'testdata', 'frontend/dist', 'architecture']:
         shutil.copytree(repo/name, root/name, ignore=shutil.ignore_patterns('node_modules', 'target', 'gen', '.likec4', 'build'))

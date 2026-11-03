@@ -3,7 +3,9 @@
 param(
  [Parameter(Mandatory=$true)][switch]$AllowDisposableHostedWslConfig,
  [Parameter(Mandatory=$true)][string]$Artifact,
- [Parameter(Mandatory=$true)][string]$Evidence
+ [Parameter(Mandatory=$true)][string]$Evidence,
+ [switch]$RunNativeApplication,
+ [string]$CacheRootFile
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
@@ -22,7 +24,7 @@ $ownedName='splitty-native-fixture-'+[guid]::NewGuid().ToString('N').Substring(0
 $ownedPath=Join-Path $Evidence 'distribution'
 $wsl=Join-Path $env:SystemRoot 'System32\wsl.exe'
 $config=Join-Path $env:USERPROFILE '.wslconfig'
-$cleanupPhase=$false;$configChanged=$false;$importAttempted=$false;$passed=$false;$failure=$null;$cleanupErrors=[Collections.Generic.List[string]]::new()
+$cleanupPhase=$false;$configChanged=$false;$importAttempted=$false;$passed=$false;$nativePassed=$false;$failure=$null;$cleanupErrors=[Collections.Generic.List[string]]::new()
 $hadConfig=Test-Path $config
 $originalConfig=$null
 if($hadConfig){$originalConfig=[IO.File]::ReadAllBytes($config)}
@@ -109,6 +111,100 @@ function Test-LocalhostBlocked([int]$Port){
   throw
  }finally{$client.Dispose()}
 }
+function Probe-Forwarding([bool]$enabled,[string]$Phase){
+  $nonce=[guid]::NewGuid().ToString('N')
+  $server=Start-Owned (Guest-Arguments @('/usr/bin/fixture-net','serve',[string]$port,$nonce))
+  try{
+   $until=[DateTime]::UtcNow.AddSeconds(15)
+   do{
+    # The live Job still owns its stdout writer. Share write access while
+    # reading its bounded readiness line; ReadAllText uses incompatible sharing.
+    $liveLog=[IO.File]::Open($server.StandardOutputPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+    $liveReader=[IO.StreamReader]::new($liveLog)
+    try{$ready=$liveReader.ReadToEnd()}finally{$liveReader.Dispose()}
+    if($ready.Contains("READY 127.0.0.1:$port $nonce")){break}
+    if(-not $server.RootAlive-or [DateTime]::UtcNow-ge $until){throw 'owned guest listener failed readiness'}
+    Start-Sleep -Milliseconds 50
+   }while($true)
+   if((Guest @('/usr/bin/fixture-net','check',[string]$port,$nonce))-cne $nonce){throw 'guest loopback positive control failed'}
+   if($enabled){
+    # WSL forwarding startup is asynchronous; only this positive control may
+    # retry, within a fixed 10-second deadline. Negative probes never retry.
+    $until=[DateTime]::UtcNow.AddSeconds(10);$reply=$null
+    do{try{$reply=Read-Nonce $port}catch{if([DateTime]::UtcNow-ge $until){throw};Start-Sleep -Milliseconds 100}}while($reply-ne $nonce-and [DateTime]::UtcNow-lt $until)
+    if($reply-cne $nonce){throw 'forwarding=true failed exact-nonce positive control'}
+    $events.Add(@{Phase=$Phase;Proof='forwarding=true';GuestNonce=$nonce;WindowsNonce=$reply;Port=$port})
+   }else{
+    $blocked=Test-LocalhostBlocked $port
+    if(-not $blocked){throw 'forwarding=false unexpectedly accepted a localhost TCP connection'}
+    if((Guest @('/usr/bin/fixture-net','check',[string]$port,$nonce))-cne $nonce){throw 'guest listener disappeared during negative control'}
+    $events.Add(@{Phase=$Phase;Proof='forwarding=false';GuestNonceBeforeAndAfter=$nonce;WindowsBlocked=$blocked;Port=$port})
+   }
+  }finally{
+   Shutdown-Owned
+   if($server.ActiveProcesses-ne 0-and-not $server.Stop(5000)){throw 'server Windows Job cleanup failed'}
+   $server.Dispose()
+  }
+}
+function Read-AppRoot([string]$File){
+ $root=[IO.Path]::GetFullPath(([IO.File]::ReadAllText($File)).Trim())
+ $parent=[IO.Path]::GetFullPath($env:TEMP).TrimEnd([char[]]'\/')
+ if(-not [IO.Path]::GetDirectoryName($root).Equals($parent,[StringComparison]::OrdinalIgnoreCase)-or [IO.Path]::GetFileName($root)-notmatch '^splitty-native-windows-[0-9a-f]{12}$'-or-not(Test-Path (Join-Path $root 'TEST-ONLY.txt'))){throw 'native fixture root is not an exact marked TEMP child'}
+ return $root
+}
+function Copy-AppEvidence([string]$Root){
+ $destination=Join-Path $Evidence 'native-application';New-Item -ItemType Directory -Force $destination|Out-Null
+ foreach($name in @('source-hashes.json','runtime-source-hashes.json','payload-provenance.json','production-lib.rs','owned-distros.json','distro-cleanup.json','wsl-verification.json','global-wslconfig-readonly.txt','windows-wsl-build.log','windows-wsl-driver.log','wsl-probe-bundle.log')){
+  $path=Join-Path $Root $name;if(Test-Path $path){Copy-Item -LiteralPath $path -Destination $destination -Force}
+ }
+ $runtime=Join-Path $Root 'runtime-evidence'
+ if(Test-Path $runtime){
+  $target=Join-Path $destination 'runtime-evidence';New-Item -ItemType Directory -Force $target|Out-Null
+  Get-ChildItem -LiteralPath $runtime|Where-Object{$_.Name-ne 'webview-data'}|ForEach-Object{Copy-Item -LiteralPath $_.FullName -Destination $target -Recurse -Force}
+ }
+ $probe=Join-Path $Root 'crates/splitty-tauri/runtime-assets/probe.js'
+ if(Test-Path $probe){Copy-Item -LiteralPath $probe -Destination (Join-Path $destination 'probe.js') -Force}
+}
+function Invoke-NativeApplication {
+ if(-not $CacheRootFile){throw 'native run requires the successful prebuild root record'}
+ $cache=Read-AppRoot $CacheRootFile
+ $rootRecord=Join-Path $Evidence 'native-root.txt'
+ $python=(Get-Command python.exe -ErrorAction Stop).Source
+ $scriptPath=Join-Path $PSScriptRoot '../tauri-windows-wsl-smoke.py'
+ $arguments=@($scriptPath,'--disposable-distros','--full-ui','--prepared-hosted-artifacts',$Artifact,'--cache-workspace',$cache,'--result-root',$rootRecord)
+ $job=[SplittyFixtureJob]::new($python,$arguments,$Evidence,$false);$jobs.Add($job)
+ $root=$null
+ try{
+  while($job.RootAlive-and $clock.Elapsed.TotalMinutes-lt 15){Start-Sleep -Milliseconds 100}
+  if($job.RootAlive){throw 'native application fixture exceeded work deadline'}
+  if($job.RootExitCode-ne 0){throw "native application fixture failed; see $($job.StandardOutputPath) and $($job.StandardErrorPath)"}
+  $root=Read-AppRoot $rootRecord
+  $report=Get-Content (Join-Path $root 'runtime-evidence/runtime-result.json') -Raw|ConvertFrom-Json
+  $verification=Get-Content (Join-Path $root 'wsl-verification.json') -Raw|ConvertFrom-Json
+  if($report.fullUi-ne $true-or $report.terminalBinary-ne $true-or $report.fileBytes-ne 1048833-or $verification.terminalExited-ne $true-or $verification.ownedBackendsExited-ne $true-or $verification.realAppRestart-ne $true-or $verification.guestTcpListeners-ne $false){throw 'actual native production UI/PTY/file/cleanup evidence missing'}
+  $events.Add(@{Proof='actual-native-full-ui-under-false';Root=$root;Source=$env:GITHUB_SHA;TerminalBinary=$report.terminalBinary;FileBytes=$report.fileBytes;RealAppRestart=$verification.realAppRestart})
+ }finally{
+  try{if($job.ActiveProcesses-ne 0-and-not $job.Stop(5000)){throw 'native fixture Windows Job remains active'}}finally{$job.Dispose()}
+  if(Test-Path $rootRecord){
+   $root=Read-AppRoot $rootRecord
+   try{
+    $ownershipFile=Join-Path $root 'owned-distros.json'
+    if(Test-Path $ownershipFile){
+     $ownership=Get-Content $ownershipFile -Raw|ConvertFrom-Json
+     $remaining=@(Registrations|Where-Object{$ownership.names-ccontains $_.DistributionName})
+     if($remaining.Count){
+      $cleanup=[SplittyFixtureJob]::new($python,@($scriptPath,'--disposable-distros','--cleanup-root',$root),$Evidence,$false);$jobs.Add($cleanup)
+      try{
+       $until=[DateTime]::UtcNow.AddSeconds(90)
+       while($cleanup.RootAlive-and [DateTime]::UtcNow-lt $until){Start-Sleep -Milliseconds 50}
+       if($cleanup.RootAlive-or $cleanup.RootExitCode-ne 0){throw 'recorded native fixture distro cleanup failed'}
+      }finally{if($cleanup.ActiveProcesses-ne 0){[void]$cleanup.Stop(5000)};$cleanup.Dispose()}
+     }
+    }
+   }finally{Copy-AppEvidence $root}
+  }
+ }
+}
 try{
  $before=@(Registrations)
  $before|ConvertTo-Json -Depth 4|Set-Content (Join-Path $Evidence 'registrations-before.json')
@@ -141,41 +237,17 @@ try{
   if(-not $accept.Wait(2000)){throw 'Windows loopback positive control failed'}
   $peer=$accept.GetAwaiter().GetResult();$peer.Dispose();$client.Dispose()
  }finally{$positive.Stop()}
- foreach($enabled in @($true,$false)){
-  if(-not $enabled){Write-Config $false}
-  $nonce=[guid]::NewGuid().ToString('N')
-  $server=Start-Owned (Guest-Arguments @('/usr/bin/fixture-net','serve',[string]$port,$nonce))
-  try{
-   $until=[DateTime]::UtcNow.AddSeconds(15)
-   do{
-    # The live Job still owns its stdout writer. Share write access while
-    # reading its bounded readiness line; ReadAllText uses incompatible sharing.
-    $liveLog=[IO.File]::Open($server.StandardOutputPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
-    $liveReader=[IO.StreamReader]::new($liveLog)
-    try{$ready=$liveReader.ReadToEnd()}finally{$liveReader.Dispose()}
-    if($ready.Contains("READY 127.0.0.1:$port $nonce")){break}
-    if(-not $server.RootAlive-or [DateTime]::UtcNow-ge $until){throw 'owned guest listener failed readiness'}
-    Start-Sleep -Milliseconds 50
-   }while($true)
-   if((Guest @('/usr/bin/fixture-net','check',[string]$port,$nonce))-cne $nonce){throw 'guest loopback positive control failed'}
-   if($enabled){
-    # WSL forwarding startup is asynchronous; only this positive control may
-    # retry, within a fixed 10-second deadline. Negative probes never retry.
-    $until=[DateTime]::UtcNow.AddSeconds(10);$reply=$null
-    do{try{$reply=Read-Nonce $port}catch{if([DateTime]::UtcNow-ge $until){throw};Start-Sleep -Milliseconds 100}}while($reply-ne $nonce-and [DateTime]::UtcNow-lt $until)
-    if($reply-cne $nonce){throw 'forwarding=true failed exact-nonce positive control'}
-    $events.Add(@{Proof='forwarding=true';GuestNonce=$nonce;WindowsNonce=$reply;Port=$port})
-   }else{
-    $blocked=Test-LocalhostBlocked $port
-    if(-not $blocked){throw 'forwarding=false unexpectedly accepted a localhost TCP connection'}
-    if((Guest @('/usr/bin/fixture-net','check',[string]$port,$nonce))-cne $nonce){throw 'guest listener disappeared during negative control'}
-    $events.Add(@{Proof='forwarding=false';GuestNonceBeforeAndAfter=$nonce;WindowsBlocked=$blocked;Port=$port})
-   }
-  }finally{
-   Shutdown-Owned
-   if($server.ActiveProcesses-ne 0-and-not $server.Stop(5000)){throw 'server Windows Job cleanup failed'}
-   $server.Dispose()
-  }
+ Probe-Forwarding $true 'baseline'
+ Write-Config $false
+ Probe-Forwarding $false 'before-native'
+ if($RunNativeApplication){
+  Assert-Owned
+  $expectedConfig=[IO.File]::ReadAllBytes($config)
+  Invoke-NativeApplication
+  Assert-Owned
+  if([Convert]::ToBase64String([IO.File]::ReadAllBytes($config))-cne [Convert]::ToBase64String($expectedConfig)){throw 'native fixture changed forwarding=false configuration'}
+  Probe-Forwarding $false 'after-native'
+  $nativePassed=$true
  }
  $passed=$true
 }catch{
@@ -196,7 +268,7 @@ try{
   if(-not $hadConfig-and(Test-Path $config)){throw 'configuration absence not restored'}
  }catch{$cleanupErrors.Add($_.ToString())}}
  $events|ConvertTo-Json -Depth 8|Set-Content (Join-Path $Evidence 'events.json')
- [ordered]@{Passed=($passed-and $cleanupErrors.Count-eq 0);Failure=$failure;CleanupErrors=@($cleanupErrors);OwnedHandles=[SplittyFixtureJob]::LiveHandleCount;Seconds=$clock.Elapsed.TotalSeconds;Scope='WSL2 NAT localhost forwarding preflight only; no native application proof'}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $Evidence 'result.json')
+ [ordered]@{Passed=($passed-and $cleanupErrors.Count-eq 0);Failure=$failure;CleanupErrors=@($cleanupErrors);OwnedHandles=[SplittyFixtureJob]::LiveHandleCount;Seconds=$clock.Elapsed.TotalSeconds;NativeApplicationRequested=[bool]$RunNativeApplication;NativeApplicationPassed=$nativePassed;Scope=$(if($RunNativeApplication){'Actual native Windows/WSL full production UI under localhostForwarding=false, with enclosing TCP controls'}else{'WSL2 NAT localhost forwarding preflight only; no native application proof'})}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $Evidence 'result.json')
 }
 if(-not $passed-or $cleanupErrors.Count-ne 0-or [SplittyFixtureJob]::LiveHandleCount-ne 0){throw 'Hosted WSL preflight FAILED/UNSUPPORTED; inspect evidence (never a skipped proof)'}
 Write-Host 'PROVED hosted WSL2 localhostForwarding true/false with guest and Windows positive controls; owned distro removed and config restored'

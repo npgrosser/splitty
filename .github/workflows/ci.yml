@@ -1,4 +1,4 @@
-name: Hosted WSL forwarding diagnostic
+name: Hosted WSL native forwarding diagnostic
 on:
   workflow_dispatch:
 permissions:
@@ -6,12 +6,31 @@ permissions:
 jobs:
   fixture:
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
-      - run: python3 scripts/testing/hosted-wsl-preflight/build.py "$RUNNER_TEMP/wsl-fixture"
+          fetch-depth: 0
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: hosted-wsl-linux-fixture
+      - name: Build production assets and Linux backend from the same source
+        run: |
+          git merge-base --is-ancestor 6464f3b9a0e35347d6f02309c523b148dd5aaee4 HEAD
+          pnpm --dir frontend install --frozen-lockfile
+          pnpm --dir frontend build
+          cargo build --locked -p splitty-server --bin splitty
+          python3 scripts/testing/hosted-wsl-preflight/build.py "$RUNNER_TEMP/wsl-fixture" --application
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hosted-wsl-rootfs
@@ -20,18 +39,58 @@ jobs:
   preflight:
     needs: fixture
     runs-on: windows-2025
-    timeout-minutes: 20
+    # Cold MSVC dependencies are built separately; actual controlled runtime
+    # remains capped at twenty minutes after its two distro prebuilds clean up.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           persist-credentials: false
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: hosted-wsl-rootfs
           path: ${{ runner.temp }}/hosted-wsl-rootfs
-      - name: Prove owned WSL2 NAT forwarding on and off
+      - name: Check delegated CRLF argument handling without executing WSL
         shell: pwsh
-        run: ./scripts/testing/hosted-wsl-preflight/run.ps1 -AllowDisposableHostedWslConfig -Artifact "$env:RUNNER_TEMP/hosted-wsl-rootfs" -Evidence "$env:RUNNER_TEMP/hosted-wsl-evidence"
+        run: |
+          $source=([IO.File]::ReadAllText('scripts/testing/tauri-windows-native-smoke/fixture-sentinel.ps1')).Replace("`r`n","`n").Replace("`n","`r`n")
+          $guard=([IO.File]::ReadAllText('scripts/testing/tauri-windows-native-smoke/fixture-guest-guard.sh')).Replace("`r`n","`n").Replace("`n","`r`n")
+          ./scripts/testing/hosted-wsl-preflight/delegated-guard.test.ps1 -Source $source -GuardBase64 ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($guard)))
+      - name: Prepare the existing guarded full-UI fixture without launching GUI
+        timeout-minutes: 25
+        shell: pwsh
+        run: |
+          pnpm --dir frontend install --frozen-lockfile
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          python scripts/testing/tauri-windows-wsl-smoke.py --disposable-distros --full-ui --build-only --prepared-hosted-artifacts "$env:RUNNER_TEMP/hosted-wsl-rootfs" --result-root "$env:RUNNER_TEMP/hosted-wsl-build-root.txt"
+          exit $LASTEXITCODE
+      - name: Prove actual native app under forwarding disabled with enclosing controls
+        timeout-minutes: 20
+        shell: pwsh
+        run: ./scripts/testing/hosted-wsl-preflight/run.ps1 -AllowDisposableHostedWslConfig -Artifact "$env:RUNNER_TEMP/hosted-wsl-rootfs" -Evidence "$env:RUNNER_TEMP/hosted-wsl-evidence" -RunNativeApplication -CacheRootFile "$env:RUNNER_TEMP/hosted-wsl-build-root.txt"
+      - name: Retain prebuild diagnostics without Cargo or WebView caches
+        if: always()
+        shell: pwsh
+        run: |
+          $out=Join-Path $env:RUNNER_TEMP 'hosted-wsl-evidence'
+          New-Item -ItemType Directory -Force $out | Out-Null
+          $record=Join-Path $env:RUNNER_TEMP 'hosted-wsl-build-root.txt'
+          if(Test-Path $record){
+            $root=[IO.Path]::GetFullPath(([IO.File]::ReadAllText($record)).Trim())
+            if(-not [IO.Path]::GetDirectoryName($root).Equals([IO.Path]::GetFullPath($env:TEMP).TrimEnd([char[]]'\/'),[StringComparison]::OrdinalIgnoreCase)-or [IO.Path]::GetFileName($root)-notmatch '^splitty-native-windows-[0-9a-f]{12}$'-or-not(Test-Path (Join-Path $root 'TEST-ONLY.txt'))){throw 'unsafe prebuild evidence path'}
+            foreach($name in @('windows-wsl-build.log','wsl-probe-bundle.log','source-hashes.json','runtime-source-hashes.json','payload-provenance.json','owned-distros.json','distro-cleanup.json')){
+              $path=Join-Path $root $name;if(Test-Path $path){Copy-Item -LiteralPath $path -Destination (Join-Path $out ('prebuild-'+$name)) -Force}
+            }
+          }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:

@@ -1,10 +1,15 @@
 # Every actual guest command starts with the exact pre-recorded target gate.
-$fixtureGuestGuard=(Get-Content (Join-Path $RootDir 'fixture-guest-guard.sh') -Raw).Trim()
+$fixtureGuestGuard=(Get-Content (Join-Path $RootDir 'fixture-guest-guard.sh') -Raw).Replace("`r`n","`n").Trim()
 function Get-FixtureGuestArguments([string]$Name,[string[]]$Arguments,[string]$User='') {
  if($Name-notmatch '^splitty-native-fixture-[0-9a-f]{12}-[ab]$'-or $ownership.names-notcontains $Name-or -not $ownership.created.PSObject.Properties[$Name]){throw 'unowned fixture guest target'}
+ # Normalize only fixture shell source, never positional nonce/path/data args.
+ $guestArguments=[string[]]$Arguments.Clone()
+ if($guestArguments.Length-ge 3-and $guestArguments[0]-cin @('/bin/sh','sh','/bin/bash','bash')-and $guestArguments[1]-ceq '-c'){
+  $guestArguments[2]=$guestArguments[2].Replace("`r`n","`n")
+ }
  $prefix=@('--distribution',$Name)
  if($User){if($User-cne 'root'){throw 'unsupported fixture user'};$prefix+=@('--user','root')}
- return [string[]]($prefix+@('--exec','/bin/sh','-c',$fixtureGuestGuard,'splitty-fixture-guard',$Name)+$Arguments)
+ return [string[]]($prefix+@('--exec','/bin/sh','-c',$fixtureGuestGuard,'splitty-fixture-guard',$Name)+$guestArguments)
 }
 function Invoke-FixtureGuest([string]$Name,[string[]]$Arguments,[string]$User='') {
  $guarded=Get-FixtureGuestArguments $Name $Arguments $User
