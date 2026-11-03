@@ -243,22 +243,9 @@ fn set_title_bar_color(
 ) -> Result<(), String> {
     native.main_action(&webview, &auth)?;
     #[cfg(target_os = "macos")]
-    {
-        use cocoa::appkit::{NSColor, NSWindow};
-        use cocoa::base::{id, nil};
-
-        let ns_window = window.ns_window().unwrap() as id;
-        unsafe {
-            let color = NSColor::colorWithRed_green_blue_alpha_(
-                nil,
-                r as f64 / 255.0,
-                g as f64 / 255.0,
-                b as f64 / 255.0,
-                1.0,
-            );
-            ns_window.setBackgroundColor_(color);
-        }
-    }
+    window
+        .set_background_color(Some(Color(r, g, b, 255)))
+        .map_err(|error| error.to_string())?;
 
     let _ = (window, r, g, b);
     Ok(())
@@ -578,20 +565,10 @@ fn run_embedded() {
 
             #[cfg(target_os = "macos")]
             if native_title_bar_uses_override {
-                use cocoa::appkit::{NSColor, NSWindow};
-                use cocoa::base::{id, nil};
-
-                let ns_window = window.as_ref().window().ns_window().unwrap() as id;
-                unsafe {
-                    let color = NSColor::colorWithRed_green_blue_alpha_(
-                        nil,
-                        bg_color.0 as f64 / 255.0,
-                        bg_color.1 as f64 / 255.0,
-                        bg_color.2 as f64 / 255.0,
-                        1.0,
-                    );
-                    ns_window.setBackgroundColor_(color);
-                }
+                window
+                    .as_ref()
+                    .window()
+                    .set_background_color(Some(Color(bg_color.0, bg_color.1, bg_color.2, 255)))?;
             }
 
             Ok(())

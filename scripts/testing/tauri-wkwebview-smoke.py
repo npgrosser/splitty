@@ -136,14 +136,13 @@ def macos_report(source):
     # windows array detects actual orphan NSWindows beyond Tauri's registry.
     start = source.index('        use gtk::prelude::*;')
     end = source.index('        let _ = send.send',start)
-    return source[:start]+"""        use cocoa::{appkit::{NSApp, NSWindow}, base::{id, YES}, foundation::NSArray};
-        use objc::{msg_send, sel, sel_impl};
+    return source[:start]+"""        use objc2::MainThreadMarker;
+        use objc2_app_kit::NSApplication;
         let mut managed: Vec<_> = observed.webview_windows().keys().cloned().collect();
         managed.sort();
-        let visible = unsafe {
-            let windows: id = msg_send![NSApp(), windows];
-            (0..windows.count()).filter(|&index| windows.objectAtIndex(index).isVisible() == YES).count()
-        };
+        let application = NSApplication::sharedApplication(
+            MainThreadMarker::new().expect("AppKit inventory runs on the actual main thread"));
+        let visible = application.windows().iter().filter(|window| window.isVisible()).count();
 """+source[end:]
 
 
@@ -270,8 +269,8 @@ rand = "0.8"
 subtle = "2"
 hex = "0.4"
 base64 = "0.22"
-cocoa = "0.26"
-objc = "0.2"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSApplication", "NSWindow", "NSResponder"] }
 axum = { version = "0.8", features = ["ws"] }
 ''' .replace('version = "0.1.30"', 'version = '+json.dumps(version), 1) + dependencies + '\n[build-dependencies]\ntauri-build = "2"\n')
     shutil.copyfile(repo/'Cargo.lock', harness/'Cargo.lock')

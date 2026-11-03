@@ -27,8 +27,8 @@ class ObserverTests(unittest.TestCase):
         source = (Path(__file__).parent/'tauri-webkit-smoke/report.rs').read_text()
         result = smoke.macos_report(source)
         self.assertNotIn('gtk::', result)
-        self.assertIn('msg_send![NSApp(), windows]', result)
-        self.assertIn('windows.objectAtIndex(index).isVisible()', result)
+        self.assertIn('NSApplication::sharedApplication(', result)
+        self.assertIn('application.windows().iter().filter(|window| window.isVisible())', result)
         self.assertEqual(source[:source.index('async fn smoke_windows')], result[:result.index('async fn smoke_windows')])
 
     def test_darwin_start_identity_layout_includes_microseconds(self):
