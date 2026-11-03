@@ -18,6 +18,32 @@ requires an explicit gateway. Local desktop startup does not adopt a separately
 running daemon. Pending upload destination/cancellation work is a prerequisite
 and retains cancellation and generation semantics across the transport change.
 
+## Final integration candidate
+
+The application-owned memory boundary is settled in NCT-8; framework ingress and
+total RSS are explicitly excluded without relaxing transport/output accounting or
+native authority. Independent security review accepted this boundary. Main specs
+are synchronized with the implementation (15 spec validations pass), including the
+fail-closed corrupt-discovery behavior. Architecture checks pass in both directions.
+
+Two separate corrections address the macOS core acceptance failures:
+
+- `50470d1` replaces the Apple-incompatible POSIX/ENV bootstrap with startup before
+  the first prompt or explicitly interactive command. It preserves login state,
+  profile selection, inherited startup variables and first-prompt hooks. History
+  file access is deferred until profile settings are applied, avoiding premature
+  truncation. Profile-preloaded history is retained without a second automatic
+  read; this documented integration boundary avoids emulating every Bash history
+  initialization detail. Independent Bash review found no remaining blocker.
+- `bff1069` separates process completion from reader EOF using a controlled reader
+  through the production output reader, and retains real-PTY final-byte/exit-status
+  coverage without requiring a Darwin background writer to outlive its session
+  leader. Production EOF behavior is unchanged.
+
+All 27 targeted session tests, core all-target clippy, formatting and diff checks
+pass locally. Actual macOS CI and the final integrated suite remain pending; prior
+baseline reproductions below are historical evidence, not waived acceptance tests.
+
 ## Evidence collected
 
 - Linux CI workspace tests excluding the GUI: 1,024 reported passing; optional
