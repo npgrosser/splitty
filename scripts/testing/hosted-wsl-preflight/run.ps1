@@ -148,7 +148,11 @@ try{
   try{
    $until=[DateTime]::UtcNow.AddSeconds(15)
    do{
-    $ready=[IO.File]::ReadAllText($server.StandardOutputPath)
+    # The live Job still owns its stdout writer. Share write access while
+    # reading its bounded readiness line; ReadAllText uses incompatible sharing.
+    $liveLog=[IO.File]::Open($server.StandardOutputPath,[IO.FileMode]::Open,[IO.FileAccess]::Read,[IO.FileShare]::ReadWrite)
+    $liveReader=[IO.StreamReader]::new($liveLog)
+    try{$ready=$liveReader.ReadToEnd()}finally{$liveReader.Dispose()}
     if($ready.Contains("READY 127.0.0.1:$port $nonce")){break}
     if(-not $server.RootAlive-or [DateTime]::UtcNow-ge $until){throw 'owned guest listener failed readiness'}
     Start-Sleep -Milliseconds 50
