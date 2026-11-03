@@ -6,7 +6,7 @@ The HTTP control API lets the `splitty` CLI and other automation inspect and dri
 ## Requirements
 
 ### Requirement: Two Control Transports
-The server SHALL serve the control API on its loopback HTTP listener and on a local Unix control socket, and an endpoint that is available on both transports SHALL behave identically on both. Authorization on the HTTP listener follows `access-control`; the control socket accepts requests without any credential because access to it is restricted to the owning user. Where the socket lives, which endpoints it exposes and how it is protected are defined in `access-control` (Owner-Only Control Socket, Control Socket Route Set); when the socket cannot be created, the HTTP listener remains the only control transport.
+The server SHALL serve the control API on its local Unix control socket and, when explicitly started, through a browser gateway's loopback HTTP listener, and an endpoint that is available on both transports SHALL behave identically on both. Authorization on the HTTP listener follows `access-control`; the control socket accepts requests without any credential because access to it is restricted to the owning user. Where the socket lives, which endpoints it exposes and how it is protected are defined in `access-control` (Owner-Only Control Socket, Control Socket Route Set); a missing optional control socket SHALL not start an HTTP listener. Equivalent authorized native UI operations SHALL use the same service behavior without exposing additional control or grant routes.
 
 #### Scenario: Same endpoint on both transports
 - **WHEN** a client sends `GET /api/mux/status` over the control socket and another client sends it, authorized, over the HTTP listener
@@ -32,7 +32,7 @@ The server SHALL answer `GET /health` on the HTTP listener with status 200 and t
 - **THEN** the server responds with status 200 and body `ok`
 
 ### Requirement: Shared Workspace State
-The control API SHALL read and modify the same workspace state that WebSocket clients use (see `mux-protocol` and `workspace-model`), so that a change made through either path is visible to the other immediately after it is applied.
+The control API SHALL read and modify the same workspace state that native and WebSocket clients use (see `mux-protocol` and `workspace-model`), so that a change made through either path is visible to the other immediately after it is applied.
 
 #### Scenario: Op visible to a later query
 - **WHEN** a client renames a screen through `POST /api/mux/op` and then sends `GET /api/mux/screens`
@@ -69,7 +69,7 @@ The control API SHALL read and modify the same workspace state that WebSocket cl
 - **THEN** `GET /api/mux/screens` returns an empty array with status 200
 
 ### Requirement: Server Status
-`GET /api/mux/status` SHALL return a JSON object with `serverMode` (`daemon` or `embedded`, see `server-modes`), `version`, `screens` (number of screens), `sessions` (number of sessions across all screens), `activeScreen` (the active screen id, or `null` when there is none) and `listenAddr` (the HTTP listener address).
+`GET /api/mux/status` SHALL return a JSON object with `serverMode` (`daemon` or `embedded`, see `server-modes`), `version`, `screens` (number of screens), `sessions` (number of sessions across all screens), `activeScreen` (the active screen id, or `null` when there is none) and `listenAddr` (null for the listener-independent service), plus `instance` and `transportVersion`; any browser-gateway address is reported by that gateway's startup, not fabricated as a target-service listener.
 
 #### Scenario: Status of a daemon
 - **WHEN** a client sends `GET /api/mux/status` to a server running as a daemon with two screens and three sessions
@@ -184,7 +184,7 @@ An operation applied through `POST /api/mux/op` SHALL take full effect, includin
 - **THEN** the server responds with a 4xx status and forwards nothing
 
 ### Requirement: Build and Runtime Information
-On the HTTP listener, `GET /api/build` SHALL return `{"version", "commit", "buildTime"}` for the running binary, with `commit` and `buildTime` set to `unknown` when the build did not record them, and, when the server runs inside WSL, `wslDistro` with the name of its distribution. `GET /api/stats` SHALL return the number of screens and the runtime backend.
+Through the browser gateway or the equivalent authorized native operation, `GET /api/build` SHALL return `{"version", "commit", "buildTime"}` for the running binary, with `commit` and `buildTime` set to `unknown` when the build did not record them, and, when the server runs inside WSL, `wslDistro` with the name of its distribution. `GET /api/stats` SHALL return the number of screens and the runtime backend.
 
 #### Scenario: Build info
 - **WHEN** an authorized client sends `GET /api/build`
@@ -247,7 +247,7 @@ A successful first spawn SHALL return 201 with the job; replay of that success S
 - **AND** a cursor from before the restart returns `invalid_cursor`
 
 ### Requirement: Local Grant Administration Endpoints
-Only the owner socket SHALL expose `POST /api/agents`, `GET /api/agents`, `GET /api/agents/{id}`, `POST /api/agents/{id}/revoke` and `POST /api/jobs/{id}/owner`. Creating a grant SHALL return its ID and socket path. Owner changes SHALL select a live grant or the user and obey `managed-jobs`. Grant sockets and authenticated TCP callers SHALL receive 404 for these paths; TCP requests rejected earlier by the existing guards/authentication SHALL retain those responses.
+Only the owner socket SHALL expose `POST /api/agents`, `GET /api/agents`, `GET /api/agents/{id}`, `POST /api/agents/{id}/revoke` and `POST /api/jobs/{id}/owner`. Creating a grant SHALL return its ID and socket path. Owner changes SHALL select a live grant or the user and obey `managed-jobs`. Grant sockets, native UI connections and authenticated TCP callers SHALL receive 404 for these paths; TCP requests rejected earlier by the existing guards/authentication SHALL retain those responses.
 
 #### Scenario: Administrative transfer
 - **WHEN** the owner socket receives a valid request to move a job to a new grant

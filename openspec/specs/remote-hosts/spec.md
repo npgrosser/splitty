@@ -86,51 +86,49 @@ After installing a version, the client SHALL remove every other version director
 - **THEN** both version directories remain, and the daemon keeps running
 
 ### Requirement: Remote Handshake
-`splitty remote-handshake --json` SHALL print exactly one JSON object and exit with status 0, describing the host to a client in one call:
-- `handshake`: the format version, 1;
-- `server`: the `version`, the `protocol` version and the absolute `path` of the server that answers;
-- `daemon`: `running`, and for a running daemon its `pid`, `port`, `version`, `protocol` version, whether it keeps its sessions across a restart (`keepsSessions`, from `daemon.json`; false when the file does not say) and whether this call `started` it;
-- `screens`: the running daemon's screens, each with its `id`, `name` and number of `panes`, in the daemon's order; empty without a daemon.
-
-With `--ensure-daemon --port <port>`, it SHALL first start the daemon on `127.0.0.1:<port>` when none is running, as `splitty daemon start` would, and report it with `started` true. When the daemon cannot be started, it SHALL print the reason to standard error and exit with status 1. A running daemon SHALL never be stopped or replaced, whatever its version. The command prints no credential.
+`splitty remote-handshake --json` SHALL print one format-2 JSON object and no credential: the answering server's version, mux protocol, absolute path and transport versions; daemon running state, PID, version, protocol, instance, transportVersion, startedAt, keepsSessions and started; and its ordered screen summaries. When no daemon is running, the screen list SHALL be empty. `--ensure-daemon` SHALL start a missing private-endpoint daemon without a port hint, never stop/replace a running one. Failure SHALL go to stderr with status 1.
 
 #### Scenario: Handshake without a daemon
-- **WHEN** no daemon runs on the host and a client runs `splitty remote-handshake --json`
-- **THEN** it prints `daemon` with `running` false and an empty `screens` list, and exits with status 0
+- **WHEN** no daemon runs and no ensure option is given
+- **THEN** output reports running false and no screens with status 0
 
 #### Scenario: Daemon started by the handshake
-- **WHEN** no daemon runs and a client runs `splitty remote-handshake --json --ensure-daemon --port 9811`
-- **THEN** a daemon is started on `127.0.0.1:9811` and the output reports it running on port 9811 with `started` true
+- **WHEN** a missing daemon is requested with `--ensure-daemon`
+- **THEN** the new daemon has no TCP listener and output reports started true and its native transport/instance
 
 #### Scenario: Daemon of another version
-- **WHEN** a daemon of another version runs and a client runs the handshake with `--ensure-daemon`
-- **THEN** the daemon keeps running, and the output reports its version and protocol version next to those of the answering server
+- **WHEN** a different daemon version already runs
+- **THEN** it is left running and its actual capabilities are reported separately from the answering binary
 
 #### Scenario: Daemon that keeps its sessions
-- **WHEN** the host's daemon wrote `keepsSessions: true` into `daemon.json` and a client runs the handshake
-- **THEN** the output reports the running daemon with `keepsSessions` true
-- **AND** for a daemon whose `daemon.json` has no such field it reports `keepsSessions` false
+- **WHEN** discovery says keepsSessions true
+- **THEN** the handshake preserves that value, treating a missing legacy field as false
+
+#### Scenario: Legacy daemon
+- **WHEN** a format-2 answering binary discovers a live legacy daemon
+- **THEN** it reports native transport as unsupported without connecting to or replacing the legacy daemon
 
 ### Requirement: Protocol Version
-The server SHALL have a protocol version, an integer that changes when the WebSocket protocols change incompatibly; it is 1. A daemon SHALL record its protocol version in `daemon.json` (see `server-modes`). A `daemon.json` without it SHALL count as protocol 1. A client that relays the protocol to a host's daemon SHALL use the daemon's protocol version from the handshake to decide whether it can talk to that daemon; it supports its own protocol version and the one before.
+The server SHALL have a protocol version, an integer that changes when the mux/session application protocol changes incompatibly; it is 1. A daemon SHALL record its protocol version in `daemon.json` (see `server-modes`). A `daemon.json` without it SHALL count as protocol 1. A client that relays the protocol to a host's daemon SHALL use the daemon's protocol version from the handshake to decide whether it can talk to that daemon; it supports its own protocol version and the one before. Native transport support SHALL be negotiated independently; mux compatibility alone SHALL not authorize a legacy TCP fallback.
 
 #### Scenario: Older info file
 - **WHEN** `daemon.json` has no `protocol` field
 - **THEN** the handshake reports the daemon's protocol version as 1
 
 ### Requirement: Remote Bridge
-`splitty remote-bridge` SHALL connect its standard input and output to the WebSocket of the daemon running on the same host, for a client that reaches the host over SSH:
-- Each WebSocket message SHALL travel as one frame: one byte for its kind (1 text, 2 binary), its length as a 4-byte big-endian integer, then that many bytes. A frame longer than 16 MiB or of an unknown kind SHALL end the bridge.
-- Frames read from standard input SHALL be sent to the daemon as messages; messages from the daemon SHALL be written to standard output as frames, in order.
-- The bridge SHALL end with status 0 when its standard input ends or the daemon closes the WebSocket, and with status 1, and a message on standard error, when no daemon runs or the WebSocket cannot be opened.
+`splitty remote-bridge --transport native-v1` SHALL relay the negotiated native client connection between its inherited stdin/stdout and the verified daemon client endpoint on the host. Frames SHALL retain order and text/binary payloads, with a maximum of 16 MiB and rejection of invalid framing before application dispatch. Stdout SHALL contain only protocol bytes. EOF or a clean daemon close SHALL end with status 0; a missing daemon, failed ownership check or incompatible transport SHALL produce bounded stderr diagnostics and status 1.
 
 #### Scenario: Welcome through the bridge
-- **WHEN** a daemon runs and a client starts `splitty remote-bridge` on the host
-- **THEN** the first frame on the bridge's standard output is a text frame with the daemon's `mux.welcome`
+- **WHEN** a compatible daemon runs and native bridge negotiation completes
+- **THEN** the first application event is that daemon's mux.welcome, after transport negotiation
 
 #### Scenario: No daemon
-- **WHEN** no daemon runs on the host and a client starts `splitty remote-bridge`
-- **THEN** the bridge prints that no daemon is running and exits with status 1
+- **WHEN** no daemon runs
+- **THEN** the bridge reports it on stderr and exits with status 1 without opening TCP
+
+#### Scenario: Remote path is not a local destination
+- **WHEN** the host reports a path in discovery
+- **THEN** only the host-side bridge resolves its configured endpoint and the client opens no local socket at the supplied path
 
 ### Requirement: SSH Client
 The client SHALL reach hosts with the system's OpenSSH client: on Windows with `%SystemRoot%\System32\OpenSSH\ssh.exe` when that file exists and with `ssh` from `PATH` otherwise, on other systems with `ssh` from `PATH`. On Windows it SHALL start `ssh` without a console window. The user's SSH configuration, keys and agent of that client apply.

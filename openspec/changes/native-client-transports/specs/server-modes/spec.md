@@ -133,7 +133,7 @@ The native Windows app SHALL run its local embedded backend in the selected supp
 - **AND** `splitty daemon status` reports that no daemon is running
 
 ### Requirement: Daemon Info File
-A running daemon SHALL atomically publish owner-only `daemon.json` with `format:2`, `pid`, `clientSocket`, `socket` (the control socket or empty when unavailable), `instance`, `transportVersion:1`, `startedAt`, `version`, mux `protocol` and `keepsSessions:true` in its configuration directory. It SHALL contain no credential or required TCP port. Publication occurs only after readiness. Missing/unparsable records mean no discovery; a dead process is stale. Legacy records SHALL be recognized for diagnostics without automatically connecting to their port.
+A running daemon SHALL atomically publish owner-only `daemon.json` with `format:2`, `pid`, `clientSocket`, `socket` (the control socket or empty when unavailable), `instance`, `transportVersion:1`, `startedAt`, `version`, mux `protocol` and `keepsSessions:true` in its configuration directory. It SHALL contain no credential or required TCP port. Publication occurs only after readiness. A missing record means no published discovery; corrupt or unreadable discovery SHALL fail explicitly without inferring absence or deleting the record. A dead process is stale, subject to the instance-lock and unchanged-record checks before cleanup. Legacy records SHALL be recognized for diagnostics without automatically connecting to their port.
 
 #### Scenario: Running daemon advertised
 - **WHEN** a new daemon publishes discovery
@@ -149,8 +149,8 @@ A running daemon SHALL atomically publish owner-only `daemon.json` with `format:
 
 #### Scenario: Corrupt info file
 - **WHEN** `daemon.json` contains invalid JSON
-- **THEN** `splitty daemon status` reports `No daemon running`
-- **AND** a subsequent start still checks the instance lock and private endpoint before creating a workspace
+- **THEN** `splitty daemon status`, including `--json`, exits nonzero with a diagnostic and leaves the record unchanged
+- **AND** neither status nor startup treats corrupt discovery as permission to create another workspace
 
 ### Requirement: Daemon Graceful Shutdown
 On SIGTERM or SIGINT, the daemon SHALL stop accepting connections, release the keepers of its sessions without ending the sessions (see `session-keepers`), write the final workspace state to `state.json`, remove `daemon.json`, and remove its control and client sockets and release its instance lock before exiting.
@@ -165,7 +165,7 @@ On SIGTERM or SIGINT, the daemon SHALL stop accepting connections, release the k
 - **THEN** the build keeps running after the daemon has exited
 
 ### Requirement: Single Daemon Instance
-At most one daemon SHALL be registered per user configuration directory. If `daemon.json` names a live process, `splitty daemon start` SHALL report the running daemon (see `cli`) and exit successfully without starting another daemon. If the named process is not alive, the stale file SHALL be removed and the start SHALL proceed. Embedded servers are not subject to this limit. Daemon mode SHALL be refused with a non-zero exit status on platforms other than Unix.
+At most one daemon SHALL be registered per user configuration directory. If `daemon.json` names a live process, `splitty daemon start` SHALL report the running daemon (see `cli`) and exit successfully without starting another daemon. If the named process is not alive, cleanup SHALL acquire the native instance lock and reread the unchanged record before removing it; startup SHALL proceed only after acquiring the lock and securely binding the endpoint. A held lock SHALL prevent replacement of a live or starting instance even before discovery is published. Embedded servers are not subject to this limit. Daemon mode SHALL be refused with a non-zero exit status on platforms other than Unix.
 
 #### Scenario: Daemon already running
 - **WHEN** `splitty daemon start` is run while the daemon recorded in `daemon.json` is alive
@@ -174,7 +174,7 @@ At most one daemon SHALL be registered per user configuration directory. If `dae
 
 #### Scenario: Stale registration
 - **WHEN** `splitty daemon start` finds a `daemon.json` whose pid is not alive
-- **THEN** it removes the file and starts a new daemon
+- **THEN** it removes the unchanged stale file only after acquiring the native instance lock and starts a new daemon only when the private endpoint can be securely bound
 
 ## ADDED Requirements
 

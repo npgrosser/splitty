@@ -6,7 +6,7 @@ Defines how the Splitty server runs and what outlives what: the embedded and dae
 ## Requirements
 
 ### Requirement: Two Server Modes
-The server SHALL run in exactly one of two modes for its whole lifetime: `daemon`, started by `splitty daemon start`, or `embedded`, used by `splitty serve` and by the backends the desktop app starts. Persistence SHALL be a property of the mode, not of individual screens: a daemon persists and restores its workspace, and an embedded server persists nothing.
+The server SHALL run in exactly one of two modes for its whole lifetime: `daemon`, started by `splitty daemon start`, or `embedded`, used by plain `splitty serve` and by the backends the desktop app starts; a `serve --daemon` or remote browser gateway is only a client of its target service's mode. Persistence SHALL be a property of the mode, not of individual screens: a daemon persists and restores its workspace, and an embedded server persists nothing.
 
 #### Scenario: Serve runs embedded
 - **WHEN** a user runs `splitty serve`
@@ -28,32 +28,45 @@ The server SHALL report its mode to clients as `serverMode` with the value `"dae
 - **THEN** the response contains `"serverMode": "embedded"`
 
 ### Requirement: Ephemeral Port And Bind Before Detach
-When the requested port is `0`, the server SHALL listen on a port assigned by the operating system and SHALL use the actually bound port everywhere it reports or derives its address, including its startup output (see `cli`), `daemon.json`, and its own origin (see `access-control`). `splitty daemon start` MUST bind its listener before it detaches, so that a bind failure is reported by the invoking command (see `cli`) and leaves no background process.
+An explicit browser gateway using port 0 SHALL report the actual OS-assigned loopback port everywhere, including its origin and startup output. A daemon SHALL bind its mandatory private client endpoint and acquire its instance lock before detaching. Failure SHALL be reported in the foreground with no orphan daemon. Native daemon discovery SHALL not invent or require a TCP port.
 
 #### Scenario: OS-assigned port reported
-- **WHEN** `splitty daemon start --addr 127.0.0.1:0` is run
-- **THEN** the printed `SPLITTY_PORT=<port>` line carries the non-zero port the daemon listens on
-- **AND** the `port` field of `daemon.json` holds the same port
+- **WHEN** `splitty serve --addr 127.0.0.1:0` starts
+- **THEN** its startup output and origin use the same actual non-zero bound port
+
+#### Scenario: Endpoint unavailable
+- **WHEN** a daemon cannot securely bind its private client endpoint
+- **THEN** startup fails in the foreground without detaching or opening a TCP listener
 
 #### Scenario: Port already in use
-- **WHEN** `splitty daemon start` is run while another process listens on the requested port
-- **THEN** the command fails in the foreground
-- **AND** no background process remains
+- **WHEN** an explicit browser gateway is asked to bind a port already used by another process
+- **THEN** it fails in the foreground without leaving a gateway or owned embedded service running
 
 ### Requirement: Desktop Stdio Lifetime Binding
-When started with `--desktop-stdio`, an embedded server SHALL treat its stdin as the launcher's control channel: it SHALL shut down when stdin reaches end-of-file, and for every stdin line that reads `bootstrap` it SHALL print a fresh `SPLITTY_BOOTSTRAP=<code>` line. Other input SHALL be ignored, and unterminated input beyond 4096 bytes SHALL be discarded. Without `--desktop-stdio`, stdin SHALL NOT affect the server's lifetime.
+A child started with `desktop-backend --transport native-v1` SHALL select `--backend embedded|ssh`: an owned embedded service or the shared SSH flow with a validated `--target`. It SHALL use inherited stdin/stdout only for its negotiated connection, with bounded diagnostics on stderr. EOF SHALL stop owned embedded sessions or only detach from an SSH host. Protocol bytes SHALL not be decoded as text. The former `serve --desktop-stdio` SHALL be refused with migration guidance.
 
 #### Scenario: Launcher exits
-- **WHEN** the process holding the write end of the server's stdin closes it
-- **THEN** the server shuts down and closes all of its sessions
+- **WHEN** the launcher closes the child's input pipe
+- **THEN** the child stops accepting work and shuts down its embedded sessions
+
+#### Scenario: Binary roundtrip
+- **WHEN** terminal output includes NULs, non-UTF-8 bytes or split frame headers
+- **THEN** those bytes are delivered unchanged and no log or bootstrap line contaminates stdout
+
+#### Scenario: Legacy launcher
+- **WHEN** a caller requests `serve --desktop-stdio`
+- **THEN** it gets a usage error pointing to the native child entry point, without opening a listener
 
 #### Scenario: Launcher requests a fresh code
-- **WHEN** the launcher writes the line `bootstrap` to the server's stdin
-- **THEN** the server prints exactly one new `SPLITTY_BOOTSTRAP=<code>` line on stdout
-- **AND** keeps running
+- **WHEN** a launcher writes the old `bootstrap` line to the native child's input
+- **THEN** negotiation fails as invalid input without printing a bootstrap line or opening HTTP
+
+#### Scenario: Helper attached to an independent SSH daemon
+- **WHEN** a native helper connected to an SSH daemon loses its launcher
+- **THEN** it closes its connection and owned SSH process without stopping the daemon or its sessions
 
 ### Requirement: Embedded Mode Lifetime
-An embedded server SHALL keep its workspace and sessions only in memory, for the lifetime of its process. It SHALL NOT read a persisted workspace at startup, SHALL NOT write one, and SHALL NOT register itself in `daemon.json`. When `splitty serve` receives an interrupt (Ctrl+C), or reaches end-of-file on stdin with `--desktop-stdio`, it SHALL close all sessions and stop.
+An embedded server SHALL keep its workspace and sessions only in memory, for the lifetime of its process. It SHALL NOT read a persisted workspace at startup, SHALL NOT write one, and SHALL NOT register itself in `daemon.json`. When `splitty serve` receives an interrupt (Ctrl+C), or a native child backend reaches end-of-file on its inherited input, it SHALL close all sessions and stop.
 
 #### Scenario: Serve starts empty
 - **WHEN** `splitty serve` starts while a `state.json` from a daemon exists in the configuration directory
@@ -64,28 +77,35 @@ An embedded server SHALL keep its workspace and sessions only in memory, for the
 - **THEN** every terminal session it hosts is closed before the process exits
 
 ### Requirement: Desktop App Hosting On macOS And Linux
-On macOS and Linux, the desktop app SHALL use a running daemon when `daemon.json` names a live process and that daemon issues a bootstrap code to the app. Without a live daemon, when sessions of its configuration directory are kept (see `session-keepers`), it SHALL first start the daemon with the executable those keepers run, or `splitty` from its `PATH` when that is gone, and use it once it serves within 15 seconds. Otherwise it SHALL start an embedded server inside the app process on an OS-assigned loopback port, and that server SHALL live exactly as long as the app. A `daemon.json` whose process is not alive SHALL be removed before falling back.
+On macOS and Linux the desktop app SHALL always start an owned embedded local service without a UI TCP listener. Its local workspace and jobs SHALL end when the app exits. The app SHALL NOT automatically connect to, start, restart or stop an independent local daemon, adopt its keepers or modify its discovery/workspace files. Existing, incompatible, unreachable, stale or corrupt daemon discovery SHALL not change desktop startup. Persistent local access remains explicit through the CLI or `serve --daemon`. Popouts SHALL share the owning app's service lifetime.
 
 #### Scenario: Daemon available
-- **WHEN** the desktop app starts while a daemon is running
-- **THEN** its window connects to the daemon's port instead of starting an embedded server
-- **AND** closing the app leaves the daemon and its sessions running
+- **WHEN** a compatible local daemon is already running
+- **THEN** the app starts its own empty embedded service and leaves the daemon and its sessions untouched
 
 #### Scenario: No daemon
-- **WHEN** the desktop app starts and no `daemon.json` exists
-- **THEN** it starts an embedded server on `127.0.0.1` with an OS-assigned port and connects to it
+- **WHEN** there is no daemon and no kept session
+- **THEN** the app starts its embedded service without opening a UI TCP listener
+
+#### Scenario: Independent daemon cannot admit clients
+- **WHEN** a local daemon is incompatible or unreachable
+- **THEN** normal embedded desktop startup still works without connecting to or updating that daemon
 
 #### Scenario: Daemon does not issue a code
-- **WHEN** `daemon.json` names a live process but the request for a bootstrap code fails
-- **THEN** the app falls back to an embedded server
+- **WHEN** an independent local daemon has no usable bootstrap endpoint
+- **THEN** the desktop app still starts its own embedded service over IPC without reading a browser token or requesting a code from the daemon
 
 #### Scenario: Stale daemon file
-- **WHEN** the desktop app finds a `daemon.json` whose process is not alive
-- **THEN** it removes the file and starts an embedded server
+- **WHEN** local daemon discovery is stale or corrupt
+- **THEN** the app starts embedded and leaves the independent daemon files untouched
 
 #### Scenario: Kept sessions after a daemon crash
-- **WHEN** the daemon crashed while its panes ran shells, and the desktop app starts
-- **THEN** the app starts the daemon, which adopts the kept sessions, and its window shows them
+- **WHEN** keepers remain after a daemon crash and the app starts
+- **THEN** the app starts its own embedded workspace without adopting, restarting or ending those kept sessions
+
+#### Scenario: App exit closes only its local sessions
+- **WHEN** the desktop app exits while an independent local daemon and a remote daemon have sessions
+- **THEN** its embedded local sessions and jobs end, while the independent daemon and remote sessions keep running
 
 ### Requirement: Desktop App Command Search Path
 On macOS and Linux, a desktop app whose standard input is not a terminal SHALL, before it starts its backend or a remote window, ask the user's login shell for its `PATH`: the shell named by `SHELL`, started as an interactive login shell (csh and tcsh as interactive shells), without input. The app SHALL then use the login shell's `PATH` entries, followed by the inherited `PATH` entries the login shell lacks, for every program it starts, among them `ssh` and with it the `ProxyCommand` of the user's SSH configuration. When `SHELL` is unset or not an absolute path, when the shell fails, or when it reports no `PATH` within 5 seconds, the app SHALL keep its inherited `PATH`; a program the shell's startup leaves running SHALL NOT delay the app beyond the shell's answer. The app SHALL take no variable of the shell's environment other than `PATH`. A desktop app whose standard input is a terminal SHALL keep the `PATH` it inherited.
@@ -108,39 +128,42 @@ On macOS and Linux, a desktop app whose standard input is not a terminal SHALL, 
 - **THEN** it keeps the terminal's `PATH` and does not start a login shell
 
 ### Requirement: Desktop App Hosting On Windows
-The native Windows app SHALL run its backend inside the selected WSL 2 distribution as an embedded server started with `serve --addr 127.0.0.1:0 --desktop-stdio`, and SHALL bind the backend's lifetime to the app through the backend's stdin. It SHALL NOT look for a daemon. On exit, the app SHALL close the backend's stdin, wait up to 3 seconds for it to stop, then terminate only its own bridge process; it MUST NOT terminate the WSL distribution. While a backend for the selected distribution is alive, a further start request SHALL reuse it. Starting a backend in a different distribution SHALL stop the previous one. The app SHALL NOT need WSL for remote windows (see `desktop-remote`): without WSL, or before its backend runs, its setup page SHALL still offer to connect to a host.
+The native Windows app SHALL run its local embedded backend in the selected supported WSL 2 distribution through inherited pipes using `desktop-backend --transport native-v1`. It SHALL need no localhost forwarding, discover no local daemon, and reuse its live backend for that distribution. Switching distributions SHALL revoke old client handles and stop the previous backend. On exit it SHALL close input, wait up to 3 seconds, then terminate only its owned bridge if needed, never the distribution. Remote-only windows SHALL work without WSL.
 
 #### Scenario: App exit stops the backend
-- **WHEN** the user quits the Windows app
-- **THEN** the backend in WSL receives end-of-file on stdin and shuts down, closing its sessions
+- **WHEN** the Windows app quits
+- **THEN** pipe EOF shuts down its embedded sessions without requiring a TCP connection
 
 #### Scenario: Backend does not stop in time
-- **WHEN** the backend has not exited 3 seconds after its stdin was closed
-- **THEN** the app terminates the bridge process
-- **AND** leaves the WSL distribution and unrelated processes in it running
+- **WHEN** the owned backend does not stop within 3 seconds
+- **THEN** the app terminates its bridge only and leaves unrelated WSL work running
 
 #### Scenario: Repeated start for the same distribution
-- **WHEN** the app requests a backend start for the distribution whose backend is still running
-- **THEN** no second backend is started
+- **WHEN** the app requests the already live selected distribution
+- **THEN** no second backend or listener is started
 
 #### Scenario: Remote only
-- **WHEN** the Windows app runs on a machine without WSL and the user connects to a host
-- **THEN** a remote window shows the host, and no WSL backend is started
+- **WHEN** Windows has no WSL and the user opens a host
+- **THEN** the packaged remote window uses native SSH without starting a local backend
+
+#### Scenario: WSL localhost forwarding unavailable
+- **WHEN** WSL localhost forwarding is disabled or unavailable
+- **THEN** the local desktop's terminal, API and file traffic still works through the owned pipes
 
 ### Requirement: Single Daemon Instance
-At most one daemon SHALL be registered per user configuration directory. If `daemon.json` names a live process, `splitty daemon start` SHALL report the running daemon (see `cli`) and exit successfully without starting another daemon. If the named process is not alive, the stale file SHALL be removed and the start SHALL proceed. Embedded servers are not subject to this limit. Daemon mode SHALL be refused with a non-zero exit status on platforms other than Unix.
+At most one daemon SHALL be registered per user configuration directory. If `daemon.json` names a live process, `splitty daemon start` SHALL report the running daemon (see `cli`) and exit successfully without starting another daemon. If the named process is not alive, cleanup SHALL acquire the native instance lock and reread the unchanged record before removing it; startup SHALL proceed only after acquiring the lock and securely binding the endpoint. A held lock SHALL prevent replacement of a live or starting instance even before discovery is published. Embedded servers are not subject to this limit. Daemon mode SHALL be refused with a non-zero exit status on platforms other than Unix.
 
 #### Scenario: Daemon already running
 - **WHEN** `splitty daemon start` is run while the daemon recorded in `daemon.json` is alive
-- **THEN** it reports the running daemon's pid and port and exits with status 0
+- **THEN** it reports the running daemon's pid and private endpoint (or explicit legacy status) and exits with status 0
 - **AND** no second daemon process exists
 
 #### Scenario: Stale registration
 - **WHEN** `splitty daemon start` finds a `daemon.json` whose pid is not alive
-- **THEN** it removes the file and starts a new daemon
+- **THEN** it removes the unchanged stale file only after acquiring the native instance lock and starts a new daemon only when the private endpoint can be securely bound
 
 ### Requirement: Daemon Detachment
-`splitty daemon start` SHALL detach the daemon from the invoking terminal and session so that it keeps running after the terminal closes. The invoking command SHALL return only once the daemon is serving: its HTTP listener accepts connections, its control socket is bound or was deliberately skipped, and `daemon.json` is written. If the daemon fails before that point, the invoking command SHALL report the failure (see `cli`) and SHALL leave no `daemon.json` that names the failed process. The daemon SHALL append its log output to `daemon.log` in the Splitty configuration directory.
+`splitty daemon start` SHALL detach the daemon from the invoking terminal and session so that it keeps running after the terminal closes. The invoking command SHALL return only once the daemon is serving: its private client endpoint accepts and negotiates connections, its control socket is bound or was deliberately skipped, and format-2 `daemon.json` is written. If the daemon fails before that point, the invoking command SHALL report the failure (see `cli`) and SHALL leave no `daemon.json` that names the failed process. The daemon SHALL append its log output to `daemon.log` in the Splitty configuration directory.
 
 #### Scenario: Terminal closed after start
 - **WHEN** a user runs `splitty daemon start` and then closes the terminal it was run from
@@ -156,24 +179,27 @@ At most one daemon SHALL be registered per user configuration directory. If `dae
 - **AND** `splitty daemon status` reports that no daemon is running
 
 ### Requirement: Daemon Info File
-A running daemon SHALL advertise itself in `daemon.json` in the Splitty configuration directory (`$XDG_CONFIG_HOME/splitty`, by default `~/.config/splitty` on Linux). The file SHALL contain the daemon's `pid`, its listening `port`, the path of its local control `socket`, `startedAt`, the server `version`, its `protocol` version (see `remote-hosts`) and `keepsSessions: true`, which tells that its sessions outlive it (see `session-keepers`); a file without `protocol` counts as protocol 1, and one without `keepsSessions` as a daemon whose sessions end with it. The daemon process itself SHALL write the file after detaching, once it is ready to serve. The `socket` field SHALL name a control socket that exists, or be empty when the daemon runs without one. The file SHALL NOT contain any credential; its permissions and the control socket are governed by `access-control`, and how clients use it by `cli`. A missing or unparsable file SHALL be treated as "no daemon", and a file whose `pid` is not a live process SHALL be treated as stale.
+A running daemon SHALL atomically publish owner-only `daemon.json` with `format:2`, `pid`, `clientSocket`, `socket` (the control socket or empty when unavailable), `instance`, `transportVersion:1`, `startedAt`, `version`, mux `protocol` and `keepsSessions:true` in its configuration directory. It SHALL contain no credential or required TCP port. Publication occurs only after readiness. A missing record means no published discovery; corrupt or unreadable discovery SHALL fail explicitly without inferring absence or deleting the record. A dead process is stale, subject to the instance-lock and unchanged-record checks before cleanup. Legacy records SHALL be recognized for diagnostics without automatically connecting to their port.
 
 #### Scenario: Running daemon advertised
-- **WHEN** a daemon has started
-- **THEN** `daemon.json` holds that daemon's pid, its bound port, its control socket path, its start time, its version, its protocol version and `keepsSessions: true`
-- **AND** holds no token
+- **WHEN** a new daemon publishes discovery
+- **THEN** its client socket and instance can be verified, its permissions are 0600 and no port or credential is advertised
+
+#### Scenario: Legacy record
+- **WHEN** discovery finds a live legacy daemon described by a port
+- **THEN** the client reports transport compatibility/update guidance without treating the port as a native endpoint
+
+#### Scenario: Control socket unavailable
+- **WHEN** the optional control socket could not be created but the client endpoint is ready
+- **THEN** discovery contains an empty control socket and the verified private client endpoint
 
 #### Scenario: Corrupt info file
 - **WHEN** `daemon.json` contains invalid JSON
-- **THEN** `splitty daemon status` reports `No daemon running`
-
-#### Scenario: Control socket unavailable
-- **WHEN** the daemon cannot create its control socket
-- **THEN** it still starts and serves its HTTP listener
-- **AND** the `socket` field of `daemon.json` is empty
+- **THEN** `splitty daemon status`, including `--json`, exits nonzero with a diagnostic and leaves the record unchanged
+- **AND** neither status nor startup treats corrupt discovery as permission to create another workspace
 
 ### Requirement: Daemon Graceful Shutdown
-On SIGTERM or SIGINT, the daemon SHALL stop accepting connections, release the keepers of its sessions without ending the sessions (see `session-keepers`), write the final workspace state to `state.json`, remove `daemon.json`, and remove its control socket before exiting.
+On SIGTERM or SIGINT, the daemon SHALL stop accepting connections, release the keepers of its sessions without ending the sessions (see `session-keepers`), write the final workspace state to `state.json`, remove `daemon.json`, and remove its control and client sockets and release its instance lock before exiting.
 
 #### Scenario: Graceful stop
 - **WHEN** the daemon receives SIGTERM
@@ -282,3 +308,14 @@ When the environment variable `SPLITTY_CONFIG_DIR` holds an absolute path, a Spl
 #### Scenario: Relative value
 - **WHEN** `SPLITTY_CONFIG_DIR` is `relative/dir`
 - **THEN** the platform's configuration directory is used
+
+### Requirement: Browser Adapter Lifetime
+A browser gateway SHALL own its listener and browser credentials independently of the target service. Stopping a gateway attached to a daemon SHALL only detach; stopping plain `serve` SHALL also stop its owned embedded service. A dropped target connection SHALL not release the browser listener or select another backend.
+
+#### Scenario: Daemon browser closed
+- **WHEN** `splitty serve --daemon` ends
+- **THEN** its listener closes and the daemon and its sessions keep running
+
+#### Scenario: Target temporarily unavailable
+- **WHEN** a gateway loses its daemon or SSH connection
+- **THEN** its listener stays bound and target operations fail or wait only within their documented deadlines until reconnect

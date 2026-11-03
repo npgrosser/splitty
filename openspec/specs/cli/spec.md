@@ -6,7 +6,7 @@ The `splitty` command-line interface starts and manages Splitty servers, connect
 ## Requirements
 
 ### Requirement: Single Executable Command Surface
-The CLI SHALL be a single executable named `splitty` that provides the server commands `serve`, `daemon start`, `daemon stop`, `daemon status` and `connect`, and the control commands `split`, `new-screen`, `close-pane`, `close-screen`, `rename-screen`, `list-screens`, `list-panes`, `status`, `send-keys` and `issue-bootstrap`. It SHALL additionally provide `run`, `jobs`, `inspect`, `logs`, `input`, `stop`, `forget` and `agent` with `guide`, `create`, `list`, `exec`, `revoke`, `assign` and `reclaim` subcommands.
+The CLI SHALL be a single executable named `splitty` that provides the server commands `serve`, `daemon start`, `daemon stop`, `daemon status` and `connect`, and the control commands `split`, `new-screen`, `close-pane`, `close-screen`, `rename-screen`, `list-screens`, `list-panes`, `status`, `send-keys` and `issue-bootstrap`. It SHALL provide the internal native child entry point `desktop-backend --transport native-v1`. It SHALL additionally provide `run`, `jobs`, `inspect`, `logs`, `input`, `stop`, `forget` and `agent` with `guide`, `create`, `list`, `exec`, `revoke`, `assign` and `reclaim` subcommands.
 
 #### Scenario: Version flag
 - **WHEN** a user runs `splitty --version`
@@ -17,7 +17,7 @@ The CLI SHALL be a single executable named `splitty` that provides the server co
 - **THEN** the CLI prints a usage error to stderr and exits with a non-zero status
 
 ### Requirement: Serve Command
-`splitty serve` SHALL start a server in embedded mode (see `server-modes`) in the foreground, listening on the address given by `--addr`, else by the `SPLITTY_ADDR` environment variable, else `127.0.0.1:9800`, and SHALL run until it receives Ctrl+C. With `--open` the CLI SHALL open the launch URL in the default browser; without it no browser is opened. The address MUST be a loopback address (see `access-control`), and the hidden `--desktop-stdio` flag binds the server's lifetime to its launcher (see `server-modes`).
+Plain `splitty serve` SHALL start a server in embedded mode (see `server-modes`) in the foreground, listening on the address given by `--addr`, else by the `SPLITTY_ADDR` environment variable, else `127.0.0.1:9800`, and SHALL run until it receives Ctrl+C. With `--open` the CLI SHALL open the launch URL in the default browser; without it no browser is opened. The address MUST be a loopback address (see `access-control`), and the former `--desktop-stdio` flag SHALL be refused with guidance to the native child entry point. With `--daemon`, `serve` SHALL instead attach a browser gateway to the existing compatible daemon, without creating or owning a workspace; no daemon SHALL fail with an actionable error.
 
 #### Scenario: Default address
 - **WHEN** a user runs `splitty serve` with neither `--addr` nor `SPLITTY_ADDR`
@@ -33,8 +33,16 @@ The CLI SHALL be a single executable named `splitty` that provides the server co
 - **THEN** the CLI opens the launch URL in the default browser
 - **AND** a failure to open the browser is logged without stopping the server
 
+#### Scenario: Browser for an existing daemon
+- **WHEN** a compatible daemon runs and the user invokes `splitty serve --daemon --open`
+- **THEN** a foreground browser gateway opens that daemon's workspace, and stopping the command leaves its sessions running
+
+#### Scenario: No daemon for browser attachment
+- **WHEN** `splitty serve --daemon` finds no daemon
+- **THEN** it fails without creating a workspace or leaving a listener
+
 ### Requirement: Machine-Readable Startup Output
-On startup `splitty serve` SHALL write the lines `SPLITTY_PORT=<port>`, `SPLITTY_BOOTSTRAP=<code>` and `SPLITTY_URL=http://<host>:<port>/?bootstrap=<code>&desktop=1` to stdout, one per line and flushed individually, where `<code>` is a single-use bootstrap code (see `access-control`). `splitty daemon start` SHALL write only `SPLITTY_PORT=<port>`. Which credentials may appear in this output is governed by `access-control`. A reader that closes stdout early MUST NOT cause the server to exit.
+On startup `splitty serve` SHALL write the lines `SPLITTY_PORT=<port>`, `SPLITTY_BOOTSTRAP=<code>` and `SPLITTY_URL=http://<host>:<port>/?bootstrap=<code>&desktop=1` to stdout, one per line and flushed individually, where `<code>` is a single-use bootstrap code (see `access-control`). A successful new `splitty daemon start` SHALL write `SPLITTY_CLIENT_SOCKET=<absolute path>` and `SPLITTY_INSTANCE=<instance>` instead of a port. Native child stdout SHALL contain protocol frames only. Which credentials may appear in this output is governed by `access-control`. Closing a reader of the text startup lines MUST NOT stop the service; a native child's connection closure follows Desktop Stdio Lifetime Binding.
 
 #### Scenario: Serve handshake lines
 - **WHEN** `splitty serve` has bound its listener
@@ -42,11 +50,11 @@ On startup `splitty serve` SHALL write the lines `SPLITTY_PORT=<port>`, `SPLITTY
 - **AND** the bootstrap code differs from the process token
 
 #### Scenario: Daemon handshake line
-- **WHEN** `splitty daemon start` has bound its listener
-- **THEN** stdout contains a `SPLITTY_PORT=<port>` line and no credential
+- **WHEN** `splitty daemon start` has bound its private client endpoint
+- **THEN** stdout contains its client socket and instance lines, no port line and no credential
 
 ### Requirement: Process Token Options
-`splitty serve` and `splitty daemon start` SHALL accept `--token <value>` to set the process token explicitly; without it the token SHALL be resolved as specified in `access-control`. `splitty serve --oneshot-token` SHALL use a freshly generated random token for this process only instead of resolving one.
+`splitty serve` (including `--daemon`) SHALL accept `--token <value>` to set the process token explicitly; without it the token SHALL be resolved as specified in `access-control`. `splitty serve --oneshot-token` SHALL use a freshly generated random token for this process only instead of resolving one. The gateway owned by `splitty connect` SHALL use an ephemeral token without reading a token file. Native daemon/desktop entry points SHALL reject `--token` rather than creating HTTP implicitly.
 
 #### Scenario: One-shot token
 - **WHEN** a user runs `splitty serve --oneshot-token`
@@ -54,27 +62,36 @@ On startup `splitty serve` SHALL write the lines `SPLITTY_PORT=<port>`, `SPLITTY
 - **AND** the token is not printed
 
 ### Requirement: Daemon Start Command
-`splitty daemon start` SHALL bind its listener in the foreground, so that a busy port fails immediately with exit status 1, and then detach a background daemon (see `server-modes`) and return once that daemon is serving. If the daemon fails to start, the command SHALL print `Failed to start daemon: <reason>` to stderr, naming `daemon.log` for details, and exit with status 1. If a daemon is already registered (see `server-modes`, Single Daemon Instance), the command SHALL print `Daemon already running (pid=<pid>, port=<port>)` and exit with status 0. On platforms without Unix process support the command SHALL fail with exit status 1.
+`splitty daemon start` SHALL securely bind its private client endpoint and acquire its instance lock before detaching, then return only once the daemon is serving. Bind/start failures SHALL exit with status 1 and a reason, naming `daemon.log` for detached-start failures. A registered live daemon SHALL be reported without replacement, including an explicit legacy indication when it lacks native transport. Non-Unix platforms SHALL fail with status 1. `--addr` and `--token` SHALL be usage errors pointing to `serve --daemon`; `SPLITTY_ADDR` SHALL not enable HTTP.
 
 #### Scenario: Already running
-- **WHEN** a daemon is running and the user runs `splitty daemon start`
-- **THEN** the CLI prints `Daemon already running (pid=<pid>, port=<port>)`
-- **AND** no second daemon is started
+- **WHEN** a daemon runs and `daemon start` is invoked
+- **THEN** its PID and native endpoint or legacy status are reported and no second daemon starts
 
-#### Scenario: Port in use
-- **WHEN** the requested address is already bound by another process
-- **THEN** the CLI prints `Failed to bind <addr>: <reason>` to stderr and exits with status 1
+#### Scenario: Endpoint in use or unsafe
+- **WHEN** the private client endpoint cannot be bound safely
+- **THEN** the CLI reports the reason with status 1 without detaching or opening TCP
 
 #### Scenario: Daemon fails to start
-- **WHEN** the detached daemon fails before it is serving
-- **THEN** the CLI prints `Failed to start daemon: <reason>` to stderr and exits with status 1
+- **WHEN** the detached daemon fails before readiness
+- **THEN** the CLI reports `Failed to start daemon: <reason>` and exits with status 1
+
+#### Scenario: Old listener flag
+- **WHEN** `daemon start --addr 127.0.0.1:9800` is invoked
+- **THEN** it exits with usage status 2 and explains explicit browser serving
+
+#### Scenario: Port in use
+- **WHEN** another process occupies port 9800 and `daemon start` is invoked without listener flags
+- **THEN** a daemon can start on its private endpoint without attempting to bind the occupied TCP port
 
 ### Requirement: Daemon Stop and Status Commands
-`splitty daemon stop` SHALL ask the running daemon to terminate gracefully, which leaves its sessions running in their keepers (see `session-keepers`), and wait up to about two seconds, then report either `Daemon stopped (pid=<pid>)` or that the daemon may still be shutting down. With `--end-sessions` it SHALL then end every kept session of the run directory, also when no daemon runs, wait up to 5 seconds for them and print `Ended <n> kept session(s)`. `splitty daemon status` SHALL print the daemon's PID, port, start time and version. With `--json`, `splitty daemon status` SHALL instead print exactly one JSON object and exit with status 0, whether or not a daemon runs:
+`splitty daemon stop` SHALL ask the running daemon to terminate gracefully, which leaves its sessions running in their keepers (see `session-keepers`), and wait up to about two seconds, then report either `Daemon stopped (pid=<pid>)` or that the daemon may still be shutting down. With `--end-sessions` it SHALL then end every kept session of the run directory, also when no daemon runs, wait up to 5 seconds for them and print `Ended <n> kept session(s)`. `splitty daemon status` SHALL print the daemon's PID, private client endpoint, start time and version. With `--json` and verified discovery, `splitty daemon status` SHALL instead print exactly one JSON object and exit with status 0, whether or not a daemon runs:
 - `{"running": false}` when no daemon is running;
-- otherwise `"running": true` with the daemon's `pid`, `port`, `socket`, `startedAt` and `version` as its info file holds them, and no credential.
+- otherwise `"running": true` with the daemon's `pid`, `clientSocket`, `socket`, `instance`, `transportVersion`, `startedAt` and `version` as its info file holds them, and no credential.
 
-When no daemon is running, both commands SHALL print `No daemon running` (`daemon status --json` prints its object instead), and SHALL remove a daemon info file that names a dead process. Without `--json`, `daemon status` SHALL then add the number of kept sessions, when there are any, and how to reach them.
+A running legacy record SHALL instead carry `running:true`, `legacy:true` and its known diagnostic fields, without fabricated native fields or automatic attachment to its recorded port.
+
+When no daemon is running, both commands SHALL print `No daemon running` (`daemon status --json` prints its object instead), and SHALL remove a daemon info file that names a dead process only after taking the native instance lock and rereading the unchanged record. A live instance lock SHALL prevent stale cleanup or startup from unlinking a newer publication. Corrupt or unreadable discovery SHALL produce an explicit diagnostic and nonzero exit without deleting it or inferring absence. Without `--json`, `daemon status` SHALL then add the number of kept sessions, when there are any, and how to reach them.
 
 #### Scenario: Stop a running daemon
 - **WHEN** a daemon is running and the user runs `splitty daemon stop`
@@ -93,17 +110,29 @@ When no daemon is running, both commands SHALL print `No daemon running` (`daemo
 - **THEN** the CLI prints `No daemon running` and that 2 sessions are kept, to be adopted by `splitty daemon start` or shown with `splitty attach`
 
 #### Scenario: Stale info file
-- **WHEN** the daemon info file names a process that is no longer running
+- **WHEN** the daemon info file names a process that is no longer running and no live instance holds its lock
 - **THEN** `splitty daemon status` prints `No daemon running (stale info file cleaned up)`
 - **AND** the info file is removed
 
+#### Scenario: Status races daemon publication
+- **WHEN** status or startup observes a dead PID but a running or starting daemon holds the native instance lock
+- **THEN** it does not remove or replace that daemon's discovery publication
+
+#### Scenario: Corrupt discovery is not absence
+- **WHEN** daemon status, stop or restart encounters corrupt or unreadable discovery
+- **THEN** it exits nonzero with a diagnostic and preserves the record instead of inferring that no daemon exists
+
 #### Scenario: Machine-readable status of a running daemon
 - **WHEN** a daemon is running and the user runs `splitty daemon status --json`
-- **THEN** the CLI prints one JSON object with `running` set to true and the daemon's pid, port, control socket path, start time and version, and exits with status 0
+- **THEN** the CLI prints one JSON object with `running` set to true and the daemon's pid, client and control socket paths, instance, transport version, start time and version, and exits with status 0
 
 #### Scenario: Machine-readable status without a daemon
 - **WHEN** no daemon is running and the user runs `splitty daemon status --json`
 - **THEN** the CLI prints `{"running":false}` and exits with status 0
+
+#### Scenario: Machine-readable status of a legacy daemon
+- **WHEN** a live daemon has only legacy discovery metadata
+- **THEN** JSON status marks it as legacy, reports known diagnostic fields and invents no private client endpoint
 
 ### Requirement: Server Discovery Order
 When a non-empty `SPLITTY_AGENT_SOCK` is set, control commands SHALL use only that socket; explicit `--addr` or `--token` SHALL be rejected rather than overriding scoped discovery. Otherwise control commands SHALL locate the server in this order: (1) `--addr` with `--token`, both non-empty, over TCP with a bearer token; (2) the control socket named by a non-empty `SPLITTY_SOCK`; (3) the control socket recorded in the daemon info file (`~/.config/splitty/daemon.json` on Linux) of a running daemon. A lone or empty explicit address/token SHALL be a usage error, never silently ignored. The CLI MUST NOT read a credential from the environment. Unreachable or revoked scoped sockets MUST NOT fall back to owner discovery.
@@ -217,99 +246,106 @@ Control commands SHALL exit with status 0 on success. On any failure they SHALL 
 - **THEN** the CLI prints an `Error: request failed: could not reach <socket>: …` line and exits with status 1
 
 ### Requirement: Issue Bootstrap Command
-`splitty issue-bootstrap` SHALL obtain a new single-use bootstrap code from a running server and print it as `SPLITTY_BOOTSTRAP=<code>`. It SHALL reach the server over TCP at `--addr`, else at `127.0.0.1:<port>` of the running daemon, authenticating with `--token`, else with the token from the token file. It SHALL NOT use the control socket or `SPLITTY_SOCK`, because minting a browser session is not available there (see `access-control`).
+`splitty issue-bootstrap` SHALL obtain a single-use code only from an explicitly named browser gateway using `--addr` and the process token from `--token` or the configured token file. It SHALL print `SPLITTY_BOOTSTRAP=<code>` on success. It SHALL neither use native/control sockets nor infer a TCP endpoint from daemon discovery. Without `--addr` it SHALL fail with guidance to start `serve --daemon` or name an existing gateway.
+
+#### Scenario: Mint for an explicit gateway
+- **WHEN** a gateway runs and the CLI names its address with a valid token
+- **THEN** the CLI prints one bootstrap line and exits with status 0
+
+#### Scenario: Native daemon only
+- **WHEN** the user runs `issue-bootstrap` without an explicit gateway address
+- **THEN** it fails with actionable guidance and opens no listener or native credential path
 
 #### Scenario: Mint a code for the local daemon
-- **WHEN** a daemon is running and the user runs `splitty issue-bootstrap`
-- **THEN** the CLI prints exactly one `SPLITTY_BOOTSTRAP=<code>` line and exits with status 0
+- **WHEN** a daemon and its explicit `serve --daemon` gateway run and `issue-bootstrap` names that gateway with a valid token
+- **THEN** it prints one gateway bootstrap line without requesting a credential from the daemon's socket
 
 #### Scenario: No daemon
-- **WHEN** no daemon is running and `--addr` is not given
-- **THEN** the CLI prints the no-server error and exits with status 1
+- **WHEN** no daemon runs and `--addr` is not given
+- **THEN** `issue-bootstrap` exits with status 1 and guidance to start or name an explicit browser gateway
 
 ### Requirement: Remote Connect Tunnel
-After validating the target (see `access-control`), `splitty connect` SHALL make sure the host has a server (see `remote-hosts`, Server Installation) and then ask the host for its daemon with the handshake (`remote-handshake --json --ensure-daemon`, see `remote-hosts`), run over non-interactive SSH with the installed server's absolute path when it installed one or found one installed, and with `splitty` from the host's `PATH` otherwise. The host thereby resolves its own configuration directory. When no daemon runs, the handshake SHALL start one on a port that the client found free on `127.0.0.1` and holds reserved meanwhile. The CLI SHALL then forward local `127.0.0.1:<port>` to the remote `127.0.0.1:<port>`, using the remote daemon's own port number on both ends and binding the local end to `127.0.0.1` explicitly, and verify within 15 seconds that its own `ssh` process holds the forward. When the daemon runs another version than the client, the CLI SHALL say so, and SHALL update it only when it is older than the client, keeps its sessions (`keepsSessions`) and the host's answering server is the client's version: then it SHALL stop it with `daemon stop`, run the handshake again and use the daemon that answers. Otherwise it SHALL keep using it. Every failure in this phase SHALL exit with status 1. The single-use code of Remote Connect Session Handoff SHALL be obtained with the same server.
+After target validation, `splitty connect` SHALL use the existing remote installation and noninteractive system-SSH flow, then handshake format 2 with `--ensure-daemon` and no port hint. It SHALL establish a native exec bridge to the host's private daemon endpoint and create its own loopback browser gateway. A free gateway port SHALL not need to match any remote port. No daemon TCP forwarding SHALL be requested. Phase failures SHALL exit with status 1 and clean up owned resources.
+
+A daemon of another version SHALL be reported. The existing automatic update is allowed only when it is older, keeps sessions and the answering installed server matches the client; then stop/start it without ending keepers and renegotiate. Otherwise leave it running and use it only when transport and mux protocols are supported; incompatibility SHALL fail with update guidance rather than HTTP fallback.
 
 #### Scenario: No daemon on the remote
-- **WHEN** no daemon runs on the host
-- **THEN** the handshake starts one on a port that is free on both ends, and the CLI connects to it
+- **WHEN** the host has no daemon
+- **THEN** the handshake starts a private-endpoint daemon and the gateway connects through SSH
 
 #### Scenario: Daemon cannot be started
-- **WHEN** no daemon runs on the host and starting one fails
-- **THEN** the CLI prints the reason the host reported and exits with status 1
+- **WHEN** the host cannot start a daemon
+- **THEN** the command reports the host's reason and exits with status 1
 
 #### Scenario: Splitty missing on the remote
-- **WHEN** the client has no payload for the host and the remote command exits with status 127, because `splitty` is not in the `PATH` of non-interactive SSH sessions on the host
-- **THEN** the CLI reports that `splitty` is not installed on the host or not in that `PATH`, and that a client with a server for the host's architecture would install it, and exits with status 1
+- **WHEN** no payload is available and noninteractive SSH cannot find Splitty
+- **THEN** the error explains installing Splitty or using a client carrying the host's payload
 
 #### Scenario: Splitty too old on the remote
-- **WHEN** the host's `splitty` does not know `remote-handshake`
-- **THEN** the CLI reports that the `splitty` on the host is too old for this client, and exits with status 1
+- **WHEN** the answering binary does not support the required handshake/transport and cannot be updated under the established rule
+- **THEN** the command reports incompatibility without TCP fallback
 
 #### Scenario: Local port busy
-- **WHEN** the remote daemon listens on port 9800 and a local process already listens on `127.0.0.1:9800`
-- **THEN** the CLI reports that local port 9800 is not available, explains that both ports must match, and suggests starting the remote daemon with `--addr 127.0.0.1:<port>`
-- **AND** it exits with status 1 without opening a tunnel
+- **WHEN** local port 9800 is busy
+- **THEN** the gateway selects a free local port without changing the host daemon
 
 #### Scenario: SSH needs interaction
-- **WHEN** the SSH connection would require an interactive password or host-key prompt
-- **THEN** `ssh` fails instead of prompting and the CLI exits with status 1
-- **AND** when `ssh` reports a failed host key verification, the CLI adds an instruction to run `ssh <target>` once in a terminal and check the fingerprint
+- **WHEN** SSH needs a password or host-key prompt
+- **THEN** it fails without prompting, adding the existing fingerprint-check guidance for an unknown key
 
 #### Scenario: Older daemon that keeps its sessions
-- **WHEN** a client of version 0.2.0 connects to a host whose daemon of version 0.1.0 keeps its sessions, and the client installed its own server there
-- **THEN** the CLI reports the update, the host's daemon is replaced by one of version 0.2.0, the processes in its panes keep running, and the CLI connects to the new daemon
+- **WHEN** an older daemon keeps sessions and the client's installed payload is available
+- **THEN** the established update flow restarts it with keepers preserved and negotiates native transport
 
 #### Scenario: Newer daemon, or one whose sessions would end
-- **WHEN** the host's daemon is newer than the client, or older without keeping its sessions
-- **THEN** the CLI says so and keeps using that daemon, which keeps running
+- **WHEN** a daemon is newer or cannot preserve sessions
+- **THEN** it is left running and either used compatibly or reported incompatible without a replacement workspace
 
 ### Requirement: Remote Connect Session Handoff
-After the tunnel is verified, `splitty connect` SHALL obtain a single-use bootstrap code by running `splitty issue-bootstrap` on the remote host and accept it only if it is 32 hexadecimal characters. It SHALL print `SPLITTY_URL=http://127.0.0.1:<port>/?bootstrap=<code>&host=<target>`, with the target percent-encoded, which the web UI shows as the name of the remote host. It SHALL open that URL in the default browser unless `--no-open` is given, and keep the tunnel open, rebuilding it when it drops (Remote Connect Reconnect), until the user ends the command. No long-lived credential SHALL cross the SSH link. The command SHALL exit with status 0 only when the user ends it with Ctrl+C or SIGTERM.
+After establishing the SSH backend and its own browser listener, `splitty connect` SHALL issue a local single-use bootstrap code and print `SPLITTY_URL=http://127.0.0.1:<port>/?bootstrap=<code>&host=<target>`, percent-encoding the target. It SHALL open that URL unless `--no-open` and keep the gateway and bridge alive until interrupted or reconnect fails permanently. No browser credential SHALL cross SSH. Ctrl+C or SIGTERM SHALL close owned listeners/processes, detach from the daemon and exit with status 0.
 
 #### Scenario: Successful connect
-- **WHEN** a daemon runs on the remote host and the tunnel is established
-- **THEN** the CLI prints a `SPLITTY_URL` line carrying the bootstrap code and the target, opens it in the browser and prints `SSH tunnel active. Press Ctrl+C to disconnect.`
+- **WHEN** native SSH negotiation and local gateway startup succeed
+- **THEN** the CLI prints the local session URL, opens it and reports how to disconnect
 
 #### Scenario: No browser
-- **WHEN** the user runs `splitty connect <target> --no-open`
-- **THEN** the CLI prints the `SPLITTY_URL` line and opens no browser
+- **WHEN** `connect` runs with `--no-open`
+- **THEN** it prints the URL without opening a browser
+
+#### Scenario: Gateway startup fails
+- **WHEN** the gateway cannot bind or create its browser session
+- **THEN** it reports the failure and closes its bridge without stopping host sessions
 
 #### Scenario: Remote cannot mint a code
-- **WHEN** `splitty issue-bootstrap` fails on the remote host or returns a malformed code
-- **THEN** the CLI terminates the tunnel, prints `Failed to obtain a session from the remote host: …` and exits with status 1
+- **WHEN** the host has a compatible native daemon but no browser credential endpoint
+- **THEN** `connect` issues its local gateway's bootstrap code without invoking remote `issue-bootstrap`
 
 #### Scenario: Disconnect
-- **WHEN** the user presses Ctrl+C while the tunnel is active
-- **THEN** the CLI prints `Closing tunnel...`, ends its `ssh` process and exits with status 0
+- **WHEN** the user interrupts an active connection
+- **THEN** the gateway and its owned SSH processes stop, host sessions survive and the command exits with status 0
 
 ### Requirement: Remote Connect Reconnect
-When the tunnel's `ssh` process exits while `splitty connect` is running, the CLI SHALL rebuild the tunnel instead of exiting. It SHALL print that the tunnel was lost, reserve the local port again (see `access-control`), and ask the host for its daemon again with the handshake: at once, then after waits of 1, 2, 4 and 8 seconds, then every 10 seconds, printing each failed attempt. When no daemon runs any more, the handshake SHALL start one on the previous port; when the installed server is gone, as after a rebuilt container, the CLI SHALL install it again first.
-- When the same daemon answers on the same port (same pid and start time), the CLI SHALL re-open the forward, obtain no new code and print `SSH tunnel restored.`. The browser's session keeps working.
-- When a different daemon answers, or the daemon's port changed, the CLI SHALL re-open the forward on the daemon's port, obtain a new single-use code as in Remote Connect Session Handoff, and print a new `SPLITTY_URL` line, opening it in the default browser unless `--no-open` was given.
-- When the tunnel could not be rebuilt for 10 minutes, the CLI SHALL print that it gives up and exit with status 1.
-- Ctrl+C or SIGTERM SHALL end the command at any time with status 0.
+When the SSH bridge ends, `connect` SHALL keep its browser listener and authentication state, disable backend operations and reconnect at once, then after 1, 2, 4, 8 and at most 10 seconds between attempts. It SHALL reinstall a missing server and start a missing compatible daemon through the existing flow. A recovered daemon SHALL receive a new native connection and resync without replayed mutations or a changed browser origin. After 10 minutes without success the command SHALL clean up and exit with status 1; interruption SHALL exit with status 0.
 
 #### Scenario: Tunnel drops while the daemon keeps running
-- **WHEN** the `ssh` process of an active tunnel exits and the same daemon still runs on the host
-- **THEN** the CLI re-opens the forward on the same port and prints `SSH tunnel restored.` without a new `SPLITTY_URL`
-- **AND** requests with the session cookie the browser already holds succeed again
+- **WHEN** SSH drops while the daemon remains alive
+- **THEN** the gateway stays bound, reconnects and accepts its existing browser session without a new URL
 
 #### Scenario: Daemon restarted while the tunnel was down
-- **WHEN** the tunnel drops and the host's daemon has been restarted in the meantime
-- **THEN** the CLI re-opens the forward on the daemon's port and prints a new `SPLITTY_URL` line with a fresh single-use code
+- **WHEN** the daemon restarted
+- **THEN** the gateway negotiates the new instance and resynchronizes existing sessions without a new browser URL or stale input
 
 #### Scenario: Host rebooted while the tunnel was down
-- **WHEN** the tunnel drops because the host rebooted, and no daemon runs after the reboot
-- **THEN** the CLI starts the daemon again on the previous port, re-opens the forward and prints a new `SPLITTY_URL` line
+- **WHEN** the host returns without a daemon
+- **THEN** the handshake starts one and the gateway reconnects at its original local origin
 
 #### Scenario: Host stays unreachable
-- **WHEN** the tunnel drops and the host cannot be reached again
-- **THEN** the CLI retries with waits growing to 10 seconds, and after 10 minutes without success prints that it gives up and exits with status 1
+- **WHEN** reconnect has failed for 10 minutes
+- **THEN** the command reports failure, closes its gateway and exits with status 1
 
 #### Scenario: Interrupted while reconnecting
-- **WHEN** the user presses Ctrl+C while the CLI waits for its next attempt
-- **THEN** the CLI exits with status 0
+- **WHEN** the user interrupts a retry wait
+- **THEN** owned resources are released and the command exits with status 0
 
 ### Requirement: Remote Connect Recent Hosts
 Once `splitty connect` has obtained its first session URL, it SHALL record its target as the most recent host (see `remote-hosts`, Known Hosts). A failure to record SHALL NOT fail or end the command.
@@ -326,16 +362,15 @@ Once `splitty connect` has obtained its first session URL, it SHALL record its t
 With `--json`, `splitty connect` SHALL print on standard output only JSON objects, one per line, each with an `event` field, instead of its text output:
 - `progress`, with `step` (`install`, `daemon`, `started` or `tunnel`) and `message`;
 - `notice`, with `message`, for example when the daemon runs another version, or when the target could not be recorded as a recent host or the browser could not be opened;
-- `ready`, with `url` (the session URL of Remote Connect Session Handoff) and `port`, once the tunnel is verified and the first URL obtained;
+- `ready`, with `url` (the session URL of Remote Connect Session Handoff) and `port`, once the native bridge and local gateway are ready; `port` names the gateway;
 - `forward`, with `remote`, `local` and `url`, one per forward of `--forward` after `ready` (Remote Connect Port Forwards);
 - `lost`, with `message`, when the tunnel dropped;
 - `retry`, with `message` and `retryIn` (seconds), after a failed attempt to rebuild it;
-- `restored`, when the same daemon is reachable again;
-- `url`, with `url`, when a restarted or moved daemon needs a new session;
+- `restored`, when the backend is reachable again, including a restarted daemon;
 - `failed`, with `message` and, where the text output gives an instruction, `hint`, right before the command exits with status 1, or with status 2 for a target or a `--forward` list it rejects;
 - `closed`, right before the command exits with status 0.
 
-Everything else SHALL behave as without `--json`: the steps, the reconnect rules, the browser unless `--no-open`, and the exit status. Diagnostics of `ssh` itself MAY still appear on standard error.
+Backend restarts SHALL NOT emit a new `url` event or rotate the gateway's browser session. Everything else SHALL behave as without `--json`: the steps, the reconnect rules, the browser unless `--no-open`, and the exit status. Diagnostics of `ssh` itself MAY still appear on standard error.
 
 #### Scenario: Connected
 - **WHEN** the user runs `splitty connect vm1 --json --no-open` and the tunnel is established
@@ -364,11 +399,11 @@ The hidden command `splitty remote-hosts --json` SHALL print the known hosts (se
 ### Requirement: Remote Connect Port Forwards
 `splitty connect` SHALL accept `--forward <list>`, repeatable, where the list is comma-separated and each entry is `PORT` or `LOCAL:REMOTE`, ports from 1 to 65535. An entry that does not parse, a remote port named twice, or a local port named twice SHALL be rejected with exit status 2 before `ssh` runs.
 
-For each entry, the CLI SHALL forward local `127.0.0.1:<local>` to `localhost:<remote>` on the host, in the same `ssh` process as the daemon's port:
+For each entry, the CLI SHALL forward local `127.0.0.1:<local>` to `localhost:<remote>` on the host, in a separately supervised forward-only `ssh` process, independent of the native daemon bridge:
 - the local port is `LOCAL` when given, and the remote port otherwise;
 - when that local port is not free, it is any free loopback port.
 
-The CLI SHALL hold every local port reserved until `ssh` takes it over, and SHALL rebuild the forwards on the same local ports whenever it rebuilds the tunnel (Remote Connect Reconnect). Once the tunnel is verified, it SHALL print one line per forward, `Forwarding http://localhost:<local> -> <target>:<remote>`. When the local port differs from the one asked for, the line SHALL say so.
+The CLI SHALL hold every local port reserved until `ssh` takes it over, and SHALL rebuild the forwards on the same local ports whenever it rebuilds the tunnel (Remote Connect Reconnect). Once the forwards and browser gateway are verified, it SHALL print one line per forward, `Forwarding http://localhost:<local> -> <target>:<remote>`. When the local port differs from the one asked for, the line SHALL say so.
 
 With `--json`, each forward SHALL instead be one event `{"event": "forward", "remote": <port>, "local": <port>, "url": "http://localhost:<local>"}`, after the `ready` event. A forward whose remote port has no listener on the host SHALL NOT fail the command; connections to it fail until a server listens there.
 
@@ -458,7 +493,7 @@ With `--json`, job commands SHALL emit exactly one JSON result on stdout, includ
 - **THEN** the JSON reports `exitCode` 7 and the CLI exits 0
 
 ### Requirement: Scoped Administrative Commands Are Refused
-With `SPLITTY_AGENT_SOCK` set, the CLI SHALL reject owner administration, credential minting, terminal attachment and server lifecycle/remote-launch entry points, including `issue-bootstrap`, `attach`, `serve`, `daemon`, `connect`, `remote-handshake` and `remote-bridge`, before file access or process launch. This CLI guard SHALL not be described as an OS sandbox.
+With `SPLITTY_AGENT_SOCK` set, the CLI SHALL reject owner administration, credential minting, terminal attachment and server lifecycle/remote-launch entry points, including `issue-bootstrap`, `attach`, `serve`, `daemon`, `connect`, `remote-handshake`, `remote-bridge` and `desktop-backend`, before file access or process launch. This CLI guard SHALL not be described as an OS sandbox.
 
 #### Scenario: Scoped caller tries credential or daemon commands
 - **WHEN** a scoped invocation runs `issue-bootstrap` or `daemon stop`
@@ -553,11 +588,11 @@ The guide SHALL explain listing existing jobs before launch, background placemen
 - **THEN** the CLI prints `Error: cannot attach to the session this command runs in` and exits with status 1
 
 ### Requirement: Attach Server And Credential
-`splitty attach` SHALL use the server given by both `--addr` and `--token`, otherwise the daemon recorded in the daemon info file, never `SPLITTY_SOCK`. For the daemon it SHALL read the owner-only token file of this machine, obtain a single-use WebSocket ticket over loopback and open the WebSocket with the server's own origin, as `remote-bridge` does. It SHALL print no credential. Without either server it SHALL use the keepers of this machine (Attach Without A Daemon), and without those fail with a command error naming both ways.
+`splitty attach` SHALL use the server given by both `--addr` and `--token`, otherwise the daemon recorded in the daemon info file, never `SPLITTY_SOCK`. For a daemon it SHALL verify and negotiate the private client endpoint and use its native session stream, without reading a token file or opening TCP. An explicit `--addr` with `--token` continues to target an explicitly running browser gateway using its guarded WebSocket. It SHALL print no credential. Without either server it SHALL use the keepers of this machine (Attach Without A Daemon), and without those fail with a command error naming both ways.
 
 #### Scenario: Daemon on this machine
 - **WHEN** a daemon runs and the user runs `splitty attach <pane-id>` outside any pane
-- **THEN** the CLI obtains a ticket with the token file and streams the session over the daemon's loopback WebSocket
+- **THEN** the CLI streams the session over the verified private daemon endpoint without a token or ticket
 - **AND** no token or ticket appears in its output
 
 #### Scenario: Inside a pane of an embedded server
@@ -627,11 +662,11 @@ When the session's process exits, the command SHALL show the remaining output, r
 - **THEN** the session keeps running with no input added and can be attached again
 
 ### Requirement: Daemon Restart Command
-`splitty daemon restart` SHALL stop the running daemon as `daemon stop` does, wait until it has exited, and start a daemon of the invoking binary on the stopped daemon's port, as `daemon start` does; without a running daemon it SHALL start one as `daemon start` would. With `--end-sessions` it SHALL end the kept sessions before the start. A failed start SHALL be reported as `daemon start` reports it.
+`splitty daemon restart` SHALL stop the running daemon as `daemon stop` does, wait until it has exited, and start a daemon of the invoking binary at the stopped daemon's private endpoint, as `daemon start` does; without a running daemon it SHALL start one as `daemon start` would. With `--end-sessions` it SHALL end the kept sessions before the start. A failed start SHALL be reported as `daemon start` reports it.
 
 #### Scenario: Update without ending sessions
 - **WHEN** a daemon runs a pane with `sleep 1000` and the user runs `splitty daemon restart`
-- **THEN** a new daemon process serves the same port, and the pane's session still runs the same `sleep` process
+- **THEN** a new daemon process serves the same private endpoint with a new instance identity, and the pane's session still runs the same `sleep` process
 
 #### Scenario: Restart without a daemon
 - **WHEN** no daemon runs and the user runs `splitty daemon restart`
