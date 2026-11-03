@@ -108,19 +108,21 @@ fn remote_editor_path_uri(
     editor: Editor,
     kind: PathKind,
 ) -> Result<String, String> {
+    if target.len() > 255 {
+        return Err("Unsupported SSH target.".into());
+    }
     let parsed = SshTarget::parse(target).map_err(|_| "Unsupported SSH target")?;
     if matches!(editor, Editor::Sftp) {
         // An sftp:// authority carries a port and a bracketed IPv6 literal as
         // they are; the byte check also refuses the `+` a u16 port parse allows.
         if parsed.as_str() != target
-            || target.len() > 255
             || !target
                 .bytes()
                 .all(|b| b.is_ascii_alphanumeric() || b"._-@:[]".contains(&b))
         {
             return Err("Unsupported SSH target.".into());
         }
-    } else if parsed.as_str() != target || target.len() > 255 || target.contains([':', '[', ']']) {
+    } else if parsed.as_str() != target || target.contains([':', '[', ']']) {
         return Err(
             "Unsupported SSH target; configure a local SSH alias and reconnect through it.".into(),
         );
@@ -230,6 +232,12 @@ mod tests {
     #[test]
     fn bounds_untrusted_input_before_dispatch() {
         assert!(remote_editor_uri(&"x".repeat(256), "/srv", Editor::Vscode).is_err());
+        for editor in [Editor::Vscode, Editor::Sftp] {
+            assert_eq!(
+                remote_editor_uri(&format!("-{}", "x".repeat(1024 * 1024)), "/srv", editor),
+                Err("Unsupported SSH target.".into())
+            );
+        }
         assert!(
             remote_editor_uri("vm1", &format!("/{}", "界".repeat(1366)), Editor::Vscode).is_err()
         );

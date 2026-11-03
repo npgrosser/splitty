@@ -38,6 +38,9 @@ use tokio::task::JoinHandle;
 /// finish parsing or inspecting both captured streams.
 pub type CapturedOutput = Charged<Output>;
 
+/// Shared native target ceiling, applied before trimming, copying or diagnostics.
+pub const MAX_TARGET_BYTES: usize = 4096;
+
 /// A validated SSH destination.
 ///
 /// Construction is the validation: holding one of these means the value is safe
@@ -47,6 +50,9 @@ pub struct SshTarget(String);
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum TargetError {
+    #[error("SSH target exceeds 4096 bytes")]
+    TooLong,
+
     #[error("SSH target must not be empty")]
     Empty,
 
@@ -62,6 +68,9 @@ pub enum TargetError {
 
 impl SshTarget {
     pub fn parse(raw: &str) -> Result<Self, TargetError> {
+        if raw.len() > MAX_TARGET_BYTES {
+            return Err(TargetError::TooLong);
+        }
         let value = raw.trim_matches(|c: char| c == ' ' || c == '\t');
 
         if value.is_empty() {
@@ -1144,6 +1153,32 @@ mod tests {
             "host.example.com:2222",
         ] {
             assert!(SshTarget::parse(raw).is_ok(), "{raw:?} should be accepted");
+        }
+    }
+
+    #[test]
+    fn target_byte_ceiling_preserves_long_valid_users() {
+        let target = format!("{}@h", "u".repeat(MAX_TARGET_BYTES - 2));
+        assert_eq!(SshTarget::parse(&target).unwrap().as_str(), target);
+        assert_eq!(
+            SshTarget::parse(&format!("u{target}")),
+            Err(TargetError::TooLong)
+        );
+    }
+
+    #[test]
+    fn oversized_targets_are_rejected_before_normalization_or_diagnostics() {
+        for raw in [
+            format!("{}@host", "u".repeat(1024 * 1024)),
+            format!("-{}", "x".repeat(1024 * 1024)),
+            format!("host\n{}", "x".repeat(1024 * 1024)),
+            format!("{}host", " ".repeat(MAX_TARGET_BYTES)),
+            "界".repeat(MAX_TARGET_BYTES / 3 + 1),
+        ] {
+            let error = SshTarget::parse(&raw).unwrap_err();
+            assert_eq!(error, TargetError::TooLong);
+            assert_eq!(error.to_string(), "SSH target exceeds 4096 bytes");
+            assert_eq!(format!("{error:?}"), "TooLong");
         }
     }
 
