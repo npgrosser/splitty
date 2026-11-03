@@ -20,15 +20,21 @@ fixture=importlib.util.module_from_spec(spec);spec.loader.exec_module(fixture)
 common=fixture.common
 SSH=Path('/mnt/c/Windows/System32/OpenSSH/ssh.exe')
 
-def host_rootfs(path,base,keys,port):
+def host_rootfs(path,base,keys,port,package=None):
     base(path)
-    package=Path('/tmp/splitty-native-sshd/root')
-    files={str(path.relative_to(package)):path.resolve() for path in (package/'usr/lib/x86_64-linux-gnu').glob('*.so*')}
+    package=Path(package) if package is not None else Path('/tmp/splitty-native-sshd/root')
+    files={}
+    if package!=Path('/'):
+        files.update({str(path.relative_to(package)):path.resolve() for path in (package/'usr/lib/x86_64-linux-gnu').glob('*.so*')})
     library_env={**os.environ,'LD_LIBRARY_PATH':str(package/'usr/lib/x86_64-linux-gnu')}
     for name in ['sshd','sshd-session','sshd-auth']:
         source=package/('usr/sbin/sshd' if name=='sshd' else 'usr/lib/openssh/'+name)
+        if name!='sshd' and not source.is_file():continue
+        if not source.is_file():raise RuntimeError('trusted SSH server tool missing: '+str(source))
         files[str(source.relative_to(package))]=source
-        for line in subprocess.check_output(['ldd',str(source)],text=True,env=library_env).splitlines():
+        dependencies=subprocess.check_output(['ldd',str(source)],text=True,env=library_env)
+        if 'not found' in dependencies:raise RuntimeError('missing staged SSH dependency: '+dependencies)
+        for line in dependencies.splitlines():
             match=re.search(r'=> (/\S+)',line) or re.search(r'^\s*(/\S+)',line)
             if match:
                 library=Path(match.group(1)); destination=str(library.relative_to(package)) if library.is_relative_to(package) else str(library).lstrip('/');files[destination]=library.resolve()
@@ -41,10 +47,8 @@ def host_rootfs(path,base,keys,port):
       'etc/passwd':'root:x:0:0:root:/root:/bin/sh\nsplitty-fixture:x:1000:1000:fixture:/home/splitty-fixture:/bin/sh\nsshd:x:101:101:sshd:/run/sshd:/bin/sh\n',
       'etc/group':'root:x:0:\nsplitty-fixture:x:1000:\nsshd:x:101:\n',
       'etc/shadow':'root:*:20000:0:99999:7:::\nsplitty-fixture::20000:0:99999:7:::\nsshd:*:20000:0:99999:7:::\n',
-      'etc/sshd_config':f'Port {port}\nListenAddress 127.0.0.1\nHostKey /etc/fixture-hostkey\nAuthorizedKeysFile /etc/fixture-authorized_keys\nUsePAM no\nStrictModes no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nAllowUsers splitty-fixture\nAllowTcpForwarding no\nPermitTunnel no\nX11Forwarding no\nPidFile /run/fixture-sshd.pid\nSshdSessionPath /usr/lib/openssh/sshd-session\nSshdAuthPath /usr/lib/openssh/sshd-auth\nForceCommand /usr/bin/fixture-host-env\nLogLevel VERBOSE\n',
       'usr/bin/fixture-host-env':'#!/bin/sh\nexport HOME=/home/splitty-fixture XDG_CONFIG_HOME=/home/splitty-fixture/.config XDG_DATA_HOME=/home/splitty-fixture/.local/share XDG_RUNTIME_DIR=/home/splitty-fixture/run PATH=/usr/bin:/bin\ncd "$HOME" || exit 1\nexec /bin/sh -c "$SSH_ORIGINAL_COMMAND"\n',
     }
-    files['etc/fixture-hostkey']=keys/'hostkey';files['etc/fixture-authorized_keys']=keys/'clientkey.pub'
     with tarfile.open(path,'a') as archive:
         for name in ['usr/sbin','usr/lib/openssh','run/sshd']:
             info=tarfile.TarInfo(name);info.type=tarfile.DIRTYPE;info.mode=0o755;archive.addfile(info)
@@ -53,6 +57,19 @@ def host_rootfs(path,base,keys,port):
             with source.open('rb') as data:archive.addfile(info,data)
         for name,text in texts.items():
             data=text.encode();info=tarfile.TarInfo(name);info.size=len(data);info.mode=0o755 if name.startswith('usr/bin/') else 0o600;archive.addfile(info,io.BytesIO(data))
+    helpers=[name for name in ['sshd-session','sshd-auth'] if 'usr/lib/openssh/'+name in files]
+    if keys is not None:overlay_host_identity(path,keys,port,helpers)
+    return {'helpers':helpers,'tools':{name:hashlib.sha256(source.read_bytes()).hexdigest() for name,source in files.items()}}
+
+def overlay_host_identity(path,keys,port,helpers):
+    """Overlay fresh fixture identity/config only; no Linux commands required."""
+    if not isinstance(port,int) or not 1024<=port<=65535 or any(name not in ['sshd-session','sshd-auth'] for name in helpers):raise RuntimeError('invalid prepared SSH fixture catalog')
+    config=f'Port {port}\nListenAddress 127.0.0.1\nHostKey /etc/fixture-hostkey\nAuthorizedKeysFile /etc/fixture-authorized_keys\nUsePAM no\nStrictModes no\nPasswordAuthentication no\nKbdInteractiveAuthentication no\nPubkeyAuthentication yes\nAllowUsers splitty-fixture\nAllowTcpForwarding no\nPermitTunnel no\nX11Forwarding no\nPidFile /run/fixture-sshd.pid\nForceCommand /usr/bin/fixture-host-env\nLogLevel VERBOSE\n'
+    if 'sshd-session' in helpers:config+='SshdSessionPath /usr/lib/openssh/sshd-session\n'
+    if 'sshd-auth' in helpers:config+='SshdAuthPath /usr/lib/openssh/sshd-auth\n'
+    with tarfile.open(path,'a') as archive:
+        for name,data in [('etc/fixture-hostkey',(keys/'hostkey').read_bytes()),('etc/fixture-authorized_keys',(keys/'clientkey.pub').read_bytes()),('etc/sshd_config',config.encode())]:
+            info=tarfile.TarInfo(name);info.size=len(data);info.mode=0o644 if name=='etc/fixture-authorized_keys' else 0o600;archive.addfile(info,io.BytesIO(data))
 
 def gui(root,config,names,repo,cache):
     raise RuntimeError("GUI disabled pending independent STARTUPINFOEX stdio review")

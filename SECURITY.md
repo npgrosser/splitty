@@ -151,9 +151,12 @@ limits do not establish a bound on every WebView/framework allocation or total
 renderer RSS. Actual platform isolation and resource checks are tracked separately
 from unit coverage. Linux full UI checks cover assets, binary terminal traffic,
 heartbeat, independent daemon lifetime and absence of app/WebKit TCP listeners.
-Native MSVC tests and the WebView2 setup-role smoke pass. The revised output
-carrier, native popout cleanup, WSL and macOS require their own runtime checks;
-one platform's result does not establish another's behavior.
+Full UI runs also exercise the revised output carrier and parent-owned popout
+cleanup on macOS and Windows/WSL, including WSL with localhost forwarding
+disabled. The Windows sibling/slow-consumer fixture passes its functional checks
+but still fails its strict listener check. Remaining platform/resource gates and
+the whole-framework allocation bound stay open; one platform's result does not
+establish another's behavior.
 
 ## Terminal output
 

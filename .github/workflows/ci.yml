@@ -26,11 +26,16 @@ jobs:
           key: hosted-wsl-linux-fixture
       - name: Build production assets and Linux backend from the same source
         run: |
-          git merge-base --is-ancestor 6464f3b9a0e35347d6f02309c523b148dd5aaee4 HEAD
+          git merge-base --is-ancestor 9c49e83ee9257a74302bf55168d3f03358dbbc5b HEAD
           pnpm --dir frontend install --frozen-lockfile
           pnpm --dir frontend build
+          python3 scripts/testing/tauri-windows-guard.test.py
+          node scripts/testing/tauri-windows-native-smoke/pressure.test.mjs
           cargo build --locked -p splitty-server --bin splitty
-          python3 scripts/testing/hosted-wsl-preflight/build.py "$RUNNER_TEMP/wsl-fixture" --application
+          mkdir -p "$RUNNER_TEMP/ssh-package/root"
+          (cd "$RUNNER_TEMP/ssh-package" && apt-get download openssh-server libwrap0)
+          for archive in "$RUNNER_TEMP/ssh-package/"*.deb; do dpkg-deb -x "$archive" "$RUNNER_TEMP/ssh-package/root"; done
+          python3 scripts/testing/hosted-wsl-preflight/build.py "$RUNNER_TEMP/wsl-fixture" --application --ssh-package-root "$RUNNER_TEMP/ssh-package/root"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: hosted-wsl-rootfs
@@ -65,18 +70,19 @@ jobs:
           $source=([IO.File]::ReadAllText('scripts/testing/tauri-windows-native-smoke/fixture-sentinel.ps1')).Replace("`r`n","`n").Replace("`n","`r`n")
           $guard=([IO.File]::ReadAllText('scripts/testing/tauri-windows-native-smoke/fixture-guest-guard.sh')).Replace("`r`n","`n").Replace("`n","`r`n")
           ./scripts/testing/hosted-wsl-preflight/delegated-guard.test.ps1 -Source $source -GuardBase64 ([Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($guard)))
-      - name: Prepare the existing guarded full-UI fixture without launching GUI
+          ./scripts/testing/hosted-wsl-preflight/scenario.test.ps1
+      - name: Prepare the existing guarded isolation fixture without launching GUI
         timeout-minutes: 25
         shell: pwsh
         run: |
           pnpm --dir frontend install --frozen-lockfile
           if ($LASTEXITCODE) { exit $LASTEXITCODE }
-          python scripts/testing/tauri-windows-wsl-smoke.py --disposable-distros --full-ui --build-only --prepared-hosted-artifacts "$env:RUNNER_TEMP/hosted-wsl-rootfs" --result-root "$env:RUNNER_TEMP/hosted-wsl-build-root.txt"
+          python scripts/testing/tauri-windows-wsl-smoke.py --disposable-distros --isolation-consumer --build-only --prepared-hosted-artifacts "$env:RUNNER_TEMP/hosted-wsl-rootfs" --result-root "$env:RUNNER_TEMP/hosted-wsl-build-root.txt"
           exit $LASTEXITCODE
-      - name: Prove actual native app under forwarding disabled with enclosing controls
+      - name: Exercise native isolation and original replay ordering under forwarding enabled
         timeout-minutes: 20
         shell: pwsh
-        run: ./scripts/testing/hosted-wsl-preflight/run.ps1 -AllowDisposableHostedWslConfig -Artifact "$env:RUNNER_TEMP/hosted-wsl-rootfs" -Evidence "$env:RUNNER_TEMP/hosted-wsl-evidence" -RunNativeApplication -CacheRootFile "$env:RUNNER_TEMP/hosted-wsl-build-root.txt"
+        run: ./scripts/testing/hosted-wsl-preflight/run.ps1 -AllowDisposableHostedWslConfig -Artifact "$env:RUNNER_TEMP/hosted-wsl-rootfs" -Evidence "$env:RUNNER_TEMP/hosted-wsl-evidence" -RunIsolationConsumer -CacheRootFile "$env:RUNNER_TEMP/hosted-wsl-build-root.txt"
       - name: Retain prebuild diagnostics without Cargo or WebView caches
         if: always()
         shell: pwsh

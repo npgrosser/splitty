@@ -63,9 +63,10 @@ and retains cancellation and generation semantics across the transport change.
   return to zero, independent guest sentinels answer fresh nonces, and both
   temporary distributions are removed. The last popout closes at app exit;
   this is not Windows parent-reload or sibling-remote isolation evidence.
-- Actual macOS CI at `4eb7e72` passes GUI all-target clippy and all 90 GUI library tests.
-  All twelve real-child native bridge failure/cancellation regressions pass at
-  `5d25bf9`, including the new owner cleanup and held-stderr deadline cases;
+- Actual macOS [CI at `b88933f`](https://github.com/npgrosser/splitty/actions/runs/41717039859)
+  passes GUI all-target clippy and all 90 GUI library tests. All twelve real-child
+  native bridge failure/cancellation regressions pass, including the owner
+  cleanup and held-stderr deadline cases;
   these exercise controlled carriers, not permanent system-SSH reconnect failure.
   Private endpoint peer-user checks, native forwarding reservation, IPv4/IPv6
   listener positive controls, owned-helper lifetime and explicit gateway
@@ -215,18 +216,69 @@ remote/server all-target clippy passes. Fixed-size setup metadata is separately
 bounded by length and setup admission; the transport ledger is not a total
 process RSS or trusted deployment-archive bound.
 
-## Hosted Windows forwarding preflight
+## Windows isolation and consumer-pressure fixture
 
-A separate diagnostic branch at `6acdbdd` passes GitHub run
-[41709278261](https://github.com/npgrosser/splitty/actions/runs/41709278261).
-On a fresh hosted Windows VM, actual WSL 2 guest execution and matching guest/
-Windows nonce responses establish the forwarding-enabled positive control.
-After disabling localhost forwarding and restarting WSL, the guest still
-answers before and after the refused Windows connection. The private distro
-is removed, the original configuration is restored, cleanup reports no errors
-and owned Windows handles return to zero. This proves the availability of a
-disposable test environment; it does not yet prove Splitty's native app works
-with forwarding disabled. That application run remains part of task 7.6.
+The expanded fixture's `a52fde175fc7` run completes its functional workload:
+Setup/Main and two Remote windows, no opener/named-window references or shared
+storage, denied foreign target/handle use, independent slow-client closure,
+healthy API/file completion on the unchanged connection, replay containing the
+post-close marker, and 32-handle saturation/refusal/replacement/recovery. Actual
+binary PTY and two file digests pass. Local helpers/PTYs exit, the remote daemon
+survives app exit, independent fixture sentinels survive and both private
+distributions are removed with zero owned Windows handles.
+
+The overall result remains failed: sampled SSH listener rows are unclassified,
+and the separate native TCP control reports an unexpected state for its own
+listener. Copied-handle denial is a capsule check; stale Setup-proof denial is a
+broker diagnostic. The slow client withholds receipts rather than freezing a
+JavaScript engine; global/worker ceilings are not independently saturated here.
+An earlier replay-marker failure remains unexplained. The next source version
+restores immediate write/open/attach ordering, keeping diagnostic awaits after
+attach; the passing diagnostic run does not establish that timing variant.
+[Fixture instructions and evidence limits](../../../scripts/testing/tauri-windows-native-smoke/README.md)
+retain these distinctions.
+
+## Native Windows app with localhost forwarding disabled
+
+The separate diagnostic branch at `dfe1996`, including production revision
+`6464f3b`, passes GitHub [run 41712473304](https://github.com/npgrosser/splitty/actions/runs/41712473304).
+Linux builds the production assets, backend and private rootfs from the same
+revision; the Windows runner verifies their digests and lockfile provenance.
+The existing full-UI fixture runs under NAT with `localhostForwarding=false`.
+Matching guest/Windows nonce responses first prove forwarding works when
+enabled. Guest-positive/Windows-blocked controls then enclose the actual app
+run, while configuration bytes remain unchanged.
+
+The actual WebView2 app loads production CSS, font and WASM, renders the Ghostty
+canvas, persists settings and passes the bounded shared-popout checks. Binary
+PTY traffic and a 1,048,833-byte transfer pass; its independently checked SHA256
+is `2863365348a5ef27b6035a51ff1783a1303e28f78045001face85bee49b8caae`.
+Duplicate start retains the first owner; distribution switching performs a real
+app restart. Both app instances exit naturally, owned helpers/PTYs exit, sampled
+app and guest listener inventories are empty, independent fixture workers
+survive, and owned handles return to zero. Both app distributions and the
+control distribution are removed; configuration restoration and cleanup pass.
+
+This establishes the disabled-forwarding application case of task 7.6. It does
+not establish sibling-remote isolation, the remaining consumer-pressure cases,
+whole-framework memory bounds or continuous TCP-listener absence. The separate
+local SSH listener observation remains unresolved and is not waived by this run.
+
+## Hosted Windows TCP measurement control
+
+The isolated diagnostic at `58ed0ce` passes GitHub
+[run 41717658574](https://github.com/npgrosser/splitty/actions/runs/41717658574)
+on a fresh Windows 2025 runner. It creates only its own IPv4/IPv6 loopback
+listeners and connected peers. `GetExtendedTcpTable`, raw CIM properties and
+`Get-NetTCPConnection` agree: listener state 2 and established state 5, with
+matching endpoints. Independent decoder controls pass and every owned socket
+is closed. The retained helper matches the earlier local candidate exactly
+after checkout CRLF normalization.
+
+This validates the decoder on the hosted runner. It does not explain or waive
+the local native-API state 0 / CIM null listener control or classify the earlier
+SSH observations. The application isolation/SSH scenario still needs a valid
+listener inventory; the self-socket control is not an application pass.
 
 ## Open merge gates
 
@@ -242,8 +294,6 @@ with forwarding disabled. That application run remains part of task 7.6.
   native macOS positive controls now pass in CI. The complete listener/resource
   inventory matrix remains open; WSL refusal checks alone are not positive
   native-platform coverage.
-- Disabled WSL localhost forwarding has not been exercised; the pipe tests ran
-  with the existing host networking configuration unchanged.
 - Migration, conformance and security review must reconcile the remaining task
   checks, including framework-bound scope, before cutover is approved.
 

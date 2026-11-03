@@ -46,39 +46,58 @@ script does not claim Windows Job membership owns Linux guest processes.
 Without `-RunNativeApplication`, passing proves only hosted WSL2 and effective
 NAT localhost forwarding on/off. It does not prove the application transport.
 
-## Optional actual application proof (prepared, not yet executed)
+## Application scenarios
 
-The diagnostic workflow now incorporates the committed product snapshot
-`6464f3b9a0e35347d6f02309c523b148dd5aaee4` and builds its production frontend and Linux backend from the same
-workflow source revision. The additional application manifest pins Cargo.lock,
-raw/stripped backend, existing full fixture rootfs, and production asset archive.
-Windows verifies every prepared digest before extracting assets into its fresh
-hosted checkout. No Linux tools execute on Windows.
+The existing `-RunNativeApplication` mode retains its actual full production UI
+run under `localhostForwarding=false`, with positive/negative controls before
+and a fresh negative control afterward. Its previously recorded result remains
+separate from the new scenario below.
 
-The existing `tauri-windows-wsl-smoke.py --disposable-distros --full-ui` remains
-the only app fixture: same Rust instrumentation, TypeScript assertions,
-PowerShell runtime driver, kernel Jobs and exact registry/guest guards. Its host
-path/PowerShell utilities and Vite invocation now support native Windows. Two
-optional entrypoints reuse that flow: `--build-only` warms MSVC dependencies and
-cleans its temporary distributions without starting GUI; prepared artifact input
-replaces only Linux `strip`/`ldd` preparation. The subsequent run copies fresh
-source and reuses only the marked build target cache.
+The diagnostic workflow now selects `-RunIsolationConsumer`, a mutually exclusive
+scenario under explicit NAT `localhostForwarding=true`. After its positive nonce
+control it runs the existing guarded `--disposable-distros --isolation-consumer`
+fixture once, verifies its app/cleanup evidence and unchanged true config bytes,
+then finishes and restores the original configuration. It does not run false
+controls or a second GUI in this scenario. The fixture's private guest-loopback
+SSH host requires this forwarding-enabled setting. No false-mode claim is made.
 
-The full-UI run occurs after the true positive and false negative TCP controls,
-while the false config bytes remain unchanged. Fresh false controls run again
-after its two distro contexts finish. Actual success additionally requires the
-production UI report, binary PTY bytes, 1,048,833-byte file transfer, app restart,
-owned backend/session cleanup and no guest TCP listener. Source/runtime hashes,
-probe bundle, app reports and private distro cleanup are retained separately.
-`NativeApplicationPassed` stays false until both app and post-run controls pass.
+Current fixture source includes the original post-close write → open replay →
+attach ordering. Diagnostic catalog/checkpoint awaits follow attach. Success
+requires persisted write/open/attach timestamps in order and the actual replay
+marker; a portable source check rejects extra pre-attach awaits. Earlier local
+missing-marker evidence remains unexplained; a later pass is not its diagnosis.
+The strict raw-CIM listener/unknown/error gate remains enabled.
 
-The Windows job reserves up to 25 minutes for a cold MSVC prebuild. The actual
-controlled-runtime step still has a 20-minute cap (15-minute work deadline plus
-cleanup reserve). On timeout the exact parent Job is stopped, and the existing
-fixture's recorded-only cleanup entrypoint handles any remaining private distro
-registrations. A bad/missing ownership record fails closed; abrupt VM teardown
-remains the final boundary on hosted cancellation. No installer, remote SSH
-isolation, or hard OS-failure shutdown guarantee is added by this fixture.
+Both modes reuse the same suspended-create kernel Jobs, exact registration and
+first-action guest guards, fresh marked source/driver copies and recorded-only
+cleanup fallback. They do not change existing distributions, user SSH files or
+clipboard. Windows paths, Vite entrypoints and prepared inputs work without Linux
+commands on Windows. A separate prebuild warms only Cargo artifacts and removes
+its two private distributions before the one runtime begins.
+
+The Linux job builds production assets and backend at the workflow revision. It
+stages `openssh-server` and `libwrap0` with `apt-get download`/`dpkg-deb` in
+RUNNER_TEMP, without installing packages or running service/key-generation hooks.
+The existing rootfs tool/dependency catalog packages these explicit files and
+fails on missing libraries. Package/tool, Cargo.lock, payload, asset and rootfs
+hashes accompany the same-source manifest. Windows verifies all digests before
+using the prepared inputs.
+
+The prepared SSH rootfs contains no per-run host or client keys. Windows generates
+fresh fixture keys and a private loopback SSH config, then overlays only its host
+key (0600), public authorized key (0644) and sshd config (0600). Base/final rootfs
+and public-key hashes are retained. Evidence upload enumerates reports and hashes;
+it does not upload private keys, key directories, generated rootfs or WebView data.
+The Windows app/SSH readiness and authentication remain actual runtime checks,
+not claims established by portable archive tests.
+
+The cold MSVC prebuild has a 25-minute step cap; controlled runtime has a
+20-minute cap with a 15-minute work deadline and cleanup reserve. The outer Job
+is stopped on timeout, and recorded exact-target cleanup handles remaining app
+fixtures before the preflight distro/config finally cleanup. Abrupt hosted-job
+cancellation ultimately relies on disposable VM teardown. Neither mode is an
+installer or whole-framework/RSS bound test. Source preparation does not dispatch
+this manual workflow.
 
 Portable preparation (no WSL/configuration operations):
 

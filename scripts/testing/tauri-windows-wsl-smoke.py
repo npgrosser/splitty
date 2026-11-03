@@ -143,7 +143,7 @@ def cleanup_owned_records(root,before,owned):
     (root/'distro-cleanup.json').write_text(json.dumps(cleanup,indent=2))
     if any(row.get('error') or not row.get('unregistered') for row in cleanup): raise RuntimeError('fixture cleanup needs inspection: '+str(root/'distro-cleanup.json'))
 
-def instrument(root,names,repo,full_ui=False):
+def instrument(root,names,repo,full_ui=False,isolation=None):
     common.instrument(root)
     crate=root/'crates/splitty-tauri'; path=crate/'src/windows_wsl.rs'; source=path.read_text()
     source=source.replace('fn config_path(app: &AppHandle) -> Result<PathBuf, String> {','fn config_path(app: &AppHandle) -> Result<PathBuf, String> {\n        if let Some(path) = std::env::var_os("SPLITTY_SMOKE_APP_DATA") { return Ok(PathBuf::from(path).join("windows.json")); }',1)
@@ -183,7 +183,7 @@ fn windows_smoke_report(app: AppHandle, webview: tauri::Webview, native: tauri::
     value["wslOwnerPid"] = serde_json::json!(owner.as_ref().ok().and_then(|owner| owner.id()));
     let phase = value["phase"].as_str().unwrap_or("error");
     let final_report = phase == "final" || value.get("error").is_some();
-    let filename = if final_report { "runtime-result.json".to_owned() } else if ["started-a","duplicate-a","started-b","main-a","native-open"].contains(&phase) { format!("checkpoint-{phase}.json") } else { return Err("invalid fixture checkpoint".into()); };
+    let filename = if final_report { "runtime-result.json".to_owned() } else if ["started-a","duplicate-a","started-b","main-a","native-open","isolation-complete","pressure-observed","capture-requested","pressure-replay"].contains(&phase) { format!("checkpoint-{phase}.json") } else { return Err("invalid fixture checkpoint".into()); };
     std::fs::write(std::path::PathBuf::from(std::env::var_os("SPLITTY_SMOKE_EVIDENCE").expect("fixture evidence")).join(filename), serde_json::to_vec_pretty(&value).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     if final_report { app.exit(if value.get("error").is_some() { 1 } else { 0 }); }
     Ok(value)
@@ -195,11 +195,65 @@ fn windows_smoke_report(app: AppHandle, webview: tauri::Webview, native: tauri::
         (assets/name).write_text('<!doctype html><html><head><title>Isolated Windows WSL native smoke</title><script type="module" src="/probe.js"></script></head><body>Hidden native pipe fixture</body></html>')
     if full_ui:
         prepare_full_ui(crate,assets,repo,root)
+    if isolation:
+        instrument_isolation(root,crate,isolation)
     config=root/'wsl-vite.config.mjs'
-    config.write_text('import {defineConfig} from '+json.dumps((repo/'frontend/node_modules/vite/dist/node/index.js').resolve().as_uri())+'; export default defineConfig({build:{outDir:'+json.dumps(str(assets))+',emptyOutDir:false,minify:false,lib:{entry:'+json.dumps(str(HERE/'tauri-windows-native-smoke/wsl-entry.ts'))+',name:"WslNativeProbe",formats:["iife"],fileName:()=>"probe.js"},target:"es2022"},define:{__FIXTURES__:'+json.dumps(json.dumps(names))+',__WINDOWS_FULL_UI__:'+json.dumps(full_ui)+'}});')
+    config.write_text('import {defineConfig} from '+json.dumps((repo/'frontend/node_modules/vite/dist/node/index.js').resolve().as_uri())+'; export default defineConfig({build:{outDir:'+json.dumps(str(assets))+',emptyOutDir:false,minify:false,lib:{entry:'+json.dumps(str(HERE/'tauri-windows-native-smoke/wsl-entry.ts'))+',name:"WslNativeProbe",formats:["iife"],fileName:()=>"probe.js"},target:"es2022"},define:{__FIXTURES__:'+json.dumps(json.dumps(names))+',__WINDOWS_FULL_UI__:'+json.dumps(full_ui)+',__ISOLATION_CONSUMER__:'+json.dumps(bool(isolation))+',__ISOLATION_ALIASES__:'+json.dumps(json.dumps(isolation['aliases'] if isolation else []))+'}});')
     with (root/'wsl-probe-bundle.log').open('w') as output:
         subprocess.run(['node',str(repo/'frontend/node_modules/vite/bin/vite.js'),'build','--config',str(config)],cwd=repo,stdout=output,stderr=subprocess.STDOUT,check=True)
     (root/'runtime-source-hashes.json').write_text(json.dumps(common.hashes(root),indent=2))
+
+def prepare_isolation_host(root, prepared_dir=None, prepared=None):
+    spec=importlib.util.spec_from_file_location('isolation_ssh_fixture',HERE/'tauri-windows-remote-smoke.py')
+    remote=importlib.util.module_from_spec(spec);spec.loader.exec_module(remote)
+    keys=root/'isolation-ssh';keys.mkdir()
+    keygen=str(Path(os.environ.get('SystemRoot',r'C:\Windows'))/'System32/OpenSSH/ssh-keygen.exe') if common.NATIVE_WINDOWS else 'ssh-keygen'
+    for name in ['hostkey','clientkey']:subprocess.run([keygen,'-q','-t','ed25519','-N','','-f',str(keys/name)],check=True)
+    port=int(common.powershell('$s=[System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback,0);$s.Start();$p=$s.LocalEndpoint.Port;$s.Stop();$p'))
+    aliases=['splitty-isolation-one','splitty-isolation-two'];public=(keys/'hostkey.pub').read_text().split()
+    (keys/'known_hosts').write_text('splitty-isolation-host '+public[0]+' '+public[1]+'\n')
+    config=keys/'config';config.write_text('Host '+' '.join(aliases)+'\n HostName 127.0.0.1\n Port '+str(port)+'\n User splitty-fixture\n HostKeyAlias splitty-isolation-host\n IdentityFile "'+common.windows(keys/'clientkey')+'"\n UserKnownHostsFile "'+common.windows(keys/'known_hosts')+'"\n GlobalKnownHostsFile none\n IdentitiesOnly yes\n IdentityAgent none\n BatchMode yes\n StrictHostKeyChecking yes\n ConnectTimeout 5\n')
+    common.powershell('& icacls.exe '+common.quote(common.windows(keys/'clientkey'))+' /inheritance:r /grant:r ($env:USERNAME+":F") | Out-Null; if($LASTEXITCODE){exit $LASTEXITCODE}')
+    if prepared_dir:
+        if 'app-ssh-rootfs.tar' not in prepared['files']:raise RuntimeError('prepared SSH rootfs missing')
+        def make_rootfs(path):
+            shutil.copyfile(prepared_dir/'app-ssh-rootfs.tar',path)
+            remote.overlay_host_identity(path,keys,port,prepared.get('sshHelpers',[]))
+            (root/'isolation-rootfs-provenance.json').write_text(json.dumps({'baseSha256':prepared['files']['app-ssh-rootfs.tar'],'finalSha256':hashlib.sha256(path.read_bytes()).hexdigest(),'hostPublicKeySha256':hashlib.sha256((keys/'hostkey.pub').read_bytes()).hexdigest(),'clientPublicKeySha256':hashlib.sha256((keys/'clientkey.pub').read_bytes()).hexdigest()},indent=2))
+    else:make_rootfs=lambda path:remote.host_rootfs(path,rootfs,keys,port)
+    return {'aliases':aliases,'config':config,'rootfs':make_rootfs}
+
+def instrument_isolation(root,crate,isolation):
+    path=root/'crates/splitty-remote/src/ssh.rs';source=path.read_text();anchor='.args(hardening_options())'
+    if source.count(anchor)!=1:raise RuntimeError('isolated SSH configuration anchor changed')
+    path.write_text(source.replace(anchor,anchor+'.arg("-F").arg('+json.dumps(common.windows(isolation['config']))+')',1))
+    path=crate/'src/navigation.rs';source=path.read_text()
+    start=source.index('fn open_externally(');end=source.index('\n}\n',start)+2
+    source=source[:start]+'fn open_externally(_app: &AppHandle, url: &Url) { crate::fixture_external_open(url); }'+source[end:]
+    source=source.replace('use tauri_plugin_opener::OpenerExt;','')
+    path.write_text(source)
+    path=crate/'src/remote.rs';source=path.read_text()
+    focus='fn focus(window: &WebviewWindow) {\n    let _ = window.unminimize();\n    let _ = window.show();\n    let _ = window.set_focus();\n}'
+    if source.count(focus)!=1:raise RuntimeError('hidden remote fixture focus anchor changed')
+    source=source.replace(focus,'fn focus(_window: &WebviewWindow) { /* Fixture only: stay hidden and never take focus. */ }',1)
+    source=source.replace('builder.data_directory(webview_data_dir(app, label)?)','builder.data_directory(PathBuf::from('+json.dumps(common.windows(root/'remote-data'))+').join(label))')
+    source=source.replace('    app.path()\n        .app_config_dir()\n        .map_err(|error| format!("could not resolve the configuration directory: {error}"))','    Ok(PathBuf::from('+json.dumps(common.windows(root/'isolated-host-config'))+'))')
+    path.write_text(source)
+    path=crate/'src/client_ipc.rs';source=path.read_text();source+='''
+impl Broker {
+    pub(crate) fn smoke_proof(&self,label:&str)->Option<Proof>{self.registry.lock().ok()?.windows.get(label)?.proof.clone()}
+    pub(crate) fn smoke_counts(&self)->serde_json::Value{
+        let registry=self.registry.lock().unwrap();
+        serde_json::json!({"handles":registry.entries.len(),"opening":registry.opening,"mainHandles":registry.entries.values().filter(|entry|entry.window=="main").count()})
+    }
+}
+''';path.write_text(source)
+    path=crate/'src/lib.rs';source=path.read_text()
+    source=source.replace('            windows_smoke_report,','            windows_smoke_report,\n            windows_fixture_state,',1)
+    source=source.replace('.permission("allow-windows-smoke-report")','.permission("allow-windows-smoke-report").permission("allow-windows-fixture-state")',1)
+    source=source.replace('            app.add_capability(capability::main_window())?;','            app.add_capability(capability::main_window())?;\n            app.add_capability(tauri::ipc::CapabilityBuilder::new("fixture-isolation-remote-report").window("remote-*").local(true).permission("allow-windows-fixture-state"))?;',1)
+    source+=(HERE/'tauri-windows-native-smoke/isolation-state.rs').read_text();path.write_text(source)
+    path=crate/'build.rs';source=path.read_text().replace('            "windows_smoke_report",','            "windows_smoke_report",\n            "windows_fixture_state",',1);path.write_text(source)
 
 def prepare_full_ui(crate,assets,repo,root):
     dist=repo/'frontend/dist'
@@ -262,9 +316,11 @@ def main(argv=None):
     parser.add_argument('--cleanup-root',type=Path,help='clean only recorded private distributions of a marked TEMP fixture')
     parser.add_argument('--build-only',action='store_true',help='build the fresh guarded fixture, clean its distros, and return without launching GUI')
     parser.add_argument('--cache-workspace',type=Path,help='marked TEMP Cargo target artifacts only; fresh source/driver always copied')
+    parser.add_argument('--isolation-consumer',action='store_true',help='bounded Setup/Main/two-remote isolation and non-consuming-client admission fixture; implies --full-ui')
     parser.add_argument('--full-ui',action='store_true',help='exercise real packaged frontend assets and bounded shared UI/popout checks')
     parser.add_argument('--disposable-distros',action='store_true',required=True,help='explicitly create, run and clean two isolated temporary distributions')
     args=parser.parse_args(argv)
+    if args.isolation_consumer:args.full_ui=True
     with approved_private_wsl(args.disposable_distros):
         if args.cleanup_root:
             root=args.cleanup_root.resolve()
@@ -274,7 +330,7 @@ def main(argv=None):
             cleanup_owned_records(root,value['before'],value['created'])
         else: _run_full(args)
 
-def load_hosted_artifacts(directory, repo):
+def load_hosted_artifacts(directory, repo, require_ssh=False):
     """No Linux tool execution on Windows: verify the same-run prepared inputs."""
     if not common.NATIVE_WINDOWS or os.environ.get('GITHUB_ACTIONS') != 'true' or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted' or os.environ.get('RUNNER_OS') != 'Windows':
         raise RuntimeError('prepared artifacts require GitHub-hosted native Windows')
@@ -285,8 +341,9 @@ def load_hosted_artifacts(directory, repo):
         raise RuntimeError('prepared artifact source revision mismatch')
     if value['cargoLockSha256'] != hashlib.sha256((repo/'Cargo.lock').read_bytes().replace(b'\r\n',b'\n')).hexdigest():
         raise RuntimeError('prepared Cargo.lock mismatch')
-    if set(value['files']) != {'splitty','app-rootfs.tar','frontend-dist.tar'}:
+    if set(value['files']) not in [{'splitty','app-rootfs.tar','frontend-dist.tar'}, {'splitty','app-rootfs.tar','frontend-dist.tar','app-ssh-rootfs.tar'}]:
         raise RuntimeError('unexpected prepared artifact file catalog')
+    if require_ssh and 'app-ssh-rootfs.tar' not in value['files']:raise RuntimeError('prepared isolation requires SSH rootfs')
     for name,digest in value['files'].items():
         if hashlib.sha256((directory/name).read_bytes()).hexdigest() != digest:
             raise RuntimeError('prepared artifact digest mismatch: '+name)
@@ -297,6 +354,17 @@ def load_hosted_artifacts(directory, repo):
         archive.extractall(dist,filter='data')
     return value
 
+def listener_only_evidence_continuation(process,value,expected_instances):
+    # Continue only private read-only evidence collection; never changes exit.
+    if not isinstance(process,dict):return False
+    if not isinstance(value,dict) or value.get('phase')!='final' or 'error' in value or value.get('terminalBinary') is not True or not isinstance(value.get('savedPath'),str):return False
+    instances=process.get('AppInstances')
+    return (process.get('TimedOut') is False and isinstance(instances,list) and len(instances)==expected_instances
+        and all(isinstance(row,dict) and row.get('ExitCode')==0 and row.get('Alive') is False for row in instances)
+        and process.get('RemainingOwned')==[] and process.get('IndependentFixturePreserved') is True
+        and process.get('JobEmptyAfterCleanup') is True and process.get('OwnedHandlesAfterCleanup')==0
+        and process.get('CleanupErrors')==[] and bool(process.get('Listeners')))
+
 def fixture_executable_path(root):
     # Convert only the fresh root: wslpath on the child path resolves the Cargo
     # target junction into its cache and would violate the exact launch guard.
@@ -305,7 +373,7 @@ def fixture_executable_path(root):
 def _run_full(args):
     if not WSL_EXECUTION_APPROVED:raise RuntimeError('explicit --disposable-distros scoped approval required')
     repo=HERE.parents[1]
-    prepared = load_hosted_artifacts(args.prepared_hosted_artifacts, repo) if args.prepared_hosted_artifacts else None
+    prepared = load_hosted_artifacts(args.prepared_hosted_artifacts, repo, require_ssh=args.isolation_consumer) if args.prepared_hosted_artifacts else None
     if prepared:
         payload = args.prepared_hosted_artifacts/'splitty'
         provenance = prepared
@@ -324,14 +392,15 @@ def _run_full(args):
     # Snapshot global networking configuration read-only; never edit it.
     global_config=common.powershell('$p=Join-Path $env:USERPROFILE ".wslconfig"; if(Test-Path $p){Get-Content $p}else{"<absent>"}')
     (root/'global-wslconfig-readonly.txt').write_text(global_config)
+    isolation=prepare_isolation_host(root, args.prepared_hosted_artifacts if prepared else None, prepared) if args.isolation_consumer else None
     prepared_rootfs = (lambda path: shutil.copyfile(args.prepared_hosted_artifacts/'app-rootfs.tar', path)) if prepared else None
-    with fixtures(root,rootfs_builder=prepared_rootfs) as names:
-        instrument(root,names,repo,full_ui=args.full_ui)
+    with fixtures(root,rootfs_builder=isolation['rootfs'] if isolation else prepared_rootfs) as names:
+        instrument(root,names,repo,full_ui=args.full_ui,isolation=isolation)
         (appdata/'windows.json').write_text(json.dumps({'selectedDistro':names[0]}))
         # Only the current Windows child process receives these fixture guards.
         original=common.powershell
         def scoped(source,log=None):
-            prefix='$env:SPLITTY_SMOKE_APP_DATA='+common.quote(common.windows(appdata))+'\n$env:SPLITTY_SMOKE_DISTROS='+common.quote(json.dumps(names))+'\n'
+            prefix=('$env:SPLITTY_REMOTE_PAYLOAD='+common.quote(common.windows(root/'crates/splitty-tauri/resources/splitty-wsl-x86_64.tar.gz'))+'\n' if isolation else '')+'$env:SPLITTY_SMOKE_APP_DATA='+common.quote(common.windows(appdata))+'\n$env:SPLITTY_SMOKE_DISTROS='+common.quote(json.dumps(names))+'\n'
             return original(prefix+source,log)
         common.powershell=scoped
         try:
@@ -343,24 +412,42 @@ def _run_full(args):
             shutil.copyfile(HERE/'tauri-windows-native-smoke/fixture-sentinel.ps1',root/'fixture-sentinel.ps1')
             shutil.copyfile(HERE/'tauri-windows-native-smoke/fixture-guest-guard.sh',root/'fixture-guest-guard.sh')
             shutil.copyfile(HERE/'tauri-windows-native-smoke/fixture-registration.ps1',root/'fixture-registration.ps1')
+            shutil.copyfile(HERE/'tauri-windows-native-smoke/fixture-listener.ps1',root/'fixture-listener.ps1')
             other=args.cache_workspace.resolve()/'target/debug/splitty-gui.exe' if args.cache_workspace else root/'target/debug/splitty-gui.exe'
-            command='& '+common.quote(common.windows(driver))+' -Executable '+common.quote(fixture_executable_path(root))+' -OtherExecutable '+common.quote(common.windows(other))+' -RootDir '+common.quote(common.windows(root))+' -FixtureB '+common.quote(names[1])+' -PermitIsolatedFullRun\nexit $LASTEXITCODE'
-            common.powershell(command,root/'windows-wsl-driver.log')
-            process_evidence=json.loads((evidence/'processes.json').read_text(encoding='utf-8-sig'))
+            command='& '+common.quote(common.windows(driver))+' -Executable '+common.quote(fixture_executable_path(root))+' -OtherExecutable '+common.quote(common.windows(other))+' -RootDir '+common.quote(common.windows(root))+' -FixtureB '+common.quote(names[1])+' -PermitIsolatedFullRun'+(' -PermitIsolatedSshHost' if isolation else '')+' -ExpectedAppInstances '+('1' if isolation else '2')+'\nexit $LASTEXITCODE'
+            driver_error=None
+            try:common.powershell(command,root/'windows-wsl-driver.log')
+            except RuntimeError as error:driver_error=error
+            try:
+                process_evidence=json.loads((evidence/'processes.json').read_text(encoding='utf-8-sig'))
+                value=json.loads((evidence/'runtime-result.json').read_text())
+            except (OSError,ValueError):
+                if driver_error:raise driver_error
+                raise
+            if driver_error and not listener_only_evidence_continuation(process_evidence,value,1 if isolation else 2):raise driver_error
             if not process_evidence.get('IndependentFixturePreserved'):raise RuntimeError('independent fixture work did not survive app exit')
             guest=(evidence/'guest-live.txt').read_text(encoding='utf-8-sig')
             if 'PID:' not in guest or 'LISTEN:' in guest: raise RuntimeError('guest native owner TCP inventory failed')
-            value=json.loads((evidence/'runtime-result.json').read_text()); path=value['savedPath']
+            path=value['savedPath']
             if not path.startswith('/home/splitty-fixture/'): raise RuntimeError('file saved outside isolated HOME')
             observed=wsl(names[1],['sha256sum',path]).split()[0]
             expected=hashlib.sha256(bytes(index%256 for index in range(1_048_833))).hexdigest()
             if observed!=expected: raise RuntimeError('WSL uploaded file digest mismatch')
-            for name in names:
+            for name in (names[1:] if isolation else names):
                 tasks=wsl(name,['ps','-e','-o','comm=']).splitlines()
                 if 'splitty' in [task.strip() for task in tasks]: raise RuntimeError('owned WSL backend survived app exit')
+            if isolation:
+                pressure_file=value['pressure']['healthyFile']
+                if pressure_file!='/home/splitty-fixture/healthy-pressure.bin':raise RuntimeError('healthy pressure file escaped fixture HOME')
+                pressure_hash=wsl(names[1],['sha256sum',pressure_file]).split()[0]
+                if pressure_hash!=hashlib.sha256(bytes(index%256 for index in range(65537))).hexdigest():raise RuntimeError('healthy pressure transfer corrupted')
+                status=wsl(names[0],['sh','-c','export XDG_CONFIG_HOME="$HOME/.config" XDG_DATA_HOME="$HOME/.local/share" XDG_RUNTIME_DIR="$HOME/run"; set -- "$HOME"/.local/share/splitty/remote/*/splitty; "$1" daemon status --json'])
+                (root/'preserved-remote-daemon.json').write_text(status)
+                if json.loads(status).get('running') is not True:raise RuntimeError('private remote daemon did not survive app exit')
             if wsl(names[1],['sh','-c','kill -0 '+str(value['terminalPid'])+' 2>/dev/null; test $? -ne 0']).strip(): raise RuntimeError('unexpected shell cleanup output')
-            (root/'wsl-verification.json').write_text(json.dumps({'uploadedSha256':observed,'terminalExited':True,'ownedBackendsExited':True,'unrelatedFixtureWorkPreserved':True,'guestTcpListeners':False,'realAppRestart':True,'names':names},indent=2))
+            (root/'wsl-verification.json').write_text(json.dumps({'strictWindowsListenerGatePassed':not bool(process_evidence.get('Listeners')),'uploadedSha256':observed,'terminalExited':True,'ownedBackendsExited':True,'ownedBackendScope':('local B only; remote A is intentionally preserved' if isolation else 'local A and B'),'remoteDaemonStatusRecorded':bool(isolation),'unrelatedFixtureWorkPreserved':True,'guestTcpListeners':False,'realAppRestart':not bool(isolation),'names':names},indent=2))
             print(evidence,flush=True)
+            if driver_error:raise driver_error
         finally:
             common.powershell=original
 

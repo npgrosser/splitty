@@ -5,6 +5,7 @@ param(
  [Parameter(Mandatory=$true)][string]$Artifact,
  [Parameter(Mandatory=$true)][string]$Evidence,
  [switch]$RunNativeApplication,
+ [switch]$RunIsolationConsumer,
  [string]$CacheRootFile
 )
 $ErrorActionPreference='Stop'
@@ -12,6 +13,7 @@ Set-StrictMode -Version Latest
 if(-not $AllowDisposableHostedWslConfig -or $env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:RUNNER_OS -cne 'Windows'){
  throw 'Only an explicitly opted-in fresh GitHub-hosted Windows VM may change WSL configuration'
 }
+if($RunNativeApplication-and $RunIsolationConsumer){throw 'select exactly one native application scenario'}
 $evidencePath=[IO.Path]::GetFullPath($Evidence)
 $tempPath=[IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd([char[]]'\/')
 if(-not [IO.Path]::GetDirectoryName($evidencePath).Equals($tempPath,[StringComparison]::OrdinalIgnoreCase)-or(Test-Path $evidencePath)){throw 'evidence must be a fresh direct child of RUNNER_TEMP'}
@@ -154,7 +156,7 @@ function Read-AppRoot([string]$File){
 }
 function Copy-AppEvidence([string]$Root){
  $destination=Join-Path $Evidence 'native-application';New-Item -ItemType Directory -Force $destination|Out-Null
- foreach($name in @('source-hashes.json','runtime-source-hashes.json','payload-provenance.json','production-lib.rs','owned-distros.json','distro-cleanup.json','wsl-verification.json','global-wslconfig-readonly.txt','windows-wsl-build.log','windows-wsl-driver.log','wsl-probe-bundle.log')){
+ foreach($name in @('source-hashes.json','runtime-source-hashes.json','payload-provenance.json','isolation-rootfs-provenance.json','preserved-remote-daemon.json','production-lib.rs','owned-distros.json','distro-cleanup.json','wsl-verification.json','global-wslconfig-readonly.txt','windows-wsl-build.log','windows-wsl-driver.log','wsl-probe-bundle.log')){
   $path=Join-Path $Root $name;if(Test-Path $path){Copy-Item -LiteralPath $path -Destination $destination -Force}
  }
  $runtime=Join-Path $Root 'runtime-evidence'
@@ -165,13 +167,20 @@ function Copy-AppEvidence([string]$Root){
  $probe=Join-Path $Root 'crates/splitty-tauri/runtime-assets/probe.js'
  if(Test-Path $probe){Copy-Item -LiteralPath $probe -Destination (Join-Path $destination 'probe.js') -Force}
 }
-function Invoke-NativeApplication {
+# Pure evidence predicate; no process, registry or filesystem operations.
+function Assert-IsolationReplayEvidence($Capture,$Replay){
+ $timing=$Capture.sessionState
+ if($Capture.phase-cne 'capture-requested'-or $Replay.phase-cne 'pressure-replay'-or $Replay.replay.markerPresent-ne $true-or $null-eq $timing.writeAcceptedAt-or $null-eq $timing.replayOpenStartedAt-or $null-eq $timing.attachSentAt-or $timing.writeAcceptedAt-gt $timing.replayOpenStartedAt-or $timing.replayOpenStartedAt-gt $timing.attachSentAt){throw 'original-order replay checkpoint evidence missing or out of order'}
+ return $timing
+}
+function Invoke-NativeApplication([switch]$IsolationConsumer) {
  if(-not $CacheRootFile){throw 'native run requires the successful prebuild root record'}
  $cache=Read-AppRoot $CacheRootFile
  $rootRecord=Join-Path $Evidence 'native-root.txt'
  $python=(Get-Command python.exe -ErrorAction Stop).Source
  $scriptPath=Join-Path $PSScriptRoot '../tauri-windows-wsl-smoke.py'
- $arguments=@($scriptPath,'--disposable-distros','--full-ui','--prepared-hosted-artifacts',$Artifact,'--cache-workspace',$cache,'--result-root',$rootRecord)
+ $mode=$(if($IsolationConsumer){'--isolation-consumer'}else{'--full-ui'})
+ $arguments=@($scriptPath,'--disposable-distros',$mode,'--prepared-hosted-artifacts',$Artifact,'--cache-workspace',$cache,'--result-root',$rootRecord)
  $job=[SplittyFixtureJob]::new($python,$arguments,$Evidence,$false);$jobs.Add($job)
  $root=$null
  try{
@@ -181,8 +190,17 @@ function Invoke-NativeApplication {
   $root=Read-AppRoot $rootRecord
   $report=Get-Content (Join-Path $root 'runtime-evidence/runtime-result.json') -Raw|ConvertFrom-Json
   $verification=Get-Content (Join-Path $root 'wsl-verification.json') -Raw|ConvertFrom-Json
-  if($report.fullUi-ne $true-or $report.terminalBinary-ne $true-or $report.fileBytes-ne 1048833-or $verification.terminalExited-ne $true-or $verification.ownedBackendsExited-ne $true-or $verification.realAppRestart-ne $true-or $verification.guestTcpListeners-ne $false){throw 'actual native production UI/PTY/file/cleanup evidence missing'}
-  $events.Add(@{Proof='actual-native-full-ui-under-false';Root=$root;Source=$env:GITHUB_SHA;TerminalBinary=$report.terminalBinary;FileBytes=$report.fileBytes;RealAppRestart=$verification.realAppRestart})
+  if($report.fullUi-ne $true-or $report.terminalBinary-ne $true-or $report.fileBytes-ne 1048833-or $verification.terminalExited-ne $true-or $verification.ownedBackendsExited-ne $true-or $verification.guestTcpListeners-ne $false){throw 'actual native production UI/PTY/file/cleanup evidence missing'}
+  if($IsolationConsumer){
+   if($verification.realAppRestart-ne $false-or $verification.strictWindowsListenerGatePassed-ne $true-or $report.isolation.oldSetupDenied-ne $true-or @($report.isolation.externalOpens).Count-ne 0-or $report.pressure.nonConsumingClientClosed-ne $true-or $report.pressure.captureReplay-ne $true-or $report.pressure.perWindow32-ne $true-or $report.pressure.excessRefused-ne $true-or $report.pressure.replacementAdmitted-ne $true){throw 'native isolation/consumer evidence incomplete'}
+   $capture=Get-Content (Join-Path $root 'runtime-evidence/checkpoint-capture-requested.json') -Raw|ConvertFrom-Json
+   $replay=Get-Content (Join-Path $root 'runtime-evidence/checkpoint-pressure-replay.json') -Raw|ConvertFrom-Json
+   $timing=Assert-IsolationReplayEvidence $capture $replay
+   $events.Add(@{Proof='actual-native-isolation-consumer-under-true';Root=$root;Source=$env:GITHUB_SHA;TerminalBinary=$report.terminalBinary;FileBytes=$report.fileBytes;OriginalReplayOrdering=$true;WriteAcceptedAt=$timing.writeAcceptedAt;ReplayOpenStartedAt=$timing.replayOpenStartedAt;AttachSentAt=$timing.attachSentAt})
+  }else{
+   if($verification.realAppRestart-ne $true){throw 'native full-UI app restart evidence missing'}
+   $events.Add(@{Proof='actual-native-full-ui-under-false';Root=$root;Source=$env:GITHUB_SHA;TerminalBinary=$report.terminalBinary;FileBytes=$report.fileBytes;RealAppRestart=$verification.realAppRestart})
+  }
  }finally{
   try{if($job.ActiveProcesses-ne 0-and-not $job.Stop(5000)){throw 'native fixture Windows Job remains active'}}finally{$job.Dispose()}
   if(Test-Path $rootRecord){
@@ -238,16 +256,25 @@ try{
   $peer=$accept.GetAwaiter().GetResult();$peer.Dispose();$client.Dispose()
  }finally{$positive.Stop()}
  Probe-Forwarding $true 'baseline'
- Write-Config $false
- Probe-Forwarding $false 'before-native'
- if($RunNativeApplication){
+ if($RunIsolationConsumer){
   Assert-Owned
   $expectedConfig=[IO.File]::ReadAllBytes($config)
-  Invoke-NativeApplication
+  Invoke-NativeApplication -IsolationConsumer
   Assert-Owned
-  if([Convert]::ToBase64String([IO.File]::ReadAllBytes($config))-cne [Convert]::ToBase64String($expectedConfig)){throw 'native fixture changed forwarding=false configuration'}
-  Probe-Forwarding $false 'after-native'
+  if([Convert]::ToBase64String([IO.File]::ReadAllBytes($config))-cne [Convert]::ToBase64String($expectedConfig)){throw 'isolation fixture changed forwarding=true configuration'}
   $nativePassed=$true
+ }else{
+  Write-Config $false
+  Probe-Forwarding $false 'before-native'
+  if($RunNativeApplication){
+   Assert-Owned
+   $expectedConfig=[IO.File]::ReadAllBytes($config)
+   Invoke-NativeApplication
+   Assert-Owned
+   if([Convert]::ToBase64String([IO.File]::ReadAllBytes($config))-cne [Convert]::ToBase64String($expectedConfig)){throw 'native fixture changed forwarding=false configuration'}
+   Probe-Forwarding $false 'after-native'
+   $nativePassed=$true
+  }
  }
  $passed=$true
 }catch{
@@ -268,7 +295,11 @@ try{
   if(-not $hadConfig-and(Test-Path $config)){throw 'configuration absence not restored'}
  }catch{$cleanupErrors.Add($_.ToString())}}
  $events|ConvertTo-Json -Depth 8|Set-Content (Join-Path $Evidence 'events.json')
- [ordered]@{Passed=($passed-and $cleanupErrors.Count-eq 0);Failure=$failure;CleanupErrors=@($cleanupErrors);OwnedHandles=[SplittyFixtureJob]::LiveHandleCount;Seconds=$clock.Elapsed.TotalSeconds;NativeApplicationRequested=[bool]$RunNativeApplication;NativeApplicationPassed=$nativePassed;Scope=$(if($RunNativeApplication){'Actual native Windows/WSL full production UI under localhostForwarding=false, with enclosing TCP controls'}else{'WSL2 NAT localhost forwarding preflight only; no native application proof'})}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $Evidence 'result.json')
+ [ordered]@{Passed=($passed-and $cleanupErrors.Count-eq 0);Failure=$failure;CleanupErrors=@($cleanupErrors);OwnedHandles=[SplittyFixtureJob]::LiveHandleCount;Seconds=$clock.Elapsed.TotalSeconds;NativeApplicationRequested=([bool]$RunNativeApplication-or[bool]$RunIsolationConsumer);IsolationConsumerRequested=[bool]$RunIsolationConsumer;NativeApplicationPassed=$nativePassed;Scope=$(if($RunIsolationConsumer){'Native Windows isolation/consumer and original replay ordering under localhostForwarding=true'}elseif($RunNativeApplication){'Actual native Windows/WSL full production UI under localhostForwarding=false, with enclosing TCP controls'}else{'WSL2 NAT localhost forwarding preflight only; no native application proof'})}|ConvertTo-Json -Depth 5|Set-Content (Join-Path $Evidence 'result.json')
 }
 if(-not $passed-or $cleanupErrors.Count-ne 0-or [SplittyFixtureJob]::LiveHandleCount-ne 0){throw 'Hosted WSL preflight FAILED/UNSUPPORTED; inspect evidence (never a skipped proof)'}
-Write-Host 'PROVED hosted WSL2 localhostForwarding true/false with guest and Windows positive controls; owned distro removed and config restored'
+if($RunIsolationConsumer){
+ Write-Host 'PROVED hosted native isolation/consumer and original replay ordering under localhostForwarding=true; exact fixture cleanup and configuration restoration passed'
+}else{
+ Write-Host 'PROVED hosted WSL2 localhostForwarding true/false with guest and Windows positive controls; owned distro removed and config restored'
+}

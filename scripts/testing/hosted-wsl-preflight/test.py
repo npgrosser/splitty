@@ -71,13 +71,57 @@ class NativePreparedInputs(unittest.TestCase):
         self.environment={'GITHUB_ACTIONS':'true','RUNNER_ENVIRONMENT':'github-hosted','RUNNER_OS':'Windows',
                           'GITHUB_SHA':'pinned-source','GITHUB_WORKSPACE':str(self.repo)}
     def write_manifest(self): (self.artifact/'app-manifest.json').write_text(json.dumps(self.value))
-    def load(self):
+    def load(self,require_ssh=False):
         with patch.object(self.fixture.common,'NATIVE_WINDOWS',True),patch.dict(os.environ,self.environment,clear=True):
-            return self.fixture.load_hosted_artifacts(self.artifact,self.repo)
+            return self.fixture.load_hosted_artifacts(self.artifact,self.repo,require_ssh=require_ssh)
     def test_verified_assets_load_without_linux_commands(self):
         with patch.object(self.fixture.subprocess,'run',side_effect=AssertionError('no child expected')):
             self.load()
         self.assertIn('real-packaged-assets',(self.repo/'frontend/dist/index.html').read_text())
+    def test_isolation_requires_verified_ssh_archive_before_extracting_assets(self):
+        with self.assertRaisesRegex(RuntimeError,'requires SSH rootfs'):self.load(require_ssh=True)
+        self.assertFalse((self.repo/'frontend/dist').exists())
+        (self.artifact/'app-ssh-rootfs.tar').write_bytes(b'prepared-ssh-rootfs')
+        self.value['files']['app-ssh-rootfs.tar']=hashlib.sha256(b'prepared-ssh-rootfs').hexdigest();self.write_manifest()
+        self.load(require_ssh=True)
+        (self.artifact/'app-ssh-rootfs.tar').write_bytes(b'corrupt')
+        with self.assertRaisesRegex(RuntimeError,'digest mismatch'):self.load(require_ssh=True)
+    def test_ssh_overlay_has_only_fresh_identity_and_private_loopback_config(self):
+        spec=importlib.util.spec_from_file_location('ssh_overlay_fixture',HERE.parent/'tauri-windows-remote-smoke.py')
+        remote=importlib.util.module_from_spec(spec);spec.loader.exec_module(remote)
+        archive=self.artifact/'ssh.tar'
+        with tarfile.open(archive,'w') as tar:
+            data=b'base';info=tarfile.TarInfo('base-marker');info.size=len(data);tar.addfile(info,io.BytesIO(data))
+        keys=self.artifact/'keys';keys.mkdir();(keys/'hostkey').write_bytes(b'fresh-test-private');(keys/'clientkey.pub').write_bytes(b'fresh-test-public')
+        with patch.object(remote.subprocess,'check_output',side_effect=AssertionError('no Linux command')),patch.object(remote.subprocess,'run',side_effect=AssertionError('no command')):
+            remote.overlay_host_identity(archive,keys,54321,[])
+        with tarfile.open(archive) as tar:
+            self.assertEqual(tar.getnames(),['base-marker','etc/fixture-hostkey','etc/fixture-authorized_keys','etc/sshd_config'])
+            self.assertEqual(tar.extractfile('etc/fixture-hostkey').read(),b'fresh-test-private')
+            self.assertEqual(tar.getmember('etc/fixture-authorized_keys').mode,0o644)
+            self.assertEqual(tar.getmember('etc/fixture-hostkey').mode,0o600)
+            self.assertEqual(tar.getmember('etc/sshd_config').mode,0o600)
+            config=tar.extractfile('etc/sshd_config').read().decode()
+            for expected in ['Port 54321','ListenAddress 127.0.0.1','AllowTcpForwarding no','ForceCommand /usr/bin/fixture-host-env']:self.assertIn(expected,config)
+            self.assertNotIn('SshdSessionPath',config)
+        before=archive.read_bytes()
+        with self.assertRaisesRegex(RuntimeError,'catalog'):remote.overlay_host_identity(archive,keys,54321,['unexpected'])
+        self.assertEqual(archive.read_bytes(),before)
+    def test_prepared_ssh_base_contains_no_run_identity(self):
+        spec=importlib.util.spec_from_file_location('ssh_base_fixture',HERE.parent/'tauri-windows-remote-smoke.py')
+        remote=importlib.util.module_from_spec(spec);spec.loader.exec_module(remote)
+        package=self.artifact/'package';(package/'usr/sbin').mkdir(parents=True);(package/'usr/sbin/sshd').write_bytes(b'fake-catalog-only')
+        archive=self.artifact/'base-ssh.tar'
+        def base(path):
+            with tarfile.open(path,'w'):pass
+        with patch.object(remote.subprocess,'check_output',return_value=''):
+            result=remote.host_rootfs(archive,base,None,1024,package=package)
+        with tarfile.open(archive) as tar:
+            self.assertNotIn('etc/fixture-hostkey',tar.getnames());self.assertNotIn('etc/fixture-authorized_keys',tar.getnames());self.assertNotIn('etc/sshd_config',tar.getnames())
+            self.assertIn('usr/sbin/sshd',tar.getnames());self.assertIn('usr/bin/fixture-host-env',tar.getnames())
+        self.assertIn('usr/sbin/sshd',result['tools'])
+        with patch.object(remote.subprocess,'check_output',return_value='libmissing.so => not found'):
+            with self.assertRaisesRegex(RuntimeError,'missing staged SSH dependency'):remote.host_rootfs(archive,base,None,1024,package=package)
     def test_revision_and_digest_fail_before_modifying_existing_assets(self):
         dist=self.repo/'frontend/dist';dist.mkdir();(dist/'sentinel').write_text('unchanged')
         self.value['sourceSha']='other';self.write_manifest()

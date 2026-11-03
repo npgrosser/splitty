@@ -1,240 +1,137 @@
 # Native Windows and isolated WSL smoke
 
-## Runtime entrypoint status
+The latest isolation/consumer run (`a52fde175fc7`) passed its functional workload
+but **failed overall** at the strict Windows listener gate. It completed
+Setup/Main/two-Remote isolation, slow-client closure, healthy API/file operations
+on the unchanged connection, post-close API, replay containing the actual marker,
+32 per-window handles, excess refusal, replacement and baseline recovery. Binary
+PTY bytes and the 1,048,833-byte and 65,537-byte upload SHA checks passed. The app
+exited naturally; owned Jobs emptied, handles reached zero, independent guest
+identity/nonce checks passed, and both new distributions were removed.
 
-The full WSL A/restart/B workflow requires explicit CLI opt-in:
+Five sampled CIM Listen rows remained UNCLASSIFIED. Their whole-second socket
+creation preceded the retained SSH process birth. The script collected the same
+guarded read-only functional verification, recorded
+`strictWindowsListenerGatePassed:false`, then re-raised the original driver
+failure. This is not an overall pass or a listener-absence proof.
 
-```sh
-python3 scripts/testing/tauri-windows-wsl-smoke.py --disposable-distros
-```
+The earlier `c92108c1f378` run failed to find the post-close capture marker. That
+failure remains unexplained. The later passing run added diagnostic awaits
+between write and attach and therefore does not establish a fix. Current source
+restores write → open replay → attach without additional diagnostic awaits in
+that sequence; catalog queries and checkpoint IPC follow attach. This ordering
+change has source checks only. See the [verification record](../../../openspec/changes/native-client-transports/verification.md)
+for the broader evidence chronicle and unresolved gates.
 
-That required flag enables fixture execution only inside a `try/finally` scope;
-imported helpers remain denied by default and approval resets after success or
-failure. The workflow always copies fresh current source and drivers. Optional
-`--cache-workspace` reuses only a marked TEMP Cargo target, never old source or
-runtime drivers. It imports exactly two new random distributions into recorded
-TEMP paths and removes only those matching names/paths in `finally`.
+## Entrypoints and evidence
 
-The copied PowerShell driver requires its internal `-PermitIsolatedFullRun`
-switch and revalidates the marked root, exactly two new A/B registrations and
-their recorded paths under the expected TEMP directory before creating Jobs.
-Its guest identity gates, Job ownership, stdio allowlist and timeouts remain
-mandatory. Do not invoke copied drivers manually or reuse old TEMP drivers.
-
-Setup-only and remote GUI entrypoints remain hard-stopped. Console-spawn tests
-remain paused; pure formatter, gate and registration tests may run. Historical
-PID-based cleanup reports do not establish isolation from unrelated applications;
-the later Job-owned results remain separate, source-versioned observations.
-
-The old inventory seeded numerical root PIDs and followed `ParentProcessId`
-without checking the parent's process generation. An older unrelated child can
-retain a parent PID after that number is reused by a fixture. Checking the
-child's creation time immediately before killing it only confirms the wrongly
-classified child; it does not establish fixture ownership. `taskkill /T` repeats
-an unverified descendant traversal, while a separate CIM check followed by
-`Stop-Process -Id` also has a PID-reuse race.
-
-The retained `owned-processes.ps1` functions and seven pure snapshot checks reject
-the original older-child case and basic identity/ancestry mismatches. They are
-not an approved destructive cleanup policy. A mixed-time enumeration can still
-contain a fixture root born at T20, after which it exits at T30 and its PID is
-reused at T50, together with an unrelated child born at T51. Comparing only
-`child.creation >= parent.creation` accepts that child against the obsolete root
-row. An enumeration is not assumed to be an atomic process-lifetime snapshot.
-
-The replacement `fixture-job.cs` uses a private, unnamed Windows Job with
-kill-on-close and no breakaway flags. It creates each root suspended, assigns
-its exact process handle to that Job, verifies membership, then resumes it.
-Failure before assignment terminates only the exact newly created suspended
-handle. If Job setup fails, no root is launched. Windows application descendants
-remain in the Job, and separate fixture sleep workers receive separate Jobs.
-Cleanup targets only retained Job handles. There is no PID-based termination or
-parent-PID traversal in the drivers.
-
-Membership snapshots come from `QueryInformationJobObject`; each opened member
-handle is checked again using `IsProcessInJob` before its creation time and image
-are recorded. These snapshots are inventory, never cleanup authority. The
-fixture retains opened process handles to record their eventual exit status.
-Windows listener inventory samples `Get-NetTCPConnection` and joins sampled Job
-member IDs later. A PID reused between samples can falsely attribute a listener,
-and polling cannot prove absence of transient listeners. Reports must retain
-that sampled scope.
-
-Fresh console-only checks use `fixture-job.test.ps1` and `fixture-console.cs`.
-They cover owned child/grandchild cleanup, preservation of a separate fixture,
-breakaway refusal, real assignment failure before resume, and zero remaining
-tracked owned handles. They launch no GUI and inspect no existing application.
-The Job helper and driver integration received independent source review.
-Earlier runtime evidence does not establish the new mechanism. Only explicitly
-authorized fresh hidden scenarios may run; there are no popout or reload loops.
-
-## WSL target parsing and first-action guard
-
-An isolated sentinel attempt exited 127 with `zsh:1: command not found: -d`:
-the always-quoted `"-d"` token was interpreted as a command in the default Ubuntu
-distribution. Its exact input arguments, reconstructed generated command line,
-stdio, exit result and source hashes were preserved. No termination targeted
-that distribution. The earlier missing-stdio explanation was disproved by the
-captured stderr; explicit stdio isolation remains useful independently.
-
-The formatter now leaves plain option/name tokens unquoted and quotes only
-arguments that require Windows escaping. Pure Windows argument-parser tests
-cover whitespace, quotes, trailing backslashes, empty values and plain WSL
-options without launching a process. This does not itself establish a new WSL
-runtime result.
-
-Every actual guest command is wrapped by `fixture-guest-guard.sh`. Its first
-shell action compares `WSL_DISTRO_NAME` with the exact pre-recorded expected
-fixture name before executing a probe, script or mutation. Missing or different
-identity refuses execution. The same guard covers Python helpers, PowerShell
-sentinel/probe/transaction paths, and both the copied application's executor and
-native backend owner path. Fixture names and recorded registration base paths
-remain independently checked. WSL import/terminate/unregister operate only on
-new exact names with matching recorded TEMP paths. No existing distro or user
-profile may be queried to test this fix.
-
-Pure synthetic-environment tests verify that wrong or absent identity performs
-zero child writes. The full WSL CLI opt-in described above is the enabled workflow. Setup-only
-and remote GUI entrypoints remain paused; enabling them is separate work.
-
-## Available compile-only check
-
-From WSL, with the installed Windows MSVC Rust toolchain, built
-`frontend/dist` and Linux debug `splitty` executable:
+Build `frontend/dist` and the Linux debug `splitty` payload first. From WSL, with
+the installed Windows MSVC toolchain, the enabled fixture entrypoints are:
 
 ```sh
 python3 scripts/testing/tauri-windows-native-smoke.py --build-only
+python3 scripts/testing/tauri-windows-wsl-smoke.py --disposable-distros
+python3 scripts/testing/tauri-windows-wsl-smoke.py --disposable-distros --full-ui
+python3 scripts/testing/tauri-windows-wsl-smoke.py --disposable-distros --isolation-consumer
 ```
 
-This creates a fresh marked Windows TEMP source copy and runs native GUI crate
-unit tests without starting a GUI probe. It installs no application, toolchain,
-Node, pnpm or system package. Source SHA-256 manifests and build logs remain
-under that temporary workspace. The bundled Linux executable is a test payload,
-not a release package or a static compatibility claim.
+`--disposable-distros` is mandatory and scopes in-memory execution approval with
+`try/finally`; imported helpers deny execution by default. Each run copies fresh
+source and drivers to marked Windows TEMP. Optional `--cache-workspace` reuses
+only marked Cargo target artifacts. Never execute an old TEMP driver manually.
+Setup-only and standalone remote GUI entrypoints remain hard-stopped, as does
+the console-spawn suite. Runtime changes and new scenarios require review and
+explicit authorization; the commands above are not authorization to run them.
 
-## Runtime scenario status
+Evidence stays in the fresh `%TEMP%\splitty-native-windows-*` workspace:
+source/payload hashes, build logs, `owned-distros.json`, `distro-cleanup.json`,
+`runtime-evidence/processes.json`, checkpoints, `runtime-result.json` and
+`wsl-verification.json`. Isolation and pressure checkpoints survive later test
+failures. Replay diagnostics contain bounded events/errors, byte counts and
+first/last 96-byte hex previews. Private fixture bytes are the only previews.
 
-The full WSL implementation uses explicit opt-in and a fresh Job driver.
-Setup and remote implementations retain hard stops. Do not invoke PowerShell
-drivers outside their fresh authorized fixture.
-Do not reuse old TEMP copies or cached runtime drivers. A prior Cargo target
-cache may supply build artifacts to a fresh source and driver snapshot.
+## Ownership and guest guards
 
-The setup scenario targets production Windows Tauri startup, capabilities,
-private bootstrap and broker with a small packaged setup document. Its intended
-assertions include setup-role stream/editor denial, invalid-target refusal and
-no WSL owner startup. Earlier reports' process-tree, TCP-listener and surviving
-child results used the invalid ownership classifier; they are not accepted
-runtime-isolation or process-cleanup evidence. Native IPC observations and
-compile/unit results must be evaluated separately against their recorded source
-versions. Full Svelte UI and successful remote SSH coverage remain separate.
+`fixture-job.cs` creates a private unnamed kill-on-close Job before launching a
+suspended root, assigns and verifies its exact process handle, then resumes it.
+There are no breakaway flags. Assignment failure terminates only the exact new
+suspended handle; cleanup targets retained Job handles. STARTUPINFOEX inherits
+only the fixture's explicit stdin/stdout/stderr handles. Membership inventory
+comes from the Job and same-handle checks, never parent-PID traversal.
 
-The extended WSL scenario targets duplicate starts, distribution switching and
-app restart, backend identity, native API calls, binary PTY output, a
-1,048,833-byte upload with an independent SHA-256 check and a heartbeat interval.
-Its process attribution and cleanup use the reviewed Job mechanism. Independent
-fixture workers must retain both their guest PID and `/proc` start tick and
-answer a fresh nonce transaction after app exit; a live Windows WSL launcher
-alone is insufficient. The app-owned helper and PTY must exit.
+The WSL workflow imports exactly two fresh random distributions at recorded
+TEMP paths, with UID1000, private HOME, and disabled guest systemd, automount and
+interop. The driver checks the marked root, pinned executable, exact registration
+names/base paths and its explicit permit before Job launch. Every actual guest
+command first compares `WSL_DISTRO_NAME` with the recorded expected name, including
+the copied application's WSL executor and owner paths. Only newly owned matching
+registrations may be terminated/unregistered in `finally`. No user distribution,
+default selection, global `.wslconfig`, profile or clipboard is changed.
 
-## Disposable WSL fixture boundaries
+Earlier PID-based cleanup misclassified unrelated user processes. Those process
+isolation and cleanup claims are invalid. Retained synthetic ancestry helpers
+are not a destructive ownership policy: mixed-time snapshots and PID reuse can
+still misclassify descendants. An earlier always-quoted WSL option also executed
+`-d` in the default distro; the conditional formatter and first-action identity
+gate replace that path. These incidents and invalidated evidence remain in the
+verification record. Do not restore PID kills, `taskkill /T`, or check-then-kill.
 
-The retained setup code builds a minimal root filesystem from local shell,
-coreutils and shared libraries. It imports newly generated exact distribution
-names into recorded TEMP folders, uses a non-root user with private HOME, and
-disables systemd, Windows drive automounts and interop inside those fixtures.
-The copied Tauri configuration points at TEMP; a guard rejects `wsl.exe -d`
-targets outside the recorded fixture names. These boundaries complement kernel Job ownership and do not authorize accessing
-an existing distribution.
+## Scenario scope and limits
 
-Distribution cleanup checks each newly generated exact name against the
-original registration snapshot and its recorded TEMP base path before
-unregistering that distribution. This narrow distribution-name policy is separate from kernel Job process
-ownership and from the guest first-action identity guard.
-Recorded creation timestamps alone do not authorize terminating a process.
-Evidence files include `owned-distros.json`, `distro-cleanup.json`, source hashes
-and the prior runtime reports; the latter retain the limitations above.
+The default WSL scenario checks A/restart/B selection, duplicate starts, backend
+identity, binary PTY/file traffic, heartbeat, owned helper/PTY death and independent
+guest sentinel preservation. `--full-ui` copies real packaged production assets
+and reuses shared App/CSS/font/Ghostty/settings assertions plus three bounded
+popout checks. The `94f8368a656b` full-UI run passed; its final child was cleaned
+at app exit, not by parent reload. Window inventory covers Tauri-managed HWNDs.
+Modern and legacy clipboard operations are blocked and recorded in owned main,
+setup and popout documents; clipboard feature parity is not tested.
 
-The source's read-only networking-configuration snapshot and a run with mirrored
-networking or default localhost forwarding do not establish the separate
-localhost-forwarding-disabled check. No claim is made here for macOS runtime,
-Windows remote-host isolation, exhaustive frozen-client admission limits or
-packaged installer behavior.
+`--isolation-consumer` implies production assets, uses two aliases for one private
+SSH host in fixture A, and starts local B without the default restart sequence.
+All native SSH command forms use a temporary `-F` config, private keys/known_hosts
+and an explicitly owned loopback SSH listener. A dedicated foreground sshd Job
+must pass a bounded native Windows SSH HOME/UID/nonce authentication transaction
+before app launch. At most four readiness attempts are admitted before the
+20-second between-attempt deadline, each with a five-second wait and cleanup
+bound. Guest teardown owns any Linux lifetime remaining after Windows Job stop.
 
-## Paused isolated Job console check
+Its reference/storage/target checks use production roles and capsule paths.
+Copied-handle denial is a capsule check; stale Setup-proof denial is a native
+broker diagnostic, not a raw forged-IPC attempt. The temporary external-opener
+effect recorder must stay empty; this is not a positive OS-opener test. The slow
+client actually withholds receipts; the JavaScript engine is not suspended.
+Healthy operations may complete after immediate slow-client closure; precise
+timestamps and unchanged connection identity are retained. Global/worker quota
+saturation and whole-framework/RSS bounds are not established. Local B must exit;
+remote A's daemon intentionally survives app exit until exact fixture teardown.
 
-The repository console-spawn test remains guarded; do not run it until the
-current review is complete. Its intended invocation after authorization is:
+Listener collection freezes live identities from retained handles before/after
+sampling and records socket creation/state/endpoints. Missing, older or future
+creation times stay UNCLASSIFIED. The raw CIM query filters only owned PIDs;
+provider errors fail rather than becoming an empty result. Null, zero and unknown
+TCP states also fail; known non-listening observations are retained separately.
+Every listener row still fails. Sampling does not prove continuous absence. The separate native TCP-table candidate failed its
+owned-listener control and remains unwired, preserved outside this commit for a
+fresh hosted control. That control now passes on Windows 2025 for IPv4/IPv6
+([run 41717658574](https://github.com/npgrosser/splitty/actions/runs/41717658574));
+it validates the decoder there but does not resolve the local measurement or
+prove application listener absence. No guessed state mapping is accepted. Disabled localhost
+forwarding and packaged installer compatibility remain separate validation.
 
-```powershell
-& .\scripts\testing\tauri-windows-native-smoke\fixture-job.test.ps1
-```
-
-It creates a fresh marked Windows TEMP directory and retains its exact helper
-sources, hashes, member snapshots and result JSON. Every launched console root
-is assigned to its private Job before it executes. All test Jobs are stopped
-and disposed in `finally`; the unrelated process assertion refers to a second
-explicitly created console fixture, never a user application.
-
-## Currently allowed pure checks
+## Pure checks
 
 ```sh
 python3 scripts/testing/tauri-windows-guard.test.py
+node scripts/testing/tauri-windows-native-smoke/pressure.test.mjs
 ```
 
 ```powershell
 & .\scripts\testing\tauri-windows-native-smoke\fixture-commandline.test.ps1
 & .\scripts\testing\tauri-windows-native-smoke\fixture-registration.test.ps1
+& .\scripts\testing\tauri-windows-native-smoke\fixture-listener.test.ps1
 ```
 
-The first uses only synthetic environment values and local temporary marker
-files. The PowerShell checks compile the formatter, parse strings and validate
-synthetic registration metadata in memory. They launch no fixture process,
-query no registry and call no WSL executable.
-
-## Opt-in production UI mode
-
-Add `--full-ui` to the guarded `--disposable-distros` workflow to copy the real
-built `frontend/dist` into the packaged fixture. The production index, CSS,
-fonts, Ghostty WASM and popout document remain real; a separate probe module is
-appended to the index. The existing setup document still controls the isolated
-A/restart/B backend selection. Default fixture behavior is unchanged.
-
-The mode reuses the shared production DOM/settings/Ghostty assertions and three
-sequential, bounded popout lifecycle checks. Fixture windows stay hidden. Its
-window inventory counts Tauri-managed HWND entries, not all OS windows. The
-probe uses a separate native-open request namespace from the production App.
-Clipboard methods are blocked and attempts recorded; no global clipboard read
-or write is part of this test. SSH host-list reads use an empty fixture folder.
-Production asset hashes and UI observations are retained with the evidence.
-
-The reviewed mode passed an actual bounded Windows MSVC/WebView2 run in
-`%TEMP%\splitty-native-windows-94f8368a656b`. The production App mounted with
-CSS and SplittyMono loaded; Ghostty WASM came from the packaged origin with
-`application/wasm`, rendered glyphs into a 900×540 canvas, and the renderer
-setting persisted through the native API. Observed UI errors, network fallback
-attempts and modern/legacy clipboard attempts were empty.
-
-The three sequential popout checks verified direct command denial, allowed
-parent-domain calls/shared opener, ordinary close, parent-mediated close and
-foreign-label refusal. The final child survived until app exit; this is app-exit
-cleanup evidence, not a Windows parent-reload result. Window inventory covers
-Tauri-managed HWNDs only. Both app instances exited naturally with no remaining
-Job members before cleanup; owned handle count reached zero. Independent guest
-sentinels retained their exact start identities and answered fresh nonces.
-Owned helper/PTY exit, binary PTY traffic and the 1,048,833-byte upload hash also
-passed. Both newly registered distributions were removed.
-
-Evidence includes `production-ui-assets.json`,
-`runtime-evidence/runtime-result.json`, `runtime-evidence/processes.json`, the
-sentinel before/after records, `wsl-verification.json` and `distro-cleanup.json`.
-The earlier `5990d77041bd` attempt stopped before any GUI because the pinned
-executable guard correctly refused a junction-resolved cache path. Launch path
-construction now preserves the fresh root's lexical target path; the exact
-guard was not relaxed.
-
-This result does not establish sibling remote/setup reference isolation, frozen
-client or admission-flood behavior, a noncooperative bridge shutdown, disabled
-localhost forwarding, global OS-window enumeration, clipboard feature parity,
-or whole-framework/RSS memory bounds. TCP inventories remain sampled. No global
-clipboard operation or WSL configuration change was part of this run.
+These use synthetic environments, temporary marker files, argument parsing and
+in-memory metadata. They launch no GUI, query no registrations and invoke no WSL
+command. The separate Job console suite remains paused.

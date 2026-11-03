@@ -13,11 +13,12 @@ and the managed jobs for agents in [the jobs guide](cli-jobs.md).
 | **Embedded** | The desktop app, `splitty serve` | The app or `serve` process ends |
 | **Daemon** | `splitty daemon start` | You end them (`daemon stop --end-sessions`), a reboot, or a logout that kills user processes |
 
-Persistence is a property of the mode, not of a screen: a daemon saves and
-restores its whole workspace (`~/.config/splitty/state.json`), an embedded
-server keeps nothing. The desktop app owns its local embedded backend on every
-platform and closes its sessions when the app ends. On Windows that backend runs
-in WSL. A separately started daemon remains independent of the app.
+Workspace persistence is a property of the mode, not of a screen: a daemon
+saves and restores its workspace in `state.json` in its configuration directory.
+An embedded backend does not save its local workspace; settings and host
+preferences are still persisted. The desktop app owns its local embedded backend
+on every platform and closes its sessions when the app ends. On Windows that
+backend runs in WSL. A separately started daemon remains independent of the app.
 
 Native daemon clients use a private Unix socket, and desktop clients use native
 IPC or inherited child pipes. Browser access is explicit: `serve` and `connect`
@@ -58,7 +59,7 @@ splitty daemon stop --end-sessions            # stop the daemon and end every se
 
 So after installing a new version, `splitty daemon restart` updates without ending anything. While no daemon runs, `splitty attach` still shows a kept session, and the next daemon takes it back. Before downgrading to a version without keepers, run `splitty daemon stop --end-sessions`: an older daemon would start fresh shells and leave the keepers running. A reboot, a macOS logout or the end of a container still ends the processes; the workspace is restored as before. On Linux with systemd-logind's `KillUserProcesses=yes`, a logout ends daemon and keepers alike unless lingering is on (`loginctl enable-linger`).
 
-`daemon start` reports `SPLITTY_CLIENT_SOCKET` and `SPLITTY_INSTANCE` only after native negotiation succeeds. The endpoint directory must be private and on a local Unix filesystem; unsafe paths fail without a TCP fallback. A live legacy daemon is reported as legacy. A legacy daemon whose sessions cannot survive a restart requires a deliberate `daemon restart --end-sessions`.
+`daemon start` reports `SPLITTY_CLIENT_SOCKET` and `SPLITTY_INSTANCE` only after native negotiation succeeds. If another process holds the instance lock before discovery is published, it exits with temporary-failure code 75. Native connection setup refreshes discovery within its existing retry limit; it never takes over the lock. The endpoint directory must be private and on a local Unix filesystem; unsafe paths fail without a TCP fallback. A live legacy daemon is reported as legacy. A legacy daemon whose sessions cannot survive a restart requires a deliberate `daemon restart --end-sessions`.
 
 Corrupt or unreadable discovery is an explicit error, including for `daemon status --json`; it is never treated as permission to create a replacement workspace. Dead records are removed only while holding the native instance lock and after rereading the same record. A starting or running daemon's publication cannot be deleted by a stale status/stop request. A new start replaces stale publication only after acquiring that lock.
 
@@ -122,6 +123,6 @@ The browser never holds a long-lived secret:
 2. The page exchanges it for an **`HttpOnly` session cookie** and removes the code from the address bar.
 3. Each WebSocket connection uses a **single-use ticket** valid for ten seconds.
 
-Explicit HTTP CLI callers authenticate with the **process token** from `~/.config/splitty/auth-token` (created on first run, mode `0600`), or with `--token`. If you open the UI without a launch code, Splitty asks for that token once and turns it into a session. To rotate a file-backed token, stop the gateways using it, delete the file and restart them. `connect` uses a random process-local token and never reads this file. `splitty issue-bootstrap --addr 127.0.0.1:9800` mints a fresh launch code for an explicit gateway. Native desktop and daemon connections use no browser cookies, tokens or launch codes.
+Explicit HTTP CLI callers authenticate with the **process token** from `auth-token` in the configuration directory (`~/.config/splitty` on Linux, `~/Library/Application Support/splitty` on macOS), or with `--token`. A file-backed browser gateway creates the token file with mode `0600` when needed. If you open the UI without a launch code, Splitty asks for that token once and turns it into a session. To rotate a file-backed token, stop the gateways using it, delete the file and restart them. `connect` uses a random process-local token and never reads this file. `splitty issue-bootstrap --addr 127.0.0.1:9800` mints a fresh launch code for an explicit gateway. Native desktop and daemon connections use no browser cookies, tokens or launch codes.
 
 Details, guarantees and limits are in [`SECURITY.md`](../SECURITY.md).
