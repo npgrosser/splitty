@@ -114,6 +114,11 @@ fn a_published_reverse_worker_blocks_gateway_reuse_after_its_coordinator_is_kill
         assert_eq!(response["code"], "unsupported_environment");
         assert_eq!(lab.ssh_invocations(), before);
         assert!(reverse_ssh(&hub).is_empty());
+        assert_ne!(
+            std::env::var("SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE").as_deref(),
+            Ok("1"),
+            "required native SSH crash scenario cannot use the unsupported path"
+        );
         eprintln!("native Linux published-worker crash scenario UNRUN: explicit unsupported/no-SSH refusal verified in this environment");
         return;
     }
@@ -201,4 +206,5 @@ fn a_published_reverse_worker_blocks_gateway_reuse_after_its_coordinator_is_kill
     let replacement = browser(&lab, &address);
     assert_eq!(opened_port(&replacement), local);
     assert!(replacement.terminate().0.success());
+    eprintln!("NATIVE_SSH_CRASH_POSITIVE_EXERCISED: hostile peer retained forwarding after coordinator death; gateway excluded until actual worker exit");
 }

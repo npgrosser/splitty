@@ -101,6 +101,31 @@ jobs:
           SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE: '1'
         run: cargo test --locked -p splitty-remote --test native_exposure -- --exact native_policy_retains_published_worker_after_coordinator_death --nocapture
 
+      # The SSH server is unpacked privately, never installed as a host service.
+      # Only this disposable hosted runner's user-namespace policy is adjusted.
+      - name: Prepare isolated real SSH crash fixture
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          mkdir -p "${RUNNER_TEMP}/splitty-sshd/packages" "${RUNNER_TEMP}/splitty-sshd/root"
+          cd "${RUNNER_TEMP}/splitty-sshd/packages"
+          apt-get download openssh-server libwrap0
+          for package in ./*.deb; do
+            dpkg-deb --extract "$package" "${RUNNER_TEMP}/splitty-sshd/root"
+          done
+          if test -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-current-user --keep-caps --net true
+
+      - name: Require real SSH forwarding crash and kept-session migration
+        env:
+          SPLITTY_TEST_SSHD_ROOT: ${{ runner.temp }}/splitty-sshd/root
+          SPLITTY_TEST_REQUIRE_SSH_LAB: '1'
+          SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE: '1'
+        run: |
+          cargo test --locked -p splitty-server --test remote_connect exposure_crash::a_published_reverse_worker_blocks_gateway_reuse_after_its_coordinator_is_killed -- --exact --nocapture
+          cargo test --locked -p splitty-server --test remote_connect the_hub_updates_a_host_daemon_of_another_version -- --exact --nocapture
+
   aarch64:
     name: Static server (aarch64)
     if: github.event_name != 'schedule'

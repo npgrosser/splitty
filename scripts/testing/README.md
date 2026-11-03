@@ -250,7 +250,12 @@ cargo test -p splitty-server --test remote_connect \
 ```
 
 If sshd is unpacked instead of installed at `/usr/sbin/sshd`, also set
-`SPLITTY_TEST_SSHD_ROOT` to its package root. The existing lab prerequisites
+`SPLITTY_TEST_SSHD_ROOT` to its package root. Set
+`SPLITTY_TEST_REQUIRE_SSH_LAB=1` when a missing lab must fail rather than skip.
+The native forwarding crash check additionally uses
+`SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE=1` to reject unsupported environments as
+positive evidence. CI unpacks its SSH server privately and runs it only through
+the isolated lab; it does not install a host SSH service. The existing lab prerequisites
 (`ssh`, `ssh-keygen`, `unshare`, `nsenter`, `ip` and permitted local sockets/user
 namespaces) must work, and the browser hook additionally requires `node` and
 `python3`. Use private test XDG directories; no user preview is an acceptable

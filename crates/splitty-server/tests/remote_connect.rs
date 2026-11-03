@@ -792,6 +792,11 @@ fn lab() -> Option<Lab> {
     match Lab::start() {
         Ok(lab) => Some(lab),
         Err(reason) => {
+            assert_ne!(
+                std::env::var("SPLITTY_TEST_REQUIRE_SSH_LAB").as_deref(),
+                Ok("1"),
+                "required SSH lab could not start: {reason}"
+            );
             eprintln!("skipping: the SSH lab cannot run here: {reason}");
             None
         }
