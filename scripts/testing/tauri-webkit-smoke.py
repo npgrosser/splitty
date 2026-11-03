@@ -249,8 +249,8 @@ def main():
     if args.isolation_consumer and args.full_ui: parser.error('--isolation-consumer is a separate mode; omit --full-ui')
     repo = Path(__file__).resolve().parents[2]
     harness = args.harness_dir.resolve()
-    if sys.platform != 'linux':
-        raise RuntimeError('this actual WebKitGTK smoke requires Linux')
+    if sys.platform != 'linux' and not args.prepare_only:
+        raise RuntimeError('actual WebKitGTK execution requires Linux; --prepare-only is portable')
     if not args.prepare_only and (not args.xvfb or not args.xvfb.is_file()):
         raise RuntimeError('an isolated Xvfb executable is required (--xvfb); the user desktop is never used')
     evidence = (args.evidence_dir or Path(tempfile.mkdtemp(prefix='splitty-webkit-evidence-'))).resolve()

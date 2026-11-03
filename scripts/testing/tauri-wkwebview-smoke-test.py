@@ -4,6 +4,8 @@ import ctypes
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest import mock
+import json
 import tempfile
 import subprocess
 
@@ -62,6 +64,19 @@ class ObserverTests(unittest.TestCase):
 
 
 class IsolationPreparationTests(unittest.TestCase):
+    def test_gtk_preparation_is_portable_but_runtime_still_requires_linux(self):
+        path=Path(__file__).with_name('tauri-webkit-smoke.py')
+        spec=importlib.util.spec_from_file_location('gtk_portable_preparation',path)
+        gtk=importlib.util.module_from_spec(spec);spec.loader.exec_module(gtk)
+        with tempfile.TemporaryDirectory() as temporary:
+            root=Path(temporary);harness=root/'harness';evidence=root/'evidence'
+            argv=[str(path),'--isolation-consumer','--harness-dir',str(harness),'--evidence-dir',str(evidence)]
+            with mock.patch.object(gtk.sys,'platform','darwin'), mock.patch.object(gtk.sys,'argv',argv+['--prepare-only']), mock.patch.object(gtk.subprocess,'run',side_effect=AssertionError('preparation must not launch a process')):
+                gtk.main()
+            self.assertFalse(json.loads((evidence/'preparation.json').read_text())['runtimeVerified'])
+            with mock.patch.object(gtk.sys,'platform','darwin'), mock.patch.object(gtk.sys,'argv',argv), self.assertRaisesRegex(RuntimeError,'actual WebKitGTK execution requires Linux'):
+                gtk.main()
+
     def test_both_native_harnesses_prepare_roles_effect_guards_and_cleanup_without_gui(self):
         repo=Path(__file__).resolve().parents[2]
         original=(repo/'crates/splitty-tauri/src/client_ipc/provider.rs').read_bytes()
