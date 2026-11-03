@@ -31,6 +31,16 @@ def instrument(harness,repo,source):
     carrier=harness/'src/client_ipc/carrier.rs'
     carrier.write_text(once(carrier.read_text(), '        let _ = ended.await;', '''        let ending = ended.await;
         crate::smoke_carrier_ending(handle_string(attempt.handle()), &ending);'''))
+    session=harness/'src/client_ipc/session.rs'
+    text=session.read_text()
+    text=once(text,'        let cleanup = owner.finish().await;', '''        crate::smoke_session_ending(attempt.handle(), "relay", &result);
+        let cleanup = owner.finish().await;''')
+    text=once(text,'        if cleaned {', '''        if let Some(attempt) = &self.guard.0 {
+            crate::smoke_session_ending(attempt.handle(), "frontendFinish", &frontend);
+            crate::smoke_session_ending(attempt.handle(), "backendFinish", &backend);
+        }
+        if cleaned {''')
+    session.unlink();session.write_text(text)
     path=harness/'src/client_ipc.rs'
     path.write_text(path.read_text()+'''
 impl Broker { pub(crate) fn smoke_counts(&self)->serde_json::Value {

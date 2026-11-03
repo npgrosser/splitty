@@ -90,3 +90,13 @@ fn smoke_carrier_ending(handle: String, ending: &Result<std::io::Result<()>, tok
     };
     endings.push(value);
 }
+fn smoke_session_ending(handle: client_ipc::Handle, stage: &str, result: &std::io::Result<()>) {
+    let mut endings = smoke_carrier_endings().lock().unwrap();
+    if endings.len() >= 64 { return; }
+    let handle: String = handle.bytes().iter().map(|byte| format!("{byte:02x}")).collect();
+    let value = match result {
+        Ok(()) => serde_json::json!({"handle":handle,"stage":stage,"outcome":"ok"}),
+        Err(error) => serde_json::json!({"handle":handle,"stage":stage,"outcome":"ioError","kind":format!("{:?}",error.kind()),"message":error.to_string().chars().take(512).collect::<String>()}),
+    };
+    endings.push(value);
+}
