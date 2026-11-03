@@ -28,6 +28,9 @@ def instrument(harness,repo,source):
 '''
     provider=once(provider,'                let result = tunnel::open(',hook+'                let result = tunnel::open(')
     path=harness/'src/client_ipc/provider.rs';path.unlink();path.write_text(provider)
+    carrier=harness/'src/client_ipc/carrier.rs'
+    carrier.write_text(once(carrier.read_text(), '        let _ = ended.await;', '''        let ending = ended.await;
+        crate::smoke_carrier_ending(handle_string(attempt.handle()), &ending);'''))
     path=harness/'src/client_ipc.rs'
     path.write_text(path.read_text()+'''
 impl Broker { pub(crate) fn smoke_counts(&self)->serde_json::Value {
@@ -60,6 +63,8 @@ app.add_capability(tauri::ipc::CapabilityBuilder::new("smoke-isolation-state").w
     let success = isolation_ok && retained_holds_explained''')
     source=source.replace('"reloadQuotaStable":reload_quota_stable,','"isolationConsumer":first["isolationConsumer"],"isolationOk":isolation_ok,"reloadQuotaStable":reload_quota_stable,')
     source+='\n'+(here/'isolation.rs').read_text()
+    source=once(source,'    if value.get("error").is_some() {','''    smoke_write("carrier-endings.json", &serde_json::json!(*smoke_carrier_endings().lock().unwrap()));
+    if value.get("error").is_some() {''')
     build=harness/'build.rs';build.write_text(once(build.read_text(),'"smoke_report", "smoke_windows",','"smoke_report", "smoke_windows", "smoke_state",'))
     (harness/'backend-substitution.json').write_text(json.dumps({
         'targets':['fixture-one','fixture-two'],'backend':'two real embedded services with production Remote role',

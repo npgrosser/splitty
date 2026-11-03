@@ -76,3 +76,17 @@ fn smoke_pressure_file(value: &serde_json::Value) -> bool {
     if metadata.len() != 65537 { return false; }
     std::fs::read(path).is_ok_and(|bytes| bytes.iter().enumerate().all(|(index, byte)| *byte == (index % 256) as u8))
 }
+fn smoke_carrier_endings() -> &'static std::sync::Mutex<Vec<serde_json::Value>> {
+    static ENDINGS: std::sync::OnceLock<std::sync::Mutex<Vec<serde_json::Value>>> = std::sync::OnceLock::new();
+    ENDINGS.get_or_init(Default::default)
+}
+fn smoke_carrier_ending(handle: String, ending: &Result<std::io::Result<()>, tokio::sync::oneshot::error::RecvError>) {
+    let mut endings = smoke_carrier_endings().lock().unwrap();
+    if endings.len() >= 64 { return; }
+    let value = match ending {
+        Ok(Ok(())) => serde_json::json!({"handle":handle,"outcome":"ok"}),
+        Ok(Err(error)) => serde_json::json!({"handle":handle,"outcome":"ioError","kind":format!("{:?}",error.kind()),"message":error.to_string().chars().take(512).collect::<String>()}),
+        Err(_) => serde_json::json!({"handle":handle,"outcome":"oneshotCanceled"}),
+    };
+    endings.push(value);
+}

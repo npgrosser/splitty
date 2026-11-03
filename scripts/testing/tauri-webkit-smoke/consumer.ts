@@ -28,10 +28,10 @@ export async function consumerAdmission(capsule:any,healthy:NativeSocket,request
   replay.onError=error=>{replayError=String(error)};
   replay.onMessage((value:any)=>{if(replayEvents.length<16)replayEvents.push({type:value.type,sessionId:value.sessionId,error:value.error})});
   replay.onBinaryMessage((_id,data)=>{if(bytes.length+data.length>1024*1024){replayError='replay byte bound';replay.dispose();return}bytes.push(...data)});
-  replay.adopt(await openTauriChannel(bridge));replay.send({type:'attach',id:session!,cols:80,rows:24});deadline=Date.now()+10000;
+  replay.adopt(await openTauriChannel(bridge));const replayHandle=replay.assignment?.handle;replay.send({type:'attach',id:session!,cols:80,rows:24});deadline=Date.now()+10000;
   while(!new TextDecoder().decode(new Uint8Array(bytes)).includes('AFTER_SLOW_CLOSE')&&!replayError&&Date.now()<deadline)await wait(25);
   const marker=new TextDecoder().decode(new Uint8Array(bytes)).includes('AFTER_SLOW_CLOSE');
-  await fixtureState({phase:'pressure-replay',session,replayEvents,replayError,bytes:bytes.length,lastBytes:bytes.slice(-96),marker});
+  await fixtureState({phase:'pressure-replay',session,replayHandle,replayEvents,replayError,bytes:bytes.length,lastBytes:bytes.slice(-96),marker});
   assert(marker,'post-close capture missing: '+replayError);replay.dispose();extras.pop();
   deadline=Date.now()+10000;while((await fixtureState()).broker.mainHandles!==baseline.broker.mainHandles&&Date.now()<deadline)await wait(25);
   const restored=await fixtureState();assert(restored.broker.mainHandles===baseline.broker.mainHandles,'slow channel admission leaked');
