@@ -31,14 +31,17 @@ pub const DIR_NAME: &str = "relay";
 pub const HEARTBEAT_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// How long `serve` waits for `sshd` to create the socket.
+#[cfg(target_os = "linux")]
 const SOCKET_WAIT: Duration = Duration::from_secs(10);
 
 /// Socket files at least this old that refuse connections are left over
 /// from a relay that could not remove its own, and `prepare` removes them.
 /// Younger ones may belong to a forward `sshd` is just setting up.
+#[cfg(target_os = "linux")]
 const STALE_AFTER: Duration = Duration::from_secs(60);
 
 /// At most this many connections are relayed at once; more are closed.
+#[cfg(target_os = "linux")]
 const MAX_CONNECTIONS: usize = 256;
 
 /// The relay directory of this host's server.
@@ -85,6 +88,7 @@ pub fn is_socket_name(name: &str) -> bool {
 }
 
 /// `socket` if it names a relay socket directly inside `dir`.
+#[cfg(any(target_os = "linux", test))]
 fn check_socket_path(dir: &Path, socket: &Path) -> Result<(), Failure> {
     let inside = socket.parent() == Some(dir);
     let named = socket

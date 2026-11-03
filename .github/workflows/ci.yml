@@ -308,6 +308,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           key: tauri-macos
+          # Preserve compiled dependencies while platform checks are diagnosed.
+          cache-on-failure: true
 
       # A missing alternate user or WindowServer is a failed verification,
       # never a passing test that silently skipped its OS assertions.
