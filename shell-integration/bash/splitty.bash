@@ -2,36 +2,46 @@
 # Emits OSC 133 semantic prompt sequences so the terminal can detect
 # prompt/input/output/command-finished boundaries.
 #
-# Loaded automatically by Splitty's POSIX/ENV injection.
+# Loaded automatically by Splitty before the first prompt or command.
 # Can also be sourced manually:
 #   [[ -n "$SPLITTY_SHELL_INTEGRATION" ]] && source "$SPLITTY_SHELL_INTEGRATION/bash/splitty.bash"
 
 # We need to be in interactive mode.
 if [[ "$-" != *i* ]]; then builtin return; fi
 
-# When auto-injected, we were started in POSIX mode. Re-create the normal
-# bash startup sequence and then disable POSIX mode.
-if [ -n "$SPLITTY_BASH_INJECT" ]; then
+# Auto-injected shells defer startup files until this bootstrap, keeping
+# their real login_shell state on Bash 3.2 as well as newer versions.
+if [[ ${SPLITTY_BASH_INJECT+x} ]]; then
     builtin declare __splitty_bash_flags="$SPLITTY_BASH_INJECT"
     builtin unset SPLITTY_BASH_INJECT
 
-    # Restore an existing ENV value that was saved during injection.
-    if [[ -n "$SPLITTY_BASH_ENV" ]]; then
-        builtin export ENV="$SPLITTY_BASH_ENV"
-        builtin unset SPLITTY_BASH_ENV
+    if [[ ${SPLITTY_BASH_PROMPT_COMMAND+x} ]]; then
+        PROMPT_COMMAND="$SPLITTY_BASH_PROMPT_COMMAND"
     else
-        builtin unset ENV
+        builtin unset PROMPT_COMMAND
     fi
+    builtin unset SPLITTY_BASH_PROMPT_COMMAND
 
-    # Leave POSIX mode.
-    builtin set +o posix
-    builtin shopt -u inherit_errexit 2>/dev/null
-
-    # Unexport HISTFILE if it was set by the injection code.
-    if [[ -n "$SPLITTY_BASH_UNEXPORT_HISTFILE" ]]; then
+    # The first prompt follows Bash's automatic history load. Its temporary
+    # empty HISTFILE prevents premature reads or truncation; restore the same
+    # variables startup files normally observe before loading those files.
+    for __splitty_history_var in HISTSIZE HISTFILESIZE; do
+        __splitty_saved_var="SPLITTY_BASH_$__splitty_history_var"
+        if builtin declare -p "$__splitty_saved_var" &>/dev/null; then
+            builtin printf -v "$__splitty_history_var" '%s' "${!__splitty_saved_var}"
+            builtin export "$__splitty_history_var"
+        else
+            builtin unset "$__splitty_history_var"
+        fi
+    done
+    if [[ ${SPLITTY_BASH_HISTFILE+x} ]]; then
+        builtin export HISTFILE="$SPLITTY_BASH_HISTFILE"
+    else
+        HISTFILE="$HOME/.bash_history"
         builtin export -n HISTFILE
-        builtin unset SPLITTY_BASH_UNEXPORT_HISTFILE
     fi
+    builtin unset SPLITTY_BASH_HISTFILE SPLITTY_BASH_HISTSIZE SPLITTY_BASH_HISTFILESIZE
+    builtin unset __splitty_history_var __splitty_saved_var
 
     # Source the normal startup files that bash would have loaded.
     if builtin shopt -q login_shell; then
@@ -54,6 +64,16 @@ if [ -n "$SPLITTY_BASH_INJECT" ]; then
             done
             if [[ -z "$SPLITTY_BASH_RCFILE" ]]; then SPLITTY_BASH_RCFILE="$HOME/.bashrc"; fi
             [ -r "$SPLITTY_BASH_RCFILE" ] && builtin source "$SPLITTY_BASH_RCFILE"
+        fi
+    fi
+
+    # Load ordinary startup history after profiles. Leave history explicitly
+    # populated by startup files alone, including a profile's `history -s`.
+    if [[ $__splitty_bash_flags != *"--splitty-command"* && -z "$(builtin history 1)" ]]; then
+        HISTSIZE="${HISTSIZE-500}"
+        HISTFILESIZE="${HISTFILESIZE-$HISTSIZE}"
+        if [[ -n "$HISTFILE" && -f "$HISTFILE" && -r "$HISTFILE" ]]; then
+            builtin history -r "$HISTFILE"
         fi
     fi
 

@@ -124,6 +124,17 @@ the same directory/PATH helpers for its child while retaining its grant-only soc
 GUI-only packages without an installed/bundled CLI keep their existing PATH; no
 fake GUI alias or runtime CLI installation is created.
 
+Bash integration defers its normal startup files to a bootstrap before the first
+prompt, or before an explicitly interactive `-c` command. It preserves the actual
+login-shell flag, sources the selected profiles/rc file once, and restores inherited
+`PROMPT_COMMAND`; it does not use POSIX mode or replace `ENV`. Initial history-file
+access is deferred until those files have selected `HISTFILE`, `HISTSIZE` and
+`HISTFILESIZE`, preventing premature truncation. If a profile explicitly populates
+the history list (for example with `history -r` or `history -s`), the integration
+retains that list without an additional automatic read. This differs from native
+Bash configurations that deliberately preload a file and then let Bash append a
+second copy. Noninteractive commands retain Bash's own startup path.
+
 CLI commands use the shared HTTP API over an owner/scoped Unix socket, or an explicitly
 authenticated TCP connection. Layout commands post `/api/mux/op`; the reducer applies the
 intent, the effect runner returns actual outcomes, and clients receive successful spawn

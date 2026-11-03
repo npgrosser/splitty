@@ -364,16 +364,16 @@ fn build_spec(
     let rows = if opts.rows == 0 { 24 } else { opts.rows };
 
     // Build command. Shell-integration arguments must precede profile
-    // arguments: Bash requires GNU long options such as `--posix` before
+    // arguments: Bash requires GNU long options such as `--noprofile` before
     // short options such as the detected profile's `-l`.
     let integration_dir = find_shell_integration_dir();
     let integration_dir_str = integration_dir
         .as_ref()
         .map(|path| path.to_string_lossy().into_owned());
-    let mut cmd = if let Some(argv) = argv {
+    let (mut cmd, bash_bootstrap) = if let Some(argv) = argv {
         let mut cmd = CommandBuilder::new(&argv[0]);
         cmd.args(&argv[1..]);
-        cmd
+        (cmd, None)
     } else {
         build_shell_command(
             &shell,
@@ -410,6 +410,49 @@ fn build_spec(
         if let Some((key, val)) = env_str.split_once('=') {
             cmd.env(key, val);
         }
+    }
+
+    // Private bootstrap state comes only from selected startup options, never
+    // inherited environment or extra_env. Capture the final user prompt hook.
+    for key in [
+        "SPLITTY_BASH_INJECT",
+        "SPLITTY_BASH_PROMPT_COMMAND",
+        "SPLITTY_BASH_RCFILE",
+        "SPLITTY_BASH_HISTFILE",
+        "SPLITTY_BASH_HISTSIZE",
+        "SPLITTY_BASH_HISTFILESIZE",
+    ] {
+        cmd.env_remove(key);
+    }
+    if let Some(bootstrap) = bash_bootstrap {
+        // Defer Bash's automatic history read/truncation until profiles have
+        // chosen the file and limits. Preserve exact inherited presence/value.
+        for key in ["HISTFILE", "HISTSIZE", "HISTFILESIZE"] {
+            let original = cmd
+                .iter_full_env_as_str()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.to_owned());
+            if let Some(value) = original {
+                cmd.env(format!("SPLITTY_BASH_{key}"), value);
+            }
+        }
+        cmd.env("HISTFILE", "");
+        cmd.env("SPLITTY_BASH_INJECT", bootstrap.flags);
+        if let Some(path) = bootstrap.rcfile {
+            cmd.env("SPLITTY_BASH_RCFILE", path);
+        }
+        let original = cmd
+            .iter_full_env_as_str()
+            .find(|(key, _)| *key == "PROMPT_COMMAND")
+            .map(|(_, value)| value.to_owned());
+        cmd.env_remove("SPLITTY_BASH_PROMPT_COMMAND");
+        if let Some(value) = original {
+            cmd.env("SPLITTY_BASH_PROMPT_COMMAND", value);
+        }
+        cmd.env(
+            "PROMPT_COMMAND",
+            "builtin source \"$SPLITTY_SHELL_INTEGRATION/bash/splitty.bash\" && builtin eval -- \"$PROMPT_COMMAND\"",
+        );
     }
 
     super::cli_path::configure_command(&mut cmd, cli_dir);
@@ -688,36 +731,23 @@ fn setup_shell_integration(
             cmd.env("ZDOTDIR", &zsh_dir);
         }
         Some("bash") if plain_shell => {
-            // POSIX/ENV trick: start bash in POSIX mode so it reads the ENV
-            // variable on startup. Our script disables POSIX mode and
-            // re-creates the normal startup sequence.
+            // Apple Bash 3.2 ignores --posix while choosing interactive
+            // startup files. Bootstrap at its first prompt instead, keeping
+            // login_shell intact while the integration loads user files.
             let script = format!("{}/bash/splitty.bash", integration_dir);
             if !std::path::Path::new(&script).exists() {
                 return;
             }
-
-            // Preserve existing ENV
-            if let Ok(old) = std::env::var("ENV") {
-                cmd.env("SPLITTY_BASH_ENV", &old);
-            }
-            cmd.env("ENV", &script);
-            cmd.env("SPLITTY_BASH_INJECT", "1");
-
-            // In POSIX mode HISTFILE defaults to ~/.sh_history; fix it.
-            if std::env::var("HISTFILE").is_err() {
-                if let Some(home) = dirs::home_dir() {
-                    cmd.env(
-                        "HISTFILE",
-                        home.join(".bash_history").to_string_lossy().as_ref(),
-                    );
-                    cmd.env("SPLITTY_BASH_UNEXPORT_HISTFILE", "1");
-                }
-            }
-
-            cmd.arg("--posix");
+            cmd.arg("--noprofile");
+            cmd.arg("--norc");
         }
         _ => {}
     }
+}
+
+struct BashBootstrap {
+    flags: String,
+    rcfile: Option<String>,
 }
 
 fn build_shell_command(
@@ -725,16 +755,78 @@ fn build_shell_command(
     command_args: &[String],
     integration_dir: Option<&str>,
     plain_shell: bool,
-) -> CommandBuilder {
+) -> (CommandBuilder, Option<BashBootstrap>) {
     let mut cmd = CommandBuilder::new(shell);
+    // Parse only startup options, never the command text or its positional
+    // arguments. Bash accepts grouped short options and -o/-O values.
+    let mut command = false;
+    let mut interactive = false;
+    let mut payload = None;
+    let mut flags = String::from("1");
+    let mut rcfile = None;
+    let mut index = 0;
+    while index < command_args.len() {
+        let arg = &command_args[index];
+        match arg.as_str() {
+            "--noprofile" | "--norc" => {
+                flags.push(' ');
+                flags.push_str(arg);
+            }
+            "--rcfile" | "--init-file" => {
+                index += 1;
+                rcfile = command_args.get(index);
+            }
+            "-o" | "+o" | "-O" | "+O" => {
+                index += 1;
+            }
+            "--" => {
+                payload = command_args.get(index + 1).map(|_| index + 1);
+                break;
+            }
+            _ if arg.starts_with("--") => {}
+            _ if arg.starts_with('-') && arg.len() > 1 => {
+                command |= arg.contains('c');
+                interactive |= arg.contains('i');
+            }
+            _ if arg.starts_with('+') && arg.len() > 1 => {}
+            _ => {
+                payload = Some(index);
+                break;
+            }
+        }
+        index += 1;
+    }
+    if command {
+        flags.push_str(" --splitty-command");
+    }
+    let bash_inject = detect_shell(shell) == Some("bash")
+        && plain_shell
+        && (interactive || (!command && payload.is_none()))
+        && integration_dir.is_some_and(|dir| {
+            std::path::Path::new(dir)
+                .join("bash/splitty.bash")
+                .is_file()
+        });
     if let Some(dir) = integration_dir {
         cmd.env("SPLITTY_SHELL_INTEGRATION", dir);
-        setup_shell_integration(shell, &mut cmd, dir, plain_shell);
+        setup_shell_integration(shell, &mut cmd, dir, bash_inject);
     }
-    for arg in command_args {
-        cmd.arg(arg);
+    for (index, arg) in command_args.iter().enumerate() {
+        if bash_inject && command && payload == Some(index) && integration_dir.is_some() {
+            cmd.arg(format!(
+                "builtin source \"$SPLITTY_SHELL_INTEGRATION/bash/splitty.bash\"\n{arg}"
+            ));
+        } else {
+            cmd.arg(arg);
+        }
     }
-    cmd
+    (
+        cmd,
+        bash_inject.then(|| BashBootstrap {
+            flags,
+            rcfile: rcfile.cloned(),
+        }),
+    )
 }
 
 pub(super) fn generate_id() -> String {
@@ -940,6 +1032,357 @@ mod tests {
             1,
             "no installation files"
         );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bash_bootstrap_preserves_inherited_startup_environment() {
+        for original in [None, Some(""), Some("printf '\\nINHERITED_PC_EXECUTED\\n'")] {
+            let home = tempfile::tempdir().expect("home");
+            let profile = home.path().join(".bash_profile");
+            let content = "printf 'ENV:%s:<%s>\\n' \"${ENV+x}\" \"${ENV-}\"; printf 'PC:%s:<%s>\\n' \"${PROMPT_COMMAND+x}\" \"${PROMPT_COMMAND-}\"; printf 'PROFILE_ONCE\\n'; printf 'LOGIN:%s\\n' \"$(shopt -q login_shell && echo yes)\"\n";
+            std::fs::write(&profile, content).expect("profile");
+            let mut opts = sh_opts("posix-bootstrap", "");
+            opts.shell = "/bin/bash".into();
+            opts.shell_args = vec!["-l".into(), "-i".into()];
+            opts.dir = home.path().to_string_lossy().into_owned();
+            opts.extra_env = vec![
+                format!("HOME={}", home.path().display()),
+                "HISTFILE=/dev/null".into(),
+            ];
+            if let Some(value) = original {
+                opts.extra_env.push(format!("ENV={value}"));
+                opts.extra_env.push(format!("PROMPT_COMMAND={value}"));
+            }
+            let (mut spec, _) = build_spec(&opts, None, None).expect("spec");
+            spec.env.retain(|(key, _)| key != "POSIXLY_CORRECT");
+            if original.is_none() {
+                spec.env.retain(|(key, _)| {
+                    !matches!(key.as_str(), "ENV" | "SPLITTY_BASH_PROMPT_COMMAND")
+                });
+            }
+            use std::io::Write;
+            let mut child = std::process::Command::new(&spec.argv[0])
+                .args(&spec.argv[1..])
+                .env_clear()
+                .envs(spec.env)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+                .expect("bash");
+            child
+                .stdin
+                .take()
+                .expect("stdin")
+                .write_all(
+                    b"type __splitty_restore_cli_path; env | /usr/bin/grep '^ENV='; exit 0\n",
+                )
+                .expect("input");
+            let output = child.wait_with_output().expect("output");
+            let stdout = String::from_utf8(output.stdout).expect("UTF-8 output");
+            assert!(output.status.success(), "{stdout}");
+            assert_eq!(
+                stdout
+                    .lines()
+                    .filter(|line| *line == "PROFILE_ONCE")
+                    .count(),
+                1,
+                "{stdout}"
+            );
+            assert!(
+                stdout.contains(&format!(
+                    "ENV:{}:<{}>",
+                    if original.is_some() { "x" } else { "" },
+                    original.unwrap_or("")
+                )),
+                "{stdout}"
+            );
+            // System profiles may themselves initialize PROMPT_COMMAND. Match
+            // what the same profile observes under native Bash startup.
+            let mut native = std::process::Command::new("/bin/bash");
+            native
+                .args(["-ilc", "exit 0"])
+                .env_remove("POSIXLY_CORRECT")
+                .env_remove("PROMPT_COMMAND")
+                .env_remove("ENV")
+                .env("HOME", home.path())
+                .env("HISTFILE", "/dev/null")
+                .env("TERM", "xterm-256color");
+            if let Some(value) = original {
+                native.env("PROMPT_COMMAND", value).env("ENV", value);
+            }
+            let native = native.output().expect("native bash");
+            let native = String::from_utf8(native.stdout).expect("native output");
+            assert_eq!(
+                stdout.lines().find(|line| line.starts_with("PC:")),
+                native.lines().find(|line| line.starts_with("PC:")),
+                "{stdout}\nNative: {native}"
+            );
+            assert!(stdout.contains("LOGIN:yes"), "{stdout}");
+            assert!(
+                stdout.contains("__splitty_restore_cli_path is a function"),
+                "{stdout}"
+            );
+            assert_eq!(
+                stdout.lines().find_map(|line| line.strip_prefix("ENV=")),
+                original,
+                "{stdout}"
+            );
+            if original.is_some_and(|value| !value.is_empty()) {
+                assert_eq!(
+                    stdout
+                        .lines()
+                        .filter(|line| *line == "INHERITED_PC_EXECUTED")
+                        .count(),
+                    1,
+                    "{stdout}"
+                );
+            }
+            assert_eq!(std::fs::read_to_string(profile).expect("profile"), content);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bash_interactive_command_bootstraps_before_its_first_command() {
+        let home = tempfile::tempdir().expect("home");
+        std::fs::write(
+            home.path().join(".bash_profile"),
+            "printf 'PROFILE_ONCE\\n'\nalias profile_alias='printf \"FIRST:<%s>:<%s>\\n\"'\n",
+        )
+        .expect("profile");
+        let mut opts = sh_opts("immediate-bash", "");
+        opts.shell = "/bin/bash".into();
+        opts.shell_args = vec!["-ilc".into(),
+            "profile_alias \"$0\" \"$1\"; type __splitty_restore_cli_path; printf '%s' '--noprofile --norc'; exit 7".into(),
+            "command-name".into(), "literal argument".into()];
+        opts.extra_env = vec![
+            format!("HOME={}", home.path().display()),
+            "HISTFILE=/dev/null".into(),
+        ];
+        let (spec, _) = build_spec(&opts, None, None).expect("spec");
+        let output = std::process::Command::new(&spec.argv[0])
+            .args(&spec.argv[1..])
+            .env_clear()
+            .envs(spec.env)
+            .output()
+            .expect("bash");
+        let stdout = String::from_utf8(output.stdout).expect("output");
+        assert_eq!(output.status.code(), Some(7), "{stdout}");
+        assert_eq!(stdout.matches("PROFILE_ONCE").count(), 1, "{stdout}");
+        assert!(
+            stdout.contains("FIRST:<command-name>:<literal argument>"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("__splitty_restore_cli_path is a function"),
+            "{stdout}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bash_bootstrap_honors_startup_file_options() {
+        let home = tempfile::tempdir().expect("home");
+        for (name, marker) in [
+            (".bash_profile", "PROFILE"),
+            (".bashrc", "BASHRC"),
+            ("custom rc", "CUSTOM"),
+        ] {
+            std::fs::write(home.path().join(name), format!("printf '{marker}\\n'\n"))
+                .expect("startup file");
+        }
+        let custom = home.path().join("custom rc").to_string_lossy().into_owned();
+        for (args, expected) in [
+            (vec!["--noprofile", "-ilc"], None),
+            (vec!["--norc", "-ic"], None),
+            (vec!["--rcfile", custom.as_str(), "-ic"], Some("CUSTOM")),
+            (vec!["-ic"], Some("BASHRC")),
+        ] {
+            let mut opts = sh_opts("startup-options", "");
+            opts.shell = "/bin/bash".into();
+            opts.shell_args = args.into_iter().map(str::to_owned).collect();
+            opts.shell_args
+                .push("type __splitty_restore_cli_path >/dev/null; exit".into());
+            opts.extra_env = vec![
+                format!("HOME={}", home.path().display()),
+                "HISTFILE=/dev/null".into(),
+            ];
+            let (spec, _) = build_spec(&opts, None, None).expect("spec");
+            let output = std::process::Command::new(&spec.argv[0])
+                .args(&spec.argv[1..])
+                .env_clear()
+                .envs(spec.env)
+                .output()
+                .expect("bash");
+            let stdout = String::from_utf8(output.stdout).expect("output");
+            assert!(output.status.success(), "{stdout}");
+            for marker in ["PROFILE", "BASHRC", "CUSTOM"] {
+                assert_eq!(
+                    stdout.lines().filter(|line| *line == marker).count(),
+                    usize::from(expected == Some(marker)),
+                    "{stdout}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bash_bootstrap_loads_history_after_profiles_without_early_truncation() {
+        for mode in ["changed-file", "raised-limits", "seeded"] {
+            let mut captures = Vec::new();
+            for integrated in [false, true] {
+                let home = tempfile::tempdir().expect("home");
+                std::fs::write(home.path().join(".hushlogin"), "").expect("quiet login");
+                let default_history = (0..700)
+                    .map(|index| format!("DEFAULT_{index}\n"))
+                    .collect::<String>();
+                std::fs::write(home.path().join(".bash_history"), &default_history)
+                    .expect("default history");
+                std::fs::write(
+                    home.path().join("custom_history"),
+                    "CUSTOM_1\nCUSTOM_2\nCUSTOM_3\nCUSTOM_4\n",
+                )
+                .expect("custom history");
+                let profile = match mode {
+                    "changed-file" => "HISTFILE=\"$HOME/custom_history\"; HISTSIZE=3; HISTFILESIZE=1000; HISTCONTROL=ignoreboth\n",
+                    "raised-limits" => "HISTSIZE=1000; HISTFILESIZE=1000; HISTCONTROL=ignoreboth\n",
+                    _ => "HISTSIZE=1000; HISTFILESIZE=1000; HISTCONTROL=ignoreboth; history -s PROFILE_SEED\n",
+                };
+                std::fs::write(home.path().join(".bash_profile"), profile).expect("profile");
+                let command = "printf 'SETTINGS:%s:%s:%s\\n' \"$HISTSIZE\" \"$HISTFILESIZE\" \"$HISTCONTROL\"; history; exit 0";
+                let mut opts = sh_opts("history-bootstrap", "");
+                opts.shell = "/bin/bash".into();
+                opts.shell_args = vec!["-il".into()];
+                opts.dir = home.path().to_string_lossy().into_owned();
+                opts.extra_env = vec![format!("HOME={}", home.path().display())];
+                let native = vec!["/bin/bash".into(), "-il".into()];
+                let (mut spec, _) =
+                    build_spec(&opts, (!integrated).then_some(native.as_slice()), None)
+                        .expect("spec");
+                // The fixture deliberately exercises Bash's native defaults.
+                spec.env.retain(|(key, _)| {
+                    !matches!(
+                        key.as_str(),
+                        "POSIXLY_CORRECT"
+                            | "HISTSIZE"
+                            | "HISTFILESIZE"
+                            | "SPLITTY_BASH_HISTSIZE"
+                            | "SPLITTY_BASH_HISTFILESIZE"
+                    )
+                });
+                if !integrated {
+                    spec.env.retain(|(key, _)| key != "HISTFILE");
+                }
+                if integrated {
+                    spec.env.retain(|(key, _)| key != "SPLITTY_BASH_HISTFILE");
+                }
+                use std::io::Write;
+                let mut child = std::process::Command::new(&spec.argv[0])
+                    .args(&spec.argv[1..])
+                    .env_clear()
+                    .envs(spec.env)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("bash");
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin")
+                    .write_all(format!("{command}\n").as_bytes())
+                    .expect("input");
+                let output = child.wait_with_output().expect("output");
+                assert!(output.status.success());
+                let stdout = String::from_utf8(
+                    super::super::log_text::LogText::default().push(&output.stdout),
+                )
+                .expect("output");
+                if mode == "raised-limits" {
+                    assert!(
+                        stdout.contains("DEFAULT_0\n") && stdout.contains("DEFAULT_699\n"),
+                        "{stdout}"
+                    );
+                } else if mode == "changed-file" {
+                    assert_eq!(
+                        std::fs::read_to_string(home.path().join(".bash_history"))
+                            .expect("default history"),
+                        default_history
+                    );
+                }
+                captures.push(stdout);
+            }
+            assert_eq!(captures[0], captures[1], "{mode}");
+        }
+    }
+
+    #[test]
+    fn private_bash_environment_cannot_enable_bootstrap() {
+        for (shell, direct) in [
+            ("/bin/zsh", false),
+            ("/bin/bash", false),
+            ("/bin/bash", true),
+        ] {
+            let mut opts = sh_opts("forged-bootstrap", "exit 0");
+            opts.shell = shell.into();
+            opts.dir = std::env::temp_dir().to_string_lossy().into_owned();
+            opts.extra_env = vec![
+                "SPLITTY_BASH_INJECT=forged".into(),
+                "SPLITTY_BASH_RCFILE=/forged".into(),
+                "SPLITTY_BASH_PROMPT_COMMAND=forged".into(),
+                "SPLITTY_BASH_HISTFILE=/forged".into(),
+                "SPLITTY_BASH_HISTSIZE=1".into(),
+                "SPLITTY_BASH_HISTFILESIZE=1".into(),
+                "PROMPT_COMMAND=: original".into(),
+            ];
+            let argv = vec!["/bin/sh".into(), "-c".into(), "exit 0".into()];
+            let (spec, _) =
+                build_spec(&opts, direct.then_some(argv.as_slice()), None).expect("spec");
+            assert_eq!(
+                spec.env
+                    .iter()
+                    .find(|(key, _)| key == "PROMPT_COMMAND")
+                    .map(|(_, value)| value.as_str()),
+                Some(": original")
+            );
+            assert!(!spec.env.iter().any(|(key, _)| matches!(
+                key.as_str(),
+                "SPLITTY_BASH_INJECT"
+                    | "SPLITTY_BASH_RCFILE"
+                    | "SPLITTY_BASH_PROMPT_COMMAND"
+                    | "SPLITTY_BASH_HISTFILE"
+                    | "SPLITTY_BASH_HISTSIZE"
+                    | "SPLITTY_BASH_HISTFILESIZE"
+            )));
+        }
+    }
+
+    #[test]
+    fn bash_noninteractive_command_keeps_native_startup() {
+        let dir = tempfile::tempdir().expect("integration");
+        std::fs::create_dir(dir.path().join("bash")).expect("bash");
+        std::fs::write(dir.path().join("bash/splitty.bash"), "exit 99").expect("script");
+        let args = vec![
+            "-lc".into(),
+            "printf '%s' \"$0:$1\"; exit 7".into(),
+            "command-name".into(),
+            "literal argument".into(),
+        ];
+        let (cmd, _) = build_shell_command("/bin/bash", &args, dir.path().to_str(), true);
+        assert_eq!(
+            cmd.get_argv()
+                .iter()
+                .skip(1)
+                .map(|arg| arg.to_string_lossy().into_owned())
+                .collect::<Vec<_>>(),
+            args
+        );
+        assert!(!cmd
+            .iter_full_env_as_str()
+            .any(|(key, _)| key == "SPLITTY_BASH_INJECT"));
     }
 
     #[tokio::test]
@@ -1718,7 +2161,7 @@ mod tests {
         std::fs::write(bash_dir.join("splitty.bash"), "").unwrap();
 
         let integration_dir = dir.path().to_string_lossy();
-        let cmd = build_shell_command(
+        let (cmd, _) = build_shell_command(
             "/bin/bash",
             &["-l".to_string()],
             Some(integration_dir.as_ref()),
@@ -1730,7 +2173,7 @@ mod tests {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect::<Vec<_>>();
 
-        assert_eq!(argv, vec!["/bin/bash", "--posix", "-l"]);
+        assert_eq!(argv, vec!["/bin/bash", "--noprofile", "--norc", "-l"]);
     }
 }
 
