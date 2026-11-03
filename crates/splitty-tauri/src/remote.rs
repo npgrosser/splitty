@@ -997,7 +997,7 @@ fn build(
         .incognito(true)
         .disable_drag_drop_handler()
         .initialization_script(NO_LEAVE_PROMPT);
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "linux"))]
     let builder = builder.data_directory(webview_data_dir(app, label)?);
     let builder = crate::configure_window(
         builder,
@@ -1019,12 +1019,15 @@ fn build(
     Ok(link)
 }
 
-/// A WebView2 user data folder per remote window (D13 of remote-window,
-/// provisional). WebView2 keeps one InPrivate session per user data folder
+/// A separate context key per remote window. On Linux, Tauri caches custom
+/// protocol registration by this path, while Wry creates a fresh ephemeral
+/// context for incognito windows. Reusing Main's key would omit the packaged
+/// protocol handler from that fresh context, preventing the UI from loading.
+/// WebView2 keeps one InPrivate session per user data folder
 /// and profile, shared by every InPrivate webview in it, so `incognito` alone
 /// would let two hosts' windows share their cookies. Labels repeat across
 /// runs; the folder keeps no browsing data, since the webview is InPrivate.
-#[cfg(target_os = "windows")]
+#[cfg(any(target_os = "windows", target_os = "linux"))]
 fn webview_data_dir(app: &AppHandle, label: &str) -> tauri::Result<PathBuf> {
     Ok(app
         .path()
