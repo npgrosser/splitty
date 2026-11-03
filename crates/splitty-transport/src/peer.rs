@@ -32,6 +32,7 @@ pub struct Sender {
     context: queue::Context,
     data: queue::Sender<Outbound>,
     control: queue::Sender<Outbound>,
+    receipts: queue::Sender<Delivery>,
     generation: u32,
     limits: wire::Limits,
 }
@@ -188,7 +189,10 @@ impl Incoming {
 impl Drop for Incoming {
     fn drop(&mut self) {
         if let Some(receipt) = self.receipt {
-            let _ = self.sender.control(Kind::Credit, &flow::credit(receipt));
+            let _ = self
+                .sender
+                .receipts
+                .send(std::mem::size_of::<Delivery>(), true, || receipt);
         }
     }
 }
@@ -209,12 +213,14 @@ impl Peer {
     {
         let (outgoing, out_rx) = context.channel(queue::QUEUE_ITEMS);
         let (control, ctl_rx) = context.channel(CONTROLS);
+        let (receipts, receipt_rx) = context.channel(queue::QUEUE_ITEMS);
         let (incoming, in_rx) = context.channel(queue::QUEUE_ITEMS);
         let (cancel, cancel_rx) = context.channel(CONTROLS);
         let sender = Sender {
             context: context.clone(),
             data: outgoing,
             control,
+            receipts,
             generation: ready.generation,
             limits: ready.limits.clone(),
         };
@@ -228,7 +234,8 @@ impl Peer {
         });
         let write_context = context;
         let write = tokio::spawn(async move {
-            let result = write_loop(writer, out_rx, ctl_rx, ledger, &write_context).await;
+            let result =
+                write_loop(writer, out_rx, ctl_rx, receipt_rx, ledger, &write_context).await;
             write_context.close();
             result
         });
@@ -379,19 +386,44 @@ async fn write_loop<W: AsyncWrite + Unpin>(
     mut writer: W,
     mut data: queue::Receiver<Outbound>,
     mut control: queue::Receiver<Outbound>,
+    mut receipts: queue::Receiver<Delivery>,
     ledger: Arc<Mutex<flow::Credits>>,
     context: &queue::Context,
 ) -> io::Result<()> {
     let mut closing = context.closing();
     loop {
-        let frame = tokio::select! { biased;
+        enum Next {
+            Frame(Charged<Outbound>),
+            Receipt(Charged<Delivery>),
+        }
+        let next = tokio::select! { biased;
             _ = closing.wait_for(|closed| *closed) => return Ok(()),
-            value = control.recv() => value,
-            value = data.recv() => value,
+            value = control.recv() => value.map(Next::Frame),
+            value = receipts.recv() => value.map(Next::Receipt),
+            value = data.recv() => value.map(Next::Frame),
         };
-        let Some(frame) = frame else {
+        let Some(next) = next else {
             return Ok(());
         };
+        // Keep compact receipt storage until its encoded frame is actually
+        // written. Only this writer allocates one encoded credit at a time.
+        let mut receipt = None;
+        let frame = match next {
+            Next::Frame(frame) => frame,
+            Next::Receipt(delivery) => {
+                let scratch = context
+                    .budget
+                    .reserve(32, true)
+                    .map_err(|error| io::Error::new(io::ErrorKind::OutOfMemory, error))?;
+                let credit = flow::credit(*delivery);
+                let frame = Frame::control(Kind::Credit, &credit, &context.budget)?;
+                drop(credit);
+                drop(scratch);
+                receipt = Some(delivery);
+                frame.map(Outbound::Frame)
+            }
+        };
+        let _receipt = receipt;
         if context.is_closed() {
             return Ok(());
         }
@@ -438,6 +470,119 @@ async fn write_loop<W: AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     use crate::budget::{ConnectionBudget, ProcessBudget};
+    #[tokio::test]
+    async fn consumed_burst_does_not_exhaust_ordinary_control_slots() {
+        let context = queue::Context::default();
+        let (reader, mut remote) = tokio::io::duplex(64 * 1024);
+        let (writer, mut blocked_reader) = tokio::io::duplex(1);
+        let mut peer = Peer::start(reader, writer, &ready(), context.clone());
+        let origin = ConnectionBudget::default();
+        let mut credits = flow::Credits::new(3);
+        for _ in 0..queue::QUEUE_ITEMS {
+            let delivery = Delivery::new(3);
+            drop(
+                credits
+                    .track(delivery, origin.reserve(1, false).unwrap())
+                    .unwrap(),
+            );
+            codec::write(
+                &mut remote,
+                &Frame::data(Kind::Binary, delivery, b"x").unwrap(),
+            )
+            .await
+            .unwrap();
+            drop(peer.recv().await.expect("received frame"));
+        }
+        assert!(
+            !context.is_closed(),
+            "receipt burst must not close the connection"
+        );
+        peer.sender
+            .control(Kind::Ping, &wire::Ping { nonce: 17 })
+            .unwrap();
+        peer.sender
+            .control(
+                Kind::Cancel,
+                &wire::Cancel {
+                    generation: 3,
+                    id: 8,
+                },
+            )
+            .unwrap();
+        let mut kinds = Vec::new();
+        for _ in 0..queue::QUEUE_ITEMS + 2 {
+            let frame = time::timeout(
+                wire::HANDSHAKE_TIMEOUT,
+                codec::read(&mut blocked_reader, &context.budget),
+            )
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+            kinds.push(frame.kind);
+            if frame.kind == Kind::Credit {
+                let credit = frame
+                    .decode_control::<wire::Credit>(&context.budget)
+                    .unwrap();
+                assert!(credits.acknowledge(&credit).unwrap());
+            }
+        }
+        assert_eq!(&kinds[..3], &[Kind::Credit, Kind::Ping, Kind::Cancel]);
+        assert!(credits.is_empty());
+        assert_eq!(
+            origin.used(),
+            0,
+            "each exact receipt releases its original lease"
+        );
+        assert!(!context.is_closed());
+        peer.shutdown().await;
+        assert_eq!(context.budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn receipt_lane_overflow_closes_and_releases_every_charge() {
+        let context = queue::Context::default();
+        let (reader, mut remote) = tokio::io::duplex(64 * 1024);
+        let (writer, _blocked_reader) = tokio::io::duplex(1);
+        let mut peer = Peer::start(reader, writer, &ready(), context.clone());
+        for _ in 0..queue::QUEUE_ITEMS + 2 {
+            codec::write(
+                &mut remote,
+                &Frame::data(Kind::Binary, Delivery::new(3), b"x").unwrap(),
+            )
+            .await
+            .unwrap();
+            if let Some(message) = peer.recv().await {
+                drop(message);
+            } else {
+                break;
+            }
+        }
+        assert!(context.is_closed(), "receipt backlog remains bounded");
+        peer.shutdown().await;
+        assert_eq!(context.budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_an_undrained_receipt_backlog() {
+        let context = queue::Context::default();
+        let (reader, mut remote) = tokio::io::duplex(64 * 1024);
+        let (writer, _blocked_reader) = tokio::io::duplex(1);
+        let mut peer = Peer::start(reader, writer, &ready(), context.clone());
+        for _ in 0..128 {
+            codec::write(
+                &mut remote,
+                &Frame::data(Kind::Binary, Delivery::new(3), b"x").unwrap(),
+            )
+            .await
+            .unwrap();
+            drop(peer.recv().await.unwrap());
+        }
+        assert!(!context.is_closed());
+        assert!(context.budget.control.used() > 0);
+        peer.shutdown().await;
+        assert_eq!(context.budget.used(), 0);
+    }
     fn ready() -> Ready {
         Ready {
             generation: 3,
