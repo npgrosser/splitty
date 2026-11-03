@@ -104,17 +104,16 @@ reload identity, stale-proof denial, parent-mediated popouts, cleanup and no
 app/WebKit TCP listeners. A separate daemon and keeper job remain usable after
 the app exits. These checks use production capsule, carrier and provider code.
 
-The Windows harnesses build with MSVC and generated ACL/resources. Actual
-WebView2 runs have exercised the setup role and app-owned WSL pipes, including
-binary traffic, a distribution switch and app restart. The fixtures isolate
-configuration and distribution discovery, so they do not prove normal host
-inventory or disabled localhost-forwarding behavior. Windows GUI runs are
-being revalidated after their process-cleanup inventory mistook unrelated
-processes for descendants after PID reuse. The replacement uses private kernel
-Jobs with assignment before process start. Fresh setup and remote-only SSH runs
-pass. An isolated target-identity preflight passes after a WSL argument-quoting
-fix, and the guarded WSL switch/restart rerun passes. Earlier
-process-tree cleanup claims must not be used as evidence of isolation. See the
+The Windows harnesses build with MSVC and generated ACL/resources. Fresh
+WebView2 runs cover Setup/Main/two-Remote isolation, native SSH recovery,
+app-owned WSL pipes, binary terminal/file traffic, distribution switching and
+app restart. A separate hosted run verifies the full UI with localhost
+forwarding disabled, enclosed by positive/negative TCP controls. The fixtures
+isolate configuration and distributions; they do not establish arbitrary
+host-inventory behavior. Cleanup uses private kernel Jobs assigned before
+process start and exact temporary-distribution ownership. Fresh runs pass
+listener inventory, independent-process preservation and complete teardown.
+Earlier PID-tree cleanup claims remain excluded; see the
 [verification status](../openspec/changes/native-client-transports/verification.md).
 
 The opt-in Windows `--full-ui` fixture also passes actual WebView2 production

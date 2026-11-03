@@ -331,26 +331,50 @@ closure; no stronger overlapping-completion claim is made. This fixture uses
 packaged minimal test content and receipt starvation, not the full UI or an
 OS-suspended JavaScript engine.
 
-macOS CI at `d4a53b1` passes the existing full-UI/native exposure checks but fails
-the new fixture on the welcome-order issue corrected locally afterward. The two
-core baseline failures also remain; the step's continue-on-error status must
-not be interpreted as a passing core suite. The final integrated revision
-requires a fresh macOS run.
+The integrated macOS run at `cb51fa7` passes both actual WKWebView fixtures
+([CI run 41727093381](https://github.com/npgrosser/splitty/actions/runs/41727093381)).
+The production full UI completes 37 document generations. The separate
+Main/two-Remote isolation/consumer run replays 94,112 bytes including the
+post-close marker; 258 healthy API replies and the verified file transfer
+complete while the slow consumer is still stalled. Window saturation,
+refusal/replacement/recovery and final resource counters pass. Both apps exit
+naturally with all observed shell/terminal processes gone; 324 full-UI and 151
+isolation-run TCP samples contain no listeners. The recorded transport source
+hashes match `cb51fa7`. Cookie-positive and whole-engine/RSS claims remain
+excluded, as in the other minimal isolation fixtures.
+
+The same run passes 90 GUI tests, 12 real-child carrier cleanup cases,
+private-endpoint peer-user checks and native exposure/gateway positive controls.
+All non-macOS CI jobs and CodeQL pass. The macOS core suite still reports 389
+passed and two failed; both failures reproduce on exact baseline `cc66e97`.
+The explicit final gate correctly keeps the overall CI result red. The core
+step's continue-on-error status must not be interpreted as a passing core suite.
+No new functional platform failure is waived by the passing WebView evidence.
+
+Task 7.6 is complete on the combined platform evidence, not on any single
+smoke result. Packaged assets and binary traffic use the full-UI runs; the
+separate minimal fixtures establish remote/setup authority, consumer isolation
+and admission recovery. Disabled forwarding and distribution switching apply
+to Windows/WSL and use its dedicated hosted runs. App exit, real owned-child
+failure/cancellation and surviving independent daemons use the lifecycle
+fixtures described above. “Frozen client” means withheld output consumption;
+no operating-system engine suspension or total-RSS bound is claimed. The
+remaining framework allocation and core-suite gates are not waived.
 
 ## Open merge gates
 
 - Whole-path resource limits: Wry allocates inbound IPC request bodies before
   application validation. Application-owned quotas do not establish a bound on
   framework allocation, generic invoke replies, JavaScript engine memory or RSS.
-- The complete platform isolation/stress matrix remains open. Actual macOS
-  full-UI, native endpoint and coexistence checks pass; core failures remain. Windows remote-only/reconnect now passes
-  its fresh kernel Job fixture; that does not fill every platform matrix cell.
+- The current Linux/macOS/Windows WebView isolation and consumer fixtures pass,
+  including the integrated receipt fix on Linux and macOS. The macOS core
+  baseline failures remain blocking independently of those platform fixtures.
 - The strict native Linux reservation test passed with an actual surviving
   worker after coordinator SIGKILL, IPv4/IPv6 gateway exclusion and reuse only
   after observed worker exit. The real SSH/hostile-peer crash variant and
   native macOS positive controls and the hosted Windows app/SSH inventory now
-  pass. Task 5.9 is complete on this combined evidence; the remaining actual
-  window-isolation/consumer cases belong to task 7.6.
+  pass. Task 5.9 is complete on this combined evidence; actual window-isolation
+  and consumer evidence is recorded separately under task 7.6.
 - Migration, conformance and security review must reconcile the remaining task
   checks, including framework-bound scope, before cutover is approved.
 
