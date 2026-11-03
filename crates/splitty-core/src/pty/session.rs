@@ -1585,49 +1585,86 @@ mod tests {
     }
 
     #[tokio::test]
-    #[cfg(unix)]
     async fn logs_keep_final_bytes_when_the_process_exits_before_capture_ends() {
         use super::super::output::{read_waiting, OutputQuery};
-        use std::io::Write;
-        use std::os::unix::fs::OpenOptionsExt;
-        if !pty_available() {
-            return;
+        // A process result can precede reader EOF. Model that ordering with a
+        // controlled reader: Darwin revokes the slave when its leader exits,
+        // so a background writer cannot portably supply bytes after that exit.
+        struct Exited;
+        #[async_trait]
+        impl Terminal for Exited {
+            fn pid(&self) -> Option<u32> {
+                None
+            }
+            async fn write(&self, _: &[u8]) -> io::Result<()> {
+                Ok(())
+            }
+            fn resize(&self, _: u16, _: u16) -> io::Result<()> {
+                Ok(())
+            }
+            fn close(&self) -> io::Result<()> {
+                Ok(())
+            }
+            async fn stop(&self) -> io::Result<super::super::ProcessResult> {
+                Ok(self.result().expect("result"))
+            }
+            fn done(&self) -> watch::Receiver<bool> {
+                watch::channel(true).1
+            }
+            fn result(&self) -> Option<super::super::ProcessResult> {
+                Some(super::super::ProcessResult {
+                    exit_code: Some(7),
+                    ..Default::default()
+                })
+            }
+            fn foreground_pgid(&self) -> Option<u32> {
+                None
+            }
         }
-        let directory = tempfile::tempdir().expect("fixture");
-        let gate = directory.path().join("gate");
-        nix::unistd::mkfifo(
-            &gate,
-            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
-        )
-        .expect("gate");
-        let mut opts = sh_opts("trailing-output", "");
-        opts.dir = directory.path().to_string_lossy().into_owned();
-        let session = Session::new_program(
-            opts,
-            vec![
-                "/bin/sh".into(),
-                "-c".into(),
-                "trap '' HUP; (read line < gate; printf FINAL_BYTES) & exit 7".into(),
-            ],
-        )
-        .expect("job");
-        assert!(wait_until(TIMEOUT, || *session.done().borrow()).await);
+        struct ControlledReader(std::sync::mpsc::Receiver<Vec<u8>>);
+        impl io::Read for ControlledReader {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                match self.0.recv_timeout(Duration::from_secs(5)) {
+                    Ok(bytes) => {
+                        buffer[..bytes.len()].copy_from_slice(&bytes);
+                        Ok(bytes.len())
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Ok(0),
+                    Err(error) => Err(io::Error::new(io::ErrorKind::TimedOut, error)),
+                }
+            }
+        }
+        let (send, receive) = std::sync::mpsc::channel();
+        let mut reader = None;
+        let session = Session::with_terminal("trailing-output".into(), None, true, 1024, |feed| {
+            reader = Some(std::thread::spawn(move || {
+                super::super::terminal::read_output(
+                    Box::new(ControlledReader(receive)),
+                    feed.as_ref(),
+                    None,
+                )
+            }));
+            Ok(Box::new(Exited))
+        })
+        .expect("session");
+        assert!(*session.done().borrow());
         let result = session.process_result();
         let before = session
             .read_output("job", &OutputQuery::default())
             .expect("before tail");
-        // Always release the child before asserting, so a failed assertion leaves no writer behind.
-        assert!(
-            wait_until(TIMEOUT, || std::fs::OpenOptions::new()
-                .write(true)
-                .custom_flags(nix::libc::O_NONBLOCK)
-                .open(&gate)
-                .and_then(|mut file| file.write_all(b"continue\n"))
-                .is_ok())
-            .await
-        );
         assert_eq!(result.expect("exit").exit_code, Some(7));
         assert!(!before.output_complete);
+        send.send(b"FINAL_BYTES".to_vec()).expect("final chunk");
+        assert!(
+            wait_until(TIMEOUT, || text(&session.scrollback())
+                .contains("FINAL_BYTES"))
+            .await
+        );
+        let buffered = session
+            .read_output("job", &OutputQuery::default())
+            .expect("buffered final bytes");
+        assert!(buffered.data.contains("FINAL_BYTES") && !buffered.output_complete);
+        drop(send);
         let tail = read_waiting(
             session.as_ref(),
             "job",
@@ -1641,6 +1678,38 @@ mod tests {
         .expect("tail");
         assert!(tail.data.contains("FINAL_BYTES"));
         assert!(wait_until(TIMEOUT, || session.output_complete()).await);
+        reader.expect("reader").join().expect("reader finished");
+        let final_page = session
+            .read_output("job", &OutputQuery::default())
+            .expect("final page");
+        assert!(final_page.output_complete && final_page.data.contains("FINAL_BYTES"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn logs_capture_final_pty_bytes_written_before_process_exit() {
+        use super::super::output::OutputQuery;
+        if !pty_available() {
+            return;
+        }
+        let mut opts = sh_opts("final-pty-bytes", "");
+        opts.dir = std::env::temp_dir().to_string_lossy().into_owned();
+        let session = Session::new_program(
+            opts,
+            vec![
+                "/bin/sh".into(),
+                "-c".into(),
+                "printf FINAL_BYTES; exit 7".into(),
+            ],
+        )
+        .expect("job");
+        assert!(wait_until(TIMEOUT, || *session.done().borrow()).await);
+        assert_eq!(session.process_result().expect("result").exit_code, Some(7));
+        assert!(wait_until(TIMEOUT, || session.output_complete()).await);
+        let page = session
+            .read_output("job", &OutputQuery::default())
+            .expect("output");
+        assert!(page.output_complete && page.data.contains("FINAL_BYTES"));
     }
 
     #[tokio::test]

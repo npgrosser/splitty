@@ -210,7 +210,8 @@ fn spawn_with_input(spec: &SessionSpec, nonblocking: bool) -> Result<Spawned, Pt
 /// It runs whether or not anyone streams the session, so output always reaches
 /// the feed and a busy process never blocks on a full PTY buffer. Its own
 /// descriptor keeps the PTY master open; it ends at the EOF (EIO on Linux)
-/// that follows once the session's processes are gone.
+/// reported by the platform. A controlling terminal can be revoked when its
+/// session leader exits, even if descendants still hold slave descriptors.
 pub fn read_output(mut reader: Box<dyn io::Read + Send>, feed: &dyn Feed, readiness: Readiness) {
     let mut buf = vec![0u8; READ_CHUNK];
     loop {
