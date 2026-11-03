@@ -64,7 +64,8 @@ and retains cancellation and generation semantics across the transport change.
   temporary distributions are removed. The last popout closes at app exit;
   this is not Windows parent-reload or sibling-remote isolation evidence.
 - Actual macOS CI at `4eb7e72` passes GUI all-target clippy and all 90 GUI library tests.
-  All ten real-child native bridge failure/cancellation regressions also pass;
+  All twelve real-child native bridge failure/cancellation regressions pass at
+  `5d25bf9`, including the new owner cleanup and held-stderr deadline cases;
   these exercise controlled carriers, not permanent system-SSH reconnect failure.
   Private endpoint peer-user checks, native forwarding reservation, IPv4/IPv6
   listener positive controls, owned-helper lifetime and explicit gateway
@@ -128,8 +129,24 @@ passes afterward; a held-stderr case, the five owner tests, all twelve bridge
 tests and the actual helper/job-reaping smoke pass. Targeted all-target clippy
 and independent source review pass. Process/worker ownership is retained until
 actual exit; these timing tests do not establish a hard deadline under OS
-failure. Fresh CI remains required. The macOS core gate again fails the same
-two baseline cases, both reproduced against the merge base in that run.
+failure. The complete Rust CI job passes at `5d25bf9` in
+[run 41709472218](https://github.com/npgrosser/splitty/actions/runs/41709472218),
+alongside frontend, Electron, Linux Tauri, aarch64 and dependency checks. Its
+CodeQL analyses also pass. macOS passes all 90 GUI tests, all twelve bridge
+regressions and its native endpoint/lifetime/gateway and packaged UI checks.
+Its core gate still fails the same two baseline cases, both reproduced against
+the merge base in this run; those failures remain open.
+
+The Windows isolation fixture subsequently exposed a fatal native-endpoint
+`EAGAIN` during remote preparation. A targeted smoke now reproduces the same
+classification gap by holding the real private instance lock before discovery
+publication. Native daemon start reports temporary contention with exit 75,
+and remote handshake preserves the existing typed discovery-refresh result.
+The client retains its existing bounded refresh policy; corrupt discovery
+still fails permanently and no lock or live endpoint is replaced. The extended
+lifecycle smoke passes and independent source review passes. This establishes
+the classification fix, not the identity of the lock holder in the original
+Windows run or completion of the outstanding Windows isolation check.
 
 Three findings do not indicate a vulnerability in their reported contexts:
 
@@ -197,6 +214,19 @@ Drop/exhaustion tests pass with 149 remote unit tests and 11 hub failure tests;
 remote/server all-target clippy passes. Fixed-size setup metadata is separately
 bounded by length and setup admission; the transport ledger is not a total
 process RSS or trusted deployment-archive bound.
+
+## Hosted Windows forwarding preflight
+
+A separate diagnostic branch at `6acdbdd` passes GitHub run
+[41709278261](https://github.com/npgrosser/splitty/actions/runs/41709278261).
+On a fresh hosted Windows VM, actual WSL 2 guest execution and matching guest/
+Windows nonce responses establish the forwarding-enabled positive control.
+After disabling localhost forwarding and restarting WSL, the guest still
+answers before and after the refused Windows connection. The private distro
+is removed, the original configuration is restored, cleanup reports no errors
+and owned Windows handles return to zero. This proves the availability of a
+disposable test environment; it does not yet prove Splitty's native app works
+with forwarding disabled. That application run remains part of task 7.6.
 
 ## Open merge gates
 

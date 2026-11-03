@@ -1043,6 +1043,20 @@ fn assert_no_tcp_listener(pid: u32) {
 #[test]
 fn native_discovery_loss_corruption_and_concurrent_start_cannot_replace_a_live_daemon() {
     let sandbox = Sandbox::new();
+    // A real held instance lock models another launcher before publication.
+    // Remote discovery must classify contention as retryable, never replace it.
+    let starting = splitty_server::native::endpoint::InstanceLock::acquire(&sandbox.run_dir())
+        .expect("hold the unpublished daemon instance");
+    let handshake = sandbox.splitty(&["remote-handshake", "--json", "--ensure-daemon"]);
+    assert_eq!(
+        handshake.status.code(),
+        Some(75),
+        "{}",
+        sandbox.describe(&handshake)
+    );
+    assert!(!sandbox.info_path().exists());
+    assert!(!sandbox.run_dir().join("client.sock").exists());
+    drop(starting);
     let mut command = Command::new(env!("CARGO_BIN_EXE_splitty"));
     command.args(["daemon", "start"]);
     let first = sandbox
@@ -1059,6 +1073,13 @@ fn native_discovery_loss_corruption_and_concurrent_start_cannot_replace_a_live_d
         sandbox.describe(&first),
         sandbox.describe(&second)
     );
+    for started in [&first, &second] {
+        assert!(
+            started.status.success() || started.status.code() == Some(75),
+            "concurrent start must succeed or request a discovery refresh: {}",
+            sandbox.describe(started)
+        );
+    }
     let record = fs::read(sandbox.info_path()).unwrap();
     let info: splitty_core::daemon::DaemonInfo = serde_json::from_slice(&record).unwrap();
     assert_no_tcp_listener(info.pid);
@@ -1068,6 +1089,9 @@ fn native_discovery_loss_corruption_and_concurrent_start_cannot_replace_a_live_d
         } else {
             fs::remove_file(sandbox.info_path()).unwrap();
         }
+        let handshake = sandbox.splitty(&["remote-handshake", "--json", "--ensure-daemon"]);
+        assert_eq!(handshake.status.code(), Some(if corrupt.is_some() { 1 } else { 75 }),
+            "corrupt discovery remains fatal; missing publication with a live lock is retryable: {}", sandbox.describe(&handshake));
         let again = sandbox.splitty(&["daemon", "start"]);
         assert!(
             !again.status.success(),
