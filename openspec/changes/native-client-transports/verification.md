@@ -361,6 +361,17 @@ fixtures described above. “Frozen client” means withheld output consumption;
 no operating-system engine suspension or total-RSS bound is claimed. The
 remaining framework allocation and core-suite gates are not waived.
 
+The documentation revision `8521d6b` has the same transport source hashes.
+Its [CI run 41730093388](https://github.com/npgrosser/splitty/actions/runs/41730093388)
+again passes every non-macOS job, both WKWebView fixtures and native boundary
+checks; only the same two core baseline tests fail. The isolation run replays
+94,114 bytes with its marker and zero final resources. CodeQL passes all four
+languages. CI executes the required formatting, workspace/GUI clippy and tests,
+frontend check/test/build, Electron build and architecture checks. The separate
+`openspec validate --specs` command passes all 14 specifications. Final cutover
+and task 9.4 remain open pending resolution of the declared scope/core gates;
+this records the checked revision rather than waiving those gates.
+
 ## Open merge gates
 
 - Whole-path resource limits: Wry allocates inbound IPC request bodies before
