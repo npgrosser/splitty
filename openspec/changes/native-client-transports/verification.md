@@ -1,7 +1,7 @@
 # Native transport verification status
 
-This change is under review and is not ready to merge. Unchecked tasks retain
-all their requirements; the evidence below does not narrow their scope.
+Implementation and all 58 planned tasks are complete. The PR remains subject to
+independent review; the checks below record their exact revisions and limits.
 
 ## Implemented behavior
 
@@ -18,7 +18,7 @@ requires an explicit gateway. Local desktop startup does not adopt a separately
 running daemon. Pending upload destination/cancellation work is a prerequisite
 and retains cancellation and generation semantics across the transport change.
 
-## Final integration candidate
+## Final integration acceptance
 
 The application-owned memory boundary is settled in NCT-8; framework ingress and
 total RSS are explicitly excluded without relaxing transport/output accounting or
@@ -41,10 +41,33 @@ Two separate corrections address the macOS core acceptance failures:
   leader. Production EOF behavior is unchanged.
 
 All 27 targeted session tests, core all-target clippy, formatting and diff checks
-pass locally. Actual macOS CI and the final integrated suite remain pending; prior
-baseline reproductions below are historical evidence, not waived acceptance tests.
+pass locally. [CI run 41734365955](https://github.com/npgrosser/splitty/actions/runs/41734365955)
+at `8a55cd3` passes the complete macOS job: 398 core tests with the actual system
+Bash, 90 GUI tests, 12 real-child cleanup cases and all native boundary and
+WKWebView checks. Linux core also passes all 410 tests. The complete UI runs
+37 document generations with 305 empty TCP inventory samples; the separate
+isolation fixture replays 94,114 bytes with its marker, completes healthy file/API
+work during the stalled stream, refuses excess handles and recovers admission.
+Both end with zero application resources, exited owned terminals and app status 0.
+All 28 recorded source hashes in each fixture match the reviewed sources.
+Independent daemon/keeper discovery and the original shell remain usable.
 
-## Evidence collected
+The Rust workspace job encountered one unchanged baseline test assertion that
+tried to rebind an already released ephemeral port. Its log cannot identify the
+competing occupant. Cleanup ownership was reviewed; the test now observes the
+actual owned listener's disposal instead of global port availability after release.
+A temporary fault injection that leaves that listener alive fails the new assertion.
+All 14 forwarding tests and targeted clippy pass. The correction is committed
+as `f76a7d3` and independently reviewed; the final local workspace clippy and
+all 1,045 reported workspace tests pass. Optional OS-dependent tests may skip
+locally when their prerequisites are unavailable; the explicit hosted native/SSH
+and Windows/WSL evidence remains the platform acceptance record. IPv6 conflict, Down state and saved-port immutability checks remain intact.
+Prior baseline reproductions below are historical evidence, not waived tests.
+
+## Earlier runs and investigations
+
+The following sections record results at their named revisions. References to
+then-open gates are historical; current acceptance is recorded above and below.
 
 - Linux CI workspace tests excluding the GUI: 1,024 reported passing; optional
   OS tests can skip at runtime, so individual platform evidence is listed
@@ -413,22 +436,25 @@ to local authority requiring a Wry fork. A compromised packaged renderer can
 nevertheless exhaust framework storage before application validation. Remote
 windows therefore isolate authority but do not promise availability isolation
 from every other window sharing the desktop process. This limitation is now
-normative in the client-connections delta and explicit in the security and
+normative in the synchronized client-connections specification and explicit in the security and
 architecture documentation, rather than an unfulfilled quantitative claim.
 
-## Open merge gates
+## Completed acceptance gates
 
-- The current Linux/macOS/Windows WebView isolation and consumer fixtures pass,
-  including the integrated receipt fix on Linux and macOS. The macOS core
-  baseline failures remain blocking independently of those platform fixtures.
+- Linux/macOS/Windows WebView isolation and consumer fixtures pass, including
+  the integrated receipt fix on Linux and macOS. Actual macOS core acceptance
+  and the final workspace rerun after the forwarding-test correction pass.
 - The strict native Linux reservation test passed with an actual surviving
   worker after coordinator SIGKILL, IPv4/IPv6 gateway exclusion and reuse only
   after observed worker exit. The real SSH/hostile-peer crash variant and
   native macOS positive controls and the hosted Windows app/SSH inventory now
   pass. Task 5.9 is complete on this combined evidence; actual window-isolation
   and consumer evidence is recorded separately under task 7.6.
-- Migration, conformance and security review must reconcile the remaining task
-  checks, including the macOS corrections, before cutover is approved.
+- Final integration and documentation review close tasks 9.5 and 9.6. Formatting,
+  workspace clippy/tests and all 15 main-spec validations pass locally. The passing
+  GUI/frontend/Electron jobs in run 41734365955 cover unchanged application
+  sources; CodeQL run 41734365900 also passes. The branch CI repeats these checks
+  after the test-only correction. No failing acceptance test is waived.
 
 ## Windows harness cleanup incident
 

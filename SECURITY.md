@@ -162,8 +162,9 @@ disabled. Fresh Windows sibling/slow-consumer checks also pass the strict
 app/SSH listener inventory, admission recovery and owned-process cleanup. Linux
 Main/two-Remote isolation and receipt-pressure checks pass with zero final
 resource counters; the integrated macOS fixtures now pass these checks too.
-The macOS core baseline failures remain open; the framework limitation above
-is an explicit boundary of the memory contract. One platform's result does not
+The macOS core acceptance checks now pass after separate Bash startup and PTY
+test corrections. The framework limitation above is an explicit boundary of the
+memory contract. One platform's result does not
 establish another's behavior. The [verification record](openspec/changes/native-client-transports/verification.md)
 distinguishes these current runs from excluded historical evidence.
 

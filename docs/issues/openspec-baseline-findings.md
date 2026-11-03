@@ -138,8 +138,8 @@ Line numbers refer to the tree at commit `b495e1c`.
 - The pane-to-session lookup for `create` with `paneId` is never wired in production, so such a `create` always
   starts a new random session instead of reusing the pane's (`dispatcher.rs:138-150`).
 - `shell_name` claims to be case-insensitive but is not (`pty/startup.rs:75-87`).
-- Not specced yet: shell-integration injection (`ZDOTDIR`, `ENV`, `--posix`, `SPLITTY_SHELL_INTEGRATION`,
-  `pty/session.rs:509-567`). Belongs to a later terminal-intelligence capability.
+- Not specced yet: shell-integration injection (`ZDOTDIR`, the Bash startup bootstrap and
+  `SPLITTY_SHELL_INTEGRATION` in `pty/session.rs`). Belongs to a later terminal-intelligence capability.
 
 ### access-control
 
@@ -219,8 +219,9 @@ Hardening candidates, not open holes.
   test are unchanged. Apple's Bash 3.2 startup code shadows `posixly_correct`
   inside the interactive startup block, bypassing the `ENV` integration path
   used with `--posix` ([Apple Bash source](https://github.com/apple-oss-distributions/bash/blob/main/bash-3.2/shell.c#L1041)).
-  This needs a separate shell-integration correction that preserves login-shell
-  behavior; substituting `--rcfile` alone does not cover login shells.
+  Fixed by the separate startup bootstrap in `50470d1`, preserving login-shell
+  state and profile selection without POSIX mode. Actual macOS CI run
+  41734365955 passes the CLI-path, environment and history regressions.
 - **The final-output PTY test assumes a background writer survives session-leader exit**
   (reproduced 2026-11-03 on baseline `cc66e97`). On macOS,
   `logs_keep_final_bytes_when_the_process_exits_before_capture_ends` already sees
@@ -228,10 +229,10 @@ Hardening candidates, not open holes.
   The same assertion fails on the native-transport branch. Darwin revokes the
   controlling terminal when its session leader exits, independently of whether
   the background writer ignores SIGHUP ([Darwin exit source](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_exit.c#L2140)).
-  The fixture should separate deterministic process-result-before-reader-EOF
-  ordering from real PTY final-byte capture before exit. The current test does
-  not establish a product loss-of-final-bytes regression; changing the reader to
-  suppress an actual EOF would be incorrect.
+  Fixed in `bff1069` by separating deterministic process-result-before-reader-EOF
+  ordering from real PTY final-byte capture before exit. Both cases pass on
+  actual macOS in run 41734365955. The production reader still respects real EOF;
+  the earlier failure did not establish a product loss-of-final-bytes regression.
 
 - **A spawned child can hold a port this process just released** (found 2026-10-28). On macOS, Rust sets
   close-on-exec only after `socket()` and `accept()`, and `posix_spawn` copies the parent's descriptors until the
