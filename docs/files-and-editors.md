@@ -7,7 +7,9 @@ host; a host needs a current version of Splitty for it (see **Update…** in
 
 ## Drop files onto a terminal
 
-Drop files onto a terminal (or its scratchpad) to put them on that terminal's server, local or SSH host: each file lands in Splitty's paste cache (normally `~/.cache/splitty/paste/`) for 24 hours, and its path is inserted. Up to 512 MB per file.
+Drop files onto a terminal (or its scratchpad) to choose how to put them on that terminal's server, local or SSH host. **Temporarily store and insert paths** is the default: files land in Splitty's paste cache (normally `~/.cache/splitty/paste/`) and their paths are inserted. Alternatively choose **Upload into a folder**, check or edit the suggested working directory, and optionally insert the paths. The destination must already exist; existing files are never replaced, and filenames are sanitized (spaces and special characters become underscores). Nothing is sent until you choose **Upload**.
+
+A progress card in the pane shows bytes and file count, with **Cancel**. Cancelling removes the unfinished file and stops the remaining files; completed files stay, and no paths are inserted for a cancelled or failed batch. Temporary files are cleaned up on later uploads after 24 hours or beyond the newest 100. Up to 512 MB per file; archive folders before dropping them. Older hosts need updating for the drop dialog's upload controls.
 
 This is how Claude Code on a host reads a PDF or a log from your computer: drop it, and the agent gets a path it can open.
 

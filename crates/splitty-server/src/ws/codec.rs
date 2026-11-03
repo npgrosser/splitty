@@ -190,11 +190,12 @@ mod tests {
     fn test_decode_upload_request() {
         let decode = |json: &str| decode_request(serde_json::from_str(json).unwrap());
         let first = decode(
-            r#"{"type":"upload","requestId":"u1","offset":0,"data":"AAE=","name":"a b.pdf","size":3000000000}"#,
+            r#"{"type":"upload","requestId":"u1","offset":0,"data":"AAE=","name":"a b.pdf","size":3000000000,"dir":"/work"}"#,
         );
         assert_eq!(first.msg_type, splitty_core::protocol::MSG_UPLOAD);
         assert_eq!(first.request_id, "u1");
         assert_eq!(first.name, "a b.pdf");
+        assert_eq!(first.dir, "/work");
         assert_eq!(first.size, Some(3_000_000_000));
         assert_eq!(first.offset, 0);
         assert_eq!(first.data, b"AAE=");
@@ -202,6 +203,10 @@ mod tests {
         assert_eq!(next.offset, 1_048_576);
         assert_eq!(next.size, None);
         assert!(next.name.is_empty());
+        assert!(next.dir.is_empty());
+        let cancel = decode(r#"{"type":"upload_cancel","requestId":"u1"}"#);
+        assert_eq!(cancel.msg_type, splitty_core::protocol::MSG_UPLOAD_CANCEL);
+        assert_eq!(cancel.request_id, "u1");
     }
 
     /// `save_image` carries its request id and the image's base64 text,

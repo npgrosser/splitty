@@ -1,9 +1,9 @@
 /**
  * Files pasted or dropped into a pane (`terminal-sessions`, Image Paste In A
  * Pane and Files Into A Pane): each goes to the pane's own server, which
- * stores it as a file, and the file's path is pasted into the pane. Images go
- * with `save_image`, which older hosts know too; every other file goes in
- * chunks with `upload`. Claude Code and other agents take a pasted path as the
+ * stores it as a file. Clipboard images go with `save_image`, which older
+ * hosts know too; every other pasted file goes in chunks with `upload`.
+ * Drops go to the destination dialog before anything is sent. Claude Code and other agents take a pasted path as the
  * file, also when they run on a host whose clipboard is empty.
  *
  * The files come from the browser's `paste` and `drop` events; the page may
@@ -42,6 +42,8 @@ export interface ImagePasteTarget {
   saveImage(data: string): Promise<string>;
   /** Store a file on the pane's server in chunks; resolves with its path. */
   uploadFile(file: File, onProgress?: (received: number) => void): Promise<string>;
+  /** Offer dropped files without sending any bytes yet. */
+  dropFiles?(files: File[]): void;
   /** Paste text into the pane as a bracketed paste. */
   paste(text: string): void;
   /** Send Ctrl+V's `^V` to the terminal. */
@@ -173,11 +175,13 @@ export function attachImageInsert(
   field: HTMLTextAreaElement,
   store: Pick<ImagePasteTarget, "saveImage" | "uploadFile">,
   insert: (text: string) => void,
+  dropFiles?: (files: File[]) => void,
 ): () => void {
   const target: ImagePasteTarget = {
     saveImage: (data) => store.saveImage(data),
     uploadFile: (file, onProgress) => store.uploadFile(file, onProgress),
     paste: insert,
+    dropFiles,
     sendCtrlV: () => {},
     failed: reportImageFailure,
     progress: progressNotice(),
@@ -198,7 +202,7 @@ export function attachImageInsert(
     if (!hasFiles(e.dataTransfer)) return;
     e.preventDefault();
     const found = droppedFiles(e.dataTransfer);
-    if (found.length > 0) void pasteFiles(found, target);
+    if (found.length > 0) target.dropFiles?.(found);
   };
 
   field.addEventListener("paste", paste);
@@ -262,7 +266,7 @@ export function attachImagePaste(container: HTMLElement, target: ImagePasteTarge
     e.preventDefault();
     e.stopPropagation();
     const found = droppedFiles(e.dataTransfer);
-    if (found.length > 0) void pasteFiles(found, target);
+    if (found.length > 0) target.dropFiles?.(found);
   };
 
   container.addEventListener("keydown", keydown, true);

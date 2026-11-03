@@ -13,6 +13,8 @@ import {
   steppedFontSize, type ScratchpadControl, type Scratchpads,
 } from "../lib/scratchpad.ts";
 import { shortcutKey } from "../lib/shortcuts.ts";
+import { createDropUpload, type DropContext } from "../lib/terminal/drop_upload_view.ts";
+import type { UploadOptions } from "../lib/terminal/session_client.ts";
 import { attachImageInsert } from "../lib/terminal/image_paste.ts";
 
 /** A note page, for the pane controls and the tab's marker. */
@@ -42,7 +44,8 @@ export interface ScratchpadAreaOptions {
   /** Store an image (base64) on the session's server; resolves with its path. */
   saveImage: (data: string) => Promise<string>;
   /** Store a file on the session's server in chunks; resolves with its path. */
-  uploadFile: (file: File, onProgress?: (received: number) => void) => Promise<string>;
+  uploadFile: (file: File, onProgress?: (received: number) => void, options?: UploadOptions) => Promise<string>;
+  uploadContext: () => DropContext;
   /** Give the keyboard back to the terminal. */
   focusTerminal: () => void;
 }
@@ -126,7 +129,12 @@ export class ScratchpadArea implements ScratchpadControl {
         options.focusTerminal();
       }
     });
-    this.cleanups.push(attachImageInsert(this.textarea, options, (text) => this.insert(text)));
+    const uploads = createDropUpload(this.textarea, {
+      uploadFile: (file, progress, settings) => options.uploadFile(file, progress, settings),
+      paste: (text) => this.insert(text),
+    }, options.uploadContext);
+    this.cleanups.push(uploads.dispose);
+    this.cleanups.push(attachImageInsert(this.textarea, options, (text) => this.insert(text), uploads.drop));
     this.listen(this.textarea, "wheel", (event) => {
       const e = event as WheelEvent;
       if (!e.ctrlKey) return;

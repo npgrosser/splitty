@@ -89,6 +89,10 @@ async fn a_file_offer_is_saved_by_the_registered_attached_window() {
         .as_array()
         .expect("capabilities")
         .contains(&json!("file-offer-v1")));
+    assert!(welcome["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("upload-control-v1")));
     send(&mut socket, json!({"type":"file.register"})).await;
     send(
         &mut socket,

@@ -196,6 +196,12 @@ impl Connection {
             MSG_CLOSE => self.handle_close(req).await,
             MSG_SAVE_IMAGE => self.handle_save_image(req).await,
             MSG_UPLOAD => self.handle_upload(req).await,
+            MSG_UPLOAD_CANCEL => {
+                self.uploads
+                    .lock()
+                    .expect("uploads")
+                    .remove(&req.request_id);
+            }
             MSG_ACTIVITY => {
                 self.dispatcher
                     .sizes
@@ -673,15 +679,18 @@ impl Connection {
                 if size > upload::MAX_FILE_BYTES {
                     return Err(UploadError::TooLarge);
                 }
-                let store = self
-                    .dispatcher
-                    .paste_dir
-                    .clone()
-                    .ok_or(UploadError::NoDirectory)?;
+                let store = self.dispatcher.paste_dir.clone();
                 let name = req.name.clone();
-                tokio::task::spawn_blocking(move || Upload::begin(&store, &name, size))
-                    .await
-                    .map_err(|error| UploadError::Io(std::io::Error::other(error)))??
+                let dir = req.dir.clone();
+                tokio::task::spawn_blocking(move || {
+                    if dir.is_empty() {
+                        Upload::begin(&store.ok_or(UploadError::NoDirectory)?, &name, size)
+                    } else {
+                        Upload::begin_in_directory(std::path::Path::new(&dir), &name, size)
+                    }
+                })
+                .await
+                .map_err(|error| UploadError::Io(std::io::Error::other(error)))??
             }
         };
         let offset = req.offset;
@@ -690,7 +699,9 @@ impl Connection {
                 .await
                 .map_err(|error| UploadError::Io(std::io::Error::other(error)))??;
         if upload.is_complete() {
-            return Ok(Some(upload.finish()));
+            return tokio::task::spawn_blocking(move || upload.finish().map(Some))
+                .await
+                .map_err(|error| UploadError::Io(std::io::Error::other(error)))?;
         }
         self.uploads
             .lock()
@@ -1914,6 +1925,38 @@ mod tests {
         assert_eq!(std::fs::read(path).unwrap(), [first, second].concat());
     }
 
+    #[tokio::test]
+    async fn upload_destination_and_cancel_are_owned_by_the_connection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("paste");
+        let sender = Arc::new(MockSender::new());
+        let conn = paste_connection(&dir, sender.clone());
+        let other = paste_connection(&dir, Arc::new(MockSender::new()));
+        let mut request = upload_chunk("durable", 0, b"a", Some(("file.txt", 2)));
+        request.dir = tmp.path().to_string_lossy().into_owned();
+        conn.handle(&request).await;
+        let cancel = Request {
+            msg_type: MSG_UPLOAD_CANCEL.into(),
+            request_id: "durable".into(),
+            ..Request::default()
+        };
+        other.handle(&cancel).await;
+        assert_eq!(upload_dirs(tmp.path()).len(), 1);
+        conn.handle(&cancel).await;
+        conn.handle(&cancel).await;
+        assert!(upload_dirs(tmp.path()).is_empty());
+        assert!(!tmp.path().join("file.txt").exists());
+        request.size = Some(1);
+        conn.handle(&request).await;
+        conn.handle(&cancel).await;
+        assert_eq!(std::fs::read(tmp.path().join("file.txt")).unwrap(), b"a");
+        let events = sender.events();
+        assert!(matches!(
+            events.last(),
+            Some(ServerEvent::UploadSaved { .. })
+        ));
+    }
+
     /// terminal-sessions, Chunked File Uploads, Chunk out of order: the upload
     /// fails and nothing of it remains; a chunk that starts no upload and a
     /// fifth upload at once fail too.
@@ -1995,9 +2038,15 @@ mod tests {
         ))
         .await;
         assert_eq!(upload_dirs(&dir).len(), 1);
+        let mut durable = upload_chunk("durable", 0, b"a", Some(("partial", 2)));
+        durable.dir = tmp.path().to_string_lossy().into_owned();
+        conn.handle(&durable).await;
+        assert_eq!(upload_dirs(tmp.path()).len(), 1);
         conn.close();
 
         assert!(upload_dirs(&dir).is_empty());
+        assert!(upload_dirs(tmp.path()).is_empty());
+        assert!(!tmp.path().join("partial").exists());
     }
 
     /// An empty file is one first chunk with no data.

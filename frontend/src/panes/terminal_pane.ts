@@ -247,7 +247,8 @@ export class TerminalPaneRenderer implements IContentRenderer {
             store: conn.scratchpads,
             screenId: () => binding.wireId,
             saveImage: (data) => s.client.saveImage(data),
-            uploadFile: (file, onProgress) => s.client.uploadFile(file, onProgress),
+            uploadFile: (file, onProgress, options) => s.client.uploadFile(file, onProgress, undefined, options),
+            uploadContext: () => ({ host: conn.label, cwd: s.lastCwd, supported: s.client.uploadControl }),
             focusTerminal: () => this.session?.emulator.focus(),
           });
           this.element.appendChild(this.scratchpad.element);

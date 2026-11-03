@@ -96,6 +96,7 @@ impl MuxHandler {
             capabilities.push(super::editor::CAPABILITY.into());
             capabilities.push(super::files::CAPABILITY.into());
             capabilities.push(splitty_core::protocol::sizing::CAPABILITY.into());
+            capabilities.push(splitty_core::protocol::upload::CAPABILITY.into());
         }
         self.send_event(&event).await;
     }

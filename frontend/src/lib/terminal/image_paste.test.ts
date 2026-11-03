@@ -29,6 +29,7 @@ function target(paths: string[] = ["/home/me/.cache/splitty/paste/paste-1.png"])
     paste: vi.fn(),
     sendCtrlV: vi.fn(),
     failed: vi.fn(),
+    dropFiles: vi.fn(),
   } satisfies ImagePasteTarget;
 }
 
@@ -186,30 +187,18 @@ describe("a pane's paste and drop", () => {
     expect(t.saveImage).not.toHaveBeenCalled();
   });
 
-  it("uploads dropped images and other files", async () => {
+  it("offers dropped files without uploading or inserting anything", () => {
     const t = target();
     const p = pane();
     attachImagePaste(p.container, t);
-    const over = p.fire("dragover", { dataTransfer: { ...transfer([png()]), dropEffect: "none" } });
+    const files = [png(), pdf()];
+    const over = p.fire("dragover", { dataTransfer: { ...transfer(files), dropEffect: "none" } });
     expect(over.preventDefault).toHaveBeenCalled();
-    p.fire("drop", { dataTransfer: transfer([png()]) });
-    await vi.runAllTimersAsync();
-    expect(t.paste).toHaveBeenCalledOnce();
-    p.fire("drop", { dataTransfer: transfer([new File(["echo"], "run.sh", { type: "text/x-sh" })]) });
-    await vi.runAllTimersAsync();
-    expect(t.uploadFile).toHaveBeenCalledOnce();
-    expect(t.paste).toHaveBeenCalledTimes(2);
-    expect(t.failed).not.toHaveBeenCalled();
-  });
-
-  it("PDF into Claude Code on a host: a dropped PDF is uploaded and its path pasted", async () => {
-    const t = target(["/home/me/.cache/splitty/paste/upload-20261029-1/spec.pdf"]);
-    const p = pane("CANVAS");
-    attachImagePaste(p.container, t);
-    p.fire("drop", { dataTransfer: transfer([pdf()]) });
-    await vi.runAllTimersAsync();
+    p.fire("drop", { dataTransfer: transfer(files) });
+    expect(t.dropFiles).toHaveBeenCalledExactlyOnceWith(files);
     expect(t.saveImage).not.toHaveBeenCalled();
-    expect(t.paste).toHaveBeenCalledExactlyOnceWith("/home/me/.cache/splitty/paste/upload-20261029-1/spec.pdf");
+    expect(t.uploadFile).not.toHaveBeenCalled();
+    expect(t.paste).not.toHaveBeenCalled();
   });
 
   it("lets Ctrl+V's paste upload a copied file instead of sending ^V", async () => {
@@ -268,24 +257,19 @@ describe("images in a text field", () => {
     expect(save).not.toHaveBeenCalled();
   });
 
-  it("inserts the paths of dropped images, separated by spaces", async () => {
+  it("offers scratchpad drops without uploading or changing text", () => {
     const { el, fire } = field();
-    const paths = ["/cache/a.png", "/cache/b.png"];
+    const storage = store();
     const insert = vi.fn();
-    attachImageInsert(el, store(vi.fn(async () => paths.shift() ?? "")), insert);
-    fire("drop", { dataTransfer: transfer([png("a.png"), png("b.png")]) });
-    await vi.waitFor(() => expect(insert).toHaveBeenCalledWith("/cache/a.png /cache/b.png"));
-  });
-
-  it("A log dropped into the scratchpad: the file is uploaded and its path inserted", async () => {
-    const { el, fire } = field();
-    const upload = vi.fn(async (_file: File) => "/cache/upload-1/build.log");
-    const insert = vi.fn();
-    attachImageInsert(el, store(undefined, upload), insert);
-    const drop = fire("drop", { dataTransfer: transfer([new File(["ok"], "build.log", { type: "text/plain" })]) });
-    expect(drop.preventDefault).toHaveBeenCalled();
-    await vi.waitFor(() => expect(insert).toHaveBeenCalledWith("/cache/upload-1/build.log"));
-    expect(upload.mock.calls[0][0].name).toBe("build.log");
+    const dropFiles = vi.fn();
+    attachImageInsert(el, storage, insert, dropFiles);
+    const files = [png(), pdf("build.log")];
+    const event = fire("drop", { dataTransfer: transfer(files) });
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(dropFiles).toHaveBeenCalledExactlyOnceWith(files);
+    expect(storage.saveImage).not.toHaveBeenCalled();
+    expect(storage.uploadFile).not.toHaveBeenCalled();
+    expect(insert).not.toHaveBeenCalled();
   });
 
   it("stops listening when cleaned up", () => {

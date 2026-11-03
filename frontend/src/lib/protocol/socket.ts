@@ -34,7 +34,7 @@ export interface ConnSocket {
  * only, so a socket never queues them for a reconnect.
  */
 export function belongsToConnection(msg: IncomingMessage): boolean {
-  return msg.type === "save_image" || msg.type === "upload" || msg.type.startsWith("file.") || msg.type.startsWith("editor.");
+  return msg.type === "save_image" || msg.type === "upload" || msg.type === "upload_cancel" || msg.type.startsWith("file.") || msg.type.startsWith("editor.");
 }
 
 export function decodeOutputFrame(bytes: Uint8Array): { id: string; payload: Uint8Array } | null {

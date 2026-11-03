@@ -242,6 +242,51 @@ describe("SessionClient: uploaded files", () => {
     await expect(conn.sessions.uploadFile(file(10), undefined, 10)).rejects.toThrow("did not answer");
   });
 
+  it("gates upload controls and sends a destination only on the first chunk", async () => {
+    const { socket, conn } = fakeServer("host:vm1");
+    await expect(conn.sessions.uploadFile(file(10), undefined, undefined, { dir: "/work" })).rejects.toMatchObject({ needsUpdate: true });
+    expect(chunks(socket)).toEqual([]);
+    socket.message({ type: "mux.welcome", clientId: "c", screens: [], capabilities: ["upload-control-v1"] });
+    const saved = conn.sessions.uploadFile(file(2 * MiB), undefined, undefined, { dir: "/work" });
+    await sent(socket, 1);
+    const id = chunks(socket)[0].requestId;
+    expect(chunks(socket)[0].dir).toBe("/work");
+    socket.message({ type: "upload_progress", requestId: id, received: MiB });
+    await sent(socket, 2);
+    expect(chunks(socket)[1].dir).toBeUndefined();
+    socket.message({ type: "upload_saved", requestId: id, path: "/work/notes.txt" });
+    await expect(saved).resolves.toBe("/work/notes.txt");
+    socket.message({ type: "mux.welcome", clientId: "c", screens: [] });
+    expect(conn.sessions.uploadControl).toBe(false);
+  });
+
+  it("cancels while awaiting a chunk, ignores late replies and sends no further chunks", async () => {
+    const { socket, conn } = fakeServer("host:vm1");
+    socket.message({ type: "mux.welcome", clientId: "c", screens: [], capabilities: ["upload-control-v1"] });
+    const controller = new AbortController();
+    const progress = vi.fn();
+    const upload = conn.sessions.uploadFile(file(2 * MiB), progress, undefined, { signal: controller.signal });
+    const rejected = expect(upload).rejects.toMatchObject({ name: "AbortError" });
+    await sent(socket, 1);
+    const id = chunks(socket)[0].requestId;
+    controller.abort();
+    await rejected;
+    expect(socket.sentOfType("upload_cancel")).toEqual([{ type: "upload_cancel", requestId: id }]);
+    socket.message({ type: "upload_progress", requestId: id, received: MiB });
+    await flush();
+    expect(chunks(socket)).toHaveLength(1);
+    expect(progress).not.toHaveBeenCalled();
+    await expect(conn.sessions.uploadFile(file(1), undefined, undefined, { signal: controller.signal })).rejects.toMatchObject({ name: "AbortError" });
+    expect(chunks(socket)).toHaveLength(1);
+  });
+
+  it("cancels a chunk timeout on capable hosts", async () => {
+    const { socket, conn } = fakeServer("host:vm1");
+    socket.message({ type: "mux.welcome", clientId: "c", screens: [], capabilities: ["upload-control-v1"] });
+    await expect(conn.sessions.uploadFile(file(1), undefined, 10)).rejects.toThrow("did not answer");
+    expect(socket.sentOfType("upload_cancel")).toHaveLength(1);
+  });
+
   it("takes the answer only from its own connection", async () => {
     const local = fakeServer("local");
     const host = fakeServer("host:vm1");

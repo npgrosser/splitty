@@ -83,7 +83,8 @@ export type IncomingMessage =
   | { type: "save_image"; requestId: string; data: string }
   // A chunk of a file for a pane's drop or paste, at most 1 MiB as base64; the first
   // (`offset` 0) names the file and its size. Answered by `upload_progress`, `upload_saved` or `upload_failed`.
-  | { type: "upload"; requestId: string; offset: number; data: string; name?: string; size?: number }
+  | { type: "upload"; requestId: string; offset: number; data: string; name?: string; size?: number; dir?: string }
+  | { type: "upload_cancel"; requestId: string }
   // File offers (`file-offer-v1`): receive them, take or decline one, read the taken one chunk by chunk.
   | { type: "file.register" }
   | { type: "file.accept"; offerId: string }

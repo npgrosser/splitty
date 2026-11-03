@@ -107,9 +107,15 @@ function savedPath(path: unknown): string | null {
   return plainText(path, MAX_IMAGE_PATH) === path ? path : null;
 }
 
+export interface UploadOptions {
+  dir?: string;
+  signal?: AbortSignal;
+}
+
 export class SessionClient {
   /** Home directory reported by this server, used for ~ substitution in paths. */
   homeDir = "";
+  uploadControl = false;
   /** This server decides PTY sizes (`pty-size-v1` in its latest welcome). */
   sizing = false;
 
@@ -211,24 +217,39 @@ export class SessionClient {
     file: Blob & { readonly name: string },
     onProgress?: (received: number) => void,
     timeoutMs = UPLOAD_CHUNK_TIMEOUT_MS,
+    options: UploadOptions = {},
   ): Promise<string> {
     if (file.size > MAX_UPLOAD_BYTES) throw new ImageSaveError(`${file.name || "The file"} is larger than 512 MB.`);
+    if ((options.dir !== undefined || options.signal) && !this.uploadControl) {
+      throw new ImageSaveError("Update this host's Splitty to choose upload destinations and cancel uploads.", true);
+    }
+    const { signal } = options;
+    signal?.throwIfAborted();
     const id = requestId("up");
+    let started = false;
     let offset = 0;
-    for (;;) {
-      const bytes = new Uint8Array(await file.slice(offset, offset + UPLOAD_CHUNK_BYTES).arrayBuffer());
-      const end = offset + bytes.length;
-      const chunk: Extract<IncomingMessage, { type: "upload" }> = { type: "upload", requestId: id, offset, data: toBase64(bytes) };
-      if (offset === 0) Object.assign(chunk, { name: file.name, size: file.size });
-      const answer = await this.uploadChunk(chunk, timeoutMs);
-      if (answer.saved !== undefined) {
-        if (end !== file.size) throw new ImageSaveError("The server stored the file before all of it was sent.");
-        onProgress?.(file.size);
-        return answer.saved;
+    try {
+      for (;;) {
+        signal?.throwIfAborted();
+        const bytes = new Uint8Array(await file.slice(offset, offset + UPLOAD_CHUNK_BYTES).arrayBuffer());
+        signal?.throwIfAborted();
+        const end = offset + bytes.length;
+        const chunk: Extract<IncomingMessage, { type: "upload" }> = { type: "upload", requestId: id, offset, data: toBase64(bytes) };
+        if (offset === 0) Object.assign(chunk, { name: file.name, size: file.size, ...(options.dir !== undefined ? { dir: options.dir } : {}) });
+        started = true;
+        const answer = await this.uploadChunk(chunk, timeoutMs, signal);
+        if (answer.saved !== undefined) {
+          if (end !== file.size) throw new ImageSaveError("The server stored the file before all of it was sent.");
+          onProgress?.(file.size);
+          return answer.saved;
+        }
+        if (answer.received !== end || end >= file.size) throw new ImageSaveError("The server lost track of the upload.");
+        onProgress?.(end);
+        offset = end;
       }
-      if (answer.received !== end || end >= file.size) throw new ImageSaveError("The server lost track of the upload.");
-      onProgress?.(end);
-      offset = end;
+    } catch (error) {
+      if (started && this.uploadControl) this.socket.send({ type: "upload_cancel", requestId: id });
+      throw error;
     }
   }
 
@@ -236,9 +257,11 @@ export class SessionClient {
   private uploadChunk(
     chunk: Extract<IncomingMessage, { type: "upload" }>,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<{ received?: number; saved?: string }> {
     return new Promise((resolve, reject) => {
       const finish = (settle: () => void) => {
+        signal?.removeEventListener("abort", abort);
         clearTimeout(timeout);
         unsubMessage();
         unsubDisconnect();
@@ -259,7 +282,10 @@ export class SessionClient {
           finish(() => reject(new ImageSaveError("This server's Splitty is too old to take files.", true)));
         }
       });
-      this.socket.send(chunk);
+      const abort = () => finish(() => reject(signal?.reason ?? new DOMException("Upload cancelled", "AbortError")));
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+      else this.socket.send(chunk);
     });
   }
 
@@ -350,6 +376,7 @@ export class SessionClient {
   private route(msg: OutgoingMessage): void {
     switch (msg.type) {
       case "mux.welcome":
+        this.uploadControl = Array.isArray(msg.capabilities) && msg.capabilities.includes("upload-control-v1");
         this.sizing = Array.isArray(msg.capabilities) && msg.capabilities.includes(SIZE_CAPABILITY);
         break;
       case "size": {

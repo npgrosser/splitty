@@ -370,8 +370,12 @@ interface SaveImage {
  * failed upload, and an unfinished one when its connection closes, is
  * removed. Older servers answer `error` "unknown message type: upload".
  */
+/** upload-control-v1: dir selects an existing absolute directory. The server
+ * stages privately there, then publishes without overwriting any entry. */
 interface Upload {
   type: "upload";
+  /** First chunk only, omitted for temporary storage. */
+  dir?: string;
   /** Names the upload; echoed by every answer. */
   requestId: string;
   /** Where in the file `data` starts: the bytes received so far. */
@@ -382,6 +386,13 @@ interface Upload {
   name?: string;
   /** First chunk only: the file's length in bytes. */
   size?: number;
+}
+
+/** upload-control-v1: idempotently discard this connection's unfinished upload.
+ * No response. Completed files remain. Never queued across reconnects. */
+interface UploadCancel {
+  type: "upload_cancel";
+  requestId: string;
 }
 
 // --- Mux Messages (new in Milestone 1) ---
@@ -456,6 +467,7 @@ type ClientMessage =
   | SessionClose
   | SaveImage
   | Upload
+  | UploadCancel
   | MuxConnect
   | MuxAttach
   | MuxDetach
@@ -685,7 +697,7 @@ interface MuxWelcome extends ServerEvent {
   clientId: string;
   screens: ScreenInfo[];
   serverMode?: "embedded" | "daemon";
-  capabilities?: string[]; // includes "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1" and "tab-select-v1"; absent on old servers
+  capabilities?: string[]; // includes "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1" and "tab-select-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */

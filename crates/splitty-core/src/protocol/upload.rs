@@ -5,7 +5,9 @@
 //! every upload in a new directory `upload-<UTC yyyymmdd-hhmmss>-<8 random
 //! hex>/` of the image store's directory (`paste`), as a file only its owner
 //! can read, under the client's name made safe ([`sanitize_name`]): the name
-//! never selects a directory. A failed or abandoned upload is removed.
+//! never selects a directory. An explicit destination stages privately in that
+//! directory and publishes by hard link without replacement. A failed, cancelled
+//! or abandoned upload is removed.
 
 use std::fs;
 use std::io::{self, Write};
@@ -29,6 +31,9 @@ pub const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 
 /// How many uploads one connection may have under way at once.
 pub const MAX_IN_FLIGHT: usize = 4;
+
+/// Destination selection and cancellation, announced in the welcome.
+pub const CAPABILITY: &str = "upload-control-v1";
 
 /// The start of every upload directory's name, and of only those.
 const PREFIX: &str = "upload-";
@@ -60,6 +65,10 @@ pub enum UploadError {
     TooMany,
     #[error("the server has no cache directory for uploads")]
     NoDirectory,
+    #[error("choose an existing absolute destination directory")]
+    InvalidDirectory,
+    #[error("a file named {0} already exists in the destination; rename it before uploading")]
+    DestinationExists(String),
     #[error("{0}")]
     Directory(#[from] PasteError),
     #[error("could not store the file: {0}")]
@@ -130,6 +139,7 @@ pub struct Upload {
     file: Option<fs::File>,
     size: u64,
     received: u64,
+    destination: Option<PathBuf>,
 }
 
 impl Upload {
@@ -141,7 +151,37 @@ impl Upload {
         }
         let store = paste::prepare_dir(store)?;
         remove_old(&store, SystemTime::now());
-        let dir = create_dir(&store)?;
+        Self::create(&store, name, size, None)
+    }
+
+    /// Stage beside the destination, without changing its permissions.
+    pub fn begin_in_directory(
+        directory: &Path,
+        name: &str,
+        size: u64,
+    ) -> Result<Self, UploadError> {
+        if size > MAX_FILE_BYTES {
+            return Err(UploadError::TooLarge);
+        }
+        if !directory.is_absolute() || !directory.is_dir() {
+            return Err(UploadError::InvalidDirectory);
+        }
+        let directory = directory.canonicalize()?;
+        let destination = directory.join(sanitize_name(name));
+        // Includes dangling links. Publication checks again atomically.
+        if destination.symlink_metadata().is_ok() {
+            return Err(UploadError::DestinationExists(sanitize_name(name)));
+        }
+        Self::create(&directory, name, size, Some(destination))
+    }
+
+    fn create(
+        store: &Path,
+        name: &str,
+        size: u64,
+        destination: Option<PathBuf>,
+    ) -> Result<Self, UploadError> {
+        let dir = create_dir(store)?;
         let path = dir.join(sanitize_name(name));
         let mut options = fs::OpenOptions::new();
         // `create_new` never follows a link; the directory is new anyway.
@@ -164,6 +204,7 @@ impl Upload {
             file: Some(file),
             size,
             received: 0,
+            destination,
         })
     }
 
@@ -193,9 +234,28 @@ impl Upload {
     }
 
     /// Close the file and keep it; returns its absolute path.
-    pub fn finish(mut self) -> PathBuf {
+    pub fn finish(mut self) -> Result<PathBuf, UploadError> {
         self.file = None;
-        std::mem::take(&mut self.path)
+        if let Some(destination) = self.destination.take() {
+            // Same filesystem, atomic publication, and never replaces an entry.
+            fs::hard_link(&self.path, &destination).map_err(|error| {
+                if error.kind() == io::ErrorKind::AlreadyExists {
+                    UploadError::DestinationExists(
+                        destination
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .into_owned(),
+                    )
+                } else {
+                    UploadError::Io(error)
+                }
+            })?;
+            // Drop removes only the staging directory, not the published link.
+            Ok(destination)
+        } else {
+            Ok(std::mem::take(&mut self.path))
+        }
     }
 }
 
@@ -329,7 +389,7 @@ mod tests {
         assert!(!upload.is_complete());
         upload.append(MAX_CHUNK_BYTES as u64, &second).unwrap();
         assert!(upload.is_complete());
-        let path = upload.finish();
+        let path = upload.finish().unwrap();
 
         assert!(path.is_absolute(), "{path:?}");
         assert_eq!(path.file_name().unwrap(), "notes.txt");
@@ -349,6 +409,60 @@ mod tests {
             assert_eq!(mode(&path), 0o600);
             assert_eq!(mode(dir), 0o700);
             assert_eq!(mode(&store), 0o700);
+        }
+    }
+
+    #[test]
+    fn durable_upload_publishes_only_when_complete_and_never_replaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let directory = tmp.path().canonicalize().unwrap();
+        let target = directory.join("report.pdf");
+        let mut upload = Upload::begin_in_directory(&directory, "../report.pdf", 2).unwrap();
+        upload.append(0, b"a").unwrap();
+        assert!(!target.exists());
+        upload.append(1, b"b").unwrap();
+        assert_eq!(upload.finish().unwrap(), target);
+        assert_eq!(fs::read(&target).unwrap(), b"ab");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        assert!(matches!(
+            Upload::begin_in_directory(&directory, "report.pdf", 1),
+            Err(UploadError::DestinationExists(_))
+        ));
+        // A conflict created while the upload runs is also preserved.
+        let mut race = Upload::begin_in_directory(&directory, "race.txt", 1).unwrap();
+        race.append(0, b"x").unwrap();
+        fs::write(directory.join("race.txt"), b"original").unwrap();
+        assert!(matches!(
+            race.finish(),
+            Err(UploadError::DestinationExists(_))
+        ));
+        assert_eq!(fs::read(directory.join("race.txt")).unwrap(), b"original");
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+        let partial = Upload::begin_in_directory(&directory, "cancel.txt", 10).unwrap();
+        drop(partial);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 2);
+        assert!(Upload::begin_in_directory(Path::new("relative"), "x", 0).is_err());
+        assert!(Upload::begin_in_directory(&directory.join("missing"), "x", 0).is_err());
+        assert!(Upload::begin_in_directory(&target, "x", 0).is_err());
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::{symlink, PermissionsExt};
+            fs::set_permissions(&directory, fs::Permissions::from_mode(0o755)).unwrap();
+            let empty = Upload::begin_in_directory(&directory, "empty", 0).unwrap();
+            let empty = empty.finish().unwrap();
+            assert_eq!(
+                fs::metadata(&directory).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+            assert_eq!(
+                fs::metadata(empty).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+            symlink(directory.join("missing"), directory.join("link")).unwrap();
+            assert!(matches!(
+                Upload::begin_in_directory(&directory, "link", 0),
+                Err(UploadError::DestinationExists(_))
+            ));
         }
     }
 
@@ -390,7 +504,7 @@ mod tests {
         let store = tmp.path().join("paste");
         let mut upload = Upload::begin(&store, "../../outside.txt", 1).unwrap();
         upload.append(0, b"x").unwrap();
-        let path = upload.finish();
+        let path = upload.finish().unwrap();
         assert_eq!(path.file_name().unwrap(), "outside.txt");
         assert_eq!(path.parent().unwrap().parent(), Some(store.as_path()));
         assert!(!tmp.path().join("outside.txt").exists());
@@ -428,7 +542,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let upload = Upload::begin(tmp.path(), "empty.txt", 0).unwrap();
         assert!(upload.is_complete());
-        let path = upload.finish();
+        let path = upload.finish().unwrap();
         assert_eq!(fs::read(path).unwrap(), b"");
     }
 
@@ -471,7 +585,7 @@ mod tests {
         }
 
         let upload = Upload::begin(&store, "new.txt", 0).unwrap();
-        let path = upload.finish();
+        let path = upload.finish().unwrap();
 
         assert!(!old.exists());
         assert!(store.join("upload-not-a-dir").exists());
