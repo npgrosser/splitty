@@ -218,23 +218,33 @@ process RSS or trusted deployment-archive bound.
 
 ## Windows isolation and consumer-pressure fixture
 
-The expanded fixture's `a52fde175fc7` run completes its functional workload:
-Setup/Main and two Remote windows, no opener/named-window references or shared
-storage, denied foreign target/handle use, independent slow-client closure,
-healthy API/file completion on the unchanged connection, replay containing the
-post-close marker, and 32-handle saturation/refusal/replacement/recovery. Actual
-binary PTY and two file digests pass. Local helpers/PTYs exit, the remote daemon
-survives app exit, independent fixture sentinels survive and both private
-distributions are removed with zero owned Windows handles.
+The hosted isolation/consumer run at `6b08775` passes
+[run 41720162085](https://github.com/npgrosser/splitty/actions/runs/41720162085).
+Setup/Main and two Remote windows pass opener/named-window/storage isolation,
+foreign target/handle denial, independent slow-client closure, healthy API/file
+completion on the unchanged connection, and 32-handle saturation/refusal/
+replacement/recovery. Original write → open → attach ordering is retained:
+write/open at 1793740944716 ms precede attach at 1793740944723 ms; the attached
+stream delivers 94,084 bytes including the actual post-close marker. Diagnostic
+awaits follow attach. Binary PTY and both file SHA checks pass.
 
-The overall result remains failed: sampled SSH listener rows are unclassified,
-and the separate native TCP control reports an unexpected state for its own
-listener. Copied-handle denial is a capsule check; stale Setup-proof denial is a
-broker diagnostic. The slow client withholds receipts rather than freezing a
-JavaScript engine; global/worker ceilings are not independently saturated here.
-An earlier replay-marker failure remains unexplained. The next source version
-restores immediate write/open/attach ordering, keeping diagnostic awaits after
-attach; the passing diagnostic run does not establish that timing variant.
+The strict listener gate passes with no listener/unknown-state rows and no
+provider error. Bounded known non-listening observations are retained separately.
+The app exits naturally with code 0; local helpers/PTYs exit, the remote daemon
+survives until fixture teardown, independent sentinels preserve identity and
+answer fresh nonces, both app distributions are removed, and owned handles reach
+zero. The outer control distribution is also removed and the original WSL
+configuration absence is restored. This scenario uses forwarding enabled for
+its explicit SSH listener; disabled-forwarding evidence is separate below.
+
+Earlier local `a52fde175fc7` remains an overall failure on unclassified listener
+rows, despite passing its functional workload. Local native-API state 0 / CIM
+null controls and the earlier `c92108c1f378` replay-marker failure remain
+unexplained. The hosted result establishes the original-order case on a valid
+measurement environment; it does not identify those earlier failure causes.
+Copied-handle denial is a capsule check; stale Setup-proof denial is a broker
+diagnostic. The slow client withholds receipts rather than freezing an engine;
+global/worker ceilings are observed but not independently saturated.
 [Fixture instructions and evidence limits](../../../scripts/testing/tauri-windows-native-smoke/README.md)
 retain these distinctions.
 
@@ -277,8 +287,8 @@ after checkout CRLF normalization.
 
 This validates the decoder on the hosted runner. It does not explain or waive
 the local native-API state 0 / CIM null listener control or classify the earlier
-SSH observations. The application isolation/SSH scenario still needs a valid
-listener inventory; the self-socket control is not an application pass.
+SSH observations. The later application run above supplies its own successful
+strict inventory; the self-socket control alone is not an application pass.
 
 ## Open merge gates
 
@@ -291,9 +301,9 @@ listener inventory; the self-socket control is not an application pass.
 - The strict native Linux reservation test passed with an actual surviving
   worker after coordinator SIGKILL, IPv4/IPv6 gateway exclusion and reuse only
   after observed worker exit. The real SSH/hostile-peer crash variant and
-  native macOS positive controls now pass in CI. The complete listener/resource
-  inventory matrix remains open; WSL refusal checks alone are not positive
-  native-platform coverage.
+  native macOS positive controls and the hosted Windows app/SSH inventory now
+  pass. Task 5.9 is complete on this combined evidence; the remaining actual
+  window-isolation/consumer cases belong to task 7.6.
 - Migration, conformance and security review must reconcile the remaining task
   checks, including framework-bound scope, before cutover is approved.
 

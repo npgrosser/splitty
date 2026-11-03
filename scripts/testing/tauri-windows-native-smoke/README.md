@@ -1,27 +1,24 @@
 # Native Windows and isolated WSL smoke
 
-The latest isolation/consumer run (`a52fde175fc7`) passed its functional workload
-but **failed overall** at the strict Windows listener gate. It completed
-Setup/Main/two-Remote isolation, slow-client closure, healthy API/file operations
-on the unchanged connection, post-close API, replay containing the actual marker,
-32 per-window handles, excess refusal, replacement and baseline recovery. Binary
-PTY bytes and the 1,048,833-byte and 65,537-byte upload SHA checks passed. The app
-exited naturally; owned Jobs emptied, handles reached zero, independent guest
-identity/nonce checks passed, and both new distributions were removed.
+The latest hosted isolation/consumer run at `6b08775` **passes overall**
+([run 41720162085](https://github.com/npgrosser/splitty/actions/runs/41720162085)).
+Setup/Main/two-Remote isolation, slow-client closure, healthy same-connection
+API/file work, post-close API, original-order replay, 32 handles, excess refusal,
+replacement and baseline recovery all pass. The replay includes the actual
+post-close marker in 94,084 bytes, with write/open preceding attach and no added
+diagnostic awaits before attach. Both file SHA checks and binary PTY pass.
 
-Five sampled CIM Listen rows remained UNCLASSIFIED. Their whole-second socket
-creation preceded the retained SSH process birth. The script collected the same
-guarded read-only functional verification, recorded
-`strictWindowsListenerGatePassed:false`, then re-raised the original driver
-failure. This is not an overall pass or a listener-absence proof.
+The strict raw-CIM inventory reports no listener/unknown rows or query error;
+known non-listening rows are retained separately. Natural app exit, zero owned
+handles, independent sentinel preservation, exact distribution removal and WSL
+configuration restoration pass. The remote daemon survives app exit until
+fixture teardown. This uses forwarding enabled for the explicit SSH fixture.
 
-The earlier `c92108c1f378` run failed to find the post-close capture marker. That
-failure remains unexplained. The later passing run added diagnostic awaits
-between write and attach and therefore does not establish a fix. Current source
-restores write → open replay → attach without additional diagnostic awaits in
-that sequence; catalog queries and checkpoint IPC follow attach. This ordering
-change has source checks only. See the [verification record](../../../openspec/changes/native-client-transports/verification.md)
-for the broader evidence chronicle and unresolved gates.
+Earlier local runs retain their failed status: `a52fde175fc7` had unclassified
+listener rows, and `c92108c1f378` lacked the replay marker. The hosted result does
+not explain those failures or the local raw-API/CIM state anomaly. See the
+[verification record](../../../openspec/changes/native-client-transports/verification.md)
+for the evidence and its remaining limits.
 
 ## Entrypoints and evidence
 
