@@ -2219,6 +2219,61 @@ async fn the_hub_relays_a_host_through_real_ssh() {
 /// daemon's version.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_hub_updates_a_host_daemon_of_another_version() {
+    // Keeper socket identity alone does not establish a live terminal. A
+    // fresh nonce must round-trip through the bridge to the original shell,
+    // preserving both its PID and private in-memory state across migration.
+    async fn prove_shell(
+        socket: &mut HubSocket,
+        session: &str,
+        secret: &str,
+        initialize: bool,
+    ) -> u32 {
+        let nonce = format!("{:032x}", rand::random::<u128>());
+        let initialize = if initialize {
+            format!("SPLITTY_MIGRATION_PROOF='{secret}'; ")
+        } else {
+            String::new()
+        };
+        let input = format!("{initialize}printf '\nMIGRATION_%s:%s:%s\n' '{nonce}' \"$$\" \"$SPLITTY_MIGRATION_PROOF\"\n");
+        socket
+            .send(
+                &serde_json::json!({"type":"attach","id":session,"cols":80,"rows":24}).to_string(),
+            )
+            .await;
+        socket
+            .send(&serde_json::json!({"type":"input","id":session,"data":input}).to_string())
+            .await;
+        let prefix = format!("MIGRATION_{nonce}:");
+        let mut bytes = Vec::new();
+        loop {
+            if let Message::Binary(frame) = socket.next().await {
+                let Some((id, output)) =
+                    splitty_server::client_session::codec::decode_binary_frame(&frame)
+                else {
+                    panic!("invalid terminal output");
+                };
+                if id != session {
+                    continue;
+                }
+                bytes.extend_from_slice(output);
+                assert!(
+                    bytes.len() < 64 * 1024,
+                    "shell nonce missing from bounded output"
+                );
+                let text = String::from_utf8_lossy(&bytes);
+                for line in text.lines() {
+                    if let Some((pid, value)) = line
+                        .strip_prefix(&prefix)
+                        .and_then(|line| line.split_once(':'))
+                    {
+                        if value.trim() == secret {
+                            return pid.parse().expect("same shell PID");
+                        }
+                    }
+                }
+            }
+        }
+    }
     let Some(lab) = lab() else { return };
     let payload = lab.payload();
     let hub = HubServer::start(&lab, &payload);
@@ -2233,7 +2288,14 @@ async fn the_hub_updates_a_host_daemon_of_another_version() {
             r#"{"type":"mux.op","screenId":"kept","op":{"type":"create_screen","screenId":"kept","name":"kept","newPaneId":"kept-pane"}}"#,
         )
         .await;
-    while socket.next_json().await["type"] != "mux.pane_spawned" {}
+    let session = loop {
+        let event = socket.next_json().await;
+        if event["type"] == "mux.pane_spawned" {
+            break event["sessionId"].as_str().unwrap().to_owned();
+        }
+    };
+    let secret = format!("{:032x}", rand::random::<u128>());
+    let shell_pid = prove_shell(&mut socket, &session, &secret, true).await;
     socket.close().await;
     hub.wait_without_ssh();
     let daemon = host_daemon_pid(&lab);
@@ -2244,14 +2306,18 @@ async fn the_hub_updates_a_host_daemon_of_another_version() {
     assert_eq!(steps, ["daemon", "bridge"], "nothing to update: {ready}");
     assert_eq!(ready["daemon"]["started"], false, "{ready}");
     assert_eq!(socket.next_json().await["type"], "mux.welcome");
+    assert_eq!(
+        prove_shell(&mut socket, &session, &secret, false).await,
+        shell_pid
+    );
     socket.close().await;
     hub.wait_without_ssh();
     assert_eq!(host_daemon_pid(&lab), daemon, "the same daemon runs");
 
     // The daemon becomes one of another version and protocol.
     let info_path = lab.dir.path().join("home/.config/splitty/daemon.json");
-    let mut info: serde_json::Value =
-        serde_json::from_str(&fs::read_to_string(&info_path).expect("daemon.json")).expect("JSON");
+    let original_record = fs::read(&info_path).expect("daemon.json");
+    let mut info: serde_json::Value = serde_json::from_slice(&original_record).expect("JSON");
     let protocol = info["protocol"].as_u64().expect("protocol");
     info["version"] = "0.0.1-old".into();
     info["protocol"] = (protocol + 2).into();
@@ -2267,6 +2333,24 @@ async fn the_hub_updates_a_host_daemon_of_another_version() {
         kill(Pid::from_raw(daemon), None).is_ok(),
         "without update=1 the daemon keeps running"
     );
+    socket.close().await;
+    hub.wait_without_ssh();
+    assert_eq!(host_keepers(&lab), keepers);
+    let old_record = fs::read(&info_path).unwrap();
+    // Restore only the test's simulated version metadata to probe the actual
+    // unchanged daemon, then restore the old record for explicit update.
+    fs::write(&info_path, &original_record).unwrap();
+    let mut probe = hub.open(HOST).await;
+    assert_eq!(probe.outcome().await.1["type"], "remote.ready");
+    assert_eq!(probe.next_json().await["type"], "mux.welcome");
+    assert_eq!(
+        prove_shell(&mut probe, &session, &secret, false).await,
+        shell_pid
+    );
+    probe.close().await;
+    hub.wait_without_ssh();
+    assert_eq!(host_daemon_pid(&lab), daemon);
+    fs::write(&info_path, &old_record).unwrap();
 
     let mut socket = hub.open_with(HOST, "&update=1").await;
     let (progress, ready) = socket.progress().await;
@@ -2301,6 +2385,10 @@ async fn the_hub_updates_a_host_daemon_of_another_version() {
         "the new daemon adopted the keeper"
     );
     assert_eq!(socket.next_json().await["type"], "mux.welcome");
+    assert_eq!(
+        prove_shell(&mut socket, &session, &secret, false).await,
+        shell_pid
+    );
     assert_ne!(host_daemon_pid(&lab), daemon, "a new daemon runs");
     // Its info file is gone before the process has quite ended.
     let deadline = std::time::Instant::now() + WAIT;
@@ -2333,6 +2421,10 @@ async fn the_hub_updates_a_host_daemon_of_another_version() {
     assert_eq!(ready["daemon"]["version"], "99.0.0", "{ready}");
     assert_eq!(ready["daemon"]["started"], false, "{ready}");
     assert_eq!(socket.next_json().await["type"], "mux.welcome");
+    assert_eq!(
+        prove_shell(&mut socket, &session, &secret, false).await,
+        shell_pid
+    );
     socket.close().await;
     hub.wait_without_ssh();
     assert_eq!(host_daemon_pid(&lab), replacement_pid);
@@ -2367,6 +2459,20 @@ async fn the_hub_updates_a_host_daemon_of_another_version() {
         hub.wait_without_ssh();
         assert_eq!(host_daemon_pid(&lab), replacement_pid);
         assert_eq!(fs::read(&info_path).unwrap(), record);
+        assert_eq!(host_keepers(&lab), keepers);
+        // The refusal left the simulated discovery intact. Repair it only
+        // for this fixture's native liveness probe of the same service/shell.
+        fs::write(&info_path, &replacement_record).unwrap();
+        let mut probe = hub.open(HOST).await;
+        assert_eq!(probe.outcome().await.1["type"], "remote.ready");
+        assert_eq!(probe.next_json().await["type"], "mux.welcome");
+        assert_eq!(
+            prove_shell(&mut probe, &session, &secret, false).await,
+            shell_pid
+        );
+        probe.close().await;
+        hub.wait_without_ssh();
+        assert_eq!(host_daemon_pid(&lab), replacement_pid);
         assert_eq!(host_keepers(&lab), keepers);
     }
     fs::write(&info_path, replacement_record).unwrap();
