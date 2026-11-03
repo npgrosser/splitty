@@ -17,10 +17,10 @@ use splitty_transport::{
 use tokio::io::{AsyncRead, BufReader, ReadBuf};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 
 use crate::install::Server;
-use crate::ssh::{diagnostic_budget, keep_end, kept_end, Diagnostic, Ssh, SshTarget};
+use crate::ssh::{diagnostic_budget, keep_end, kept_end, kept_end_for, Diagnostic, Ssh, SshTarget};
 
 /// The owned child and its bounded diagnostic drain.
 pub struct BridgeProcess {
@@ -157,6 +157,7 @@ struct NativeConnection {
     peer: Option<Peer>,
     owner_watch: Option<JoinHandle<()>>,
     process: BridgeProcess,
+    owner_cleanup: bool,
     _carrier: admission::Carrier,
     opening: Option<admission::Opening>,
     stream: Option<admission::Stream>,
@@ -164,6 +165,11 @@ struct NativeConnection {
 
 impl NativeConnection {
     async fn finish(mut self) -> (io::Result<()>, Ended) {
+        // Pipe/task shutdown and diagnostics consume the same app-owned exit
+        // budget. Reserve a small margin within the public three-second bound.
+        let owner_deadline = self
+            .owner_cleanup
+            .then(|| Instant::now() + Duration::from_millis(2900));
         let result = match self.peer.take() {
             Some(peer) => peer.finish().await,
             None => Ok(()),
@@ -171,7 +177,10 @@ impl NativeConnection {
         if let Some(watch) = self.owner_watch.take() {
             let _ = watch.await;
         }
-        let ended = self.process.finish(Duration::from_millis(500)).await;
+        let ended = match owner_deadline {
+            Some(deadline) => self.process.finish_owner(deadline).await,
+            None => self.process.finish(Duration::from_millis(500)).await,
+        };
         (result, ended)
     }
 }
@@ -275,6 +284,7 @@ impl NativeBridge {
                 peer: None,
                 owner_watch: None,
                 process,
+                owner_cleanup: matches!(expected.purpose, wire::Purpose::Owner),
                 _carrier: carrier,
                 opening: Some(opening),
                 stream: None,
@@ -431,6 +441,27 @@ impl BridgeProcess {
         self.ended().await
     }
 
+    async fn finish_owner(&mut self, deadline: Instant) -> Ended {
+        // Owned PTY lifecycle retains its child through a 500ms escalation
+        // grace before reaping. The relay's identical 500ms kill races cleanup.
+        let grace =
+            Duration::from_millis(2750).min(deadline.saturating_duration_since(Instant::now()));
+        let status = match timeout(grace, self.child.wait()).await {
+            Ok(status) => status,
+            Err(_) => {
+                let _ = self.child.start_kill();
+                self.child.wait().await
+            }
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let stderr = kept_end_for(self.stderr.take(), remaining).await;
+        Ended {
+            status,
+            stderr,
+            budget: self.budget.clone(),
+        }
+    }
+
     /// End a bridge whose input is closed: it gets `grace` to
     /// finish on its own, then it is killed.
     pub async fn finish(&mut self, grace: Duration) -> Ended {
@@ -553,6 +584,140 @@ mod tests {
         let (result, ended) = bridge.finish().await;
         result.unwrap();
         assert!(ended.status.unwrap().success(), "{}", ended.stderr);
+    }
+
+    /// The app-owned helper must finish its lifecycle reaper after EOF. An
+    /// ordinary SSH relay retains the shorter teardown grace.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn embedded_owner_cleanup_outlives_the_ordinary_relay_grace() {
+        for (purpose, cleans_up) in [(wire::Purpose::Owner, true), (wire::Purpose::Direct, false)] {
+            let directory = tempfile::tempdir().unwrap();
+            let marker = directory.path().join("cleaned");
+            let ready = wire::Ready {
+                generation: 1,
+                instance: "a".repeat(32),
+                mux_protocol: 1,
+                purpose,
+                limits: wire::Limits::default(),
+            };
+            let mut command = Command::new("python3");
+            command
+                .args(["-u", "-c", include_str!("../tests/native_bridge.py")])
+                .arg(serde_json::to_string(&ready).unwrap())
+                .arg("__OWNER_CLEANUP__")
+                .arg(&marker);
+            let admission = admission::Admission::global();
+            let capacity = (
+                admission.carrier().unwrap(),
+                admission
+                    .begin(admission::Assignment::new(
+                        admission::Backend::new(),
+                        admission::Domain::new(),
+                    ))
+                    .unwrap(),
+            );
+            let context = queue::Context::default();
+            let bridge = NativeBridge::spawn_context(
+                command,
+                capacity,
+                negotiation::Expected {
+                    instance: Some(&ready.instance),
+                    purpose: &ready.purpose,
+                    mux_protocol: 1,
+                    preparation: wire::HANDSHAKE_TIMEOUT,
+                },
+                context.clone(),
+                |_| {},
+            )
+            .await
+            .unwrap();
+            let (_, ended) = tokio::time::timeout(Duration::from_secs(3), bridge.finish())
+                .await
+                .unwrap();
+            assert_eq!(
+                ended.status.as_ref().unwrap().success(),
+                cleans_up,
+                "{ended:?}"
+            );
+            assert_eq!(
+                marker.exists(),
+                cleans_up,
+                "only owner cleanup completes before observed child exit"
+            );
+            drop(ended);
+            assert_eq!(context.budget.used(), 0);
+        }
+    }
+
+    /// A second exact owned process holds a real stderr pipe open. Its drain
+    /// must consume the owner's remaining deadline, not add two more seconds.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owner_exit_deadline_includes_a_stderr_pipe_held_open_after_child_exit() {
+        let ready = wire::Ready {
+            generation: 1,
+            instance: "a".repeat(32),
+            mux_protocol: 1,
+            purpose: wire::Purpose::Owner,
+            limits: wire::Limits::default(),
+        };
+        let mut command = Command::new("python3");
+        command
+            .args(["-u", "-c", include_str!("../tests/native_bridge.py")])
+            .arg(serde_json::to_string(&ready).unwrap())
+            .arg("__IGNORE_EOF__");
+        let admission = admission::Admission::global();
+        let capacity = (
+            admission.carrier().unwrap(),
+            admission
+                .begin(admission::Assignment::new(
+                    admission::Backend::new(),
+                    admission::Domain::new(),
+                ))
+                .unwrap(),
+        );
+        let context = queue::Context::default();
+        let mut bridge = NativeBridge::spawn_context(
+            command,
+            capacity,
+            negotiation::Expected {
+                instance: None,
+                purpose: &ready.purpose,
+                mux_protocol: 1,
+                preparation: wire::HANDSHAKE_TIMEOUT,
+            },
+            context.clone(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let mut holder = Command::new("sleep")
+            .arg("30")
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let process = &mut bridge.live.as_mut().unwrap().process;
+        let original = process.stderr.take().unwrap();
+        original.abort();
+        let _ = original.await;
+        process.stderr = Some(tokio::spawn(keep_end(
+            holder.stderr.take().unwrap(),
+            diagnostic_budget(&context.budget).unwrap(),
+        )));
+        let result = tokio::time::timeout(Duration::from_secs(3), bridge.finish()).await;
+        // Retain the exact holder handle and reap it even if the assertion fails.
+        holder.kill().await.unwrap();
+        let (_, ended) =
+            result.expect("child exit plus pending stderr drain fit the owner deadline");
+        assert!(!ended.status.as_ref().unwrap().success());
+        drop(ended);
+        assert_eq!(
+            context.budget.used(),
+            0,
+            "aborted drain releases its actual storage"
+        );
     }
 
     #[cfg(unix)]

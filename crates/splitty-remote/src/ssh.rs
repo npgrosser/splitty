@@ -699,6 +699,15 @@ const STDERR_WAIT: Duration = Duration::from_secs(2);
 /// What the [`keep_end`] task of a process that ended kept, if it ends in
 /// time.
 pub(crate) fn kept_end(task: Option<JoinHandle<Diagnostic>>) -> impl Future<Output = Diagnostic> {
+    kept_end_for(task, STDERR_WAIT)
+}
+
+/// An app-owned helper shares its overall cleanup deadline with this drain.
+/// Cancellation still aborts and observes the task before releasing its lease.
+pub(crate) fn kept_end_for(
+    task: Option<JoinHandle<Diagnostic>>,
+    wait: Duration,
+) -> impl Future<Output = Diagnostic> {
     struct Drain(JoinHandle<Diagnostic>);
     impl Drop for Drain {
         fn drop(&mut self) {
@@ -710,14 +719,16 @@ pub(crate) fn kept_end(task: Option<JoinHandle<Diagnostic>>) -> impl Future<Outp
     let task = task.map(Drain);
     async move {
         match task {
-            Some(mut task) => match tokio::time::timeout(STDERR_WAIT, &mut task.0).await {
-                Ok(result) => result.unwrap_or_default(),
-                Err(_) => {
-                    task.0.abort();
-                    let _ = (&mut task.0).await;
-                    Diagnostic::default()
+            Some(mut task) => {
+                match tokio::time::timeout(wait.min(STDERR_WAIT), &mut task.0).await {
+                    Ok(result) => result.unwrap_or_default(),
+                    Err(_) => {
+                        task.0.abort();
+                        let _ = (&mut task.0).await;
+                        Diagnostic::default()
+                    }
                 }
-            },
+            }
             None => Diagnostic::default(),
         }
     }
@@ -903,6 +914,26 @@ mod tests {
             .await
             .expect("cancelled stderr reader is dropped");
         }
+    }
+
+    #[tokio::test]
+    async fn an_exhausted_stderr_deadline_observes_drain_storage_release() {
+        let budget = ConnectionBudget::default();
+        let storage = diagnostic_budget(&budget).unwrap();
+        let (entered, ready) = tokio::sync::oneshot::channel();
+        let drain = tokio::spawn(async move {
+            let _storage = storage;
+            entered.send(()).unwrap();
+            std::future::pending::<Diagnostic>().await
+        });
+        ready.await.unwrap();
+        assert!(budget.used() > 0);
+        drop(kept_end_for(Some(drain), Duration::ZERO).await);
+        assert_eq!(
+            budget.used(),
+            0,
+            "zero deadline aborts and observes the actual drain drop"
+        );
     }
 
     #[cfg(unix)]

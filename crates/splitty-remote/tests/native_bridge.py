@@ -64,6 +64,11 @@ try:
     assert kind == 13 and json.loads(body) == {
         "generation": generation, "instance": ready["instance"]
     }
+    if sys.argv[2] == "__OWNER_CLEANUP__":
+        # Real child EOF cleanup lasts longer than an ordinary relay's grace.
+        # The owner must let cleanup finish, while a relay may be killed.
+        while True:
+            read_frame()
     if sys.argv[2] == "__IGNORE_EOF__":
         import time
         time.sleep(30)
@@ -94,4 +99,8 @@ try:
             if json.loads(body[4:-16]).get("type") == "input":
                 data(2, bytes([0, 1, 2, 255]))
 except EOFError:
-    pass
+    if sys.argv[2] == "__OWNER_CLEANUP__":
+        import time
+        time.sleep(0.75)
+        with open(sys.argv[3], "w") as output:
+            output.write("cleanup completed")
