@@ -3583,3 +3583,455 @@ fn rust_embedded_owner_shares_runtime_across_reload_and_reaps_its_jobs() {
         assert_eq!(fs::read(discovery).unwrap(), b"independent corrupt discovery");
     });
 }
+
+/// Smoke: only two real released-format implementations can demonstrate that
+/// rollback adopts the original keeper and shell instead of recreating them.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_kept_shell_survives_a_pinned_previous_binary_rollback_and_return() {
+    use std::os::fd::FromRawFd;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::Path;
+
+    let Some(previous) = std::env::var_os("SPLITTY_TEST_PREVIOUS_BINARY") else {
+        assert_ne!(
+            std::env::var("SPLITTY_TEST_REQUIRE_PREVIOUS_BINARY").as_deref(),
+            Ok("1"),
+            "strict rollback proof requires SPLITTY_TEST_PREVIOUS_BINARY and its SHA256"
+        );
+        eprintln!("UNRUN historical rollback: no explicitly pinned previous binary");
+        return;
+    };
+    // No daemon runs in the host PID namespace. Namespace PID1 exiting kills
+    // every descendant, including a detached daemon whose start failed early.
+    const NAMESPACE_CHILD: &str = "SPLITTY_TEST_ROLLBACK_NAMESPACE_CHILD";
+    if std::env::var_os(NAMESPACE_CHILD).is_none() {
+        let logs = tempfile::tempdir().unwrap();
+        let out = logs.path().join("stdout");
+        let err = logs.path().join("stderr");
+        let previous_path = PathBuf::from(&previous).canonicalize().unwrap();
+        let executable = std::env::current_exe().unwrap();
+        let server = Path::new(env!("CARGO_BIN_EXE_splitty"))
+            .canonicalize()
+            .unwrap();
+        let mut command = Command::new("bwrap");
+        command.args([
+            "--unshare-user",
+            "--unshare-pid",
+            "--unshare-net",
+            "--as-pid-1",
+            "--die-with-parent",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind",
+            "/etc",
+            "/etc",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--chdir",
+            "/",
+        ]);
+        // This Linux smoke requires a merged-/usr runtime. lib64 is optional
+        // (e.g. absent on aarch64); never guess an architecture-specific loader.
+        for (link, target) in [
+            ("/bin", "usr/bin"),
+            ("/lib", "usr/lib"),
+            ("/lib64", "usr/lib64"),
+        ] {
+            if link == "/lib64" && !Path::new(link).exists() {
+                continue;
+            }
+            assert_eq!(
+                fs::read_link(link).expect("merged-/usr runtime prerequisite"),
+                Path::new(target)
+            );
+            command.args(["--symlink", target, link]);
+        }
+        // No host HOME or repository directory is mounted. Only these three
+        // artifacts are visible at their original paths, always read-only.
+        for binary in [&executable, &server, &previous_path] {
+            command.arg("--ro-bind").arg(binary).arg(binary);
+        }
+        let mut child = command
+            .arg("--")
+            .arg(&executable)
+            .args([
+                "a_kept_shell_survives_a_pinned_previous_binary_rollback_and_return",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(NAMESPACE_CHILD, "1")
+            .env("SPLITTY_TEST_PREVIOUS_BINARY", &previous_path)
+            // Lifecycle proof uses a fixed POSIX shell, independent of the
+            // invoking user's interactive shell and its first-run setup.
+            .env("SHELL", "/bin/sh")
+            .stdin(Stdio::null())
+            .stdout(File::create(&out).unwrap())
+            .stderr(File::create(&err).unwrap())
+            .spawn()
+            .expect("private PID namespace is required for rollback proof");
+        let deadline = Instant::now() + Duration::from_secs(90);
+        let result = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Ok(status),
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(20))
+                }
+                Ok(None) => break Err("rollback namespace exceeded 90 seconds".to_string()),
+                Err(error) => break Err(format!("observing rollback namespace: {error}")),
+            }
+        };
+        if result.is_err() {
+            // Child is still unreaped: its identity cannot have been reused.
+            let kill = child.kill();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let reaped = loop {
+                match child.try_wait() {
+                    Ok(Some(_)) => break true,
+                    Ok(None) if Instant::now() < deadline => {
+                        std::thread::sleep(Duration::from_millis(20))
+                    }
+                    _ => break false,
+                }
+            };
+            assert!(
+                reaped,
+                "owned namespace supervisor cleanup failed: {kill:?}"
+            );
+        }
+        let stdout = fs::read_to_string(out).unwrap();
+        let stderr = fs::read_to_string(err).unwrap();
+        print!("{stdout}");
+        eprint!("{stderr}");
+        assert!(
+            result.as_ref().is_ok_and(|status| status.success()),
+            "{result:?}\n{stdout}\n{stderr}"
+        );
+        return;
+    }
+    assert_eq!(
+        unsafe { nix::libc::getpid() },
+        1,
+        "rollback child must be private namespace PID1"
+    );
+    let previous = PathBuf::from(previous).canonicalize().unwrap();
+    let expected = std::env::var("SPLITTY_TEST_PREVIOUS_SHA256").expect("pinned artifact SHA256");
+    assert_eq!(expected.len(), 64);
+    let digest = Command::new("sha256sum")
+        .arg("--")
+        .arg(&previous)
+        .output()
+        .unwrap();
+    assert!(digest.status.success());
+    assert_eq!(
+        String::from_utf8(digest.stdout)
+            .unwrap()
+            .split_whitespace()
+            .next(),
+        Some(expected.as_str())
+    );
+    let sandbox = Sandbox::new();
+
+    // pidfds hold exact fixture generations, including on assertion failure.
+    struct Owned(Vec<File>);
+    impl Owned {
+        fn pin(&mut self, pid: u32, sandbox: &Sandbox) {
+            // Acquire the generation before reading PID-indexed provenance.
+            // An unverified descriptor is only closed on failure, never signalled.
+            let fd = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid, 0) };
+            assert!(fd >= 0, "pin candidate process {pid}");
+            let file = unsafe { File::from_raw_fd(fd as i32) };
+            assert!(
+                !Self::exited(&file).expect("observe candidate generation"),
+                "candidate generation is live"
+            );
+            let env = fs::read(format!("/proc/{pid}/environ")).expect("owned process environment");
+            let home = format!(
+                "HOME={}",
+                sandbox.home.path().canonicalize().unwrap().display()
+            );
+            assert!(env
+                .split(|byte| *byte == 0)
+                .any(|entry| entry == home.as_bytes()));
+            assert!(
+                !Self::exited(&file).expect("observe candidate generation"),
+                "same generation survived provenance validation"
+            );
+            self.0.push(file);
+        }
+        fn exited(file: &File) -> std::io::Result<bool> {
+            loop {
+                let mut event = nix::libc::pollfd {
+                    fd: file.as_raw_fd(),
+                    events: nix::libc::POLLIN,
+                    revents: 0,
+                };
+                let result = unsafe { nix::libc::poll(&mut event, 1, 0) };
+                if result >= 0 {
+                    if event.revents & (nix::libc::POLLERR | nix::libc::POLLNVAL) != 0 {
+                        return Err(std::io::Error::other("invalid pidfd observation"));
+                    }
+                    return Ok(event.revents & nix::libc::POLLIN != 0);
+                }
+                let error = std::io::Error::last_os_error();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            for file in &self.0 {
+                if matches!(Self::exited(file), Ok(false)) {
+                    unsafe {
+                        nix::libc::syscall(
+                            nix::libc::SYS_pidfd_send_signal,
+                            file.as_raw_fd(),
+                            nix::libc::SIGKILL,
+                            std::ptr::null::<nix::libc::siginfo_t>(),
+                            0,
+                        );
+                    }
+                }
+            }
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while self
+                .0
+                .iter()
+                .any(|file| !matches!(Self::exited(file), Ok(true)))
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            assert!(
+                self.0
+                    .iter()
+                    .all(|file| matches!(Self::exited(file), Ok(true))),
+                "all exact owned generations exited"
+            );
+        }
+    }
+    let mut owned = Owned(Vec::new());
+    let run = |binary: &Path, args: &[&str]| {
+        eprintln!("ROLLBACK CLI binary={} args={args:?}", binary.display());
+        let stdout_path = sandbox.path("rollback-cli.stdout");
+        let stderr_path = sandbox.path("rollback-cli.stderr");
+        let mut command = Command::new(binary);
+        sandbox
+            .isolate(&mut command)
+            .args(args)
+            .process_group(0)
+            .stdout(File::create(&stdout_path).unwrap())
+            .stderr(File::create(&stderr_path).unwrap());
+        let mut child = command.spawn().expect("owned bounded CLI");
+        let deadline = Instant::now() + READ_TIMEOUT;
+        let status = loop {
+            if let Some(status) = child.try_wait().unwrap() {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let signal = killpg(Pid::from_raw(child.id() as i32), Signal::SIGKILL);
+                let cleanup_deadline = Instant::now() + Duration::from_secs(2);
+                let reaped = loop {
+                    match child.try_wait() {
+                        Ok(Some(_)) => break true,
+                        Ok(None) if Instant::now() < cleanup_deadline => {
+                            std::thread::sleep(Duration::from_millis(20))
+                        }
+                        _ => break false,
+                    }
+                };
+                panic!(
+                    "bounded rollback CLI timed out: {args:?}; signal={signal:?}, reaped={reaped}"
+                );
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let output = Output {
+            status,
+            stdout: fs::read(stdout_path).unwrap(),
+            stderr: fs::read(stderr_path).unwrap(),
+        };
+        assert!(
+            output.status.success(),
+            "{args:?}: {}",
+            sandbox.describe(&output)
+        );
+        output
+    };
+    let current = Path::new(env!("CARGO_BIN_EXE_splitty"));
+    run(current, &["daemon", "start"]);
+    owned.pin(
+        sandbox.read_info().unwrap()["pid"].as_u64().unwrap() as u32,
+        &sandbox,
+    );
+    run(current, &["new-screen"]);
+    let screens: serde_json::Value =
+        serde_json::from_slice(&run(current, &["list-screens", "--json"]).stdout).unwrap();
+    let screen = screens.as_array().unwrap().last().unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let panes: serde_json::Value =
+        serde_json::from_slice(&run(current, &["list-panes", "--screen", screen, "--json"]).stdout)
+            .unwrap();
+    let (pane, record) = panes.as_object().unwrap().iter().next().unwrap();
+    let session = record["sessionId"].as_str().unwrap();
+    let random = || {
+        use std::io::Read;
+        let mut bytes = [0u8; 16];
+        File::open("/dev/urandom")
+            .unwrap()
+            .read_exact(&mut bytes)
+            .unwrap();
+        bytes
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>()
+    };
+    let secret = random();
+    let expected_shell = std::cell::Cell::new(None::<u32>);
+    let tail = |path: &Path| -> String {
+        use std::io::{Read, Seek, SeekFrom};
+        let Ok(mut file) = File::open(path) else {
+            return "<absent>".into();
+        };
+        let length = file.metadata().unwrap().len();
+        file.seek(SeekFrom::Start(length.saturating_sub(8192)))
+            .unwrap();
+        let mut bytes = Vec::new();
+        file.take(8192).read_to_end(&mut bytes).unwrap();
+        String::from_utf8_lossy(&bytes).into_owned()
+    };
+    eprintln!(
+        "ROLLBACK shell environment SHELL={:?} ENV={:?} BASH_ENV={:?} ZDOTDIR={:?}; settings={}",
+        std::env::var_os("SHELL"),
+        std::env::var_os("ENV"),
+        std::env::var_os("BASH_ENV"),
+        std::env::var_os("ZDOTDIR"),
+        tail(&sandbox.config_dir().join("settings.json"))
+    );
+    let prove = |binary: &Path, stage: &str, initialize: bool| {
+        eprintln!(
+            "ROLLBACK PROOF stage={stage} initialize={initialize} expected_pid={:?}",
+            expected_shell.get()
+        );
+        let nonce = random();
+        let init = if initialize {
+            format!("SPLITTY_ROLLBACK_PROOF={secret}; ")
+        } else {
+            String::new()
+        };
+        let line = format!(
+            "{init}printf '%s:%s:%s\\n' '{nonce}' \"$$\" \"$SPLITTY_ROLLBACK_PROOF\" > {}\\n",
+            sandbox.path(stage).display()
+        );
+        run(
+            binary,
+            &["send-keys", "--screen", screen, "--pane", pane, &line],
+        );
+        let proof = sandbox.wait_for(stage);
+        let fields: Vec<_> = proof.split(':').collect();
+        let pid = fields.get(1).and_then(|pid| pid.parse::<u32>().ok());
+        let identities: Vec<_> = fs::read_dir(sandbox.run_dir().join("keepers"))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), entry.metadata().unwrap().ino())
+            })
+            .collect();
+        eprintln!("ROLLBACK PROOF stage={stage} proof={proof:?} current_pid={pid:?} expected_pid={:?} discovery={} keepers={identities:?} shell_exe={:?} shell_cmdline={} daemonlog(last8KiB)={}",
+            expected_shell.get(), tail(&sandbox.info_path()),
+            pid.and_then(|pid| fs::read_link(format!("/proc/{pid}/exe")).ok()),
+            pid.map(|pid| tail(Path::new(&format!("/proc/{pid}/cmdline")))).unwrap_or_default(), tail(&sandbox.log_path()));
+        assert_eq!(
+            fs::read_link(format!("/proc/{}/exe", pid.expect("shell PID"))).unwrap(),
+            Path::new("/bin/sh").canonicalize().unwrap(),
+            "{stage}: explicitly selected fixture shell"
+        );
+        assert_eq!(fields.len(), 3, "{stage}: {proof}");
+        assert_eq!(fields[0], nonce);
+        assert_eq!(
+            fields[2], secret,
+            "{stage}: unexported original shell state; proof={proof}"
+        );
+        fields[1].parse::<u32>().unwrap()
+    };
+    let shell = prove(current, "rollback-before", true);
+    expected_shell.set(Some(shell));
+    let shell_generation = owned.0.len();
+    owned.pin(shell, &sandbox);
+    assert!(!Owned::exited(&owned.0[shell_generation]).expect("observe retained shell generation"));
+    let stat = fs::read_to_string(format!("/proc/{shell}/stat")).unwrap();
+    assert!(
+        !Owned::exited(&owned.0[shell_generation]).expect("observe retained shell generation"),
+        "shell generation survived parent lookup"
+    );
+    let keeper: u32 = stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    owned.pin(keeper, &sandbox);
+    assert!(
+        !Owned::exited(&owned.0[shell_generation]).expect("observe retained shell generation"),
+        "shell generation survived keeper validation"
+    );
+    let sockets = || {
+        let mut entries: Vec<_> = fs::read_dir(sandbox.run_dir().join("keepers"))
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                (entry.file_name(), entry.metadata().unwrap().ino())
+            })
+            .collect();
+        entries.sort();
+        entries
+    };
+    let original_sockets = sockets();
+    assert!(!original_sockets.is_empty());
+    run(current, &["daemon", "stop"]);
+    assert!(alive(&shell.to_string()));
+    // The historical server deliberately exposes only its explicit ephemeral
+    // loopback browser listener; no current native client consumes that port.
+    run(&previous, &["daemon", "start", "--addr", "127.0.0.1:0"]);
+    let info = sandbox.read_info().unwrap();
+    owned.pin(info["pid"].as_u64().unwrap() as u32, &sandbox);
+    assert_eq!(
+        fs::read_link(format!("/proc/{}/exe", info["pid"])).unwrap(),
+        previous
+    );
+    let adopted: serde_json::Value = serde_json::from_slice(
+        &run(&previous, &["list-panes", "--screen", screen, "--json"]).stdout,
+    )
+    .unwrap();
+    assert_eq!(adopted[pane]["sessionId"], session);
+    assert_eq!(prove(&previous, "rollback-previous", false), shell);
+    assert_eq!(sockets(), original_sockets);
+    run(&previous, &["daemon", "stop"]);
+    run(current, &["daemon", "start"]);
+    owned.pin(
+        sandbox.read_info().unwrap()["pid"].as_u64().unwrap() as u32,
+        &sandbox,
+    );
+    assert_eq!(prove(current, "rollback-return", false), shell);
+    assert_eq!(sockets(), original_sockets);
+    run(current, &["daemon", "stop", "--end-sessions"]);
+    wait_until("all rollback process generations exit", || {
+        owned
+            .0
+            .iter()
+            .all(|file| matches!(Owned::exited(file), Ok(true)))
+    });
+    assert_eq!(sandbox.keeper_sockets(), 0);
+    eprintln!("PROVED historical rollback current→{expected}→current: original shell PID, private state, session and keeper inode retained; exact processes exited");
+}

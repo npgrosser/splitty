@@ -135,10 +135,23 @@ filesystem paths. They do not waive the remaining resource or platform gates.
 | Compatible native daemon | Private endpoint/negotiation tests and actual daemon client smoke | Remaining desktop platform cells are tracked separately. |
 | Older kept daemon update | `the_hub_updates_a_host_daemon_of_another_version` passed through actual isolated OpenSSH and real daemon replacement, preserving keeper socket identity and the original shell PID/private state through fresh nonce-bearing output | The old version/protocol is simulated in discovery metadata; this is not execution of a historical release binary. |
 | Incompatible non-kept/newer daemon | Supervisor and HTTP policy tests plus the extended real-SSH `the_hub_updates_a_host_daemon_of_another_version`: explicit updates refuse both cases without replacing discovery, daemon PID or keeper sockets; fresh native input/output proves the original shell remains usable | Version/protocol differences are simulated in valid discovery metadata; remaining desktop platform checks stay open. |
-| Supported client downgrade | The same real-SSH test connects to a compatible newer-version daemon without restarting it or changing discovery/keepers; the original shell returns its private state with a fresh nonce | Version metadata simulation, not execution of a historical client binary. |
+| Supported client downgrade | The real-SSH test reuses a compatible newer-version daemon and proves original shell state; the historical rollback smoke runs current → actual `cc66e97` server → current and proves the same shell PID, private variable, session ID and keeper inode | Version-policy simulation and actual previous-implementation rollback are distinct checks; the historical artifact is locally built from the pinned revision, not a downloaded release package. |
 | Stale/corrupt/legacy discovery | Daemon lifecycle `native_discovery_loss_corruption_and_concurrent_start_cannot_replace_a_live_daemon` and `a_live_legacy_record_is_diagnostic_and_never_selects_its_tcp_port` | Legacy ownership uncertainty refuses implicit replacement. |
-| Explicit restart and keeper adoption | `a_shell_outlives_stop_restart_update_and_crash_of_its_daemon` and explicit daemon gateway replacement smoke | Keepers are real processes; historical release binaries are not covered. |
+| Explicit restart and keeper adoption | `a_shell_outlives_stop_restart_update_and_crash_of_its_daemon`, explicit daemon gateway replacement and the pinned historical rollback smoke | Keepers are real processes; the historical check covers the exact prior implementation listed below. |
 | Local app with independent daemon | Actual Linux Tauri/Electron and macOS WKWebView coexistence smokes; owned-child pipe lifecycle smoke | The complete Windows matrix remains a separate gate. |
+
+The Linux historical rollback smoke uses an artifact built from exact revision
+`cc66e97024f1013cc2abad1727ba9378db2200af`, with SHA256
+`3af8b58d33d3408c9b89a32ffac97d51f1fe6838a2e6e5a64be0564c8ebb82b5`.
+Source archive, lockfile, compiler and binary provenance were recorded separately.
+The strict run passes in a private Bubblewrap PID/user/network namespace with
+read-only executable mounts and private temporary storage. It fixes the fixture
+shell to `/bin/sh` and checks the actual executable; inherited interactive-shell
+startup is not part of this lifecycle test. All captured process generations
+exit and no keeper sockets remain. The old implementation's explicit ephemeral
+browser listener stays inside the private network namespace; current native
+clients never fall back to it. This verifies an ordinary supervised run, not
+supervisor death during Bubblewrap's early pre-exec setup.
 
 The catalog/role audit found no remaining native HTTP/token fallback. All 53
 operations (31 backend and 22 local hub) and 12 adapter-only routes have checked

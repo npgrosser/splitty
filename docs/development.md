@@ -263,3 +263,26 @@ starts the setup. `SPLITTY_WINDOWS_PATH` adds Windows directories to the build's
 `PATH`, for a pnpm that is not on it; `--skip-tests` skips the type check and the
 Windows unit tests. Uncommitted changes are not built, and the version is the one
 the sources carry.
+
+## Pinned historical rollback smoke
+
+On Linux with Bubblewrap, permitted user/PID/network namespaces and a merged
+`/usr` runtime, the daemon lifecycle suite can exercise a verified earlier
+server artifact. Build or obtain the intended revision separately, verify its
+provenance, and pin its SHA256 before running:
+
+```sh
+SPLITTY_TEST_PREVIOUS_BINARY=/absolute/path/to/verified/splitty \
+SPLITTY_TEST_PREVIOUS_SHA256='replace-with-verified-64-character-sha256' \
+SPLITTY_TEST_REQUIRE_PREVIOUS_BINARY=1 \
+cargo test -p splitty-server --test daemon_lifecycle \
+  a_kept_shell_survives_a_pinned_previous_binary_rollback_and_return -- --exact --nocapture
+```
+
+The test checks current → previous → current using real daemons and keepers,
+retaining the same shell PID and private shell state. It runs as PID 1 inside a
+private namespace and binds only the three executable artifacts read-only;
+its filesystem and loopback listener remain isolated. CLI calls and the outer
+supervisor have deadlines. Without an explicitly pinned artifact, the optional
+test reports `UNRUN`; strict mode makes that omission a failure. A normal
+workspace test pass alone is not historical interoperability evidence.
