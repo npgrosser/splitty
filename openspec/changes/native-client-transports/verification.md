@@ -59,20 +59,56 @@ and retains cancellation and generation semantics across the transport change.
   replacement also pass. Two core failures (Bash CLI PATH restoration and the
   background-writer PTY fixture) reproduce on exact baseline `cc66e97`; they
   remain failing checks and are recorded in the baseline findings. The earlier
-  managed-stop failure did not recur in this run, so its diagnostic remains.
-  Resolving the fixture home to its canonical private path allows WKWebView
-  startup. The next run reaches the actual UI and popout, where WKWebView
-  inherits the test initialization script into the child: the child correctly
-  lacks native authority but incorrectly reports the parent-only capsule
-  assertion. The probe now gates on the top packaged index document and adds
-  document metadata to reports. Three Node regressions and six portable
-  checks pass; the full actual rerun remains open. Production bootstrap and
-  endpoint rejection are unchanged. Independent runtime evidence does not
-  waive the mandatory core failure gate.
+  managed-stop failure recurs intermittently: the new diagnostic identifies
+  `killpg` on the owned leader's group returning `EPERM`. That remains open;
+  no blanket permission-error suppression was added.
+- Actual macOS WKWebView now passes the full packaged UI through 37 document
+  generations: styles/fonts, Ghostty WASM/canvas, binary terminal data, settings,
+  direct popout denial, parent-mediated operations and native window cleanup.
+  All generations keep the same owned service instance. There are no observed
+  HTTP/WebSocket backend requests or TCP listeners (309 inventory samples).
+  Final application byte/stream/carrier/worker/handle/open counters are zero;
+  owned shells exit. A real separate daemon keeps unchanged discovery and
+  keeper sockets, and the same original shell accepts input after app exit.
+  Fixture fixes canonicalize the private home and restrict an inherited test
+  probe to the top packaged workspace; production authority checks remain
+  unchanged. These passing runtime checks do not waive the core failure gate.
 
 These results describe the runs performed, not proof that every requirement is
 complete. Final source checks and platform results must be reconciled before
 marking the change ready.
+
+## CodeQL review
+
+The pull-request findings were checked against the actual data flow, with an
+independent security review. The WebSocket trace now uses a constant format
+string; keeper-stop diagnostics omit the session identifier. The Electron IPC
+smoke encodes script values as JSON literals with escaped HTML delimiters and
+Unicode line separators. Its real renderer checks a hostile literal roundtrip;
+the full IPC smoke still passes binary traffic, frozen-client isolation and zero
+final resource counters. Eleven focused socket tests and the server check pass.
+
+Three findings do not indicate a vulnerability in their reported contexts:
+
+- `rust/hard-coded-cryptographic-value` in `client_ipc/bootstrap.rs` is a
+  deterministic JSON-escaping fixture under `#[cfg(test)]`. It is not used by a
+  running app. Production document nonces use `crypto.getRandomValues`;
+  native bootstrap/challenge/proof values use `rand::random`.
+- The same query at `tauri::generate_handler!` identifies generated `"nonce"`
+  argument lookup keys. Tauri's `CommandArg::from_command` deserializes the
+  actual value from the invocation payload; the static key is not a nonce.
+- `rust/path-injection` in `service/operations.rs::post_editor_open` identifies
+  an intentionally owner-selected absolute host path. The operation checks the
+  live session and path syntax, obtains metadata, and sends a confirmation
+  request to a registered attached client. It does not read file contents or
+  launch an editor. Browser authentication, private owner-socket access and
+  native assigned-backend authority apply before dispatch; restricted agent
+  sockets do not expose this operation. The client still requires a deliberate
+  local confirmation and derives the host from its connection. Confining this
+  operation to a repository root would remove its specified behavior.
+
+These dispositions apply to the specific findings, not to all uses of nonces or
+filesystem paths. They do not waive the remaining resource or platform gates.
 
 ## Migration evidence
 
@@ -84,7 +120,7 @@ marking the change ready.
 | Supported client downgrade | The same real-SSH test connects to a compatible newer-version daemon without restarting it or changing discovery/keepers | Version metadata simulation, not execution of a historical client binary. |
 | Stale/corrupt/legacy discovery | Daemon lifecycle `native_discovery_loss_corruption_and_concurrent_start_cannot_replace_a_live_daemon` and `a_live_legacy_record_is_diagnostic_and_never_selects_its_tcp_port` | Legacy ownership uncertainty refuses implicit replacement. |
 | Explicit restart and keeper adoption | `a_shell_outlives_stop_restart_update_and_crash_of_its_daemon` and explicit daemon gateway replacement smoke | Keepers are real processes; historical release binaries are not covered. |
-| Local app with independent daemon | Actual Linux Tauri and Electron coexistence smokes; owned-child pipe lifecycle smoke | macOS and the complete Windows matrix remain separate gates. |
+| Local app with independent daemon | Actual Linux Tauri/Electron and macOS WKWebView coexistence smokes; owned-child pipe lifecycle smoke | The complete Windows matrix remains a separate gate. |
 
 The catalog/role audit found no remaining native HTTP/token fallback. Static
 classification and native/browser conformance tests cover enumerated operations,
@@ -107,8 +143,8 @@ process RSS or trusted deployment-archive bound.
 - Whole-path resource limits: Wry allocates inbound IPC request bodies before
   application validation. Application-owned quotas do not establish a bound on
   framework allocation, generic invoke replies, JavaScript engine memory or RSS.
-- Full macOS WKWebView runtime and the complete platform isolation matrix
-  remain unverified; native macOS endpoint identity checks pass. Windows remote-only/reconnect now passes
+- The complete platform isolation/stress matrix remains open. Actual macOS
+  full-UI, native endpoint and coexistence checks pass; core failures remain. Windows remote-only/reconnect now passes
   its fresh kernel Job fixture; that does not fill every platform matrix cell.
 - The strict native Linux reservation test passed with an actual surviving
   worker after coordinator SIGKILL, IPv4/IPv6 gateway exclusion and reuse only

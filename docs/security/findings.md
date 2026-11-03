@@ -102,7 +102,7 @@ actual native evaluation completion or callback destruction, with independent
 renderer-consumption credit; stale document output is rejected. Retired renderer
 records retain capacity until their normal/cleanup invokes settle. Residual: Wry allocates inbound request bodies before application
 validation. Application bounds therefore do not prove a bound on every framework
-allocation. The actual Linux WebKit full UI run covers assets, native traffic,
+allocation. The actual Linux WebKit and macOS WKWebView full UI runs cover assets, native traffic,
 heartbeat, reload, popouts, independent daemon lifetime and final zero resource
 counters. Native MSVC tests, WebView2 setup-role checks and actual WSL pipe
 traffic/switch checks pass. Following a PID-reuse bug in the Windows harness,

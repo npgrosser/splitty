@@ -117,8 +117,10 @@ fix, and the guarded WSL switch/restart rerun passes. Earlier
 process-tree cleanup claims must not be used as evidence of isolation. See the
 [verification status](../openspec/changes/native-client-transports/verification.md).
 
-The macOS WKWebView harness and CI job are prepared. Runtime results remain a
-separate gate; successful portable harness preparation is not a macOS result.
+The actual macOS WKWebView full-UI run passes 37 document generations, packaged
+assets, popouts, native traffic and coexistence with a separate daemon. macOS
+core failures and the remaining platform matrix are recorded in the verification
+status; passing this runtime smoke does not waive those checks.
 
 ## Production builds
 
