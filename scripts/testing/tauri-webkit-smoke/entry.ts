@@ -86,6 +86,10 @@ void (async () => {
   const binary: number[] = [];
   socket.onMessage(message => events.push(message));
   socket.onBinaryMessage((_id, bytes) => binary.push(...bytes));
+  // SessionClient learns upload capabilities from the initial mux.welcome.
+  // Subscribe before adoption can deliver that first packet.
+  const sessions = first && __SPLITTY_ISOLATION_CONSUMER__
+    ? new SessionClient(socket,new AttachRegistry(socket)) : undefined;
   socket.adopt(channel);
   const request = async (operation: string, args: object = {}) => {
     const reply = await socket.request({ operation, args } as any);
@@ -95,13 +99,17 @@ void (async () => {
   stage = 'full UI';
   const ui = __SPLITTY_FULL_UI__ && !__SPLITTY_ISOLATION_CONSUMER__ ? await exerciseFullUi(request, first) : undefined;
   const isolation = first && __SPLITTY_ISOLATION_CONSUMER__ ? await mainIsolation(capsule,assignment.instance) : undefined;
+  if (isolation) await fixtureState({phase:'isolation-complete',isolation});
   let pressure: unknown;
   if (first && __SPLITTY_ISOLATION_CONSUMER__) {
     stage = 'receipt-starved client and healthy work';
-    const sessions = new SessionClient(socket,new AttachRegistry(socket));
-    try { pressure = await consumerAdmission(capsule,socket,request,home=>sessions.uploadFile(new File([
+    const welcomeDeadline = Date.now()+10000;
+    while (!events.some(message=>message.type==='mux.welcome') && Date.now()<welcomeDeadline) await wait(25);
+    assert(events.some(message=>message.type==='mux.welcome'),'healthy mux welcome missing');
+    assert(sessions?.uploadControl,'healthy welcome lacks upload-control-v1');
+    try { pressure = await consumerAdmission(capsule,socket,request,home=>sessions!.uploadFile(new File([
       Uint8Array.from({length:65537},(_,index)=>index%256)],'webkit-pressure.bin'),undefined,30000,{dir:home})); }
-    finally { sessions.dispose(); }
+    finally { sessions!.dispose(); }
   }
 
   if (__SPLITTY_FULL_UI__ && !__SPLITTY_ISOLATION_CONSUMER__ && (first || last)) {

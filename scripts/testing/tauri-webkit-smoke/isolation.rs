@@ -47,7 +47,7 @@ fn smoke_state(webview: tauri::Webview, native: tauri::State<'_, Arc<Native>>, v
     if let Some(value) = value {
         if serde_json::to_vec(&value).map_err(|error|error.to_string())?.len() > 16*1024 { return Err("fixture report too large".into()); }
         if !reports.contains_key(webview.label()) && reports.len() >= 3 { return Err("fixture report capacity".into()); }
-        if let Some(phase) = value["phase"].as_str().filter(|phase| ["pressure-observed", "pressure-replay"].contains(phase)) {
+        if let Some(phase) = value["phase"].as_str().filter(|phase| ["isolation-complete", "pressure-observed", "pressure-replay"].contains(phase)) {
             smoke_write(&format!("{phase}.json"), &value);
         }
         reports.insert(webview.label().to_owned(), value);
