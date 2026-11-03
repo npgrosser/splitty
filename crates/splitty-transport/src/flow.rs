@@ -108,7 +108,7 @@ fn unhex(text: &str) -> Option<[u8; 16]> {
         return None;
     }
     let mut receipt = [0; 16];
-    for (dest, pair) in receipt.iter_mut().zip(text.as_bytes().chunks_exact(2)) {
+    for (dest, pair) in receipt.iter_mut().zip(text.as_bytes().as_chunks::<2>().0) {
         *dest = digit(pair[0])? * 16 + digit(pair[1])?;
     }
     Some(receipt)

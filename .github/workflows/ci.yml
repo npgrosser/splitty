@@ -95,6 +95,12 @@ jobs:
       - name: Test server, core and architecture check
         run: cargo test --locked --workspace --exclude splitty-gui
 
+      # Native policy must actually execute; WSL/container refusal is not proof.
+      - name: Require native forwarding reservation lifecycle
+        env:
+          SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE: '1'
+        run: cargo test --locked -p splitty-remote --test native_exposure -- --exact native_policy_retains_published_worker_after_coordinator_death --nocapture
+
   aarch64:
     name: Static server (aarch64)
     if: github.event_name != 'schedule'
@@ -204,6 +210,12 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
+      # Frontend conformance tests type-check the actual Electron adapters.
+      - name: Install Electron adapter types
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+        run: pnpm install --frozen-lockfile --dir frontend-electron
+
       - name: Check, test and build
         working-directory: frontend
         run: pnpm install --frozen-lockfile && pnpm check && pnpm test && pnpm build
@@ -228,7 +240,11 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend-electron/pnpm-lock.yaml
 
-      - name: Type-check the main process
+      # The Electron build also builds and packages the shared frontend.
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile --dir frontend
+
+      - name: Type-check and package main-process assets
         working-directory: frontend-electron
         run: pnpm install --frozen-lockfile && pnpm build
 
@@ -319,7 +335,10 @@ jobs:
           cargo test --locked -p splitty-server --test native_endpoint -- --nocapture
 
       - name: Verify native exposure and explicit gateway positive controls
+        env:
+          SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE: '1'
         run: |
+          cargo test --locked -p splitty-remote --test native_exposure -- --exact native_policy_retains_published_worker_after_coordinator_death --nocapture
           cargo test --locked -p splitty-server --test daemon_lifecycle process_inventory::inventory_observes_owned_ipv4_and_ipv6_listeners -- --exact
           cargo test --locked -p splitty-server --test daemon_lifecycle owned_native_child_pipes_end_only_their_embedded_sessions -- --exact
           cargo test --locked -p splitty-server --test daemon_lifecycle an_explicit_daemon_browser_gateway_survives_daemon_replacement_and_detaches_cleanly -- --exact

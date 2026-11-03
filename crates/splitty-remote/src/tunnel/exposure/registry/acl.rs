@@ -102,7 +102,7 @@ fn validate(bytes: &[u8], private: bool) -> io::Result<()> {
     const READ_ONLY: u32 =
         (1 << 1) | (1 << 3) | (1 << 7) | (1 << 9) | (1 << 11) | (1 << 20) | (1 << 22) | (1 << 24);
     const KNOWN_FLAGS: u32 = 0xf | (1 << 4) | (1 << 5) | (1 << 6) | (1 << 7) | (1 << 8);
-    for entry in acl[44..].chunks_exact(24) {
+    for entry in acl[44..].as_chunks::<24>().0 {
         let flags = number(entry, 16)?;
         let rights = number(entry, 20)?;
         if flags & !KNOWN_FLAGS != 0 {

@@ -68,6 +68,12 @@ resolved inside the owning `ServerConnection`.
 - Node.js 24 and pnpm
 - (Desktop) Tauri v2 prerequisites — see [Tauri docs](https://v2.tauri.app/start/prerequisites/)
 
+Frontend conformance tests import the actual Electron adapters. Install both
+`frontend/` and `frontend-electron/` dependencies before running `pnpm check` or
+`pnpm test` in `frontend/`. `ELECTRON_SKIP_BINARY_DOWNLOAD=1` can be set for the
+Electron dependency install when only types and unit tests are needed. The
+Electron build also requires the frontend dependencies to package shared assets.
+
 ## Running from source
 
 ```bash

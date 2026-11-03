@@ -45,7 +45,7 @@ pub fn tcp_listeners(pid: u32) -> Vec<SocketAddr> {
                 } else {
                     assert_eq!(address.len(), 32);
                     let mut bytes = [0; 16];
-                    for (index, chunk) in bytes.chunks_exact_mut(4).enumerate() {
+                    for (index, chunk) in bytes.as_chunks_mut::<4>().0.iter_mut().enumerate() {
                         chunk.copy_from_slice(
                             &u32::from_str_radix(&address[index * 8..index * 8 + 8], 16)
                                 .expect("IPv6 address")
