@@ -64,6 +64,8 @@ model {
     owner -> splitty.transport.queue 'App and document cancellation scopes'
     owner -> splitty.transport.wire 'Helper stream control and readiness'
     install -> ssh 'CommandLine, Executor, run_checked, allowlists'
+    install -> splitty.transport.budget 'Retain bounded installation diagnostics through native error conversion'
+    install -> splitty.transport.wire 'Exercise diagnostic admission at connection byte limits'
     handshake -> ssh 'Executor, run_checked, SshError'
     handshake -> install 'Server'
     handshake -> splitty.transport.wire 'Native transport capability independent of mux compatibility'
