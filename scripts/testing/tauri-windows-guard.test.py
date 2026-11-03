@@ -115,12 +115,14 @@ class GateTests(unittest.TestCase):
     def test_listener_inventory_brackets_retained_handle_generations_without_waiver(self):
         source=(HERE/'tauri-windows-native-smoke/wsl-runtime.ps1').read_text()
         before=source.index('$before=@($app.History()')
-        sample=source.index('$socketRows=@(Get-NetTCPConnection')
+        sample=source.index('$socketRows=@(Get-FixtureTcpRows')
         after=source.index('$after=@($app.History()')
         self.assertLess(before,sample);self.assertLess(sample,after)
         for expected in ['SocketCreationUTC','BeforeUTC','AfterUTC','RemoteAddress','RemotePort',"'UNCLASSIFIED'",'Test-FixtureSocketGeneration $pre $post $socketCreated $afterAt','-or $listeners.Count']:
             self.assertIn(expected,source)
-        self.assertNotIn('Get-CimInstance',source)
+        self.assertNotIn('Get-NetTCPConnection',source)
+        self.assertIn("if($stateKind-eq 'non-listening')",source)
+        self.assertIn('InventoryError=$inventoryError',source)
     def test_listener_failure_continuation_never_changes_safety_requirements(self):
         import copy
         value={'phase':'final','terminalBinary':True,'savedPath':'/home/splitty-fixture/file'}

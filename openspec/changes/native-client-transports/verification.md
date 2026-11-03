@@ -63,9 +63,10 @@ and retains cancellation and generation semantics across the transport change.
   return to zero, independent guest sentinels answer fresh nonces, and both
   temporary distributions are removed. The last popout closes at app exit;
   this is not Windows parent-reload or sibling-remote isolation evidence.
-- Actual macOS CI at `4eb7e72` passes GUI all-target clippy and all 90 GUI library tests.
-  All twelve real-child native bridge failure/cancellation regressions pass at
-  `5d25bf9`, including the new owner cleanup and held-stderr deadline cases;
+- Actual macOS [CI at `b88933f`](https://github.com/npgrosser/splitty/actions/runs/41717039859)
+  passes GUI all-target clippy and all 90 GUI library tests. All twelve real-child
+  native bridge failure/cancellation regressions pass, including the owner
+  cleanup and held-stderr deadline cases;
   these exercise controlled carriers, not permanent system-SSH reconnect failure.
   Private endpoint peer-user checks, native forwarding reservation, IPv4/IPv6
   listener positive controls, owned-helper lifetime and explicit gateway

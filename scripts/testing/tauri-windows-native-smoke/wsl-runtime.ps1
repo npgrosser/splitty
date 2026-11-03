@@ -37,6 +37,7 @@ done
 '@
 . (Join-Path $RootDir 'fixture-sentinel.ps1')
 $guestSentinels=@();$sentinelLaunches=@()
+$nonListeners=@();$nonListenerRowsOmitted=0;$inventoryError=$null
 $sshServer=$null;$sshEvidence=[ordered]@{Requested=[bool]$PermitIsolatedSshHost;Authenticated=$false;Attempts=@();JobEmpty=$null;CommandLine=$null;StdOutPath=$null;StdErrPath=$null};$app=$null;$sentinels=@();$listeners=@();$remaining=@();$history=@();$preserved=$false;$timedOut=$false;$empty=$false;$cleanupErrors=@();$exits=@()
 try {
  if($PermitIsolatedSshHost){
@@ -92,7 +93,7 @@ try {
   $before=@($app.History()|Where-Object{$_.Alive}|ForEach-Object{[pscustomobject]@{Id=$_.Id;Creation=$_.Creation;ExecutablePath=$_.ExecutablePath;Alive=[bool]$_.Alive}})
   $ids=@($before|ForEach-Object{$_.Id})
   if($ids.Count){
-   $socketRows=@(Get-NetTCPConnection -State Listen -OwningProcess $ids -ErrorAction SilentlyContinue)
+   try{$socketRows=@(Get-FixtureTcpRows $ids)}catch{$inventoryError=$_.Exception.Message;throw}
    $after=@($app.History()|Where-Object{$_.Alive}|ForEach-Object{[pscustomobject]@{Id=$_.Id;Creation=$_.Creation;ExecutablePath=$_.ExecutablePath;Alive=[bool]$_.Alive}})
    $afterAt=[DateTime]::UtcNow.ToString('o')
    foreach($socket in $socketRows){
@@ -100,7 +101,12 @@ try {
     $post=@($after|Where-Object{$_.Id-eq $socket.OwningProcess})
     $socketCreated=$(if($socket.CreationTime){$socket.CreationTime.ToUniversalTime().ToString('o')}else{$null})
     $matched=Test-FixtureSocketGeneration $pre $post $socketCreated $afterAt
-    $listeners += [pscustomobject]@{LocalAddress=$socket.LocalAddress;LocalPort=$socket.LocalPort;RemoteAddress=$socket.RemoteAddress;RemotePort=$socket.RemotePort;State=[string]$socket.State;SocketCreationUTC=$socketCreated;BeforeUTC=$beforeAt;AfterUTC=$afterAt;OwningProcess=$socket.OwningProcess;Classification=$(if($matched){'retained-owned-generation'}else{'UNCLASSIFIED'});BeforeMember=$pre;AfterMember=$post}
+    $rawState=$socket.CimInstanceProperties['State'].Value
+    $stateKind=Get-FixtureTcpState $rawState
+    $observation=[pscustomobject]@{LocalAddress=$socket.LocalAddress;LocalPort=$socket.LocalPort;RemoteAddress=$socket.RemoteAddress;RemotePort=$socket.RemotePort;State=$rawState;StateKind=$stateKind;SocketCreationUTC=$socketCreated;BeforeUTC=$beforeAt;AfterUTC=$afterAt;OwningProcess=$socket.OwningProcess;Classification=$(if($matched){'retained-owned-generation'}else{'UNCLASSIFIED'});BeforeMember=$pre;AfterMember=$post}
+    if($stateKind-eq 'non-listening'){
+     if($nonListeners.Count-lt 256){$nonListeners+=$observation}else{$nonListenerRowsOmitted++}
+    }else{$listeners+=$observation} # Unknown states fail the same strict gate.
    }
   }
   if((Test-Path (Join-Path $evidence 'checkpoint-native-open.json'))-and-not(Test-Path (Join-Path $evidence 'guest-live.txt'))){
@@ -126,6 +132,7 @@ try {
  if($app){try{$empty=$app.Stop(5000);$history=@($app.History())}catch{$cleanupErrors+=$_.Exception.Message}finally{$app.Dispose()}}
  foreach($sentinel in $sentinels){try{if(-not $sentinel.Stop(5000)){$cleanupErrors+='sentinel Job remains active'}}catch{$cleanupErrors+=$_.Exception.Message}finally{$sentinel.Dispose()}}
  $result=[ordered]@{TimedOut=$timedOut;AppInstances=$exits;Processes=$history;Listeners=$listeners;RemainingOwned=$remaining;IndependentFixturePreserved=$preserved;JobEmptyAfterCleanup=$empty;OwnedHandlesAfterCleanup=[SplittyFixtureJob]::LiveHandleCount;CleanupErrors=$cleanupErrors;SentinelLaunches=$sentinelLaunches;AppCommandLine=$(if($app){$app.LaunchedCommandLine}else{$null})}
+ $result.NonListeningObservations=$nonListeners;$result.NonListeningRowsOmitted=$nonListenerRowsOmitted;$result.InventoryError=$inventoryError
  $result|ConvertTo-Json -Depth 5|Out-File -Encoding utf8 (Join-Path $evidence 'processes.json')
 }
-if($timedOut-or $exits.Count-ne $ExpectedAppInstances-or @($exits|Where-Object{$_.ExitCode-ne 0-or $_.Alive}).Count-or $listeners.Count-or $remaining.Count-or-not $preserved-or-not $empty-or $cleanupErrors.Count-or [SplittyFixtureJob]::LiveHandleCount-ne 0){exit 1}
+if($inventoryError-or $timedOut-or $exits.Count-ne $ExpectedAppInstances-or @($exits|Where-Object{$_.ExitCode-ne 0-or $_.Alive}).Count-or $listeners.Count-or $remaining.Count-or-not $preserved-or-not $empty-or $cleanupErrors.Count-or [SplittyFixtureJob]::LiveHandleCount-ne 0){exit 1}

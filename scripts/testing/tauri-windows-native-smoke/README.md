@@ -108,8 +108,10 @@ remote A's daemon intentionally survives app exit until exact fixture teardown.
 
 Listener collection freezes live identities from retained handles before/after
 sampling and records socket creation/state/endpoints. Missing, older or future
-creation times stay UNCLASSIFIED. Every listener row still fails. Sampling does
-not prove continuous absence. The separate native TCP-table candidate failed its
+creation times stay UNCLASSIFIED. The raw CIM query filters only owned PIDs;
+provider errors fail rather than becoming an empty result. Null, zero and unknown
+TCP states also fail; known non-listening observations are retained separately.
+Every listener row still fails. Sampling does not prove continuous absence. The separate native TCP-table candidate failed its
 owned-listener control and remains unwired, preserved outside this commit for a
 fresh hosted control. That control now passes on Windows 2025 for IPv4/IPv6
 ([run 41717658574](https://github.com/npgrosser/splitty/actions/runs/41717658574));
