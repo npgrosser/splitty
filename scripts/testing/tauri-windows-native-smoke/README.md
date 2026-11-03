@@ -191,3 +191,50 @@ The first uses only synthetic environment values and local temporary marker
 files. The PowerShell checks compile the formatter, parse strings and validate
 synthetic registration metadata in memory. They launch no fixture process,
 query no registry and call no WSL executable.
+
+## Opt-in production UI mode
+
+Add `--full-ui` to the guarded `--disposable-distros` workflow to copy the real
+built `frontend/dist` into the packaged fixture. The production index, CSS,
+fonts, Ghostty WASM and popout document remain real; a separate probe module is
+appended to the index. The existing setup document still controls the isolated
+A/restart/B backend selection. Default fixture behavior is unchanged.
+
+The mode reuses the shared production DOM/settings/Ghostty assertions and three
+sequential, bounded popout lifecycle checks. Fixture windows stay hidden. Its
+window inventory counts Tauri-managed HWND entries, not all OS windows. The
+probe uses a separate native-open request namespace from the production App.
+Clipboard methods are blocked and attempts recorded; no global clipboard read
+or write is part of this test. SSH host-list reads use an empty fixture folder.
+Production asset hashes and UI observations are retained with the evidence.
+
+The reviewed mode passed an actual bounded Windows MSVC/WebView2 run in
+`%TEMP%\splitty-native-windows-94f8368a656b`. The production App mounted with
+CSS and SplittyMono loaded; Ghostty WASM came from the packaged origin with
+`application/wasm`, rendered glyphs into a 900×540 canvas, and the renderer
+setting persisted through the native API. Observed UI errors, network fallback
+attempts and modern/legacy clipboard attempts were empty.
+
+The three sequential popout checks verified direct command denial, allowed
+parent-domain calls/shared opener, ordinary close, parent-mediated close and
+foreign-label refusal. The final child survived until app exit; this is app-exit
+cleanup evidence, not a Windows parent-reload result. Window inventory covers
+Tauri-managed HWNDs only. Both app instances exited naturally with no remaining
+Job members before cleanup; owned handle count reached zero. Independent guest
+sentinels retained their exact start identities and answered fresh nonces.
+Owned helper/PTY exit, binary PTY traffic and the 1,048,833-byte upload hash also
+passed. Both newly registered distributions were removed.
+
+Evidence includes `production-ui-assets.json`,
+`runtime-evidence/runtime-result.json`, `runtime-evidence/processes.json`, the
+sentinel before/after records, `wsl-verification.json` and `distro-cleanup.json`.
+The earlier `5990d77041bd` attempt stopped before any GUI because the pinned
+executable guard correctly refused a junction-resolved cache path. Launch path
+construction now preserves the fresh root's lexical target path; the exact
+guard was not relaxed.
+
+This result does not establish sibling remote/setup reference isolation, frozen
+client or admission-flood behavior, a noncooperative bridge shutdown, disabled
+localhost forwarding, global OS-window enumeration, clipboard feature parity,
+or whole-framework/RSS memory bounds. TCP inventories remain sampled. No global
+clipboard operation or WSL configuration change was part of this run.

@@ -37,6 +37,46 @@ class GateTests(unittest.TestCase):
         self.assertEqual(args[6:],['splitty-fixture-guard',EXPECTED,'touch','marker'])
     def test_no_user_distro_argument_accepted(self):
         with self.assertRaises(RuntimeError):fixture.guarded_guest_arguments('Ubuntu',['touch','marker'])
+    def test_full_ui_is_opt_in(self):
+        seen=[]
+        with patch.object(fixture,'_run_full',side_effect=lambda args:seen.append(args.full_ui)):
+            fixture.main(['--disposable-distros'])
+            fixture.main(['--disposable-distros','--full-ui'])
+        self.assertEqual(seen,[False,True]);self.assertFalse(fixture.WSL_EXECUTION_APPROVED)
+    def test_full_ui_copies_real_assets_and_keeps_setup_controller(self):
+        import shutil
+        repo=HERE.parents[1]
+        with tempfile.TemporaryDirectory(prefix='splitty-full-ui-pure-') as directory:
+            root=Path(directory)/'snapshot';crate=root/'crates/splitty-tauri';(crate/'src').mkdir(parents=True)
+            for name in ['lib.rs','windows_wsl.rs','navigation.rs','remote.rs']:shutil.copyfile(repo/'crates/splitty-tauri/src'/name,crate/'src'/name)
+            for name in ['build.rs','tauri.conf.json']:shutil.copyfile(repo/'crates/splitty-tauri'/name,crate/name)
+            fake_repo=Path(directory)/'input';dist=fake_repo/'frontend/dist';(dist/'assets').mkdir(parents=True)
+            (dist/'index.html').write_text('<body><div id="app"></div><script type="module" src="/assets/real.js"></script></body>')
+            (dist/'popout.html').write_text('<body>real production child</body>')
+            (dist/'assets/real.js').write_text('production-ui-marker')
+            (dist/'assets/ghostty.wasm').write_bytes(b'wasm-fixture-preserved')
+            with patch.object(fixture.subprocess,'run') as child,patch.object(fixture.common,'windows',side_effect=lambda path:'C:\\Fixture\\'+Path(path).name):
+                fixture.instrument(root,[EXPECTED,'splitty-native-fixture-000000000000-b'],fake_repo,full_ui=True)
+                child.assert_called_once() # bundler call mocked; no process/WSL
+            assets=crate/'runtime-assets'
+            self.assertEqual((assets/'assets/ghostty.wasm').read_bytes(),b'wasm-fixture-preserved')
+            self.assertIn('real.js',(assets/'index.html').read_text());self.assertIn('/probe.js',(assets/'index.html').read_text())
+            self.assertNotIn('id="app"',(assets/'setup.html').read_text())
+            self.assertIn('real production child',(assets/'popout.html').read_text())
+            self.assertIn('nativeCount',(crate/'src/lib.rs').read_text())
+            self.assertIn('.window_features(features).visible(false)',(crate/'src/navigation.rs').read_text())
+            self.assertIn('allow-smoke-windows',(crate/'src/lib.rs').read_text())
+            self.assertNotIn(r'\nfunction',(crate/'src/windows-full-ui-init.js').read_text())
+            self.assertTrue((root/'production-ui-assets.json').is_file())
+    def test_launch_argv_keeps_fresh_root_lexical_target_path(self):
+        root=Path('/mnt/c/Temp/splitty-native-windows-123456789abc')
+        lexical=r'C:\Temp\splitty-native-windows-123456789abc'
+        def convert(path):
+            if path==root:return lexical
+            self.fail('converter followed a target junction instead of using the lexical root')
+        with patch.object(fixture.common,'windows',side_effect=convert) as convert_call:
+            self.assertEqual(fixture.fixture_executable_path(root),lexical+r'\target\debug\splitty-gui.exe')
+            convert_call.assert_called_once_with(root)
     def test_imported_full_entry_refuses_before_windows_prep(self):
         fixture.WSL_EXECUTION_APPROVED=False
         with patch.object(fixture.common,'powershell',side_effect=AssertionError('Windows prep called')):

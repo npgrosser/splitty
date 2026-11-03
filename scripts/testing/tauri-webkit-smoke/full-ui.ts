@@ -11,7 +11,7 @@ async function until<T>(description: string, read: () => T): Promise<NonNullable
   }
   throw Error(`${description} timed out; DOM: ${document.body.innerText.slice(0, 1800)}`);
 }
-export async function exerciseFullUi(request: (operation: string, args?: object) => Promise<any>, checkPopout: boolean) {
+export async function exerciseFullUi(request: (operation: string, args?: object) => Promise<any>, checkPopout: boolean, options: { countField?: "nativeVisible" | "nativeCount" } = {}) {
   await until('production App mount', () => document.querySelector('#app .dockview-theme-abyss, #app .dv-dockview, #app .dockview-container, #app .workspace-root'));
   const initialTerminal = await until('production terminal mount', () => document.querySelector('#app textarea'));
   const style = getComputedStyle(document.body);
@@ -63,8 +63,9 @@ export async function exerciseFullUi(request: (operation: string, args?: object)
   const mainStillUsable = await (window as any).__SPLITTY_TAURI__.invoke('remote_hosts');
   if (!Array.isArray(mainStillUsable)) throw Error('denied foreign navigation revoked the main document');
   const inventory = () => (window as any).__TAURI_INTERNALS__.invoke('smoke_windows');
+  const count = (value: any): number => value[options.countField ?? 'nativeVisible'];
   const baseline = await inventory();
-  if (baseline.managed.some((label: string) => label.startsWith('popout-')) || baseline.nativeVisible !== 1) {
+  if (baseline.managed.some((label: string) => label.startsWith('popout-')) || count(baseline) !== 1) {
     throw Error(`parent reload left native child windows: ${JSON.stringify(baseline)}`);
   }
   let popout: object = { skipped: 'only first document opens a child' };
@@ -82,17 +83,17 @@ export async function exerciseFullUi(request: (operation: string, args?: object)
       const hosts = await (child.opener as any).__SPLITTY_TAURI__.invoke('remote_hosts');
       if (!Array.isArray(hosts)) throw Error('parent-mediated popout request failed');
       const opened = await inventory();
-      if (opened.managed.filter((label: string) => label.startsWith('popout-')).length !== 1 || opened.nativeVisible !== 2) throw Error(`native popout not owned: ${JSON.stringify(opened)}`);
+      if (opened.managed.filter((label: string) => label.startsWith('popout-')).length !== 1 || count(opened) !== 2) throw Error(`native popout not owned: ${JSON.stringify(opened)}`);
       const sharedOpener = child.opener === window;
       child.close();
       await until('child.closed after production window.close()', () => child!.closed);
       let closed: any;
       for (let tries = 0; tries < 100; tries++) {
         closed = await inventory();
-        if (closed.nativeVisible === baseline.nativeVisible && closed.managed.length === baseline.managed.length) break;
+        if (count(closed) === count(baseline) && closed.managed.length === baseline.managed.length) break;
         await wait(20);
       }
-      if (closed.nativeVisible !== 1 || closed.managed.length !== 1) throw Error(`window.close left native window shells: ${JSON.stringify(closed)}`);
+      if (count(closed) !== 1 || closed.managed.length !== 1) throw Error(`window.close left native window shells: ${JSON.stringify(closed)}`);
       popout = { opened: true, directDenied, parentMediated: true, sharedOpener, closed: true, nativeInventoryClosed: true };
     } finally { child?.close(); }
     for (const label of ['main', 'remote-foreign', 'unknown-popout']) {
@@ -111,8 +112,8 @@ export async function exerciseFullUi(request: (operation: string, args?: object)
       await (window as any).__SPLITTY_TAURI__.invoke('close_popout', { label });
       await until('command-close child.closed', () => commanded.closed);
       let closed: any;
-      for (let tries=0; tries<100; tries++) { closed = await inventory(); if(closed.nativeVisible===1 && closed.managed.length===1) break; await wait(20); }
-      if (closed.nativeVisible!==1 || closed.managed.length!==1) throw Error('parent command left native child window');
+      for (let tries=0; tries<100; tries++) { closed = await inventory(); if(count(closed)===1 && closed.managed.length===1) break; await wait(20); }
+      if (count(closed)!==1 || closed.managed.length!==1) throw Error('parent command left native child window');
       popout = { ...popout, parentCloseCommand: true, foreignCloseDenied: true };
     } finally { commanded.close(); }
     // This final child deliberately survives until the parent's navigation;

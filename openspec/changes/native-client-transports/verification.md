@@ -53,6 +53,16 @@ and retains cancellation and generation semantics across the transport change.
   with zero remaining Job members; their helper/PTY ends, while independent
   guest sentinels preserve their start identities and answer fresh nonces. Both
   temporary distributions are removed and owned handle counts return to zero.
+- Actual Windows WebView2 also passes the production full-UI mode: packaged
+  CSS/font/WASM, Ghostty canvas, native settings and three bounded popout
+  lifecycle checks. Direct popout commands are denied while parent-mediated
+  calls remain allowed in the shared trust domain. The existing binary PTY and
+  1,048,833-byte upload checks pass alongside the real UI. UI-error, backend
+  HTTP/WebSocket and clipboard-attempt observations are empty. Both app
+  instances exit naturally; their Jobs are empty before cleanup, owned handles
+  return to zero, independent guest sentinels answer fresh nonces, and both
+  temporary distributions are removed. The last popout closes at app exit;
+  this is not Windows parent-reload or sibling-remote isolation evidence.
 - Actual macOS CI passes GUI all-target clippy and all 89 GUI library tests.
   Private endpoint peer-user checks, native forwarding reservation, IPv4/IPv6
   listener positive controls, owned-helper lifetime and explicit gateway
@@ -122,8 +132,12 @@ filesystem paths. They do not waive the remaining resource or platform gates.
 | Explicit restart and keeper adoption | `a_shell_outlives_stop_restart_update_and_crash_of_its_daemon` and explicit daemon gateway replacement smoke | Keepers are real processes; historical release binaries are not covered. |
 | Local app with independent daemon | Actual Linux Tauri/Electron and macOS WKWebView coexistence smokes; owned-child pipe lifecycle smoke | The complete Windows matrix remains a separate gate. |
 
-The catalog/role audit found no remaining native HTTP/token fallback. Static
-classification and native/browser conformance tests cover enumerated operations,
+The catalog/role audit found no remaining native HTTP/token fallback. All 53
+operations (31 backend and 22 local hub) and 12 adapter-only routes have checked
+classifications. Remaining TCP binds and browser credentials belong to explicit
+browser gateways or requested development forwards; native commands retain
+assigned-window/document checks. Static classification and native/browser
+conformance tests cover enumerated operations,
 credential-route refusal and assigned-host restrictions. The expanded framed
 Remote-role test rejects all 22 LocalHub operations with 403, verifies nine
 management-state views after each refusal and observes zero connector calls.

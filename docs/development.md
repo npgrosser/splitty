@@ -117,6 +117,11 @@ fix, and the guarded WSL switch/restart rerun passes. Earlier
 process-tree cleanup claims must not be used as evidence of isolation. See the
 [verification status](../openspec/changes/native-client-transports/verification.md).
 
+The opt-in Windows `--full-ui` fixture also passes actual WebView2 production
+assets, native settings, binary traffic and bounded popout lifecycle checks.
+See the [Windows harness scope](../scripts/testing/tauri-windows-native-smoke/README.md)
+for the remaining platform cases and the distinction between app exit and reload.
+
 The actual macOS WKWebView full-UI run passes 37 document generations, packaged
 assets, popouts, native traffic and coexistence with a separate daemon. macOS
 core failures and the remaining platform matrix are recorded in the verification

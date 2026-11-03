@@ -1,9 +1,13 @@
-// Isolated fixture only: production native adapters, no HTTP backend or popouts.
+// Isolated fixture only: production native adapters, no HTTP backend; production UI/popouts are opt-in.
+import { exerciseFullUi } from '../tauri-webkit-smoke/full-ui.ts';
+import { isWindowsFixtureDocument, probeBridge } from './document.mjs';
 import { NativeSocket } from '../../../frontend/src/lib/protocol/native_socket.ts';
 import { openTauriChannel } from '../../../frontend/src/lib/protocol/tauri_channel.ts';
 import { SessionClient } from '../../../frontend/src/lib/terminal/session_client.ts';
 import { AttachRegistry } from '../../../frontend/src/lib/terminal/attach_registry.ts';
 declare const __FIXTURES__: string[];
+declare const __WINDOWS_FULL_UI__: boolean;
+if (isWindowsFixtureDocument(window, true)) {
 const capsule = (window as any).__SPLITTY_TAURI__;
 const report = (value: unknown) => (window as any).__TAURI_INTERNALS__.invoke('windows_smoke_report', { value });
 const assert = (condition: unknown, message: string) => { if (!condition) throw Error(message); };
@@ -40,7 +44,7 @@ void (async () => {
   socket.onError = error => { failure = error; };
   socket.onMessage(message => events.push(message));
   socket.onBinaryMessage((_id, data) => bytes.push(...data));
-  socket.adopt(await openTauriChannel(capsule.native));
+  socket.adopt(await openTauriChannel(__WINDOWS_FULL_UI__ ? probeBridge(capsule.native) : capsule.native));
   const request = async (operation: string, args = {}) => {
     const reply = await socket.request({ operation, args });
     assert(reply.status >= 200 && reply.status < 300, `${operation}: ${reply.status}: ${reply.body}`);
@@ -57,6 +61,8 @@ void (async () => {
   }
   assert(build.wslDistro === __FIXTURES__[1], 'wrong WSL backend identity');
   await request('home.get');
+  stage = 'production UI';
+  const ui = __WINDOWS_FULL_UI__ ? await exerciseFullUi(request, true, { countField: 'nativeCount' }) : undefined;
   stage = 'WSL terminal bytes';
   socket.send({ type: 'create', cols: 80, rows: 24 });
   const deadline = Date.now() + 15000;
@@ -77,6 +83,14 @@ void (async () => {
   const savedPath = await sessions.uploadFile(new File([fileBytes], 'windows-native-fixture.bin'), undefined, 30000, { dir: '/home/splitty-fixture' });
   await report({ phase: 'native-open' });
   stage = 'WSL heartbeat'; await wait(17000); if (failure) throw failure;
+  const observations = __WINDOWS_FULL_UI__ ? (window as any).__SPLITTY_WINDOWS_UI_PROBE__ : undefined;
+  if (__WINDOWS_FULL_UI__) {
+    assert(observations && observations.network.length === 0, 'production UI attempted network fallback');
+    assert(observations.clipboard.length === 0, 'production UI attempted global clipboard access');
+    assert(observations.errors.length === 0, 'production UI connection error: ' + observations.errors.join('; '));
+  }
   sessions.dispose(); socket.dispose(); clearTimeout(timer);
-  await report({ phase: 'final', terminalBinary: true, terminalPid: Number(pid![1]), savedPath, fileBytes: fileBytes.length, distro: build.wslDistro });
+  await report({ phase: 'final', fullUi: __WINDOWS_FULL_UI__, ui, observations, terminalBinary: true, terminalPid: Number(pid![1]), savedPath, fileBytes: fileBytes.length, distro: build.wslDistro });
 })().catch(error => { clearTimeout(timer); void report({ error: String(error), stage, stack: error?.stack }); });
+
+}

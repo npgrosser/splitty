@@ -10,7 +10,7 @@ import hashlib
 import importlib.util
 import io
 import json
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shutil
 import subprocess
@@ -134,7 +134,7 @@ def fixtures(root,count=2):
         (root/'distro-cleanup.json').write_text(json.dumps(cleanup,indent=2))
         if any(row.get('error') or not row.get('unregistered') for row in cleanup): raise RuntimeError('fixture cleanup needs inspection: '+str(root/'distro-cleanup.json'))
 
-def instrument(root,names,repo):
+def instrument(root,names,repo,full_ui=False):
     common.instrument(root)
     crate=root/'crates/splitty-tauri'; path=crate/'src/windows_wsl.rs'; source=path.read_text()
     source=source.replace('fn config_path(app: &AppHandle) -> Result<PathBuf, String> {','fn config_path(app: &AppHandle) -> Result<PathBuf, String> {\n        if let Some(path) = std::env::var_os("SPLITTY_SMOKE_APP_DATA") { return Ok(PathBuf::from(path).join("windows.json")); }',1)
@@ -184,11 +184,57 @@ fn windows_smoke_report(app: AppHandle, webview: tauri::Webview, native: tauri::
     assets=crate/'runtime-assets'
     for name in ['setup.html','index.html']:
         (assets/name).write_text('<!doctype html><html><head><title>Isolated Windows WSL native smoke</title><script type="module" src="/probe.js"></script></head><body>Hidden native pipe fixture</body></html>')
+    if full_ui:
+        prepare_full_ui(crate,assets,repo,root)
     config=root/'wsl-vite.config.mjs'
-    config.write_text('import {defineConfig} from '+json.dumps(str(repo/'frontend/node_modules/vite/dist/node/index.js'))+'; export default defineConfig({build:{outDir:'+json.dumps(str(assets))+',emptyOutDir:false,minify:false,lib:{entry:'+json.dumps(str(HERE/'tauri-windows-native-smoke/wsl-entry.ts'))+',name:"WslNativeProbe",formats:["iife"],fileName:()=>"probe.js"},target:"es2022"},define:{__FIXTURES__:'+json.dumps(json.dumps(names))+'}});')
+    config.write_text('import {defineConfig} from '+json.dumps(str(repo/'frontend/node_modules/vite/dist/node/index.js'))+'; export default defineConfig({build:{outDir:'+json.dumps(str(assets))+',emptyOutDir:false,minify:false,lib:{entry:'+json.dumps(str(HERE/'tauri-windows-native-smoke/wsl-entry.ts'))+',name:"WslNativeProbe",formats:["iife"],fileName:()=>"probe.js"},target:"es2022"},define:{__FIXTURES__:'+json.dumps(json.dumps(names))+',__WINDOWS_FULL_UI__:'+json.dumps(full_ui)+'}});')
     with (root/'wsl-probe-bundle.log').open('w') as output:
         subprocess.run([str(repo/'frontend/node_modules/.bin/vite'),'build','--config',str(config)],cwd=repo,stdout=output,stderr=subprocess.STDOUT,check=True)
     (root/'runtime-source-hashes.json').write_text(json.dumps(common.hashes(root),indent=2))
+
+def prepare_full_ui(crate,assets,repo,root):
+    dist=repo/'frontend/dist'
+    if not (dist/'index.html').is_file() or not (dist/'popout.html').is_file():raise RuntimeError('build frontend/dist before --full-ui')
+    source_assets={str(path.relative_to(dist)):hashlib.sha256(path.read_bytes()).hexdigest() for path in dist.rglob('*') if path.is_file()}
+    setup=(assets/'setup.html').read_text()
+    shutil.copytree(dist,assets,dirs_exist_ok=True)
+    (assets/'setup.html').write_text(setup) # setup remains the existing isolated backend controller
+    index=(assets/'index.html').read_text()
+    if '</body>' not in index:raise RuntimeError('production index body missing')
+    (assets/'index.html').write_text(index.replace('</body>','<script type="module" src="/probe.js"></script></body>',1))
+    (root/'production-ui-assets.json').write_text(json.dumps({'assets':source_assets,'mode':'real production index plus separate probe; setup controller unchanged'},indent=2))
+    helpers=(HERE/'tauri-windows-native-smoke/document.mjs').read_text().replace('export function','function')
+    observer=(HERE/'tauri-windows-native-smoke/full-ui-init.js').read_text()
+    (crate/'src/windows-full-ui-init.js').write_text('(function(){\n'+helpers+'\n'+observer+'\n})();')
+    path=crate/'src/lib.rs';source=path.read_text()
+    source=source.replace('            windows_smoke_report,','            windows_smoke_report,\n            smoke_windows,',1)
+    source=source.replace('.permission("allow-windows-smoke-report")','.permission("allow-windows-smoke-report").permission("allow-smoke-windows")',1)
+    anchor='.initialization_script(script)'
+    if source.count(anchor)!=1:raise RuntimeError('full UI initialization anchor changed')
+    source=source.replace(anchor,anchor+'.initialization_script(include_str!("windows-full-ui-init.js"))',1)
+    source+='''
+#[cfg(target_os = "windows")]
+#[tauri::command]
+fn smoke_windows(app: AppHandle) -> Result<serde_json::Value, String> {
+    let windows=app.webview_windows();
+    let mut managed: Vec<_>=windows.keys().cloned().collect();managed.sort();
+    let native_count=windows.values().filter(|window| window.hwnd().is_ok()).count();
+    Ok(serde_json::json!({"managed":managed,"nativeCount":native_count,"inventoryScope":"Tauri-managed HWNDs, including hidden windows"}))
+}
+'''
+    path.write_text(source)
+    path=crate/'build.rs';source=path.read_text().replace('            "windows_smoke_report",','            "windows_smoke_report",\n            "smoke_windows",',1);path.write_text(source)
+    path=crate/'src/navigation.rs';source=path.read_text();anchor='.window_features(features)'
+    if source.count(anchor)!=1:raise RuntimeError('full UI hidden popout anchor changed')
+    source=source.replace(anchor,anchor+'.visible(false)',1)
+    source=source.replace('.initialization_script(close_script)','.initialization_script(close_script).initialization_script(include_str!("windows-full-ui-init.js"))',1)
+    path.write_text(source)
+    # The UI's host-list query must not inspect the user's real SSH files.
+    path=crate/'src/remote.rs';source=path.read_text()
+    if source.count('hosts::default_ssh_dir().as_deref()')!=1:raise RuntimeError('full UI private SSH inventory anchor changed')
+    source=source.replace('hosts::default_ssh_dir().as_deref()','Some(std::path::Path::new('+json.dumps(common.windows(root/'empty-ssh'))+'))')
+    (root/'empty-ssh').mkdir()
+    path.write_text(source)
 
 @contextlib.contextmanager
 def approved_private_wsl(permit):
@@ -203,10 +249,16 @@ def approved_private_wsl(permit):
 def main(argv=None):
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--cache-workspace',type=Path,help='marked TEMP Cargo target artifacts only; fresh source/driver always copied')
+    parser.add_argument('--full-ui',action='store_true',help='exercise real packaged frontend assets and bounded shared UI/popout checks')
     parser.add_argument('--disposable-distros',action='store_true',required=True,help='explicitly create, run and clean two isolated temporary distributions')
     args=parser.parse_args(argv)
     with approved_private_wsl(args.disposable_distros):
         _run_full(args)
+
+def fixture_executable_path(root):
+    # Convert only the fresh root: wslpath on the child path resolves the Cargo
+    # target junction into its cache and would violate the exact launch guard.
+    return str(PureWindowsPath(common.windows(root))/'target'/'debug'/'splitty-gui.exe')
 
 def _run_full(args):
     if not WSL_EXECUTION_APPROVED:raise RuntimeError('explicit --disposable-distros scoped approval required')
@@ -225,7 +277,7 @@ def _run_full(args):
     global_config=common.powershell('$p=Join-Path $env:USERPROFILE ".wslconfig"; if(Test-Path $p){Get-Content $p}else{"<absent>"}')
     (root/'global-wslconfig-readonly.txt').write_text(global_config)
     with fixtures(root) as names:
-        instrument(root,names,repo)
+        instrument(root,names,repo,full_ui=args.full_ui)
         (appdata/'windows.json').write_text(json.dumps({'selectedDistro':names[0]}))
         # Only the current Windows child process receives these fixture guards.
         original=common.powershell
@@ -242,7 +294,7 @@ def _run_full(args):
             shutil.copyfile(HERE/'tauri-windows-native-smoke/fixture-guest-guard.sh',root/'fixture-guest-guard.sh')
             shutil.copyfile(HERE/'tauri-windows-native-smoke/fixture-registration.ps1',root/'fixture-registration.ps1')
             other=args.cache_workspace.resolve()/'target/debug/splitty-gui.exe' if args.cache_workspace else root/'target/debug/splitty-gui.exe'
-            command='& '+common.quote(common.windows(driver))+' -Executable '+common.quote(common.windows(root/'target/debug/splitty-gui.exe'))+' -OtherExecutable '+common.quote(common.windows(other))+' -RootDir '+common.quote(common.windows(root))+' -FixtureB '+common.quote(names[1])+' -PermitIsolatedFullRun\nexit $LASTEXITCODE'
+            command='& '+common.quote(common.windows(driver))+' -Executable '+common.quote(fixture_executable_path(root))+' -OtherExecutable '+common.quote(common.windows(other))+' -RootDir '+common.quote(common.windows(root))+' -FixtureB '+common.quote(names[1])+' -PermitIsolatedFullRun\nexit $LASTEXITCODE'
             common.powershell(command,root/'windows-wsl-driver.log')
             process_evidence=json.loads((evidence/'processes.json').read_text(encoding='utf-8-sig'))
             if not process_evidence.get('IndependentFixturePreserved'):raise RuntimeError('independent fixture work did not survive app exit')
