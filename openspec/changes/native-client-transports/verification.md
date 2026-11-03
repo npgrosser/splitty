@@ -63,7 +63,9 @@ and retains cancellation and generation semantics across the transport change.
   return to zero, independent guest sentinels answer fresh nonces, and both
   temporary distributions are removed. The last popout closes at app exit;
   this is not Windows parent-reload or sibling-remote isolation evidence.
-- Actual macOS CI passes GUI all-target clippy and all 89 GUI library tests.
+- Actual macOS CI at `4eb7e72` passes GUI all-target clippy and all 90 GUI library tests.
+  All ten real-child native bridge failure/cancellation regressions also pass;
+  these exercise controlled carriers, not permanent system-SSH reconnect failure.
   Private endpoint peer-user checks, native forwarding reservation, IPv4/IPv6
   listener positive controls, owned-helper lifetime and explicit gateway
   replacement also pass. Two core failures (Bash CLI PATH restoration and the
@@ -113,6 +115,21 @@ alert remains separate; the comparison result is not a claim that the entire
 repository has no findings. macOS again passes the actual WKWebView and native
 network/lifetime checks, while its mandatory core gate still fails on the two
 reproduced baseline cases.
+
+The later run at `4eb7e72` passes frontend, Electron, Linux Tauri, aarch64,
+dependency and CodeQL checks. Its Rust lifecycle suite fails
+`rust_embedded_owner_shares_runtime_across_reload_and_reaps_its_jobs`: the
+managed job PID remained visible after owner shutdown. The cause is a 500 ms
+helper termination grace racing its own 500 ms PTY cleanup grace. Owner helpers
+now use a shared shutdown deadline selected from trusted policy before
+negotiation; stderr draining consumes that same deadline. Ordinary SSH relay
+policy is unchanged. The new real-child regression fails before the fix and
+passes afterward; a held-stderr case, the five owner tests, all twelve bridge
+tests and the actual helper/job-reaping smoke pass. Targeted all-target clippy
+and independent source review pass. Process/worker ownership is retained until
+actual exit; these timing tests do not establish a hard deadline under OS
+failure. Fresh CI remains required. The macOS core gate again fails the same
+two baseline cases, both reproduced against the merge base in that run.
 
 Three findings do not indicate a vulnerability in their reported contexts:
 
