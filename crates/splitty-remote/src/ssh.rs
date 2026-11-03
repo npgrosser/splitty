@@ -731,7 +731,10 @@ pub enum SshError {
 
     /// The host's shell did not find the program (status 127).
     #[error("the command was not found on {host}")]
-    NotFound { host: String },
+    NotFound {
+        host: String,
+        allocation: Option<Box<Lease>>,
+    },
 
     #[error("{message}")]
     Failed {
@@ -801,8 +804,11 @@ pub fn classify_budgeted(
     // NotFound only copies the caller-owned host. Failed keeps its converted
     // message, stderr and optional hint after the original capture is gone.
     if status.code() == Some(127) {
+        let host = host.to_owned();
         return SshError::NotFound {
-            host: host.to_owned(),
+            host,
+            // Retain conversion headroom for missing-server error wrappers.
+            allocation: Some(Box::new(storage)),
         };
     }
     let message = if stderr.is_empty() {
@@ -1565,6 +1571,36 @@ mod tests {
             .unwrap();
         assert!(
             matches!(classify_budgeted("vm", exit(255), "Host key verification failed", &budget), SshError::Spawn(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+        drop(held);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_command_keeps_host_charged_and_refuses_before_copying() {
+        let budget = ConnectionBudget::default();
+        let host = "u".repeat(MAX_TARGET_BYTES);
+        let error = classify_budgeted(&host, exit(127), "not found", &budget);
+        assert!(
+            matches!(&error, SshError::NotFound { host: retained, allocation: Some(_) } if retained == &host)
+        );
+        assert!(budget.used() >= host.len());
+        assert_eq!(
+            error.to_string(),
+            format!("the command was not found on {host}")
+        );
+        drop(error);
+        assert_eq!(budget.used(), 0);
+        let held = budget
+            .reserve(
+                splitty_transport::wire::CONNECTION_BYTES
+                    - splitty_transport::wire::CONNECTION_CONTROL_BYTES,
+                false,
+            )
+            .unwrap();
+        assert!(
+            matches!(classify_budgeted(&host, exit(127), "not found", &budget), SshError::Spawn(error) if error.kind() == io::ErrorKind::WouldBlock)
         );
         drop(held);
         assert_eq!(budget.used(), 0);

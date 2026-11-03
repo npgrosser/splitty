@@ -687,6 +687,7 @@ mod tests {
     fn hosts_splitty_cannot_serve_are_unsupported() {
         assert_eq!(
             code(HubError::Install(InstallError::UnsupportedKernel {
+                allocation: None,
                 host: "vm".into(),
                 kernel: "Darwin".into()
             })),
@@ -694,7 +695,8 @@ mod tests {
         );
         assert_eq!(
             code(HubError::Install(InstallError::Ssh(SshError::NotFound {
-                host: "vm".into()
+                host: "vm".into(),
+                allocation: None
             }))),
             Code::UnsupportedHost
         );
@@ -721,12 +723,17 @@ mod tests {
     #[test]
     fn failed_installs_and_daemons_are_named() {
         for error in [
-            InstallError::Checksum { host: "vm".into() },
+            InstallError::Checksum {
+                host: "vm".into(),
+                allocation: None,
+            },
             InstallError::DoesNotRun {
+                allocation: None,
                 host: "vm".into(),
                 arch: "x86_64".into(),
             },
             InstallError::InvalidProbe {
+                allocation: None,
                 host: "vm".into(),
                 detail: "x".into(),
             },

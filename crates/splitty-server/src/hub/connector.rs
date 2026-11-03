@@ -49,12 +49,31 @@ impl Connector for SshConnector {
             match handshake::handshake(&ssh, &prepared.server, true).await {
                 // `prepare` found neither this version installed nor a payload
                 // for the host, and the host's `PATH` has no splitty either.
-                Err(HandshakeError::Ssh(SshError::NotFound { host }))
-                    if prepared.server == Server::Path =>
-                {
-                    Err(HubError::NoServer {
-                        host,
-                        arch: prepared.probe.arch.clone(),
+                Err(HandshakeError::Ssh(SshError::NotFound {
+                    host,
+                    allocation: _source_allocation,
+                })) if prepared.server == Server::Path => {
+                    let storage = context
+                        .budget
+                        .reserve(
+                            host.capacity()
+                                + prepared.probe.arch.len()
+                                + std::mem::size_of::<HubError>()
+                                + std::mem::size_of::<splitty_transport::budget::Lease>(),
+                            false,
+                        )
+                        .map_err(|error| {
+                            HubError::NativeBridge(std::io::Error::new(
+                                std::io::ErrorKind::WouldBlock,
+                                error,
+                            ))
+                        })?;
+                    Err(HubError::Retained {
+                        error: Box::new(HubError::NoServer {
+                            host,
+                            arch: prepared.probe.arch.clone(),
+                        }),
+                        allocation: Box::new(storage),
                     })
                 }
                 answer => Ok(answer?),

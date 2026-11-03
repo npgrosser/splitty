@@ -16,6 +16,7 @@ use std::io;
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
+use splitty_transport::budget::{ConnectionBudget, Lease};
 
 use crate::ssh::{is_sha256, is_version, run_checked, CommandLine, Executor, SshError};
 
@@ -70,10 +71,18 @@ pub enum InstallError {
     Ssh(#[from] SshError),
 
     #[error("{host} runs {kernel}; Splitty supports Linux and macOS hosts only")]
-    UnsupportedKernel { host: String, kernel: String },
+    UnsupportedKernel {
+        host: String,
+        kernel: String,
+        allocation: Option<Box<Lease>>,
+    },
 
     #[error("{host} gave an unexpected answer to the probe: {detail}")]
-    InvalidProbe { host: String, detail: String },
+    InvalidProbe {
+        host: String,
+        detail: String,
+        allocation: Option<Box<Lease>>,
+    },
 
     #[error("version {0:?} cannot be installed (unexpected characters)")]
     InvalidVersion(String),
@@ -85,19 +94,29 @@ pub enum InstallError {
     SelfPayload(String),
 
     #[error("the server arrived corrupted on {host} (checksum mismatch); nothing was installed")]
-    Checksum { host: String },
+    Checksum {
+        host: String,
+        allocation: Option<Box<Lease>>,
+    },
 
     #[error(
         "{host} has neither sha256sum nor shasum to verify the server's checksum; \
          nothing was installed"
     )]
-    NoChecksumTool { host: String },
+    NoChecksumTool {
+        host: String,
+        allocation: Option<Box<Lease>>,
+    },
 
     #[error(
         "the server does not run on {host} ({arch}); nothing was installed. \
          Is the payload built for that architecture?"
     )]
-    DoesNotRun { host: String, arch: String },
+    DoesNotRun {
+        host: String,
+        arch: String,
+        allocation: Option<Box<Lease>>,
+    },
 }
 
 /// What the probe found on the host.
@@ -112,9 +131,34 @@ pub struct Probe {
 
 /// Parse the probe's output, checking `$HOME` before it is ever used.
 pub fn parse_probe(host: &str, stdout: &[u8]) -> Result<Probe, InstallError> {
-    let invalid = |detail: &str| InstallError::InvalidProbe {
-        host: host.to_owned(),
-        detail: detail.to_owned(),
+    parse_probe_budgeted(host, stdout, &ConnectionBudget::default())
+}
+
+fn diagnostic_storage(budget: &ConnectionBudget, bytes: usize) -> Result<Box<Lease>, InstallError> {
+    budget
+        .reserve(
+            bytes + std::mem::size_of::<InstallError>() + std::mem::size_of::<Lease>(),
+            false,
+        )
+        .map(Box::new)
+        .map_err(|error| SshError::Spawn(io::Error::new(io::ErrorKind::WouldBlock, error)).into())
+}
+
+fn parse_probe_budgeted(
+    host: &str,
+    stdout: &[u8],
+    budget: &ConnectionBudget,
+) -> Result<Probe, InstallError> {
+    let invalid = |detail: &str| {
+        let allocation = match diagnostic_storage(budget, host.len() + detail.len()) {
+            Ok(storage) => storage,
+            Err(error) => return error,
+        };
+        InstallError::InvalidProbe {
+            host: host.to_owned(),
+            detail: detail.to_owned(),
+            allocation: Some(allocation),
+        }
     };
     let text = std::str::from_utf8(stdout).map_err(|_| invalid("not UTF-8"))?;
     let mut lines = text.strip_suffix('\n').unwrap_or(text).split('\n');
@@ -356,11 +400,15 @@ pub async fn prepare<E: Executor>(
         .word("splitty-probe")
         .value(version);
     let output = run_checked(executor, &probe_line, None).await?;
-    let probe = parse_probe(executor.host(), &output.stdout)?;
+    let budget = executor.budget();
+    let probe = parse_probe_budgeted(executor.host(), &output.stdout, &budget)?;
     if !KERNELS.contains(&probe.kernel.as_str()) {
+        let allocation =
+            diagnostic_storage(&budget, executor.host().len() + probe.kernel.capacity())?;
         return Err(InstallError::UnsupportedKernel {
             host: executor.host().to_owned(),
             kernel: probe.kernel,
+            allocation: Some(allocation),
         });
     }
     let installed = Server::Installed {
@@ -407,22 +455,39 @@ pub async fn prepare<E: Executor>(
             uploaded: true,
             had_payload: true,
         }),
-        Err(SshError::Failed {
-            status: Some(3), ..
-        }) => Err(InstallError::Checksum {
-            host: executor.host().to_owned(),
-        }),
-        Err(SshError::Failed {
-            status: Some(4), ..
-        }) => Err(InstallError::DoesNotRun {
-            host: executor.host().to_owned(),
-            arch: probe.arch,
-        }),
-        Err(SshError::Failed {
-            status: Some(5), ..
-        }) => Err(InstallError::NoChecksumTool {
-            host: executor.host().to_owned(),
-        }),
+        Err(
+            source @ SshError::Failed {
+                status: Some(3..=5),
+                ..
+            },
+        ) => {
+            let status = match &source {
+                SshError::Failed { status, .. } => *status,
+                _ => unreachable!(),
+            };
+            let allocation = Some(diagnostic_storage(
+                &budget,
+                executor.host().len()
+                    + if status == Some(4) {
+                        probe.arch.capacity()
+                    } else {
+                        0
+                    },
+            )?);
+            let host = executor.host().to_owned();
+            let error = match status {
+                Some(3) => InstallError::Checksum { host, allocation },
+                Some(4) => InstallError::DoesNotRun {
+                    host,
+                    arch: probe.arch,
+                    allocation,
+                },
+                Some(5) => InstallError::NoChecksumTool { host, allocation },
+                _ => unreachable!(),
+            };
+            drop(source);
+            Err(error)
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -945,6 +1010,119 @@ mod tests {
 
     /// A host whose `uname -s` is neither Linux nor Darwin.
     struct OtherKernel;
+
+    struct InstallationFailure {
+        budget: ConnectionBudget,
+        status: i32,
+    }
+    impl Executor for InstallationFailure {
+        fn host(&self) -> &str {
+            "vm"
+        }
+        fn budget(&self) -> ConnectionBudget {
+            self.budget.clone()
+        }
+        async fn run(
+            &self,
+            line: &CommandLine,
+            _: Option<Vec<u8>>,
+        ) -> io::Result<crate::ssh::CapturedOutput> {
+            use std::os::unix::process::ExitStatusExt;
+            self.budget
+                .charge(256, false, || {
+                    let probe = line.as_str().contains("splitty-probe");
+                    std::process::Output {
+                        status: std::process::ExitStatus::from_raw(if probe {
+                            0
+                        } else {
+                            self.status << 8
+                        }),
+                        stdout: if probe {
+                            b"Linux\nx86_64\n/fixture\n".to_vec()
+                        } else {
+                            Vec::new()
+                        },
+                        stderr: if probe {
+                            Vec::new()
+                        } else {
+                            b"installation refused".to_vec()
+                        },
+                    }
+                })
+                .map_err(io::Error::other)
+        }
+    }
+
+    #[tokio::test]
+    async fn installation_status_errors_keep_owner_reservations_after_capture_drops() {
+        for status in [3, 4, 5] {
+            let budget = ConnectionBudget::default();
+            let error = prepare(
+                &InstallationFailure {
+                    budget: budget.clone(),
+                    status,
+                },
+                "0.1.0",
+                |_, _| Ok(Some(payload(true))),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                (&error, status),
+                (
+                    InstallError::Checksum {
+                        allocation: Some(_),
+                        ..
+                    },
+                    3
+                ) | (
+                    InstallError::DoesNotRun {
+                        allocation: Some(_),
+                        ..
+                    },
+                    4
+                ) | (
+                    InstallError::NoChecksumTool {
+                        allocation: Some(_),
+                        ..
+                    },
+                    5
+                )
+            ));
+            assert!(budget.used() > 0);
+            drop(error);
+            assert_eq!(budget.used(), 0);
+        }
+    }
+
+    #[test]
+    fn probe_errors_keep_their_owner_budget_and_refuse_exhaustion() {
+        let budget = ConnectionBudget::default();
+        let error = parse_probe_budgeted("vm", b"invalid", &budget).unwrap_err();
+        assert!(matches!(
+            &error,
+            InstallError::InvalidProbe {
+                allocation: Some(_),
+                ..
+            }
+        ));
+        assert!(budget.used() > 0);
+        drop(error);
+        assert_eq!(budget.used(), 0);
+        let held = budget
+            .reserve(
+                splitty_transport::wire::CONNECTION_BYTES
+                    - splitty_transport::wire::CONNECTION_CONTROL_BYTES,
+                false,
+            )
+            .unwrap();
+        assert!(
+            matches!(parse_probe_budgeted("vm", b"invalid", &budget), Err(InstallError::Ssh(SshError::Spawn(error))) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+        drop(held);
+        assert_eq!(budget.used(), 0);
+    }
 
     impl Executor for OtherKernel {
         fn host(&self) -> &str {

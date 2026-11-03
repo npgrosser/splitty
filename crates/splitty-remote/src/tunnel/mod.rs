@@ -50,10 +50,16 @@ pub enum RemoteError {
          carries a server for the host's architecture installs one itself; see \
          SPLITTY_REMOTE_PAYLOAD in the README"
     )]
-    SplittyMissing { host: String },
+    SplittyMissing {
+        host: String,
+        allocation: Option<Box<Lease>>,
+    },
 
     #[error("the splitty on {host} is too old for this client; update it there")]
-    SplittyTooOld { host: String },
+    SplittyTooOld {
+        host: String,
+        allocation: Option<Box<Lease>>,
+    },
 
     #[error(transparent)]
     Ssh(SshError),
@@ -241,12 +247,15 @@ impl RemoteError {
 }
 
 /// What a failed `splitty` command on the host means for a connect.
+#[cfg(test)]
 fn from_ssh(host: &str, error: SshError) -> RemoteError {
+    from_ssh_budgeted(host, error, &ConnectionBudget::default())
+}
+
+fn from_ssh_budgeted(host: &str, error: SshError, budget: &ConnectionBudget) -> RemoteError {
     match error {
         SshError::Spawn(error) => RemoteError::Spawn(error),
-        SshError::NotFound { .. } => RemoteError::SplittyMissing {
-            host: host.to_owned(),
-        },
+        SshError::NotFound { host, allocation } => RemoteError::SplittyMissing { host, allocation },
         SshError::Failed {
             status: Some(75), ..
         } => RemoteError::DiscoveryChanged,
@@ -256,8 +265,15 @@ fn from_ssh(host: &str, error: SshError) -> RemoteError {
             if status != Some(255)
                 && (stderr.contains("'remote-handshake'") || stderr.contains("'--json'")) =>
         {
-            RemoteError::SplittyTooOld {
-                host: host.to_owned(),
+            match budget.display(&host, false) {
+                Ok(host) => {
+                    let (host, allocation) = host.into_parts();
+                    RemoteError::SplittyTooOld {
+                        host,
+                        allocation: Some(Box::new(allocation)),
+                    }
+                }
+                Err(error) => RemoteError::Native(error),
             }
         }
         error @ SshError::Failed { .. } => RemoteError::Ssh(error),
@@ -423,7 +439,9 @@ impl SshRemote {
         handshake::handshake(&self.ssh, &self.server(), true)
             .await
             .map_err(|error| match error {
-                HandshakeError::Ssh(error) => from_ssh(self.host(), error),
+                HandshakeError::Ssh(error) => {
+                    from_ssh_budgeted(self.host(), error, &self.ssh.context().budget)
+                }
                 HandshakeError::Invalid {
                     host,
                     detail,
@@ -547,7 +565,7 @@ impl Remote for SshRemote {
         run_checked(&self.ssh, &command, None)
             .await
             .map(|_| ())
-            .map_err(|error| from_ssh(self.host(), error))
+            .map_err(|error| from_ssh_budgeted(self.host(), error, &self.ssh.context().budget))
     }
 
     async fn open_bridge(
@@ -569,7 +587,9 @@ impl Remote for SshRemote {
         .await
         .map_err(
             |error| match crate::bridge::ssh_failure(self.host(), &error) {
-                Some(failure) => from_ssh(self.host(), failure),
+                Some(failure) => {
+                    from_ssh_budgeted(self.host(), failure, &self.ssh.context().budget)
+                }
                 None => RemoteError::Native(error),
             },
         )
@@ -900,7 +920,13 @@ mod tests {
 
     #[test]
     fn a_missing_or_old_splitty_is_named() {
-        let missing = from_ssh("vm", SshError::NotFound { host: "vm".into() });
+        let missing = from_ssh(
+            "vm",
+            SshError::NotFound {
+                host: "vm".into(),
+                allocation: None,
+            },
+        );
         assert!(
             matches!(missing, RemoteError::SplittyMissing { .. }),
             "{missing:?}"
@@ -919,6 +945,72 @@ mod tests {
 
         let refused = from_ssh("vm", failed(255, "Connection refused '--json'"));
         assert!(matches!(refused, RemoteError::Ssh(_)), "{refused:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn missing_splitty_conversion_keeps_the_original_host_and_reservation() {
+        use std::os::unix::process::ExitStatusExt;
+        let budget = ConnectionBudget::default();
+        let source = crate::ssh::classify_budgeted(
+            "vm",
+            std::process::ExitStatus::from_raw(127 << 8),
+            "not found",
+            &budget,
+        );
+        let pointer = match &source {
+            SshError::NotFound { host, .. } => host.as_ptr(),
+            other => panic!("unexpected error: {other}"),
+        };
+        let used = budget.used();
+        assert!(used > 0);
+        let converted = from_ssh("vm", source);
+        assert!(
+            matches!(&converted, RemoteError::SplittyMissing { host, allocation: Some(_) } if host.as_ptr() == pointer)
+        );
+        assert_eq!(budget.used(), used);
+        drop(converted);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn old_cli_conversion_is_charged_until_drop_and_refuses_exhaustion() {
+        use std::os::unix::process::ExitStatusExt;
+        let budget = ConnectionBudget::default();
+        let make_source = || {
+            crate::ssh::classify_budgeted(
+                "vm",
+                std::process::ExitStatus::from_raw(2 << 8),
+                "unexpected argument '--json'",
+                &budget,
+            )
+        };
+        let converted = from_ssh_budgeted("vm", make_source(), &budget);
+        assert!(matches!(
+            &converted,
+            RemoteError::SplittyTooOld {
+                allocation: Some(_),
+                ..
+            }
+        ));
+        assert!(budget.used() >= 2);
+        drop(converted);
+        assert_eq!(budget.used(), 0);
+        let source = make_source();
+        let held = budget
+            .reserve(
+                splitty_transport::wire::CONNECTION_BYTES
+                    - splitty_transport::wire::CONNECTION_CONTROL_BYTES
+                    - budget.used(),
+                false,
+            )
+            .unwrap();
+        assert!(
+            matches!(from_ssh_budgeted("vm", source, &budget), RemoteError::Native(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+        drop(held);
+        assert_eq!(budget.used(), 0);
     }
 
     /// `host` is shown by the title bar; it must arrive as one opaque value.
@@ -1076,7 +1168,11 @@ mod tests {
         );
         assert_eq!(unreachable.hint, None);
 
-        let corrupted = RemoteError::from(InstallError::Checksum { host: "vm".into() }).failure();
+        let corrupted = RemoteError::from(InstallError::Checksum {
+            host: "vm".into(),
+            allocation: None,
+        })
+        .failure();
         assert!(
             corrupted
                 .message
