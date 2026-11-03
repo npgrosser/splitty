@@ -257,12 +257,7 @@ pub(crate) enum DocumentRole {
 /// Exact packaged authority and entry path. Queries never confer authority.
 /// Deliberate development servers are excluded from production native grants.
 pub(crate) fn packaged_entry(url: &Url, role: DocumentRole) -> bool {
-    #[cfg(target_os = "windows")]
-    let authority = url.scheme() == "http" && url.host_str() == Some("tauri.localhost");
-    #[cfg(not(target_os = "windows"))]
-    let authority = url.scheme() == "tauri" && url.host_str() == Some("localhost");
-    authority
-        && url.port().is_none()
+    packaged_authority(url)
         && url.username().is_empty()
         && url.password().is_none()
         && match role {
@@ -271,6 +266,16 @@ pub(crate) fn packaged_entry(url: &Url, role: DocumentRole) -> bool {
             }
             DocumentRole::Setup => url.path() == "/setup.html",
         }
+}
+
+/// The asset origin is internal even when its Windows representation uses
+/// HTTP. A rejected packaged path must never become a system-browser action.
+fn packaged_authority(url: &Url) -> bool {
+    #[cfg(target_os = "windows")]
+    let authority = url.scheme() == "http" && url.host_str() == Some("tauri.localhost");
+    #[cfg(not(target_os = "windows"))]
+    let authority = url.scheme() == "tauri" && url.host_str() == Some("localhost");
+    authority && url.port().is_none()
 }
 
 pub(crate) fn packaged_navigation(url: &Url, role: DocumentRole) -> Decision {
@@ -349,6 +354,9 @@ fn open_externally(app: &AppHandle, url: &Url) {
 }
 
 fn external_or_block(url: &Url) -> Decision {
+    if packaged_authority(url) {
+        return Decision::Block;
+    }
     match url.scheme() {
         "http" | "https" => Decision::OpenExternally,
         // `javascript:`, `data:`, `file:`, `blob:` and every OS protocol handler
@@ -470,9 +478,9 @@ mod tests {
             packaged_new_window(&packaged("/popout.html"), DocumentRole::Main),
             Decision::Allow
         );
-        assert_ne!(
+        assert_eq!(
             packaged_new_window(&packaged("/popout.html"), DocumentRole::Remote),
-            Decision::Allow
+            Decision::Block
         );
         let blob = url(&format!("blob:{}", packaged("/id")));
         assert!(packaged_download(&blob, DocumentRole::Main));
@@ -481,6 +489,52 @@ mod tests {
             &url("blob:http://127.0.0.1:1420/id"),
             DocumentRole::Main
         ));
+    }
+
+    #[test]
+    fn rejected_packaged_targets_never_reach_the_system_opener() {
+        for role in [
+            DocumentRole::Main,
+            DocumentRole::Remote,
+            DocumentRole::Setup,
+        ] {
+            for path in [
+                "/index.html",
+                "/setup.html",
+                "/popout.html",
+                "/assets/app.js",
+                "/unknown?role=main",
+            ] {
+                let target = packaged(path);
+                assert_eq!(
+                    packaged_navigation(&target, role),
+                    if packaged_entry(&target, role) {
+                        Decision::Allow
+                    } else {
+                        Decision::Block
+                    },
+                    "navigation: {role:?} {target}"
+                );
+                assert_eq!(
+                    packaged_new_window(&target, role),
+                    if role == DocumentRole::Main && path == "/popout.html" {
+                        Decision::Allow
+                    } else {
+                        Decision::Block
+                    },
+                    "new window: {role:?} {target}"
+                );
+                // Popout handlers also use this fallback directly.
+                assert_eq!(external_or_block(&target), Decision::Block);
+            }
+        }
+        let mut credentials = packaged("/index.html");
+        credentials.set_username("untrusted").unwrap();
+        assert!(!packaged_entry(&credentials, DocumentRole::Main));
+        assert_eq!(external_or_block(&credentials), Decision::Block);
+        for external in ["https://example.com/", "http://tauri.localhost:8080/"] {
+            assert_eq!(external_or_block(&url(external)), Decision::OpenExternally);
+        }
     }
 
     #[test]
