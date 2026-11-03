@@ -263,6 +263,22 @@ not establish sibling-remote isolation, the remaining consumer-pressure cases,
 whole-framework memory bounds or continuous TCP-listener absence. The separate
 local SSH listener observation remains unresolved and is not waived by this run.
 
+## Hosted Windows TCP measurement control
+
+The isolated diagnostic at `58ed0ce` passes GitHub
+[run 41717658574](https://github.com/npgrosser/splitty/actions/runs/41717658574)
+on a fresh Windows 2025 runner. It creates only its own IPv4/IPv6 loopback
+listeners and connected peers. `GetExtendedTcpTable`, raw CIM properties and
+`Get-NetTCPConnection` agree: listener state 2 and established state 5, with
+matching endpoints. Independent decoder controls pass and every owned socket
+is closed. The retained helper matches the earlier local candidate exactly
+after checkout CRLF normalization.
+
+This validates the decoder on the hosted runner. It does not explain or waive
+the local native-API state 0 / CIM null listener control or classify the earlier
+SSH observations. The application isolation/SSH scenario still needs a valid
+listener inventory; the self-socket control is not an application pass.
+
 ## Open merge gates
 
 - Whole-path resource limits: Wry allocates inbound IPC request bodies before

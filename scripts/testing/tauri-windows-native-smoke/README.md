@@ -111,7 +111,10 @@ sampling and records socket creation/state/endpoints. Missing, older or future
 creation times stay UNCLASSIFIED. Every listener row still fails. Sampling does
 not prove continuous absence. The separate native TCP-table candidate failed its
 owned-listener control and remains unwired, preserved outside this commit for a
-fresh hosted control; no guessed state mapping is accepted. Disabled localhost
+fresh hosted control. That control now passes on Windows 2025 for IPv4/IPv6
+([run 41717658574](https://github.com/npgrosser/splitty/actions/runs/41717658574));
+it validates the decoder there but does not resolve the local measurement or
+prove application listener absence. No guessed state mapping is accepted. Disabled localhost
 forwarding and packaged installer compatibility remain separate validation.
 
 ## Pure checks
