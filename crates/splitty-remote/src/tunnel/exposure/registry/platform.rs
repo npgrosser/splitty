@@ -210,7 +210,7 @@ pub(super) fn policy() -> io::Result<Policy> {
     // replacement value is supplied. Failed/short/unrecognized data refuses.
     if unsafe {
         libc::sysctlbyname(
-            b"kern.bootsessionuuid\0".as_ptr().cast(),
+            c"kern.bootsessionuuid".as_ptr(),
             boot.as_mut_ptr().cast(),
             &mut length,
             std::ptr::null_mut(),
