@@ -1398,7 +1398,13 @@ async fn bind_and_start_daemon() {
             .await
             .unwrap_or_else(|error| {
                 eprintln!("Failed to bind native endpoint {}: {error}", path.display());
-                std::process::exit(1);
+                // Another launcher may own the instance before it publishes
+                // discovery. Preserve the lock and let native clients refresh.
+                std::process::exit(if error.kind() == std::io::ErrorKind::WouldBlock {
+                    75
+                } else {
+                    1
+                });
             });
         if let Err(reason) = start_daemon(bound).await {
             daemon_start_failed(

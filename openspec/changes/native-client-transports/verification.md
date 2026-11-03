@@ -137,6 +137,17 @@ regressions and its native endpoint/lifetime/gateway and packaged UI checks.
 Its core gate still fails the same two baseline cases, both reproduced against
 the merge base in this run; those failures remain open.
 
+The Windows isolation fixture subsequently exposed a fatal native-endpoint
+`EAGAIN` during remote preparation. A targeted smoke now reproduces the same
+classification gap by holding the real private instance lock before discovery
+publication. Native daemon start reports temporary contention with exit 75,
+and remote handshake preserves the existing typed discovery-refresh result.
+The client retains its existing bounded refresh policy; corrupt discovery
+still fails permanently and no lock or live endpoint is replaced. The extended
+lifecycle smoke passes and independent source review passes. This establishes
+the classification fix, not the identity of the lock holder in the original
+Windows run or completion of the outstanding Windows isolation check.
+
 Three findings do not indicate a vulnerability in their reported contexts:
 
 - `rust/hard-coded-cryptographic-value` in `client_ipc/bootstrap.rs` is a

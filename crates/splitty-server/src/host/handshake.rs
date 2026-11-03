@@ -108,7 +108,7 @@ pub async fn run(ensure_daemon: bool) -> Result<Handshake, Error> {
 
 /// `daemon start` of this very binary, so its readiness wait and its errors
 /// apply unchanged; its output stays off the handshake's.
-async fn start_daemon(executable: &std::path::Path) -> Result<(), String> {
+async fn start_daemon(executable: &std::path::Path) -> Result<(), Error> {
     let mut command = tokio::process::Command::new(executable);
     command.args(["daemon", "start"]);
     let output = splitty_remote::ssh::run_with_input(command, None)
@@ -117,6 +117,9 @@ async fn start_daemon(executable: &std::path::Path) -> Result<(), String> {
     if output.status.success() {
         return Ok(());
     }
+    if output.status.code() == Some(75) {
+        return Err(Error::DiscoveryChanged);
+    }
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
     let reason = if stderr.trim().is_empty() {
@@ -124,7 +127,7 @@ async fn start_daemon(executable: &std::path::Path) -> Result<(), String> {
     } else {
         stderr
     };
-    Err(reason.trim().to_owned())
+    Err(reason.trim().to_owned().into())
 }
 
 #[cfg(unix)]
