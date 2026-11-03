@@ -98,6 +98,8 @@ struct Lab {
     dir: TempDir,
     /// Holds the host's namespace; its pid is the `nsenter` target.
     holder: Child,
+    /// Pins the exact private namespace even after its initial holder exits.
+    namespace: fs::File,
 }
 
 impl Lab {
@@ -339,7 +341,13 @@ exec chroot "$rootfs" /bin/sh -c 'cd /; echo ready; exec sleep infinity'
         }
         fs::write(&holder_pid_file, holder.id().to_string()).expect("ns.pid");
 
-        let lab = Self { dir, holder };
+        let namespace = fs::File::open(format!("/proc/{}/ns/net", holder.id()))
+            .expect("pin fixture network namespace");
+        let lab = Self {
+            dir,
+            holder,
+            namespace,
+        };
         let probe = lab.on_host(&["true"]);
         assert!(
             probe.status.success(),
@@ -724,21 +732,131 @@ server.serve_forever()
     }
 }
 
+/// Resolve a saved PID only as a lookup hint. The pidfd is the signal target;
+/// namespace membership and a live-handle check establish fixture ownership.
+fn kill_fixture_namespace_member(pid: u32, namespace: &fs::File) -> io::Result<()> {
+    use std::os::{fd::FromRawFd, unix::fs::MetadataExt};
+    // SAFETY: pidfd_open takes a PID and zero flags; no pointers are supplied.
+    let raw = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, pid, 0) };
+    if raw < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let raw = i32::try_from(raw).expect("kernel returned a process descriptor");
+    // SAFETY: successful pidfd_open returns a new descriptor owned by this call.
+    let handle = unsafe { std::os::fd::OwnedFd::from_raw_fd(raw) };
+    let owner = namespace.metadata()?;
+    let member = fs::metadata(format!("/proc/{pid}/ns/net"))?;
+    if (owner.dev(), owner.ino()) != (member.dev(), member.ino()) {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "process is outside the fixture network namespace",
+        ));
+    }
+    for signal in [0, nix::libc::SIGKILL] {
+        // Verify that the opened generation is still live after the namespace
+        // lookup. If its PID was reused during that lookup, this exact pidfd
+        // reports exit and can never signal the replacement process.
+        // SAFETY: the owned pidfd is valid, siginfo is absent and flags are zero.
+        if unsafe {
+            nix::libc::syscall(
+                nix::libc::SYS_pidfd_send_signal,
+                handle.as_raw_fd(),
+                signal,
+                std::ptr::null::<nix::libc::siginfo_t>(),
+                0,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
 impl Drop for Lab {
     fn drop(&mut self) {
-        let info = self.dir.path().join("home/.config/splitty/daemon.json");
-        if let Some(pid) = fs::read_to_string(info)
-            .ok()
-            .and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok())
-            .and_then(|info| info["pid"].as_i64())
-            .and_then(|pid| i32::try_from(pid).ok())
-            .filter(|pid| *pid > 0)
-        {
-            let _ = kill(Pid::from_raw(pid), Signal::SIGKILL);
+        // Daemons and keepers detach from their SSH parent, but cannot leave
+        // the private fixture network namespace accidentally. Pin that kernel
+        // namespace and use pidfds for every signal, including after its holder
+        // exits. Re-scan to collect descendants forked during the first pass.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let mut signaled = false;
+            for entry in fs::read_dir("/proc")
+                .expect("fixture process inventory")
+                .flatten()
+            {
+                let Some(pid) = entry
+                    .file_name()
+                    .to_str()
+                    .and_then(|name| name.parse::<u32>().ok())
+                else {
+                    continue;
+                };
+                if kill_fixture_namespace_member(pid, &self.namespace).is_ok() {
+                    signaled = true;
+                }
+            }
+            if !signaled || Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
         let _ = self.holder.kill();
         let _ = self.holder.wait();
     }
+}
+
+#[test]
+fn fixture_cleanup_refuses_processes_outside_its_network_namespace() {
+    let Some(mut lab) = lab() else { return };
+    struct SeparateFixture(Child);
+    impl Drop for SeparateFixture {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut unrelated = SeparateFixture(Command::new("sleep").arg("60").spawn().unwrap());
+    assert_eq!(
+        kill_fixture_namespace_member(unrelated.0.id(), &lab.namespace)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert!(unrelated.0.try_wait().unwrap().is_none());
+    let launched = lab.on_host(&[
+        "sh",
+        "-c",
+        "'setsid sleep 60 </dev/null >/dev/null 2>&1 & echo $!'",
+    ]);
+    assert!(launched.status.success(), "{}", describe(&launched));
+    let orphan: u32 = String::from_utf8(launched.stdout)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // SAFETY: pidfd_open receives only a fixture-reported PID and zero flags.
+    let raw = unsafe { nix::libc::syscall(nix::libc::SYS_pidfd_open, orphan, 0) };
+    assert!(raw >= 0, "{}", io::Error::last_os_error());
+    use std::os::fd::FromRawFd;
+    // SAFETY: this successful pidfd_open returned a new owned descriptor.
+    let orphan_handle = unsafe { std::os::fd::OwnedFd::from_raw_fd(i32::try_from(raw).unwrap()) };
+    kill_fixture_namespace_member(lab.holder.id(), &lab.namespace).unwrap();
+    assert!(!lab.holder.wait().unwrap().success());
+    drop(lab);
+    let mut descriptor = nix::libc::pollfd {
+        fd: orphan_handle.as_raw_fd(),
+        events: nix::libc::POLLIN,
+        revents: 0,
+    };
+    // SAFETY: one valid pollfd is writable for the duration of this call.
+    assert_eq!(
+        unsafe { nix::libc::poll(&mut descriptor, 1, 5000) },
+        1,
+        "detached fixture process must exit even after the namespace holder"
+    );
+    assert!(unrelated.0.try_wait().unwrap().is_none());
 }
 
 /// A server the test started on the host.
@@ -2192,6 +2310,66 @@ async fn the_hub_updates_a_host_daemon_of_another_version() {
     }
     socket.close().await;
     hub.wait_without_ssh();
+
+    // A downgraded client may use a newer daemon when the native/mux contract
+    // remains compatible. Version metadata simulates that version difference;
+    // this is still the actual daemon, native bridge and existing keeper.
+    let replacement_pid = host_daemon_pid(&lab);
+    let replacement_record = fs::read(&info_path).unwrap();
+    struct RestoreDiscovery(PathBuf, Vec<u8>);
+    impl Drop for RestoreDiscovery {
+        fn drop(&mut self) {
+            // Keep fixture teardown usable even if a policy assertion fails.
+            fs::write(&self.0, &self.1).expect("restore native fixture discovery");
+        }
+    }
+    let _restore = RestoreDiscovery(info_path.clone(), replacement_record.clone());
+    let mut newer: serde_json::Value = serde_json::from_slice(&replacement_record).unwrap();
+    newer["version"] = "99.0.0".into();
+    let newer_record = serde_json::to_vec(&newer).unwrap();
+    fs::write(&info_path, &newer_record).unwrap();
+    let mut socket = hub.open(HOST).await;
+    let (_, ready) = socket.progress().await;
+    assert_eq!(ready["daemon"]["version"], "99.0.0", "{ready}");
+    assert_eq!(ready["daemon"]["started"], false, "{ready}");
+    assert_eq!(socket.next_json().await["type"], "mux.welcome");
+    socket.close().await;
+    hub.wait_without_ssh();
+    assert_eq!(host_daemon_pid(&lab), replacement_pid);
+    assert_eq!(fs::read(&info_path).unwrap(), newer_record);
+    assert_eq!(host_keepers(&lab), keepers);
+
+    // Even an explicit UI update cannot downgrade a newer incompatible daemon
+    // or terminate a daemon that does not promise to keep its sessions.
+    for (version, keeps) in [("99.0.0", true), ("0.0.1-old", false)] {
+        let mut incompatible: serde_json::Value =
+            serde_json::from_slice(&replacement_record).unwrap();
+        incompatible["version"] = version.into();
+        incompatible["protocol"] = (protocol + 2).into();
+        incompatible["keepsSessions"] = keeps.into();
+        if !keeps {
+            // Native format-2 daemons promise keepers. A non-kept predecessor
+            // must use a structurally valid legacy record, not corrupt native
+            // metadata that would fail before the migration policy is reached.
+            let fields = incompatible.as_object_mut().unwrap();
+            for field in ["format", "clientSocket", "instance", "transportVersion"] {
+                fields.remove(field);
+            }
+            fields.insert("port".into(), 1.into());
+        }
+        let record = serde_json::to_vec(&incompatible).unwrap();
+        fs::write(&info_path, &record).unwrap();
+        let mut socket = hub.open_with(HOST, "&update=1").await;
+        let (_, failure) = socket.outcome().await;
+        assert_eq!(failure["type"], "remote.error", "{failure}");
+        assert_eq!(failure["code"], "incompatible", "{failure}");
+        socket.close().await;
+        hub.wait_without_ssh();
+        assert_eq!(host_daemon_pid(&lab), replacement_pid);
+        assert_eq!(fs::read(&info_path).unwrap(), record);
+        assert_eq!(host_keepers(&lab), keepers);
+    }
+    fs::write(&info_path, replacement_record).unwrap();
 }
 
 /// The hub's `ssh` processes that hold a forward, not a bridge.

@@ -290,12 +290,16 @@ impl OwnedProcess for UnixChild {
         let leader = getpgid(Some(pid)).ok() == Some(pid);
         match kill(pid, sig) {
             Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(format!("kill owned leader {pid} with {sig:?}: {error}")),
         }
         if leader {
             match killpg(pid, sig) {
                 Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-                Err(error) => return Err(error.to_string()),
+                Err(error) => {
+                    return Err(format!(
+                        "killpg owned leader group {pid} with {sig:?}: {error}"
+                    ))
+                }
             }
         }
         Ok(())

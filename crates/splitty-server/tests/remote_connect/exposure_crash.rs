@@ -89,13 +89,46 @@ fn browser(lab: &Lab, address: &str) -> Connect {
     Connect { child, lines }
 }
 fn opened_port(process: &Connect) -> u16 {
-    process
+    let port = process
         .until("SPLITTY_PORT=")
         .iter()
         .find_map(|line| line.strip_prefix("SPLITTY_PORT="))
         .unwrap()
         .parse()
-        .unwrap()
+        .unwrap();
+    // SPLITTY_PORT is emitted before serve polls shutdown_signal. The server's
+    // biased loop polls shutdown before accept, so a completed public entry
+    // request is also a barrier for its SIGTERM handler registration.
+    assert_eq!(http(port, "GET", "/", None, None).0, 200);
+    port
+}
+
+#[test]
+fn explicit_gateway_shutdown_probe_waits_for_an_actual_request_handler() {
+    let fixture = tempfile::tempdir().unwrap();
+    for cycle in 0..8 {
+        let private = fixture.path().join(cycle.to_string());
+        let mut child = Command::new(env!("CARGO_BIN_EXE_splitty"))
+            .args(["serve", "--oneshot-token", "--addr", "127.0.0.1:0"])
+            .env("HOME", &private)
+            .env("XDG_CONFIG_HOME", private.join("config"))
+            .env("XDG_DATA_HOME", private.join("data"))
+            .env("XDG_CACHE_HOME", private.join("cache"))
+            .env("SPLITTY_CONFIG_DIR", private.join("splitty"))
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let lines = read_lines(child.stdout.take().unwrap());
+        let process = Connect { child, lines };
+        assert_ne!(opened_port(&process), 0);
+        let (status, output) = process.terminate();
+        assert!(
+            status.success(),
+            "ready gateway cycle {cycle} shutdown {status}: {output}"
+        );
+    }
 }
 
 #[test]
@@ -196,7 +229,11 @@ fn a_published_reverse_worker_blocks_gateway_reuse_after_its_coordinator_is_kill
     );
     let alternate = browser(&lab, "127.0.0.1:0");
     assert_ne!(opened_port(&alternate), local);
-    assert!(alternate.terminate().0.success());
+    let (status, output) = alternate.terminate();
+    assert!(
+        status.success(),
+        "alternate gateway shutdown {status}: {output}"
+    );
     // Ending the remote program is not our proof: independently observe the
     // recorded local worker's actual exit before expecting port release.
     drop(hostile);
@@ -205,6 +242,10 @@ fn a_published_reverse_worker_blocks_gateway_reuse_after_its_coordinator_is_kill
     });
     let replacement = browser(&lab, &address);
     assert_eq!(opened_port(&replacement), local);
-    assert!(replacement.terminate().0.success());
+    let (status, output) = replacement.terminate();
+    assert!(
+        status.success(),
+        "replacement gateway shutdown {status}: {output}"
+    );
     eprintln!("NATIVE_SSH_CRASH_POSITIVE_EXERCISED: hostile peer retained forwarding after coordinator death; gateway excluded until actual worker exit");
 }

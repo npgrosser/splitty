@@ -123,6 +123,7 @@ jobs:
           SPLITTY_TEST_REQUIRE_SSH_LAB: '1'
           SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE: '1'
         run: |
+          cargo test --locked -p splitty-server --test remote_connect fixture_cleanup_refuses_processes_outside_its_network_namespace -- --exact --nocapture
           cargo test --locked -p splitty-server --test remote_connect exposure_crash::a_published_reverse_worker_blocks_gateway_reuse_after_its_coordinator_is_killed -- --exact --nocapture
           cargo test --locked -p splitty-server --test remote_connect the_hub_updates_a_host_daemon_of_another_version -- --exact --nocapture
 
@@ -358,8 +359,16 @@ jobs:
         run: |
           cargo clippy --locked -p splitty-gui --all-targets -- -D warnings
           cargo test --locked -p splitty-gui --lib
-          cargo test --locked -p splitty-core
-          cargo test --locked -p splitty-server --test native_endpoint -- --nocapture
+
+      # Gather the independent native IPC runtime evidence even when a
+      # core platform test fails. The final gate still fails this job.
+      - name: Test macOS core
+        id: core_tests
+        continue-on-error: true
+        run: cargo test --locked -p splitty-core
+
+      - name: Verify native endpoint peer-user boundary
+        run: cargo test --locked -p splitty-server --test native_endpoint -- --nocapture
 
       - name: Verify native exposure and explicit gateway positive controls
         env:
@@ -377,6 +386,37 @@ jobs:
           python3 scripts/testing/tauri-wkwebview-smoke.py
           --full-ui --coexist-daemon --reloads 36
           --evidence-dir "${RUNNER_TEMP}/splitty-macos-native-evidence"
+
+      # Distinguish transport regressions from existing platform failures.
+      # This diagnostic cannot waive the HEAD suite's mandatory gate below.
+      - name: Compare failing macOS core tests with the merge base
+        if: always() && steps.core_tests.outcome == 'failure'
+        env:
+          BASELINE_REV: ${{ github.event.pull_request.base.sha || 'cc66e97024f1013cc2abad1727ba9378db2200af' }}
+        run: |
+          git fetch --no-tags origin "$BASELINE_REV"
+          baseline_dir="$(mktemp -d "$RUNNER_TEMP/splitty-core-base.XXXXXX")"
+          git archive "$BASELINE_REV" | tar -x -C "$baseline_dir"
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/splitty-core-base-target"
+          evidence_dir="$RUNNER_TEMP/splitty-macos-native-evidence"
+          mkdir -p "$evidence_dir"
+          echo "$BASELINE_REV" > "$evidence_dir/core-baseline-revision.txt"
+          for case in cli_path_survives_bash_and_zsh_startup_without_editing_user_files logs_keep_final_bytes_when_the_process_exits_before_capture_ends managed_input_backpressure_does_not_block_revocation_or_stop; do
+            status=0
+            cargo test --locked --manifest-path "$baseline_dir/Cargo.toml" -p splitty-core --lib "pty::session::tests::$case" -- --exact --nocapture > "$evidence_dir/base-$case.log" 2>&1 || status=$?
+            cat "$evidence_dir/base-$case.log"
+            echo "$case exit=$status" >> "$evidence_dir/core-baseline-results.txt"
+          done
+
+      - name: Enforce macOS core test result
+        if: always()
+        env:
+          CORE_TEST_OUTCOME: ${{ steps.core_tests.outcome }}
+        run: |
+          if [ "$CORE_TEST_OUTCOME" != success ]; then
+            echo '::error::The macOS core suite did not pass; later runtime evidence does not waive this gate.'
+            exit 1
+          fi
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
