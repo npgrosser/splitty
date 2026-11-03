@@ -117,18 +117,19 @@ pub fn parse_probe(host: &str, stdout: &[u8]) -> Result<Probe, InstallError> {
         detail: detail.to_owned(),
     };
     let text = std::str::from_utf8(stdout).map_err(|_| invalid("not UTF-8"))?;
-    let lines: Vec<&str> = text
-        .strip_suffix('\n')
-        .unwrap_or(text)
-        .split('\n')
-        .collect();
-    let (kernel, arch, home, marker) = match lines[..] {
-        [kernel, arch, home] => (kernel, arch, home, None),
-        [kernel, arch, home, marker] => (kernel, arch, home, Some(marker)),
-        _ => return Err(invalid("expected three or four lines")),
+    let mut lines = text.strip_suffix('\n').unwrap_or(text).split('\n');
+    let (Some(kernel), Some(arch), Some(home)) = (lines.next(), lines.next(), lines.next()) else {
+        return Err(invalid("expected three or four lines"));
     };
-    if kernel.is_empty() || arch.is_empty() {
-        return Err(invalid("no kernel or architecture"));
+    let marker = lines.next();
+    if lines.next().is_some() {
+        return Err(invalid("expected three or four lines"));
+    }
+    if kernel.is_empty() || arch.is_empty() || kernel.len() > 256 || arch.len() > 256 {
+        return Err(invalid("invalid kernel or architecture"));
+    }
+    if marker.is_some_and(|marker| marker.len() > 64) {
+        return Err(invalid("invalid checksum marker"));
     }
     if !home.starts_with('/') || home.len() > 4096 || home.chars().any(char::is_control) {
         return Err(invalid("the home directory is not an absolute path"));
@@ -432,7 +433,6 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
-    use std::process::Output;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A "host" that is this machine's `sh` with its own `HOME`: the real
@@ -465,7 +465,11 @@ mod tests {
             "user@vm"
         }
 
-        async fn run(&self, line: &CommandLine, input: Option<Vec<u8>>) -> io::Result<Output> {
+        async fn run(
+            &self,
+            line: &CommandLine,
+            input: Option<Vec<u8>>,
+        ) -> io::Result<crate::ssh::CapturedOutput> {
             let input = input.map(|mut bytes| {
                 self.uploads.fetch_add(1, Ordering::SeqCst);
                 if self.corrupt {
@@ -520,6 +524,18 @@ mod tests {
 
     fn version_dir(home: &Path, version: &str) -> PathBuf {
         home.join(REMOTE_DIR).join(version)
+    }
+
+    #[test]
+    fn malformed_probe_line_floods_and_oversized_identity_fields_are_rejected() {
+        assert!(parse_probe("vm", &vec![b'\n'; 1024 * 1024]).is_err());
+        for stdout in [
+            format!("{}\nx86_64\n/home/me\n", "K".repeat(257)),
+            format!("Linux\n{}\n/home/me\n", "a".repeat(257)),
+            format!("Linux\nx86_64\n/home/me\n{}\n", "m".repeat(65)),
+        ] {
+            assert!(parse_probe("vm", stdout.as_bytes()).is_err());
+        }
     }
 
     #[test]
@@ -935,7 +951,11 @@ mod tests {
             "mac"
         }
 
-        async fn run(&self, line: &CommandLine, input: Option<Vec<u8>>) -> io::Result<Output> {
+        async fn run(
+            &self,
+            line: &CommandLine,
+            input: Option<Vec<u8>>,
+        ) -> io::Result<crate::ssh::CapturedOutput> {
             assert!(input.is_none(), "nothing may be uploaded");
             assert!(line.as_str().contains("splitty-probe"));
             let mut command = tokio::process::Command::new("printf");

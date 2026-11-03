@@ -3,6 +3,7 @@
 //! the remote session contributes only cwd, which is encoded as path data.
 
 use splitty_remote::ssh::SshTarget;
+use tauri::Manager;
 use tauri_plugin_opener::OpenerExt;
 
 #[derive(Clone, Copy, Default, serde::Deserialize)]
@@ -25,14 +26,17 @@ pub enum PathKind {
 
 #[tauri::command]
 pub fn open_remote_editor(
-    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    native: tauri::State<'_, std::sync::Arc<crate::client_ipc::carrier::Native>>,
+    auth: crate::client_ipc::carrier::Auth,
     target: String,
     cwd: String,
     editor: Option<Editor>,
     kind: Option<PathKind>,
 ) -> Result<(), String> {
+    native.main_action(&webview, &auth)?;
     dispatch(
-        &app,
+        webview.app_handle(),
         remote_editor_path_uri(
             &target,
             &cwd,
@@ -44,14 +48,17 @@ pub fn open_remote_editor(
 
 #[tauri::command]
 pub fn open_local_editor(
-    app: tauri::AppHandle,
+    webview: tauri::Webview,
+    native: tauri::State<'_, std::sync::Arc<crate::client_ipc::carrier::Native>>,
+    auth: crate::client_ipc::carrier::Auth,
     cwd: String,
     editor: Editor,
     wsl_distro: Option<String>,
     kind: Option<PathKind>,
 ) -> Result<(), String> {
+    native.main_action(&webview, &auth)?;
     dispatch(
-        &app,
+        webview.app_handle(),
         local_editor_path_uri(
             &cwd,
             wsl_distro.as_deref(),

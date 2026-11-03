@@ -22,7 +22,15 @@ import { attachImagePaste, progressNotice, reportImageFailure } from "./image_pa
  */
 function wireImagePaste(container: HTMLElement, session: TerminalSession): void {
   let alive = true;
+  const captureConnection = () => {
+    const current = session.client.captureConnection();
+    return () => {
+      if (!alive) throw Error("The terminal is no longer available.");
+      current();
+    };
+  };
   const uploads = createDropUpload(container, {
+    captureConnection,
     uploadFile: (file, progress, options) => session.client.uploadFile(file, progress, undefined, options),
     paste: (text) => { if (alive) session.emulator.paste(text); },
   }, () => ({
@@ -31,6 +39,7 @@ function wireImagePaste(container: HTMLElement, session: TerminalSession): void 
     supported: session.client.uploadControl,
   }));
   const detachPaste = attachImagePaste(container, {
+    captureConnection,
     dropFiles: uploads.drop,
     saveImage: (data) => session.client.saveImage(data),
     uploadFile: (file, onProgress) => session.client.uploadFile(file, onProgress),

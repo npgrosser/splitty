@@ -61,43 +61,49 @@ function isProgress(value: unknown): value is RemoteProgress {
 
 function tauriBridge(scope: any): RemoteWindowsAPI {
   const invoke = (command: string, args?: Record<string, unknown>): Promise<unknown> =>
-    scope.__TAURI_INTERNALS__.invoke(command, args);
+    scope.__SPLITTY_TAURI__.invoke(command, args);
 
+  const callbacks = new Set<(progress: RemoteProgress) => void>();
+  const pending = new Set<string>();
+  const polling = new Set<string>();
+  const last = new Map<string, string>();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const poll = () => {
+    for (const target of pending) {
+      if (polling.has(target)) continue;
+      polling.add(target);
+      void invoke("remote_progress", { target }).then(value => {
+        if (!pending.has(target) || !isProgress(value)) return;
+        const key = JSON.stringify(value);
+        if (last.get(target) === key) return;
+        last.set(target, key);
+        for (const callback of callbacks) callback(value);
+      }).catch(() => {}).finally(() => polling.delete(target));
+    }
+  };
   return {
     available: true,
     async hosts() {
       return parseKnownHosts(await invoke("remote_hosts"));
     },
     async open(target) {
+      pending.add(target);
+      if (!timer) timer = setInterval(poll, 150);
       try {
         await invoke("remote_open", { target });
       } catch (cause) {
         throw toOpenError(cause);
+      } finally {
+        pending.delete(target); last.delete(target);
+        if (!pending.size) { clearInterval(timer); timer = undefined; }
       }
     },
     async cancel(target) {
       await invoke("remote_cancel", { target }).catch(() => {});
     },
     onProgress(callback) {
-      // `listen` registers asynchronously; an unsubscribe before that finishes
-      // drops the listener as soon as it exists.
-      let unlisten: (() => void) | undefined;
-      let disposed = false;
-      void import("@tauri-apps/api/event")
-        .then(({ listen }) => listen<unknown>("remote-progress", (event) => {
-          if (isProgress(event.payload)) callback(event.payload);
-        }))
-        .then((fn) => {
-          if (disposed) fn();
-          else unlisten = fn;
-        })
-        .catch((error: unknown) => {
-          console.warn("could not follow remote window progress", error);
-        });
-      return () => {
-        disposed = true;
-        unlisten?.();
-      };
+      callbacks.add(callback);
+      return () => { callbacks.delete(callback); };
     },
   };
 }

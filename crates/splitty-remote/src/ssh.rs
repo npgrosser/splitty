@@ -24,9 +24,19 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Output, Stdio};
 use std::time::Duration;
 
+use splitty_transport::{
+    admission::Admission,
+    budget::{Charged, ConnectionBudget, Lease},
+    queue,
+    worker::Worker,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{ChildStderr, Command};
 use tokio::task::JoinHandle;
+
+/// Setup output owns its byte reservation beyond process exit, until callers
+/// finish parsing or inspecting both captured streams.
+pub type CapturedOutput = Charged<Output>;
 
 /// A validated SSH destination.
 ///
@@ -177,10 +187,26 @@ pub fn hardening_options() -> Vec<String> {
 /// forwarding, and none of the forwards the configuration names. A tunnel
 /// cannot use them: `ClearAllForwardings` clears its own `-L` as well.
 pub fn stdio_only_options() -> Vec<String> {
-    ["-T", "-a", "-x", "-o", "ClearAllForwardings=yes"]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    [
+        "-T",
+        "-a",
+        "-x",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "ControlMaster=no",
+        "-o",
+        "ControlPath=none",
+        "-o",
+        "ControlPersist=no",
+        "-o",
+        "ForkAfterAuthentication=no",
+        "-o",
+        "StdinNull=no",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 /// Options for a connection that carries only the port forwards named on its
@@ -289,12 +315,17 @@ pub trait Executor: Sync {
     /// The host as the user named it, for messages.
     fn host(&self) -> &str;
 
+    /// Setup and derived diagnostics share the connector owner's byte budget.
+    fn budget(&self) -> ConnectionBudget {
+        ConnectionBudget::default()
+    }
+
     /// Run `line`, feeding `input` to its standard input when given.
     fn run(
         &self,
         line: &CommandLine,
         input: Option<Vec<u8>>,
-    ) -> impl Future<Output = io::Result<Output>> + Send;
+    ) -> impl Future<Output = io::Result<CapturedOutput>> + Send;
 }
 
 /// The `ssh` client this machine runs: on Windows the system's OpenSSH
@@ -343,15 +374,37 @@ pub struct Ssh {
     program: PathBuf,
     /// Options after the hardening ones.
     options: Vec<String>,
+    /// Native owner cancellation and byte accounting across every setup step.
+    context: Option<queue::Context>,
 }
 
 impl Ssh {
+    #[cfg(test)]
+    pub(crate) fn with_test_program(mut self, program: PathBuf) -> Self {
+        self.program = program;
+        self
+    }
     pub fn new(target: SshTarget) -> Self {
         Self {
             target,
             program: ssh_program(),
             options: Vec::new(),
+            context: None,
         }
+    }
+
+    /// The native owner supplies this before starting preparation. It never
+    /// comes from a remote host or renderer-selected address. This context
+    /// belongs to one connection attempt; a retry supplies a fresh context.
+    pub fn with_context(mut self, context: queue::Context) -> Self {
+        self.context = Some(context);
+        self
+    }
+    pub(crate) fn context(&self) -> queue::Context {
+        self.context.clone().unwrap_or_default()
+    }
+    pub(crate) fn owner_context(&self) -> Option<queue::Context> {
+        self.context.clone()
     }
 
     /// The host, for commands and their standard input and output only
@@ -361,6 +414,13 @@ impl Ssh {
             options: stdio_only_options(),
             ..Self::new(target)
         }
+    }
+
+    /// Preserve the selected executable/target while assigning the owned
+    /// command-only policy; a connector cannot inherit forwarding options.
+    pub fn into_stdio_only(mut self) -> Self {
+        self.options = stdio_only_options();
+        self
     }
 
     /// The host, for port forwards named on the command line only
@@ -388,12 +448,24 @@ impl Ssh {
     pub async fn configured_forwards(&self) -> Result<Vec<String>, SshError> {
         let mut command = self.command();
         command.arg("-G").arg(self.target.as_str());
-        let output = run_with_input(command, None)
+        let context = self.context();
+        let output = run_context(&mut command, None, &Admission::global(), &context)
             .await
             .map_err(SshError::Spawn)?;
         if !output.status.success() {
+            let _decoded = context
+                .budget
+                .reserve(3 * output.stderr.len(), false)
+                .map_err(|error| {
+                    SshError::Spawn(io::Error::new(io::ErrorKind::WouldBlock, error))
+                })?;
             let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(classify(self.target.as_str(), output.status, &stderr));
+            return Err(classify_budgeted(
+                self.target.as_str(),
+                output.status,
+                &stderr,
+                &context.budget,
+            ));
         }
         Ok(forwards_in_config(&String::from_utf8_lossy(&output.stdout)))
     }
@@ -421,19 +493,77 @@ impl Executor for Ssh {
         self.target.as_str()
     }
 
-    async fn run(&self, line: &CommandLine, input: Option<Vec<u8>>) -> io::Result<Output> {
+    fn budget(&self) -> ConnectionBudget {
+        self.context().budget
+    }
+
+    async fn run(&self, line: &CommandLine, input: Option<Vec<u8>>) -> io::Result<CapturedOutput> {
         let mut command = self.command();
         command
             .arg(self.target.as_str())
             .arg("--")
             .arg(line.as_str());
-        run_with_input(command, input).await
+        run_context(&mut command, input, &Admission::global(), &self.context()).await
     }
 }
 
 /// Run `command`, writing `input` to its standard input while its output is
 /// collected, so neither side can block the other.
-pub async fn run_with_input(mut command: Command, input: Option<Vec<u8>>) -> io::Result<Output> {
+pub async fn run_with_input(
+    mut command: Command,
+    input: Option<Vec<u8>>,
+) -> io::Result<CapturedOutput> {
+    run_admitted(&mut command, input, &Admission::global()).await
+}
+
+const SETUP_STDOUT: usize = 1024 * 1024;
+const SETUP_TIMEOUT: Duration = Duration::from_secs(120);
+
+async fn run_admitted(
+    command: &mut Command,
+    input: Option<Vec<u8>>,
+    admission: &Admission,
+) -> io::Result<CapturedOutput> {
+    run_budgeted(command, input, admission, &ConnectionBudget::default()).await
+}
+
+async fn run_budgeted(
+    command: &mut Command,
+    input: Option<Vec<u8>>,
+    admission: &Admission,
+    budget: &ConnectionBudget,
+) -> io::Result<CapturedOutput> {
+    run_context(
+        command,
+        input,
+        admission,
+        &queue::Context::new(budget.clone()),
+    )
+    .await
+}
+
+async fn run_context(
+    command: &mut Command,
+    input: Option<Vec<u8>>,
+    admission: &Admission,
+    context: &queue::Context,
+) -> io::Result<CapturedOutput> {
+    if context.is_closed() {
+        return Err(io::Error::new(
+            io::ErrorKind::BrokenPipe,
+            "SSH owner closed",
+        ));
+    }
+    let budget = &context.budget;
+    // Byte admission precedes both process creation and output allocation.
+    // Include stderr's read scratch until collection finishes; the retained
+    // output then keeps only its actual Vec capacities and struct storage.
+    let storage = budget
+        .reserve(
+            SETUP_STDOUT + 1 + STDERR_KEPT + 4096 + std::mem::size_of::<Output>(),
+            false,
+        )
+        .map_err(|error| io::Error::new(io::ErrorKind::WouldBlock, error))?;
     command
         .stdin(if input.is_some() {
             Stdio::piped()
@@ -442,8 +572,14 @@ pub async fn run_with_input(mut command: Command, input: Option<Vec<u8>>) -> io:
         })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = command.spawn()?;
-    let stdin = child.stdin.take();
+    let mut child = Worker::spawn(command, admission)?;
+    let stdin = child.stdin();
+    let stdout = child
+        .stdout()
+        .ok_or_else(|| io::Error::other("missing SSH stdout pipe"))?;
+    let stderr = child
+        .stderr()
+        .ok_or_else(|| io::Error::other("missing SSH stderr pipe"))?;
     let write = async move {
         if let (Some(mut stdin), Some(input)) = (stdin, input) {
             stdin.write_all(&input).await?;
@@ -451,8 +587,35 @@ pub async fn run_with_input(mut command: Command, input: Option<Vec<u8>>) -> io:
         }
         Ok::<(), io::Error>(())
     };
-    let (written, output) = tokio::join!(write, child.wait_with_output());
-    let output = output?;
+    let collect = async {
+        tokio::try_join!(
+            async { Ok::<_, io::Error>(write.await) },
+            setup_output(stdout),
+            diagnostic_tail(stderr),
+            child.wait()
+        )
+    };
+    let mut closing = context.closing();
+    let result = tokio::select! { biased;
+        _ = closing.wait_for(|closed| *closed) => Err(io::Error::new(io::ErrorKind::BrokenPipe, "SSH owner closed")),
+        result = tokio::time::timeout(SETUP_TIMEOUT, collect) => result
+            .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "SSH setup exceeded its deadline"))),
+    };
+    let (written, stdout, stderr, status) = match result {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = child.start_kill();
+            let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+            // If exit cannot yet be observed, Worker's reaper retains the slot.
+            return Err(error);
+        }
+    };
+    let retained = stdout.capacity() + stderr.capacity() + std::mem::size_of::<Output>();
+    let output = storage.shrink(retained).charge(Output {
+        status,
+        stdout,
+        stderr,
+    });
     // A command that stops reading early fails on its own; its status and
     // error output say more than the broken pipe.
     if let Err(error) = written {
@@ -463,22 +626,61 @@ pub async fn run_with_input(mut command: Command, input: Option<Vec<u8>>) -> io:
     Ok(output)
 }
 
+async fn setup_output(reader: impl tokio::io::AsyncRead + Unpin) -> io::Result<Vec<u8>> {
+    // Fixed maximum allocation, including the byte which proves overflow.
+    let mut output = Vec::with_capacity(SETUP_STDOUT + 1);
+    reader
+        .take(u64::try_from(SETUP_STDOUT + 1).map_err(io::Error::other)?)
+        .read_to_end(&mut output)
+        .await?;
+    if output.len() > SETUP_STDOUT {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "SSH setup output exceeds 1 MiB",
+        ));
+    }
+    Ok(output)
+}
+
+async fn diagnostic_tail(mut reader: impl tokio::io::AsyncRead + Unpin) -> io::Result<Vec<u8>> {
+    let mut kept = Vec::with_capacity(STDERR_KEPT);
+    let mut buffer = [0u8; 4096];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            return Ok(kept);
+        }
+        let excess = (kept.len() + read).saturating_sub(STDERR_KEPT);
+        kept.drain(..excess);
+        kept.extend_from_slice(&buffer[..read]);
+    }
+}
+
 /// How much of a long-running `ssh`'s error output is kept, from its end.
 pub(crate) const STDERR_KEPT: usize = 8 * 1024;
 
-/// Read the error output of a long-running process to its end, keeping the
-/// last [`STDERR_KEPT`] bytes for a message. Run as a task of its own, so the
-/// process never blocks on a full pipe.
-pub(crate) async fn keep_end(mut stderr: ChildStderr) -> String {
-    let mut kept = Vec::new();
-    let mut buffer = [0u8; 4096];
-    while let Ok(read @ 1..) = stderr.read(&mut buffer).await {
-        kept.extend_from_slice(&buffer[..read]);
-        if kept.len() > STDERR_KEPT {
-            kept.drain(..kept.len() - STDERR_KEPT);
-        }
-    }
-    String::from_utf8_lossy(&kept).trim().to_owned()
+/// A retained SSH diagnostic keeps its capacity reservation after the reader
+/// exits, until the consumer drops it or converts it into another error type.
+pub(crate) type Diagnostic = Charged<String>;
+
+/// Reserve before spawning the child/drain. Covers the tail, read scratch,
+/// lossy UTF-8 growth (old and new capacity) and the trimmed returned string.
+pub(crate) fn diagnostic_budget(budget: &ConnectionBudget) -> io::Result<Lease> {
+    budget
+        .reserve(10 * STDERR_KEPT + 4096, false)
+        .map_err(|error| io::Error::new(io::ErrorKind::WouldBlock, error))
+}
+
+/// Drain a long-running child's stderr without an unbounded tail or waiter.
+pub(crate) async fn keep_end(stderr: ChildStderr, storage: Lease) -> Diagnostic {
+    let kept = diagnostic_tail(stderr).await.unwrap_or_default();
+    let decoded = String::from_utf8_lossy(&kept);
+    let message = decoded.trim().to_owned();
+    drop(decoded);
+    drop(kept);
+    storage
+        .shrink(message.capacity() + std::mem::size_of::<String>())
+        .charge(message)
 }
 
 /// How long the error output may stay open after the process ended: a
@@ -487,14 +689,28 @@ const STDERR_WAIT: Duration = Duration::from_secs(2);
 
 /// What the [`keep_end`] task of a process that ended kept, if it ends in
 /// time.
-pub(crate) async fn kept_end(task: Option<JoinHandle<String>>) -> String {
-    match task {
-        Some(task) => tokio::time::timeout(STDERR_WAIT, task)
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default(),
-        None => String::new(),
+pub(crate) fn kept_end(task: Option<JoinHandle<Diagnostic>>) -> impl Future<Output = Diagnostic> {
+    struct Drain(JoinHandle<Diagnostic>);
+    impl Drop for Drain {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    // Wrap before constructing the future, so cancellation before its first
+    // poll also owns the task. A bare JoinHandle would detach on drop.
+    let task = task.map(Drain);
+    async move {
+        match task {
+            Some(mut task) => match tokio::time::timeout(STDERR_WAIT, &mut task.0).await {
+                Ok(result) => result.unwrap_or_default(),
+                Err(_) => {
+                    task.0.abort();
+                    let _ = (&mut task.0).await;
+                    Diagnostic::default()
+                }
+            },
+            None => Diagnostic::default(),
+        }
     }
 }
 
@@ -515,6 +731,8 @@ pub enum SshError {
         stderr: String,
         /// What the user can do about it, when `ssh` said why it failed.
         hint: Option<String>,
+        /// Reservation for owned diagnostic copies, retained with this error.
+        allocation: Option<Box<Lease>>,
     },
 }
 
@@ -545,7 +763,34 @@ pub fn authentication_failed(stderr: &str) -> bool {
 /// ssh passes the remote command's status through and uses 255 for its own
 /// failures.
 pub fn classify(host: &str, status: ExitStatus, stderr: &str) -> SshError {
+    classify_budgeted(host, status, stderr, &ConnectionBudget::default())
+}
+
+/// Reserve before converting a captured diagnostic into retained error strings.
+/// The original capture remains independently charged until its owner drops it.
+pub fn classify_budgeted(
+    host: &str,
+    status: ExitStatus,
+    stderr: &str,
+    budget: &ConnectionBudget,
+) -> SshError {
     let stderr = stderr.trim();
+    let bytes = host
+        .len()
+        .checked_add(stderr.len())
+        .and_then(|bytes| bytes.checked_mul(8))
+        .and_then(|bytes| bytes.checked_add(4096));
+    let storage = match bytes.and_then(|bytes| budget.reserve(bytes, false).ok()) {
+        Some(storage) => storage,
+        None => {
+            return SshError::Spawn(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "SSH diagnostic capacity exhausted",
+            ))
+        }
+    };
+    // NotFound only copies the caller-owned host. Failed keeps its converted
+    // message, stderr and optional hint after the original capture is gone.
     if status.code() == Some(127) {
         return SshError::NotFound {
             host: host.to_owned(),
@@ -562,11 +807,18 @@ pub fn classify(host: &str, status: ExitStatus, stderr: &str) -> SshError {
              terminal and check the fingerprint before you connect again."
         )
     });
+    let stderr = stderr.to_owned();
+    let retained = message.capacity()
+        + stderr.capacity()
+        + hint.as_ref().map_or(0, String::capacity)
+        + std::mem::size_of::<SshError>()
+        + std::mem::size_of::<Lease>();
     SshError::Failed {
         message,
         status: status.code(),
-        stderr: stderr.to_owned(),
+        stderr,
         hint,
+        allocation: Some(Box::new(storage.shrink(retained))),
     }
 }
 
@@ -575,19 +827,273 @@ pub async fn run_checked<E: Executor>(
     executor: &E,
     line: &CommandLine,
     input: Option<Vec<u8>>,
-) -> Result<Output, SshError> {
+) -> Result<CapturedOutput, SshError> {
     let output = executor.run(line, input).await.map_err(SshError::Spawn)?;
     if output.status.success() {
         Ok(output)
     } else {
+        let budget = executor.budget();
+        let _decoded = budget
+            .reserve(3 * output.stderr.len(), false)
+            .map_err(|error| SshError::Spawn(io::Error::new(io::ErrorKind::WouldBlock, error)))?;
         let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(classify(executor.host(), output.status, &stderr))
+        Err(classify_budgeted(
+            executor.host(),
+            output.status,
+            &stderr,
+            &budget,
+        ))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelling_a_stderr_wait_aborts_the_drain_even_before_its_first_poll() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        struct Dropped(Arc<AtomicBool>);
+        impl Drop for Dropped {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        for poll in [false, true] {
+            let dropped = Arc::new(AtomicBool::new(false));
+            let marker = dropped.clone();
+            let (entered, ready) = tokio::sync::oneshot::channel();
+            let drain = tokio::spawn(async move {
+                let _guard = Dropped(marker);
+                entered.send(()).unwrap();
+                std::future::pending::<Diagnostic>().await
+            });
+            ready.await.unwrap();
+            if poll {
+                let waiting = tokio::spawn(kept_end(Some(drain)));
+                tokio::task::yield_now().await;
+                waiting.abort();
+                let _ = waiting.await;
+            } else {
+                drop(kept_end(Some(drain)));
+            }
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !dropped.load(Ordering::Acquire) {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("cancelled stderr reader is dropped");
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn setup_capture_is_bounded_and_failed_commands_release_only_reaped_workers() {
+        let admission = Admission::default();
+        let process = splitty_transport::budget::ProcessBudget::new(4 * SETUP_STDOUT, 0);
+        let budget = ConnectionBudget::new(process.clone(), 4 * SETUP_STDOUT, 0);
+        let mut command = Command::new("sh");
+        command.args(["-c", "head -c 1048577 /dev/zero; exec sleep 30"]);
+        let result = run_budgeted(&mut command, None, &admission, &budget).await;
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+        assert_eq!(admission.counts().workers, 0);
+        assert_eq!(budget.used(), 0);
+
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "head -c 32768 /dev/zero >&2; printf reason >&2; printf ready; exit 7",
+        ]);
+        let output = run_budgeted(&mut command, None, &admission, &budget)
+            .await
+            .unwrap();
+        assert_eq!(output.status.code(), Some(7));
+        assert_eq!(output.stdout, b"ready");
+        assert_eq!(output.stderr.len(), STDERR_KEPT);
+        assert!(output.stderr.ends_with(b"reason"));
+        assert_eq!(admission.counts().workers, 0);
+        assert_eq!(
+            budget.used(),
+            output.stdout.capacity() + output.stderr.capacity() + std::mem::size_of::<Output>()
+        );
+        assert_eq!(
+            process.used(),
+            budget.used(),
+            "output remains counted after worker exit"
+        );
+        drop(output);
+        assert_eq!(process.used(), 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn saturated_setup_refuses_before_spawn_and_cancelled_setup_is_reaped() {
+        let admission = std::sync::Arc::new(Admission::default());
+        let mut held: Vec<_> = (0..32)
+            .map(|_| {
+                let mut command = Command::new("sleep");
+                command.arg("30");
+                Worker::spawn(&mut command, &admission).unwrap()
+            })
+            .collect();
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("started");
+        let mut command = Command::new("touch");
+        command.arg(&marker);
+        assert_eq!(
+            run_admitted(&mut command, None, &admission)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(!marker.exists());
+        for worker in &mut held {
+            worker.start_kill().unwrap();
+        }
+        for worker in &mut held {
+            worker.wait().await.unwrap();
+        }
+        drop(held);
+        let workers = admission.clone();
+        let path = marker.clone();
+        let task = tokio::spawn(async move {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", "printf started > \"$1\"; exec sleep 30", "sh"])
+                .arg(path);
+            run_admitted(&mut command, None, &workers).await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(admission.counts().workers, 1);
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while admission.counts().workers != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled worker is observed before its slot returns");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owner_cancellation_reaps_setup_before_returning_and_prevents_later_spawns() {
+        let context = queue::Context::default();
+        let admission = Admission::default();
+        let dir = tempfile::tempdir().unwrap();
+        let marker = dir.path().join("pid");
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "echo $$ > \"$1\"; exec sleep 30", "sh"])
+            .arg(&marker);
+        let cancel = async {
+            let pid = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Ok(text) = tokio::fs::read_to_string(&marker).await {
+                        if let Ok(pid) = text.trim().parse::<u32>() {
+                            break pid;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(admission.counts().workers, 1);
+            assert!(context.budget.used() > SETUP_STDOUT);
+            context.close();
+            pid
+        };
+        let (result, pid) = tokio::join!(
+            run_context(&mut command, None, &admission, &context),
+            cancel
+        );
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(admission.counts().workers, 0);
+        assert_eq!(context.budget.used(), 0);
+        assert!(!Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .unwrap()
+            .success());
+        let not_started = dir.path().join("unexpected");
+        let mut command = Command::new("touch");
+        command.arg(&not_started);
+        assert_eq!(
+            run_context(&mut command, None, &admission, &context)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::BrokenPipe
+        );
+        assert!(!not_started.exists());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn setup_byte_admission_precedes_spawn_and_cancellation_releases_capture() {
+        let admission = std::sync::Arc::new(Admission::default());
+        let process = splitty_transport::budget::ProcessBudget::new(4 * SETUP_STDOUT, 0);
+        let budget = ConnectionBudget::new(process.clone(), 4 * SETUP_STDOUT, 0);
+        let held = process.data.acquire(4 * SETUP_STDOUT).unwrap();
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("started");
+        let mut command = Command::new("touch");
+        command.arg(&marker);
+        assert_eq!(
+            run_budgeted(&mut command, None, &admission, &budget)
+                .await
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        assert!(!marker.exists());
+        assert_eq!(admission.counts().workers, 0);
+        assert_eq!(budget.used(), 0);
+        drop(held);
+        let task_budget = budget.clone();
+        let task_admission = admission.clone();
+        let path = marker.clone();
+        let task = tokio::spawn(async move {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", "printf started > \"$1\"; exec sleep 30", "sh"])
+                .arg(path);
+            run_budgeted(&mut command, None, &task_admission, &task_budget).await
+        });
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !marker.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(budget.used() > SETUP_STDOUT);
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while admission.counts().workers != 0 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(process.used(), 0);
+    }
 
     /// SR-13: a target that ssh would read as an option must be refused before
     /// the process starts. `-oProxyCommand=` is the dangerous case — it makes
@@ -702,6 +1208,56 @@ mod tests {
         );
         assert!(stdio_only.ends_with(&options), "{stdio_only:?}");
         assert_eq!(args(&Ssh::new(target)), hardening_options());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owned_stdio_overrides_background_masters_and_configured_forwarding() {
+        if std::process::Command::new("ssh")
+            .arg("-V")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let config = directory.path().join("config");
+        std::fs::write(&config, "Host host\n  HostName 192.0.2.1\n  ControlMaster auto\n  ControlPath /tmp/unused-splitty-test-master\n  ControlPersist yes\n  ForkAfterAuthentication yes\n  StdinNull yes\n  ForwardAgent yes\n  ForwardX11 yes\n  RequestTTY force\n  LocalForward 5432 localhost:5432\n  RemoteForward 8080 localhost:8080\n  DynamicForward 1080\n").unwrap();
+        let ssh = Ssh::stdio_only(SshTarget::parse("host").unwrap());
+        let mut command = ssh.command();
+        command.arg("-F").arg(config).args(["-G", "host"]);
+        let result = run_with_input(command, None).await.unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let text = std::str::from_utf8(&result.stdout).unwrap();
+        let values: std::collections::HashMap<_, _> = text
+            .lines()
+            .filter_map(|line| line.split_once(' '))
+            .collect();
+        for key in [
+            "controlmaster",
+            "controlpersist",
+            "forkafterauthentication",
+            "stdinnull",
+            "forwardagent",
+            "forwardx11",
+            "requesttty",
+        ] {
+            assert!(
+                values
+                    .get(key)
+                    .is_some_and(|value| matches!(*value, "no" | "false")),
+                "{key}: {:?}",
+                values.get(key)
+            );
+        }
+        assert!(values
+            .get("controlpath")
+            .is_none_or(|value| *value == "none"));
+        assert!(forwards_in_config(text).is_empty());
     }
 
     /// A forward-only connection runs no command and adds no terminal,
@@ -887,6 +1443,96 @@ mod tests {
             .arg(format!("exit {code}"))
             .status()
             .expect("sh")
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn checked_setup_conversion_retains_its_owner_budget_after_capture_drop() {
+        struct FailedSetup(ConnectionBudget);
+        impl Executor for FailedSetup {
+            fn host(&self) -> &str {
+                "vm"
+            }
+            fn budget(&self) -> ConnectionBudget {
+                self.0.clone()
+            }
+            async fn run(
+                &self,
+                _line: &CommandLine,
+                _input: Option<Vec<u8>>,
+            ) -> io::Result<CapturedOutput> {
+                let mut command = Command::new("sh");
+                command.args([
+                    "-c",
+                    "printf '\\377Host key verification failed.\\200' >&2; exit 255",
+                ]);
+                run_budgeted(&mut command, None, &Admission::default(), &self.0).await
+            }
+        }
+        let budget = ConnectionBudget::default();
+        let error = run_checked(
+            &FailedSetup(budget.clone()),
+            &CommandLine::new("ignored"),
+            None,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains('\u{fffd}'));
+        assert!(error.hint().is_some());
+        assert!(
+            budget.used() > 0,
+            "derived error owns its converted bytes after raw output drops"
+        );
+        drop(error);
+        assert_eq!(budget.used(), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn converted_diagnostic_is_admitted_and_retained_in_the_owner_budget() {
+        let budget = ConnectionBudget::default();
+        for host in ["vm".into(), "u".repeat(4096)] {
+            for diagnostic in [
+                "Connection refused".into(),
+                "Host key verification failed. 界".repeat(1024),
+            ] {
+                let error = classify_budgeted(&host, exit(255), &diagnostic, &budget);
+                match &error {
+                    SshError::Failed {
+                        message,
+                        stderr,
+                        hint,
+                        allocation,
+                        ..
+                    } => {
+                        let payload = message.capacity()
+                            + stderr.capacity()
+                            + hint.as_ref().map_or(0, String::capacity);
+                        assert!(allocation.is_some());
+                        assert!(
+                            budget.used() >= payload,
+                            "converted copies outlive the source capture"
+                        );
+                        assert!(message.contains(&diagnostic));
+                    }
+                    other => panic!("unexpected classification: {other}"),
+                }
+                drop(error);
+                assert_eq!(budget.used(), 0);
+            }
+        }
+        let held = budget
+            .reserve(
+                splitty_transport::wire::CONNECTION_BYTES
+                    - splitty_transport::wire::CONNECTION_CONTROL_BYTES,
+                false,
+            )
+            .unwrap();
+        assert!(
+            matches!(classify_budgeted("vm", exit(255), "Host key verification failed", &budget), SshError::Spawn(error) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+        drop(held);
+        assert_eq!(budget.used(), 0);
     }
 
     #[cfg(unix)]

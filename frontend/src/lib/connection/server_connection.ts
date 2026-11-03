@@ -46,8 +46,9 @@ export class ServerConnection {
     /** How the UI names the server, e.g. a host. */
     readonly label: string,
     readonly socket: ConnSocket,
+    kind: ConnKind = key === "local" ? "local" : "remote",
   ) {
-    this.kind = key === "local" ? "local" : "remote";
+    this.kind = kind;
     this.mux = new MuxClient(socket);
     this.attachments = new AttachRegistry(socket);
     this.sessions = new SessionClient(socket, this.attachments);

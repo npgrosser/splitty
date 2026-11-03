@@ -1,3 +1,4 @@
+import { invokeTauri } from "./tauri_invoke.ts";
 /**
  * Files offered by a pane's process (`terminal-sessions`, File Offers and
  * Saving An Offered File): `splitty download <file>` in a pane makes its
@@ -39,7 +40,7 @@ export type RevealDownload = (url: string) => Promise<unknown>;
 
 /** The desktop shell's, which knows where it saved its downloads; a browser has none. */
 export const revealDownload: RevealDownload | null =
-  shellKind === "tauri" ? (url) => (window as any).__TAURI_INTERNALS__.invoke("reveal_download", { url }) :
+  shellKind === "tauri" ? (url) => invokeTauri("reveal_download", { url }) :
   shellKind === "electron" ? (url) => (window as any).__SPLITTY_ELECTRON__.invoke("download:reveal", url) :
   null;
 

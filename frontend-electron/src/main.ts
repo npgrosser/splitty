@@ -1,23 +1,29 @@
-import { rememberDownload, savedDownload } from "./downloads";
+import { NativeBroker } from "./native_broker";
+import { NativeOwner } from "./native_owner";
+import { startNativeHelper } from "./native_helper";
+import { readWindowSettings, readKnownHosts } from "./native_settings";
+import type { PipeEvents, NativeClosed } from "./native_pipe";
+import { installAssets } from "./asset_protocol";
+import { isPackagedDocument } from "./navigation";
+import { isPackagedBlob, rememberDownload, savedDownload } from "./downloads";
 import { openLocalEditor, openRemoteEditor } from "./editor";
-import { app, BrowserWindow, Menu, shell, ipcMain, session, webContents, type Session, type WebContents } from "electron";
-import { spawn, ChildProcess } from "child_process";
+import { app, BrowserWindow, Menu, shell, ipcMain, protocol, session, webContents, MessageChannelMain, type Session, type WebContents } from "electron";
 import path from "path";
 import {
-  exitFailure, isAcceptableTarget, parseConnectEvent, parseKnownHosts, remoteTitle, tunnelOrigin,
-  type ConnectEvent, type ConnectionState, type KnownHost,
+  isAcceptableTarget, remoteTitle, type KnownHost, type ConnectionState,
 } from "./remote";
 
-let splittyProcess: ChildProcess | null = null;
-/**
- * Origin of the backend, e.g. `http://127.0.0.1:45299`.
- *
- * Deliberately *not* the full launch URL. That URL carries a bootstrap code, and
- * keeping it around to reuse for a second window meant handing out a credential
- * more than once (security review SR-03/SR-04). Additional
- * windows request a fresh code instead — see `requestBootstrap`.
- */
-let backendOrigin: string | null = null;
+// Secure packaged scheme; privileges never bypass CSP or enable service workers.
+protocol.registerSchemesAsPrivileged([{ scheme: "splitty", privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
+
+const APP_ORIGIN = "splitty://app";
+const APP_URL = `${APP_ORIGIN}/index.html`;
+const broker = new NativeBroker(() => new MessageChannelMain(), isOwnDocument);
+let owner: NativeOwner | undefined;
+const remoteHelpers = new Set<ReturnType<typeof startNativeHelper>>();
+ipcMain.on("native:document", event => broker.document(event));
+ipcMain.on("native:open", (event, input) => broker.open(event, input));
+ipcMain.on("native:cancel-open", (event, input) => broker.cancel(event, input));
 let windowSettings: { nativeTitleBar: boolean } = { nativeTitleBar: false };
 
 function findBinary(): string {
@@ -43,115 +49,6 @@ function cleanEnv(): NodeJS.ProcessEnv {
   return env;
 }
 
-/** Resolvers waiting for the next `SPLITTY_BOOTSTRAP=` line. */
-const bootstrapWaiters: ((code: string) => void)[] = [];
-
-/**
- * Ask the running backend for a fresh single-use bootstrap code.
- *
- * The request travels over the backend's stdin, which only this process holds
- * the write end of. Codes are spent on first use, so every window that needs to
- * establish a session has to ask for its own.
- */
-function requestBootstrap(): Promise<string | null> {
-  if (!splittyProcess?.stdin?.writable) return Promise.resolve(null);
-
-  return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      const idx = bootstrapWaiters.indexOf(waiter);
-      if (idx >= 0) bootstrapWaiters.splice(idx, 1);
-      resolve(null);
-    }, 5000);
-
-    const waiter = (code: string) => {
-      clearTimeout(timer);
-      resolve(code);
-    };
-    bootstrapWaiters.push(waiter);
-    splittyProcess!.stdin!.write("bootstrap\n");
-  });
-}
-
-function startSplitty(): Promise<{ port: string; url: string }> {
-  return new Promise((resolve, reject) => {
-    const bin = findBinary();
-    splittyProcess = spawn(bin, ["serve", "--addr", "127.0.0.1:0", "--oneshot-token"], {
-      env: cleanEnv(),
-      stdio: ["pipe", "pipe", "pipe"],
-    });
-
-    const vars: Record<string, string> = {};
-    let buffer = "";
-
-    splittyProcess.stdout?.on("data", (chunk: Buffer) => {
-      buffer += chunk.toString();
-      const lines = buffer.split("\n");
-      buffer = lines.pop() ?? "";
-
-      for (const line of lines) {
-        const match = line.match(/^SPLITTY_(PORT|BOOTSTRAP|URL)=(.+)$/);
-        if (!match) continue;
-
-        // A bootstrap line after startup is an answer to requestBootstrap.
-        if (match[1] === "BOOTSTRAP" && vars.bootstrap) {
-          bootstrapWaiters.shift()?.(match[2]);
-          continue;
-        }
-        vars[match[1].toLowerCase()] = match[2];
-      }
-
-      if (vars.port && vars.bootstrap && vars.url) {
-        resolve({ port: vars.port, url: vars.url });
-      }
-    });
-
-    splittyProcess.stderr?.on("data", (chunk: Buffer) => {
-      process.stderr.write(chunk);
-    });
-
-    splittyProcess.on("error", (err) => {
-      reject(new Error(`Failed to start splitty: ${err.message}`));
-    });
-
-    splittyProcess.on("exit", (code) => {
-      if (!vars.port) {
-        reject(new Error(`splitty exited with code ${code} before becoming ready`));
-      }
-    });
-  });
-}
-
-/**
- * Read the window settings needed before the first window is created.
- *
- * Spends a bootstrap code of its own rather than lifting a credential out of the
- * launch URL, which is what this used to do. The session it establishes lives in
- * the response cookie and is discarded — this call only needs one field.
- */
-async function fetchSettings(origin: string): Promise<{ nativeTitleBar: boolean }> {
-  try {
-    const bootstrap = await requestBootstrap();
-    if (!bootstrap) return { nativeTitleBar: false };
-
-    const session = await fetch(new URL("/api/session", origin).toString(), {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Origin: origin },
-      body: JSON.stringify({ bootstrap }),
-    });
-    const cookie = session.headers.get("set-cookie");
-    if (!session.ok || !cookie) return { nativeTitleBar: false };
-
-    const res = await fetch(new URL("/api/home/settings", origin).toString(), {
-      headers: { Cookie: cookie.split(";")[0], Origin: origin },
-    });
-    if (res.ok) {
-      const settings = await res.json();
-      return { nativeTitleBar: settings?.window?.nativeTitleBar ?? false };
-    }
-  } catch {}
-  return { nativeTitleBar: false };
-}
-
 // ---------------------------------------------------------------------------
 // Per-WebContents policy: the one origin each window belongs to
 // ---------------------------------------------------------------------------
@@ -160,12 +57,12 @@ async function fetchSettings(origin: string): Promise<{ nativeTitleBar: boolean 
  * - `main`: a window on the app's own backend; the only role whose IPC calls
  *   are served.
  * - `popout`: a window the main UI opened on that origin (dockview pop-outs).
- * - `remote`: a remote window, pinned to its tunnel origin (`desktop-remote`).
+ * - `remote`: a packaged remote window, assigned one fixed SSH host.
  */
 type WindowRole = "main" | "popout" | "remote";
 
 interface WindowPolicy {
-  /** `http://127.0.0.1:<port>`; a remote window's changes with a new session. */
+  /** The fixed packaged application origin. */
   origin: string;
   role: WindowRole;
 }
@@ -200,16 +97,17 @@ function policyOf(contents: WebContents): WindowPolicy | undefined {
  */
 function originOf(url: string): string | null {
   try {
-    return new URL(url).origin;
+    const parsed = new URL(url);
+    return parsed.protocol === "splitty:" && parsed.host === "app" ? APP_ORIGIN : parsed.origin;
   } catch {
     return null;
   }
 }
 
-/** Does this URL belong to the origin the WebContents is pinned to? */
-function isOwnOrigin(contents: WebContents, url: string): boolean {
+/** Does this URL name the entry assigned to this WebContents? */
+function isOwnDocument(contents: WebContents, url: string): boolean {
   const policy = policyOf(contents);
-  return policy !== undefined && originOf(url) === policy.origin;
+  return policy !== undefined && isPackagedDocument(policy.role, url);
 }
 
 /**
@@ -236,7 +134,7 @@ function openExternally(targetUrl: string): void {
  * Browser permissions the UI uses: desktop notifications for bells and
  * finished commands, and writing to the clipboard on copy. Electron grants
  * every permission by default; everything not listed here is denied, and these
- * only to the window's own origin — a remote window's tunnel origin included
+ * only to the window's packaged application origin
  * (D7).
  */
 const ALLOWED_PERMISSIONS = new Set(["notifications", "clipboard-sanitized-write"]);
@@ -245,7 +143,7 @@ const ALLOWED_PERMISSIONS = new Set(["notifications", "clipboard-sanitized-write
  * Chromium passes no WebContents for some checks (notifications, cross-origin
  * subframes); those are decided by the session's own origin. Each session
  * belongs to one origin: the default session to the backend, a remote
- * window's partition to its tunnel.
+ * window's private partition to packaged assets.
  */
 function permissionAllowed(
   permission: string,
@@ -286,11 +184,12 @@ function hardenWebContents(contents: WebContents): void {
     const policy = policyOf(contents);
     if (!policy) return { action: "deny" };
     if (originOf(targetUrl) === policy.origin) {
-      if (policy.role === "remote") return { action: "deny" };
+      if (policy.role === "remote" || !isPackagedDocument("popout", targetUrl)) return { action: "deny" };
       return {
         action: "allow",
         overrideBrowserWindowOptions: {
           webPreferences: {
+            preload: path.join(__dirname, "popout_preload.js"),
             sandbox: true,
             contextIsolation: true,
             nodeIntegration: false,
@@ -303,20 +202,19 @@ function hardenWebContents(contents: WebContents): void {
     return { action: "deny" };
   });
 
-  // Top-level navigation stays on the window's origin. Without this, anything
+  // Top-level navigation stays on the window's assigned entry. Without this, anything
   // able to set `location` in the renderer could move the privileged window —
-  // which holds the session cookie — onto a foreign page, or a remote window
-  // off its tunnel. Web URLs go to the system browser, `file:` and the rest
+  // onto a foreign page. Web URLs go to the system browser, `file:` and the rest
   // nowhere.
   contents.on("will-navigate", (event) => {
-    if (isOwnOrigin(contents, event.url)) return;
+    if (isOwnDocument(contents, event.url)) return;
     event.preventDefault();
     if (policyOf(contents)) openExternally(event.url);
   });
 
   // A server-side redirect is a navigation as well.
   contents.on("will-redirect", (event) => {
-    if (event.isMainFrame && !isOwnOrigin(contents, event.url)) event.preventDefault();
+    if (event.isMainFrame && !isOwnDocument(contents, event.url)) event.preventDefault();
   });
 
   // Renderers must never gain Node privileges through an attached webview tag.
@@ -355,7 +253,10 @@ function createWindow(url: string, opts: { nativeTitleBar: boolean }): BrowserWi
 
   // Navigation, popup and webview guards are attached to every WebContents in
   // `hardenWebContents`; they pin this one to the backend.
-  if (backendOrigin) policies.set(win.webContents, { origin: backendOrigin, role: "main" });
+  policies.set(win.webContents, { origin: APP_ORIGIN, role: "main" });
+  const backend = owner;
+  if (!backend) throw Error("Embedded backend is unavailable");
+  broker.grant(win.webContents, { role: "main", open: (events, target, update) => backend.connect(events, target, update) });
 
   // On Linux with frameless windows, the WM reserves the top few pixels of a
   // maximized window for its own resize edge detection, stealing mouse events
@@ -380,304 +281,289 @@ function createWindow(url: string, opts: { nativeTitleBar: boolean }): BrowserWi
 }
 
 // ---------------------------------------------------------------------------
-// Remote windows (desktop-remote): a host's UI through a tunnel the app holds
+// Remote windows: packaged UI with a fixed SSH native helper
 // ---------------------------------------------------------------------------
 
 /** What `remote:open` resolves with; `ipcRenderer.invoke` rejections lose their fields. */
 type RemoteOpenResult = { ok: true } | { ok: false; error: { message: string; hint?: string } };
 
 function openFailure(message: string, hint?: string): RemoteOpenResult {
+  try {
+    const diagnostic = JSON.parse(message);
+    if (diagnostic?.type === "remote.error" && typeof diagnostic.message === "string") {
+      message = diagnostic.message;
+      if (typeof diagnostic.hint === "string") hint = diagnostic.hint;
+    }
+  } catch { /* Ordinary native diagnostic. */ }
   return { ok: false, error: hint ? { message, hint } : { message } };
 }
 
-/** A remote window and the `splitty connect --json` process holding its tunnel. */
 interface RemoteWindow {
-  target: string;
-  win: BrowserWindow;
-  policy: WindowPolicy;
-  /** Set while the connection is alive; null once it gave up or ended. */
-  child: ChildProcess | null;
+  target: string; win: BrowserWindow; state: ConnectionState;
+  connected: boolean; rendererGone: boolean;
+  helpers: Set<ReturnType<typeof startNativeHelper>>; rememberNextOpen: boolean; opensAllowed: boolean;
+  lastFailure?: NativeClosed;
+  ready(): void; failed(error: Error): void;
 }
-
-/** An open in flight. Concurrent opens of the same target share it. */
 interface PendingOpen {
   promise: Promise<RemoteOpenResult>;
-  child: ChildProcess;
-  /** The trusted UIs that asked; they get its progress. */
-  requesters: Set<WebContents>;
-  finish: (result: RemoteOpenResult) => void;
+  helper?: ReturnType<typeof startNativeHelper>;
+  requesters: Map<WebContents, { document: string; remove(): void }>;
+  cancel(requester: WebContents): void;
 }
-
-/** One window per target (D3). */
 const remoteWindows = new Map<string, RemoteWindow>();
 const pendingOpens = new Map<string, PendingOpen>();
 let remoteWindowCount = 0;
-
-function setRemoteState(entry: RemoteWindow, state: ConnectionState): void {
-  if (!entry.win.isDestroyed()) entry.win.setTitle(remoteTitle(entry.target, state));
-}
-
-/** The connection gave up or its process ended; the next open runs it again (D11). */
-function markDisconnected(entry: RemoteWindow): void {
-  entry.child = null;
-  setRemoteState(entry, "disconnected");
-}
-
-/**
- * A window for the host's UI that can call nothing of the shell: no preload,
- * sandboxed, and a cookie store of its own that lives in memory only (no
- * `persist:` prefix) and that no other window uses.
- */
-function createRemoteWindow(target: string, origin: string, child: ChildProcess): RemoteWindow {
-  const partition = `remote-${++remoteWindowCount}`;
-  const policy: WindowPolicy = { origin, role: "remote" };
-  guardPermissions(session.fromPartition(partition), () => policy.origin);
-
-  const win = new BrowserWindow({
-    width: 1280,
-    height: 800,
-    backgroundColor: "#181818",
-    title: remoteTitle(target, "connected"),
-    webPreferences: {
-      partition,
-      sandbox: true,
-      contextIsolation: true,
-      nodeIntegration: false,
-      devTools: !app.isPackaged,
-    },
-  });
-  policies.set(win.webContents, policy);
-  const entry: RemoteWindow = { target, win, policy, child };
-
-  // The title names the host and its connection state, not the page's title.
-  win.on("page-title-updated", (event) => event.preventDefault());
-
-  // The web UI's `beforeunload` guard for running processes would silently
-  // cancel closing the window and loading a new session. Neither ends anything
-  // on the host, whose daemon keeps the sessions.
-  win.webContents.on("will-prevent-unload", (event) => event.preventDefault());
-
-  // Its close is not intercepted: the confirmation dialog needs the preload.
-  // Closing ends the tunnel, never the host's daemon or its sessions.
-  win.on("closed", () => {
-    entry.child?.kill("SIGTERM");
-    if (remoteWindows.get(target) === entry) remoteWindows.delete(target);
-  });
-  return entry;
-}
-
-/** The window for a ready connection: the target's own after a give-up, or a new one. */
-function attachConnection(target: string, origin: string, child: ChildProcess): RemoteWindow {
-  const existing = remoteWindows.get(target);
-  if (existing) {
-    existing.policy.origin = origin;
-    existing.child = child;
-    setRemoteState(existing, "connected");
-    return existing;
+ipcMain.on("native:state", (event, input) => {
+  const state = broker.remoteState(event, input);
+  if (!state) return;
+  for (const entry of remoteWindows.values()) if (entry.win.webContents === event.sender && !entry.win.isDestroyed()) {
+    entry.state = state; entry.rendererGone = false;
+    entry.win.setTitle(remoteTitle(entry.target, state));
+    if (state === "connected") { entry.connected = true; entry.ready(); }
+    else if (state === "disconnected") entry.failed(Error(entry.lastFailure?.message ?? "The remote workspace could not finish connecting"));
+    break;
   }
-  const entry = createRemoteWindow(target, origin, child);
-  remoteWindows.set(target, entry);
-  return entry;
-}
+});
 
-/**
- * Run `splitty connect` for a target and map its events (design.md, The shell
- * API). The open resolves once the window shows the host, and fails with the
- * `failed` event, or with the end of stderr if the process ended without one.
- */
-function connectRemote(target: string, requester: WebContents): Promise<RemoteOpenResult> {
-  // `--` keeps the target a positional argument whatever it starts with.
-  const child = spawn(findBinary(), ["connect", "--no-open", "--json", "--", target], {
-    env: cleanEnv(),
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  let resolve!: (result: RemoteOpenResult) => void;
-  let settled = false;
-  const pending: PendingOpen = {
-    promise: new Promise((r) => { resolve = r; }),
-    child,
-    requesters: new Set([requester]),
-    finish: (result) => {
-      if (pendingOpens.get(target) === pending) pendingOpens.delete(target);
-      if (settled) return;
-      settled = true;
-      resolve(result);
-    },
-  };
-  pendingOpens.set(target, pending);
-
-  let entry: RemoteWindow | null = null;
-  let stderrTail = "";
-
-  const handle = (event: ConnectEvent): void => {
-    switch (event.event) {
-      case "progress":
-      case "notice": {
-        const step = event.event === "progress" ? event.step : "notice";
-        for (const contents of pending.requesters) {
-          if (!contents.isDestroyed()) contents.send("remote:progress", { target, step, message: event.message });
-        }
-        break;
-      }
-      case "ready": {
-        if (settled) break;
-        const origin = tunnelOrigin(event.url);
-        if (!origin) {
-          child.kill("SIGTERM");
-          pending.finish(openFailure(`splitty connect reported a session outside the tunnel: ${event.url}`));
-          break;
-        }
-        // From here on the open can no longer be cancelled; closing the window ends it.
-        if (pendingOpens.get(target) === pending) pendingOpens.delete(target);
-        const shown = attachConnection(target, origin, child);
-        entry = shown;
-        // Settled once the page's document is there, not when every
-        // resource has loaded: a slow resource through the tunnel would
-        // otherwise keep the picker waiting on a window that is already up.
-        const shownUp = (): void => {
-          if (!shown.win.isDestroyed()) shown.win.focus();
-          pending.finish({ ok: true });
-        };
-        shown.win.webContents.once("dom-ready", shownUp);
-        void shown.win.loadURL(event.url).catch(() => {}).then(shownUp);
-        break;
-      }
-      case "url": {
-        // A restarted or moved daemon: a new session for the same window.
-        const origin = tunnelOrigin(event.url);
-        if (!entry || entry.win.isDestroyed() || !origin) break;
-        entry.policy.origin = origin;
-        setRemoteState(entry, "connected");
-        void entry.win.loadURL(event.url).catch(() => {});
-        break;
-      }
-      case "lost":
-      case "retry":
-        if (entry) setRemoteState(entry, "reconnecting");
-        break;
-      case "restored":
-        if (entry) setRemoteState(entry, "connected");
-        break;
-      case "failed":
-        if (entry) markDisconnected(entry);
-        else pending.finish(openFailure(event.message, event.hint));
-        break;
-      case "closed":
-        break;
-    }
-  };
-
-  let buffer = "";
-  child.stdout?.on("data", (chunk: Buffer) => {
-    buffer += chunk.toString();
-    const lines = buffer.split("\n");
-    buffer = lines.pop() ?? "";
-    for (const line of lines) {
-      const event = parseConnectEvent(line);
-      if (event) handle(event);
-    }
-  });
-
-  child.stderr?.on("data", (chunk: Buffer) => {
-    process.stderr.write(chunk);
-    stderrTail = (stderrTail + chunk.toString()).slice(-4096);
-  });
-
-  child.on("error", (err) => {
-    pending.finish(openFailure(`Could not run splitty: ${err.message}`));
-  });
-
-  child.on("exit", (code) => {
-    if (entry && entry.child === child) markDisconnected(entry);
-    pending.finish(openFailure(exitFailure(code, stderrTail)));
-  });
-
-  return pending.promise;
-}
-
-/**
- * Open a host: focus its window while its connection is alive, join an open of
- * it in flight, or connect (again, into the same window after a give-up).
- */
-function openRemote(target: string, requester: WebContents): Promise<RemoteOpenResult> {
-  const existing = remoteWindows.get(target);
-  if (existing?.child) {
-    if (existing.win.isMinimized()) existing.win.restore();
-    existing.win.focus();
-    return Promise.resolve({ ok: true });
-  }
-  const pending = pendingOpens.get(target);
-  if (pending) {
-    pending.requesters.add(requester);
-    return pending.promise;
-  }
-  return connectRemote(target, requester);
-}
-
-function cancelRemote(target: string): void {
+function reportRemoteProgress(target: string, value: { phase: string; message: string }): void {
   const pending = pendingOpens.get(target);
   if (!pending) return;
-  pending.child.kill("SIGTERM");
-  pending.finish(openFailure("cancelled"));
+  for (const [contents, grant] of pending.requesters) if (requesterCurrent(contents, grant.document)) {
+    contents.send("remote:progress", { target, step: value.phase, message: value.message });
+  }
 }
 
-/** `splitty remote-hosts --json`; nothing when it fails. */
+function remoteHelper(target: string, events: PipeEvents, rememberTarget = false) {
+  const helper = startNativeHelper(findBinary(), cleanEnv(), events, target, undefined, false, rememberTarget);
+  remoteHelpers.add(helper);
+  void helper.exited.then(() => remoteHelpers.delete(helper));
+  return helper;
+}
+
+function openRemote(target: string, event: Electron.IpcMainInvokeEvent): Promise<RemoteOpenResult> {
+  const requester = event.sender, document = broker.callerDocument(event);
+  if (!document) return Promise.resolve(openFailure("The requesting document is no longer assigned"));
+  // An existing but not yet ready window still belongs to its coalesced open.
+  const active = pendingOpens.get(target);
+  if (active) { addRequester(active, requester, document); return active.promise; }
+  const existing = remoteWindows.get(target);
+  if (existing && !existing.win.isDestroyed()) {
+    if (existing.win.isMinimized()) existing.win.restore();
+    existing.win.focus();
+    if (existing.rendererGone || existing.state !== "connected") return reopenRemote(existing, requester, document);
+    return Promise.resolve({ ok: true });
+  }
+  if (pendingOpens.size >= 4 || remoteWindows.size + pendingOpens.size >= 32) return Promise.resolve(openFailure("Remote window capacity exhausted"));
+  const requesters: PendingOpen["requesters"] = new Map();
+  let openedWindow: BrowserWindow | undefined, cancelled = false;
+  let assignedEvents: PipeEvents | undefined;
+  let initialFailure: NativeClosed | undefined;
+  const helper = remoteHelper(target, {
+    closed: reason => { initialFailure = reason; assignedEvents?.closed(reason); },
+    progress: value => {
+      assignedEvents?.progress?.(value);
+      reportRemoteProgress(target, value);
+    },
+  }, true);
+  const windowHelpers = new Set([helper]);
+  void helper.exited.then(() => windowHelpers.delete(helper));
+  const promise = helper.pipe.ready.then(async () => {
+    if (initialFailure) throw Error(initialFailure.message);
+    if (cancelled || ![...requesters].some(([contents, grant]) => requesterCurrent(contents, grant.document))) {
+      throw Error("The requesting document is no longer assigned");
+    }
+    const partition = `remote-${++remoteWindowCount}`;
+    const isolatedSession = session.fromPartition(partition);
+    installAssets(isolatedSession, path.join(__dirname, "ui"));
+    guardPermissions(isolatedSession, () => APP_ORIGIN);
+    isolatedSession.on("will-download", event => event.preventDefault());
+    const win = new BrowserWindow({ width: 1280, height: 800, backgroundColor: "#181818",
+      title: remoteTitle(target, "reconnecting"), webPreferences: {
+        partition, preload: path.join(__dirname, "preload.js"), sandbox: true, contextIsolation: true,
+        nodeIntegration: false, devTools: !app.isPackaged,
+      } });
+    openedWindow = win;
+    policies.set(win.webContents, { origin: APP_ORIGIN, role: "remote" });
+    let initial = true;
+    broker.grant(win.webContents, { role: "remote", target, open: events => {
+      // Cancellation revokes pending retry/backoff intents before a delayed
+      // renderer event can allocate another child under the same document.
+      if (!entry.opensAllowed) throw Error("The remote connection attempt was cancelled");
+      if (initial) {
+        initial = false; assignedEvents = events;
+        // Ready may have been followed by EOF while the packaged page loaded.
+        // Replay the terminal state before handing off the already-settled
+        // promises, so the opening client receives failure instead of hanging.
+        if (initialFailure) events.closed(initialFailure);
+        return { pipe: helper.pipe, released: helper.exited };
+      }
+      const remember = entry.rememberNextOpen; entry.rememberNextOpen = false;
+      const next = remoteHelper(target, {
+        progress: value => { events.progress?.(value); reportRemoteProgress(target, value); },
+        closed: reason => { entry.lastFailure = reason; events.closed(reason); },
+      }, remember);
+      windowHelpers.add(next); void next.exited.then(() => windowHelpers.delete(next));
+      return { pipe: next.pipe, released: next.exited };
+    } });
+    let ready!: () => void, failed!: (error: Error) => void;
+    const usable = new Promise<void>((resolve, reject) => { ready = resolve; failed = reject; });
+    // Loading and the UI handshake run concurrently; install rejection handling
+    // immediately so a renderer failure during load is not unhandled.
+    void usable.catch(() => {});
+    const entry: RemoteWindow = { target, win, state: "reconnecting", connected: false, rendererGone: false,
+      helpers: windowHelpers, rememberNextOpen: false, opensAllowed: true, ready, failed };
+    remoteWindows.set(target, entry);
+    win.on("page-title-updated", event => event.preventDefault());
+    win.webContents.on("will-prevent-unload", event => event.preventDefault());
+    win.webContents.on("render-process-gone", () => {
+      entry.rendererGone = true; entry.state = "disconnected";
+      if (!win.isDestroyed()) win.setTitle(remoteTitle(target, entry.state));
+      entry.failed(Error("The remote workspace renderer stopped"));
+    });
+    win.on("closed", () => {
+      entry.failed(Error("The remote window closed before connecting"));
+      for (const owned of windowHelpers) owned.close();
+      if (remoteWindows.get(target) === entry) remoteWindows.delete(target);
+    });
+    const startupDeadline = setTimeout(() => failed(Error("The remote workspace startup timed out")), 125_000);
+    try { await win.loadURL(APP_URL); await usable; win.focus(); return { ok: true } as const; }
+    catch (error) { win.destroy(); throw error; }
+    finally { clearTimeout(startupDeadline); }
+  }).catch(error => { helper.close(); return openFailure(error instanceof Error ? error.message : String(error)); })
+    .finally(async () => {
+      for (const grant of requesters.values()) grant.remove();
+      requesters.clear();
+      // Successful transfer is counted by remoteWindows. Cancellation/failure
+      // retains opening capacity until the actual helper has been reaped.
+      if (!openedWindow || openedWindow.isDestroyed()) await Promise.all([...windowHelpers].map(owned => owned.exited));
+      if (pendingOpens.get(target)?.helper === helper) pendingOpens.delete(target);
+    });
+  const pending: PendingOpen = { promise, helper, requesters, cancel: contents => {
+    requesters.get(contents)?.remove(); requesters.delete(contents);
+    if (!requesters.size) { cancelled = true; helper.close(); openedWindow?.destroy(); }
+  } };
+  pendingOpens.set(target, pending);
+  addRequester(pending, requester, document);
+  return promise;
+}
+
+/** Keep deliberate retries coalesced until the existing document is connected.
+ * Cancellation stops only its owned attachment, leaving the window available. */
+function reopenRemote(entry: RemoteWindow, requester: WebContents, document: string): Promise<RemoteOpenResult> {
+  if (pendingOpens.size >= 4) return Promise.resolve(openFailure("Remote window capacity exhausted"));
+  const { target, win } = entry;
+  const requesters: PendingOpen["requesters"] = new Map();
+  let succeed!: () => void, fail!: (error: Error) => void;
+  const usable = new Promise<void>((resolve, reject) => { succeed = resolve; fail = reject; });
+  const previousReady = entry.ready, previousFailed = entry.failed;
+  entry.ready = succeed; entry.failed = fail; entry.lastFailure = undefined; entry.opensAllowed = true;
+  const stop = (message: string) => {
+    entry.opensAllowed = false; entry.rememberNextOpen = false;
+    for (const helper of entry.helpers) helper.pipe.close({ code: "cancelled", retryable: false, message });
+    fail(Error(message));
+  };
+  const deadline = setTimeout(() => stop("The remote workspace startup timed out"), 125_000);
+  let successful = false;
+  const promise = usable.then(() => { successful = true; return { ok: true } as const; })
+    .catch(error => openFailure(error instanceof Error ? error.message : String(error)))
+    .finally(async () => {
+      clearTimeout(deadline);
+      entry.ready = previousReady; entry.failed = previousFailed;
+      for (const grant of requesters.values()) grant.remove();
+      requesters.clear();
+      // Failure does not free opening capacity before child exit is observed.
+      if (!successful) await Promise.all([...entry.helpers].map(helper => helper.exited));
+      if (pendingOpens.get(target) === pending) pendingOpens.delete(target);
+    });
+  const pending: PendingOpen = { promise, requesters, cancel: contents => {
+    requesters.get(contents)?.remove(); requesters.delete(contents);
+    if (!requesters.size) stop("The requesting document is no longer assigned");
+  } };
+  pendingOpens.set(target, pending); addRequester(pending, requester, document);
+  if (entry.rendererGone) { entry.rememberNextOpen = true; win.webContents.reload(); }
+  else if (entry.state === "disconnected") {
+    entry.rememberNextOpen = true;
+    if (!broker.retryRemote(win.webContents)) stop("The remote document is no longer assigned. Reload this window.");
+  }
+  return promise;
+}
+
+function requesterCurrent(contents: WebContents, document: string): boolean {
+  try { return broker.authorized({ sender: contents, senderFrame: contents.mainFrame }, document); }
+  catch { return false; }
+}
+function addRequester(pending: PendingOpen, contents: WebContents, document: string): void {
+  const current = pending.requesters.get(contents);
+  if (current?.document === document) return;
+  current?.remove();
+  const revoked = () => pending.cancel(contents);
+  const navigating = (details: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>) => {
+    if (details.isMainFrame && !details.isSameDocument && isOwnDocument(contents, details.url)) revoked();
+  };
+  const remove = () => {
+    contents.removeListener("did-start-navigation", navigating);
+    contents.removeListener("render-process-gone", revoked);
+    contents.removeListener("destroyed", revoked);
+  };
+  pending.requesters.set(contents, { document, remove });
+  contents.on("did-start-navigation", navigating);
+  contents.on("render-process-gone", revoked);
+  contents.once("destroyed", revoked);
+  if (!requesterCurrent(contents, document)) revoked();
+}
+function cancelRemote(target: string, requester: WebContents): void { pendingOpens.get(target)?.cancel(requester); }
+
+/** Coalesce UI metadata reads onto one bounded native client. */
+let hostsRead: Promise<KnownHost[]> | undefined;
 function knownHosts(): Promise<KnownHost[]> {
-  return new Promise((resolve) => {
-    const child = spawn(findBinary(), ["remote-hosts", "--json"], {
-      env: cleanEnv(),
-      stdio: ["ignore", "pipe", "ignore"],
-    });
-    let output = "";
-    const timer = setTimeout(() => {
-      child.kill();
-      resolve([]);
-    }, 10_000);
-    child.stdout?.on("data", (chunk: Buffer) => { output += chunk.toString(); });
-    child.on("error", () => {
-      clearTimeout(timer);
-      resolve([]);
-    });
-    child.on("close", (code) => {
-      clearTimeout(timer);
-      resolve(code === 0 ? parseKnownHosts(output) : []);
-    });
-  });
+  if (!owner) return Promise.resolve([]);
+  return hostsRead ??= readKnownHosts(owner).catch(() => []).finally(() => { hostsRead = undefined; });
 }
 
 // ---------------------------------------------------------------------------
 // IPC handlers — resolve the target window from the event sender
 // ---------------------------------------------------------------------------
 
+/** Every exposed shell action is checked against the actual registered main
+ * frame and the current private-preload challenge, including queued old IPC. */
+function handleNativeCommand(channel: string, handler: (event: Electron.IpcMainInvokeEvent, ...args: any[]) => unknown): void {
+  ipcMain.handle(channel, (event, envelope: unknown) => {
+    if (!envelope || typeof envelope !== "object") throw Error("Native command has no document assignment");
+    const value = envelope as { document?: unknown; args?: unknown };
+    if (!broker.authorized(event, value.document) || !Array.isArray(value.args)) throw Error("Native command is not authorized for this document");
+    return handler(event, ...value.args);
+  });
+}
+
 function winFromEvent(event: Electron.IpcMainInvokeEvent): BrowserWindow | null {
   return BrowserWindow.fromWebContents(event.sender);
 }
 
-ipcMain.handle("window:minimize", (event) => {
+handleNativeCommand("window:minimize", (event) => {
   winFromEvent(event)?.minimize();
 });
 
-ipcMain.handle("window:maximize", (event) => {
+handleNativeCommand("window:maximize", (event) => {
   winFromEvent(event)?.maximize();
 });
 
-ipcMain.handle("window:unmaximize", (event) => {
+handleNativeCommand("window:unmaximize", (event) => {
   winFromEvent(event)?.unmaximize();
 });
 
-ipcMain.handle("window:toggle-maximize", (event) => {
+handleNativeCommand("window:toggle-maximize", (event) => {
   const win = winFromEvent(event);
   if (win) {
     win.isMaximized() ? win.unmaximize() : win.maximize();
   }
 });
 
-ipcMain.handle("window:close", (event) => {
+handleNativeCommand("window:close", (event) => {
   winFromEvent(event)?.close();
 });
 
-ipcMain.handle("window:force-close", (event) => {
+handleNativeCommand("window:force-close", (event) => {
   const win = winFromEvent(event);
   if (win) {
     (win as any)._forceClose = true;
@@ -685,7 +571,7 @@ ipcMain.handle("window:force-close", (event) => {
   }
 });
 
-ipcMain.handle("window:start-drag", (event, screenX: number, screenY: number) => {
+handleNativeCommand("window:start-drag", (event, screenX: number, screenY: number) => {
   const win = winFromEvent(event);
   if (!win) return;
 
@@ -708,24 +594,24 @@ ipcMain.handle("window:start-drag", (event, screenX: number, screenY: number) =>
 });
 
 // The zoom shortcuts zoom the whole page (display-zoom); the factor stays within their steps.
-ipcMain.handle("window:set-zoom", (event, factor: unknown) => {
+handleNativeCommand("window:set-zoom", (event, factor: unknown) => {
   if (typeof factor !== "number" || !Number.isFinite(factor)) return;
   event.sender.setZoomFactor(Math.min(3, Math.max(0.5, factor)));
 });
 
-ipcMain.handle("window:is-maximized", (event) => {
+handleNativeCommand("window:is-maximized", (event) => {
   return winFromEvent(event)?.isMaximized() ?? false;
 });
 
-ipcMain.handle("shell:open-external", (_event, url: unknown) => {
+handleNativeCommand("shell:open-external", (_event, url: unknown) => {
   if (typeof url === "string") openExternally(url);
 });
 
 /**
  * Is this call from the shell's own UI: the top frame of a main window on the
- * backend origin (access-control, Desktop Shell Command Scope)? Remote windows
- * have no preload and cannot call at all; this keeps the remote channels, which
- * run processes, closed to every other frame as well.
+ * packaged origin? handleNativeCommand also verifies the actual current main
+ * frame and document challenge. Remote preloads carry their assigned transport
+ * but do not receive local shell-command authority.
  */
 function fromOwnUi(event: Electron.IpcMainInvokeEvent): boolean {
   const policy = policies.get(event.sender);
@@ -733,7 +619,7 @@ function fromOwnUi(event: Electron.IpcMainInvokeEvent): boolean {
   return policy?.role === "main" && !!frame && frame.parent === null && frame.origin === policy.origin;
 }
 
-ipcMain.handle("editor:open-remote", (event, input: unknown) => {
+handleNativeCommand("editor:open-remote", (event, input: unknown) => {
   const policy = policies.get(event.sender);
   const frame = event.senderFrame;
   return openRemoteEditor({
@@ -744,7 +630,7 @@ ipcMain.handle("editor:open-remote", (event, input: unknown) => {
   }, input, (uri) => shell.openExternal(uri));
 });
 
-ipcMain.handle("editor:open-local", (event, input: unknown) => {
+handleNativeCommand("editor:open-local", (event, input: unknown) => {
   const policy = policies.get(event.sender);
   const frame = event.senderFrame;
   return openLocalEditor({
@@ -757,24 +643,25 @@ ipcMain.handle("editor:open-local", (event, input: unknown) => {
 
 // Show a finished download of this window in the file manager (access-control,
 // Showing A Saved Download): named by its URL, never by a path from the page.
-ipcMain.handle("download:reveal", (event, url: unknown) => {
-  const saved = fromOwnUi(event) ? savedDownload(url) : undefined;
+handleNativeCommand("download:reveal", (event, url: unknown) => {
+  const document = broker.callerDocument(event);
+  const saved = document ? savedDownload(event.sender, document, url) : undefined;
   if (!saved) throw new Error("No finished download of this URL.");
   shell.showItemInFolder(saved);
 });
 
-ipcMain.handle("remote:hosts", (event) => {
+handleNativeCommand("remote:hosts", (event) => {
   return fromOwnUi(event) ? knownHosts() : [];
 });
 
-ipcMain.handle("remote:open", (event, target: unknown): RemoteOpenResult | Promise<RemoteOpenResult> => {
+handleNativeCommand("remote:open", (event, target: unknown): RemoteOpenResult | Promise<RemoteOpenResult> => {
   if (!fromOwnUi(event)) return openFailure("Remote windows open only from Splitty's own window.");
   if (!isAcceptableTarget(target)) return openFailure("Not a valid target: use [user@]host[:port].");
-  return openRemote(target, event.sender);
+  return openRemote(target, event);
 });
 
-ipcMain.handle("remote:cancel", (event, target: unknown) => {
-  if (fromOwnUi(event) && typeof target === "string") cancelRemote(target);
+handleNativeCommand("remote:cancel", (event, target: unknown) => {
+  if (fromOwnUi(event) && typeof target === "string") cancelRemote(target, event.sender);
 });
 
 // ---------------------------------------------------------------------------
@@ -787,38 +674,35 @@ if (!gotLock) {
   // Another instance is already running — it will handle the new window.
   app.quit();
 } else {
-  // Each additional window gets its own bootstrap code. Reusing the original
-  // launch URL would hand out an already-spent credential — and, before codes
-  // became single-use, a reusable one (SR-03/SR-04).
-  app.on("second-instance", () => {
-    if (!backendOrigin) return;
-    void requestBootstrap().then((bootstrap) => {
-      if (!bootstrap) return;
-      createWindow(`${backendOrigin}/?bootstrap=${bootstrap}&desktop=1`, windowSettings);
-    });
-  });
+  app.on("second-instance", () => { if (owner) createWindow(APP_URL, windowSettings); });
 
   app.on("web-contents-created", (_event, contents) => hardenWebContents(contents));
 
   app.whenReady().then(async () => {
     Menu.setApplicationMenu(null);
+    installAssets(session.defaultSession, path.join(__dirname, "ui"));
 
     // Electron answers every permission request with "granted" unless told
     // otherwise. Remote windows' partitions get theirs when they are created.
-    guardPermissions(session.defaultSession, () => backendOrigin);
+    guardPermissions(session.defaultSession, () => APP_ORIGIN);
     // Files a main window saved (`splitty download`) are remembered to be shown.
-    session.defaultSession.on("will-download", (_event, item, contents) => {
-      if (policyOf(contents)?.role !== "main") return;
+    session.defaultSession.on("will-download", (event, item, contents) => {
       const url = item.getURL();
+      let document: string | undefined;
+      try { document = broker.callerDocument({ sender: contents, senderFrame: contents.mainFrame }); } catch { /* Destroyed source. */ }
+      if (!document || !isPackagedBlob(url)) { event.preventDefault(); return; }
+      const assignedDocument = document;
       item.once("done", (_done, state) => {
-        if (state === "completed" && item.getSavePath()) rememberDownload(url, item.getSavePath());
+        if (state === "completed" && item.getSavePath() && requesterCurrent(contents, assignedDocument)) {
+          rememberDownload(contents, assignedDocument, url, item.getSavePath());
+        }
       });
     });
 
-    const { port, url } = await startSplitty();
-    backendOrigin = `http://127.0.0.1:${port}`;
-    windowSettings = await fetchSettings(backendOrigin);
-    createWindow(url, windowSettings);
+    owner = new NativeOwner(findBinary(), cleanEnv(), { closed: reason => console.error(reason.message) });
+    await owner.ready;
+    windowSettings = await readWindowSettings(owner);
+    createWindow(APP_URL, windowSettings);
   }).catch((err) => {
     console.error(err);
     app.quit();
@@ -828,12 +712,16 @@ if (!gotLock) {
     app.quit();
   });
 
-  app.on("will-quit", () => {
-    if (splittyProcess && !splittyProcess.killed) {
-      splittyProcess.kill();
-    }
-    // Quitting ends every tunnel; the hosts' daemons keep running.
-    for (const entry of remoteWindows.values()) entry.child?.kill("SIGTERM");
-    for (const pending of pendingOpens.values()) pending.child.kill("SIGTERM");
+  let quitting = false, cleaned = false;
+  app.on("before-quit", event => {
+    if (cleaned) return;
+    event.preventDefault();
+    if (quitting) return;
+    quitting = true;
+    for (const win of BrowserWindow.getAllWindows()) win.destroy();
+    owner?.close();
+    const cleanup = [...remoteHelpers].map(helper => { helper.close(); return helper.exited; });
+    if (owner) cleanup.push(owner.helper.exited);
+    void Promise.all(cleanup).then(() => { cleaned = true; app.quit(); });
   });
 }

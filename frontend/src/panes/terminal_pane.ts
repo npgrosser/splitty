@@ -242,6 +242,7 @@ export class TerminalPaneRenderer implements IContentRenderer {
         if (conn.mux.scratchpads && !this.scratchpad) {
           conn.scratchpads.link(api.id, s.id);
           this.scratchpad = new ScratchpadArea({
+            captureConnection: () => s.client.captureConnection(),
             paneId: api.id,
             sessionId: s.id,
             store: conn.scratchpads,

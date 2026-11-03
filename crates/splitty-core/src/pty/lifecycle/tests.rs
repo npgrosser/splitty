@@ -102,6 +102,7 @@ fn observed_exit_wins_a_queued_stop_without_signalling_reused_identity() {
     let (result, replies) = drive(
         &mut FakeProcess(kernel.clone()),
         rx,
+        &std::sync::atomic::AtomicBool::new(false),
         Duration::ZERO,
         Duration::ZERO,
     );
@@ -128,6 +129,7 @@ fn failed_signalling_and_unconfirmed_stop_are_errors_not_success() {
             drive(
                 &mut FakeProcess(worker_kernel),
                 rx,
+                &std::sync::atomic::AtomicBool::new(false),
                 Duration::ZERO,
                 Duration::ZERO,
             )

@@ -19,13 +19,66 @@ model {
       }
     }
 
-    ws = component 'ws' {
-      description 'WebSocket connections: binary output frames and JSON codec, the per-connection mux handler (welcome, resync, ops and their effects), broadcasting to clients, and ports.changed: the listening ports of the sessions after each welcome and on change, scanned every 2 seconds while clients are connected. Ephemeral editor requests target one registered attached client, expire and cancel on disconnect; never authorize desktop launches. File offers go to every registered attached client; the first to accept reads the file in chunks, the others drop it; offers expire and end on disconnect.'
+    service = component 'service' {
+      description 'Transport-independent UI operations: an explicit native operation catalog, fixed backend and local-hub roles, request validation, size limits and cancellation policy. Browser credentials and owner/grant administration are excluded.'
+      metadata { module 'splitty_server::service' spec 'control-api' }
+    }
+    native = component 'native' {
+      description 'Verified native carrier and fixed-role service dispatcher; request generations, bounded concurrent operations, cancellation and shared session identity. The inherited embedded owner pipe keeps one runtime across bounded document/Hub substreams without a client listener.'
+      metadata { module 'splitty_server::native' spec 'mux-protocol' }
+    }
+
+    client_session = component 'client_session' {
+      description 'Common client connections: independent per-connection identity and cleanup, binary output frames and JSON codec, the per-connection mux handler (welcome, resync, ops and their effects), typed broadcasts through per-client notification queues that drain after welcome, and ports.changed: the listening ports of the sessions after each welcome and on change, scanned every 2 seconds while clients are connected. Ephemeral editor requests target one registered attached client, expire and cancel on disconnect; never authorize desktop launches. File offers go to every registered attached client; the first to accept reads the file in chunks, the others drop it; offers expire and end on disconnect.'
       metadata {
-        module 'splitty_server::ws'
+        module 'splitty_server::client_session'
         spec 'mux-protocol'
       }
     }
+
+    ws = component 'ws' {
+      description 'WebSocket carrier: translates text/binary/control frames to the common client loop, with independent identity and cleanup for every upgraded browser connection.'
+      metadata { module 'splitty_server::ws' spec 'mux-protocol' }
+    }
+
+    ws -> client_session 'One common service connection per WebSocket'
+    native -> service 'Validated operation catalog, shared dispatch and bounded response serialization'
+    native -> hub 'Owner-endpoint host streams use the same assigned service hub and forwarding lifetime'
+    native -> splitty.remote.ssh 'Validate an explicit host-open intent before preparing SSH'
+    native -> client_session 'One session identity after service admission'
+    native -> splitty.core.protocol 'Independent mux protocol version'
+    native -> splitty.core.config 'Configured private run directory and unsupported mount paths'
+    native -> splitty.core.daemon 'Validated native discovery with legacy diagnosis and no TCP fallback'
+    native -> splitty.core.pty 'Owned embedded terminals for desktop child pipes'
+    native -> control 'Optional owner control for an embedded child service'
+    native -> splitty.transport.budget 'Keep received frame leases through CLI consumption'
+    native -> splitty.transport.admission 'Carrier/opening/stream lifetimes and trusted quota assignment'
+    native -> splitty.transport.negotiation 'Verify framing and service before dispatch'
+    native -> splitty.transport.peer 'Full-duplex framed carrier with bounded controls'
+    native -> splitty.transport.queue 'Shared session and wire byte budget and close scope'
+    native -> splitty.transport.requests 'Request IDs, deadlines and cancellation generations'
+    native -> splitty.transport.wire 'Explicit request, reply and session frame envelopes'
+    service -> splitty.transport.budget 'Retain decoded session objects and response capacity'
+    service -> splitty.transport.codec 'Admit JSON object allocation before session validation'
+    service -> splitty.transport.wire 'Maximum serialized response size'
+    http -> ws 'Authenticated WebSocket upgrade'
+    main -> splitty.transport.admission 'Trusted quota keys for the explicit SSH browser gateway'
+    main -> splitty.transport.negotiation 'Recognize stale daemon discovery during browser gateway recovery'
+    main -> hub 'Own and stop the deliberately requested development forwards'
+    http -> native 'Fixed-backend browser gateway connects to verified private daemon clients'
+    http -> splitty.transport.codec 'Malformed framing and pre-admission conformance cases'
+    http -> splitty.transport.negotiation 'Native/browser conformance and stale discovery tests'
+    http -> splitty.transport.peer 'Conformance tests use the same native client carrier'
+    http -> splitty.transport.queue 'Shared byte context in adapter tests'
+    http -> splitty.transport.wire 'Cross-adapter request, cancellation and reply assertions'
+    http -> splitty.transport.budget 'Browser parser, body, decoded reply and WebSocket delivery leases'
+    http -> splitty.transport.admission 'Admit anonymous HTTP carriers before task allocation; retain through upgrades'
+    http -> splitty.remote.bridge 'Independent native SSH connections for API and browser streams'
+    http -> splitty.remote.handshake 'Supervisor-assigned daemon instance; no browser-selected endpoint'
+    http -> splitty.remote.tunnel 'Admit and open only the assigned native SSH backend'
+    http -> splitty.remote.ssh 'Validate main-role host intent and native host-open conformance targets'
+    http -> splitty.core.daemon 'Checked native daemon descriptor for explicit browser access'
+
 
     embed = component 'embed' {
       description 'The built frontend (frontend/dist) embedded into the binary; index.html with the theme colors injected.'
@@ -43,7 +96,7 @@ model {
     }
 
     cli = component 'cli' {
-      description 'Client side of the control commands: offline version-matched agent guide, server discovery (environment, daemon.json, flags), calls to the API over TCP or the control socket, scoped agent exec with CLI PATH inheritance, external editor path requests, and file downloads to a window, packing a folder into a zip first. The server\'s WebSocket for local clients (socket: token, ticket, own origin), and attach: a session of the daemon in this terminal as a session protocol client (targets and the pick list, raw mode and the mode reset, the detach key, the replay without report requests, size reports).'
+      description 'Client side of the control commands: offline version-matched agent guide, server discovery (environment, daemon.json, flags), calls to the API over TCP or the control socket, scoped agent exec with CLI PATH inheritance, external editor path requests, and file downloads to a window, packing a folder into a zip first. The server\'s WebSocket for local clients (socket: token, ticket, own origin), and attach: verified private native daemon discovery by default, an explicit authenticated browser gateway when selected, or direct keeper access without a daemon; a session in this terminal as a session protocol client (targets and the pick list, raw mode and the mode reset, the detach key, the replay without report requests, size reports).'
       metadata {
         module 'splitty_server::cli'
         spec 'cli'
@@ -51,14 +104,14 @@ model {
     }
 
     host = component 'host' {
-      description 'What the binary does on a remote host for a client over SSH: remote-handshake (this server, the daemon with whether it keeps its sessions, started on request with daemon start, and its screens) and remote-bridge (the daemon\'s WebSocket over stdio, authenticated on the host with the token file and a ticket, so no credential crosses SSH) and, Linux only, remote-relay (prepare: the owner-only relay directory in the run directory; serve: one shared port on 127.0.0.1 and ::1 of the host, relayed to the Unix socket sshd binds for the client\'s remote forward, only for connections whose socket the /proc owner check finds to be of its own user, ended at end of input or after 45 seconds without a heartbeat).'
+      description 'Host commands over SSH: remote-handshake reports the answering binary, daemon and screens; remote-bridge validates the private native endpoint and relays bounded, separately credited frames over stdio, without tokens or HTTP. It restricts incoming requests to the remote UI catalog and detaches without ending host sessions. Linux remote-relay prepares a private relay directory and serves one deliberately shared loopback port via the sshd Unix socket, with an owner check for connecting sockets and a heartbeat deadline.'
       metadata {
         module 'splitty_server::host'
       }
     }
 
     hub = component 'hub' {
-      description 'The remote screen hub (/ws/remote, /api/remote/hosts, /api/remote/screens, /api/remote/catalog, /api/remote/host-preferences, /api/remote/host-order): for each socket its own ssh connections, carrying only stdio, which install the server, run the handshake with --ensure-daemon and a port hint free on this side, with update=1 stop a daemon of another version (daemon stop) and run the handshake again, check the daemon\'s protocol (the same version or the one before) and start remote-bridge on the host; remote.progress, one remote.ready (with the daemon\'s keepsSessions) or a remote.error with a code, message and hint, then a verbatim relay both ways, closed with 4001 when the host side ends. Records visible ready targets as recent hosts, lists the known hosts with display aliases, saves host preferences and the arranged order of the host groups, and forgets recent/alias/order/catalog metadata without ending connections or forwards, and keeps the client\'s remembered remote screens in remote-screens.json (checked, owner-only). Caches the last observed screen directories of 20 hosts in remote-catalog.json, separately from open screens, with validated per-host merges under a mutex and atomic private writes; reading or updating the cache never contacts a host. Forwards ports of hosts on request (/api/remote/forwards): one owned forward-only ssh -N each on 127.0.0.1, positively verified, supervised and rebuilt on the same port until stopped, at most 32 active/opening per host. hub::preferences stores opt-in mappings, labels and enabled state in private atomic remote-forwards.json (32 per host, 256 total); /api/remote/forward-preferences merges metadata without SSH. Successful remote.ready schedules only that host\'s enabled inactive mappings without delaying relay. Per-key ordered operations include cancelled-request cleanup, while short map/storage locks merge independent entries. Stop durably disables before closing; successful explicit Resume commits after verification; Forget keeps live supervision. Saved/explicit ports are strict on both loopback families and initial failures remain queryable only in runtime lastError. hub::reverse shares local ports with hosts on request (/api/remote/reverse-forwards, /api/remote/reverse-forward-preferences): one relay-only ssh -R to a Unix socket in the host\'s relay directory plus remote-relay serve each, Linux hosts only, never the server\'s own port, the same lanes, supervision, limits and opt-in restore after remote.ready as forwards, saved in remote-reverse-forwards.json.'
+      description 'The remote screen hub (/ws/remote, /api/remote/hosts, /api/remote/screens, /api/remote/catalog, /api/remote/host-preferences, /api/remote/host-order): for each socket its own ssh connections, carrying only stdio, which install the server, run the port-free format-2 handshake with --ensure-daemon, with update=1 conditionally stop only the checked older keeper-backed daemon through its owner socket and refresh discovery, check the daemon\'s protocol (the same version or the one before) and start remote-bridge on the host; remote.progress, one remote.ready (with the daemon\'s keepsSessions) or a remote.error with a code, message and hint, then a bounded native relay with independent delivery credit; native host streams carry the same prelude after verified host-purpose admission, closed with 4001 when the host side ends. Records visible ready targets as recent hosts, lists the known hosts with display aliases, saves host preferences and the arranged order of the host groups, and forgets recent/alias/order/catalog metadata without ending connections or forwards, and keeps the client\'s remembered remote screens in remote-screens.json (checked, owner-only). Caches the last observed screen directories of 20 hosts in remote-catalog.json, separately from open screens, with validated per-host merges under a mutex and atomic private writes; reading or updating the cache never contacts a host. Forwards ports of hosts on request (/api/remote/forwards): one owned forward-only ssh -N each on 127.0.0.1, positively verified, supervised and rebuilt on the same port until stopped, at most 32 active/opening per host. hub::preferences stores opt-in mappings, labels and enabled state in private atomic remote-forwards.json (32 per host, 256 total); /api/remote/forward-preferences merges metadata without SSH. Successful remote.ready schedules only that host\'s enabled inactive mappings without delaying relay. Per-key ordered operations include cancelled-request cleanup, while short map/storage locks merge independent entries. Stop durably disables before closing; successful explicit Resume commits after verification; Forget keeps live supervision. Saved/explicit ports are strict on both loopback families and initial failures remain queryable only in runtime lastError. hub::reverse shares local ports with hosts on request (/api/remote/reverse-forwards, /api/remote/reverse-forward-preferences): one relay-only ssh -R to a Unix socket in the host\'s relay directory plus remote-relay serve each, Linux hosts only, never the server\'s own port, the same lanes, supervision, limits and opt-in restore after remote.ready as forwards, saved in remote-reverse-forwards.json.'
       metadata {
         module 'splitty_server::hub'
         spec 'remote-screens'
@@ -77,18 +130,37 @@ model {
     jobs -> splitty.core.effect_runner 'EffectRunner, EnvContext'
     jobs -> splitty.core.pty 'Backend, session handles, bounded output and process results'
     jobs -> splitty.core.protocol 'ServerEvent'
-    ws -> jobs 'Shared job coordinator'
-    main -> jobs 'Await managed-job shutdown'
+    client_session -> jobs 'Shared job coordinator'
+    client_session -> splitty.transport.queue 'Bounded ordered input/output and shared PTY delivery context'
+    client_session -> splitty.transport.wire 'Frame ceilings include generation and receipt overhead'
+    client_session -> splitty.transport.codec 'Measure JSON before queue admission and allocate exact serialized capacity'
+    client_session -> splitty.transport.budget 'Count parsed session objects and download scratch through actual worker completion'
+    client_session -> splitty.transport.admission 'Bound live client identities before allocating state and until cleanup'
     http -> jobs 'Job routes, actor scopes, grant administration'
+    http -> service 'Shared terminal-service state and explicit native operation catalog'
+    service -> client_session 'Shared session registry, dispatcher and client delivery'
+    service -> hub 'Service-owned remote host management'
+    service -> splitty.core.mux 'Workspace store'
+    service -> splitty.core.daemon 'Persist workspace changes only in daemon mode'
+    service -> splitty.core.effect_runner 'Runtime composition of PTY effects and owner-control environment'
+    service -> splitty.core.config 'Home and server settings'
+    service -> splitty.core.shell_profiles 'Shell profile state'
+    service -> splitty.core.template 'Template store'
+    service -> jobs 'Trusted-user and scoped job operations with serialization under authorization guards'
+    service -> splitty.core.ids 'Screen, pane and job identifiers'
+    service -> splitty.core.protocol 'Client commands, server events and size policy'
+    service -> splitty.core.pty 'Job log query options'
+    service -> splitty.core.theme 'Resolve and list themes'
     http -> cli 'Bounded control-socket transport and splitty download in tests'
     http -> control 'Provision private grant sockets'
     control -> jobs 'Grant listeners and their lifetime'
     control -> splitty.core.ids 'AgentId'
 
     http -> embed 'FrontendAssets, themed_index_html'
-    http -> ws 'WebSocket upgrade, WsState; PortWatch in tests'
+    http -> client_session 'WebSocket upgrade, WsState; PortWatch in tests'
     http -> hub 'Hub, serve, known_hosts, remembered_screens, remember_screens, open_forward_with, forwards, stop_forward, forward_preferences, save_forward, forget_forward, reserve_local_port, open_reverse, reverses, stop_reverse, reverse_preferences, save_reverse, forget_reverse, ForwardError, Code, MAX_MESSAGE; a scripted host, HOST_LOST and VERSION in tests'
     control -> http 'AppState, build_control_router'
+    control -> service 'Compose owner control without browser credentials'
 
     // Into the core
 
@@ -99,34 +171,44 @@ model {
     http -> splitty.core.protocol 'ClientCommand, ServerEvent, SizeConfig (settings updates); sizing types in tests'
     http -> splitty.core.shell_profiles 'ShellProfilesState, detection, updates'
     http -> splitty.core.template 'TemplateStore, FileStore, Template'
-    http -> splitty.core.theme 'list_themes, resolve_theme'
     http -> splitty.core.effect_runner 'EffectRunner, EnvContext in tests'
     http -> splitty.core.pty 'pty::manager::Manager, ListeningPort and CreateSessionOpts in tests'
-    ws -> splitty.core.ids 'ids'
-    ws -> splitty.core.mux 'Store, Op, ScreenOp, Effect'
-    ws -> splitty.core.effect_runner 'EffectRunner, EnvContext'
-    ws -> splitty.core.protocol 'Dispatcher, Request, ServerEvent, message types, the pty-size-v1 capability'
-    ws -> splitty.core.pty 'Backend, ports (the scan, ListeningPort)'
-    ws -> splitty.core.shell_profiles 'ShellProfilesState'
+    client_session -> splitty.core.ids 'ids'
+    client_session -> splitty.core.mux 'Store, Op, ScreenOp, Effect'
+    client_session -> splitty.core.effect_runner 'EffectRunner, EnvContext'
+    client_session -> splitty.core.protocol 'Dispatcher, Request, ServerEvent, message types, the pty-size-v1 capability'
+    client_session -> splitty.core.pty 'Backend, ports (the scan, ListeningPort)'
+    client_session -> splitty.core.shell_profiles 'ShellProfilesState'
     embed -> splitty.core.config 'load, themes_dir'
     embed -> splitty.core.theme 'resolve_theme'
     control -> splitty.core.config 'config_dir_override, ensure_private_dir'
     cli -> splitty.core.daemon 'read_info, is_running'
     cli -> splitty.core.ids 'JobId for request identifiers'
     cli -> splitty.core.pty 'Available CLI directory and OS-native PATH composition for agent exec; the replay filter for attach; pty::testing in tests'
-    cli -> splitty.core.auth 'resolve (the token file) for attach'
+    cli -> native 'Native endpoint validation, fixed-incarnation API and session attachment'
+    cli -> service 'Enumerated native mux state query'
+    cli -> splitty.transport.budget 'Borrow frame bytes while retaining delivery allowance'
+    cli -> splitty.transport.codec 'Reserve decoded native workspace JSON before selecting a pane'
+    cli -> splitty.transport.peer 'Native session messages remain charged through consumption'
+    cli -> splitty.transport.wire 'Native text/binary session kinds'
     cli -> splitty.core.config 'ensure_private_dir for the folder archive store'
     cli -> splitty.core.protocol 'Session protocol message types for attach; the offer size limit and civil_from_days for folder archives'
-    cli -> ws 'decode_binary_frame for attach; encode_binary_frame in tests'
+    cli -> client_session 'decode_binary_frame for attach; encode_binary_frame in tests'
 
     // The host side of remote clients
 
-    host -> cli 'ServerInfo, Transport, api_get (screens), socket::open (the daemon\'s WebSocket for the bridge)'
-    host -> splitty.core.auth 'resolve (the token file)'
+    host -> native 'Verified private daemon client for the SSH exec bridge'
+    host -> service 'Restrict host stream requests to the remote UI operation catalog'
+    host -> splitty.transport.admission 'Acquire carrier and stream capacity before negotiating'
+    host -> splitty.transport.codec 'Validate and relay native frames and admit decoded screen lists'
+    host -> splitty.transport.negotiation 'Native hello and verified daemon identity over SSH stdio'
+    host -> splitty.transport.peer 'Bounded full-duplex relay with independent hop credits'
+    host -> splitty.transport.queue 'Per-connection budget and cancellation context'
+    host -> splitty.transport.wire 'Native request, reply, cancel and session kinds'
     host -> splitty.core.daemon 'read_info, is_running'
     host -> splitty.core.protocol 'PROTOCOL_VERSION'
     host -> splitty.remote.handshake 'Handshake and its parts'
-    host -> splitty.remote.bridge 'read_frame, write_frame'
+    host -> splitty.remote.ssh 'Bounded owned daemon-start capture with worker admission'
     host -> splitty.core.config 'run_dir, ensure_private_dir (the relay directory)'
     host -> splitty.core.pty 'ports::connection_owner (the relay\'s owner check)'
     main -> host 'remote-handshake, remote-bridge, remote-relay'
@@ -138,15 +220,31 @@ model {
     hub -> splitty.remote.ssh 'SshTarget, Ssh (stdio-only, forward-only, relay-only), run_checked, classify, host key and login failures'
     hub -> splitty.remote.install 'prepare, payload_for, Prepared, Server, CONFIG_DIR_VARIABLE'
     hub -> splitty.remote.handshake 'handshake, Handshake, RunningDaemon, Screen'
-    hub -> splitty.remote.bridge 'Bridge, Frame, MAX_FRAME'
+    hub -> splitty.remote.bridge 'NativeBridge, verified service identity and owned exec cleanup'
     hub -> splitty.remote.hosts 'known, record_recent_if_visible, preferences, update_preference, host_order, set_host_order, forget_locked, lock, default_ssh_dir, write_private (atomic private catalog/screens/forward preferences)'
     hub -> splitty.remote.tunnel 'PortReservation, reserve, reserve_exact, check_forward_address, backoff, PortTunnel, PortTunnelError, ReverseTunnel, ReverseTunnelError, prepare_command, parse_prepared'
+    hub -> native 'Fixed-host input validation and bounded preparation over native pipes'
+    hub -> service 'Validate relayed session operations before forwarding'
+    hub -> splitty.transport.admission 'Reserve process, domain and host capacity before setup'
+    hub -> splitty.transport.budget 'Hold browser relay and early-message bytes through delivery'
+    hub -> splitty.transport.codec 'Bounded preparation and native failure frames'
+    hub -> splitty.transport.negotiation 'Verify fixed-host service purpose before admission'
+    hub -> splitty.transport.peer 'Independent native host stream, ordered relay and credits'
+    hub -> splitty.transport.queue 'Native host connection cancellation and byte budget'
+    hub -> splitty.transport.wire 'Native preparation, host prelude and fixed service identity'
+    native -> splitty.transport.codec 'Serialize native preparation and relay frames'
+    native -> splitty.remote.ssh 'Validated target and stdio-only owned SSH connector'
+    native -> splitty.remote.hosts 'Record successful explicit host opens; automatic recovery preserves forgotten hosts'
+    native -> splitty.remote.install 'Prepare the shipped host payload for an SSH helper'
+    native -> splitty.remote.tunnel 'Bounded native SSH setup with progress and safe conditional updates'
+
 
     // Into splitty-remote
 
     main -> splitty.remote.ssh 'SshTarget, Ssh'
     main -> splitty.remote.install 'payload_for'
     main -> splitty.remote.tunnel 'open, supervise, GIVE_UP_AFTER, ConnectEvent'
+    main -> splitty.remote.bridge 'Keep permanent admitted framing failures typed through supervision'
     main -> splitty.remote.hosts 'record_recent, known, default_ssh_dir'
 
     // Composition root
@@ -154,16 +252,15 @@ model {
     main -> cli 'discover, api calls'
     main -> control 'socket_path, spawn'
     main -> http 'AppState, routers'
-    main -> ws 'WsState'
+    main -> service 'Explicit embedded or persistent runtime construction'
+    main -> native 'Private listener inheritance, daemon accept loop and owned desktop child pipes'
+    main -> splitty.transport.wire 'Native discovery transport version'
     main -> splitty.core.auth 'load_or_create, resolve'
     main -> splitty.core.config 'config_dir, load, load_server, themes_dir'
     main -> splitty.core.daemon 'daemon.json, PID checks, save_state, restore'
     main -> splitty.core.effect_runner 'EffectRunner, EnvContext'
-    main -> splitty.core.mux 'Store, WorkspaceState'
     main -> splitty.core.protocol 'Dispatcher, NotificationEngine, SizeConfig'
     main -> splitty.core.pty 'Backend, Manager, publish_stable_cli'
-    main -> splitty.core.shell_profiles 'state_from_settings'
-    main -> splitty.core.template 'FileStore'
     main -> splitty.core.keeper 'process::run (the session-keeper subcommand), client::Keepers and ProcessLauncher (the daemon\'s terminals), find and take_over (adoption at start, --end-sessions), dir::keepers_dir'
     cli -> splitty.core.keeper 'client::find and Found, wire frames, dir::keepers_dir: attach to a keeper while no daemon runs'
   }

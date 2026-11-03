@@ -2,7 +2,7 @@
 //! it over SSH: the handshake (`remote-handshake`), the bridge
 //! (`remote-bridge`) and the relay of a reverse forward (`remote-relay`).
 //! They run as the SSH user; the first two touch only that user's daemon,
-//! over loopback or its owner-only control socket, and the relay only that
+//! over its verified private endpoint, and the relay only that
 //! user's connections and its own socket.
 
 pub mod bridge;
@@ -11,33 +11,14 @@ pub mod relay;
 
 use splitty_core::daemon::{self, DaemonInfo};
 
-/// The running daemon, after removing a stale info file.
-fn running_daemon() -> Option<DaemonInfo> {
-    let info = daemon::read_info()?;
-    if daemon::is_running(info.pid) {
-        Some(info)
-    } else {
-        daemon::remove_info();
-        None
+/// Read-only discovery. A stale observation must never remove a replacement's
+/// record; only the instance-locked daemon lifecycle may rewrite discovery.
+fn running_daemon() -> Result<Option<DaemonInfo>, String> {
+    let info = daemon::read_info_checked()
+        .map_err(|error| format!("cannot verify daemon discovery: {error}"))?;
+    match info {
+        Some(info) if daemon::is_running(info.pid) => Ok(Some(info)),
+        Some(_) => Ok(None),
+        None => Ok(None),
     }
-}
-
-/// How the local CLI reaches this daemon: its control socket, or loopback TCP
-/// with the token file when it runs without one.
-fn reach(info: &DaemonInfo) -> Result<crate::cli::ServerInfo, String> {
-    use crate::cli::{ServerInfo, Transport};
-
-    let transport = if info.socket.is_empty() {
-        let (token, _) = splitty_core::auth::resolve("").map_err(|e| e.to_string())?;
-        Transport::Tcp {
-            addr: format!("127.0.0.1:{}", info.port),
-            token,
-        }
-    } else {
-        Transport::LocalSocket(info.socket.clone())
-    };
-    Ok(ServerInfo {
-        transport,
-        source: "daemon",
-    })
 }

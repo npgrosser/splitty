@@ -5,14 +5,13 @@
   "identifier": "com.splitty.app",
   "build": {
     "beforeDevCommand": "",
-    "devUrl": "http://localhost:1420",
     "beforeBuildCommand": "",
     "frontendDist": "../../frontend/dist"
   },
   "app": {
     "windows": [],
     "security": {
-      "csp": "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost http://127.0.0.1:*; frame-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+      "csp": "default-src 'none'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: asset: http://asset.localhost; font-src 'self'; connect-src 'self' ipc: http://ipc.localhost; frame-src 'none'; frame-ancestors 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
     }
   },
   "bundle": {

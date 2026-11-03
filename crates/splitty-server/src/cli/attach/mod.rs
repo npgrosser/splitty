@@ -3,8 +3,8 @@
 //! it. The server keeps owning the session; detaching leaves it running.
 //!
 //! The server is the daemon of this machine, reached like `remote-bridge`
-//! reaches it (token file, ticket, WebSocket), or one named by `--addr` and
-//! `--token`. `SPLITTY_SOCK` is not used, so the pane list and the stream
+//! reaches it (verified private Unix socket), or an explicit browser gateway
+//! named by `--addr` and `--token`. `SPLITTY_SOCK` is not used, so the pane list and the stream
 //! always come from the same server. Without either, the terminal controls a
 //! session keeper of this machine directly, until a starting daemon takes it
 //! over and the attach continues through the daemon.
@@ -86,15 +86,39 @@ async fn run_in_terminal(options: Options) -> Result<Outcome, CliError> {
     if !terminal::is_terminal() {
         return Err(CliError::Failed("splitty attach needs a terminal".into()));
     }
-    let Some((addr, token)) = server(
-        options.addr.as_deref(),
-        options.token.as_deref(),
-        daemon_port,
-        token_file,
-    )?
-    else {
-        return run_on_keeper(options).await;
-    };
+    if options.addr.is_none() && options.token.is_none() {
+        let Some(info) = native_daemon()? else {
+            return run_on_keeper(options).await;
+        };
+        let connector = crate::native::client::Connector::default();
+        let mut api = connector.local(&info).await.map_err(native_error)?;
+        let reply = api
+            .request(
+                crate::service::catalog::Operation::MuxState,
+                serde_json::Map::new(),
+            )
+            .await
+            .map_err(native_error)?;
+        if reply.status != 200 {
+            return Err(CliError::Failed(reply.body.chars().take(4096).collect()));
+        }
+        let decoded = splitty_transport::codec::reserve_json(
+            reply.body.as_bytes(),
+            &api.sender().context().budget,
+            false,
+        )
+        .map_err(native_error)?;
+        let state = serde_json::from_str(&reply.body).map_err(native_error)?;
+        api.shutdown().await;
+        let panes = target::panes(&state);
+        let session_id = session_for(options.target.as_deref(), &panes, pick)?;
+        drop((panes, state, reply, decoded));
+        refuse_own_session(&session_id, std::env::var("SPLITTY_SESSION_ID").ok())?;
+        let client = connector.local(&info).await.map_err(native_error)?;
+        return show_native(client, session_id, options.detach_key).await;
+    }
+    let (addr, token) = explicit_server(options.addr.as_deref(), options.token.as_deref())?
+        .expect("explicit options were provided");
     let api = super::ServerInfo {
         transport: super::Transport::Tcp {
             addr: addr.clone(),
@@ -106,7 +130,6 @@ async fn run_in_terminal(options: Options) -> Result<Outcome, CliError> {
     let panes = target::panes(&state);
     let session_id = session_for(options.target.as_deref(), &panes, pick)?;
     refuse_own_session(&session_id, std::env::var("SPLITTY_SESSION_ID").ok())?;
-
     let socket = super::socket::open(&addr, &token)
         .await
         .map_err(CliError::Failed)?;
@@ -138,8 +161,6 @@ async fn run_in_terminal(options: Options) -> Result<Outcome, CliError> {
 /// Without a daemon: a keeper of this machine, controlled directly.
 #[cfg(unix)]
 async fn run_on_keeper(options: Options) -> Result<Outcome, CliError> {
-    use futures::StreamExt;
-
     let found = splitty_core::keeper::client::find(&splitty_core::keeper::dir::keepers_dir());
     if found.is_empty() {
         return Err(CliError::Failed(NO_DAEMON.into()));
@@ -165,18 +186,25 @@ async fn run_on_keeper(options: Options) -> Result<Outcome, CliError> {
         Ok(keeper::Ended::TakenOver) => match daemon_after_takeover().await {
             // A starting daemon took the keeper: carry on through it, without
             // showing what the terminal shows already.
-            Some((addr, token)) => match super::socket::open(&addr, &token).await {
-                Ok(socket) => {
-                    let (to_server, from_server) = socket.split();
-                    let attach = session::Attach {
-                        session_id,
-                        detach_key: options.detach_key,
-                        size: terminal::size(&std::io::stdout()).unwrap_or(size),
-                        skip_replay: true,
-                    };
-                    session::run(attach, to_server, from_server, &mut events, &mut screen).await
+            Some(info) => match crate::native::client::Connector::default()
+                .local(&info)
+                .await
+            {
+                Ok(client) => {
+                    run_native(
+                        client,
+                        session::Attach {
+                            session_id,
+                            detach_key: options.detach_key,
+                            size: terminal::size(&std::io::stdout()).unwrap_or(size),
+                            skip_replay: true,
+                        },
+                        &mut events,
+                        &mut screen,
+                    )
+                    .await
                 }
-                Err(error) => Err(CliError::Failed(error)),
+                Err(error) => Err(native_error(error)),
             },
             None => Ok(Outcome::TakenOver),
         },
@@ -189,12 +217,10 @@ async fn run_on_keeper(options: Options) -> Result<Outcome, CliError> {
 /// The daemon that took a keeper over, once it serves: a daemon claims its
 /// keepers before it writes `daemon.json`.
 #[cfg(unix)]
-async fn daemon_after_takeover() -> Option<(String, String)> {
+async fn daemon_after_takeover() -> Option<splitty_core::daemon::DaemonInfo> {
     for _ in 0..50 {
-        if let Some(port) = daemon_port() {
-            return token_file()
-                .ok()
-                .map(|token| (format!("127.0.0.1:{port}"), token));
+        if let Ok(Some(info)) = native_daemon() {
+            return Some(info);
         }
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     }
@@ -202,40 +228,78 @@ async fn daemon_after_takeover() -> Option<(String, String)> {
 }
 
 #[cfg(unix)]
-fn token_file() -> Result<String, String> {
-    splitty_core::auth::resolve("")
-        .map(|(token, _)| token)
-        .map_err(|e| e.to_string())
+fn native_error(error: impl std::fmt::Display) -> CliError {
+    CliError::Failed(error.to_string())
 }
 
-/// The daemon's port, when `daemon.json` names a live daemon.
 #[cfg(unix)]
-fn daemon_port() -> Option<u16> {
-    splitty_core::daemon::read_info()
-        .filter(|info| splitty_core::daemon::is_running(info.pid))
-        .map(|info| info.port)
+fn native_daemon() -> Result<Option<splitty_core::daemon::DaemonInfo>, CliError> {
+    let info = splitty_core::daemon::read_info_checked()
+        .map_err(native_error)?
+        .filter(|info| splitty_core::daemon::is_running(info.pid));
+    if info.as_ref().is_some_and(|info| info.legacy()) {
+        return Err(CliError::Failed(
+            "legacy daemon has no native endpoint; explicitly restart/update it before attaching"
+                .into(),
+        ));
+    }
+    Ok(info)
 }
 
-/// The server to attach to and its token: `--addr` with `--token`, or the
-/// daemon of this machine with the token file, which is read only then. None
-/// without either: the keepers of this machine are next.
-fn server(
+#[cfg(unix)]
+async fn show_native(
+    client: crate::native::client::Client,
+    session_id: String,
+    detach_key: DetachKey,
+) -> Result<Outcome, CliError> {
+    let size = terminal::size(&std::io::stdout()).unwrap_or((80, 24));
+    let alternate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let raw = terminal::RawMode::enable(std::io::stdin(), std::io::stdout(), alternate.clone())
+        .map_err(native_error)?;
+    let mut events = terminal::events().map_err(native_error)?;
+    let result = run_native(
+        client,
+        session::Attach {
+            session_id,
+            detach_key,
+            size,
+            skip_replay: false,
+        },
+        &mut events,
+        &mut terminal::Screen::new(std::io::stdout(), alternate),
+    )
+    .await;
+    drop(raw);
+    result
+}
+
+#[cfg(unix)]
+async fn run_native(
+    client: crate::native::client::Client,
+    attach: session::Attach,
+    events: &mut tokio::sync::mpsc::Receiver<session::Event>,
+    screen: &mut impl std::io::Write,
+) -> Result<Outcome, CliError> {
+    let sink = crate::native::client::SessionSink::new(client.sender());
+    let source = Box::pin(futures::stream::unfold(client, |mut client| async move {
+        client
+            .recv()
+            .await
+            .map(|message| (Ok::<_, std::io::Error>(message), client))
+    }));
+    session::run(attach, sink, source, events, screen).await
+}
+
+/// Explicit browser gateway attachment is the only token/WebSocket path.
+fn explicit_server(
     addr: Option<&str>,
     token: Option<&str>,
-    daemon: impl FnOnce() -> Option<u16>,
-    token_file: impl FnOnce() -> Result<String, String>,
 ) -> Result<Option<(String, String)>, CliError> {
     match (addr, token) {
         (Some(addr), Some(token)) if !addr.is_empty() && !token.is_empty() => {
-            Ok(Some((addr.to_owned(), token.to_owned())))
+            Ok(Some((addr.into(), token.into())))
         }
-        (None, None) => {
-            let Some(port) = daemon() else {
-                return Ok(None);
-            };
-            let token = token_file().map_err(CliError::Failed)?;
-            Ok(Some((format!("127.0.0.1:{port}"), token)))
-        }
+        (None, None) => Ok(None),
         _ => Err(CliError::Usage(
             "--addr and --token must both be non-empty".into(),
         )),
@@ -297,12 +361,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_server_is_the_explicit_one_or_the_daemon_never_splitty_sock() {
-        let no_daemon = || panic!("must not look for the daemon");
-        let no_token_file = || -> Result<String, String> { panic!("must not read the token file") };
+    fn tcp_attachment_is_explicit_and_cannot_resolve_a_daemon_or_token_file() {
         assert_eq!(
-            server(Some("127.0.0.1:9900"), Some("t"), no_daemon, no_token_file).expect("explicit"),
-            Some(("127.0.0.1:9900".to_owned(), "t".to_owned()))
+            explicit_server(Some("127.0.0.1:9900"), Some("t")).unwrap(),
+            Some(("127.0.0.1:9900".into(), "t".into()))
         );
         for (addr, token) in [
             (Some("127.0.0.1:1"), None),
@@ -310,21 +372,11 @@ mod tests {
             (Some(""), Some("t")),
         ] {
             assert!(matches!(
-                server(addr, token, no_daemon, no_token_file),
+                explicit_server(addr, token),
                 Err(CliError::Usage(_))
             ));
         }
-        assert_eq!(
-            server(None, None, || Some(9800), || Ok("file".into())).expect("daemon"),
-            Some(("127.0.0.1:9800".to_owned(), "file".to_owned()))
-        );
-        // Inside a pane of an embedded server only `SPLITTY_SOCK` would lead
-        // anywhere, and it is not consulted: without a daemon, the keepers
-        // are next, and without those the command fails (`run_on_keeper`).
-        assert_eq!(
-            server(None, None, || None, no_token_file).expect("no daemon"),
-            None
-        );
+        assert_eq!(explicit_server(None, None).unwrap(), None);
     }
 
     #[test]

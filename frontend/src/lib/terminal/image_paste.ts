@@ -38,6 +38,7 @@ export interface TransferData {
 
 /** The pane, or the text field, files go into. */
 export interface ImagePasteTarget {
+  captureConnection?(): () => void;
   /** Store the image (base64) on the pane's server; resolves with its path. */
   saveImage(data: string): Promise<string>;
   /** Store a file on the pane's server in chunks; resolves with its path. */
@@ -100,16 +101,24 @@ export async function pasteFiles(files: readonly File[], target: ImagePasteTarge
   let stored = 0;
   const paths: string[] = [];
   try {
+    const current = target.captureConnection?.() ?? (() => {});
+    current();
     for (const file of files) {
+      current();
       if (isImage(file)) {
-        paths.push(await target.saveImage(toBase64(new Uint8Array(await file.arrayBuffer()))));
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        current();
+        paths.push(await target.saveImage(toBase64(bytes)));
       } else {
         const before = stored;
         paths.push(await target.uploadFile(file, (received) => target.progress?.(before + received, total, false)));
       }
+      current();
       stored += file.size;
       target.progress?.(stored, total, false);
     }
+    current();
+    if (paths.length > 0) target.paste(paths.join(" "));
   } catch (err) {
     const needsUpdate = typeof err === "object" && err !== null && "needsUpdate" in err && err.needsUpdate === true;
     target.failed(readError(err) ?? (err instanceof Error ? err.message : String(err)), needsUpdate);
@@ -117,7 +126,6 @@ export async function pasteFiles(files: readonly File[], target: ImagePasteTarge
   } finally {
     target.progress?.(stored, total, true);
   }
-  if (paths.length > 0) target.paste(paths.join(" "));
 }
 
 /** What to say when the browser cannot read a dropped file, typically a folder. */
@@ -173,11 +181,12 @@ export function formatBytes(bytes: number): string {
  */
 export function attachImageInsert(
   field: HTMLTextAreaElement,
-  store: Pick<ImagePasteTarget, "saveImage" | "uploadFile">,
+  store: Pick<ImagePasteTarget, "saveImage" | "uploadFile" | "captureConnection">,
   insert: (text: string) => void,
   dropFiles?: (files: File[]) => void,
 ): () => void {
   const target: ImagePasteTarget = {
+    captureConnection: store.captureConnection,
     saveImage: (data) => store.saveImage(data),
     uploadFile: (file, onProgress) => store.uploadFile(file, onProgress),
     paste: insert,
@@ -221,12 +230,14 @@ export function attachImageInsert(
  */
 export function attachImagePaste(container: HTMLElement, target: ImagePasteTarget): () => void {
   let ctrlV: ReturnType<typeof setTimeout> | undefined;
+  let ctrlVCurrent: (() => void) | undefined;
 
-  const settleCtrlV = (): boolean => {
-    if (ctrlV === undefined) return false;
+  const settleCtrlV = (): (() => void) | undefined => {
+    if (ctrlV === undefined) return undefined;
     clearTimeout(ctrlV);
     ctrlV = undefined;
-    return true;
+    const current = ctrlVCurrent; ctrlVCurrent = undefined;
+    return current;
   };
 
   const keydown = (e: KeyboardEvent) => {
@@ -234,14 +245,22 @@ export function attachImagePaste(container: HTMLElement, target: ImagePasteTarge
     // Not to the terminal yet: the browser's paste, which follows, decides.
     e.stopImmediatePropagation();
     settleCtrlV();
+    try { ctrlVCurrent = target.captureConnection?.() ?? (() => {}); }
+    catch (error) { target.failed(String(error), false); return; }
+    const current = ctrlVCurrent;
     ctrlV = setTimeout(() => {
-      ctrlV = undefined;
-      target.sendCtrlV();
+      ctrlV = undefined; ctrlVCurrent = undefined;
+      try { current(); target.sendCtrlV(); }
+      catch (error) { target.failed(String(error), false); }
     }, CTRL_V_FALLBACK_MS);
   };
 
   const paste = (e: ClipboardEvent) => {
     const viaCtrlV = settleCtrlV();
+    if (viaCtrlV) {
+      try { viaCtrlV(); }
+      catch (error) { e.preventDefault(); e.stopImmediatePropagation(); target.failed(String(error), false); return; }
+    }
     const found = pastedFiles(e.clipboardData);
     if (found.length > 0) {
       e.preventDefault();

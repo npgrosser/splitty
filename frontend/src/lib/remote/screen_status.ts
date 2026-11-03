@@ -117,6 +117,7 @@ export function describeFailure(target: string, error: RemoteFailure): FailureVi
 }
 
 const HEADLINES: Record<RemoteFailure["code"], (target: string) => string> = {
+  unsupported_environment: () => "This connection is not supported in the local environment.",
   invalid_target: (t) => `${t} is not a host Splitty can connect to.`,
   host_key: (t) => `${t} is not known yet.`,
   auth: (t) => `SSH login to ${t} failed.`,

@@ -5,9 +5,9 @@ use splitty_core::pty::testing::{pty_available, wait_until};
 
 fn job_state(dir: &Path) -> AppState {
     let mut state = state(ADDR, dir);
-    let old = &state.ws_state;
-    let (events, _) = tokio::sync::broadcast::channel(256);
-    let ws = crate::ws::WsState::new(
+    let old = &state.client_state;
+    let events = splitty_core::protocol::notify::NotificationBus::default();
+    let ws = crate::client_session::ClientState::new(
         state.mux_store.clone(),
         old.dispatcher.clone(),
         state.shell_profiles.clone(),
@@ -18,7 +18,7 @@ fn job_state(dir: &Path) -> AppState {
         events,
         "embedded".into(),
     );
-    state.ws_state = Arc::new(ws);
+    Arc::make_mut(&mut state.service).client_state = Arc::new(ws);
     *state.shell_profiles.write().expect("profiles") =
         splitty_core::shell_profiles::state_from_settings(&Default::default());
     state
@@ -54,7 +54,7 @@ async fn managed_jobs_routes_enforce_transport_scope_and_payload_bounds() {
     assert_eq!(status, StatusCode::OK, "{grant}");
     let id = AgentId::from(grant["agentId"].as_str().expect("grant"));
     let scoped: axum::Router = super::super::jobs::routes(
-        Arc::downgrade(&state.ws_state.jobs),
+        Arc::downgrade(&state.client_state.jobs),
         Actor::Agent(id.clone()),
     );
     for path in [
@@ -201,7 +201,7 @@ async fn managed_jobs_routes_enforce_transport_scope_and_payload_bounds() {
         .await
         .1;
     assert_eq!(raw["encoding"], "base64");
-    state.ws_state.jobs.shutdown().await;
+    state.client_state.jobs.shutdown().await;
     assert!(!Path::new(grant["socket"].as_str().expect("socket")).exists());
 }
 
@@ -222,13 +222,20 @@ async fn managed_job_spawn_events_and_mux_queries_use_actual_ids_and_outcomes() 
     .await;
     assert_eq!(ordinary["revision"], 1);
     assert!(ordinary["screenId"].as_str().is_some_and(|s| !s.is_empty()));
-    let mut events = state.ws_state.notify_tx.subscribe();
+    let (event_sender, mut events) = crate::client_session::sender::ClientSender::channel();
+    let _subscription = state
+        .client_state
+        .notify_tx
+        .subscribe(Arc::new(event_sender));
     let request = launch(dir.path(), "printf END; exit 7");
     let (status, job) = call(&app, "POST", "/api/jobs", Some(&request)).await;
     assert_eq!(status, StatusCode::CREATED);
     let mut wire = Vec::new();
     while let Ok(event) = events.try_recv() {
-        wire.push(serde_json::from_str::<serde_json::Value>(&event).expect("event"));
+        let crate::client_session::Message::Text(text) = &event.value else {
+            panic!("text event");
+        };
+        wire.push(serde_json::from_str::<serde_json::Value>(text).expect("event"));
     }
     assert_eq!(wire[0]["type"], "mux.pane_spawned");
     assert_eq!(wire[1]["type"], "mux.nudge");
@@ -264,8 +271,8 @@ async fn managed_job_spawn_events_and_mux_queries_use_actual_ids_and_outcomes() 
         snapshot["jobs"][failure["jobId"].as_str().expect("job")]["state"],
         "failed"
     );
-    state.ws_state.jobs.shutdown().await;
-    state.ws_state.dispatcher.backend().close_all();
+    state.client_state.jobs.shutdown().await;
+    state.client_state.dispatcher.backend().close_all();
 }
 
 #[tokio::test]
@@ -277,7 +284,7 @@ async fn managed_grant_socket_is_private_resumable_and_never_promotes_to_owner()
     let dir = tempfile::tempdir().expect("fixture");
     let state = job_state(dir.path());
     let grant =
-        crate::control::spawn_grant(&state.ws_state.jobs, "agent".into(), None).expect("grant");
+        crate::control::spawn_grant(&state.client_state.jobs, "agent".into(), None).expect("grant");
     let path = grant["socket"].as_str().expect("socket");
     assert_eq!(
         std::fs::metadata(path)
@@ -344,7 +351,7 @@ async fn managed_grant_socket_is_private_resumable_and_never_promotes_to_owner()
         404
     );
     state
-        .ws_state
+        .client_state
         .jobs
         .revoke(&AgentId::from(grant["agentId"].as_str().expect("id")))
         .await
@@ -353,7 +360,7 @@ async fn managed_grant_socket_is_private_resumable_and_never_promotes_to_owner()
     assert!(crate::cli::request(&server, "GET", "/api/jobs", None)
         .await
         .is_err());
-    state.ws_state.jobs.shutdown().await;
+    state.client_state.jobs.shutdown().await;
 }
 
 #[tokio::test]
@@ -395,11 +402,20 @@ async fn invalid_launches_and_rejected_closes_have_no_effects() {
     assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE);
     assert_eq!(error["code"], "invalid_request");
     assert!(state.mux_store.jobs().is_empty());
-    assert!(state.ws_state.dispatcher.backend().sessions().is_empty());
+    assert!(state
+        .client_state
+        .dispatcher
+        .backend()
+        .sessions()
+        .is_empty());
     let (_, job) = call(&app, "POST", "/api/jobs", Some(&base)).await;
     let id = JobId::from(job["jobId"].as_str().expect("job"));
     let before = serde_json::to_value(state.mux_store.get_workspace_state()).expect("state");
-    let mut events = state.ws_state.notify_tx.subscribe();
+    let (event_sender, mut events) = crate::client_session::sender::ClientSender::channel();
+    let _subscription = state
+        .client_state
+        .notify_tx
+        .subscribe(Arc::new(event_sender));
     let (status, _) = call(
         &app,
         "POST",
@@ -430,7 +446,7 @@ async fn invalid_launches_and_rejected_closes_have_no_effects() {
         state.mux_store.job(&id).expect("job").state,
         splitty_core::mux::jobs::JobState::Exited
     );
-    state.ws_state.jobs.shutdown().await;
+    state.client_state.jobs.shutdown().await;
 }
 
 #[tokio::test]
@@ -455,7 +471,7 @@ async fn log_handlers_page_independently_report_loss_and_keep_draining_output() 
     )
     .await;
     let session = state
-        .ws_state
+        .client_state
         .dispatcher
         .backend()
         .get(job["sessionId"].as_str().expect("session"))
@@ -507,7 +523,7 @@ async fn log_handlers_page_independently_report_loss_and_keep_draining_output() 
     assert_eq!(empty["data"], "");
     assert!(!empty["outputComplete"].as_bool().expect("completion"));
     assert!(started.elapsed() >= Duration::from_millis(10));
-    state.ws_state.jobs.shutdown().await;
+    state.client_state.jobs.shutdown().await;
 }
 
 #[tokio::test]
@@ -526,7 +542,7 @@ async fn grants_filter_every_route_and_anchors_never_grant_terminal_access() {
     )
     .await;
     let grant = crate::control::spawn_grant(
-        &state.ws_state.jobs,
+        &state.client_state.jobs,
         "same-label".into(),
         Some(crate::jobs::Anchor {
             screen_id: anchor["screenId"].as_str().expect("screen").into(),
@@ -534,13 +550,13 @@ async fn grants_filter_every_route_and_anchors_never_grant_terminal_access() {
         }),
     )
     .expect("grant");
-    let other = crate::control::spawn_grant(&state.ws_state.jobs, "same-label".into(), None)
+    let other = crate::control::spawn_grant(&state.client_state.jobs, "same-label".into(), None)
         .expect("other grant");
     let actor = Actor::Agent(grant["agentId"].as_str().expect("grant").into());
     let scoped: axum::Router =
-        super::super::jobs::routes(Arc::downgrade(&state.ws_state.jobs), actor);
+        super::super::jobs::routes(Arc::downgrade(&state.client_state.jobs), actor);
     let second: axum::Router = super::super::jobs::routes(
-        Arc::downgrade(&state.ws_state.jobs),
+        Arc::downgrade(&state.client_state.jobs),
         Actor::Agent(other["agentId"].as_str().expect("grant").into()),
     );
     for router in [&scoped, &second] {
@@ -614,7 +630,7 @@ async fn grants_filter_every_route_and_anchors_never_grant_terminal_access() {
         call(&scoped, "POST", "/api/jobs", Some(&request)).await.0,
         StatusCode::CREATED
     );
-    state.ws_state.jobs.shutdown().await;
+    state.client_state.jobs.shutdown().await;
 }
 
 #[tokio::test]
@@ -622,11 +638,11 @@ async fn grant_bind_failures_rollback_and_shared_services_restart_empty() {
     let dir = tempfile::tempdir().expect("fixture");
     let too_long = dir.path().join("x".repeat(100));
     let state = job_state(&too_long);
-    assert!(crate::control::spawn_grant(&state.ws_state.jobs, "long".into(), None).is_err());
-    assert_eq!(state.ws_state.jobs.grants()["agents"], json!([]));
+    assert!(crate::control::spawn_grant(&state.client_state.jobs, "long".into(), None).is_err());
+    assert_eq!(state.client_state.jobs.grants()["agents"], json!([]));
     let state = job_state(dir.path());
     assert!(crate::control::spawn_grant(
-        &state.ws_state.jobs,
+        &state.client_state.jobs,
         "bad".into(),
         Some(crate::jobs::Anchor {
             screen_id: "missing".into(),
@@ -640,20 +656,20 @@ async fn grant_bind_failures_rollback_and_shared_services_restart_empty() {
             .count(),
         0
     );
-    let grant =
-        crate::control::spawn_grant(&state.ws_state.jobs, "lifetime".into(), None).expect("grant");
+    let grant = crate::control::spawn_grant(&state.client_state.jobs, "lifetime".into(), None)
+        .expect("grant");
     let old_path = grant["socket"].as_str().expect("path");
-    state.ws_state.jobs.shutdown().await;
+    state.client_state.jobs.shutdown().await;
     assert!(!Path::new(old_path).exists());
     drop(state);
     let replacement = job_state(dir.path());
-    let new = crate::control::spawn_grant(&replacement.ws_state.jobs, "lifetime".into(), None)
+    let new = crate::control::spawn_grant(&replacement.client_state.jobs, "lifetime".into(), None)
         .expect("new grant");
     assert_ne!(grant["agentId"], new["agentId"]);
     assert_ne!(grant["socket"], new["socket"]);
     assert!(replacement.mux_store.jobs().is_empty());
     assert!(tokio::net::UnixStream::connect(old_path).await.is_err());
-    replacement.ws_state.jobs.shutdown().await;
+    replacement.client_state.jobs.shutdown().await;
 }
 
 #[tokio::test]
@@ -682,10 +698,10 @@ async fn disconnected_router_reads_release_quota_without_stopping_the_job() {
         )
         .await
     });
-    assert!(wait_until(WAIT, || state.ws_state.jobs.waiting_reads() == 1).await);
+    assert!(wait_until(WAIT, || state.client_state.jobs.waiting_reads() == 1).await);
     read.abort();
     let _ = read.await;
-    assert_eq!(state.ws_state.jobs.waiting_reads(), 0);
+    assert_eq!(state.client_state.jobs.waiting_reads(), 0);
     assert_eq!(
         state
             .mux_store
@@ -694,11 +710,18 @@ async fn disconnected_router_reads_release_quota_without_stopping_the_job() {
             .state,
         splitty_core::mux::jobs::JobState::Running
     );
-    state.ws_state.jobs.shutdown().await;
+    state.client_state.jobs.shutdown().await;
 }
 
 #[tokio::test]
 async fn websocket_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids() {
+    run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids(false).await;
+    run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids(true).await;
+}
+
+async fn run_websocket_job_spawns_precede_the_next_resync_and_failures_name_allocated_ids(
+    native: bool,
+) {
     if !pty_available() {
         return;
     }
@@ -711,7 +734,7 @@ async fn websocket_job_spawns_precede_the_next_resync_and_failures_name_allocate
         state
     })
     .await;
-    let mut socket = served.open_local().await;
+    let mut socket = served.open_local_for(native).await;
     let welcome = json_of(next(&mut socket).await);
     assert!(welcome["capabilities"]
         .as_array()
@@ -845,7 +868,7 @@ async fn websocket_job_spawns_precede_the_next_resync_and_failures_name_allocate
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     assert_eq!(failed["code"], "spawn_failed");
     assert_eq!(json_of(next(&mut socket).await)["type"], "mux.nudge");
-    served.state.ws_state.jobs.shutdown().await;
-    served.state.ws_state.dispatcher.backend().close_all();
+    served.state.client_state.jobs.shutdown().await;
+    served.state.client_state.dispatcher.backend().close_all();
     let _ = socket.close(None).await;
 }

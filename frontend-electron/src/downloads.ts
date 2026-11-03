@@ -1,25 +1,21 @@
-/**
- * The main windows' downloads (`splitty download`, `terminal-sessions`, Saving
- * An Offered File) by their `blob:` URL, with where each was saved.
- *
- * The page names a download only by that URL, which it made for exactly that
- * download. The shell shows only a file it saved itself and finished, and never
- * tells the page where (`access-control`, Showing A Saved Download).
- */
-
-/** Downloads remembered at once; an older one can no longer be shown. */
+/** Finished downloads belong to the native window/document that saved them.
+ * The renderer supplies only its blob URL; native paths never cross the bridge. */
 const KEEP = 32;
+const saved = new WeakMap<object, { document: string; files: Map<string, string> }>();
 
-const saved = new Map<string, string>();
-
-/** The download of `url` finished, saved to `path`. */
-export function rememberDownload(url: string, path: string): void {
-  saved.delete(url);
-  saved.set(url, path);
-  if (saved.size > KEEP) saved.delete(saved.keys().next().value!);
+export function isPackagedBlob(url: unknown): url is string {
+  return typeof url === "string" && /^blob:splitty:\/\/app\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(url);
 }
-
-/** Where the finished download of `url` is. */
-export function savedDownload(url: unknown): string | undefined {
-  return typeof url === "string" ? saved.get(url) : undefined;
+export function rememberDownload(owner: object, document: string, url: string, path: string): void {
+  if (!isPackagedBlob(url) || !path) return;
+  let current = saved.get(owner);
+  if (!current || current.document !== document) {
+    current = { document, files: new Map() }; saved.set(owner, current);
+  }
+  current.files.delete(url); current.files.set(url, path);
+  if (current.files.size > KEEP) current.files.delete(current.files.keys().next().value!);
+}
+export function savedDownload(owner: object, document: string, url: unknown): string | undefined {
+  const current = saved.get(owner);
+  return current?.document === document && isPackagedBlob(url) ? current.files.get(url) : undefined;
 }

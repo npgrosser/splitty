@@ -1,3 +1,4 @@
+import { invokeTauri } from "./tauri_invoke.ts";
 /** Requests from a server are untrusted data. Only the local confirm action launches. */
 import { toast } from "svelte-sonner";
 import { hostOf, type ServerConnection } from "./connection/server_connection.ts";
@@ -15,17 +16,19 @@ let visible = 0;
 export function watchEditorRequests(conn: ServerConnection): () => void {
   if (isRemoteSession) return () => {};
   let connected = false;
+  let epoch = 0;
   let disposed = false;
   let lastPrompt = -Infinity;
   const seen = new Map<string, number>();
   let pending: { request: EditorRequest; dismiss: (outcome?: EditorOutcome) => void } | undefined;
-  const send = (requestId: string, outcome: EditorOutcome) => {
-    if (connected && !disposed) conn.socket.send({ type: "editor.result", requestId, outcome });
+  const send = (requestId: string, outcome: EditorOutcome, expectedEpoch = epoch) => {
+    if (connected && !disposed && expectedEpoch === epoch) conn.socket.send({ type: "editor.result", requestId, outcome });
   };
-  const stop = () => { connected = false; pending?.dismiss(); };
+  const stop = () => { epoch++; connected = false; pending?.dismiss(); };
   const unsubDisconnect = conn.socket.onDisconnect(stop);
   const unsubMessage = conn.socket.onMessage((msg) => {
     if (msg.type === "mux.welcome") {
+      epoch++;
       pending?.dismiss();
       connected = Array.isArray(msg.capabilities) && msg.capabilities.includes("editor-open-v1");
       // Do not clear replay history or rate counters on reconnect.
@@ -44,6 +47,7 @@ export function watchEditorRequests(conn: ServerConnection): () => void {
       send(msg.requestId, "failed"); return;
     }
     const requestId = msg.requestId;
+    const requestEpoch = epoch;
     const session = conn.sessions.get(msg.sessionId);
     if (!session) { send(msg.requestId, "disconnected"); return; }
     const duration = Math.min(25_000, msg.expiresAt - Date.now());
@@ -78,7 +82,7 @@ export function watchEditorRequests(conn: ServerConnection): () => void {
       visible--;
       pending = undefined;
       toast.dismiss(notification);
-      if (outcome) send(msg.requestId, outcome);
+      if (outcome) send(msg.requestId, outcome, requestEpoch);
     };
     const timer = setTimeout(() => finish("expired"), duration);
     pending = { request: msg, dismiss: finish };
@@ -99,14 +103,14 @@ export function watchEditorRequests(conn: ServerConnection): () => void {
             window.location.assign(prepared.value.uri);
             dispatch = Promise.resolve();
           } else if (shellKind === "tauri") {
-            dispatch = (window as any).__TAURI_INTERNALS__.invoke(target === undefined ? "open_local_editor" : "open_remote_editor", input);
+            dispatch = invokeTauri(target === undefined ? "open_local_editor" : "open_remote_editor", input);
           } else {
             dispatch = (window as any).__SPLITTY_ELECTRON__.invoke(target === undefined ? "editor:open-local" : "editor:open-remote", input);
           }
-          void dispatch.then(() => send(msg.requestId, "dispatched"), () => failed());
+          void dispatch.then(() => send(msg.requestId, "dispatched", requestEpoch), () => failed());
         } catch { failed(); }
         function failed() {
-          send(requestId, "failed");
+          send(requestId, "failed", requestEpoch);
           toast.error(`Could not open ${name}`, { description: "Check the editor installation and OS protocol handler. VS Code remote paths need Remote - SSH or WSL support." });
         }
       } },

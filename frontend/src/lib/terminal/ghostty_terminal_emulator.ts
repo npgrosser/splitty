@@ -1,4 +1,5 @@
-import { init, Terminal, FitAddon, OSC8LinkProvider, UrlRegexProvider, type ILink, type ILinkProvider } from "ghostty-web";
+import wasmUrl from "ghostty-web/ghostty-vt.wasm?url";
+import { Ghostty, Terminal, FitAddon, OSC8LinkProvider, UrlRegexProvider, type ILink, type ILinkProvider } from "ghostty-web";
 import { getXtermTheme } from "../theme.ts";
 import { getConfig, type TerminalConfig } from "../terminal_config.ts";
 import { getSettings, type SplittySettings } from "../settings.ts";
@@ -22,13 +23,14 @@ import {
 
 // ── Pre-warm ──
 
-let initDone = false;
+let initialized: Promise<Ghostty> | undefined;
 let warmupDone = false;
 
-async function ensureInit(): Promise<void> {
-  if (initDone) return;
-  await init();
-  initDone = true;
+async function ensureInit(): Promise<Ghostty> {
+  // Use the build-produced same-origin WASM asset explicitly. The library's
+  // default data-URL/fallback lookup is incompatible with packaged CSP.
+  initialized ??= Ghostty.load(wasmUrl).catch(error => { initialized = undefined; throw error; });
+  return initialized;
 }
 
 export function warmup(): void {
@@ -99,13 +101,14 @@ export class GhosttyTerminalEmulator implements TerminalEmulator {
    * instead of ghostty-web's bare `window.open`; see {@link linksThrough}.
    */
   static async create(openLink?: (url: string) => void): Promise<GhosttyTerminalEmulator> {
-    await ensureInit();
+    const ghostty = await ensureInit();
 
     const cfg = getConfig();
     await ensureFont(cfg);
 
     const xterm = getSettings().terminal.xterm;
     const terminal = new Terminal({
+      ghostty,
       fontSize: zoomedFontSize(cfg.fontSize, getSettings().appearance.zoom, getSettings().appearance.zoomScope),
       fontFamily: cfg.fontFamily,
       cursorStyle: cfg.cursorStyle,

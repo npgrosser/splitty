@@ -204,10 +204,10 @@ pub type BellEvent = Option<Instant>;
 /// each byte from the oldest buffered one onwards exactly once.
 pub struct Subscription {
     /// The scrollback buffer at the moment of subscribing.
-    pub snapshot: Vec<u8>,
+    pub snapshot: splitty_transport::budget::Charged<Vec<u8>>,
     /// Output produced after the snapshot. Yields `None` once the session's
     /// output has ended, because its terminal closed.
-    pub receiver: tokio::sync::mpsc::UnboundedReceiver<Arc<[u8]>>,
+    pub receiver: splitty_transport::queue::Receiver<Arc<[u8]>>,
 }
 
 /// Provides access to a single terminal session.
@@ -223,10 +223,23 @@ pub trait SessionHandle: Send + Sync {
     }
     /// Start receiving the session's output. Subscribing never affects the
     /// session or other subscribers; dropping the receiver ends only this one.
-    fn subscribe(&self) -> Subscription;
+    fn subscribe(&self) -> Subscription {
+        self.subscribe_with(splitty_transport::queue::Context::default())
+    }
+    /// A UI connection shares this context across all its PTY subscriptions,
+    /// incoming messages and outbound buffers. Overflow ends only that client.
+    fn subscribe_with(&self, context: splitty_transport::queue::Context) -> Subscription;
     async fn write(&self, data: &[u8]) -> io::Result<()>;
     fn resize(&self, cols: u16, rows: u16) -> io::Result<()>;
     fn close(&self) -> io::Result<()>;
+    /// Begin service-owned termination, including sessions already closing.
+    fn begin_shutdown(&self) -> io::Result<()> {
+        self.close()
+    }
+    /// Confirm termination before the embedded service's process exits.
+    async fn shutdown(&self) -> io::Result<ProcessResult> {
+        self.stop().await
+    }
     /// Let go of the session without ending its program, where the program
     /// outlives this process (a daemon's session keeper).
     fn release(&self) {}

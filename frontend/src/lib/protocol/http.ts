@@ -18,8 +18,50 @@
  *   `Referer` headers and browser history.
  */
 
+import { nativeApiFetch, type NativeApi, type ApiFetch } from "./native_api.ts";
+
+let assignedApi: ApiFetch | undefined;
+let nativeSelected = false;
+let browserGateway: string | undefined;
+let browserRevoked = false;
+
+/** This is public routing identity, never a credential. Pin every operation,
+ * including ticket requests, before importing the assigned workspace. */
+export function assignBrowserGateway(gateway: string): void {
+  browserOnly();
+  if (browserGateway) throw Error("Browser gateway already assigned");
+  browserGateway = gateway;
+}
+
+async function browserFetch(path: string, init?: RequestInit): Promise<Response> {
+  if (browserRevoked) throw Error("The browser gateway assignment has been revoked");
+  const headers = new Headers(init?.headers);
+  if (browserGateway) headers.set("X-Splitty-Gateway", browserGateway);
+  const response = await fetch(path, { ...init, headers, credentials: "same-origin" });
+  if (response.status === 409 && response.headers.get("x-splitty-gateway-changed") === "1") {
+    if (!browserRevoked) { browserRevoked = true; window.location.reload(); }
+    throw Error("The browser gateway changed; reloading its assignment");
+  }
+  if (browserRevoked) throw Error("The browser gateway assignment has been revoked");
+  return response;
+}
+
+/** Startup installs only the connection returned by the shell's broker.
+ * Disconnection leaves this assignment in place: it must never fall back to HTTP. */
+export function assignNativeApi(api: NativeApi): () => void {
+  const assigned = nativeApiFetch(api);
+  nativeSelected = true;
+  assignedApi = assigned;
+  return () => { if (assignedApi === assigned) assignedApi = undefined; };
+}
+
+function browserOnly(): void {
+  if (nativeSelected) throw new Error("Browser authentication is unavailable on a native connection");
+}
+
 /** Exchange a one-time bootstrap code for a session cookie. */
 export async function exchangeBootstrap(bootstrap: string): Promise<boolean> {
+  browserOnly();
   const res = await fetch("/api/session", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -31,6 +73,7 @@ export async function exchangeBootstrap(bootstrap: string): Promise<boolean> {
 
 /** Exchange a manually entered server token for a session cookie. */
 export async function exchangeToken(token: string): Promise<boolean> {
+  browserOnly();
   const res = await fetch("/api/session", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -52,8 +95,9 @@ export async function exchangeToken(token: string): Promise<boolean> {
  * fresh one.
  */
 export async function fetchWsTicket(): Promise<string | null> {
+  browserOnly();
   try {
-    const res = await fetch("/api/ws-ticket", {
+    const res = await browserFetch("/api/ws-ticket", {
       method: "POST",
       credentials: "same-origin",
     });
@@ -67,5 +111,7 @@ export async function fetchWsTicket(): Promise<string | null> {
 
 /** Thin wrapper around fetch for API calls. */
 export function apiFetch(path: string, init?: RequestInit): Promise<Response> {
-  return fetch(path, { ...init, credentials: "same-origin" });
+  if (assignedApi) return assignedApi(path, init);
+  if (nativeSelected) return Promise.reject(new Error("The native connection has been revoked"));
+  return browserFetch(path, init);
 }

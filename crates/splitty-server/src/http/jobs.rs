@@ -1,6 +1,7 @@
 //! Both local agent sockets and the trusted API use these same handlers.
 use super::AppState;
-use crate::jobs::{Access, Actor, Anchor, JobError, Jobs, WeakJobs};
+use crate::jobs::{Access, Actor, Anchor, JobError, WeakJobs};
+use crate::service::jobs::{Context, Input, Logs};
 use axum::{
     extract::{
         rejection::{JsonRejection, QueryRejection},
@@ -15,22 +16,6 @@ use serde::{de::DeserializeOwned, Deserialize};
 use serde_json::Value;
 use splitty_core::ids::{AgentId, JobId};
 use splitty_core::mux::jobs::JobLaunch;
-use splitty_core::pty::output::{LogFormat, OutputQuery};
-use std::sync::Arc;
-use std::time::Duration;
-
-#[derive(Clone)]
-pub struct Context {
-    pub jobs: WeakJobs,
-    pub actor: Actor,
-}
-impl Context {
-    fn service(&self) -> Result<Arc<Jobs>, JobError> {
-        self.jobs
-            .upgrade()
-            .ok_or_else(|| JobError::new(503, "shutting_down", "server has stopped"))
-    }
-}
 
 pub fn routes<S: Clone + Send + Sync + 'static>(jobs: WeakJobs, actor: Actor) -> Router<S> {
     Router::new()
@@ -61,9 +46,7 @@ impl IntoResponse for JobError {
     }
 }
 pub fn respond(access: Access, status: StatusCode) -> Response {
-    let response = (status, Json(&access.value)).into_response();
-    drop(access);
-    response
+    crate::service::reply::job(access, status).into_response()
 }
 fn body<T: DeserializeOwned>(value: Result<Json<T>, JsonRejection>) -> Result<T, JobError> {
     value.map(|v| v.0).map_err(|e| {
@@ -82,93 +65,44 @@ async fn launch(
     State(ctx): State<Context>,
     payload: Result<Json<JobLaunch>, JsonRejection>,
 ) -> Result<Response, JobError> {
-    let (access, replay) = ctx.service()?.launch(ctx.actor, body(payload)?).await?;
-    Ok(respond(
-        access,
-        if replay {
-            StatusCode::OK
-        } else {
-            StatusCode::CREATED
-        },
-    ))
+    ctx.launch(body(payload)?)
+        .await
+        .map(IntoResponse::into_response)
 }
 async fn list(State(ctx): State<Context>) -> Result<Response, JobError> {
-    Ok(respond(
-        ctx.service()?.list(&ctx.actor).await?,
-        StatusCode::OK,
-    ))
+    ctx.list().await.map(IntoResponse::into_response)
 }
 async fn inspect(State(ctx): State<Context>, Path(id): Path<String>) -> Result<Response, JobError> {
-    Ok(respond(
-        ctx.service()?.inspect(&ctx.actor, &JobId::from(id)).await?,
-        StatusCode::OK,
-    ))
+    ctx.inspect(id).await.map(IntoResponse::into_response)
 }
 async fn stop(State(ctx): State<Context>, Path(id): Path<String>) -> Result<Response, JobError> {
-    Ok(respond(
-        ctx.service()?.stop(&ctx.actor, &JobId::from(id)).await?,
-        StatusCode::OK,
-    ))
+    ctx.stop(id).await.map(IntoResponse::into_response)
 }
 async fn forget(State(ctx): State<Context>, Path(id): Path<String>) -> Result<Response, JobError> {
-    Ok(respond(
-        ctx.service()?.forget(&ctx.actor, &JobId::from(id)).await?,
-        StatusCode::OK,
-    ))
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Input {
-    data: String,
+    ctx.forget(id).await.map(IntoResponse::into_response)
 }
 async fn input(
     State(ctx): State<Context>,
     Path(id): Path<String>,
     payload: Result<Json<Input>, JsonRejection>,
 ) -> Result<Response, JobError> {
-    Ok(respond(
-        ctx.service()?
-            .input(&ctx.actor, &JobId::from(id), body(payload)?.data)
-            .await?,
-        StatusCode::OK,
-    ))
-}
-#[derive(Deserialize, Default)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-struct Logs {
-    cursor: Option<String>,
-    tail: Option<usize>,
-    limit: Option<usize>,
-    #[serde(default)]
-    wait_ms: u64,
-    #[serde(default)]
-    format: LogFormat,
+    ctx.input(id, body(payload)?)
+        .await
+        .map(IntoResponse::into_response)
 }
 async fn logs(
     State(ctx): State<Context>,
     Path(id): Path<String>,
     query: Result<Query<Logs>, QueryRejection>,
 ) -> Result<Response, JobError> {
-    let args = query
-        .map_err(|e| JobError::new(400, "invalid_request", e.body_text()))?
-        .0;
-    let query = OutputQuery {
-        cursor: args.cursor,
-        tail: args.tail,
-        limit: args.limit.unwrap_or(65536),
-        format: args.format,
-    };
-    Ok(respond(
-        ctx.service()?
-            .logs(
-                &ctx.actor,
-                &JobId::from(id),
-                query,
-                Duration::from_millis(args.wait_ms),
-            )
-            .await?,
-        StatusCode::OK,
-    ))
+    ctx.logs(
+        id,
+        query
+            .map_err(|e| JobError::new(400, "invalid_request", e.body_text()))?
+            .0,
+    )
+    .await
+    .map(IntoResponse::into_response)
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -183,7 +117,7 @@ async fn create_agent(
     let args = body(payload)?;
     #[cfg(unix)]
     {
-        crate::control::spawn_grant(&state.ws_state.jobs, args.name, args.anchor).map(Json)
+        crate::control::spawn_grant(&state.client_state.jobs, args.name, args.anchor).map(Json)
     }
     #[cfg(not(unix))]
     {
@@ -196,20 +130,24 @@ async fn create_agent(
     }
 }
 async fn agents(State(state): State<AppState>) -> Json<Value> {
-    Json(state.ws_state.jobs.grants())
+    Json(state.client_state.jobs.grants())
 }
 async fn agent(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, JobError> {
-    state.ws_state.jobs.grant_info(&AgentId::from(id)).map(Json)
+    state
+        .client_state
+        .jobs
+        .grant_info(&AgentId::from(id))
+        .map(Json)
 }
 async fn revoke(
     State(state): State<AppState>,
     Path(id): Path<String>,
 ) -> Result<Json<Value>, JobError> {
     state
-        .ws_state
+        .client_state
         .jobs
         .revoke(&AgentId::from(id))
         .await
@@ -238,7 +176,7 @@ async fn owner(
     };
     Ok(respond(
         state
-            .ws_state
+            .client_state
             .jobs
             .transfer(&JobId::from(id), owner)
             .await?,

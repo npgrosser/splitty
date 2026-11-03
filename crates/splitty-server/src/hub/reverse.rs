@@ -7,7 +7,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
 use serde::{Deserialize, Serialize};
@@ -98,8 +98,9 @@ struct Shared {
     connector: Arc<dyn Connector>,
     state: Mutex<State>,
     lanes: Mutex<HashMap<Key, Weak<AsyncMutex<()>>>>,
-    /// The local server's own port, never shared; 0 while unknown.
-    reserved: AtomicU16,
+    /// Browser adapters sharing this service may each own a listener. Register
+    /// all of them before admitting forwarding, not just the last one built.
+    reserved: Mutex<HashSet<u16>>,
 }
 
 pub struct Reverses {
@@ -120,7 +121,7 @@ impl Reverses {
                     restoring: HashSet::new(),
                 }),
                 lanes: Mutex::new(HashMap::new()),
-                reserved: AtomicU16::new(0),
+                reserved: Mutex::new(HashSet::new()),
             }),
             operations: Mutex::new(Vec::new()),
         }
@@ -128,7 +129,11 @@ impl Reverses {
 
     /// The local server listens on `port`, which is never shared.
     pub fn reserve(&self, port: u16) {
-        self.shared.reserved.store(port, Ordering::SeqCst);
+        self.shared
+            .reserved
+            .lock()
+            .expect("reserved listener ports")
+            .insert(port);
     }
 
     /// Share `local` here as `port` of `target`, on the user's request.
@@ -320,7 +325,12 @@ impl Drop for Reverses {
 
 impl Shared {
     fn check_reserved(&self, local: u16) -> Result<(), ForwardError> {
-        if self.reserved.load(Ordering::SeqCst) == local {
+        if self
+            .reserved
+            .lock()
+            .expect("reserved listener ports")
+            .contains(&local)
+        {
             return Err(ForwardError::LocalPortReserved { port: local });
         }
         Ok(())
@@ -459,9 +469,14 @@ impl Shared {
         remote: u16,
         local: u16,
     ) -> Result<Supervised, ForwardError> {
+        let share = self
+            .connector
+            .reserve_share(local)
+            .await
+            .map_err(|error| reverse_error(target.as_str(), error))?;
         let forwarding = self
             .connector
-            .reverse(target, local, remote)
+            .reverse(target, local, remote, share.as_ref())
             .await
             .map_err(|error| reverse_error(target.as_str(), error))?;
         let up = Arc::new(AtomicBool::new(true));
@@ -471,7 +486,7 @@ impl Shared {
             target.clone(),
             remote,
             local,
-            forwarding,
+            (forwarding, share),
             up.clone(),
             stopped,
         ));
@@ -488,6 +503,9 @@ impl Shared {
 /// hub's failures.
 fn reverse_error(host: &str, error: HubError) -> ForwardError {
     match error {
+        HubError::LocalShare { port, error } if error.kind() == std::io::ErrorKind::AddrInUse => {
+            ForwardError::LocalPortReserved { port }
+        }
         HubError::Reverse(ReverseTunnelError::HostPortConflict { port, detail }) => {
             // The relay's own words name the address; the caller's message
             // says what to do.
@@ -604,7 +622,10 @@ async fn supervise(
     target: SshTarget,
     remote: u16,
     local: u16,
-    mut forwarding: Box<dyn Forwarding>,
+    (mut forwarding, share): (
+        Box<dyn Forwarding>,
+        Option<splitty_remote::tunnel::exposure::Share>,
+    ),
     up: Arc<AtomicBool>,
     mut stop: oneshot::Receiver<()>,
 ) {
@@ -624,7 +645,7 @@ async fn supervise(
         );
         let mut failures = 0;
         forwarding = loop {
-            let attempt = connector.reverse(&target, local, remote);
+            let attempt = connector.reverse(&target, local, remote, share.as_ref());
             tokio::pin!(attempt);
             let result = tokio::select! {
                 _ = &mut stop => {

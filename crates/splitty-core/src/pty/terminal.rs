@@ -57,6 +57,12 @@ pub trait Terminal: Send + Sync {
     fn close(&self) -> io::Result<()>;
     /// Stop a managed program with escalation and await its result.
     async fn stop(&self) -> io::Result<ProcessResult>;
+    fn begin_shutdown(&self) -> io::Result<()> {
+        self.close()
+    }
+    async fn shutdown(&self) -> io::Result<ProcessResult> {
+        self.stop().await
+    }
     /// True once the program has ended.
     fn done(&self) -> watch::Receiver<bool>;
     fn result(&self) -> Option<ProcessResult>;
@@ -87,8 +93,8 @@ impl TerminalFactory for LocalTerminals {
     }
 }
 
-/// What a managed job's reader polls: the master is non-blocking there, so a
-/// job that never reads its input cannot block a writer, and a dup'ed
+/// What the reader polls: the master is non-blocking, so a
+/// program that never reads its input cannot block the executor, and a dup'ed
 /// descriptor shares that flag.
 #[cfg(unix)]
 pub type Readiness = Option<std::os::fd::OwnedFd>;
@@ -111,6 +117,10 @@ pub struct Spawned {
 /// session leader with the PTY as its controlling terminal, with exactly the
 /// spec's environment.
 pub fn spawn(spec: &SessionSpec) -> Result<Spawned, PtyError> {
+    spawn_with_input(spec, spec.managed)
+}
+
+fn spawn_with_input(spec: &SessionSpec, nonblocking: bool) -> Result<Spawned, PtyError> {
     if spec.argv.is_empty() {
         return Err(PtyError::SpawnFailed("no program to start".into()));
     }
@@ -147,15 +157,14 @@ pub fn spawn(spec: &SessionSpec) -> Result<Spawned, PtyError> {
         .take_writer()
         .map_err(|e| PtyError::SpawnFailed(format!("take writer: {}", e)))?;
 
-    // A job that never reads stdin must not indefinitely hold its caller's
-    // authorization gate. Writes fail promptly on a full PTY; the reader
-    // uses poll on an owned descriptor because dup shares O_NONBLOCK.
+    // In-process writes never block the async executor. A keeper has a
+    // dedicated input thread; only its managed jobs need immediate refusal.
+    // dup shares O_NONBLOCK, so the output reader polls the same descriptor.
     #[cfg(unix)]
-    let readiness: Readiness = if spec.managed {
+    let readiness: Readiness = if nonblocking {
         use nix::fcntl::{fcntl, FcntlArg, OFlag};
         use std::os::fd::FromRawFd;
-        let fd = master_fd
-            .ok_or_else(|| PtyError::SpawnFailed("managed PTY has no descriptor".into()))?;
+        let fd = master_fd.ok_or_else(|| PtyError::SpawnFailed("PTY has no descriptor".into()))?;
         let flags =
             fcntl(fd, FcntlArg::F_GETFL).map_err(|e| PtyError::SpawnFailed(e.to_string()))?;
         fcntl(
@@ -171,7 +180,10 @@ pub fn spawn(spec: &SessionSpec) -> Result<Spawned, PtyError> {
         None
     };
     #[cfg(not(unix))]
-    let readiness: Readiness = None;
+    let readiness: Readiness = {
+        let _ = nonblocking;
+        None
+    };
 
     // Allocate fallible PTY descriptors before starting a child.
     let child = pair
@@ -256,6 +268,7 @@ pub struct LocalTerminal {
     pid: Option<u32>,
     master_fd: i32,
     writer: Mutex<Option<Box<dyn io::Write + Send>>>,
+    input: tokio::sync::Mutex<()>,
     master: Mutex<Option<Box<dyn portable_pty::MasterPty + Send>>>,
     lifecycle: super::lifecycle::Lifecycle,
     done: watch::Receiver<bool>,
@@ -272,7 +285,7 @@ impl LocalTerminal {
             pid,
             master_fd,
             readiness,
-        } = spawn(spec)?;
+        } = spawn_with_input(spec, true)?;
 
         // Started before anything else, so not even the program's first bytes
         // can be missed. If the thread cannot start, the closure and with it
@@ -294,6 +307,7 @@ impl LocalTerminal {
             pid,
             master_fd: master_fd.unwrap_or(-1),
             writer: Mutex::new(Some(writer)),
+            input: tokio::sync::Mutex::new(()),
             master: Mutex::new(Some(master)),
             done: lifecycle.done(),
             lifecycle,
@@ -309,13 +323,41 @@ impl Terminal for LocalTerminal {
     }
 
     async fn write(&self, data: &[u8]) -> io::Result<()> {
-        match self.writer.lock().expect("terminal writer").as_mut() {
-            Some(writer) => {
-                writer.write_all(data)?;
-                writer.flush()
-            }
-            None => Err(io::Error::new(io::ErrorKind::BrokenPipe, "writer closed")),
+        if self.managed {
+            return match self.writer.lock().expect("terminal writer").as_mut() {
+                Some(writer) => {
+                    writer.write_all(data)?;
+                    writer.flush()
+                }
+                None => Err(io::Error::new(io::ErrorKind::BrokenPipe, "writer closed")),
+            };
         }
+        // Keep order without copying input into another queue or occupying a
+        // blocking worker. The caller retains its charged buffer until done.
+        tokio::time::timeout(std::time::Duration::from_secs(30), async {
+            let _input = self.input.lock().await;
+            let mut remaining = data;
+            let mut done = self.done();
+            while !remaining.is_empty() {
+                let result = {
+                    let mut writer = self.writer.lock().expect("terminal writer");
+                    writer.as_mut().ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "writer closed"))?.write(remaining)
+                };
+                match result {
+                    Ok(0) => return Err(io::Error::new(io::ErrorKind::WriteZero, "terminal accepted no input")),
+                    Ok(n) => remaining = &remaining[n..],
+                    Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        tokio::select! {
+                            _ = done.wait_for(|done| *done) => return Err(io::Error::new(io::ErrorKind::BrokenPipe, "terminal ended during input")),
+                            _ = tokio::time::sleep(std::time::Duration::from_millis(5)) => {},
+                        }
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Ok(())
+        }).await.map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "terminal input timed out; part may already have been written"))?
     }
 
     fn resize(&self, cols: u16, rows: u16) -> io::Result<()> {
@@ -345,6 +387,17 @@ impl Terminal for LocalTerminal {
 
     async fn stop(&self) -> io::Result<ProcessResult> {
         self.lifecycle.stop().await
+    }
+
+    fn begin_shutdown(&self) -> io::Result<()> {
+        self.lifecycle.begin_shutdown();
+        Ok(())
+    }
+
+    async fn shutdown(&self) -> io::Result<ProcessResult> {
+        let result = self.lifecycle.shutdown().await;
+        self.close()?;
+        result
     }
 
     fn done(&self) -> watch::Receiver<bool> {

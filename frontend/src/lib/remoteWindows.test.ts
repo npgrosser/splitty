@@ -28,7 +28,7 @@ const hostsJson = [
 
 describe("the Tauri bridge", () => {
   let invoke: ReturnType<typeof vi.fn>;
-  const bridge = () => createRemoteWindows("tauri", { __TAURI_INTERNALS__: { invoke } });
+  const bridge = () => createRemoteWindows("tauri", { __SPLITTY_TAURI__: { invoke } });
 
   beforeEach(() => {
     invoke = vi.fn(() => Promise.resolve());
@@ -70,25 +70,31 @@ describe("the Tauri bridge", () => {
     await expect(bridge().open("-oProxyCommand=x")).rejects.toEqual({ message: "not a valid target" });
   });
 
-  it("delivers progress until unsubscribed", async () => {
-    const seen: RemoteProgress[] = [];
-    const unsubscribe = bridge().onProgress((progress) => seen.push(progress));
-    await vi.waitFor(() => expect(tauriEvents.handler).not.toBeNull());
-
-    tauriEvents.handler!({ payload: { target: "vm1", step: "install", message: "Installing Splitty on vm1" } });
-    tauriEvents.handler!({ payload: { target: "vm1" } });
-    unsubscribe();
-
-    expect(seen).toEqual([{ target: "vm1", step: "install", message: "Installing Splitty on vm1" }]);
-    await vi.waitFor(() => expect(tauriEvents.unlisten[0]).toHaveBeenCalledOnce());
+  it("polls only pending targets and stops delivering after unsubscribe", async () => {
+    vi.useFakeTimers();
+    let finish!: () => void;
+    const progress = { target: "vm1", step: "install", message: "Installing Splitty on vm1" };
+    invoke.mockImplementation((command: string) => command === "remote_open"
+      ? new Promise<void>(resolve => { finish = resolve; }) : Promise.resolve(progress));
+    const api = bridge(), seen: RemoteProgress[] = [];
+    const unsubscribe = api.onProgress(value => seen.push(value));
+    const opening = api.open("vm1");
+    await vi.advanceTimersByTimeAsync(150);
+    expect(seen).toEqual([progress]);
+    await vi.advanceTimersByTimeAsync(150);
+    expect(seen).toHaveLength(1);
+    unsubscribe(); finish(); await opening;
+    const count = invoke.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(500);
+    expect(invoke.mock.calls).toHaveLength(count);
+    vi.useRealTimers();
   });
 
-  it("drops the listener when unsubscribed before it was registered", async () => {
-    const unsubscribe = bridge().onProgress(() => {});
-    unsubscribe();
-
-    await vi.waitFor(() => expect(tauriEvents.unlisten).toHaveLength(1));
-    await vi.waitFor(() => expect(tauriEvents.unlisten[0]).toHaveBeenCalledOnce());
+  it("allows unsubscribe before an open without registering event queues", () => {
+    const api = bridge(), seen = vi.fn();
+    api.onProgress(seen)();
+    expect(tauriEvents.unlisten).toHaveLength(0);
+    expect(seen).not.toHaveBeenCalled();
   });
 });
 
@@ -179,7 +185,7 @@ describe("outside a desktop shell", () => {
       vi.stubGlobal("window", {
         location: { search: "?host=vm1" },
         matchMedia: () => ({ matches: false }),
-        __TAURI_INTERNALS__: { invoke: vi.fn() },
+        __SPLITTY_TAURI__: { invoke: vi.fn() },
       });
     });
     afterAll(() => {

@@ -2,12 +2,56 @@
 //! server events (process finished, session exited, process idle).
 
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 
 use tracing::debug;
 
 use super::ServerEvent;
+
+/// Fan out typed events directly into each subscriber's admitted sender.
+/// There is no shared serialized-message backlog or receiver-side String copy.
+/// Senders must enqueue synchronously without awaiting or reentering this bus.
+#[derive(Clone, Default)]
+pub struct NotificationBus {
+    subscribers: Arc<Mutex<Vec<Weak<NotificationSubscriber>>>>,
+}
+
+struct NotificationSubscriber(Arc<dyn super::Sender>);
+
+/// Keeps this subscriber alive; dropping it removes its delivery authority.
+pub struct NotificationSubscription {
+    _subscriber: Arc<NotificationSubscriber>,
+}
+
+impl NotificationBus {
+    pub fn subscribe(&self, sender: Arc<dyn super::Sender>) -> NotificationSubscription {
+        let subscriber = Arc::new(NotificationSubscriber(sender));
+        let mut subscribers = self.subscribers.lock().expect("notification subscribers");
+        subscribers.retain(|sender| sender.strong_count() != 0);
+        subscribers.push(Arc::downgrade(&subscriber));
+        NotificationSubscription {
+            _subscriber: subscriber,
+        }
+    }
+
+    pub fn send(&self, event: &ServerEvent) {
+        self.subscribers
+            .lock()
+            .expect("notification subscribers")
+            .retain(|subscriber| {
+                let Some(subscriber) = subscriber.upgrade() else {
+                    return false;
+                };
+                let sender = &subscriber.0;
+                if sender.send(event).is_err() {
+                    sender.close();
+                    return false;
+                }
+                true
+            });
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -322,6 +366,45 @@ impl NotificationEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn notification_registration_churn_prunes_weak_entries_and_guard_drop_revokes() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        struct Counter(AtomicUsize);
+        impl super::super::Sender for Counter {
+            fn send(
+                &self,
+                _: &ServerEvent,
+            ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            fn send_binary(
+                &self,
+                _: &str,
+                _: &[u8],
+            ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+                panic!("notifications are typed events");
+            }
+        }
+        let bus = NotificationBus::default();
+        let sender = Arc::new(Counter(AtomicUsize::new(0)));
+        for _ in 0..10_000 {
+            let registration = bus.subscribe(sender.clone());
+            assert_eq!(bus.subscribers.lock().unwrap().len(), 1);
+            drop(registration);
+        }
+        bus.send(&ServerEvent::mux_nudge("revoked".into(), None));
+        assert_eq!(
+            sender.0.load(Ordering::SeqCst),
+            0,
+            "external sender aliases do not preserve a dropped registration"
+        );
+        assert!(bus.subscribers.lock().unwrap().is_empty());
+        let _registration = bus.subscribe(sender.clone());
+        bus.send(&ServerEvent::mux_nudge("live".into(), None));
+        assert_eq!(sender.0.load(Ordering::SeqCst), 1);
+    }
     use std::sync::{Arc, Mutex as StdMutex};
 
     fn collecting_engine() -> (NotificationEngine, Arc<StdMutex<Vec<ServerEvent>>>) {

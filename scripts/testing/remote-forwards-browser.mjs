@@ -49,7 +49,7 @@ export function validateConfig(config) {
   }
   check(config.local !== Number(hub.port) && config.local !== 44877, 'DISTINCT_LAB_PORT_REQUIRED', true);
   check(typeof config.target === 'string' && /^[A-Za-z][A-Za-z0-9_-]{0,62}$/.test(config.target), 'LAB_SSH_ALIAS_REQUIRED', true);
-  check(typeof config.cookie === 'string' && /^splitty-session=[A-Za-z0-9_-]{16,512}$/.test(config.cookie), 'SESSION_COOKIE_REQUIRED', true);
+  check(typeof config.cookie === 'string' && /^splitty-session(?:-[a-f0-9]{32})?=[A-Za-z0-9_-]{16,512}$/.test(config.cookie), 'SESSION_COOKIE_REQUIRED', true);
   check(typeof config.marker === 'string' && /^[\x20-\x7e]{16,200}$/.test(config.marker), 'UNIQUE_SERVICE_MARKER_REQUIRED', true);
   for (const key of ['playwrightModule', 'executablePath']) {
     check(typeof config[key] === 'string' && isAbsolute(config[key]), 'ABSOLUTE_TOOL_PATHS_REQUIRED', true);
@@ -322,7 +322,8 @@ async function run(config, report) {
         return await route.continue();
       } catch { violation = 'REQUEST_ROUTING_FAILED'; await route.abort().catch(() => {}); }
     });
-    await context.addCookies([{ name: 'splitty-session', value: config.cookie.slice('splitty-session='.length),
+    const [cookieName, cookieValue] = config.cookie.split('=');
+    await context.addCookies([{ name: cookieName, value: cookieValue,
       url: config.hubUrl, httpOnly: true, sameSite: 'Strict', secure: false }]);
     const page = await context.newPage();
     await page.addInitScript(observeOpen);

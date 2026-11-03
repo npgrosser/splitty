@@ -263,3 +263,78 @@ jobs:
       - name: npm advisories (architecture tooling)
         working-directory: architecture
         run: pnpm audit
+
+  tauri-macos:
+    name: Tauri native runtime (macOS)
+    if: github.event_name != 'schedule'
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: tauri-macos
+
+      # A missing alternate user or WindowServer is a failed verification,
+      # never a passing test that silently skipped its OS assertions.
+      - name: Verify native runtime prerequisites
+        run: |
+          /usr/bin/pgrep -x WindowServer
+          /usr/sbin/sysctl -n kern.osrelease
+          /usr/sbin/lsof -v
+          sudo -n -u nobody /usr/bin/python3 -c 'import os, sys; assert os.geteuid() != 0 and os.geteuid() != int(sys.argv[1])' "$(id -u)"
+
+      - name: Build packaged frontend
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      - name: Check portable WKWebView harness preparation
+        run: |
+          python3 scripts/testing/tauri-wkwebview-smoke-test.py
+          python3 scripts/testing/tauri-wkwebview-smoke.py --prepare-only --evidence-dir "${RUNNER_TEMP}/splitty-macos-native-evidence"
+
+      - name: Lint and test native macOS application
+        run: |
+          cargo clippy --locked -p splitty-gui --all-targets -- -D warnings
+          cargo test --locked -p splitty-gui --lib
+          cargo test --locked -p splitty-core
+          cargo test --locked -p splitty-server --test native_endpoint -- --nocapture
+
+      - name: Verify native exposure and explicit gateway positive controls
+        run: |
+          cargo test --locked -p splitty-server --test daemon_lifecycle process_inventory::inventory_observes_owned_ipv4_and_ipv6_listeners -- --exact
+          cargo test --locked -p splitty-server --test daemon_lifecycle owned_native_child_pipes_end_only_their_embedded_sessions -- --exact
+          cargo test --locked -p splitty-server --test daemon_lifecycle an_explicit_daemon_browser_gateway_survives_daemon_replacement_and_detaches_cleanly -- --exact
+          cargo build --locked -p splitty-server
+
+      # Real WKWebView/PTY/popout execution; no mock runtime or HTTP UI server.
+      - name: Run packaged WKWebView lifecycle smoke
+        run: >-
+          python3 scripts/testing/tauri-wkwebview-smoke.py
+          --full-ui --coexist-daemon --reloads 36
+          --evidence-dir "${RUNNER_TEMP}/splitty-macos-native-evidence"
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: tauri-macos-native-evidence
+          path: ${{ runner.temp }}/splitty-macos-native-evidence
+          retention-days: 7

@@ -81,7 +81,7 @@ model {
     }
 
     protocol = component 'protocol' {
-      description 'The session protocol (create, attach, input, output, resize, close, image and chunked file uploads with destination selection and cancellation, activity, idle, hide, size) with its dispatcher, the message types of both protocols, the notification engine, the stores of pasted images and uploaded files (owner-only files in the cache directory), and the arbiter of the PTY size of sessions several connections show (sizing: reports, activity, the size policy, an idle tick).'
+      description 'The session protocol (create, attach, input, output, resize, close, image and chunked file uploads with destination selection and cancellation, activity, idle, hide, size) with its dispatcher, the message types of both protocols, the notification engine and weak typed-event fanout to individually bounded senders, the stores of pasted images and uploaded files (owner-only files in the cache directory), and the arbiter of the PTY size of sessions several connections show (sizing: reports, activity, the size policy, an idle tick).'
       metadata {
         module 'splitty_core::protocol'
         spec 'terminal-sessions'
@@ -114,6 +114,12 @@ model {
     pty -> shell_profiles 'ShellProfilesState, ShellSettings'
     pty -> config 'run_dir and ensure_private_dir for the stable CLI link'
     protocol -> config 'ensure_private_dir'
+    pty -> splitty.transport.queue 'Bounded PTY subscribers share the client close and byte allowance'
+    pty -> splitty.transport.budget 'Charge replay snapshots and live output until consumption'
+    protocol -> splitty.transport.wire 'Shared mux compatibility version'
+    protocol -> splitty.transport.queue 'Sender delivery context spans every attachment'
+    protocol -> splitty.transport.budget 'Keep replay snapshots and image/upload decode workers charged until consumption'
+    effect_runner -> splitty.transport.queue 'SessionHandle test double uses the bounded subscription contract'
     protocol -> mux 'ScreenInfo, ScreenState'
     protocol -> effect_runner 'EnvContext'
     protocol -> pty 'Backend, SessionHandle, Session, OSC events, ListeningPort; pty::testing in tests'

@@ -88,7 +88,7 @@ async fn a_cli_move_nudges_both_screens_and_a_moved_shell_still_splits() {
         store.screen_of_movable_pane(&splitty_core::ids::PaneId::from("p4")),
         Some(splitty_core::ids::ScreenId::from("s2"))
     );
-    served.state.ws_state.dispatcher.backend().close_all();
+    served.state.client_state.dispatcher.backend().close_all();
 }
 
 /// control-api, Operation Targeting: an owner's tab placement follows a
@@ -114,7 +114,7 @@ async fn an_owner_placement_follows_a_moved_pane_and_an_agent_anchor_does_not() 
 
     let agent = AgentId::new();
     state
-        .ws_state
+        .client_state
         .jobs
         .register_grant(Grant::new(
             "agent".into(),
@@ -139,7 +139,7 @@ async fn an_owner_placement_follows_a_moved_pane_and_an_agent_anchor_does_not() 
         );
     }
     grant_state
-        .ws_state
+        .client_state
         .jobs
         .register_grant(Grant::new(
             "agent".into(),
@@ -161,7 +161,7 @@ async fn an_owner_placement_follows_a_moved_pane_and_an_agent_anchor_does_not() 
         StatusCode::OK
     );
     let scoped: axum::Router = super::super::jobs::routes(
-        Arc::downgrade(&grant_state.ws_state.jobs),
+        Arc::downgrade(&grant_state.client_state.jobs),
         Actor::Agent(agent),
     );
     let (code, body) = exchange(
@@ -171,6 +171,6 @@ async fn an_owner_placement_follows_a_moved_pane_and_an_agent_anchor_does_not() 
     .await;
     assert_eq!(code, StatusCode::NOT_FOUND, "{body}");
 
-    state.ws_state.dispatcher.backend().close_all();
-    grant_state.ws_state.dispatcher.backend().close_all();
+    state.client_state.dispatcher.backend().close_all();
+    grant_state.client_state.dispatcher.backend().close_all();
 }

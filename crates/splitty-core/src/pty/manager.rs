@@ -17,9 +17,14 @@ use crate::shell_profiles::{state_from_settings, ShellProfilesState, ShellSettin
 /// Session registry that manages the lifecycle of terminal sessions.
 pub struct Manager {
     sessions: Mutex<HashMap<String, Arc<dyn SessionHandle>>>,
+    // Closed panes can still own live processes during signal escalation.
+    // Always lock sessions before retiring when transferring ownership.
+    retiring: Mutex<Vec<Arc<dyn SessionHandle>>>,
     shell_profiles: Arc<RwLock<ShellProfilesState>>,
     creating: Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
     terminals: Arc<dyn TerminalFactory>,
+    ending: std::sync::atomic::AtomicBool,
+    lifecycle: tokio::sync::RwLock<()>,
 }
 
 impl Manager {
@@ -39,9 +44,12 @@ impl Manager {
     ) -> Self {
         Self {
             sessions: Mutex::new(HashMap::new()),
+            retiring: Mutex::new(Vec::new()),
             shell_profiles,
             creating: Mutex::new(HashMap::new()),
             terminals,
+            ending: std::sync::atomic::AtomicBool::new(false),
+            lifecycle: tokio::sync::RwLock::new(()),
         }
     }
 
@@ -54,6 +62,11 @@ impl Manager {
         managed: bool,
         start: impl FnOnce(Arc<dyn Feed>) -> Result<Box<dyn Terminal>, PtyError>,
     ) -> Result<Arc<dyn SessionHandle>, PtyError> {
+        let _active = self
+            .lifecycle
+            .try_read()
+            .map_err(|_| PtyError::Other("terminal service is ending".into()))?;
+        self.check_active()?;
         if let Some(existing) = self.get(id) {
             return Ok(existing);
         }
@@ -81,6 +94,52 @@ impl Manager {
         lanes.insert(id.to_owned(), Arc::downgrade(&lane));
         lane
     }
+
+    fn check_active(&self) -> Result<(), PtyError> {
+        if self.ending.load(std::sync::atomic::Ordering::Acquire) {
+            Err(PtyError::Other("terminal service is ending".into()))
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Seal creation before waiting for already admitted spawns. In particular,
+    /// a spawn cannot register a new child just after close_all drained the map.
+    pub async fn shutdown(&self, preserve: bool) -> std::io::Result<()> {
+        self.ending
+            .store(true, std::sync::atomic::Ordering::Release);
+        let _exclusive = self.lifecycle.write().await;
+        if preserve {
+            self.release_all();
+            return Ok(());
+        }
+        let sessions = self.take_all();
+        let mut error = None;
+        // Signal every lifecycle before awaiting any one of them. A failed
+        // termination must not prevent the other owned children being reaped.
+        for session in &sessions {
+            if let Err(reason) = session.begin_shutdown() {
+                error.get_or_insert(reason);
+            }
+        }
+        for session in sessions {
+            if let Err(reason) = session.shutdown().await {
+                error.get_or_insert(reason);
+            }
+        }
+        match error {
+            Some(error) => Err(error),
+            None => Ok(()),
+        }
+    }
+
+    fn take_all(&self) -> Vec<Arc<dyn SessionHandle>> {
+        let mut sessions = self.sessions.lock().expect("sessions");
+        let mut retiring = self.retiring.lock().expect("retiring sessions");
+        let mut all: Vec<_> = sessions.drain().map(|(_, session)| session).collect();
+        all.extend(retiring.drain(..));
+        all
+    }
 }
 
 impl Default for Manager {
@@ -96,6 +155,8 @@ impl Backend for Manager {
         mut opts: CreateSessionOpts,
         argv: Vec<String>,
     ) -> Result<Arc<dyn SessionHandle>, PtyError> {
+        let _active = self.lifecycle.read().await;
+        self.check_active()?;
         if opts.id.is_empty() {
             opts.id = super::session::generate_id();
         }
@@ -118,6 +179,8 @@ impl Backend for Manager {
         &self,
         mut opts: CreateSessionOpts,
     ) -> Result<Arc<dyn SessionHandle>, PtyError> {
+        let _active = self.lifecycle.read().await;
+        self.check_active()?;
         if opts.id.is_empty() {
             opts.id = super::session::generate_id();
         }
@@ -173,38 +236,36 @@ impl Backend for Manager {
     }
 
     fn close(&self, id: &str) -> Result<(), PtyError> {
-        let session = self
-            .sessions
-            .lock()
-            .unwrap()
-            .remove(id)
-            .ok_or_else(|| PtyError::SessionNotFound(id.to_string()))?;
+        let session = {
+            let mut sessions = self.sessions.lock().expect("sessions");
+            let mut retiring = self.retiring.lock().expect("retiring sessions");
+            retiring.retain(|session| !*session.done().borrow());
+            let session = sessions
+                .remove(id)
+                .ok_or_else(|| PtyError::SessionNotFound(id.to_string()))?;
+            retiring.push(session.clone());
+            session
+        };
         session.close().map_err(PtyError::WriteFailed)?;
         Ok(())
     }
 
     fn close_all(&self) {
-        let sessions: Vec<Arc<dyn SessionHandle>> = self
-            .sessions
-            .lock()
-            .unwrap()
-            .drain()
-            .map(|(_, v)| v)
-            .collect();
+        let sessions: Vec<_> = {
+            let mut sessions = self.sessions.lock().expect("sessions");
+            let mut retiring = self.retiring.lock().expect("retiring sessions");
+            retiring.retain(|session| !*session.done().borrow());
+            let closing: Vec<_> = sessions.drain().map(|(_, session)| session).collect();
+            retiring.extend(closing.iter().cloned());
+            closing
+        };
         for session in sessions {
             let _ = session.close();
         }
     }
 
     fn release_all(&self) {
-        let sessions: Vec<Arc<dyn SessionHandle>> = self
-            .sessions
-            .lock()
-            .unwrap()
-            .drain()
-            .map(|(_, v)| v)
-            .collect();
-        for session in sessions {
+        for session in self.take_all() {
             session.release();
             // Closes what could not be released; a no-op for the rest.
             let _ = session.close();
@@ -219,6 +280,80 @@ impl Backend for Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
+    async fn service_shutdown_waits_for_an_admitted_spawn_and_refuses_late_creates() {
+        use crate::pty::{
+            terminal::SessionSpec,
+            testing::{pty_available, sh_opts},
+        };
+        use std::time::Duration;
+        if !pty_available() {
+            return;
+        }
+        struct Paused {
+            entered: Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+            release: Mutex<std::sync::mpsc::Receiver<()>>,
+        }
+        impl TerminalFactory for Paused {
+            fn start(
+                &self,
+                spec: &SessionSpec,
+                feed: Arc<dyn Feed>,
+            ) -> Result<Box<dyn Terminal>, PtyError> {
+                self.entered
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .unwrap()
+                    .send(())
+                    .unwrap();
+                self.release
+                    .lock()
+                    .unwrap()
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap();
+                LocalTerminals.start(spec, feed)
+            }
+        }
+        let (entered, wait) = tokio::sync::oneshot::channel();
+        let (release, released) = std::sync::mpsc::channel();
+        let manager = Arc::new(Manager::with_terminals(
+            Arc::new(RwLock::new(state_from_settings(&ShellSettings::default()))),
+            Arc::new(Paused {
+                entered: Mutex::new(Some(entered)),
+                release: Mutex::new(released),
+            }),
+        ));
+        let creating = {
+            let manager = manager.clone();
+            tokio::spawn(
+                async move { manager.create(sh_opts("racing", "sleep 30")).await.unwrap() },
+            )
+        };
+        wait.await.unwrap();
+        let shutdown = {
+            let manager = manager.clone();
+            tokio::spawn(async move { manager.shutdown(false).await })
+        };
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(
+            !shutdown.is_finished(),
+            "an in-flight spawn is still owned until it can be closed"
+        );
+        release.send(()).unwrap();
+        let session = creating.await.unwrap();
+        shutdown.await.unwrap().unwrap();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            session.done().wait_for(|done| *done),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(manager.sessions().is_empty());
+        assert!(manager.create(sh_opts("late", "sleep 30")).await.is_err());
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn simultaneous_creates_of_one_id_start_exactly_one_program() {

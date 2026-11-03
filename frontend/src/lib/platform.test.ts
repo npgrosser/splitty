@@ -1,41 +1,42 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 
-/** Load `platform.ts` as a page with these globals and this query string would. */
 async function loadPlatform(search: string, globals: Record<string, unknown> = {}) {
   vi.resetModules();
-  vi.stubGlobal("window", {
-    location: { search },
-    matchMedia: () => ({ matches: false }),
-    ...globals,
-  });
+  vi.stubGlobal("window", { location: { search }, matchMedia: () => ({ matches: false }), ...globals });
   return import("./platform.ts");
 }
+afterEach(() => vi.unstubAllGlobals());
 
-afterEach(() => {
-  vi.unstubAllGlobals();
-});
-
-describe("shellKind", () => {
-  it("names the shell whose bridge the page has", async () => {
-    expect((await loadPlatform("", { __TAURI_INTERNALS__: {} })).shellKind).toBe("tauri");
-    expect((await loadPlatform("", { __SPLITTY_ELECTRON__: {} })).shellKind).toBe("electron");
-    expect((await loadPlatform("")).shellKind).toBe("web");
-  });
-
-  /// desktop-remote: the session URL of a remote window carries `host`. Tauri
-  /// injects its bridge into that window as well, but the page there is the
-  /// host's and has no native rights, so it behaves as in a browser.
-  it("is web in a remote session, even with Tauri's bridge injected", async () => {
-    const platform = await loadPlatform("?bootstrap=abc&host=vm1", { __TAURI_INTERNALS__: {} });
-
-    expect(platform.isRemoteSession).toBe(true);
+describe("native platform assignment", () => {
+  it("does not grant native UI capabilities from forged globals or host query parameters", async () => {
+    const platform = await loadPlatform("?host=vm1&desktop=1", { __TAURI_INTERNALS__: {}, __SPLITTY_ELECTRON__: {} });
     expect(platform.shellKind).toBe("web");
+    expect(platform.isRemoteSession).toBe(false);
     expect(platform.isDesktop).toBe(false);
   });
-
-  it("stays web after the bootstrap code left the URL", async () => {
-    const platform = await loadPlatform("?host=user%40vm1%3A2222", { __TAURI_INTERNALS__: {} });
-
-    expect(platform.shellKind).toBe("web");
+  it("uses the native assignment despite a conflicting query", async () => {
+    const platform = await loadPlatform("?host=forged");
+    platform.assignPlatform("electron", "main");
+    expect(platform.shellKind).toBe("electron");
+    expect(platform.isRemoteSession).toBe(false);
+    expect(platform.isDesktop).toBe(true);
+    expect(() => platform.assignPlatform("electron", "remote")).toThrow();
   });
+  it("keeps remote windows restricted even when no query names a host", async () => {
+    const platform = await loadPlatform("", { __TAURI_INTERNALS__: {} });
+    platform.assignPlatform("tauri", "remote");
+    expect(platform.shellKind).toBe("web");
+    expect(platform.isRemoteSession).toBe(true);
+    expect(platform.isDesktop).toBe(false);
+  });
+});
+
+it("can render server-side UI without browser globals or assigning native authority", async () => {
+  vi.resetModules(); vi.unstubAllGlobals();
+  const platform = await import("./platform.ts");
+  expect(platform.shellKind).toBe("web");
+  expect(platform.nativeShell).toBeUndefined();
+  expect(platform.isDesktop).toBe(false);
+  expect(platform.isRemoteSession).toBe(false);
+  expect(platform.isPWA).toBe(false);
 });

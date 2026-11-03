@@ -37,23 +37,45 @@ Splitty does **not** defend against:
 
 ## Network boundary
 
-- The server binds to loopback only; a routable address or the old `--remote`
-  flag aborts startup (`refuses_to_bind_to_a_routable_address`,
-  `refuses_direct_remote_mode`).
-- A `Host` check blocks DNS rebinding (`rejects_foreign_host_header`).
-- Remote machines are reached through an SSH tunnel, `splitty connect user@host`.
-  The target is parsed, so it cannot inject `ssh` options
-  (`option_like_targets_are_rejected`), and the forward is verified before a URL
-  is printed (`crates/splitty-server/src/tunnel.rs`).
+- Desktop-local connections use in-process IPC or app-owned child pipes. They
+  start no UI TCP listener, read no browser credential, and never adopt an
+  independently started daemon or its keeper sessions.
+- Explicit daemons accept UI clients on a private owner-only Unix socket.
+  Endpoint paths reject symlinks, stale cleanup checks identity, and both ends
+  verify peer ownership (`crates/splitty-server/src/native/endpoint.rs`).
+- Remote connections use SSH exec stdio to the host's private native socket.
+  Validated targets cannot inject SSH options. Native negotiation verifies
+  the expected daemon instance and protocol before application input.
+- Only explicit browser access starts a loopback HTTP/WebSocket gateway to
+  one fixed backend. Routable binds and the old `--remote` flag are refused;
+  Host and Origin checks defend this intentional listener against other pages
+  (`crates/splitty-server/src/http/middleware.rs`). Deliberate application port
+  forwards are separate from Splitty's UI transport. Explicit gateways accept
+  canonical `127.0.0.1` or `::1`, with exact origins derived from the bound
+  address and `localhost` at that port; no wildcard or port-derived native
+  grant exists.
+
+Reverse-share admission and browser binds coordinate through a private
+per-user reservation registry across configuration directories. Ambiguous
+worker identity, corrupt records and unsupported namespace views fail closed.
+Linux requires the initial PID/user namespaces and a matching root mount view.
+Windows and WSL refuse reverse sharing until a shared localhost reservation
+authority exists; explicit browser access and forward-to-local development
+ports remain separate supported surfaces. This registry does not constrain
+other forwarding tools run by the same OS user.
 
 ## Credentials
+
+These credentials belong to the explicit browser gateway. Packaged desktop
+windows use native-assigned document proofs and backend handles instead;
+remote hosts supply data, never executable UI.
 
 | Credential | Held by | Lifetime | Readable by page script |
 |---|---|---|---|
 | Bootstrap code | the launcher, in the URL it opens | one use, 120 s | yes, worthless once used |
 | Session cookie | the browser | server process | no (`HttpOnly`, `SameSite=Strict`) |
 | WebSocket ticket | the page, for one handshake | one use, 10 s | yes, worthless once used |
-| Process token | CLI and launchers, 0600 file | until deleted | never sent to the browser |
+| Process token | explicit HTTP CLI callers and gateway | file-backed for `serve`, or gateway process for `connect` / `--oneshot-token` | never included in a launch URL; a deliberate browser login may submit it |
 
 Implementation: `crates/splitty-server/src/http/session.rs`. Tests:
 `bootstrap_code_cannot_be_replayed`, `expired_bootstrap_code_is_rejected`,
@@ -61,9 +83,13 @@ Implementation: `crates/splitty-server/src/http/session.rs`. Tests:
 `ws_ticket_requires_a_session`, `query_parameter_token_is_not_accepted`,
 `startup_output_contains_no_reusable_credential`, `empty_values_never_validate`.
 
-To rotate the process token, quit Splitty, delete
-`~/.config/splitty/auth-token` and start it again. Sessions and tickets are never
-persisted and die with the process.
+To rotate a file-backed process token, stop gateways using it, delete
+`~/.config/splitty/auth-token` and restart those gateways. `connect` never reads
+that file. Browser sessions, bootstrap codes and tickets belong only to their
+gateway process; no native socket or SSH host mints or receives them. Cookie
+names include a gateway instance identifier. Cookies remain hostname-scoped,
+not port-scoped; simultaneous gateways do not provide OS or same-hostname
+isolation.
 
 ## Browser boundary
 
@@ -89,30 +115,45 @@ persisted and die with the process.
 
 Splitty never renders foreign web content. Both shells decide every
 navigation and every new-window request natively, whatever code in the page
-asked for it: the backend origin and the app's own popouts stay in Splitty,
+asked for it: exact packaged entries and parent-owned popouts stay in Splitty,
 other `http(s)` URLs open in the system browser, and every other scheme
 (`file:`, `javascript:`, OS protocol handlers) is dropped.
 
 - **Tauri** (`crates/splitty-tauri/src/navigation.rs`, with unit tests). Custom
-  commands are declared in an app manifest and granted per context: to the
-  bundled Windows setup page in `capabilities/`, and to the main window at
-  runtime, only on the exact origin of its own backend (`src/capability.rs`).
-  Only the setup page may start the backend. A remote window, which shows a
-  host's UI, is in no capability, has a cookie store of its own in memory only,
-  stays on its tunnel origin and opens no windows (`src/remote.rs`). The URL
-  opener is scoped to `http(s)`. DevTools exist only in builds with
-  `--features devtools`.
+  commands are declared in an app manifest and granted to packaged main and
+  remote windows through separate runtime capabilities. Application commands
+  additionally require a private proof of the actual current document; only
+  native setup policy may provision WSL. Remote windows load the same packaged
+  UI with a fixed host assignment and transport-only rights. They have private
+  ephemeral storage, no popouts, and no editor/reveal or local-backend access.
+  Parent-owned popouts share their parent's trust and quota; denying their
+  direct IPC is not isolation from their parent's JavaScript. DevTools exist
+  only in builds with `--features devtools`.
 - **Electron** (`frontend-electron/src/main.ts`). Sandboxed renderer with
-  context isolation and no Node integration, a fixed IPC channel list, guards on
-  every WebContents, a permission allowlist (notifications and clipboard writes,
-  backend origin only), no DevTools when packaged, and fuses that disable
-  `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS` and inspector flags and load the app
-  only from an integrity-checked asar.
+  context isolation and no Node integration, exact packaged resources,
+  restricted preload methods, native document proofs, and a permission
+  allowlist for notifications and clipboard writes. Packaged builds have no
+  DevTools. Fuses disable `ELECTRON_RUN_AS_NODE`, `NODE_OPTIONS` and inspector
+  flags and load app code only from an integrity-checked asar.
 - **WSL** (`crates/splitty-tauri/src/windows_wsl.rs`). A root default user is
-  refused (`root_default_user_is_rejected`), credentials are redacted from the
-  backend log (`backend_stdout_credentials_are_redacted_in_logs`), and the
-  control socket is refused on Windows drive mounts
-  (`windows_drive_mounts_are_refused`).
+  refused (`root_default_user_is_rejected`). Provisioning output is separately
+  bounded; protocol traffic uses raw native pipes with no port/bootstrap text
+  parsing. Shutdown cancels and reaps only owned commands and the app's helper,
+  never the distribution or unrelated WSL work.
+
+Native byte and admission limits include retained application buffers and
+encoded IPC output. Tauri output owns its source chunk and encoding reservations
+until evaluation completion or callback destruction; renderer consumption is a
+separate credit. A document check prevents stale output entering a replacement
+page. Closed renderer connections retain their slots until pending invokes settle.
+Incoming Wry request bodies are allocated before application validation, so these
+limits do not establish a bound on every WebView/framework allocation or total
+renderer RSS. Actual platform isolation and resource checks are tracked separately
+from unit coverage. Linux full UI checks cover assets, binary terminal traffic,
+heartbeat, independent daemon lifetime and absence of app/WebKit TCP listeners.
+Native MSVC tests and the WebView2 setup-role smoke pass. The revised output
+carrier, native popout cleanup, WSL and macOS require their own runtime checks;
+one platform's result does not establish another's behavior.
 
 ## Terminal output
 

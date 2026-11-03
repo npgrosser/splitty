@@ -1,7 +1,7 @@
 //! End-to-end assertions about the server's externally reachable HTTP surface.
 //!
 //! These tests boot the real `splitty serve` binary on a random loopback port,
-//! exactly as the Tauri and Electron launchers do, and then make real requests
+//! as an explicitly requested browser gateway, and then make real requests
 //! against it. They therefore cover the full middleware stack (localhost guard,
 //! CORS, auth) rather than a hand-assembled router.
 //!
@@ -17,6 +17,15 @@ use std::time::{Duration, Instant};
 
 use tempfile::TempDir;
 
+#[path = "support/command.rs"]
+mod isolated_command;
+#[cfg(target_os = "linux")]
+#[path = "support/processes.rs"]
+mod process_cleanup;
+#[cfg(unix)]
+#[path = "support/listeners.rs"]
+mod process_inventory;
+
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 
 struct TestServer {
@@ -31,13 +40,53 @@ struct TestServer {
 
 impl TestServer {
     fn start() -> Self {
+        Self::start_options(&[])
+    }
+    fn start_options(options: &[&str]) -> Self {
         let home = tempfile::tempdir().expect("tempdir");
+        let bin = home.path().join("opener-bin");
+        std::fs::create_dir(&bin).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for name in [
+                "xdg-open",
+                "gio",
+                "gnome-open",
+                "kde-open",
+                "wslview",
+                "open",
+                "powershell.exe",
+            ] {
+                let path = bin.join(name);
+                let body = if name == "powershell.exe" {
+                    "printf '%s\\n' \"$OPEN_RS_TARGET\""
+                } else {
+                    "printf '%s\\n' \"$@\""
+                };
+                std::fs::write(
+                    &path,
+                    format!(
+                        "#!/bin/sh\n{body} >> '{}'\n",
+                        home.path().join("opened").display()
+                    ),
+                )
+                .unwrap();
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            }
+        }
+        let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        )))
+        .unwrap();
         // Deliberately without `--oneshot-token`: the desktop launchers use that
         // flag, but then the process token is never written anywhere and these
         // tests could not exercise the `Authorization: Bearer` path that the CLI
         // relies on. The bootstrap flow under test is identical either way.
         let mut child = Command::new(env!("CARGO_BIN_EXE_splitty"))
             .args(["serve", "--addr", "127.0.0.1:0"])
+            .args(options)
+            .env("PATH", path)
             .env("HOME", home.path())
             .env("XDG_CONFIG_HOME", home.path().join("config"))
             .env("XDG_DATA_HOME", home.path().join("data"))
@@ -116,9 +165,22 @@ impl TestServer {
         // the server persisted — the same path the CLI discovers it through.
         // That this works at all is the point: the credential lives in a
         // 0600 file, not on a stream that ends up in logs.
-        let token = std::fs::read_to_string(home.path().join("config/splitty/auth-token"))
-            .map(|s| s.trim().to_string())
-            .expect("server should have persisted an auth token");
+        let token = if let Some(pair) = options.windows(2).find(|pair| pair[0] == "--token") {
+            pair[1].to_owned()
+        } else if options.contains(&"--oneshot-token") {
+            String::new()
+        } else {
+            std::fs::read_to_string(home.path().join("config/splitty/auth-token"))
+                .map(|s| s.trim().to_string())
+                .expect("server should have persisted an auth token")
+        };
+
+        #[cfg(unix)]
+        assert_eq!(
+            process_inventory::tcp_listeners(child.id()),
+            [std::net::SocketAddr::from(([127, 0, 0, 1], port))],
+            "an explicit browser gateway owns exactly its advertised loopback listener"
+        );
 
         Self {
             child,
@@ -685,7 +747,7 @@ async fn session_cookie_is_httponly() {
         "cookie must be SameSite=Strict, got: {cookie}"
     );
     assert!(
-        cookie.starts_with("splitty-session="),
+        cookie.starts_with("splitty-session-"),
         "unexpected cookie name: {cookie}"
     );
 }
@@ -1202,4 +1264,254 @@ async fn create_screen_over_a_screen_with_panes_is_rejected() {
         panes.contains_key("p-first") && !panes.contains_key("p-second"),
         "panes: {panes:?}"
     );
+}
+
+// Smoke: a private child process owns the entire admission pool, so this can
+// exhaust real idle WebSockets without borrowing capacity from parallel tests.
+#[tokio::test]
+async fn idle_browser_streams_are_bounded_and_closing_one_restores_capacity() {
+    use futures::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::{client::IntoClientRequest, Error, Message};
+    let server = TestServer::start();
+    let browser = server.authenticated_client().await;
+    let open = || async {
+        let ticket = browser
+            .post(server.url("/api/ws-ticket"))
+            .header("Origin", server.own_origin())
+            .send()
+            .await
+            .unwrap()
+            .json::<serde_json::Value>()
+            .await
+            .unwrap();
+        let mut request = format!(
+            "ws://127.0.0.1:{}/ws?ticket={}",
+            server.port,
+            ticket["ticket"].as_str().unwrap()
+        )
+        .into_client_request()
+        .unwrap();
+        request
+            .headers_mut()
+            .insert("Origin", server.own_origin().parse().unwrap());
+        tokio_tungstenite::connect_async(request).await
+    };
+    let mut streams = Vec::new();
+    for _ in 0..32 {
+        let (mut stream, _) = open().await.unwrap();
+        let welcome = stream.next().await.unwrap().unwrap();
+        let Message::Text(text) = welcome else {
+            panic!("missing welcome");
+        };
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&text).unwrap()["type"],
+            "mux.welcome"
+        );
+        streams.push(stream);
+    }
+    match open().await {
+        Err(Error::Http(response)) => assert_eq!(response.status(), 503),
+        _ => panic!("the 33rd stream must be refused before service creation"),
+    }
+    let mut closed = streams.pop().unwrap();
+    closed.close(None).await.unwrap();
+    drop(closed);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut replacement = loop {
+        match open().await {
+            Ok((stream, _)) => break stream,
+            Err(Error::Http(response)) if response.status() == 503 => {
+                assert!(
+                    Instant::now() < deadline,
+                    "closing a stream did not release its capacity"
+                );
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("replacement failed: {error}"),
+        }
+    };
+    let Message::Text(welcome) = replacement.next().await.unwrap().unwrap() else {
+        panic!("replacement welcome");
+    };
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&welcome).unwrap()["type"],
+        "mux.welcome"
+    );
+    replacement
+        .send(Message::Text(r#"{"type":"mux.resync"}"#.into()))
+        .await
+        .unwrap();
+    replacement.close(None).await.unwrap();
+    for mut stream in streams {
+        stream.close(None).await.unwrap();
+    }
+}
+
+#[test]
+fn removed_desktop_stdio_and_busy_browser_binds_fail_before_creating_a_workspace() {
+    let home = tempfile::tempdir().unwrap();
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = held.local_addr().unwrap().to_string();
+    for (args, expected, code) in [
+        (
+            vec!["serve", "--addr", "127.0.0.1:0", "--desktop-stdio"],
+            "desktop-backend --transport native-v1",
+            2,
+        ),
+        (vec!["serve", "--addr", address.as_str()], "cannot bind", 1),
+    ] {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_splitty"));
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let stdout = home.path().join("command.stdout");
+        let stderr = home.path().join("command.stderr");
+        let child = command
+            .args(args)
+            .env("HOME", home.path())
+            .env("XDG_CONFIG_HOME", home.path().join("config"))
+            .env("XDG_DATA_HOME", home.path().join("data"))
+            .env("XDG_RUNTIME_DIR", home.path().join("run"))
+            .stdin(Stdio::null())
+            .stdout(File::create(&stdout).unwrap())
+            .stderr(File::create(&stderr).unwrap())
+            .spawn()
+            .unwrap();
+        #[cfg(target_os = "linux")]
+        let group = child.id();
+        let status = isolated_command::wait(child);
+        let output = std::process::Output {
+            status,
+            stdout: std::fs::read(stdout).unwrap(),
+            stderr: std::fs::read(stderr).unwrap(),
+        };
+        #[cfg(target_os = "linux")]
+        process_cleanup::assert_group_exited(group);
+        assert_eq!(output.status.code(), Some(code));
+        assert!(String::from_utf8_lossy(&output.stderr).contains(expected));
+        assert!(!String::from_utf8_lossy(&output.stdout).contains("SPLITTY_PORT="));
+        assert!(
+            !home.path().join("config").exists(),
+            "refused startup must not create workspace/credentials"
+        );
+        assert!(!home.path().join("run").exists());
+    }
+}
+
+/// A leaking descendant can retain diagnostic descriptors after its command
+/// exits. A real child is needed to prove the inventory remains reachable.
+#[cfg(target_os = "linux")]
+#[test]
+fn inherited_diagnostics_do_not_block_failed_command_inventory() {
+    use std::os::unix::process::CommandExt;
+    let fixture = tempfile::tempdir().unwrap();
+    let marker = fixture.path().join("descendant.pid");
+    let child = Command::new("sh")
+        .args(["-c", "sleep 30 & echo $! > \"$1\"; exit 1", "sh"])
+        .arg(&marker)
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(File::create(fixture.path().join("stdout")).unwrap())
+        .stderr(File::create(fixture.path().join("stderr")).unwrap())
+        .spawn()
+        .unwrap();
+    let group = child.id();
+    let started = Instant::now();
+    let status = isolated_command::wait(child);
+    let elapsed = started.elapsed();
+    let members = process_cleanup::live_group_members(group);
+    let descendant: u32 = std::fs::read_to_string(marker)
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    // End the deliberately leaked fixture before reporting its assertions.
+    nix::sys::signal::killpg(
+        nix::unistd::Pid::from_raw(group.try_into().unwrap()),
+        nix::sys::signal::Signal::SIGKILL,
+    )
+    .unwrap();
+    process_cleanup::assert_group_exited(group);
+    assert_eq!(status.code(), Some(1));
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "leader wait inherited a descendant's output lifetime"
+    );
+    assert!(
+        members.contains(&descendant),
+        "the orphan remains visible to the cleanup inventory"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn explicit_serve_open_and_token_options_stay_gateway_local() {
+    let server = TestServer::start_options(&["--open", "--oneshot-token"]);
+    let opened = server._home.path().join("opened");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !opened.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "--open did not invoke the browser launcher"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(
+        std::fs::read_to_string(&opened).unwrap().trim(),
+        format!(
+            "http://127.0.0.1:{}/?bootstrap={}&desktop=1",
+            server.port, server.bootstrap
+        )
+    );
+    let browser = server.authenticated_client().await;
+    assert_eq!(
+        browser
+            .get(server.url("/api/mux/status"))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert!(
+        !server
+            ._home
+            .path()
+            .join("config/splitty/auth-token")
+            .exists(),
+        "oneshot must not resolve stored credentials"
+    );
+
+    let explicit = TestServer::start_options(&["--token", "explicit-owner-token"]);
+    assert_eq!(
+        TestServer::client()
+            .get(explicit.url("/api/mux/status"))
+            .bearer_auth("explicit-owner-token")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        200
+    );
+    assert_eq!(
+        TestServer::client()
+            .get(explicit.url("/api/mux/status"))
+            .bearer_auth("other-token")
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        401
+    );
+    assert!(
+        !explicit._home.path().join("opened").exists(),
+        "serve without --open must not open a browser"
+    );
+    assert!(!explicit
+        ._home
+        .path()
+        .join("config/splitty/auth-token")
+        .exists());
 }

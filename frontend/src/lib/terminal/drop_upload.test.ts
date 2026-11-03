@@ -1,3 +1,4 @@
+import { fakeServer } from "../testing/fake_server.ts";
 import { describe, expect, it, vi } from "vitest";
 import { quoteUploadPath, uploadDroppedFiles, type DropProgress } from "./drop_upload.ts";
 
@@ -57,4 +58,11 @@ describe("confirmed drop uploads", () => {
     expect(quoteUploadPath("/work/$(touch x)/a")).toBe("'/work/$(touch x)/a'");
     expect(quoteUploadPath("/it's/a")).toBe("'/it'\"'\"'s/a'");
   });
+});
+
+it("keeps a confirmed batch on its original connection between files", async () => {
+  const { conn, socket } = fakeServer("local");
+  const destination = { captureConnection: () => conn.sessions.captureConnection(), uploadFile: vi.fn(async () => "/tmp/first"), paste: vi.fn() };
+  await expect(uploadDroppedFiles(files(), destination, { insert: true }, progress => { if (progress.completed === 1) socket.drop(); })).rejects.toThrow("connection changed");
+  expect(destination.uploadFile).toHaveBeenCalledOnce(); expect(destination.paste).not.toHaveBeenCalled(); conn.dispose();
 });

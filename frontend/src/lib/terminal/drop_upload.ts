@@ -3,6 +3,7 @@ import { MAX_FILE_BYTES } from "./image_paste.ts";
 import type { UploadOptions } from "./session_client.ts";
 
 export interface DropUploadTarget {
+  captureConnection?(): () => void;
   uploadFile(file: File, progress: ((received: number) => void) | undefined, options: UploadOptions): Promise<string>;
   paste(text: string): void;
 }
@@ -34,16 +35,21 @@ export async function uploadDroppedFiles(
   const total = files.reduce((sum, file) => sum + file.size, 0);
   let stored = 0;
   const paths: string[] = [];
+  const current = target.captureConnection?.() ?? (() => {});
+  current();
   for (const [index, file] of files.entries()) {
+    current();
     options.signal?.throwIfAborted();
     progress({ stored, total, index, completed: paths.length });
     const path = await target.uploadFile(file, (received) => {
       progress({ stored: stored + received, total, index, completed: paths.length });
     }, options);
+    current();
     paths.push(path);
     stored += file.size;
     progress({ stored, total, index, completed: paths.length });
   }
+  current();
   options.signal?.throwIfAborted();
   if (options.insert && paths.length) target.paste(paths.map(quoteUploadPath).join(" "));
 }

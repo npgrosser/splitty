@@ -34,16 +34,24 @@ tracing-subscriber = "0.3"
 # hosts, on every platform (Windows included, where no local server exists).
 splitty-remote = { path = "../splitty-remote" }
 tokio = { workspace = true }
+rand = { workspace = true }
+subtle = "2"
+base64 = "0.22"
+splitty-transport = { path = "../splitty-transport" }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
 splitty-core = { path = "../splitty-core" }
 splitty-server = { path = "../splitty-server" }
-rand = { workspace = true }
-hex = { workspace = true }
-axum = { version = "0.8", features = ["ws"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 cocoa = "0.26"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = { version = "2", features = ["v2_40"] }
+gtk = "0.18"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }
 
 [target.'cfg(not(target_os = "windows"))'.dev-dependencies]
 tempfile = "3"

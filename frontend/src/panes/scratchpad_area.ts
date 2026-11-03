@@ -36,6 +36,7 @@ const MAX_SHARE = 0.8;
 const placements = new Map<string, Placement>();
 
 export interface ScratchpadAreaOptions {
+  captureConnection?: () => () => void;
   paneId: string;
   sessionId: string;
   store: Scratchpads;
@@ -55,6 +56,7 @@ export class ScratchpadArea implements ScratchpadControl {
   private readonly textarea: HTMLTextAreaElement;
   private readonly note: HTMLElement;
   private readonly placement: Placement;
+  private disposed = false;
   private readonly cleanups: (() => void)[] = [];
 
   constructor(private readonly options: ScratchpadAreaOptions) {
@@ -129,12 +131,20 @@ export class ScratchpadArea implements ScratchpadControl {
         options.focusTerminal();
       }
     });
+    const captureConnection = () => {
+      const current = options.captureConnection?.() ?? (() => {});
+      return () => {
+        if (this.disposed) throw Error("The scratchpad is no longer available.");
+        current();
+      };
+    };
     const uploads = createDropUpload(this.textarea, {
+      captureConnection,
       uploadFile: (file, progress, settings) => options.uploadFile(file, progress, settings),
       paste: (text) => this.insert(text),
     }, options.uploadContext);
     this.cleanups.push(uploads.dispose);
-    this.cleanups.push(attachImageInsert(this.textarea, options, (text) => this.insert(text), uploads.drop));
+    this.cleanups.push(attachImageInsert(this.textarea, { ...options, captureConnection }, (text) => this.insert(text), uploads.drop));
     this.listen(this.textarea, "wheel", (event) => {
       const e = event as WheelEvent;
       if (!e.ctrlKey) return;
@@ -181,6 +191,7 @@ export class ScratchpadArea implements ScratchpadControl {
   }
 
   dispose(): void {
+    this.disposed = true;
     this.options.store.flush(this.options.sessionId);
     for (const cleanup of this.cleanups) cleanup();
     this.cleanups.length = 0;

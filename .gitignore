@@ -39,3 +39,7 @@ Thumbs.db
 *.log
 crates/splitty-tauri/resources/splitty-wsl-x86_64.tar.gz
 crates/splitty-tauri/resources/splitty-wsl-x86_64.tar.gz.sha256
+
+# Python test harness bytecode
+__pycache__/
+*.pyc

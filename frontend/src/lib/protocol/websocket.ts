@@ -1,6 +1,6 @@
 import type { IncomingMessage, OutgoingMessage } from "./types.ts";
 import { fetchWsTicket } from "./http.ts";
-import { belongsToConnection, SocketHandlers, type ConnSocket } from "./socket.ts";
+import { SocketHandlers, type ConnSocket } from "./socket.ts";
 
 let debugMode: boolean | undefined;
 
@@ -10,7 +10,7 @@ function isDebug(): boolean {
   return debugMode;
 }
 
-function logDebug(direction: "ws->client" | "client->ws" | "client->ws:queue", payload: unknown) {
+function logDebug(direction: "ws->client" | "client->ws", payload: unknown) {
   if (!isDebug()) return;
   console.debug(`[splitty debug] ${direction}`, payload);
 }
@@ -18,17 +18,17 @@ function logDebug(direction: "ws->client" | "client->ws" | "client->ws:queue", p
 /**
  * The socket to the local server, the one that served this page.
  *
- * Two rules here hold for the local server only: a socket that fails before it
- * opened is an authentication error (the session is gone), and messages sent
- * while it is down are queued and sent once it is open again.
+ * Browser authentication belongs to this connection only. Disconnected sends
+ * are discarded; welcome-driven clients resync and reattach after reconnect.
  */
 export class SplittyWebSocket extends SocketHandlers implements ConnSocket {
   private ws: WebSocket | null = null;
-  private queue: IncomingMessage[] = [];
   private reconnectTimer: number | undefined;
   private reconnectAttempt = 0;
   private static readonly MAX_RECONNECT_DELAY = 10_000;
   private connecting = false;
+  private epoch = 0;
+  private disposed = false;
 
   onConnected: (() => void) | null = null;
   onAuthError: (() => void) | null = null;
@@ -51,10 +51,12 @@ export class SplittyWebSocket extends SocketHandlers implements ConnSocket {
    * the previous one always fails.
    */
   async connect(): Promise<void> {
-    if (this.ws || this.connecting) return;
+    if (this.disposed || this.ws || this.connecting) return;
     this.connecting = true;
+    const epoch = this.epoch;
 
     const ticket = await fetchWsTicket();
+    if (this.disposed || epoch !== this.epoch) return;
     this.connecting = false;
 
     if (!ticket) {
@@ -74,19 +76,15 @@ export class SplittyWebSocket extends SocketHandlers implements ConnSocket {
     ws.binaryType = "arraybuffer";
 
     ws.onopen = () => {
+      if (this.ws !== ws) return;
       wasOpen = true;
       this.reconnectAttempt = 0;
-      for (const msg of this.queue) {
-        logDebug("client->ws", msg);
-        ws.send(JSON.stringify(msg));
-      }
-      this.queue = [];
       this.onConnected?.();
     };
 
     // Binary frames are terminal output, text frames JSON control messages;
     // malformed frames and failing handlers stay inside `deliver`.
-    ws.onmessage = (ev) => this.deliver(ev.data);
+    ws.onmessage = (ev) => { if (this.ws === ws) this.deliver(ev.data); };
 
     ws.onerror = () => {
       // Suppress console noise — onclose handles reconnect
@@ -119,6 +117,9 @@ export class SplittyWebSocket extends SocketHandlers implements ConnSocket {
   }
 
   reconnect(): void {
+    if (this.disposed) return;
+    this.epoch++;
+    this.connecting = false;
     clearTimeout(this.reconnectTimer);
     const ws = this.ws;
     this.ws = null;
@@ -133,10 +134,6 @@ export class SplittyWebSocket extends SocketHandlers implements ConnSocket {
     if (this.ws?.readyState === WebSocket.OPEN) {
       logDebug("client->ws", msg);
       this.ws.send(JSON.stringify(msg));
-    } else if (!belongsToConnection(msg)) {
-      // Images, uploads, file offers and editor messages belong to this connection, never a reconnect.
-      logDebug("client->ws:queue", msg);
-      this.queue.push(msg);
     }
   }
 
@@ -145,12 +142,14 @@ export class SplittyWebSocket extends SocketHandlers implements ConnSocket {
   }
 
   dispose(): void {
+    this.disposed = true;
+    this.epoch++;
+    this.connecting = false;
     clearTimeout(this.reconnectTimer);
     const ws = this.ws;
     this.ws = null;
     ws?.close();
     this.clearHandlers();
-    this.queue = [];
   }
 }
 

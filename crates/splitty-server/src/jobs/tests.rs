@@ -69,7 +69,7 @@ impl Fixture {
                     .to_string_lossy()
                     .into_owned(),
             },
-            broadcast::channel(256).0,
+            Default::default(),
         );
         Self {
             jobs,
@@ -807,7 +807,7 @@ async fn global_job_record_and_reader_caps_are_atomic_and_do_not_evict() {
             f.backend.clone(),
             f.jobs.runner.clone(),
             f.jobs.env.clone(),
-            broadcast::channel(16).0,
+            Default::default(),
         );
         let error = service
             .launch(Actor::User, f.launch("no process"))
@@ -977,7 +977,8 @@ async fn closing_during_spawn_stops_the_late_process_without_resurrecting_the_pa
     f.backend.block.store(true, Ordering::SeqCst);
     let jobs = f.jobs.clone();
     let request = f.launch("read line");
-    let mut events = f.jobs.events.subscribe();
+    let events = Arc::new(RecordedEvents::default());
+    let _subscription = f.jobs.events.subscribe(events.clone());
     let caller = tokio::spawn(async move {
         jobs.launch(Actor::User, request)
             .await
@@ -1026,11 +1027,30 @@ async fn closing_during_spawn_stops_the_late_process_without_resurrecting_the_pa
         .done()
         .borrow()
         .to_owned());
-    while let Ok(event) = events.try_recv() {
+    for event in events.0.lock().unwrap().iter() {
         assert_ne!(
-            serde_json::from_str::<Value>(&event).expect("event")["type"],
+            serde_json::to_value(event).expect("event")["type"],
             "mux.pane_spawned"
         );
     }
     f.jobs.shutdown().await;
+}
+
+#[derive(Default)]
+struct RecordedEvents(Mutex<Vec<ServerEvent>>);
+impl splitty_core::protocol::Sender for RecordedEvents {
+    fn send(
+        &self,
+        event: &ServerEvent,
+    ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        self.0.lock().unwrap().push(event.clone());
+        Ok(())
+    }
+    fn send_binary(
+        &self,
+        _: &str,
+        _: &[u8],
+    ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        panic!("job notifications are typed events");
+    }
 }

@@ -33,7 +33,7 @@ beforeEach(() => {
   vi.useFakeTimers({ toFake: ["Date", "performance", "setTimeout", "clearTimeout"] });
   vi.clearAllMocks(); state.remote = false; state.shell = "tauri"; state.contextReady = true; state.distro = undefined;
   invoke.mockResolvedValue(undefined); notice.show.mockReturnValue("toast");
-  vi.stubGlobal("window", { __TAURI_INTERNALS__: { invoke }, __SPLITTY_ELECTRON__: { invoke }, location: { assign } });
+  vi.stubGlobal("window", { __SPLITTY_TAURI__: { invoke }, __SPLITTY_ELECTRON__: { invoke }, location: { assign } });
 });
 afterEach(() => { for (const cleanup of cleanups.splice(0)) cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); });
 
@@ -120,4 +120,16 @@ it("waits for local WSL context and rejects a changed distribution before launch
   server.socket.message(request({ requestId: "b".repeat(32), editor: "vscode" }));
   const stale = prompt().action.onClick; state.distro = "Debian"; stale();
   expect(invoke).not.toHaveBeenCalled(); expect(outcome(server)).toBe("disconnected");
+});
+
+it.each([false, true])("does not send an old editor completion after connection replacement (failure=%s)", async failed => {
+  let resolve!: () => void, reject!: (error: Error) => void;
+  invoke.mockImplementationOnce(() => new Promise<void>((done, fail) => { resolve = done; reject = fail; }));
+  const server = fixture(); server.socket.message(request()); prompt().action.onClick();
+  expect(invoke).toHaveBeenCalledOnce();
+  server.socket.drop(); server.socket.message({ type: "mux.welcome", capabilities: ["editor-open-v1"] });
+  if (failed) reject(Error("local handoff failed")); else resolve();
+  await Promise.resolve(); await Promise.resolve();
+  expect(server.socket.sentOfType("editor.result")).toEqual([]);
+  expect(invoke).toHaveBeenCalledOnce();
 });

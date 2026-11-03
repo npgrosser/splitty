@@ -72,6 +72,8 @@ Two modes per MCP connection: **read-only** (resources only, no input, no layout
 
 The roadmap planned to authenticate with `SPLITTY_TOKEN`. That is not available: `access-control` forbids reading credentials from the environment and putting them into pane environments. The MCP server uses the same paths as the CLI (`cli`, Server Discovery Order): the owner-only control socket via `SPLITTY_SOCK` (inside a pane) or `daemon.json` (daemon), or an explicit address and bearer token over loopback TCP. A served SSE/HTTP transport would live behind the existing Host, Origin and Fetch Metadata guards.
 
+The native UI endpoint introduced by `native-client-transports` is not the MCP discovery or authorization surface. Scoped agent callers keep using their restricted grant socket and cannot fall back to the owner control socket or native UI client socket. Browser credential issuance and host-open intent remain unavailable through that scope. Any future MCP integration must extend the restricted control API deliberately; this transport refactor does not implement MCP or grant it desktop UI authority.
+
 ## Risks / Trade-offs
 
 - [Scrollback only fills while a client streams the session, and re-attach currently loses the PTY reader] → fix both before `read_output` ships, otherwise agents read stale or truncated output (baseline findings).

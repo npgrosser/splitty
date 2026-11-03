@@ -35,6 +35,12 @@ views {
     rank sink { ids, shell_profiles }
   }
 
+  view transport of splitty.transport {
+    title 'splitty-transport components'
+    description 'Framing, verified service admission and bounded delivery shared by native carriers.'
+    include splitty.transport.*
+  }
+
   view server of splitty.server {
     title 'splitty-server components'
     description 'The components of the splitty binary and the core components they use. The composition root view shows what main uses.'

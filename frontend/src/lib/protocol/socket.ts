@@ -69,6 +69,8 @@ export class SocketHandlers {
   deliver(data: unknown): void {
     if (data instanceof ArrayBuffer) {
       this.deliverOutput(new Uint8Array(data));
+    } else if (data instanceof Uint8Array) {
+      this.deliverOutput(data);
     } else if (typeof data === "string") {
       this.deliverText(data);
     }

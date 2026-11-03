@@ -63,6 +63,7 @@ export class MuxClient {
   // of everything the client could know about the server's screens, and used to
   // replace a screen the server already had. Held ops go out after the welcome.
   private welcomed = false;
+  private disconnectedOnce = false;
   private readonly heldCreateScreens: { screenId: string; op: MuxOperation }[] = [];
   private handlers: MuxHandlers = {};
   private readonly waiters = new Map<string, PaneSpawnedWaiter>();
@@ -71,7 +72,12 @@ export class MuxClient {
   constructor(private readonly socket: ConnSocket) {
     this.unsubscribes = [
       socket.onMessage((msg) => this.handle(msg)),
-      socket.onDisconnect(() => { this.welcomed = false; }),
+      socket.onDisconnect(() => {
+        this.welcomed = false;
+        this.disconnectedOnce = true;
+        this.heldCreateScreens.length = 0;
+        for (const waiter of this.waiters.values()) waiter.reject(new Error("Connection ended before pane creation was confirmed; its outcome is unknown."));
+      }),
     ];
   }
 
@@ -86,7 +92,7 @@ export class MuxClient {
   /** Send a layout operation for a screen (fire-and-forget). */
   sendOp(screenId: string, op: MuxOperation): void {
     if (op.type === "create_screen" && !this.welcomed) {
-      this.heldCreateScreens.push({ screenId, op });
+      if (!this.disconnectedOnce && this.heldCreateScreens.length < 64) this.heldCreateScreens.push({ screenId, op });
       return;
     }
     this.socket.send({ type: "mux.op", screenId, op });
@@ -124,11 +130,12 @@ export class MuxClient {
     });
   }
 
-  /** Stop listening; waiting spawns time out as they would without an answer. */
+  /** Stop listening and revoke waits owned by this connection. */
   dispose(): void {
     for (const unsubscribe of this.unsubscribes) unsubscribe();
     this.unsubscribes = [];
     this.handlers = {};
+    for (const waiter of this.waiters.values()) waiter.reject(new Error("Connection disposed before pane creation was confirmed."));
     this.heldCreateScreens.length = 0;
   }
 

@@ -12,6 +12,7 @@ model with the code in both directions, so it can be trusted without reading imp
 | `specification.c4` | Element kinds (`actor`, `system`, `container`, `store`, `component`) and tags (`planned`, `external`) |
 | `landscape.c4` | People, external systems, the system `splitty` with its containers and stores |
 | `core.c4` | The components of `splitty-core` and their relationships |
+| `transport.c4` | Platform-neutral native framing, negotiation and resource accounting |
 | `server.c4` | The components of `splitty-server` (the `splitty` binary) and their relationships, also into the core |
 | `remote.c4` | The components of `splitty-remote` (SSH, install, handshake, bridge, tunnel, known hosts) and their relationships |
 | `desktop.c4` | The components of `splitty-gui` (the Tauri app) and their relationships, also into the core and the server |

@@ -1,50 +1,61 @@
-//! Remote windows: a host's Splitty UI in a window of its own, through an SSH
-//! tunnel this app holds (`desktop-remote`).
-//!
-//! The trusted UI (the main window on its backend's origin, or the Windows
-//! setup page) calls `remote_open`. The flow of `splitty connect` runs here,
-//! in the native process, and reports its steps to the caller; only once the
-//! host's UI is ready does a window open, straight onto the single-use session
-//! URL (D1 of remote-window, provisional). So no window that runs host code
-//! ever showed a local page.
-//!
-//! A remote window has no native rights (`access-control`, Remote Window
-//! Isolation): its label `remote-<n>` is in no capability, its cookie store is
-//! its own and in memory only, and `navigation` pins it to its tunnel origin.
-//! Its tunnel lives exactly as long as the window: the task that opened it
-//! goes on to supervise the tunnel until the window is destroyed, and ends it
-//! then (the `ssh` is also killed when the task is dropped, as on the app's
-//! exit). The host's daemon and sessions keep running.
-//!
-//! The [`Registry`] keeps one entry per target: its window, and the open in
-//! flight, which concurrent opens of that target share.
+//! Remote windows use the packaged application document with a fixed native
+//! provider for their assigned host. Their transport capability carries no
+//! browser credentials; native document proofs authorize each IPC operation.
+//! The registry shares one connection attempt and outcome per target.
 
 use std::collections::HashMap;
 use std::future::Future;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::Duration;
 
 use serde::Serialize;
 use splitty_remote::hosts::{self, KnownHost};
-use splitty_remote::install;
-use splitty_remote::ssh::{Ssh, SshTarget};
-use splitty_remote::tunnel::{
-    self, Connected, Event, Failure, Progress, SshRemote, SshTunnel, Step,
-};
+use splitty_remote::ssh::SshTarget;
+/// Outcome metadata is shared with the carrier rather than cloned per waiter.
+#[derive(Clone, Debug)]
+pub(crate) enum Failure {
+    Shared(Arc<splitty_transport::budget::Charged<splitty_remote::tunnel::Failure>>),
+    Unavailable,
+}
+impl Failure {
+    fn fields(&self) -> (&str, Option<&str>) {
+        match self {
+            Self::Shared(value) => (&value.message, value.hint.as_deref()),
+            Self::Unavailable => ("Native diagnostic unavailable", None),
+        }
+    }
+}
+impl PartialEq for Failure {
+    fn eq(&self, other: &Self) -> bool {
+        self.fields() == other.fields()
+    }
+}
+impl Eq for Failure {}
+impl Serialize for Failure {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        #[derive(Serialize)]
+        struct Borrowed<'a> {
+            message: &'a str,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            hint: Option<&'a str>,
+        }
+        let (message, hint) = self.fields();
+        Borrowed { message, hint }.serialize(serializer)
+    }
+}
+#[cfg(test)]
+use splitty_remote::tunnel::{Progress, Step};
 use tauri::async_runtime::JoinHandle;
-use tauri::{
-    AppHandle, Emitter, Manager, Url, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent,
-};
+use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindow, WebviewWindowBuilder, WindowEvent};
 use tokio::sync::watch;
 
+use crate::client_ipc::{
+    carrier::{Auth, BackendEvent, Native},
+    provider::Provider,
+    BackendId, Policy, Proof,
+};
 use crate::navigation;
-
-/// The server the host gets: this app's own version.
-const VERSION: &str = env!("CARGO_PKG_VERSION");
-
-/// The event that carries an open's progress to the window that asked.
-const PROGRESS_EVENT: &str = "remote-progress";
 
 /// How long the app's exit waits for the tunnels to be torn down.
 const EXIT_GRACE: Duration = Duration::from_secs(2);
@@ -66,11 +77,13 @@ const NO_LEAVE_PROMPT: &str = r#"(() => {
 type Outcome = Result<(), Failure>;
 
 /// A failure without a hint.
-fn failure(message: impl Into<String>) -> Failure {
-    Failure {
-        message: message.into(),
-        hint: None,
-    }
+fn failure(message: impl std::fmt::Display) -> Failure {
+    splitty_remote::tunnel::Failure::from_error_budgeted(
+        &message,
+        &splitty_transport::budget::ConnectionBudget::default(),
+    )
+    .map(|failure| Failure::Shared(Arc::new(failure)))
+    .unwrap_or(Failure::Unavailable)
 }
 
 /// What a cancelled open rejects with.
@@ -79,8 +92,9 @@ fn cancelled() -> Failure {
 }
 
 /// The connection a remote window's title reports.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Connection {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum Connection {
     Connected,
     /// The tunnel is being rebuilt.
     Reconnecting,
@@ -100,23 +114,8 @@ fn title(target: &str, connection: Connection) -> String {
 /// What the app keeps of a remote window, for the guard and the supervisor.
 #[derive(Clone)]
 struct WindowLink {
-    /// The origin the window may show, which moves with a moved daemon.
-    origin: Arc<RwLock<String>>,
-    /// Turns `true` once the window is destroyed.
+    backend: BackendId,
     closed: watch::Receiver<bool>,
-}
-
-impl WindowLink {
-    fn origin(&self) -> String {
-        self.origin
-            .read()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clone()
-    }
-
-    fn set_origin(&self, origin: String) {
-        *self.origin.write().unwrap_or_else(PoisonError::into_inner) = origin;
-    }
 }
 
 struct HostWindow {
@@ -158,6 +157,7 @@ enum Begin {
 }
 
 /// Where an attempt whose flow succeeded shows the host.
+#[cfg(test)]
 enum Commit {
     /// In the target's window, whose connection gave up.
     Reuse { label: String, link: WindowLink },
@@ -214,6 +214,20 @@ impl Registry {
 
     /// The flow of `attempt` succeeded: where to show the host, or `None`
     /// when the open was cancelled meanwhile.
+    fn mark_committed(&mut self, target: &str, attempt: u64) -> bool {
+        let Some(current) = self
+            .hosts
+            .get_mut(target)
+            .and_then(|host| host.attempt.as_mut())
+            .filter(|current| current.id == attempt)
+        else {
+            return false;
+        };
+        current.committed = true;
+        true
+    }
+
+    #[cfg(test)]
     fn commit(&mut self, target: &str, attempt: u64) -> Option<Commit> {
         let host = self.hosts.get_mut(target)?;
         let current = host
@@ -275,7 +289,19 @@ impl Registry {
         true
     }
 
+    fn connection_state(&mut self, label: &str, state: Connection) {
+        if let Some(window) = self
+            .hosts
+            .values_mut()
+            .filter_map(|host| host.window.as_mut())
+            .find(|window| window.label == label)
+        {
+            window.connected = state != Connection::Disconnected;
+        }
+    }
+
     /// The supervisor of the window `label` gave up.
+    #[cfg(test)]
     fn disconnected(&mut self, label: &str) {
         if let Some(window) = self
             .hosts
@@ -323,15 +349,193 @@ impl Registry {
 }
 
 /// The app's remote windows: the registry and the tasks that hold tunnels.
-#[derive(Default)]
 pub struct Remotes {
     registry: Mutex<Registry>,
+    opening: Arc<splitty_transport::budget::Budget>,
+    reads: Arc<splitty_transport::budget::Budget>,
+    request_process: Arc<splitty_transport::budget::Budget>,
+    request_documents: Mutex<HashMap<(String, u64), Weak<splitty_transport::budget::Budget>>>,
+    requesters: Mutex<HashMap<String, Requester>>,
     tasks: Mutex<Vec<JoinHandle<()>>>,
+    progress: Mutex<
+        HashMap<String, Arc<splitty_transport::budget::Charged<splitty_transport::wire::Progress>>>,
+    >,
+}
+
+#[derive(Clone)]
+struct Requester {
+    window: String,
+    proof: Proof,
+    references: usize,
+}
+/// Command waiters and connector cleanup have separate lifetimes. A coalesced
+/// waiter must consume admission even though it never starts a connector.
+struct RequestAdmission {
+    _process: splitty_transport::budget::Permit,
+    _document: splitty_transport::budget::Permit,
+}
+
+struct RequestGuard {
+    remotes: Arc<Remotes>,
+    key: String,
+}
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        let mut requesters = self.remotes.requesters.lock().expect("remote requesters");
+        let released = if let Some(requester) = requesters.get_mut(&self.key) {
+            requester.references -= 1;
+            requester.references == 0
+        } else {
+            true // A newer authorized request already purged this stale document.
+        };
+        if released {
+            requesters.remove(&self.key);
+            // Keep removal atomic with creation of another guard for this key.
+            // Registry readers release their lock before taking requesters.
+            for host in self.remotes.lock().hosts.values_mut() {
+                if let Some(attempt) = &mut host.attempt {
+                    attempt.callers.retain(|caller| caller != &self.key);
+                }
+            }
+        }
+    }
+}
+
+impl Default for Remotes {
+    fn default() -> Self {
+        Self {
+            registry: Default::default(),
+            requesters: Default::default(),
+            tasks: Default::default(),
+            progress: Default::default(),
+            request_process: {
+                static PROCESS: std::sync::OnceLock<Arc<splitty_transport::budget::Budget>> =
+                    std::sync::OnceLock::new();
+                PROCESS
+                    .get_or_init(|| {
+                        splitty_transport::budget::Budget::new(
+                            splitty_transport::admission::OPENING,
+                        )
+                    })
+                    .clone()
+            },
+            request_documents: Default::default(),
+            reads: splitty_transport::budget::Budget::new(
+                splitty_transport::admission::DOMAIN_OPENING,
+            ),
+            opening: splitty_transport::budget::Budget::new(
+                splitty_transport::admission::DOMAIN_OPENING,
+            ),
+        }
+    }
 }
 
 impl Remotes {
     fn lock(&self) -> MutexGuard<'_, Registry> {
         self.registry.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn admit_request(
+        &self,
+        native: &Native,
+        window: &str,
+        proof: &Proof,
+    ) -> Result<RequestAdmission, Failure> {
+        native.broker.with_authority(window, proof, || {
+            let process = self.request_process.acquire(1)
+                .map_err(|_| failure("Too many remote requests are pending. Try again shortly."))?;
+            let mut documents = self.request_documents.lock().expect("remote request admission");
+            // Only weak bookkeeping lives here: live command permits retain
+            // their exact document budget across revocation until actual drop.
+            // Purging expired keys bounds reload bookkeeping by process slots.
+            documents.retain(|_, budget| budget.strong_count() != 0);
+            let entry = documents.entry((window.to_owned(), proof.document)).or_default();
+            let budget = match entry.upgrade() {
+                Some(budget) => budget,
+                None => {
+                    let budget = splitty_transport::budget::Budget::new(splitty_transport::admission::DOMAIN_OPENING);
+                    *entry = Arc::downgrade(&budget);
+                    budget
+                }
+            };
+            let document = budget.acquire(1)
+                .map_err(|_| failure("Too many remote requests are pending for this document. Try again shortly."))?;
+            Ok(RequestAdmission { _process: process, _document: document })
+        }).map_err(|_| failure("Native document denied"))?
+    }
+
+    fn requester(self: &Arc<Self>, native: &Native, window: &str, proof: Proof) -> RequestGuard {
+        let key = format!("{window}:{}", proof.document);
+        let mut requesters = self.requesters.lock().expect("remote requesters");
+        requesters.retain(|_, requester| {
+            native
+                .broker
+                .authorize(&requester.window, &requester.proof)
+                .is_ok()
+        });
+        let requester = requesters.entry(key.clone()).or_insert(Requester {
+            window: window.into(),
+            proof,
+            references: 0,
+        });
+        requester.references += 1;
+        RequestGuard {
+            remotes: self.clone(),
+            key,
+        }
+    }
+    fn current_requesters(
+        &self,
+        native: &Native,
+        target: &str,
+        attempt: u64,
+    ) -> Vec<(String, Requester)> {
+        let callers = self.lock().callers(target, attempt);
+        let requesters: Vec<_> = {
+            let registry = self.requesters.lock().expect("remote requesters");
+            callers
+                .into_iter()
+                .filter_map(|key| {
+                    registry
+                        .get(&key)
+                        .cloned()
+                        .map(|requester| (key, requester))
+                })
+                .collect()
+        };
+        requesters
+            .into_iter()
+            .filter(|(_, requester)| {
+                native
+                    .broker
+                    .authorize(&requester.window, &requester.proof)
+                    .is_ok()
+            })
+            .collect()
+    }
+
+    fn admit_read(
+        &self,
+    ) -> Result<
+        (
+            splitty_transport::budget::Permit,
+            splitty_transport::budget::Permit,
+        ),
+        Failure,
+    > {
+        static PROCESS: std::sync::OnceLock<Arc<splitty_transport::budget::Budget>> =
+            std::sync::OnceLock::new();
+        let process = PROCESS.get_or_init(|| {
+            splitty_transport::budget::Budget::new(splitty_transport::admission::OPENING)
+        });
+        let process = process
+            .acquire(1)
+            .map_err(|_| failure("Too many native reads are running."))?;
+        let domain = self
+            .reads
+            .acquire(1)
+            .map_err(|_| failure("Too many native reads are running."))?;
+        Ok((process, domain))
     }
 
     fn spawn(&self, task: impl Future<Output = ()> + Send + 'static) {
@@ -403,21 +607,25 @@ fn config_dir(app: &AppHandle) -> Result<PathBuf, String> {
 }
 
 /// A step of an open as `connect --json` names it, or `notice`.
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 enum ProgressStep {
+    #[cfg(test)]
     Step(Step),
+    #[cfg(test)]
     Other(&'static str),
+    Named(String),
 }
 
 /// The payload of [`PROGRESS_EVENT`].
 #[derive(Debug, Clone, Serialize)]
-struct RemoteProgress {
+pub(crate) struct RemoteProgress {
     target: String,
     step: ProgressStep,
     message: String,
 }
 
+#[cfg(test)]
 impl RemoteProgress {
     fn new(target: &str, progress: Progress) -> Self {
         let (step, message) = match progress {
@@ -434,13 +642,22 @@ impl RemoteProgress {
 
 /// The known hosts: recent hosts first, then those of `~/.ssh/config`.
 #[tauri::command]
-pub async fn remote_hosts(app: AppHandle) -> Result<Vec<KnownHost>, Failure> {
+pub async fn remote_hosts(
+    app: AppHandle,
+    webview: tauri::Webview,
+    native: tauri::State<'_, Arc<Native>>,
+    remotes: tauri::State<'_, Arc<Remotes>>,
+    auth: Auth,
+) -> Result<Vec<KnownHost>, Failure> {
+    native.launcher_action(&webview, &auth).map_err(failure)?;
     let config_dir = config_dir(&app).map_err(failure)?;
+    let permits = remotes.admit_read()?;
     tauri::async_runtime::spawn_blocking(move || {
+        let _permits = permits;
         hosts::known(&config_dir, hosts::default_ssh_dir().as_deref())
     })
     .await
-    .map_err(|error| failure(format!("could not read the known hosts: {error}")))
+    .map_err(|error| failure(format_args!("could not read the known hosts: {error}")))
 }
 
 /// Open `target` in a remote window. Resolves once the window shows the host.
@@ -449,13 +666,22 @@ pub async fn remote_open(
     app: AppHandle,
     webview: tauri::Webview,
     remotes: tauri::State<'_, Arc<Remotes>>,
+    native: tauri::State<'_, Arc<Native>>,
+    auth: Auth,
     target: String,
 ) -> Result<(), Failure> {
+    native.launcher_action(&webview, &auth).map_err(failure)?;
+    let proof = auth.proof();
+    // Nonwaiting admission precedes requester guards, outcome subscriptions
+    // and registry work, including duplicate opens of the same target.
+    let _admission = remotes.admit_request(&native, webview.label(), &proof)?;
+    let caller = format!("{}:{}", webview.label(), proof.document);
     // Before anything runs, as `splitty connect` does (`access-control`).
-    let target = SshTarget::parse(&target).map_err(|error| failure(error.to_string()))?;
+    let target = SshTarget::parse(&target).map_err(failure)?;
     let remotes = Arc::clone(remotes.inner());
+    let _request = remotes.requester(&native, webview.label(), proof.clone());
     loop {
-        let begin = remotes.lock().begin(target.as_str(), webview.label());
+        let begin = remotes.lock().begin(target.as_str(), &caller);
         match begin {
             Begin::Focus { label } => {
                 if let Some(window) = app.get_webview_window(&label) {
@@ -470,12 +696,24 @@ pub async fn remote_open(
                 attempt,
                 mut outcome,
             } => {
+                let opening = match remotes.opening.acquire(1) {
+                    Ok(opening) => opening,
+                    Err(_) => {
+                        let error =
+                            failure("Too many remote windows are opening. Try again shortly.");
+                        remotes
+                            .lock()
+                            .finish(target.as_str(), attempt, Err(error.clone()));
+                        return Err(error);
+                    }
+                };
                 remotes.spawn(connect(
                     app.clone(),
                     Arc::clone(&remotes),
                     target,
                     attempt,
                     outcome.clone(),
+                    opening,
                 ));
                 return settled(&mut outcome).await;
             }
@@ -485,74 +723,250 @@ pub async fn remote_open(
 
 /// Cancel the open of `target` in flight; it then rejects with `cancelled`.
 #[tauri::command]
-pub fn remote_cancel(remotes: tauri::State<'_, Arc<Remotes>>, target: String) {
-    // An invalid target cannot have an open in flight.
+pub fn remote_cancel(
+    webview: tauri::Webview,
+    native: tauri::State<'_, Arc<Native>>,
+    auth: Auth,
+    remotes: tauri::State<'_, Arc<Remotes>>,
+    target: String,
+) -> Result<(), String> {
+    native.launcher_action(&webview, &auth)?;
+    let caller = format!("{}:{}", webview.label(), auth.proof().document);
     if let Ok(target) = SshTarget::parse(&target) {
-        remotes.lock().cancel(target.as_str());
+        let attempt = remotes
+            .lock()
+            .hosts
+            .get(target.as_str())
+            .and_then(|host| host.attempt.as_ref())
+            .map(|attempt| attempt.id);
+        if let Some(attempt) = attempt {
+            let remaining: Vec<_> = remotes
+                .current_requesters(&native, target.as_str(), attempt)
+                .into_iter()
+                .map(|(key, _)| key)
+                .filter(|key| key != &caller)
+                .collect();
+            let mut registry = remotes.lock();
+            if let Some(current) = registry
+                .hosts
+                .get_mut(target.as_str())
+                .and_then(|host| host.attempt.as_mut())
+                .filter(|current| current.id == attempt)
+            {
+                current.callers.retain(|key| remaining.contains(key));
+                if current.callers.is_empty() {
+                    registry.cancel(target.as_str());
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn assigned_remote(native: &Native, label: &str, proof: &Proof) -> Result<SshTarget, String> {
+    match native
+        .broker
+        .policy(label, proof)
+        .map_err(|_| "native document denied")?
+    {
+        Policy::Remote { target, .. } => Ok(target),
+        _ => Err("remote connection state denied".into()),
     }
 }
 
-/// The task of one attempt: run the flow, show the host, then keep its tunnel
-/// for as long as the window lives.
+/// A remote document reports the state of its own recovery machine. It cannot
+/// name another window or host, and state changes carry no backend authority.
+#[tauri::command]
+pub(crate) fn native_connection_state(
+    app: AppHandle,
+    webview: tauri::Webview,
+    native: tauri::State<'_, Arc<Native>>,
+    remotes: tauri::State<'_, Arc<Remotes>>,
+    auth: Auth,
+    state: Connection,
+) -> Result<(), String> {
+    let proof = native.authenticate(&webview, &auth)?;
+    let target = assigned_remote(&native, webview.label(), &proof)?;
+    native
+        .broker
+        .with_authority(webview.label(), &proof, || {
+            remotes.lock().connection_state(webview.label(), state);
+            if let Some(window) = app.get_webview_window(webview.label()) {
+                set_title(&window, target.as_str(), state);
+            }
+        })
+        .map_err(|_| "native document denied".into())
+}
+
+/// A bounded latest-value progress snapshot, pulled by the launcher. Native
+/// progress never accumulates an unacknowledged WebView event queue.
+#[tauri::command]
+pub fn remote_progress(
+    webview: tauri::Webview,
+    native: tauri::State<'_, Arc<Native>>,
+    auth: Auth,
+    remotes: tauri::State<'_, Arc<Remotes>>,
+    target: String,
+) -> Result<Option<RemoteProgress>, String> {
+    native.launcher_action(&webview, &auth)?;
+    Ok(remotes
+        .progress
+        .lock()
+        .expect("remote progress")
+        .get(&target)
+        .map(|progress| RemoteProgress {
+            target: target.clone(),
+            step: ProgressStep::Named(progress.phase.clone()),
+            message: progress.message.clone(),
+        }))
+}
+
 async fn connect(
     app: AppHandle,
     remotes: Arc<Remotes>,
     target: SshTarget,
     attempt: u64,
     mut outcome: watch::Receiver<Option<Outcome>>,
+    opening: splitty_transport::budget::Permit,
 ) {
     let host = target.as_str().to_owned();
     let _unsettled = Unsettled {
-        remotes: Arc::clone(&remotes),
+        remotes: remotes.clone(),
         target: host.clone(),
         attempt,
     };
-
-    let on_progress = |progress: Progress| {
-        let progress = RemoteProgress::new(&host, progress);
-        let callers = remotes.lock().callers(&host, attempt);
-        for caller in callers {
-            if let Err(error) = app.emit_to(caller.as_str(), PROGRESS_EVENT, progress.clone()) {
-                tracing::warn!("could not report the progress of {host}: {error}");
-            }
+    let native = app.state::<Arc<Native>>().inner().clone();
+    let existing = remotes
+        .lock()
+        .hosts
+        .get(&host)
+        .and_then(|host| host.window.as_ref())
+        .map(|window| (window.label.clone(), window.link.clone()));
+    let reused = existing.is_some();
+    let (backend, label, link, mut events, ready_epoch) = if let Some((label, link)) = existing {
+        let backend = link.backend;
+        let Some(events) = native.watch_backend(backend) else {
+            return;
+        };
+        let ready_epoch = native.ready_epoch(backend);
+        if let Some(window) = app.get_webview_window(&label) {
+            let _ = window.eval("window.dispatchEvent(new Event('splitty-native-retry'))");
         }
-    };
-    let flow = tunnel::open(
-        Ssh::new(target.clone()),
-        VERSION,
-        install::payload_for,
-        on_progress,
-    );
-    // A cancel settles the attempt; dropping the flow then kills every `ssh`
-    // it started.
-    let (remote, connected) = tokio::select! {
-        result = flow => match result {
-            Ok(opened) => opened,
+        (backend, label, link, events, ready_epoch)
+    } else {
+        let backend = BackendId::new();
+        native.provider(backend, Arc::new(Provider::remote(target.clone())));
+        let label = remotes.lock().new_label();
+        if native
+            .broker
+            .register(
+                &label,
+                Policy::Remote {
+                    backend,
+                    target: target.clone(),
+                },
+            )
+            .is_err()
+        {
+            native.remove_provider(backend);
+            remotes.lock().finish(
+                &host,
+                attempt,
+                Err(failure("Native window capacity is exhausted.")),
+            );
+            return;
+        }
+        let Some(events) = native.watch_backend(backend) else {
+            return;
+        };
+        let link = match build(&app, &remotes, &label, &host, backend) {
+            Ok(link) => link,
             Err(error) => {
-                tracing::warn!("could not connect to {host}: {error}");
-                remotes.lock().finish(&host, attempt, Err(error.failure()));
+                native.destroyed(&label);
+                native.remove_provider(backend);
+                remotes.lock().finish(&host, attempt, Err(failure(error)));
                 return;
             }
-        },
-        _ = settled(&mut outcome) => return,
+        };
+        (backend, label, link, events, 0)
     };
-
-    // Dropping `connected` on the way out closes the tunnel.
-    let Some(commit) = remotes.lock().commit(&host, attempt) else {
-        return;
-    };
-    record_recent(&app, &target);
-    let (label, link) = match show(&app, &remotes, commit, &host, &connected.url) {
-        Ok(shown) => shown,
-        Err(failure) => {
-            remotes.lock().finish(&host, attempt, Err(failure));
-            return;
+    let mut check = tokio::time::interval(Duration::from_millis(100));
+    let result = loop {
+        tokio::select! { biased;
+            _ = settled(&mut outcome) => break Err(cancelled()),
+            _ = check.tick() => {
+                if remotes.current_requesters(&native, &host, attempt).is_empty() { break Err(cancelled()); }
+                if *link.closed.borrow() { break Err(cancelled()); }
+                if native.ready_epoch(backend) > ready_epoch { break Ok(()); }
+            }
+            changed = events.changed() => {
+                if changed.is_err() { break Err(failure("Native backend closed.")); }
+                match events.borrow().clone() {
+                    BackendEvent::Ready => break Ok(()),
+                    BackendEvent::Failed(error) => break Err(Failure::Shared(error)),
+                    BackendEvent::Closed => break Err(failure("Native backend failed; diagnostic unavailable")),
+                    BackendEvent::Progress(progress) => {
+                        remotes.progress.lock().expect("remote progress").insert(host.clone(), progress);
+                    }
+                    _ => {}
+                }
+            }
         }
     };
     remotes
+        .progress
+        .lock()
+        .expect("remote progress")
+        .remove(&host);
+    if let Err(error) = result {
+        if !reused {
+            if let Some(window) = app.get_webview_window(&label) {
+                let _ = window.destroy();
+            }
+            native.remove_provider(backend);
+        }
+        remotes.lock().finish(&host, attempt, Err(error));
+        return;
+    }
+    // Commit linearizes against both requester revocation and cancellation.
+    // The closure only touches the remote registry while broker authority is
+    // locked; it never re-enters the broker.
+    let requesters = remotes.current_requesters(&native, &host, attempt);
+    let committed = requesters.into_iter().any(|(_, requester)| {
+        native
+            .broker
+            .with_authority(&requester.window, &requester.proof, || {
+                remotes.lock().mark_committed(&host, attempt)
+            })
+            .unwrap_or(false)
+    });
+    if !committed {
+        if !reused {
+            if let Some(window) = app.get_webview_window(&label) {
+                let _ = window.destroy();
+            }
+            native.remove_provider(backend);
+        }
+        remotes.lock().finish(&host, attempt, Err(cancelled()));
+        return;
+    }
+    record_recent(&app, &target);
+    if let Some(window) = app.get_webview_window(&label) {
+        focus(&window);
+    }
+    remotes
         .lock()
         .finish(&host, attempt, Ok((label.clone(), link.clone())));
-    keep(&app, &remotes, &host, &label, &link, &remote, connected).await;
+    drop(opening);
+    if reused {
+        return;
+    }
+    // The renderer's bounded recovery machine owns its deadline. Only its
+    // authenticated state callback changes the established window's title and
+    // retry affordance; late pipe cleanup must not overwrite Disconnected.
+    let mut closed = link.closed.clone();
+    let _ = closed.wait_for(|gone| *gone).await;
+    native.remove_provider(backend);
 }
 
 fn record_recent(app: &AppHandle, target: &SshTarget) {
@@ -566,84 +980,39 @@ fn record_recent(app: &AppHandle, target: &SshTarget) {
     }
 }
 
-/// Show the host's session `url`: in its window when that is still open
-/// (a reconnect after giving up), otherwise in a new one.
-fn show(
-    app: &AppHandle,
-    remotes: &Arc<Remotes>,
-    commit: Commit,
-    target: &str,
-    url: &str,
-) -> Result<(String, WindowLink), Failure> {
-    let url: Url = url
-        .parse()
-        .map_err(|_| failure("The host returned an invalid session URL."))?;
-    let label = match commit {
-        Commit::Reuse { label, link } => {
-            if let Some(window) = app.get_webview_window(&label) {
-                load(&window, &link, url);
-                set_title(&window, target, Connection::Connected);
-                focus(&window);
-                return Ok((label, link));
-            }
-            remotes.lock().closed(&label);
-            remotes.lock().new_label()
-        }
-        Commit::New { label } => label,
-    };
-    build(app, remotes, &label, target, url)
-        .map(|link| (label, link))
-        .map_err(|error| failure(format!("Could not open a window for {target}: {error}")))
-}
-
-/// A new remote window `label` on the session `url` of `target`.
+/// A host receives packaged executable UI and one fixed native provider.
 fn build(
     app: &AppHandle,
     remotes: &Arc<Remotes>,
     label: &str,
     target: &str,
-    url: Url,
+    backend: BackendId,
 ) -> tauri::Result<WindowLink> {
     let (closed_sender, closed) = watch::channel(false);
-    let link = WindowLink {
-        origin: Arc::new(RwLock::new(navigation::tunnel_origin(&url))),
-        closed,
-    };
-    let navigation_app = app.clone();
-    let navigation_link = link.clone();
-    let new_window_app = app.clone();
-    let new_window_link = link.clone();
-
-    // Native decorations: the UI's own title bar needs window commands, which
-    // a remote window does not get.
-    let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::External(url))
-        .title(title(target, Connection::Connected))
+    let link = WindowLink { backend, closed };
+    let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App("index.html".into()))
+        .title(title(target, Connection::Reconnecting))
         .inner_size(1200.0, 800.0)
-        // A cookie store of its own, in memory only: the host's session
-        // cookie reaches no other server, and no other cookie reaches it.
+        .visible(false)
         .incognito(true)
         .disable_drag_drop_handler()
-        .initialization_script(NO_LEAVE_PROMPT)
-        .on_navigation(move |url| {
-            let decision = navigation::remote_navigation(url, &navigation_link.origin());
-            navigation::follow(&navigation_app, url, decision)
-        })
-        .on_new_window(move |url, _features| {
-            let decision = navigation::remote_new_window(&url, &new_window_link.origin());
-            navigation::follow_new_window(&new_window_app, &url, decision)
-        })
-        // A host's UI saves nothing on this computer: file offers are taken by
-        // the hub's window (file-transfer D10).
-        .on_download(|_webview, _event| false);
+        .initialization_script(NO_LEAVE_PROMPT);
     #[cfg(target_os = "windows")]
     let builder = builder.data_directory(webview_data_dir(app, label)?);
+    let builder = crate::configure_window(
+        builder,
+        app.clone(),
+        label,
+        navigation::DocumentRole::Remote,
+    );
     let window = builder.build()?;
-
-    let remotes = Arc::clone(remotes);
+    let remotes = remotes.clone();
+    let native = app.state::<Arc<Native>>().inner().clone();
     let window_label = label.to_owned();
     window.on_window_event(move |event| {
         if let WindowEvent::Destroyed = event {
             closed_sender.send_replace(true);
+            native.destroyed(&window_label);
             remotes.lock().closed(&window_label);
         }
     });
@@ -662,73 +1031,6 @@ fn webview_data_dir(app: &AppHandle, label: &str) -> tauri::Result<PathBuf> {
         .app_local_data_dir()?
         .join("remote-windows")
         .join(label))
-}
-
-/// Keep the tunnel of the window `label` until the window is destroyed.
-async fn keep(
-    app: &AppHandle,
-    remotes: &Remotes,
-    target: &str,
-    label: &str,
-    link: &WindowLink,
-    remote: &SshRemote,
-    connected: Connected<SshTunnel>,
-) {
-    let mut closed = link.closed.clone();
-    let shutdown = async move {
-        let _ = closed.wait_for(|gone| *gone).await;
-    };
-    let on_event = |event: Event| {
-        let window = app.get_webview_window(label);
-        let connection = match event {
-            Event::Lost { reason } => {
-                tracing::info!("the tunnel to {target} was lost ({reason}), reconnecting");
-                Connection::Reconnecting
-            }
-            Event::RetryFailed { error, retry_in } => {
-                tracing::info!(
-                    "reconnecting to {target} failed, next attempt in {} s: {error}",
-                    retry_in.as_secs()
-                );
-                Connection::Reconnecting
-            }
-            Event::Restored => Connection::Connected,
-            // The daemon was restarted or moved: the window's session is gone.
-            Event::NewUrl { url } => {
-                match (url.parse::<Url>(), &window) {
-                    (Ok(url), Some(window)) => load(window, link, url),
-                    (Err(error), _) => {
-                        tracing::warn!("{target} sent an invalid session URL: {error}")
-                    }
-                    (Ok(_), None) => {}
-                }
-                Connection::Connected
-            }
-        };
-        if let Some(window) = &window {
-            set_title(window, target, connection);
-        }
-    };
-    let supervised =
-        tunnel::supervise(remote, connected, tunnel::GIVE_UP_AFTER, shutdown, on_event).await;
-    if let Err(error) = supervised {
-        // The window stays, showing the host's UI in its own disconnected
-        // state; opening the target again reconnects it (D11 of
-        // remote-window, provisional).
-        tracing::warn!("{error}");
-        remotes.lock().disconnected(label);
-        if let Some(window) = app.get_webview_window(label) {
-            set_title(&window, target, Connection::Disconnected);
-        }
-    }
-}
-
-/// Load a new session `url` into `window`, admitting its origin first.
-fn load(window: &WebviewWindow, link: &WindowLink, url: Url) {
-    link.set_origin(navigation::tunnel_origin(&url));
-    if let Err(error) = window.navigate(url) {
-        tracing::warn!("could not load the new session: {error}");
-    }
 }
 
 fn set_title(window: &WebviewWindow, target: &str, connection: Connection) {
@@ -750,7 +1052,7 @@ mod tests {
     fn link() -> WindowLink {
         let (_closed, closed) = watch::channel(false);
         WindowLink {
-            origin: Arc::new(RwLock::new("http://127.0.0.1:9800".to_owned())),
+            backend: BackendId::new(),
             closed,
         }
     }
@@ -775,6 +1077,132 @@ mod tests {
         };
         registry.finish(target, attempt, Ok((label.clone(), link())));
         label
+    }
+
+    #[test]
+    fn recovery_deadline_state_enables_deliberate_retry_in_the_existing_window() {
+        let mut registry = Registry::default();
+        let label = open(&mut registry, "vm1");
+        registry.connection_state(&label, Connection::Reconnecting);
+        assert!(matches!(registry.begin("vm1", "main"), Begin::Focus { .. }));
+        registry.connection_state(&label, Connection::Disconnected);
+        let (attempt, _) = start(&mut registry, "vm1");
+        assert!(
+            matches!(registry.commit("vm1", attempt), Some(Commit::Reuse { label: reused, .. }) if reused == label)
+        );
+        registry.finish("vm1", attempt, Ok((label.clone(), link())));
+        registry.connection_state(&label, Connection::Connected);
+        assert!(
+            matches!(registry.begin("vm1", "main"), Begin::Focus { label: focused } if focused == label)
+        );
+    }
+
+    #[test]
+    fn remote_state_authority_rejects_main_setup_other_windows_and_stale_documents() {
+        let native = Native::default();
+        let backend = BackendId::new();
+        let target = SshTarget::parse("vm1").unwrap();
+        for (label, policy) in [
+            ("main", Policy::Main { backend }),
+            ("setup", Policy::Setup),
+            (
+                "remote-1",
+                Policy::Remote {
+                    backend,
+                    target: target.clone(),
+                },
+            ),
+        ] {
+            native.broker.register(label, policy).unwrap();
+        }
+        let main = native.broker.committed("main").unwrap();
+        let setup = native.broker.committed("setup").unwrap();
+        let remote = native.broker.committed("remote-1").unwrap();
+        assert!(assigned_remote(&native, "main", &main).is_err());
+        assert!(assigned_remote(&native, "setup", &setup).is_err());
+        assert!(assigned_remote(&native, "remote-1", &main).is_err());
+        assert_eq!(
+            assigned_remote(&native, "remote-1", &remote).unwrap(),
+            target
+        );
+        native.broker.navigating("remote-1");
+        assert!(assigned_remote(&native, "remote-1", &remote).is_err());
+    }
+
+    #[test]
+    fn coalesced_open_survives_its_first_requesting_document_being_replaced() {
+        let native = Native::default();
+        native
+            .broker
+            .register(
+                "main",
+                Policy::Main {
+                    backend: BackendId::new(),
+                },
+            )
+            .unwrap();
+        let remotes = Arc::new(Remotes::default());
+        let first = native.broker.committed("main").unwrap();
+        let first_request = remotes.requester(&native, "main", first.clone());
+        let attempt = match remotes.lock().begin("vm1", &first_request.key) {
+            Begin::Start { attempt, .. } => attempt,
+            _ => panic!("first open"),
+        };
+        native.broker.navigating("main");
+        let second = native.broker.committed("main").unwrap();
+        let second_request = remotes.requester(&native, "main", second.clone());
+        assert!(matches!(
+            remotes.lock().begin("vm1", &second_request.key),
+            Begin::Wait { .. }
+        ));
+        let current = remotes.current_requesters(&native, "vm1", attempt);
+        assert_eq!(current.len(), 1);
+        assert_eq!(current[0].0, second_request.key);
+        assert!(native
+            .broker
+            .with_authority("main", &first, || remotes
+                .lock()
+                .mark_committed("vm1", attempt))
+            .is_err());
+        assert!(native
+            .broker
+            .with_authority("main", &second, || remotes
+                .lock()
+                .mark_committed("vm1", attempt))
+            .unwrap());
+        drop(first_request);
+        assert_eq!(remotes.current_requesters(&native, "vm1", attempt).len(), 1);
+        drop(second_request);
+        assert!(remotes
+            .current_requesters(&native, "vm1", attempt)
+            .is_empty());
+    }
+
+    #[test]
+    fn cancellation_and_commit_have_one_native_order() {
+        let mut registry = Registry::default();
+        let (attempt, _) = start(&mut registry, "vm1");
+        assert!(registry.cancel("vm1"));
+        assert!(!registry.mark_committed("vm1", attempt));
+        let (next, _) = start(&mut registry, "vm1");
+        assert!(registry.mark_committed("vm1", next));
+        assert!(!registry.cancel("vm1"));
+        assert!(!registry.mark_committed("vm1", attempt));
+    }
+
+    #[test]
+    fn blocking_read_capacity_follows_the_worker_owned_permit() {
+        let remotes = Remotes::default();
+        let mut workers = Vec::new();
+        for _ in 0..splitty_transport::admission::DOMAIN_OPENING {
+            workers.push(remotes.admit_read().unwrap());
+        }
+        assert!(remotes.admit_read().is_err());
+        drop(workers.pop());
+        workers.push(remotes.admit_read().unwrap());
+        assert!(remotes.admit_read().is_err());
+        drop(workers);
+        assert!(remotes.admit_read().is_ok());
     }
 
     #[test]
@@ -984,5 +1412,235 @@ mod tests {
             serde_json::to_value(cancelled()).ok(),
             Some(serde_json::json!({ "message": "cancelled" }))
         );
+    }
+    #[tokio::test]
+    async fn remote_outcome_waiters_share_diagnostic_lease_through_last_release() {
+        let budget = splitty_transport::budget::ConnectionBudget::default();
+        let charged = Arc::new(
+            splitty_remote::tunnel::Failure::from_error_budgeted(
+                &"shared sensitive failure",
+                &budget,
+            )
+            .unwrap(),
+        );
+        let mut registry = Registry::default();
+        let (attempt, first) = start(&mut registry, "vm1");
+        let Begin::Wait { outcome: second } = registry.begin("vm1", "other") else {
+            panic!("not shared");
+        };
+        registry.finish("vm1", attempt, Err(Failure::Shared(charged.clone())));
+        let Err(Failure::Shared(one)) = outcome_of(&first).unwrap() else {
+            panic!("missing failure");
+        };
+        let Err(Failure::Shared(two)) = outcome_of(&second).unwrap() else {
+            panic!("missing failure");
+        };
+        assert!(Arc::ptr_eq(&charged, &one));
+        assert!(Arc::ptr_eq(&one, &two));
+        drop(charged);
+        drop(first);
+        drop(second);
+        drop(registry);
+        drop(one);
+        tokio::task::yield_now().await;
+        assert!(budget.used() > 0);
+        assert_eq!(
+            serde_json::to_value(Failure::Shared(two.clone())).unwrap(),
+            serde_json::json!({"message":"shared sensitive failure"})
+        );
+        drop(two);
+        assert_eq!(budget.used(), 0);
+    }
+    #[tokio::test]
+    async fn duplicate_remote_open_flood_is_admitted_before_waiter_allocation_and_released_on_abort(
+    ) {
+        let native = Native::default();
+        native
+            .broker
+            .register(
+                "main",
+                crate::client_ipc::Policy::Main {
+                    backend: BackendId::new(),
+                },
+            )
+            .unwrap();
+        let proof = native.broker.committed("main").unwrap();
+        let remotes = Arc::new(Remotes {
+            request_process: splitty_transport::budget::Budget::new(
+                splitty_transport::admission::OPENING,
+            ),
+            ..Remotes::default()
+        });
+        let mut held = Vec::new();
+        let mut rejected = 0;
+        let mut attempt_id = 0;
+        for _ in 0..128 {
+            let Ok(admission) = remotes.admit_request(&native, "main", &proof) else {
+                rejected += 1;
+                continue;
+            };
+            let request = remotes.requester(&native, "main", proof.clone());
+            let begin = remotes
+                .lock()
+                .begin("vm1", &format!("main:{}", proof.document));
+            let outcome = match begin {
+                Begin::Start { attempt, outcome } => {
+                    attempt_id = attempt;
+                    outcome
+                }
+                Begin::Wait { outcome } => outcome,
+                Begin::Focus { .. } => panic!("unexpected window"),
+            };
+            held.push((admission, request, outcome));
+        }
+        assert_eq!(held.len(), splitty_transport::admission::DOMAIN_OPENING);
+        assert_eq!(rejected, 124);
+        assert_eq!(
+            remotes
+                .lock()
+                .attempt("vm1", attempt_id)
+                .unwrap()
+                .outcome
+                .receiver_count(),
+            4
+        );
+        assert_eq!(
+            remotes
+                .requesters
+                .lock()
+                .unwrap()
+                .values()
+                .next()
+                .unwrap()
+                .references,
+            4
+        );
+        assert_eq!(remotes.request_process.used(), 4);
+        assert_eq!(
+            remotes.opening.used(),
+            0,
+            "waiter admission does not replace independent connector cleanup admission"
+        );
+        let waiting = held.pop().unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let (_admission, _request, mut outcome) = waiting;
+            started.send(()).unwrap();
+            settled(&mut outcome).await
+        });
+        ready.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(remotes.request_process.used(), 3);
+        assert_eq!(
+            remotes
+                .lock()
+                .attempt("vm1", attempt_id)
+                .unwrap()
+                .outcome
+                .receiver_count(),
+            3
+        );
+        let replacement = remotes.admit_request(&native, "main", &proof).unwrap();
+        assert!(remotes.admit_request(&native, "main", &proof).is_err());
+        drop(replacement);
+        drop(held);
+        assert_eq!(remotes.request_process.used(), 0);
+        assert!(remotes.requesters.lock().unwrap().is_empty());
+        assert_eq!(
+            remotes
+                .lock()
+                .attempt("vm1", attempt_id)
+                .unwrap()
+                .outcome
+                .receiver_count(),
+            0
+        );
+        assert!(remotes.lock().callers("vm1", attempt_id).is_empty());
+        for _ in 0..64 {
+            native.broker.navigating("main");
+            let proof = native.broker.committed("main").unwrap();
+            let admission = remotes.admit_request(&native, "main", &proof).unwrap();
+            let request = remotes.requester(&native, "main", proof.clone());
+            let Begin::Wait { outcome } = remotes
+                .lock()
+                .begin("vm1", &format!("main:{}", proof.document))
+            else {
+                panic!("lost shared attempt");
+            };
+            assert_eq!(remotes.lock().callers("vm1", attempt_id).len(), 1);
+            drop(outcome);
+            drop(request);
+            drop(admission);
+            assert!(
+                remotes.lock().callers("vm1", attempt_id).is_empty(),
+                "completed commands must not accumulate caller keys"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_request_admission_is_document_bound_and_process_bounded_across_reload() {
+        let native = Native::default();
+        for window in ["main", "other", "third", "fourth"] {
+            native
+                .broker
+                .register(
+                    window,
+                    crate::client_ipc::Policy::Main {
+                        backend: BackendId::new(),
+                    },
+                )
+                .unwrap();
+        }
+        let remotes = Remotes {
+            request_process: splitty_transport::budget::Budget::new(
+                splitty_transport::admission::OPENING,
+            ),
+            ..Remotes::default()
+        };
+        let old = native.broker.committed("main").unwrap();
+        let old_commands: Vec<_> = (0..4)
+            .map(|_| remotes.admit_request(&native, "main", &old).unwrap())
+            .collect();
+        native.broker.navigating("main");
+        let current = native.broker.committed("main").unwrap();
+        assert!(remotes.admit_request(&native, "main", &old).is_err());
+        let mut commands: Vec<_> = (0..4)
+            .map(|_| remotes.admit_request(&native, "main", &current).unwrap())
+            .collect();
+        for window in ["other", "third"] {
+            let proof = native.broker.committed(window).unwrap();
+            commands
+                .extend((0..4).map(|_| remotes.admit_request(&native, window, &proof).unwrap()));
+        }
+        assert_eq!(
+            remotes.request_process.used(),
+            16,
+            "revocation retains old command permits until actual drop"
+        );
+        let fourth = native.broker.committed("fourth").unwrap();
+        assert!(remotes.admit_request(&native, "fourth", &fourth).is_err());
+        drop(old_commands);
+        let available: Vec<_> = (0..4)
+            .map(|_| remotes.admit_request(&native, "fourth", &fourth).unwrap())
+            .collect();
+        assert!(remotes.admit_request(&native, "fourth", &fourth).is_err());
+        assert_eq!(remotes.request_process.used(), 16);
+        drop(available);
+        drop(commands);
+        assert_eq!(remotes.request_process.used(), 0);
+        for _ in 0..100 {
+            native.broker.navigating("main");
+            let proof = native.broker.committed("main").unwrap();
+            let command = remotes.admit_request(&native, "main", &proof).unwrap();
+            assert_eq!(
+                remotes.request_documents.lock().unwrap().len(),
+                1,
+                "expired document bookkeeping must not grow with reloads"
+            );
+            drop(command);
+        }
+        assert_eq!(remotes.request_process.used(), 0);
     }
 }

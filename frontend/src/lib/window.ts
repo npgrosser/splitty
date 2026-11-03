@@ -1,4 +1,5 @@
-import { shellKind } from "./platform.ts";
+import { invokeTauri } from "./tauri_invoke.ts";
+import { shellKind, nativeShell } from "./platform.ts";
 import type { ActionReturn } from "svelte/action";
 
 export interface WindowAPI {
@@ -57,7 +58,7 @@ const tauriAPI: WindowAPI = {
     // No `window.open` fallback: on Windows that used to open the target in a
     // WebView2 popup inside Splitty (security review SR-26, see
     // docs/security/findings.md). The capability scopes the opener to http(s).
-    (window as any).__TAURI_INTERNALS__?.invoke("plugin:opener|open_url", { url }).catch(openFailed);
+    invokeTauri("plugin:opener|open_url", { url }).catch(openFailed);
     return true;
   },
   startDragFromMaximized() {
@@ -73,7 +74,7 @@ const tauriAPI: WindowAPI = {
   },
   setBackgroundColor(r, g, b) {
     tauriReady.then(() => {
-      (window as any).__TAURI_INTERNALS__?.invoke("set_title_bar_color", { r, g, b });
+      invokeTauri("set_title_bar_color", { r, g, b });
     });
   },
 };
@@ -112,6 +113,13 @@ const webAPI: WindowAPI = {
   close() { window.close(); },
   isMaximized() { return Promise.resolve(false); },
   openExternal(url) {
+    if (nativeShell) {
+      // Restricted native documents have no OS-command grant and cannot open
+      // a blank child. Their native navigation guard hands this exact web URL
+      // to the system browser and denies creating a WebContents for it.
+      window.open(url, "_blank", "noopener,noreferrer");
+      return true;
+    }
     // Opened blank first and cut from this page, so the page it shows cannot
     // navigate Splitty's (xterm.js opens OSC 8 links the same way). Null when
     // the browser blocked the window, e.g. long after the click.
@@ -194,7 +202,7 @@ export interface ReservedExternalOpen {
 
 /** Native shells have no browser activation deadline and keep their usual opener. */
 export function reserveExternalOpen(): ReservedExternalOpen | undefined {
-  if (shellKind !== "web") return undefined;
+  if (nativeShell) return undefined;
   let opened: Window | null;
   try {
     opened = window.open("", "_blank");

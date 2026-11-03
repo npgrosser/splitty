@@ -76,6 +76,11 @@ async fn offer(app: axum::Router, input: serde_json::Value) -> (StatusCode, serd
 /// credential.
 #[tokio::test]
 async fn a_file_offer_is_saved_by_the_registered_attached_window() {
+    run_a_file_offer_is_saved_by_the_registered_attached_window(false).await;
+    run_a_file_offer_is_saved_by_the_registered_attached_window(true).await;
+}
+
+async fn run_a_file_offer_is_saved_by_the_registered_attached_window(native: bool) {
     use splitty_core::pty::testing::pty_available;
     if !pty_available() {
         return;
@@ -83,7 +88,7 @@ async fn a_file_offer_is_saved_by_the_registered_attached_window() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = Served::start(hub(&host, dir.path()), dir.path()).await;
-    let mut socket = served.open_local().await;
+    let mut socket = served.open_local_for(native).await;
     let welcome = message_type(&mut socket, "mux.welcome").await;
     assert!(welcome["capabilities"]
         .as_array()
@@ -122,7 +127,20 @@ async fn a_file_offer_is_saved_by_the_registered_attached_window() {
     assert_eq!(body["code"], "invalid_path");
 
     let input = json!({"sessionId":session,"path":file});
-    let worker = tokio::spawn(offer(control.clone(), input.clone()));
+    let worker = if native {
+        let state = served.state.clone();
+        let input = input.clone();
+        tokio::spawn(async move {
+            super::conformance::native(
+                &state,
+                crate::service::catalog::Operation::FileOffer,
+                json!({"body":input}),
+            )
+            .await
+        })
+    } else {
+        tokio::spawn(offer(control.clone(), input.clone()))
+    };
     let offered = message_type(&mut socket, "file.offer").await;
     assert_eq!(offered["name"], "report 界.pdf");
     assert_eq!(offered["size"], bytes.len());
@@ -236,7 +254,7 @@ async fn a_file_offer_is_saved_by_the_registered_attached_window() {
         .await
         .expect("HTTP");
     assert_eq!(response.status().as_u16(), 401);
-    let backend = served.state.ws_state.dispatcher.backend();
+    let backend = served.state.client_state.dispatcher.backend();
     backend.close(&session).expect("close");
     backend
         .close(fence["sessionId"].as_str().expect("session"))

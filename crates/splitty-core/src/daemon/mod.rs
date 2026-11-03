@@ -1,8 +1,9 @@
 //! Daemon lifecycle helpers: info file, PID checks, and state persistence.
 //!
 //! The daemon info file (`daemon.json`) in the config directory acts as the
-//! discovery mechanism for CLI tools and the Tauri desktop app. It records
-//! the PID, port, and token of a running daemon so clients can find it.
+//! discovery mechanism for explicit daemon clients. Embedded desktop backends
+//! do not use it. Format 2 identifies a private native socket and incarnation;
+//! old TCP records are read only for diagnostics and deliberate migration.
 
 mod persistence;
 
@@ -24,14 +25,25 @@ use crate::config::config_dir;
 /// leaving it here would have accomplished nothing — a process would simply have
 /// read the file instead of its own environment.
 ///
-/// Clients reach the daemon over `socket` and are authorised by the filesystem,
+/// UI clients use `clientSocket`; owner CLI requests use the optional `socket`.
+/// Both are authorised by peer user and private filesystem permissions,
 /// not by a bearer value. `#[serde(default)]` lets a `daemon.json` written by an
 /// older version still deserialise; any `token` key it contains is ignored.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DaemonInfo {
     pub pid: u32,
-    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client_socket: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_version: Option<u32>,
+    /// Diagnostic only: native clients never connect to a legacy TCP port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     /// Path to the daemon's local control socket.
     #[serde(default)]
     pub socket: String,
@@ -47,6 +59,50 @@ pub struct DaemonInfo {
     pub keeps_sessions: bool,
 }
 
+impl DaemonInfo {
+    pub fn legacy(&self) -> bool {
+        self.format.is_none()
+    }
+
+    /// Validate discovery before it can select an endpoint. An unsupported
+    /// transport version is retained for the caller's compatibility error.
+    pub fn validate(&self) -> io::Result<()> {
+        let valid = self.pid > 0
+            && self.pid <= i32::MAX as u32
+            && match self.format {
+                None => {
+                    self.port.is_some_and(|port| port > 0)
+                        && self.client_socket.is_none()
+                        && self.instance.is_none()
+                        && self.transport_version.is_none()
+                }
+                Some(2) => {
+                    self.port.is_none()
+                        && self.transport_version.is_some_and(|v| v > 0)
+                        && self
+                            .client_socket
+                            .as_ref()
+                            .is_some_and(|p| std::path::Path::new(p).is_absolute())
+                        && self.instance.as_ref().is_some_and(|s| {
+                            s.len() == 32
+                                && s.bytes()
+                                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                        })
+                        && self.keeps_sessions
+                }
+                _ => false,
+            };
+        if valid {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "invalid or unsupported daemon discovery record",
+            ))
+        }
+    }
+}
+
 fn first_protocol() -> u32 {
     1
 }
@@ -58,28 +114,164 @@ pub fn info_path() -> PathBuf {
 
 /// Write daemon info atomically, readable only by the owner.
 ///
-/// This file holds the server token, and it used to be written with a plain
+/// This file used to hold the server token and be written with a plain
 /// `fs::write` into a directory created by a plain `create_dir_all`
 /// (security review SR-21): mode 0644 inside a 0755 directory
 /// under a typical umask. The auth-token module's 0700 handling did not cover
 /// it, because in the desktop flow that module is never reached.
 pub fn write_info(info: &DaemonInfo) -> io::Result<()> {
+    info.validate()?;
     let json = serde_json::to_string_pretty(info).map_err(io::Error::other)?;
-    crate::config::write_private_file(&info_path(), json.as_bytes())
+    write_record(&info_path(), json.as_bytes())
+}
+
+/// Unique O_EXCL temporary file and atomic rename. Never truncate an existing
+/// path or follow a symlink from a previous interrupted publication.
+fn write_record(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| io::Error::other("missing discovery directory"))?;
+    private_directory(parent)?;
+    let temp = parent.join(format!(".daemon-{}.tmp", uuid::Uuid::new_v4()));
+    let mut options = fs::OpenOptions::new();
+    options.create_new(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options
+            .mode(0o600)
+            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
+    }
+    let result = (|| {
+        let mut file = options.open(&temp)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+        fs::rename(&temp, path)
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
+    }
+    result
+}
+
+/// Publication must not follow a configuration-directory symlink or harden a
+/// directory belonging to another user. Existing owner directories may be
+/// traversable; the final directory is required to be private.
+pub fn private_directory(path: &std::path::Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::{
+            os::unix::fs::{DirBuilderExt, MetadataExt},
+            path::Component,
+        };
+        if !path.is_absolute() {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "daemon directory must be absolute",
+            ));
+        }
+        let own = nix::unistd::geteuid().as_raw();
+        let mut part = PathBuf::new();
+        for component in path.components() {
+            if !matches!(component, Component::RootDir | Component::Normal(_)) {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "unsafe daemon directory component",
+                ));
+            }
+            part.push(component);
+            let meta = match fs::symlink_metadata(&part) {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => {
+                    match fs::DirBuilder::new().mode(0o700).create(&part) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                        Err(e) => return Err(e),
+                    }
+                    fs::symlink_metadata(&part)?
+                }
+                Err(e) => return Err(e),
+            };
+            if !meta.is_dir()
+                || meta.file_type().is_symlink()
+                || (meta.uid() != own && meta.uid() != 0)
+                || (meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0)
+                || (part == path && (meta.uid() != own || meta.mode() & 0o777 != 0o700))
+            {
+                return Err(io::Error::new(
+                    io::ErrorKind::PermissionDenied,
+                    "unsafe daemon configuration directory",
+                ));
+            }
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        crate::config::ensure_private_dir(path)
+    }
 }
 
 /// Read daemon info. Returns `None` if the file is missing or corrupt.
 pub fn read_info() -> Option<DaemonInfo> {
-    let data = fs::read_to_string(info_path()).ok()?;
-    serde_json::from_str(&data).ok()
+    read_info_checked().ok().flatten()
 }
 
-/// What `splitty daemon status --json` prints, and what `splitty connect`
-/// reads back from a remote host: the info file of a running daemon, or only
+/// Startup must distinguish absent metadata from damaged live discovery. The
+/// native instance lock remains authoritative even when this record is lost.
+pub fn read_info_checked() -> io::Result<Option<DaemonInfo>> {
+    use std::io::Read;
+    let path = info_path();
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC | nix::libc::O_NONBLOCK);
+    }
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    let meta = file.metadata()?;
+    if !meta.is_file() || meta.len() > 16 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid daemon discovery file",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if meta.uid() != nix::unistd::geteuid().as_raw() || meta.mode() & 0o022 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "unsafe daemon discovery ownership or permissions",
+            ));
+        }
+    }
+    let mut data = Vec::new();
+    file.take(16 * 1024 + 1).read_to_end(&mut data)?;
+    if data.len() > 16 * 1024 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "daemon discovery too large",
+        ));
+    }
+    let info: DaemonInfo = serde_json::from_slice(&data)?;
+    info.validate()?;
+    Ok(Some(info))
+}
+
+/// What `splitty daemon status --json` prints: the info file of a running daemon, or only
 /// `"running": false`. Holds no credential, like the info file itself.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DaemonStatus {
     pub running: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy: bool,
     #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
     pub daemon: Option<DaemonInfo>,
 }
@@ -88,6 +280,7 @@ impl DaemonStatus {
     pub fn of(daemon: Option<DaemonInfo>) -> Self {
         Self {
             running: daemon.is_some(),
+            legacy: daemon.as_ref().is_some_and(DaemonInfo::legacy),
             daemon,
         }
     }
@@ -103,7 +296,14 @@ pub fn remove_info() {
 pub fn is_running(pid: u32) -> bool {
     use nix::sys::signal;
     use nix::unistd::Pid;
-    signal::kill(Pid::from_raw(pid as i32), None).is_ok()
+    let Ok(pid) = i32::try_from(pid) else {
+        return false;
+    };
+    pid > 0
+        && matches!(
+            signal::kill(Pid::from_raw(pid), None),
+            Ok(()) | Err(nix::errno::Errno::EPERM)
+        )
 }
 
 #[cfg(not(unix))]
@@ -404,7 +604,11 @@ mod tests {
     fn info() -> DaemonInfo {
         DaemonInfo {
             pid: 42,
-            port: 9800,
+            format: Some(2),
+            port: None,
+            transport_version: Some(1),
+            client_socket: Some("/run/user/1000/splitty/client.sock".into()),
+            instance: Some("a".repeat(32)),
             socket: "/run/user/1000/splitty/control.sock".into(),
             started_at: "1760000000".into(),
             version: "0.1.0".into(),
@@ -421,7 +625,7 @@ mod tests {
             serde_json::json!({
                 "running": true,
                 "pid": 42,
-                "port": 9800,
+                "format": 2, "clientSocket": "/run/user/1000/splitty/client.sock", "instance": "a".repeat(32), "transportVersion": 1,
                 "socket": "/run/user/1000/splitty/control.sock",
                 "startedAt": "1760000000",
                 "version": "0.1.0",
@@ -454,5 +658,68 @@ mod tests {
             !info.keeps_sessions,
             "an older daemon's sessions end with it"
         );
+        info.validate().unwrap();
+        let status = serde_json::to_value(DaemonStatus::of(Some(info))).unwrap();
+        assert_eq!(status["legacy"], true);
+        for key in [
+            "format",
+            "clientSocket",
+            "instance",
+            "transportVersion",
+            "token",
+        ] {
+            assert!(status.get(key).is_none());
+        }
+    }
+
+    #[test]
+    fn native_discovery_requires_identity_and_never_retains_a_legacy_port_or_token() {
+        let native = info();
+        native.validate().unwrap();
+        let mut value = serde_json::to_value(native).unwrap();
+        value["token"] = serde_json::json!("old-secret");
+        let decoded: DaemonInfo = serde_json::from_value(value.clone()).unwrap();
+        decoded.validate().unwrap();
+        assert!(!serde_json::to_string(&decoded).unwrap().contains("secret"));
+        for (key, bad) in [
+            ("pid", serde_json::json!(0)),
+            ("format", serde_json::json!(3)),
+            ("port", serde_json::json!(9800)),
+            ("clientSocket", serde_json::json!("relative.sock")),
+            ("instance", serde_json::json!("A".repeat(32))),
+            ("transportVersion", serde_json::json!(0)),
+            ("keepsSessions", serde_json::json!(false)),
+        ] {
+            let mut bad_value = value.clone();
+            bad_value[key] = bad;
+            assert!(
+                serde_json::from_value::<DaemonInfo>(bad_value)
+                    .unwrap()
+                    .validate()
+                    .is_err(),
+                "{key}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn metadata_publication_is_atomic_private_and_never_follows_a_link() {
+        use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let root = dir.path().canonicalize().unwrap();
+        let target = root.join("daemon.json");
+        let unrelated = root.join("unrelated");
+        fs::write(&unrelated, "preserve").unwrap();
+        symlink(&unrelated, &target).unwrap();
+        write_record(&target, b"complete").unwrap();
+        assert_eq!(fs::read(&unrelated).unwrap(), b"preserve");
+        assert_eq!(fs::read(&target).unwrap(), b"complete");
+        assert_eq!(fs::metadata(&target).unwrap().mode() & 0o777, 0o600);
+        let linked = root.join("linked");
+        symlink(&root, &linked).unwrap();
+        assert!(write_record(&linked.join("no-write.json"), b"bad").is_err());
+        assert!(!root.join("no-write.json").exists());
     }
 }

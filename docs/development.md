@@ -19,6 +19,49 @@ listed in [`CLAUDE.md`](../CLAUDE.md#checks).
 | Config | TOML (`~/.config/splitty/config.toml`) |
 | Templates | YAML (`~/.config/splitty/templates/`) |
 
+## Frontend transport boundary
+
+The packaged entry completes a native assignment before importing UI modules.
+`protocol/connection.ts` then supplies the root `ConnSocket`; host views receive
+separate assigned native streams. Browser entries authenticate with their
+explicit gateway and pin its role, target and gateway identity before mounting.
+Neither shell globals nor URL parameters grant a connection. A failed or
+revoked native assignment stays native and never requests a token or ticket.
+
+All backend HTTP-shaped calls use `protocol/http.ts::apiFetch`, which routes
+native documents through the enumerated `native_api.ts` operation catalog.
+Settings, themes, profiles, templates and remote helpers use this adapter;
+unknown native routes, methods, headers or arguments fail before dispatch.
+Settings and profile data come from the service rather than the former
+loopback origin's browser storage.
+
+The remaining frontend network sites have these purposes:
+
+| Site | Purpose |
+| --- | --- |
+| `protocol/browser_assignment.ts` | Browser-only authenticated gateway role lookup; skipped after native assignment. |
+| `protocol/http.ts` | Browser gateway API calls, session exchanges and single-use WebSocket tickets; native mode rejects authentication/ticket calls and uses native operations for APIs. |
+| `protocol/websocket.ts` | Browser root session socket; native startup replaces the default connection before UI imports. |
+| `remote/api.ts` | Browser Hub WebSocket; native main documents use their assigned host opener, and native remote documents cannot open another host. |
+| Remote helper `deps.fetch` / `fx.fetch` calls | Injected `apiFetch` from the workspace, including host order, preferences, remembered screens and forwarding. |
+| `ghostty-web` WASM loader and `FontFace` | Ghostty loads an explicit build-emitted WASM URL; the font is a same-origin packaged resource. Neither uses a backend, CDN or library fallback path. CSS and dynamic module imports are build-produced resources. |
+
+`NativeSocket` handles native heartbeat Ping/Pong controls as well as data
+receipts; control replies do not consume application request or delivery slots.
+Reconnect discards terminal input and outstanding non-idempotent requests;
+uncertain mutations are reported rather than retried. Clipboard and image reads, multi-file
+paste/drop batches and delayed Ctrl+V capture one session-client generation.
+A disconnect, replacement welcome or disposed view prevents their remaining
+bytes and final path insertion from reaching another connection. Confirmed
+editor completions likewise cannot reply on a replacement generation.
+
+Dockview popouts use the parent's existing session/connection objects and the
+packaged `popout.html`; they start no independent backend connection or native
+grant. They share the parent's script trust domain. The parent closes its
+Dockview popouts on unload, while native document revocation independently
+closes its handles and pending operations. Backend/session IDs are always
+resolved inside the owning `ServerConnection`.
+
 ## Prerequisites
 
 - Rust (stable)
@@ -31,14 +74,42 @@ listed in [`CLAUDE.md`](../CLAUDE.md#checks).
 # Backend with the embedded frontend on 127.0.0.1:9800, rebuilt on changes
 make dev
 
-# Frontend with hot reload on :1420, proxying the API to :9800
-cd frontend && pnpm install && pnpm dev
-
-# Desktop app in development mode
+# Desktop app using packaged assets and native IPC
 make dev-tauri
 ```
 
-`make dev` prints `SPLITTY_URL`; open it, or `http://localhost:1420/?bootstrap=<SPLITTY_BOOTSTRAP>` for hot reload.
+For browser development, `make dev` starts an explicit loopback gateway and
+prints `SPLITTY_URL`; open that exact URL. It serves the embedded frontend from
+the same origin as its API. Rebuild frontend assets before restarting the
+backend to pick up UI changes. A separate Vite server and its proxy do not gain
+native authority or a browser gateway origin exception.
+
+`make dev-tauri` builds `frontend/dist`, watches it with `vite build --watch`,
+and starts `cargo tauri dev`. It loads packaged assets through Tauri's protocol
+handler, with no `devUrl` or UI TCP listener. Reload the app after an asset
+rebuild. Normal Cargo desktop builds use this packaged path as well; build the
+frontend first. On Windows, local terminals still require the app-owned WSL
+backend; remote windows use Windows OpenSSH without WSL.
+
+The Linux WebKit smoke (`scripts/testing/tauri-webkit-smoke.py`) supports a
+minimal transport fixture and the actual packaged UI. The full UI run covers
+CSS/fonts, Ghostty WebAssembly and rendering, heartbeat, binary terminal output,
+reload identity, stale-proof denial, parent-mediated popouts, cleanup and no
+app/WebKit TCP listeners. A separate daemon and keeper job remain usable after
+the app exits. These checks use production capsule, carrier and provider code.
+
+The Windows harnesses build with MSVC and generated ACL/resources. Actual
+WebView2 runs have exercised the setup role and app-owned WSL pipes, including
+binary traffic, a distribution switch and app restart. The fixtures isolate
+configuration and distribution discovery, so they do not prove normal host
+inventory or disabled localhost-forwarding behavior. Windows GUI runs are
+currently disabled: their process-cleanup inventory could mistake unrelated
+processes for descendants after PID reuse. Earlier process-tree cleanup claims
+must not be used as evidence of isolation. See the
+[verification status](../openspec/changes/native-client-transports/verification.md).
+
+The macOS WKWebView harness and CI job are prepared. Runtime results remain a
+separate gate; successful portable harness preparation is not a macOS result.
 
 ## Production builds
 

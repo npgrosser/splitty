@@ -347,3 +347,41 @@ describe("SessionClient: PTY sizes", () => {
     expect(conn.sessions.sizeOf("sess-1")).toEqual({ cols: 1000, rows: 500, policy: "active" });
   });
 });
+
+describe("SessionClient connection generations", () => {
+  it("revokes an admitted create and drops queued creates instead of running them after reconnect", async () => {
+    const { socket, conn } = fakeServer("local");
+    const a = conn.sessions.requestSession({ paneId: "a", cols: 80, rows: 24 });
+    const b = conn.sessions.requestSession({ paneId: "b", cols: 80, rows: 24 });
+    const rejectedA = expect(a).rejects.toThrow("outcome is unknown");
+    const rejectedB = expect(b).rejects.toThrow("request was not sent");
+    await flush(); socket.drop(); await Promise.all([rejectedA, rejectedB]);
+    socket.message({ type: "created", sessionId: "late-old-result" });
+    expect(socket.sentOfType("create").map(m => m.paneId)).toEqual(["a"]);
+    const next = conn.sessions.requestSession({ paneId: "c", cols: 80, rows: 24 }); await flush();
+    socket.message({ type: "created", sessionId: "fresh" }); expect((await next).sessionId).toBe("fresh");
+  });
+  it("rejects image waits on disconnect and does not accept an old answer", async () => {
+    const { socket, conn } = fakeServer("local"); const saved = conn.sessions.saveImage("eA==");
+    const failed = expect(saved).rejects.toThrow("connection was lost");
+    const request = socket.sentOfType("save_image")[0]!; socket.drop();
+    socket.message({ type: "image_saved", requestId: request.requestId, path: "/tmp/old.png" }); await failed;
+  });
+  it("does not send a file chunk whose asynchronous read crosses a disconnect", async () => {
+    const { socket, conn } = fakeServer("local"); let finish!: (bytes: ArrayBuffer) => void;
+    const file = { name: "sample.txt", size: 1, slice: () => ({ arrayBuffer: () => new Promise<ArrayBuffer>(resolve => { finish = resolve; }) }) } as unknown as Blob & { name: string };
+    const upload = conn.sessions.uploadFile(file); const failed = expect(upload).rejects.toThrow("connection changed");
+    socket.drop(); finish(new Uint8Array([1]).buffer); await failed; expect(socket.sentOfType("upload")).toEqual([]);
+  });
+});
+
+it("does not send an upload read started offline when a new welcome arrives", async () => {
+  const { conn, socket } = fakeServer("local"); socket.drop();
+  let finish!: (bytes: ArrayBuffer) => void;
+  const file = { name: "offline.txt", size: 1, slice: () => ({ arrayBuffer: () => new Promise<ArrayBuffer>(resolve => { finish = resolve; }) }) } as unknown as Blob & { name: string };
+  const upload = conn.sessions.uploadFile(file);
+  const rejected = expect(upload).rejects.toThrow("connection changed");
+  socket.message({ type: "mux.welcome", clientId: "replacement", screens: [] });
+  finish(new Uint8Array([1]).buffer); await rejected;
+  expect(socket.sentOfType("upload")).toEqual([]); conn.dispose();
+});

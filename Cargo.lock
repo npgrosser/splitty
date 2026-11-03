@@ -4020,6 +4020,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "splitty-transport",
  "subtle",
  "tempfile",
  "thiserror 2.0.21",
@@ -4035,9 +4036,9 @@ dependencies = [
 name = "splitty-gui"
 version = "0.1.30"
 dependencies = [
- "axum",
+ "base64 0.22.1",
  "cocoa",
- "hex",
+ "gtk",
  "rand 0.8.8",
  "serde",
  "serde_json",
@@ -4045,6 +4046,8 @@ dependencies = [
  "splitty-core",
  "splitty-remote",
  "splitty-server",
+ "splitty-transport",
+ "subtle",
  "tauri",
  "tauri-build",
  "tauri-plugin-opener",
@@ -4053,6 +4056,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "webkit2gtk",
  "windows-sys 0.61.2",
 ]
 
@@ -4061,9 +4065,12 @@ name = "splitty-remote"
 version = "0.1.30"
 dependencies = [
  "dirs 6.0.0",
+ "nix 0.29.0",
+ "rand 0.8.8",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "splitty-transport",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -4082,6 +4089,8 @@ dependencies = [
  "futures",
  "hex",
  "http",
+ "hyper",
+ "hyper-util",
  "mime_guess",
  "nix 0.29.0",
  "open",
@@ -4092,6 +4101,8 @@ dependencies = [
  "serde_json",
  "splitty-core",
  "splitty-remote",
+ "splitty-transport",
+ "syn 2.0.119",
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
@@ -4100,6 +4111,17 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "zip",
+]
+
+[[package]]
+name = "splitty-transport"
+version = "0.1.30"
+dependencies = [
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

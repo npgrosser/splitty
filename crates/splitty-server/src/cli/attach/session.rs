@@ -51,9 +51,45 @@ enum Phase {
     Live,
 }
 
+/// Borrow the payload while its carrier keeps ownership/credit alive.
+pub enum View<'a> {
+    Text(&'a str),
+    Binary(&'a [u8]),
+    Closed,
+    Other,
+}
+pub trait SessionFrame {
+    fn view(&self) -> View<'_>;
+}
+impl SessionFrame for Message {
+    fn view(&self) -> View<'_> {
+        match self {
+            Message::Text(text) => View::Text(text.as_str()),
+            Message::Binary(bytes) => View::Binary(bytes),
+            Message::Close(_) => View::Closed,
+            _ => View::Other,
+        }
+    }
+}
+impl SessionFrame for splitty_transport::budget::Charged<splitty_transport::peer::Incoming> {
+    fn view(&self) -> View<'_> {
+        use splitty_transport::wire::Kind;
+        let Ok((_, bytes)) = self.frame.application() else {
+            return View::Closed;
+        };
+        match self.frame.kind {
+            Kind::Text => std::str::from_utf8(bytes)
+                .map(View::Text)
+                .unwrap_or(View::Closed),
+            Kind::Binary => View::Binary(bytes),
+            _ => View::Other,
+        }
+    }
+}
+
 /// Show the session until the user detaches, its process ends, the terminal
 /// goes or the connection is lost.
-pub async fn run<Tx, Rx, RxError>(
+pub async fn run<Tx, Rx, RxError, RxFrame>(
     attach: Attach,
     mut to_server: Tx,
     mut from_server: Rx,
@@ -62,7 +98,8 @@ pub async fn run<Tx, Rx, RxError>(
 ) -> Result<Outcome, CliError>
 where
     Tx: Sink<Message> + Unpin,
-    Rx: Stream<Item = Result<Message, RxError>> + Unpin,
+    Rx: Stream<Item = Result<RxFrame, RxError>> + Unpin,
+    RxFrame: SessionFrame,
 {
     let id = attach.session_id.as_str();
     let mut size = attach.size;
@@ -72,9 +109,11 @@ where
 
     let outcome = loop {
         tokio::select! {
-            message = from_server.next() => match message {
-                Some(Ok(Message::Text(message))) => {
-                    let Ok(event) = serde_json::from_str::<Value>(message.as_str()) else {
+            message = from_server.next() => {
+                let frame = match message { Some(Ok(frame)) => frame, Some(Err(_)) | None => return Err(lost()) };
+                match frame.view() {
+                View::Text(message) => {
+                    let Ok(event) = serde_json::from_str::<Value>(message) else {
                         continue;
                     };
                     let mine = event["sessionId"].as_str() == Some(id);
@@ -111,8 +150,8 @@ where
                         _ => {}
                     }
                 }
-                Some(Ok(Message::Binary(frame))) => {
-                    let Some((session, bytes)) = crate::ws::codec::decode_binary_frame(&frame) else {
+                View::Binary(frame) => {
+                    let Some((session, bytes)) = crate::client_session::codec::decode_binary_frame(frame) else {
                         continue;
                     };
                     if session != id {
@@ -125,8 +164,9 @@ where
                         Phase::Live => show(screen, bytes)?,
                     }
                 }
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => return Err(lost()),
-                Some(Ok(_)) => {}
+                View::Closed => return Err(lost()),
+                View::Other => {}
+                }
             },
             event = events.recv() => match event {
                 Some(Event::Input(bytes)) => {
@@ -204,7 +244,7 @@ fn show(screen: &mut impl Write, bytes: &[u8]) -> Result<(), CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ws::codec::encode_binary_frame;
+    use crate::client_session::codec::encode_binary_frame;
     use futures::channel::mpsc as channel;
 
     const SID: &str = "sess-1";

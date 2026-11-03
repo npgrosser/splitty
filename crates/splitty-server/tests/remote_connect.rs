@@ -19,7 +19,7 @@
 //!
 //! The SSH lab gives each test a host of its own without root:
 //! - an unprivileged user and network namespace, so the host has its own
-//!   loopback and its daemon's port is free on this side;
+//!   loopback independently of the local browser gateway;
 //! - `sshd -i`, one per connection, started inside that namespace by the
 //!   client's `ProxyCommand` through `nsenter`, with throwaway keys;
 //! - a `ForceCommand` that gives the host its own `HOME` and XDG directories and
@@ -44,7 +44,7 @@ use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::io::{self, BufRead, BufReader, Read, Write};
-use std::net::{Ipv6Addr, TcpListener, TcpStream};
+use std::net::{TcpListener, TcpStream};
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::process::CommandExt;
@@ -56,6 +56,13 @@ use std::time::{Duration, Instant};
 use nix::sys::signal::{kill, killpg, Signal};
 use nix::unistd::Pid;
 use tempfile::TempDir;
+
+#[path = "support/command.rs"]
+mod isolated_command;
+#[path = "support/processes.rs"]
+mod process_cleanup;
+#[path = "support/listeners.rs"]
+mod process_inventory;
 
 const HOST: &str = "splittyhost";
 /// A host nothing listens for.
@@ -105,7 +112,15 @@ impl Lab {
                 sshd.display()
             ));
         }
-        for tool in ["ssh", "ssh-keygen", "unshare", "nsenter", "ip"] {
+        for tool in [
+            "ssh",
+            "ssh-keygen",
+            "unshare",
+            "nsenter",
+            "ip",
+            "python3",
+            "chroot",
+        ] {
             if which(tool).is_none() {
                 return Err(format!("{tool} is not installed"));
             }
@@ -186,7 +201,7 @@ impl Lab {
                    : > {d_str}/gate/passed\n\
                  fi\n\
                  exec env LD_LIBRARY_PATH={libs} nsenter --target \"$(cat {pid})\" \
-                 --user --net --preserve-credentials {sshd} -i -f {d_str}/sshd_config\n",
+                 --user --net --mount --root --wd --preserve-credentials {sshd} -i -f {d_str}/sshd_config\n",
                 libs = libraries.join(":"),
                 pid = holder_pid_file.display(),
                 sshd = sshd.display(),
@@ -252,16 +267,52 @@ impl Lab {
             );
         }
 
+        // Current open-rs delegates WSL URLs through an environment variable
+        // to PowerShell before trying Unix openers. Keep the smoke private.
+        write_executable(
+            &d.join("client-bin/powershell.exe"),
+            &format!("#!/bin/sh\nprintf '%s\\n' \"$OPEN_RS_TARGET\" >> {d_str}/opened\n"),
+        );
+
         let mut holder = Command::new("unshare")
             .args([
                 "--user",
                 "--map-current-user",
                 "--keep-caps",
+                "--mount",
                 "--net",
                 "sh",
                 "-c",
             ])
-            .arg("ip link set lo up && echo ready && exec sleep infinity")
+            .arg(r#"
+set -eu
+lab=$1
+package=$2
+rootfs="$lab/rootfs"
+ip link set lo up
+# Call mount directly: a setuid mount helper drops the ambient capabilities
+# of this unprivileged user namespace before it can bind its fixture root.
+python3 - "$rootfs" "$lab" "$package" <<'PY_MOUNT'
+import ctypes, os, sys
+rootfs, lab, package = sys.argv[1:]
+libc = ctypes.CDLL(None, use_errno=True)
+libc.mount.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_void_p]
+def bind(source, recursive=False):
+    destination = rootfs + source
+    os.makedirs(destination, exist_ok=True)
+    if libc.mount(os.fsencode(source), os.fsencode(destination), None, 4096 | (16384 if recursive else 0), None):
+        raise OSError(ctypes.get_errno(), "bind fixture root", source)
+os.makedirs(rootfs + "/tmp", exist_ok=True)
+# Bind the lab before populating its rootfs, avoiding a recursive fixture.
+bind(lab)
+if package != "/": bind(package)
+for system in ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/dev", "/proc", "/home", "/run"]:
+    # System trees can contain locked nested mounts (e.g. WSL libraries).
+    # Recursive bind preserves those restrictions in an unprivileged namespace.
+    if os.path.exists(system): bind(system, True)
+PY_MOUNT
+exec chroot "$rootfs" /bin/sh -c 'cd /; echo ready; exec sleep infinity'
+"#).arg("splitty-ssh-lab").arg(d).arg(&root)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -324,24 +375,24 @@ impl Lab {
         .expect("symlink splitty");
     }
 
-    /// Start the host's daemon on `port` (0: any) and return its port.
-    fn start_daemon(&self, port: u16) -> u16 {
-        let addr = format!("127.0.0.1:{port}");
-        let start = self.on_host(&["splitty", "daemon", "start", "--addr", &addr]);
+    /// The host's daemon has a private socket and no TCP port.
+    fn start_daemon(&self) {
+        let start = self.on_host(&["splitty", "daemon", "start"]);
         assert!(
             start.status.success(),
             "daemon start on the host\n{}",
             describe(&start)
         );
-        String::from_utf8_lossy(&start.stdout)
-            .lines()
-            .find_map(|line| line.strip_prefix("SPLITTY_PORT="))
-            .and_then(|port| port.trim().parse().ok())
-            .unwrap_or_else(|| panic!("no SPLITTY_PORT\n{}", describe(&start)))
+        assert!(
+            String::from_utf8_lossy(&start.stdout).contains("SPLITTY_CLIENT_SOCKET="),
+            "{}",
+            describe(&start)
+        );
     }
 
-    /// A server on the host's loopback at `port`: `splitty serve`, whose
-    /// `/health` answers `ok`. Only a forward reaches it from this side.
+    /// An ordinary HTTP service on the host's loopback, whose `/health`
+    /// answers `ok`. It is independent of Splitty's terminal-service gateway
+    /// and its exact Host/Origin policy. Only a forward reaches this namespace.
     fn serve_on_host(&self, port: u16) -> HostServer {
         let directory = tempfile::Builder::new()
             .prefix("serve-")
@@ -354,10 +405,34 @@ impl Lab {
         let mut child = Command::new("nsenter")
             .arg("--target")
             .arg(self.holder.id().to_string())
-            .args(["--user", "--net", "--preserve-credentials"])
-            .arg(env!("CARGO_BIN_EXE_splitty"))
-            .args(["serve", "--oneshot-token", "--addr"])
-            .arg(format!("127.0.0.1:{port}"))
+            .args([
+                "--user",
+                "--net",
+                "--mount",
+                "--root",
+                "--wd",
+                "--preserve-credentials",
+            ])
+            .args([
+                "python3",
+                "-u",
+                "-c",
+                r#"
+import http.server, sys
+class Handler(http.server.BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header('Content-Length', '2')
+        self.send_header('Connection', 'close')
+        self.end_headers()
+        self.wfile.write(b'ok')
+    def log_message(self, *args): pass
+server = http.server.HTTPServer(('127.0.0.1', int(sys.argv[1])), Handler)
+print('SPLITTY_PORT=' + str(server.server_port), flush=True)
+server.serve_forever()
+"#,
+            ])
+            .arg(port.to_string())
             .env("HOME", home)
             .env("XDG_CONFIG_HOME", home.join("config"))
             .env("XDG_DATA_HOME", home.join("data"))
@@ -427,7 +502,8 @@ impl Lab {
         let mut child = Command::new("nsenter")
             .arg("--target")
             .arg(self.holder.id().to_string())
-            .args(["--user", "--net", "--preserve-credentials"])
+            .args(["--user", "--net", "--mount", "--root", "--preserve-credentials"])
+            .arg(format!("--wdns={}", directory.path().display()))
             .arg(python)
             .args(["-I", "-u", "-c"])
             .arg(
@@ -536,7 +612,7 @@ server.serve_forever()
             .current_dir(directory.path())
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            .stderr(Stdio::from(fs::File::create(directory.path().join("marker.stderr")).unwrap()))
             .spawn()
             .expect("browser BLOCKED: cannot spawn namespace marker service");
         let lines = read_lines(child.stdout.take().expect("marker service stdout"));
@@ -547,7 +623,13 @@ server.serve_forever()
         };
         service.port = lines
             .recv_timeout(WAIT)
-            .expect("browser BLOCKED: marker service startup deadline")
+            .unwrap_or_else(|error| {
+                panic!(
+                    "browser marker service startup: {error}; {}",
+                    fs::read_to_string(service._directory.path().join("marker.stderr"))
+                        .unwrap_or_default()
+                )
+            })
             .strip_prefix("SPLITTY_PORT=")
             .and_then(|port| port.parse().ok())
             .expect("browser BLOCKED: marker service port");
@@ -556,15 +638,6 @@ server.serve_forever()
             "browser BLOCKED: reserved service port"
         );
         service
-    }
-
-    fn stop_daemon(&self) {
-        let stop = self.on_host(&["splitty", "daemon", "stop"]);
-        assert!(
-            stop.status.success(),
-            "daemon stop on the host\n{}",
-            describe(&stop)
-        );
     }
 
     /// `splitty connect` with the lab's `ssh`, its output line by line.
@@ -577,6 +650,7 @@ server.serve_forever()
             .client(&["connect", HOST])
             .args(extra)
             .envs(env.iter().map(|(key, value)| (*key, *value)))
+            .process_group(0)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -684,11 +758,30 @@ impl Drop for HostServer {
 /// A port nothing listens on here, on `127.0.0.1` or `::1`, which a forward
 /// therefore takes as asked.
 fn free_local_port() -> u16 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    // Keep fixture ports unique after probe/handoff and outside the kernel's
+    // automatic range, where another parallel fixture could reuse a freed
+    // number before the SSH-bind or final-release assertion observes it.
+    static NEXT: AtomicU32 = AtomicU32::new(25000);
+    #[cfg(target_os = "linux")]
+    let automatic: Vec<u16> = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .unwrap()
+        .split_whitespace()
+        .map(|number| number.parse().unwrap())
+        .collect();
     loop {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind");
-        let port = listener.local_addr().expect("address").port();
-        let ipv6 = TcpListener::bind((Ipv6Addr::LOCALHOST, port));
-        if !matches!(ipv6, Err(error) if error.kind() == io::ErrorKind::AddrInUse) {
+        let number = NEXT.fetch_add(1, Ordering::Relaxed);
+        assert!(number < 30000, "SSH fixture port pool exhausted");
+        let port = u16::try_from(number).expect("bounded fixture port");
+        #[cfg(target_os = "linux")]
+        if (automatic[0]..=automatic[1]).contains(&port) {
+            continue;
+        }
+        let Ok(_listener) = std::net::TcpListener::bind(("127.0.0.1", port)) else {
+            continue;
+        };
+        let ipv6 = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port));
+        if !matches!(ipv6, Err(error) if error.kind() == std::io::ErrorKind::AddrInUse) {
             return port;
         }
     }
@@ -780,14 +873,58 @@ impl Connect {
         ssh_children_of(self.child.id())
     }
 
+    fn assert_native_gateway(&self, port: u16) {
+        assert_eq!(
+            process_inventory::tcp_listeners(self.child.id()),
+            [std::net::SocketAddr::from(([127, 0, 0, 1], port))]
+        );
+        let children = self.ssh_children();
+        assert!(
+            !children.is_empty(),
+            "the connected gateway owns an SSH bridge"
+        );
+        for pid in children {
+            assert!(
+                process_inventory::tcp_listeners(pid.try_into().unwrap()).is_empty(),
+                "native SSH child {pid} opened a TCP listener"
+            );
+        }
+    }
+
     fn kill_tunnel(&self) {
-        let tunnels = self.ssh_children();
+        let tunnels: Vec<_> = self
+            .ssh_children()
+            .into_iter()
+            .filter(|pid| {
+                fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|args| {
+                    args.windows(b"remote-bridge".len())
+                        .any(|part| part == b"remote-bridge")
+                })
+            })
+            .collect();
         assert_eq!(
             tunnels.len(),
             1,
             "exactly one ssh should hold the tunnel: {tunnels:?}"
         );
         kill(Pid::from_raw(tunnels[0]), Signal::SIGKILL).expect("kill ssh");
+    }
+
+    fn kill_forward(&self, remote: u16) -> i32 {
+        let suffix = format!(":localhost:{remote}");
+        let workers: Vec<_> = self
+            .ssh_children()
+            .into_iter()
+            .filter(|pid| {
+                fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|args| {
+                    args.split(|byte| *byte == 0)
+                        .any(|arg| arg.ends_with(suffix.as_bytes()))
+                })
+            })
+            .collect();
+        assert_eq!(workers.len(), 1, "one owned forward worker for {remote}");
+        kill(Pid::from_raw(workers[0]), Signal::SIGKILL).unwrap();
+        workers[0]
     }
 
     /// SIGTERM, the exit status and every line printed after the ones read.
@@ -807,6 +944,9 @@ impl Drop for Connect {
     /// SIGTERM first, so `connect` ends its tunnel's `ssh`; a SIGKILL alone
     /// would leave that `ssh` running, holding a connection into the lab.
     fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            return; // an already-reaped numeric PID is no longer owned
+        }
         let _ = kill(Pid::from_raw(self.child.id() as i32), Signal::SIGTERM);
         for _ in 0..50 {
             if matches!(self.child.try_wait(), Ok(Some(_))) {
@@ -907,23 +1047,25 @@ fn listeners(port: u16) -> Vec<String> {
 fn connect_reconnects_and_hands_over_sessions_through_real_ssh() {
     let Some(lab) = lab() else { return };
     lab.install_splitty();
-    let port = lab.start_daemon(0);
+    lab.start_daemon();
 
     let connect = lab.connect(&["--no-open"]);
-    let lines = connect.until("SSH tunnel active.");
+    let lines = connect.until("Browser gateway active.");
     let url = Connect::url(&lines);
     assert!(
         url.ends_with(&format!("&host={HOST}")),
         "the URL names the host: {url}"
     );
 
-    // GatewayPorts yes in the client's config, yet only loopback listens.
+    let port = reqwest::Url::parse(&url).unwrap().port().unwrap();
+    // GatewayPorts yes in the client's config, yet only the owned gateway listens.
     assert_eq!(
         listeners(port),
         [format!("0100007F:{port:04X}")],
         "the forward must listen on 127.0.0.1 only"
     );
 
+    connect.assert_native_gateway(port);
     let (port, cookie) = sign_in(&url);
     let (status, response) = http(port, "GET", "/api/mux/state", Some(&cookie), None);
     assert_eq!(status, 200, "{response}");
@@ -942,18 +1084,22 @@ fn connect_reconnects_and_hands_over_sessions_through_real_ssh() {
         "the browser's session works again:\n{response}"
     );
 
-    // The daemon restarts on the same port while the tunnel is down.
-    lab.stop_daemon();
-    assert_eq!(lab.start_daemon(port), port);
-    connect.kill_tunnel();
+    connect.assert_native_gateway(port);
+
+    // A new host incarnation uses the same local gateway/cookie.
+    kill(Pid::from_raw(host_daemon_pid(&lab)), Signal::SIGKILL).expect("kill host daemon");
     let lines = connect.until("SSH tunnel restored.");
-    let new_url = Connect::url(&lines);
-    assert_ne!(new_url, url, "a restarted daemon needs a new session");
-    let (_, new_cookie) = sign_in(&new_url);
-    let (status, response) = http(port, "GET", "/api/mux/state", Some(&new_cookie), None);
+    assert!(
+        !lines.iter().any(|line| line.starts_with("SPLITTY_URL=")),
+        "{lines:?}"
+    );
+    let (status, response) = http(port, "GET", "/api/mux/state", Some(&cookie), None);
     assert_eq!(status, 200, "{response}");
 
+    connect.assert_native_gateway(port);
     assert_eq!(lab.opened(), None, "--no-open must not open a browser");
+    let group = connect.child.id();
+    assert!(process_cleanup::live_group_members(group).contains(&group));
     let tunnels = connect.ssh_children();
     let (status, rest) = connect.terminate();
     assert!(
@@ -961,6 +1107,7 @@ fn connect_reconnects_and_hands_over_sessions_through_real_ssh() {
         "SIGTERM ends connect with status 0: {status}\n{rest}"
     );
     assert!(rest.contains("Closing tunnel..."), "{rest}");
+    process_cleanup::assert_group_exited(group);
     for pid in tunnels {
         assert!(
             !Path::new(&format!("/proc/{pid}")).exists()
@@ -1084,6 +1231,29 @@ fn connect_json_reports_progress_the_session_and_its_end() {
     );
 }
 
+#[test]
+fn connect_opens_only_its_locally_issued_launch_url_by_default() {
+    let Some(lab) = lab() else { return };
+    lab.install_splitty();
+    let connect = lab.connect(&["--json"]);
+    let events = json_events(&connect.until(r#"{"event":"ready""#));
+    let url = events.last().unwrap()["url"].as_str().unwrap();
+    let deadline = Instant::now() + WAIT;
+    loop {
+        if let Some(opened) = lab.opened() {
+            assert_eq!(opened.trim(), url);
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "default browser launcher was not called"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let (status, _) = connect.terminate();
+    assert!(status.success());
+}
+
 /// `cli`, Remote Connect Machine-Readable Output (Unknown host key) and
 /// Remote Connect Recent Hosts (Failed connect).
 #[test]
@@ -1091,11 +1261,24 @@ fn connect_json_reports_why_it_failed_and_records_nothing() {
     let Some(lab) = lab() else { return };
     lab.install_splitty();
     for target in [NOWHERE, NEW_KEY] {
-        let out = lab
+        let stdout = lab.dir.path().join("failed-connect.stdout");
+        let stderr = lab.dir.path().join("failed-connect.stderr");
+        let child = lab
             .client(&["connect", target, "--json", "--no-open"])
+            .process_group(0)
             .stdin(Stdio::null())
-            .output()
+            .stdout(fs::File::create(&stdout).unwrap())
+            .stderr(fs::File::create(&stderr).unwrap())
+            .spawn()
             .expect("splitty connect");
+        let group = child.id();
+        let status = isolated_command::wait(child);
+        let out = Output {
+            status,
+            stdout: fs::read(stdout).unwrap(),
+            stderr: fs::read(stderr).unwrap(),
+        };
+        process_cleanup::assert_group_exited(group);
         assert_eq!(out.status.code(), Some(1), "{}", describe(&out));
         let lines: Vec<String> = String::from_utf8_lossy(&out.stdout)
             .lines()
@@ -1128,23 +1311,82 @@ fn connect_json_reports_why_it_failed_and_records_nothing() {
     );
 }
 
+/// Only the real SSH/proxy process tree can establish cleanup after a
+/// permanent reconnect failure; the host daemon remains independently owned.
+#[test]
+fn permanent_reconnect_failure_releases_gateway_and_all_local_descendants() {
+    let Some(lab) = lab() else { return };
+    lab.install_splitty();
+    let mut connect = lab.connect(&["--json", "--no-open"]);
+    let events = json_events(&connect.until(r#"{"event":"ready""#));
+    let url = reqwest::Url::parse(events.last().unwrap()["url"].as_str().unwrap()).unwrap();
+    let port = url.port().unwrap();
+    connect.assert_native_gateway(port);
+    let group = connect.child.id();
+    let before = process_cleanup::live_group_members(group);
+    assert!(
+        before.contains(&group) && before.len() > 1,
+        "real descendants must be observed before failure"
+    );
+    let daemon = host_daemon_pid(&lab);
+    let daemon_birth = fs::read_to_string(format!("/proc/{daemon}/stat"))
+        .unwrap()
+        .rsplit_once(") ")
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(19)
+        .unwrap()
+        .to_owned();
+    fs::write(lab.dir.path().join("known_hosts"), "").unwrap();
+    connect.kill_tunnel();
+    let failed = json_events(&connect.until(r#"{"event":"failed""#));
+    assert_eq!(failed.last().unwrap()["event"], "failed");
+    let deadline = Instant::now() + WAIT;
+    let status = loop {
+        if let Some(status) = connect.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "failed connect did not exit");
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(!status.success());
+    process_cleanup::assert_group_exited(group);
+    assert!(
+        listeners(port).is_empty(),
+        "failed reconnect retained its browser listener"
+    );
+    let stat = fs::read_to_string(format!("/proc/{daemon}/stat"))
+        .expect("host daemon survives gateway failure");
+    let fields: Vec<_> = stat
+        .rsplit_once(") ")
+        .unwrap()
+        .1
+        .split_whitespace()
+        .collect();
+    assert!(
+        !matches!(fields[0], "Z" | "X"),
+        "host daemon must remain alive"
+    );
+    assert_eq!(
+        fields[19], daemon_birth,
+        "the independent daemon was not replaced"
+    );
+}
+
 #[test]
 fn connect_starts_a_daemon_on_a_host_without_one() {
     let Some(lab) = lab() else { return };
     lab.install_splitty();
     let connect = lab.connect(&["--no-open"]);
-    let lines = connect.until("SSH tunnel active.");
-    let started = lines
-        .iter()
-        .find_map(|line| line.strip_prefix(&format!("Started a Splitty daemon on {HOST} (port ")))
-        .and_then(|rest| rest.strip_suffix(")."))
-        .and_then(|port| port.parse::<u16>().ok())
-        .unwrap_or_else(|| panic!("connect says it started the daemon:\n{}", lines.join("\n")));
-    let url = Connect::url(&lines);
+    let lines = connect.until("Browser gateway active.");
     assert!(
-        url.starts_with(&format!("http://127.0.0.1:{started}/")),
-        "{url}"
+        lines
+            .iter()
+            .any(|line| line == &format!("Started a private Splitty daemon on {HOST}.")),
+        "{lines:?}"
     );
+    let url = Connect::url(&lines);
     let (port, cookie) = sign_in(&url);
     let (status, response) = http(port, "GET", "/api/mux/state", Some(&cookie), None);
     assert_eq!(status, 200, "{response}");
@@ -1187,7 +1429,7 @@ fn connect_installs_its_server_and_survives_a_reboot_and_a_rebuild() {
 
     // A host without Splitty: install, start the daemon, connect.
     let connect = lab.connect_with(&["--no-open"], &[("SPLITTY_REMOTE_PAYLOAD", &payload)]);
-    let lines = connect.until("SSH tunnel active.");
+    let lines = connect.until("Browser gateway active.");
     let text = lines.join("\n");
     assert!(
         text.contains(&format!(
@@ -1197,7 +1439,7 @@ fn connect_installs_its_server_and_survives_a_reboot_and_a_rebuild() {
         "{text}"
     );
     assert!(
-        text.contains(&format!("Started a Splitty daemon on {HOST}")),
+        text.contains(&format!("Started a private Splitty daemon on {HOST}")),
         "{text}"
     );
     assert!(
@@ -1207,19 +1449,16 @@ fn connect_installs_its_server_and_survives_a_reboot_and_a_rebuild() {
     );
     assert!(installed.with_file_name("shell-integration").is_dir());
     let url = Connect::url(&lines);
-    let (port, _) = sign_in(&url);
+    let (port, cookie) = sign_in(&url);
 
     // A reboot: the daemon is gone and the tunnel drops. connect starts the
-    // daemon again on the same port and hands over a new session.
+    // daemon again while keeping the local gateway and browser session. Native
+    // EOF closes the bridge itself; there may already be no SSH child to kill.
     kill(Pid::from_raw(host_daemon_pid(&lab)), Signal::SIGKILL).expect("kill the daemon");
-    connect.kill_tunnel();
     let lines = connect.until("SSH tunnel restored.");
-    let after_reboot = Connect::url(&lines);
-    assert_ne!(after_reboot, url);
-    let (same_port, cookie) = sign_in(&after_reboot);
-    assert_eq!(
-        same_port, port,
-        "the daemon keeps its port, so the origin stays"
+    assert!(
+        !lines.iter().any(|line| line.starts_with("SPLITTY_URL=")),
+        "the gateway origin survives reboot"
     );
     let (status, response) = http(port, "GET", "/api/mux/state", Some(&cookie), None);
     assert_eq!(status, 200, "{response}");
@@ -1229,10 +1468,9 @@ fn connect_installs_its_server_and_survives_a_reboot_and_a_rebuild() {
     kill(Pid::from_raw(host_daemon_pid(&lab)), Signal::SIGKILL).expect("kill the daemon");
     fs::remove_dir_all(lab.dir.path().join("home/.local/share/splitty"))
         .expect("remove the server");
-    connect.kill_tunnel();
     let lines = connect.until("SSH tunnel restored.");
     assert!(installed.is_file(), "the server is installed again");
-    let (_, cookie) = sign_in(&Connect::url(&lines));
+    assert!(!lines.iter().any(|line| line.starts_with("SPLITTY_URL=")));
     let (status, response) = http(port, "GET", "/api/mux/state", Some(&cookie), None);
     assert_eq!(status, 200, "{response}");
     let (status, rest) = connect.terminate();
@@ -1240,7 +1478,7 @@ fn connect_installs_its_server_and_survives_a_reboot_and_a_rebuild() {
 
     // Connecting again reuses the installed server and the running daemon.
     let again = lab.connect_with(&["--no-open"], &[("SPLITTY_REMOTE_PAYLOAD", &payload)]);
-    let lines = again.until("SSH tunnel active.");
+    let lines = again.until("Browser gateway active.");
     assert!(
         !lines
             .iter()
@@ -1251,45 +1489,60 @@ fn connect_installs_its_server_and_survives_a_reboot_and_a_rebuild() {
 }
 
 #[test]
-fn the_bridge_carries_the_daemons_websocket_through_ssh() {
+fn the_bridge_carries_native_frames_through_real_ssh() {
     let Some(lab) = lab() else { return };
     lab.install_splitty();
-    lab.start_daemon(0);
-    let mut bridge = Command::new("ssh")
-        .env("PATH", lab.path())
-        .args([
-            "-o",
-            "BatchMode=yes",
-            HOST,
-            "--",
-            "splitty",
-            "remote-bridge",
-        ])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("ssh remote-bridge");
-    let mut stdout = bridge.stdout.take().expect("stdout");
-    let mut header = [0u8; 5];
-    stdout.read_exact(&mut header).expect("a frame through ssh");
-    assert_eq!(header[0], 1, "a text frame");
-    let length = u32::from_be_bytes([header[1], header[2], header[3], header[4]]) as usize;
-    let mut payload = vec![0u8; length];
-    stdout
-        .read_exact(&mut payload)
-        .expect("the frame's payload");
-    let welcome: serde_json::Value = serde_json::from_slice(&payload).expect("JSON");
-    assert_eq!(welcome["type"], "mux.welcome", "{welcome}");
-    for secret in ["token", "ticket", "bootstrap"] {
-        assert!(
-            !welcome.to_string().contains(secret),
-            "{secret} in {welcome}"
-        );
-    }
-    drop(bridge.stdin.take());
-    let status = bridge.wait().expect("wait");
-    assert!(status.success(), "the bridge ends with its input: {status}");
+    lab.start_daemon();
+    let info: serde_json::Value = serde_json::from_slice(
+        &fs::read(lab.dir.path().join("home/.config/splitty/daemon.json")).unwrap(),
+    )
+    .unwrap();
+    let mut command = Command::new("ssh");
+    command.env("PATH", lab.path()).args([
+        "-T",
+        "-a",
+        "-x",
+        "-o",
+        "ClearAllForwardings=yes",
+        "-o",
+        "BatchMode=yes",
+        HOST,
+        "--",
+        "splitty",
+        "remote-bridge",
+        "--transport",
+        "native-v1",
+    ]);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        use splitty_transport::{admission, negotiation, wire};
+        let mut bridge = splitty_remote::bridge::NativeBridge::spawn(
+            tokio::process::Command::from(command),
+            admission::Assignment::new(admission::Backend::new(), admission::Domain::new()),
+            negotiation::Expected {
+                instance: info["instance"].as_str(),
+                purpose: &wire::Purpose::Direct,
+                mux_protocol: 1,
+                preparation: WAIT,
+            },
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let frame = bridge.recv().await.unwrap();
+        let welcome: serde_json::Value = frame.frame.decode().unwrap();
+        assert_eq!(welcome["type"], "mux.welcome");
+        for secret in ["token", "ticket", "bootstrap"] {
+            assert!(!welcome.to_string().contains(secret));
+        }
+        drop(frame);
+        let (protocol, ended) = bridge.finish().await;
+        protocol.unwrap();
+        assert!(ended.status.unwrap().success(), "{}", ended.stderr);
+    });
 }
 
 /// `/health` of a host's server, through a forward's local `port`.
@@ -1315,12 +1568,22 @@ fn connect_forwards_ports_of_the_host_through_a_reconnect() {
     let busy = lab.serve_on_host(free_local_port());
     // A local process holds the second server's port here.
     let _local = TcpListener::bind(("127.0.0.1", busy.port)).expect("hold the port here");
-    let list = format!("{},{}", free.port, busy.port);
+    let absent = free_local_port();
+    let list = format!("{},{},{}", free.port, busy.port, absent);
+    let config = lab.dir.path().join("client-config/splitty");
+    fs::create_dir_all(&config).unwrap();
+    fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+    let saved_path = config.join("remote-forwards.json");
+    let saved = serde_json::json!({"version":1,"forwards":[{"target":HOST,"remote":free.port,
+        "local":free_local_port(),"label":"paused desktop mapping","enabled":false}]})
+    .to_string();
+    fs::write(&saved_path, &saved).unwrap();
+    fs::set_permissions(&saved_path, fs::Permissions::from_mode(0o600)).unwrap();
 
     let connect = lab.connect(&["--no-open", "--json", "--forward", &list]);
     connect.until(r#"{"event":"ready""#);
     // One event per forward, right after `ready`.
-    let forwards = json_events(&[connect.next(), connect.next()]);
+    let forwards = json_events(&[connect.next(), connect.next(), connect.next()]);
     assert_eq!(
         forwards[0],
         serde_json::json!({
@@ -1338,6 +1601,24 @@ fn connect_forwards_ports_of_the_host_through_a_reconnect() {
         .expect("a local port");
     assert_ne!(moved, busy.port, "the busy port is left alone");
     assert_eq!(forwards[1]["url"], format!("http://localhost:{moved}"));
+    assert_eq!(forwards[2]["remote"], absent);
+    assert_eq!(forwards[2]["local"], absent);
+    let mut missing = TcpStream::connect(("127.0.0.1", absent)).unwrap();
+    missing.set_read_timeout(Some(WAIT)).unwrap();
+    missing
+        .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+        .unwrap();
+    match missing.read(&mut [0]) {
+        Ok(0) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::BrokenPipe
+            ) => {}
+        result => panic!("a missing host service must not return application bytes: {result:?}"),
+    }
 
     // GatewayPorts yes in the client's config, yet only 127.0.0.1 listens.
     assert_eq!(
@@ -1360,13 +1641,33 @@ fn connect_forwards_ports_of_the_host_through_a_reconnect() {
     );
     assert_eq!(health(free.port), "ok");
     assert_eq!(health(moved), "ok");
+    let previous = connect.kill_forward(busy.port);
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let replaced = connect.ssh_children().into_iter().any(|pid| {
+            pid != previous
+                && fs::read(format!("/proc/{pid}/cmdline")).is_ok_and(|args| {
+                    args.split(|byte| *byte == 0)
+                        .any(|arg| arg.ends_with(format!(":localhost:{}", busy.port).as_bytes()))
+                })
+        });
+        if replaced && TcpStream::connect(("127.0.0.1", moved)).is_ok() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "forward worker did not rebuild on its reserved port"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_eq!(health(moved), "ok");
     let (status, rest) = connect.terminate();
     assert!(status.success(), "{status}\n{rest}");
 
     // The text output: a line per forward between the URL and the tunnel's
     // line, the moved one with a note.
     let text = lab.connect(&["--no-open", "--forward", &list]);
-    let lines = text.until("SSH tunnel active.");
+    let lines = text.until("Browser gateway active.");
     let url = lines
         .iter()
         .position(|line| line.starts_with("SPLITTY_URL="))
@@ -1388,15 +1689,17 @@ fn connect_forwards_ports_of_the_host_through_a_reconnect() {
             && lines[url + 2].ends_with(&note),
         "{lines:?}"
     );
-    assert_eq!(lines.len(), url + 4, "{lines:?}");
+    assert_eq!(
+        lines[url + 3],
+        format!("Forwarding http://localhost:{absent} -> {HOST}:{absent}")
+    );
+    assert_eq!(lines.len(), url + 5, "{lines:?}");
     // remote-forwards-persistence, design D2: `connect` never remembers its
     // forwards; saved mappings belong to the hub.
-    assert!(
-        !lab.dir
-            .path()
-            .join("client-config/splitty/remote-forwards.json")
-            .exists(),
-        "connect saved its forwards"
+    assert_eq!(
+        fs::read_to_string(&saved_path).unwrap(),
+        saved,
+        "CLI forward setup/stop must not read, resume or alter paused desktop mappings"
     );
 }
 
@@ -1851,7 +2154,7 @@ async fn the_hub_updates_a_host_daemon_of_another_version() {
     assert_eq!(steps, ["daemon", "update", "started", "bridge"], "{ready}");
     assert_eq!(
         progress[1]["message"],
-        format!("Stopping Splitty 0.0.1-old on {HOST}...")
+        format!("Updating Splitty 0.0.1-old on {HOST}; its sessions keep running...")
     );
     assert_eq!(ready["type"], "remote.ready", "{ready}");
     assert_eq!(
@@ -2787,6 +3090,9 @@ async fn the_hub_forwards_a_port_a_host_pane_listens_on() {
     assert_eq!(listeners(port), Vec::<String>::new());
 }
 
+#[path = "remote_connect/exposure_crash.rs"]
+mod exposure_crash;
+
 // ── Reverse forwards ────────────────────────────────────────────────────────
 
 /// The hub's `ssh` processes that hold a reverse forward.
@@ -2836,6 +3142,47 @@ fn host_listeners(lab: &Lab, port: u16) -> Vec<String> {
 }
 
 /// access-control, Hub Reverse Forwards; remote-screens, Reverse Forwards
+/// A real local dev service whose thread/listener are observed through cleanup.
+struct LocalMarkerService {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    task: Option<std::thread::JoinHandle<()>>,
+}
+impl Drop for LocalMarkerService {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Release);
+        if let Some(task) = self.task.take() {
+            task.join().unwrap();
+        }
+    }
+}
+fn local_marker_service() -> (LocalMarkerService, u16) {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let port = listener.local_addr().unwrap().port();
+    listener.set_nonblocking(true).unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let stopped = stop.clone();
+    let task = std::thread::spawn(move || {
+        while !stopped.load(std::sync::atomic::Ordering::Acquire) {
+            match listener.accept() {
+                Ok((mut socket, _)) => {
+                    let _ = socket.write_all(b"local-service\n");
+                }
+                Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(5))
+                }
+                Err(error) => panic!("local marker listener failed: {error}"),
+            }
+        }
+    });
+    (
+        LocalMarkerService {
+            stop,
+            task: Some(task),
+        },
+        port,
+    )
+}
+
 /// Through The Hub: a local service shared with a host through real `ssh -R`
 /// and the host's relay, on loopback only although the host's `sshd` says
 /// `GatewayPorts yes`, rebuilt when its `ssh` dies, and gone after Stop.
@@ -2848,17 +3195,35 @@ async fn a_shared_port_reaches_a_local_service_from_the_host_through_real_ssh() 
     }
     let payload = lab.payload();
     let hub = HubServer::start(&lab, &payload);
-    let service = TcpListener::bind(("127.0.0.1", 0)).expect("local service");
-    let local = service.local_addr().expect("address").port();
-    std::thread::spawn(move || {
-        for mut stream in service.incoming().flatten() {
-            let _ = stream.write_all(b"local-service\n");
-        }
-    });
+    let (_service, local) = local_marker_service();
     let port = 18431;
     let share = serde_json::json!({"target": HOST, "port": port, "local": local}).to_string();
 
+    let before = lab.ssh_invocations();
     let (status, shared) = reverses(&hub, "POST", Some(&share));
+    if splitty_remote::tunnel::exposure::check_sharing_supported()
+        .is_err_and(|error| error.kind() == io::ErrorKind::Unsupported)
+    {
+        assert_eq!(status, 501, "{shared}");
+        assert_eq!(shared["code"], "unsupported_environment");
+        assert!(shared["error"].as_str().unwrap().contains("reservation"));
+        assert_eq!(
+            lab.ssh_invocations(),
+            before,
+            "unsupported sharing must fail before any SSH preparation"
+        );
+        assert!(reverse_ssh(&hub).is_empty());
+        assert_eq!(reverses(&hub, "GET", None), (200, serde_json::json!([])));
+        assert!(!lab
+            .dir
+            .path()
+            .join("home/.local/share/splitty/run/relay")
+            .exists());
+        eprintln!(
+            "reverse sharing: verified explicit unsupported environment without SSH or exposure"
+        );
+        return;
+    }
     assert_eq!(status, 200, "{shared}");
     assert_eq!(
         shared,
@@ -2930,4 +3295,84 @@ async fn a_shared_port_reaches_a_local_service_from_the_host_through_real_ssh() 
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     hub.wait_without_ssh();
+}
+
+/// Actual packaged renderer/preload, child pipes and OpenSSH are required to
+/// prove remote recovery without document navigation and kept-session loss.
+#[test]
+fn electron_remote_windows_reconnect_without_navigation_through_real_ssh() {
+    let Some(electron) = env::var_os("SPLITTY_TEST_ELECTRON").map(PathBuf::from) else {
+        eprintln!("Electron UNRUN: set SPLITTY_TEST_ELECTRON to opt in");
+        return;
+    };
+    assert!(
+        electron.is_absolute() && electron.is_file(),
+        "Electron executable must be an absolute file"
+    );
+    let lab = Lab::start().unwrap_or_else(|reason| panic!("Electron SSH lab BLOCKED: {reason}"));
+    lab.install_splitty();
+    lab.start_daemon();
+    fs::write(
+        lab.dir.path().join("home/.zshrc"),
+        "# Isolated smoke shell.\n",
+    )
+    .unwrap();
+    let job = lab.on_host(&["splitty", "run", "--json", "--", "/bin/sh"]);
+    assert!(
+        job.status.success(),
+        "create kept terminal: {}",
+        describe(&job)
+    );
+    let keepers = host_keepers(&lab);
+    assert!(!keepers.is_empty(), "fixture must own a kept terminal");
+    let script = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../frontend-electron/scripts/smoke-native-remote.cjs");
+    let output = lab.dir.path().join("electron.stdout");
+    let errors = lab.dir.path().join("electron.stderr");
+    let mut child = BrowserChild {
+        child: Command::new(electron)
+            .arg(script)
+            .arg(env!("CARGO_BIN_EXE_splitty"))
+            .arg(HOST)
+            .arg(lab.dir.path())
+            .arg(NEW_KEY)
+            .env("PATH", lab.path())
+            .env_remove("ELECTRON_RUN_AS_NODE")
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(fs::File::create(&output).unwrap()))
+            .stderr(Stdio::from(fs::File::create(&errors).unwrap()))
+            .spawn()
+            .expect("start Electron SSH smoke"),
+        reaped: false,
+    };
+    let deadline = Instant::now() + Duration::from_secs(120);
+    let status = loop {
+        if let Some(status) = child.child.try_wait().expect("wait for Electron") {
+            child.reaped = true;
+            break status;
+        }
+        assert!(Instant::now() < deadline, "Electron SSH smoke timed out");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let report = fs::read_to_string(output).unwrap_or_default();
+    assert!(
+        status.success(),
+        "Electron SSH smoke failed: {report}\n{}",
+        fs::read_to_string(errors).unwrap_or_default()
+    );
+    assert!(
+        report.contains("\"sshReconnect\":true"),
+        "missing runtime evidence: {report}"
+    );
+    let surviving = host_keepers(&lab);
+    assert!(
+        keepers.iter().all(|keeper| surviving.contains(keeper)),
+        "window closure/reconnect must preserve the host terminal"
+    );
+    assert!(lab
+        .on_host(&["splitty", "daemon", "status"])
+        .status
+        .success());
+    eprintln!("Electron remote smoke: {report}");
 }

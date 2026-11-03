@@ -102,3 +102,12 @@ test('file input rejects group/world access before reading a credential', async 
     assert.ok(!result.stdout.includes(fixture.cookie));
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+
+test('accepts an isolated gateway cookie name and rejects malformed scopes', () => {
+  const scoped = { ...fixture, cookie: `splitty-session-${'a'.repeat(32)}=private-test-only-value` };
+  assert.equal(validateConfig(scoped).cookie, scoped.cookie);
+  for (const name of ['splitty-session-a', 'splitty-session-' + 'g'.repeat(32), 'other-session']) {
+    assert.throws(() => validateConfig({ ...fixture, cookie: `${name}=private-test-only-value` }), /SESSION_COOKIE_REQUIRED/);
+  }
+});

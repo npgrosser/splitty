@@ -11,10 +11,22 @@
 fn main() {
     tauri_build::try_build(tauri_build::Attributes::new().app_manifest(
         tauri_build::AppManifest::new().commands(&[
+            "native_bootstrap_begin",
+            "close_popout",
+            "native_bootstrap_confirm",
+            "native_open",
+            "native_cancel_open",
+            "native_start",
+            "native_write",
+            "native_consumed",
+            "native_close",
+            "native_connection_state",
+            "remote_progress",
             "set_title_bar_color",
             "wsl_setup_state",
             "wsl_list_distributions",
             "wsl_start_backend",
+            "wsl_open_backend",
             "wsl_switch_distribution",
             "remote_hosts",
             "remote_open",

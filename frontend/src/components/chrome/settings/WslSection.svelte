@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invokeTauri as invoke } from "../../../lib/tauri_invoke.ts";
   import { runningOnQuit } from "../../../lib/close_guard.ts";
   import SettingsSection from "./SettingsSection.svelte";
   import SettingRow from "./SettingRow.svelte";

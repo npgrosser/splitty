@@ -8,16 +8,232 @@
 //! native layer, for every navigation and every new-window request, whichever
 //! code in the page asked for it.
 //!
-//! A remote window shows UI code delivered by a host and is stricter still: it
-//! stays on its tunnel origin, never shows the app's bundled pages and opens no
-//! window at all (`access-control`, Remote Window Isolation).
+//! Every role loads packaged executable UI. Remote windows receive their fixed
+//! host through native policy, and never gain a main-window command grant.
 //!
 //! The decisions are pure functions of the URL so they can be tested without a
 //! webview; `follow` and `follow_new_window` carry them out.
 
+use std::{
+    collections::HashMap,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    },
+};
 use tauri::webview::NewWindowResponse;
 use tauri::{AppHandle, Url, Wry};
+use tauri::{Manager, WebviewUrl, WebviewWindowBuilder};
 use tauri_plugin_opener::OpenerExt;
+
+const MAX_POPOUTS: usize = 32;
+#[derive(Default)]
+struct PopoutRegistry {
+    next: u64,
+    entries: HashMap<String, (String, u64, bool)>,
+}
+impl PopoutRegistry {
+    fn reserve(&mut self, parent: &str, document: u64) -> Option<String> {
+        if self.entries.len() >= MAX_POPOUTS {
+            return None;
+        }
+        self.next = self.next.checked_add(1)?;
+        let label = format!("popout-{}", self.next);
+        self.entries
+            .insert(label.clone(), (parent.to_owned(), document, false));
+        Some(label)
+    }
+    fn owned(&self, label: &str, parent: &str, document: u64) -> bool {
+        self.entries
+            .get(label)
+            .is_some_and(|owner| owner.0 == parent && owner.1 == document && !owner.2)
+    }
+    fn revoke(&mut self, parent: &str) -> Vec<String> {
+        let labels: Vec<_> = self
+            .entries
+            .iter()
+            .filter(|(_, owner)| owner.0 == parent && !owner.2)
+            .map(|(label, _)| label.clone())
+            .collect();
+        for label in &labels {
+            self.entries.get_mut(label).expect("reserved popout").2 = true;
+        }
+        labels
+    }
+    fn start_close(&mut self, label: &str, parent: &str, document: u64) -> bool {
+        if !self.owned(label, parent, document) {
+            return false;
+        }
+        self.entries.get_mut(label).expect("owned popout").2 = true;
+        true
+    }
+}
+
+/// Parent-owned browser popouts are real native windows, without a broker
+/// registration or command capability. Reservations also count pending builds.
+#[derive(Default)]
+pub(crate) struct Popouts(Mutex<PopoutRegistry>);
+impl Popouts {
+    pub(crate) fn close_owned(
+        &self,
+        app: &AppHandle,
+        parent: &str,
+        document: u64,
+        label: &str,
+        current: impl FnOnce() -> bool,
+    ) -> Result<(), String> {
+        let allowed = {
+            let mut registry = self.0.lock().expect("native popouts");
+            current() && registry.start_close(label, parent, document)
+        };
+        if !allowed {
+            return Err("native popout close denied".into());
+        }
+        if let Some(window) = app.get_webview_window(label) {
+            window.destroy().map_err(|error| error.to_string())?;
+        }
+        Ok(())
+    }
+    /// Lock order is popouts -> native revocation. Publication takes the same
+    /// lock before checking the native document, so it cannot outlive teardown.
+    pub(crate) fn revoke_parent(&self, app: &AppHandle, parent: &str, revoke: impl FnOnce()) {
+        let labels = {
+            let mut registry = self.0.lock().expect("native popouts");
+            revoke();
+            registry.revoke(parent)
+        };
+        for label in labels {
+            if let Some(window) = app.get_webview_window(&label) {
+                let _ = window.destroy();
+            }
+        }
+    }
+    pub(crate) fn destroyed(&self, app: &AppHandle, label: &str, revoke: impl FnOnce()) {
+        self.revoke_parent(app, label, revoke);
+        self.0.lock().expect("native popouts").entries.remove(label);
+    }
+    pub(crate) fn open(
+        &self,
+        app: &AppHandle,
+        parent: &str,
+        document: u64,
+        features: tauri::webview::NewWindowFeatures,
+        current: Arc<dyn Fn() -> bool + Send + Sync>,
+    ) -> NewWindowResponse<Wry> {
+        let label = {
+            let mut registry = self.0.lock().expect("native popouts");
+            if !current() {
+                return NewWindowResponse::Deny;
+            }
+            let Some(label) = registry.reserve(parent, document) else {
+                return NewWindowResponse::Deny;
+            };
+            label
+        };
+        let nav_current = current.clone();
+        let nav_app = app.clone();
+        let links_app = app.clone();
+        let initial_navigation = AtomicBool::new(true);
+        let close_script = format!(
+            r#"(() => {{
+          const fallback = window.close.bind(window);
+          Object.defineProperty(window, 'close', {{ value() {{
+            try {{
+              const parent = window.opener?.__SPLITTY_TAURI__;
+              if (parent) {{ void parent.invoke('close_popout', {{ label: {} }}).catch(fallback); return; }}
+            }} catch {{}}
+            fallback();
+          }} }});
+        }})();"#,
+            serde_json::to_string(&label).expect("native popout label")
+        );
+        let built = WebviewWindowBuilder::new(
+            app,
+            &label,
+            WebviewUrl::External("about:blank".parse().expect("native blank entry")),
+        )
+        .window_features(features)
+        .initialization_script(close_script)
+        .title("Splitty")
+        .disable_drag_drop_handler()
+        .on_navigation(move |url| {
+            let initial = initial_navigation.swap(false, Ordering::Relaxed);
+            nav_current()
+                && follow(
+                    &nav_app,
+                    url,
+                    if (initial && url.as_str() == "about:blank") || packaged_popout(url) {
+                        Decision::Allow
+                    } else {
+                        external_or_block(url)
+                    },
+                )
+        })
+        .on_new_window(move |url, _| follow_new_window(&links_app, &url, external_or_block(&url)))
+        .on_download(|_, _| false)
+        .build();
+        let window = match built {
+            Ok(window) => window,
+            Err(error) => {
+                self.0
+                    .lock()
+                    .expect("native popouts")
+                    .entries
+                    .remove(&label);
+                tracing::warn!("could not create native popout: {error}");
+                return NewWindowResponse::Deny;
+            }
+        };
+        #[cfg(target_os = "linux")]
+        {
+            let owned = window.clone();
+            if window
+                .with_webview(move |platform| {
+                    use gtk::prelude::WidgetExt;
+                    // Wry's default GTK close handler destroys only the WebView,
+                    // leaving its native toplevel as an empty white window.
+                    platform.inner().connect_destroy(move |_| {
+                        let owned = owned.clone();
+                        // Wry destroys the widget in its first close handler.
+                        // Defer native teardown until that signal/any existing
+                        // runtime window-map borrow has finished.
+                        webkit2gtk::glib::idle_add_once(move || {
+                            let _ = owned.destroy();
+                        });
+                    });
+                })
+                .is_err()
+            {
+                if let Some(owner) = self
+                    .0
+                    .lock()
+                    .expect("native popouts")
+                    .entries
+                    .get_mut(&label)
+                {
+                    owner.2 = true;
+                }
+                let _ = window.destroy();
+                return NewWindowResponse::Deny;
+            }
+        }
+        let publish = {
+            let mut registry = self.0.lock().expect("native popouts");
+            let publish = current() && registry.owned(&label, parent, document);
+            if !publish {
+                if let Some(owner) = registry.entries.get_mut(&label) {
+                    owner.2 = true;
+                }
+            }
+            publish
+        };
+        if !publish {
+            let _ = window.destroy();
+            return NewWindowResponse::Deny;
+        }
+        NewWindowResponse::Create { window }
+    }
+}
 
 /// What to do with a navigation or a new-window request.
 #[derive(Debug, PartialEq, Eq)]
@@ -30,82 +246,66 @@ pub enum Decision {
     Block,
 }
 
-/// The origins of a Splitty backend listening on `port`.
-///
-/// Mirrors `splitty_server::http::allowed_origins`, which is not available on
-/// Windows: the backend runs inside WSL there and the server crate is not a
-/// dependency of this one.
-pub fn backend_origins(port: u16) -> Vec<String> {
-    vec![
-        format!("http://127.0.0.1:{port}"),
-        format!("http://localhost:{port}"),
-    ]
+/// A packaged document role is assigned by the native window builder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DocumentRole {
+    Main,
+    Remote,
+    Setup,
 }
 
-/// Decide a top-level navigation of the main window.
-///
-/// `local_app` admits the bundled pages (the Windows setup screen); only the
-/// Windows window ever shows one.
-pub fn navigation(url: &Url, backend_origins: &[String], local_app: bool) -> Decision {
-    if is_backend(url, backend_origins) || is_blank(url) {
-        return Decision::Allow;
-    }
-    if local_app && is_local_app(url) {
-        return Decision::Allow;
-    }
-    external_or_block(url)
+/// Exact packaged authority and entry path. Queries never confer authority.
+/// Deliberate development servers are excluded from production native grants.
+pub(crate) fn packaged_entry(url: &Url, role: DocumentRole) -> bool {
+    #[cfg(target_os = "windows")]
+    let authority = url.scheme() == "http" && url.host_str() == Some("tauri.localhost");
+    #[cfg(not(target_os = "windows"))]
+    let authority = url.scheme() == "tauri" && url.host_str() == Some("localhost");
+    authority
+        && url.port().is_none()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && match role {
+            DocumentRole::Main | DocumentRole::Remote => {
+                matches!(url.path(), "" | "/" | "/index.html")
+            }
+            DocumentRole::Setup => url.path() == "/setup.html",
+        }
 }
 
-/// Decide a `window.open` or `target="_blank"` request.
-///
-/// Windows of the app itself (dockview popouts) stay in Splitty. Every other web
-/// target goes to the system browser, and anything else is dropped.
-pub fn new_window(url: &Url, backend_origins: &[String]) -> Decision {
-    if is_backend(url, backend_origins) || is_blank(url) {
-        return Decision::Allow;
+pub(crate) fn packaged_navigation(url: &Url, role: DocumentRole) -> Decision {
+    if packaged_entry(url, role) {
+        Decision::Allow
+    } else {
+        external_or_block(url)
     }
-    external_or_block(url)
 }
 
-/// The origin of the tunnel a remote window shows, from its session URL.
-pub fn tunnel_origin(session_url: &Url) -> String {
-    session_url.origin().ascii_serialization()
+/// Only the parent-owned popout entry may acquire a shared script reference.
+/// It receives no independent native registration or command grant.
+pub(crate) fn packaged_new_window(url: &Url, role: DocumentRole) -> Decision {
+    if role == DocumentRole::Main && packaged_popout(url) {
+        Decision::Allow
+    } else {
+        external_or_block(url)
+    }
 }
 
-/// Decide a top-level navigation of a remote window showing `tunnel_origin`.
-///
-/// Unlike the main window, not even an empty document is admitted, and the
-/// bundled pages are dropped rather than handed to the system browser: one of
-/// them in a window that runs host code would be the app's own page under the
-/// host's control.
-pub fn remote_navigation(url: &Url, tunnel_origin: &str) -> Decision {
-    if url.origin().ascii_serialization() == tunnel_origin {
-        return Decision::Allow;
-    }
-    if is_local_app(url) {
-        return Decision::Block;
-    }
-    external_or_block(url)
+fn packaged_popout(url: &Url) -> bool {
+    let mut entry = url.clone();
+    entry.set_path("/index.html");
+    url.path() == "/popout.html" && packaged_entry(&entry, DocumentRole::Main)
 }
 
-/// Decide a `window.open` or `target="_blank"` request of a remote window.
-///
-/// Nothing opens inside Splitty, the UI's own popouts included (D6 of
-/// remote-window, provisional): a new window would need the same isolation.
-/// Other web targets go to the system browser.
-pub fn remote_new_window(url: &Url, tunnel_origin: &str) -> Decision {
-    if url.origin().ascii_serialization() == tunnel_origin || is_local_app(url) || is_blank(url) {
-        return Decision::Block;
+pub(crate) fn packaged_download(url: &Url, role: DocumentRole) -> bool {
+    if role != DocumentRole::Main || url.scheme() != "blob" {
+        return false;
     }
-    external_or_block(url)
-}
-
-/// Decide a download of the main window: only the page's own `blob:` URLs,
-/// which it makes of a file it received (`splitty download`), are saved.
-/// Without a handler the webview would save whatever a link starts.
-pub fn download(url: &Url, backend_origins: &[String]) -> bool {
-    // A `blob:` URL's origin is that of the page that made it.
-    url.scheme() == "blob" && is_backend(url, backend_origins)
+    let Ok(mut source) = Url::parse(url.path()) else {
+        return false;
+    };
+    source.set_path("/index.html");
+    packaged_entry(&source, DocumentRole::Main)
 }
 
 /// Carry out `decision` on a navigation to `url`: whether the webview loads
@@ -129,7 +329,8 @@ pub fn follow(app: &AppHandle, url: &Url, decision: Decision) -> bool {
 /// Carry out `decision` on a new-window request for `url`.
 pub fn follow_new_window(app: &AppHandle, url: &Url, decision: Decision) -> NewWindowResponse<Wry> {
     match decision {
-        Decision::Allow => NewWindowResponse::Allow,
+        // Allowed popouts must use the explicitly owned Create path above.
+        Decision::Allow => NewWindowResponse::Deny,
         Decision::OpenExternally => {
             open_externally(app, url);
             NewWindowResponse::Deny
@@ -156,245 +357,161 @@ fn external_or_block(url: &Url) -> Decision {
     }
 }
 
-fn is_backend(url: &Url, backend_origins: &[String]) -> bool {
-    let origin = url.origin().ascii_serialization();
-    backend_origins.contains(&origin)
-}
-
-/// An empty document. Webviews use it as the initial page of new windows, and
-/// it carries no content of its own.
-fn is_blank(url: &Url) -> bool {
-    url.as_str() == "about:blank"
-}
-
-/// The bundled frontend: `tauri://localhost` on macOS and Linux,
-/// `http(s)://tauri.localhost` on Windows, and the Vite dev server in debug
-/// builds.
-fn is_local_app(url: &Url) -> bool {
-    let bundled = match url.scheme() {
-        "tauri" => url.host_str() == Some("localhost"),
-        "http" | "https" => url.host_str() == Some("tauri.localhost"),
-        _ => false,
-    };
-    bundled || DEV_ORIGINS.contains(&url.origin().ascii_serialization().as_str())
-}
-
-/// The Vite dev server that `cargo tauri dev` loads the bundled pages from.
-/// Compiled out of release builds, like the matching entry in the server's
-/// origin allowlist, so a shipped binary cannot be talked into trusting it.
-#[cfg(debug_assertions)]
-const DEV_ORIGINS: &[&str] = &["http://localhost:1420", "http://127.0.0.1:1420"];
-#[cfg(not(debug_assertions))]
-const DEV_ORIGINS: &[&str] = &[];
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn popout_reservations_bound_pending_builds_and_never_reuse_labels() {
+        let mut registry = PopoutRegistry::default();
+        let labels: Vec<_> = (0..MAX_POPOUTS)
+            .map(|_| registry.reserve("main", 7).expect("available popout"))
+            .collect();
+        assert!(registry.reserve("main", 7).is_none());
+        registry.entries.remove(&labels[0]);
+        let replacement = registry.reserve("main", 7).unwrap();
+        assert!(!labels.contains(&replacement));
+        assert_eq!(registry.entries.len(), MAX_POPOUTS);
+    }
+
+    #[test]
+    fn parent_revocation_cancels_pending_popouts_and_only_its_own_children() {
+        let mut registry = PopoutRegistry::default();
+        let pending = registry.reserve("main", 7).unwrap();
+        let sibling = registry.reserve("other-native-parent", 9).unwrap();
+        assert!(!registry.owned(&pending, "main", 8));
+        assert_eq!(registry.revoke("main"), vec![pending.clone()]);
+        assert!(
+            !registry.owned(&pending, "main", 7),
+            "a late build cannot publish"
+        );
+        assert!(registry.owned(&sibling, "other-native-parent", 9));
+        assert!(registry.revoke("main").is_empty());
+    }
+
+    #[test]
+    fn parent_close_denies_other_documents_and_keeps_capacity_until_destruction() {
+        let mut registry = PopoutRegistry::default();
+        let own = registry.reserve("main", 7).unwrap();
+        let foreign = registry.reserve("other-native-parent", 9).unwrap();
+        for label in ["main", "remote-1", foreign.as_str(), "unknown"] {
+            assert!(!registry.start_close(label, "main", 7));
+        }
+        assert!(!registry.start_close(&own, "main", 8));
+        assert!(registry.owned(&own, "main", 7));
+        assert!(registry.start_close(&own, "main", 7));
+        assert!(!registry.start_close(&own, "main", 7));
+        assert_eq!(
+            registry.entries.len(),
+            2,
+            "close does not establish native destruction"
+        );
+        registry.entries.remove(&own); // actual Destroyed callback
+        assert_eq!(registry.entries.len(), 1);
+        assert!(registry.owned(&foreign, "other-native-parent", 9));
+    }
 
     fn url(raw: &str) -> Url {
         raw.parse().expect("valid url")
     }
 
-    fn backend() -> Vec<String> {
-        backend_origins(45299)
-    }
-
-    /// file-transfer D10: the page's own blob URLs are saved, nothing else.
-    #[test]
-    fn only_the_pages_own_blob_urls_are_downloaded() {
-        let own = url("blob:http://127.0.0.1:45299/550e8400-e29b-41d4-a716-446655440000");
-        assert!(download(&own, &backend()));
-        let localhost = url("blob:http://localhost:45299/550e8400-e29b-41d4-a716-446655440000");
-        assert!(download(&localhost, &backend()));
-        for other in [
-            "blob:http://127.0.0.1:3000/550e8400-e29b-41d4-a716-446655440000",
-            "blob:https://example.com/550e8400-e29b-41d4-a716-446655440000",
-            "http://127.0.0.1:45299/api/file",
-            "https://example.com/setup.exe",
-            "data:application/octet-stream;base64,AAAA",
-            "file:///etc/passwd",
-        ] {
-            assert!(!download(&url(other), &backend()), "{other}");
-        }
+    fn packaged(path: &str) -> Url {
+        #[cfg(target_os = "windows")]
+        let origin = "http://tauri.localhost";
+        #[cfg(not(target_os = "windows"))]
+        let origin = "tauri://localhost";
+        url(&format!("{origin}{path}"))
     }
 
     #[test]
-    fn the_backend_may_load_in_the_window() {
-        let target = url("http://127.0.0.1:45299/?bootstrap=abc&desktop=1");
-        assert_eq!(navigation(&target, &backend(), false), Decision::Allow);
-    }
-
-    /// Every other loopback port is a different origin. A page there could
-    /// otherwise reach Tauri IPC from inside the trusted window.
-    #[test]
-    fn another_loopback_port_is_not_the_backend() {
-        let target = url("http://127.0.0.1:5173/");
-        assert_eq!(
-            navigation(&target, &backend(), false),
-            Decision::OpenExternally
-        );
-        assert_eq!(new_window(&target, &backend()), Decision::OpenExternally);
-    }
-
-    #[test]
-    fn foreign_sites_go_to_the_system_browser() {
-        let target = url("https://example.com/");
-        assert_eq!(
-            navigation(&target, &backend(), true),
-            Decision::OpenExternally
-        );
-        assert_eq!(new_window(&target, &backend()), Decision::OpenExternally);
-    }
-
-    /// What a terminal program can put into an OSC 8 hyperlink.
-    #[test]
-    fn non_web_schemes_are_dropped() {
-        for raw in [
-            "file:///C:/Windows/System32/calc.exe",
-            "search-ms:query=x&crumb=location:evil.example",
-            "ms-msdt:/id",
-            "javascript:alert(1)",
-            "vscode://vscode-remote/ssh-remote+vm1/srv/",
-            "zed://ssh/vm1/srv/",
-            "sftp://vm1/srv/",
-            "data:text/html,<script>alert(1)</script>",
-        ] {
-            let target = url(raw);
-            assert_eq!(
-                navigation(&target, &backend(), true),
-                Decision::Block,
-                "{raw}"
+    fn packaged_roles_require_exact_authorities_and_entry_paths() {
+        for path in ["", "/", "/index.html", "/index.html?role=setup"] {
+            assert!(
+                packaged_entry(&packaged(path), DocumentRole::Main),
+                "{path}"
             );
-            assert_eq!(new_window(&target, &backend()), Decision::Block, "{raw}");
-        }
-    }
-
-    #[test]
-    fn app_popouts_stay_in_splitty() {
-        let target = url("http://127.0.0.1:45299/popout.html");
-        assert_eq!(new_window(&target, &backend()), Decision::Allow);
-        assert_eq!(new_window(&url("about:blank"), &backend()), Decision::Allow);
-    }
-
-    #[test]
-    fn the_setup_page_is_only_allowed_where_requested() {
-        let windows = url("http://tauri.localhost/setup.html");
-        let unix = url("tauri://localhost/setup.html");
-
-        assert_eq!(navigation(&windows, &[], true), Decision::Allow);
-        assert_eq!(navigation(&unix, &[], true), Decision::Allow);
-        assert_eq!(navigation(&windows, &[], false), Decision::OpenExternally);
-        assert_eq!(navigation(&unix, &[], false), Decision::Block);
-    }
-
-    /// Before the WSL backend is up there is no backend origin yet, and the
-    /// window must not be able to leave the setup page for a loopback port.
-    #[test]
-    fn no_backend_origin_means_no_loopback_page() {
-        let target = url("http://127.0.0.1:45299/");
-        assert_eq!(navigation(&target, &[], true), Decision::OpenExternally);
-    }
-
-    #[test]
-    fn a_lookalike_host_is_not_the_bundled_app() {
-        let target = url("http://tauri.localhost.evil.example/setup.html");
-        assert_eq!(navigation(&target, &[], true), Decision::OpenExternally);
-    }
-
-    fn tunnel() -> String {
-        tunnel_origin(&url("http://127.0.0.1:9800/?bootstrap=abc&host=vm1"))
-    }
-
-    #[test]
-    fn a_remote_window_stays_on_its_tunnel() {
-        assert_eq!(tunnel(), "http://127.0.0.1:9800");
-        for raw in [
-            "http://127.0.0.1:9800/",
-            "http://127.0.0.1:9800/?bootstrap=def&host=vm1",
-        ] {
-            assert_eq!(
-                remote_navigation(&url(raw), &tunnel()),
-                Decision::Allow,
-                "{raw}"
+            assert!(
+                packaged_entry(&packaged(path), DocumentRole::Remote),
+                "{path}"
+            );
+            assert!(
+                !packaged_entry(&packaged(path), DocumentRole::Setup),
+                "{path}"
             );
         }
-    }
-
-    /// The main window's backend, another tunnel and `localhost` are other
-    /// origins, so the host's page cannot load them in its window.
-    #[test]
-    fn a_remote_window_hands_other_web_pages_to_the_system_browser() {
         for raw in [
-            "https://example.com/",
-            "http://127.0.0.1:45299/",
-            "http://localhost:9800/",
-            "https://127.0.0.1:9800/",
-        ] {
-            assert_eq!(
-                remote_navigation(&url(raw), &tunnel()),
-                Decision::OpenExternally,
-                "{raw}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_remote_window_never_shows_a_bundled_page() {
-        for raw in [
-            "tauri://localhost/setup.html",
-            "http://tauri.localhost/setup.html",
-            "https://tauri.localhost/index.html",
-        ] {
-            assert_eq!(
-                remote_navigation(&url(raw), &tunnel()),
-                Decision::Block,
-                "{raw}"
-            );
-            assert_eq!(
-                remote_new_window(&url(raw), &tunnel()),
-                Decision::Block,
-                "{raw}"
-            );
-        }
-    }
-
-    #[test]
-    fn a_remote_window_drops_other_schemes() {
-        for raw in [
+            "tauri://localhost.evil/index.html",
+            "tauri://user@localhost/index.html",
+            "http://tauri.localhost:1420/",
+            "https://tauri.localhost/",
+            "http://localhost:1420/",
             "about:blank",
-            "file:///etc/passwd",
-            "javascript:alert(1)",
-            "data:text/html,<script>alert(1)</script>",
-            "search-ms:query=x",
-            "vscode://vscode-remote/ssh-remote+vm1/srv/",
-            "zed://ssh/vm1/srv/",
-            "sftp://vm1/srv/",
         ] {
-            assert_eq!(
-                remote_navigation(&url(raw), &tunnel()),
-                Decision::Block,
-                "{raw}"
-            );
-            assert_eq!(
-                remote_new_window(&url(raw), &tunnel()),
-                Decision::Block,
-                "{raw}"
-            );
+            assert!(!packaged_entry(&url(raw), DocumentRole::Main), "{raw}");
         }
+        #[cfg(not(target_os = "windows"))]
+        assert!(!packaged_entry(
+            &url("http://tauri.localhost/"),
+            DocumentRole::Main
+        ));
+        #[cfg(target_os = "windows")]
+        assert!(!packaged_entry(
+            &url("tauri://localhost/"),
+            DocumentRole::Main
+        ));
+        for path in ["/popout.html", "/setup.html", "/other.html"] {
+            assert!(!packaged_entry(&packaged(path), DocumentRole::Main));
+        }
+        assert!(packaged_entry(
+            &packaged("/setup.html"),
+            DocumentRole::Setup
+        ));
+        assert_eq!(
+            packaged_new_window(&packaged("/popout.html"), DocumentRole::Main),
+            Decision::Allow
+        );
+        assert_ne!(
+            packaged_new_window(&packaged("/popout.html"), DocumentRole::Remote),
+            Decision::Allow
+        );
+        let blob = url(&format!("blob:{}", packaged("/id")));
+        assert!(packaged_download(&blob, DocumentRole::Main));
+        assert!(!packaged_download(&blob, DocumentRole::Remote));
+        assert!(!packaged_download(
+            &url("blob:http://127.0.0.1:1420/id"),
+            DocumentRole::Main
+        ));
     }
 
     #[test]
-    fn a_remote_window_opens_no_window_of_its_own() {
-        for raw in ["http://127.0.0.1:9800/popout.html", "about:blank"] {
+    fn external_navigation_never_loads_foreign_executable_content() {
+        for role in [
+            DocumentRole::Main,
+            DocumentRole::Remote,
+            DocumentRole::Setup,
+        ] {
             assert_eq!(
-                remote_new_window(&url(raw), &tunnel()),
-                Decision::Block,
-                "{raw}"
+                packaged_navigation(&url("https://example.com/"), role),
+                Decision::OpenExternally
             );
+            for raw in [
+                "javascript:alert(1)",
+                "data:text/html,test",
+                "file:///etc/passwd",
+                "about:blank",
+                "vscode://file/tmp/",
+            ] {
+                assert_eq!(
+                    packaged_navigation(&url(raw), role),
+                    Decision::Block,
+                    "{raw}"
+                );
+                assert_eq!(
+                    packaged_new_window(&url(raw), role),
+                    Decision::Block,
+                    "{raw}"
+                );
+            }
         }
-        assert_eq!(
-            remote_new_window(&url("https://example.com/"), &tunnel()),
-            Decision::OpenExternally
-        );
     }
 }

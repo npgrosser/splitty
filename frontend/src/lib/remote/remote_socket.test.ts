@@ -177,7 +177,7 @@ describe("RemoteSocket before remote.ready", () => {
     r.socket.send({ type: "editor.result", requestId: "req-1", outcome: "dispatched" });
     r.socket.send({ type: "resize", id: "sess-1", cols: 80, rows: 24 });
     r.hub.ready();
-    expect(r.hub.sent).toEqual([{ type: "resize", id: "sess-1", cols: 80, rows: 24 }]);
+    expect(r.hub.sent).toEqual([]);
   });
 
   it.each([

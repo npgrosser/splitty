@@ -7,13 +7,18 @@ license.workspace = true
 publish = false
 
 [dependencies]
+splitty-transport = { path = "../splitty-transport" }
 tokio = { workspace = true }
 thiserror = { workspace = true }
 sha2 = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
+rand = { workspace = true }
 # The home directory, for the user's ~/.ssh (known hosts).
 dirs = "6"
+
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.29", features = ["fs", "user"] }
 
 [build-dependencies]
 sha2 = "0.10"
@@ -22,3 +27,6 @@ sha2 = "0.10"
 tempfile = "3"
 # Paused time for the supervisor's backoff and give-up tests.
 tokio = { workspace = true, features = ["test-util"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+nix = { version = "0.29", features = ["signal", "process"] }

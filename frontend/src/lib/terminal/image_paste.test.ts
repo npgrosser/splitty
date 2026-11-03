@@ -1,3 +1,4 @@
+import { fakeServer } from "../testing/fake_server.ts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   attachImageInsert, attachImagePaste, CTRL_V_FALLBACK_MS, droppedFiles, formatBytes, isImage, isPlainCtrlV, MAX_FILE_BYTES, MAX_IMAGE_BYTES,
@@ -277,4 +278,35 @@ describe("images in a text field", () => {
     attachImageInsert(el, store(), vi.fn())();
     expect(listeners.size).toBe(0);
   });
+});
+
+it("does not send an image read across a connection replacement", async () => {
+  const { conn, socket } = fakeServer("local");
+  let complete!: (bytes: ArrayBuffer) => void;
+  const file = png(); Object.defineProperty(file, "arrayBuffer", { value: () => new Promise<ArrayBuffer>(resolve => { complete = resolve; }) });
+  const destination = { ...target(), captureConnection: () => conn.sessions.captureConnection() };
+  const pending = pasteFiles([file], destination);
+  socket.drop(); complete(PNG.buffer); await pending;
+  expect(destination.saveImage).not.toHaveBeenCalled();
+  expect(destination.paste).not.toHaveBeenCalled();
+  expect(destination.failed).toHaveBeenCalledWith(expect.stringContaining("connection changed"), false);
+  conn.dispose();
+});
+it("does not continue a multi-file paste or insert paths after its connection changes", async () => {
+  const { conn, socket } = fakeServer("local");
+  const destination = { ...target(), captureConnection: () => conn.sessions.captureConnection() };
+  destination.uploadFile.mockImplementationOnce(async () => { socket.drop(); return "/tmp/first"; });
+  await pasteFiles([pdf(), pdf("second.pdf")], destination);
+  expect(destination.uploadFile).toHaveBeenCalledOnce();
+  expect(destination.paste).not.toHaveBeenCalled();
+  expect(destination.failed).toHaveBeenCalledOnce(); conn.dispose();
+});
+it("drops a delayed Ctrl+V when its original connection ends", () => {
+  vi.useFakeTimers();
+  const { conn, socket } = fakeServer("local");
+  const p = pane(), destination = { ...target(), captureConnection: () => conn.sessions.captureConnection() };
+  const cleanup = attachImagePaste(p.container, destination);
+  p.ctrlV(); socket.drop(); vi.advanceTimersByTime(CTRL_V_FALLBACK_MS);
+  expect(destination.sendCtrlV).not.toHaveBeenCalled();
+  expect(destination.failed).toHaveBeenCalledOnce(); cleanup(); conn.dispose(); vi.useRealTimers();
 });

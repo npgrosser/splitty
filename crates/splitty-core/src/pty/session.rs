@@ -12,7 +12,8 @@ use std::time::Instant;
 
 use async_trait::async_trait;
 use portable_pty::CommandBuilder;
-use tokio::sync::{mpsc, watch};
+use splitty_transport::queue;
+use tokio::sync::watch;
 
 use super::osc::OscScanner;
 use super::procinfo;
@@ -68,7 +69,7 @@ struct Output {
 }
 
 struct Subscribers {
-    senders: Vec<mpsc::UnboundedSender<Arc<[u8]>>>,
+    senders: Vec<queue::Sender<Arc<[u8]>>>,
     /// Set at EOF: later subscribers get the snapshot and an ended receiver.
     ended: bool,
 }
@@ -82,11 +83,15 @@ impl Output {
             ring.write(&parser.lock().expect("log parser lock").push(data));
         }
         self.scan(data);
-        let chunk: Arc<[u8]> = Arc::from(data);
-        // A send fails only when that stream has ended; forget it.
-        subscribers
-            .senders
-            .retain(|tx| tx.send(Arc::clone(&chunk)).is_ok());
+        let mut chunk = None;
+        // Acquire the first recipient's allowance before allocating. A stalled
+        // recipient closes independently while capture and other readers run.
+        subscribers.senders.retain(|tx| {
+            tx.send(data.len(), false, || {
+                Arc::clone(chunk.get_or_insert_with(|| Arc::from(data)))
+            })
+            .is_ok()
+        });
         self.changed
             .send_modify(|version| *version = version.wrapping_add(1));
     }
@@ -149,11 +154,17 @@ impl Output {
         OutputPage::from_slice(job, &self.generation, query.format, slice, output.ended)
     }
 
-    fn subscribe(&self) -> Subscription {
+    fn subscribe(&self, context: queue::Context) -> Subscription {
         let mut subscribers = self.subscribers.lock().unwrap();
-        let snapshot = self.scrollback.read_all();
-        let (tx, receiver) = mpsc::unbounded_channel();
-        if !subscribers.ended {
+        let snapshot = context
+            .budget
+            .charge(self.scrollback.len(), false, || self.scrollback.read_all())
+            .unwrap_or_else(|_| {
+                context.close();
+                Default::default()
+            });
+        let (tx, receiver) = context.channel(queue::QUEUE_ITEMS);
+        if !subscribers.ended && !context.is_closed() {
             subscribers.senders.push(tx);
         }
         Subscription { snapshot, receiver }
@@ -457,8 +468,8 @@ impl SessionHandle for Session {
         self.terminal.pid()
     }
 
-    fn subscribe(&self) -> Subscription {
-        self.output.subscribe()
+    fn subscribe_with(&self, context: queue::Context) -> Subscription {
+        self.output.subscribe(context)
     }
 
     async fn write(&self, data: &[u8]) -> io::Result<()> {
@@ -471,6 +482,14 @@ impl SessionHandle for Session {
 
     fn close(&self) -> io::Result<()> {
         self.terminal.close()
+    }
+
+    fn begin_shutdown(&self) -> io::Result<()> {
+        self.terminal.begin_shutdown()
+    }
+
+    async fn shutdown(&self) -> io::Result<super::ProcessResult> {
+        self.terminal.shutdown().await
     }
 
     fn release(&self) {
@@ -1218,7 +1237,7 @@ mod tests {
         assert!(incremental.data.contains("24 80\nSECOND"));
         assert!(!incremental.data.contains("FIRST"));
         assert!(incremental.output_complete);
-        let mut ui_bytes = ui.snapshot;
+        let mut ui_bytes = ui.snapshot.value;
         ui_bytes.extend(live);
         let raw = session
             .read_output(
@@ -1413,7 +1432,7 @@ mod tests {
         let mut output = session.subscribe();
         let (live, ended) = receive(&mut output, |_| false).await;
         assert!(ended);
-        let mut bytes = output.snapshot;
+        let mut bytes = output.snapshot.value;
         bytes.extend(live);
         let output = text(&bytes);
         assert!(output.contains(&dir.path().to_string_lossy().to_string()));
@@ -1818,5 +1837,34 @@ mod spec_tests {
         assert_eq!(session.scrollback(), b"before\x1b]2;vim\x07");
         assert_eq!(session.osc_title_watch().borrow().title, "vim");
         assert_eq!(session.shell_pid(), Some(4242));
+    }
+
+    #[tokio::test]
+    async fn a_stalled_subscriber_closes_without_interrupting_capture_or_another_client() {
+        use splitty_transport::budget::{ConnectionBudget, ProcessBudget};
+        let session = Session::with_terminal("bounded".into(), None, false, 4096, |_| {
+            Ok(Box::new(Replayed {
+                done: tokio::sync::watch::channel(false).1,
+            }))
+        })
+        .unwrap();
+        let process = ProcessBudget::new(4096, 256);
+        let slow = queue::Context::new(ConnectionBudget::new(process.clone(), 80, 16));
+        let fast = queue::Context::new(ConnectionBudget::new(process.clone(), 1024, 64));
+        let mut stalled = session.subscribe_with(slow.clone());
+        let mut active = session.subscribe_with(fast.clone());
+        let bytes = vec![b'x'; 32];
+        for _ in 0..10 {
+            session.output.record(&bytes);
+            assert_eq!(&**active.receiver.recv().await.unwrap(), bytes.as_slice());
+        }
+        assert!(slow.is_closed());
+        assert!(!fast.is_closed());
+        assert!(stalled.receiver.recv().await.is_none());
+        assert_eq!(session.scrollback(), vec![b'x'; 320]);
+        assert_eq!(session.output.subscribers.lock().unwrap().senders.len(), 1);
+        drop(stalled);
+        drop(active);
+        assert_eq!(process.used(), 0);
     }
 }

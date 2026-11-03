@@ -30,7 +30,7 @@ model {
 
     server = container 'splitty binary' {
       technology 'Rust, Tokio, Axum, crates/splitty-server'
-      description 'The `splitty` command: the HTTP and WebSocket server in embedded or daemon mode, bound to loopback; the CLI with its control commands; the control socket for processes in panes; the SSH tunnel of `splitty connect`.'
+      description 'The `splitty` command: one terminal service with shared operations and independent client session loops, HTTP/WebSocket adapters, embedded and daemon lifetimes; the CLI with its control commands; the control socket for processes in panes; SSH host connections and deliberate forwarding.'
     }
 
     desktop = container 'Desktop app' {
@@ -45,12 +45,17 @@ model {
 
     electron = container 'Electron shell' {
       technology 'Electron, frontend-electron/'
-      description 'Alternative desktop shell: starts the splitty binary and shows the web frontend it serves; its preload allows the window controls, the page zoom of the zoom shortcuts, the editor and remote channels and download:reveal, which shows a download the main window finished in the file manager.'
+      description 'Alternative desktop shell: loads manifest-checked packaged frontend assets and assigns document-bound private MessagePorts to an app-owned embedded helper or fixed-host SSH helpers. Native APIs supply startup metadata; shell commands require the actual main document challenge. Pending remote opens retain capacity through observed cleanup, and app exit awaits owned helpers.'
     }
 
     remote = container 'splitty-remote' {
       technology 'Rust library, crates/splitty-remote'
       description 'Reaching a remote host over SSH, installing the client\'s server there and keeping a tunnel to its daemon; the hosts the user knows. Platform-neutral and free of the server crates: linked into the splitty binary for splitty connect, and into the desktop app for remote windows (remote-window).'
+    }
+
+    transport = container 'splitty-transport' {
+      technology 'Rust library, crates/splitty-transport'
+      description 'Platform-neutral native framing, negotiation and resource accounting. No PTY, server, browser or OS endpoint authority.'
     }
 
     mcp = container 'MCP server' {
@@ -82,8 +87,8 @@ model {
     technology 'WebSocket'
   }
   splitty.desktop -> splitty.web 'shows'
-  splitty.electron -> splitty.server 'starts and reads the startup output of' {
-    technology 'child process'
+  splitty.electron -> splitty.server 'owns embedded and fixed-host native helpers in' {
+    technology 'bounded native-v1 child pipes'
   }
   splitty.electron -> splitty.web 'shows'
   splitty.desktop -> wsl 'starts the server in' {

@@ -5,6 +5,7 @@ members = [
     "crates/splitty-server",
     "crates/splitty-tauri",
     "crates/splitty-remote",
+    "crates/splitty-transport",
     "architecture/check",
 ]
 
