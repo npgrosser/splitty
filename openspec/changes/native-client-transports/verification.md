@@ -84,6 +84,14 @@ and retains cancellation and generation semantics across the transport change.
   probe to the top packaged workspace; production authority checks remain
   unchanged. These passing runtime checks do not waive the core failure gate.
 
+- Subsequent isolation-fixture preparation found a Windows navigation effect
+  mismatch: a rejected packaged HTTP-origin target could reach the system
+  opener. The shared fallback now blocks internal asset authorities before
+  external HTTP(S) handling, while preserving exact role entry permissions and
+  genuine external links. Six focused navigation tests and GUI library clippy
+  pass; independent source review found no authority expansion. The new
+  Windows isolation run will verify actual named-window behavior separately.
+
 These results describe the runs performed, not proof that every requirement is
 complete. Final source checks and platform results must be reconciled before
 marking the change ready.
