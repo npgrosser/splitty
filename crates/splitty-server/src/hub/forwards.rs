@@ -1257,18 +1257,28 @@ mod tests {
             gate.release();
             if let Some(cleanup) = cleanup {
                 cleanup.entered().await;
+                assert_eq!(
+                    host.forward_listener_counts(5173),
+                    (2, 1),
+                    "failed setup still owns its listener at the cleanup gate"
+                );
                 assert_eq!(manager.list()[0].state, ForwardState::Down);
                 assert_eq!(manager.list()[0].local, original);
                 cleanup.release();
                 manager.stop("vm1", 5173).await.expect("finish cleanup");
-                assert!(TcpListener::bind(("127.0.0.1", original)).is_ok());
+                assert_eq!(
+                    host.forward_listener_counts(5173),
+                    (2, 0),
+                    "acknowledged Stop waits for listener disposal"
+                );
             } else {
                 assert!(
                     matches!(opening.await, Err(ForwardError::LocalConflict { port, .. }) if port == alternate)
                 );
                 assert!(manager.list().is_empty());
-                assert!(
-                    TcpListener::bind(("127.0.0.1", alternate)).is_ok(),
+                assert_eq!(
+                    host.forward_listener_counts(5173),
+                    (1, 0),
                     "failed tunnel closed before response"
                 );
             }

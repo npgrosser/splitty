@@ -8,7 +8,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
@@ -74,6 +74,8 @@ pub struct ScriptedHost {
     failing_forwards: Arc<AtomicUsize>,
     /// What ends the running forward of each port of the host.
     forwards: Arc<Mutex<HashMap<u16, Arc<Notify>>>>,
+    /// Weak witnesses live exactly as long as each real local listener.
+    forward_listeners: Arc<Mutex<Vec<ListenerWitness>>>,
     forward_gates: Arc<Mutex<HashMap<u16, Arc<ForwardGate>>>>,
     stop_gates: Arc<Mutex<HashMap<u16, Arc<ForwardGate>>>>,
     /// The kernel the probe reports.
@@ -107,6 +109,7 @@ impl ScriptedHost {
             forward_fails: None,
             failing_forwards: Arc::default(),
             forwards: Arc::default(),
+            forward_listeners: Arc::default(),
             forward_gates: Arc::default(),
             stop_gates: Arc::default(),
             kernel: "Linux",
@@ -234,6 +237,23 @@ impl ScriptedHost {
             .expect("stop gates")
             .insert(remote, gate.clone());
         gate
+    }
+
+    /// Counts of (created, still live) listener descriptors for this host's
+    /// remote port, including failed setup attempts. This observes owned
+    /// sockets, independently of published hub state.
+    pub fn forward_listener_counts(&self, remote: u16) -> (usize, usize) {
+        self.forward_listeners
+            .lock()
+            .expect("forward listeners")
+            .iter()
+            .filter(|witness| witness.remote == remote)
+            .fold((0, 0), |(created, live), witness| {
+                (
+                    created + 1,
+                    live + usize::from(witness.alive.strong_count() > 0),
+                )
+            })
     }
 
     /// The next `count` forwards fail, as if the host were unreachable.
@@ -484,12 +504,20 @@ impl Connector for ScriptedHost {
                 .map_err(HubError::ForwardPort)?;
             let listener =
                 tokio::net::TcpListener::from_std(listener).map_err(HubError::ForwardPort)?;
+            let alive = Arc::new(());
+            self.forward_listeners
+                .lock()
+                .expect("forward listeners")
+                .push(ListenerWitness {
+                    remote,
+                    alive: Arc::downgrade(&alive),
+                });
+            let listener = ObservedListener {
+                socket: listener,
+                _alive: alive,
+            };
             let answer = format!("forwarded {remote}\n");
-            let listener = tokio::spawn(async move {
-                while let Ok((mut stream, _)) = listener.accept().await {
-                    let _ = stream.write_all(answer.as_bytes()).await;
-                }
-            });
+            let listener = tokio::spawn(listener.serve(answer));
             let ended = Arc::new(Notify::new());
             self.forwards
                 .lock()
@@ -588,6 +616,26 @@ impl ScriptedHost {
             remote: port,
             stop_gates: Arc::default(),
         }) as Box<dyn Forwarding>)
+    }
+}
+
+struct ListenerWitness {
+    remote: u16,
+    alive: Weak<()>,
+}
+
+/// Fields drop in declaration order: the descriptor closes before its witness
+/// disappears, including when Tokio drops an aborted listener task.
+struct ObservedListener {
+    socket: tokio::net::TcpListener,
+    _alive: Arc<()>,
+}
+
+impl ObservedListener {
+    async fn serve(self, answer: String) {
+        while let Ok((mut stream, _)) = self.socket.accept().await {
+            let _ = stream.write_all(answer.as_bytes()).await;
+        }
     }
 }
 
