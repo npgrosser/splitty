@@ -11,7 +11,7 @@ See [proposal.md](proposal.md) for scope. The relevant implementation currently 
 
 Frontend `ConnSocket` and connection-scoped routing are useful boundaries. `apiFetch` is another integration point, but several remote modules call `fetch` directly. Desktop capability and navigation policies are tied to a backend port; downloads validate its blob origin. Electron presently packages the server executable but obtains the app assets from it. Windows startup parses text lines and waits for WSL localhost forwarding.
 
-Planning accounts for the reverse-forward implementation on `origin/main` and the concurrent upload cancellation change. Apply on the combined baseline; do not replace either one's work with the older checkout. The mobile draft already chooses packaged UI and native SSH, but still assumes the host bridge uses a loopback WebSocket.
+Planning accounts for the reverse-forward implementation on `origin/main` and the concurrent upload cancellation change. Apply on the combined baseline; do not replace either one's work with the older checkout.
 
 ## Goals / Non-Goals
 
@@ -226,7 +226,7 @@ Rollback is an explicit downgrade/restart using the previous release after clien
 - Backpressure/admission changes can stall process output or exhaust descriptors/workers -> bound the full subscription chain and admission before spawning, test control fairness under idle/partial-connection floods and measure queued bytes plus actual worker/FD counts.
 - Browser gateway takes over lifecycle/authentication from the target -> independent session stores and cookie names, unchanged guard ordering, fixed-origin reconnect and cross-gateway denial tests.
 - A reverse worker can outlive its coordinator and a hostile host can keep it alive -> durable pre-exposure reservations and locally verified worker death; ambiguous leases remain reserved instead of relying on remote heartbeat cleanup.
-- Legacy and concurrent changes overlap -> reconcile reverse-forward and upload work first; update the mobile plan's transport dependency without implementing mobile/session-control features; preserve MCP's restricted surface.
+- Legacy and concurrent changes overlap -> reconcile reverse-forward and upload work first; preserve MCP's restricted surface.
 
 ## Provisional decisions
 
