@@ -113,7 +113,7 @@ being revalidated after their process-cleanup inventory mistook unrelated
 processes for descendants after PID reuse. The replacement uses private kernel
 Jobs with assignment before process start. Fresh setup and remote-only SSH runs
 pass. An isolated target-identity preflight passes after a WSL argument-quoting
-fix; a bounded full-fixture rerun remains outstanding. Earlier
+fix, and the guarded WSL switch/restart rerun passes. Earlier
 process-tree cleanup claims must not be used as evidence of isolation. See the
 [verification status](../openspec/changes/native-client-transports/verification.md).
 

@@ -109,7 +109,7 @@ traffic/switch checks pass. Following a PID-reuse bug in the Windows harness,
 cleanup now uses private kernel Jobs with assignment before process start.
 Fresh setup and remote-only SSH recovery runs pass. A later WSL quoting
 failure prompted exact guest-identity guards. Their isolated runtime preflight
-passes; full-fixture revalidation remains open. Prior process-tree cleanup claims remain invalid. The complete platform matrix and framework
+and guarded WSL switch/restart rerun pass. Prior process-tree cleanup claims remain invalid. The complete platform matrix and framework
 allocation bounds remain open. See the
 [verification status](../../openspec/changes/native-client-transports/verification.md).
 

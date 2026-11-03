@@ -47,13 +47,24 @@ and retains cancellation and generation semantics across the transport change.
   replacement/reconnect, reattachment to the same shell, rejected offline input
   and shell survival after app exit. Both runs end naturally with zero remaining
   Job members before cleanup and zero owned handles afterward. Listener checks
-  are sampled, not proof of continuous absence. The WSL switch scenario is being
-  revalidated separately with the new driver and exact guest-identity guards.
+  are sampled, not proof of continuous absence. A fresh guarded WSL run also
+  passes distribution A, production switch/restart to B, binary PTY traffic and
+  a byte-checked 1,048,833-byte file transfer. Both app instances exit naturally
+  with zero remaining Job members; their helper/PTY ends, while independent
+  guest sentinels preserve their start identities and answer fresh nonces. Both
+  temporary distributions are removed and owned handle counts return to zero.
 - Actual macOS CI passes GUI all-target clippy and all 89 GUI library tests.
-  Three core tests fail (shell startup PATH, final PTY bytes, and managed input
-  shutdown); the WKWebView/endpoint checks have not yet run. The CI steps now
-  collect independent runtime evidence after a core failure while retaining a
-  mandatory final failure gate. No failing assertion is waived.
+  Private endpoint peer-user checks, native forwarding reservation, IPv4/IPv6
+  listener positive controls, owned-helper lifetime and explicit gateway
+  replacement also pass. Two core failures (Bash CLI PATH restoration and the
+  background-writer PTY fixture) reproduce on exact baseline `cc66e97`; they
+  remain failing checks and are recorded in the baseline findings. The earlier
+  managed-stop failure did not recur in this run, so its diagnostic remains.
+  WKWebView startup was blocked before UI execution by the fixture using the
+  symlink `/tmp`; its home now resolves to the canonical private directory,
+  preserving production endpoint rejection. Five portable tests pass; actual
+  WKWebView execution after this correction remains open. Independent runtime
+  evidence does not waive the mandatory core failure gate.
 
 These results describe the runs performed, not proof that every requirement is
 complete. Final source checks and platform results must be reconciled before
@@ -81,14 +92,15 @@ unchecked platform conformance cells.
 - Whole-path resource limits: Wry allocates inbound IPC request bodies before
   application validation. Application-owned quotas do not establish a bound on
   framework allocation, generic invoke replies, JavaScript engine memory or RSS.
-- Native macOS endpoint identity, WKWebView runtime, and the complete platform
-  isolation matrix remain unverified. Windows remote-only/reconnect now passes
+- Full macOS WKWebView runtime and the complete platform isolation matrix
+  remain unverified; native macOS endpoint identity checks pass. Windows remote-only/reconnect now passes
   its fresh kernel Job fixture; that does not fill every platform matrix cell.
 - The strict native Linux reservation test passed with an actual surviving
   worker after coordinator SIGKILL, IPv4/IPv6 gateway exclusion and reuse only
-  after observed worker exit. The real SSH/hostile-peer crash variant, macOS
-  positive case and full listener/resource inventory remain open. WSL refusal
-  checks are not positive native-platform coverage.
+  after observed worker exit. The real SSH/hostile-peer crash variant and
+  native macOS positive controls now pass in CI. The complete listener/resource
+  inventory matrix remains open; WSL refusal checks alone are not positive
+  native-platform coverage.
 - Disabled WSL localhost forwarding has not been exercised; the pipe tests ran
   with the existing host networking configuration unchanged.
 - Migration, conformance and security review must reconcile the remaining task
@@ -114,8 +126,8 @@ Cleanup uses only retained Job handles or the exact newly created suspended
 process handle on assignment failure. No PID-only or recursive `taskkill /T`
 cleanup remains. Fresh console tests cover descendants, unrelated fixture
 preservation, breakaway refusal, assignment failure and zero retained handles.
-Fresh setup and remote-only GUI runs then passed with natural exit before cleanup;
-WSL switch verification remains separate. Old TEMP driver copies must not be
+Fresh setup, remote-only and guarded WSL switch GUI runs then passed with
+natural app exit before cleanup. Old TEMP driver copies must not be
 executed. Socket inventories remain sampled observations.
 
 The earlier Windows SSH PTY assertion failure was a fixture omission: it did not
@@ -134,8 +146,9 @@ including the copied app's deployment and backend launch paths. Independent
 source review and eight pure guard regressions pass. A fresh single-distribution sentinel then passed actual WSL argument parsing
 and exact guest identity/nonce checks. Its retained Job was intentionally
 stopped, with no remaining members or handles, and its sole temporary
-distribution was removed. The guarded full WSL fixture has been independently cleared for one
-bounded rerun; its result remains open and the sentinel does not replace it.
+distribution was removed. The independently cleared full WSL rerun also passes, including the production
+switch/restart path and independent guest preservation. The earlier interrupted
+build attempt never reached GUI execution and is not counted as a runtime pass.
 
 The Linux SSH fixture now pins its private network namespace and resolves each
 cleanup candidate to a pidfd before checking namespace membership. Signals use
