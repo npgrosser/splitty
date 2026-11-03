@@ -28,7 +28,8 @@ $originalConfig=$null
 if($hadConfig){$originalConfig=[IO.File]::ReadAllBytes($config)}
 if($hadConfig){[IO.File]::WriteAllBytes((Join-Path $Evidence 'original.wslconfig'),$originalConfig)}
 Add-Type -Path (Join-Path $PSScriptRoot '../tauri-windows-native-smoke/fixture-job.cs')
-$guestGuard=([IO.File]::ReadAllText((Join-Path $PSScriptRoot '../tauri-windows-native-smoke/fixture-guest-guard.sh'))).Trim()
+# Git on Windows may check out CRLF; /bin/sh must receive LF source.
+$guestGuard=([IO.File]::ReadAllText((Join-Path $PSScriptRoot '../tauri-windows-native-smoke/fixture-guest-guard.sh'))).Replace("`r`n","`n").Trim()
 function Registrations {
  $key='HKCU:\Software\Microsoft\Windows\CurrentVersion\Lxss'
  if(Test-Path $key){Get-ChildItem $key|ForEach-Object{Get-ItemProperty $_.PSPath|Select-Object DistributionName,BasePath,Version}}
