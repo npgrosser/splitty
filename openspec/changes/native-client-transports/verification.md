@@ -215,6 +215,28 @@ remote/server all-target clippy passes. Fixed-size setup metadata is separately
 bounded by length and setup admission; the transport ledger is not a total
 process RSS or trusted deployment-archive bound.
 
+## Windows isolation and consumer-pressure fixture
+
+The expanded fixture's `a52fde175fc7` run completes its functional workload:
+Setup/Main and two Remote windows, no opener/named-window references or shared
+storage, denied foreign target/handle use, independent slow-client closure,
+healthy API/file completion on the unchanged connection, replay containing the
+post-close marker, and 32-handle saturation/refusal/replacement/recovery. Actual
+binary PTY and two file digests pass. Local helpers/PTYs exit, the remote daemon
+survives app exit, independent fixture sentinels survive and both private
+distributions are removed with zero owned Windows handles.
+
+The overall result remains failed: sampled SSH listener rows are unclassified,
+and the separate native TCP control reports an unexpected state for its own
+listener. Copied-handle denial is a capsule check; stale Setup-proof denial is a
+broker diagnostic. The slow client withholds receipts rather than freezing a
+JavaScript engine; global/worker ceilings are not independently saturated here.
+An earlier replay-marker failure remains unexplained. The next source version
+restores immediate write/open/attach ordering, keeping diagnostic awaits after
+attach; the passing diagnostic run does not establish that timing variant.
+[Fixture instructions and evidence limits](../../../scripts/testing/tauri-windows-native-smoke/README.md)
+retain these distinctions.
+
 ## Native Windows app with localhost forwarding disabled
 
 The separate diagnostic branch at `dfe1996`, including production revision
@@ -255,8 +277,6 @@ local SSH listener observation remains unresolved and is not waived by this run.
   native macOS positive controls now pass in CI. The complete listener/resource
   inventory matrix remains open; WSL refusal checks alone are not positive
   native-platform coverage.
-- Disabled WSL localhost forwarding has not been exercised; the pipe tests ran
-  with the existing host networking configuration unchanged.
 - Migration, conformance and security review must reconcile the remaining task
   checks, including framework-bound scope, before cutover is approved.
 

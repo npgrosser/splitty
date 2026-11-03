@@ -77,6 +77,84 @@ class GateTests(unittest.TestCase):
         with patch.object(fixture.common,'windows',side_effect=convert) as convert_call:
             self.assertEqual(fixture.fixture_executable_path(root),lexical+r'\target\debug\splitty-gui.exe')
             convert_call.assert_called_once_with(root)
+    def test_isolation_opt_in_implies_production_assets(self):
+        seen=[]
+        with patch.object(fixture,'_run_full',side_effect=lambda args:seen.append((args.full_ui,args.isolation_consumer))):
+            fixture.main(['--disposable-distros','--isolation-consumer'])
+        self.assertEqual(seen,[(True,True)]);self.assertFalse(fixture.WSL_EXECUTION_APPROVED)
+    def test_private_host_config_never_uses_user_ssh_files(self):
+        with tempfile.TemporaryDirectory(prefix='splitty-ssh-config-pure-') as directory:
+            root=Path(directory)
+            def keygen(command,**kwargs):
+                (Path(command[-1]).with_suffix('.pub')).write_text('ssh-ed25519 PUBLIC-FIXTURE')
+            with patch.object(fixture.subprocess,'run',side_effect=keygen),patch.object(fixture.common,'powershell',side_effect=['34567','']),patch.object(fixture.common,'windows',side_effect=lambda path:'C:\\Fixture\\'+Path(path).name):
+                host=fixture.prepare_isolation_host(root)
+            config=host['config'].read_text()
+            self.assertIn('\n HostName 127.0.0.1\n',config)
+            self.assertIn('GlobalKnownHostsFile none',config);self.assertIn('IdentityAgent none',config)
+            self.assertIn('C:\\Fixture\\known_hosts',config)
+    def test_isolation_instrumentation_keeps_production_paths_and_owned_local_scope(self):
+        import shutil
+        repo=HERE.parents[1]
+        with tempfile.TemporaryDirectory(prefix='splitty-isolation-source-pure-') as directory:
+            root=Path(directory);crate=root/'crates/splitty-tauri';(crate/'src').mkdir(parents=True);remote=root/'crates/splitty-remote/src';remote.mkdir(parents=True)
+            for name in ['lib.rs','client_ipc.rs','navigation.rs','remote.rs']:shutil.copyfile(repo/'crates/splitty-tauri/src'/name,crate/'src'/name)
+            shutil.copyfile(repo/'crates/splitty-tauri/build.rs',crate/'build.rs');shutil.copyfile(repo/'crates/splitty-remote/src/ssh.rs',remote/'ssh.rs')
+            host={'aliases':['one','two'],'config':root/'private-config'}
+            with patch.object(fixture.common,'windows',side_effect=lambda path:'C:\\Fixture\\'+Path(path).name):fixture.instrument_isolation(root,crate,host)
+            self.assertIn('fixture_external_open',(crate/'src/navigation.rs').read_text())
+            self.assertIn('windows_fixture_state',(crate/'src/lib.rs').read_text())
+            self.assertIn('setup_proof',(crate/'src/lib.rs').read_text())
+            self.assertIn('.arg("-F")',(remote/'ssh.rs').read_text())
+            self.assertIn('smoke_counts',(crate/'src/client_ipc.rs').read_text())
+            hidden=(crate/'src/remote.rs').read_text()
+            self.assertNotIn('window.show()',hidden)
+            self.assertNotIn('window.set_focus()',hidden)
+            self.assertNotIn('window.unminimize()',hidden)
+            self.assertIn('.visible(false)',hidden)
+    def test_listener_inventory_brackets_retained_handle_generations_without_waiver(self):
+        source=(HERE/'tauri-windows-native-smoke/wsl-runtime.ps1').read_text()
+        before=source.index('$before=@($app.History()')
+        sample=source.index('$socketRows=@(Get-NetTCPConnection')
+        after=source.index('$after=@($app.History()')
+        self.assertLess(before,sample);self.assertLess(sample,after)
+        for expected in ['SocketCreationUTC','BeforeUTC','AfterUTC','RemoteAddress','RemotePort',"'UNCLASSIFIED'",'Test-FixtureSocketGeneration $pre $post $socketCreated $afterAt','-or $listeners.Count']:
+            self.assertIn(expected,source)
+        self.assertNotIn('Get-CimInstance',source)
+    def test_listener_failure_continuation_never_changes_safety_requirements(self):
+        import copy
+        value={'phase':'final','terminalBinary':True,'savedPath':'/home/splitty-fixture/file'}
+        process={'TimedOut':False,'AppInstances':[{'ExitCode':0,'Alive':False}],'RemainingOwned':[],'IndependentFixturePreserved':True,'JobEmptyAfterCleanup':True,'OwnedHandlesAfterCleanup':0,'CleanupErrors':[],'Listeners':[{'Classification':'UNCLASSIFIED'}]}
+        self.assertTrue(fixture.listener_only_evidence_continuation(process,value,1))
+        for report in [None,{},dict(value,error='failed'),dict(value,phase='isolation-complete')]:
+            self.assertFalse(fixture.listener_only_evidence_continuation(process,report,1))
+        for key,bad in [('TimedOut',True),('AppInstances',[{'ExitCode':1,'Alive':False}]),('RemainingOwned',[{}]),('IndependentFixturePreserved',False),('JobEmptyAfterCleanup',False),('OwnedHandlesAfterCleanup',1),('CleanupErrors',['bad']),('Listeners',[])]:
+            changed=copy.deepcopy(process);changed[key]=bad
+            self.assertFalse(fixture.listener_only_evidence_continuation(changed,value,1),key)
+        for key in process:
+            changed=copy.deepcopy(process);del changed[key]
+            self.assertFalse(fixture.listener_only_evidence_continuation(changed,value,1),key)
+    def test_structured_error_diagnostics_are_bounded_and_redacted(self):
+        import subprocess,json
+        module=(HERE/'tauri-windows-native-smoke/error.mjs').as_uri()
+        program="""import {fixtureError} from MODULE;
+const input={message:'install failed',hint:'missing helper',auth:'private-proof',token:'secret-token',other:'sensitive'};input.cause=input;
+const text=fixtureError(input),value=JSON.parse(text);
+if(value.message!=='install failed'||value.hint!=='missing helper'||text.includes('private-proof')||text.includes('secret-token')||text.includes('sensitive')||value.cause!=='[bounded]')throw Error(text);
+if(fixtureError({message:'x'.repeat(10000)}).length>4096)throw Error('unbounded');
+if(!fixtureError(new Error('native failure')).includes('native failure'))throw Error('Error lost');
+""".replace('MODULE',json.dumps(module))
+        subprocess.run(['node','--input-type=module','-e',program],check=True,timeout=5)
+    def test_persistent_ssh_host_uses_retained_job_and_authenticated_readiness(self):
+        driver=(HERE/'tauri-windows-native-smoke/wsl-runtime.ps1').read_text()
+        source=(HERE/'tauri-windows-wsl-smoke.py').read_text()
+        self.assertNotIn("exec /usr/sbin/sshd",source)
+        self.assertIn("(' -PermitIsolatedSshHost' if isolation else '')",source)
+        for expected in ["if($PermitIsolatedSshHost)","'/usr/sbin/sshd','-D'",'Get-FixtureGuestArguments $hostName',"'-F',$sshConfig",'splitty-isolation-one','$attempt-lt 4','/home/splitty-fixture','Authenticated=$false','$stdout-ceq $nonce','$sshServer.Stop(5000)','$sshServer.Dispose()',"'ssh-host.json'"]:
+            self.assertIn(expected,driver)
+        self.assertLess(driver.index('$sshServer=[SplittyFixtureJob]::new'),driver.index('$app=[SplittyFixtureJob]::new'))
+        self.assertLess(driver.index('if(-not $sshEvidence.Authenticated)'),driver.index('$app=[SplittyFixtureJob]::new'))
+        self.assertIn("if($guestJob.ActiveProcesses-ne 0){throw 'gated guest command deadline'}",(HERE/'tauri-windows-native-smoke/fixture-sentinel.ps1').read_text())
     def test_imported_full_entry_refuses_before_windows_prep(self):
         fixture.WSL_EXECUTION_APPROVED=False
         with patch.object(fixture.common,'powershell',side_effect=AssertionError('Windows prep called')):

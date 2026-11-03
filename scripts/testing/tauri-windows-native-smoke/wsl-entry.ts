@@ -1,4 +1,7 @@
+import { fixtureError } from './error.mjs';
 // Isolated fixture only: production native adapters, no HTTP backend; production UI/popouts are opt-in.
+import { setupIsolation, remoteIsolation, mainIsolation, fixtureState } from './isolation.ts';
+import { consumerAdmission } from './consumer.ts';
 import { exerciseFullUi } from '../tauri-webkit-smoke/full-ui.ts';
 import { isWindowsFixtureDocument, probeBridge } from './document.mjs';
 import { NativeSocket } from '../../../frontend/src/lib/protocol/native_socket.ts';
@@ -7,6 +10,8 @@ import { SessionClient } from '../../../frontend/src/lib/terminal/session_client
 import { AttachRegistry } from '../../../frontend/src/lib/terminal/attach_registry.ts';
 declare const __FIXTURES__: string[];
 declare const __WINDOWS_FULL_UI__: boolean;
+declare const __ISOLATION_CONSUMER__: boolean;
+declare const __ISOLATION_ALIASES__: string[];
 if (isWindowsFixtureDocument(window, true)) {
 const capsule = (window as any).__SPLITTY_TAURI__;
 const report = (value: unknown) => (window as any).__TAURI_INTERNALS__.invoke('windows_smoke_report', { value });
@@ -16,7 +21,18 @@ let stage = 'bootstrap';
 const timer = setTimeout(() => { void report({ error: 'isolated WSL deadline', stage }); }, 150_000);
 void (async () => {
   const metadata = await capsule.ready;
+  if (__ISOLATION_CONSUMER__ && metadata.role === 'remote') {
+    try { await remoteIsolation(capsule, metadata, __ISOLATION_ALIASES__); } catch(error) { await fixtureState({kind:'remote',error:fixtureError(error)}); }
+    clearTimeout(timer);return;
+  }
   if (metadata.role === 'setup') {
+    if (__ISOLATION_CONSUMER__) {
+      stage = 'Setup remote assignments';
+      await setupIsolation(capsule,__ISOLATION_ALIASES__);
+      stage = 'local B owner';
+      await capsule.invoke('wsl_start_backend',{distro:__FIXTURES__[1]});
+      await report({phase:'started-b'});clearTimeout(timer);await capsule.invoke('wsl_open_backend');return;
+    }
     const state = await capsule.invoke('wsl_setup_state');
     if (state.pendingDistro === __FIXTURES__[1]) {
       stage = 'start switched WSL owner after restart';
@@ -62,7 +78,10 @@ void (async () => {
   assert(build.wslDistro === __FIXTURES__[1], 'wrong WSL backend identity');
   await request('home.get');
   stage = 'production UI';
-  const ui = __WINDOWS_FULL_UI__ ? await exerciseFullUi(request, true, { countField: 'nativeCount' }) : undefined;
+  const isolation=__ISOLATION_CONSUMER__ ? await mainIsolation() : undefined;
+  if(isolation)await report({phase:'isolation-complete',isolation});
+  const pressure=__ISOLATION_CONSUMER__ ? await consumerAdmission(capsule,request,()=>sessions.uploadFile(new File([Uint8Array.from({length:65537},(_,index)=>index%256)],'healthy-pressure.bin'),undefined,30000,{dir:'/home/splitty-fixture'}),()=>failure?undefined:socket.assignment?.handle,(phase,value)=>report({phase,...value})) : undefined;
+  const ui = __WINDOWS_FULL_UI__ && !__ISOLATION_CONSUMER__ ? await exerciseFullUi(request, true, { countField: 'nativeCount' }) : undefined;
   stage = 'WSL terminal bytes';
   socket.send({ type: 'create', cols: 80, rows: 24 });
   const deadline = Date.now() + 15000;
@@ -90,7 +109,7 @@ void (async () => {
     assert(observations.errors.length === 0, 'production UI connection error: ' + observations.errors.join('; '));
   }
   sessions.dispose(); socket.dispose(); clearTimeout(timer);
-  await report({ phase: 'final', fullUi: __WINDOWS_FULL_UI__, ui, observations, terminalBinary: true, terminalPid: Number(pid![1]), savedPath, fileBytes: fileBytes.length, distro: build.wslDistro });
-})().catch(error => { clearTimeout(timer); void report({ error: String(error), stage, stack: error?.stack }); });
+  await report({ phase: 'final', fullUi: __WINDOWS_FULL_UI__, ui, observations, isolation, pressure, terminalBinary: true, terminalPid: Number(pid![1]), savedPath, fileBytes: fileBytes.length, distro: build.wslDistro });
+})().catch(error => { clearTimeout(timer); void report({ error: fixtureError(error), stage, stack: error?.stack ? fixtureError(error.stack) : undefined, pressureChronology:error?.pressureChronology }); });
 
 }
