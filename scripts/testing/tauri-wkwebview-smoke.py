@@ -26,6 +26,7 @@ _shared_spec = importlib.util.spec_from_file_location('splitty_linux_webkit_fixt
 _shared = importlib.util.module_from_spec(_shared_spec)
 _shared_spec.loader.exec_module(_shared)
 replace_once, rewrite, observe_function = _shared.replace_once, _shared.rewrite, _shared.observe_function
+_isolation = _shared._isolation
 
 
 def parse_processes(text):
@@ -173,7 +174,7 @@ def run_macos(repo, args, evidence, env):
                 samples, shells, observed, candidate_xpc, terminal_identities = [], {}, {}, {}, {}
                 count = 0
                 try:
-                    deadline = time.monotonic()+90+6*args.reloads
+                    deadline = time.monotonic()+(180 if args.isolation_consumer else 90)+6*args.reloads
                     while child.poll() is None and time.monotonic()<deadline:
                         table = process_table()
                         owned = tree(child.pid,table)
@@ -206,7 +207,7 @@ def run_macos(repo, args, evidence, env):
                     while any(identity_alive(saved) for saved in shells.values()) and time.monotonic()<deadline: time.sleep(.05)
                     terminal_pids = [value.get('terminalPid') for value in [result.get('first',{}),result.get('reloaded',{})]]
                     terminal_exited = all(isinstance(pid,int) and not identity_alive(terminal_identities.get(pid) or process_identity(pid)) for pid in terminal_pids)
-                    result.update(platform='macOS WKWebView', runtimeExecuted=True, mode='full-ui' if args.full_ui else 'minimal',
+                    result.update(platform='macOS WKWebView', runtimeExecuted=True, mode='isolation-consumer' if args.isolation_consumer else 'full-ui' if args.full_ui else 'minimal',
                         tcpListeners=samples,listenerSamples=count,observedProcesses=observed,webKitXpcCandidates=candidate_xpc,
                         ownedShellPids=sorted(shells),ownedShellPidsExited=not any(identity_alive(saved) for saved in shells.values()),
                         terminalPidsExited=terminal_exited,appExitCode=child.returncode,
@@ -230,10 +231,12 @@ def main():
     parser.add_argument('--prepare-only', action='store_true', help='generate temporary macOS harness without building or running it')
     parser.add_argument('--reloads', type=int, default=1, help='actual document reloads (1..64); full UI checks heartbeats in first and last documents')
     parser.add_argument('--coexist-daemon', action='store_true', help='prove app lifetime is independent from a real fixture daemon/keeper job')
+    parser.add_argument('--isolation-consumer', action='store_true', help='actual Main/two-Remote policies and bounded receipt-starved client; fixed fixture backends, no SSH')
     parser.add_argument('--full-ui', action='store_true', help='package frontend/dist and exercise the production Svelte application/assets')
     parser.add_argument('--harness-dir', type=Path, default=Path('/tmp/splitty-wkwebview-runtime-smoke'))
     args = parser.parse_args()
     if not 1 <= args.reloads <= 64: parser.error('--reloads must be between 1 and 64')
+    if args.isolation_consumer and args.full_ui: parser.error('--isolation-consumer is a separate mode; omit --full-ui')
     repo = Path(__file__).resolve().parents[2]
     harness = args.harness_dir.resolve()
     if sys.platform != 'darwin' and not args.prepare_only:
@@ -329,6 +332,8 @@ impl Native { pub(crate) fn smoke_delivery_handles(&self) -> std::collections::H
              'app.add_capability(capability::main_window())?;\napp.add_capability(tauri::ipc::CapabilityBuilder::new("smoke-report").window("main").permission("allow-smoke-report").permission("allow-smoke-windows"))?;')
     source = rewrite(source, r'app\.run\(\|app_handle, event\| \{', 'app.run(|app_handle, event| { if let tauri::RunEvent::ExitRequested { code: None, api, .. } = &event { api.prevent_exit(); }', count=2)
     source += '\n' + macos_report((repo/'scripts/testing/tauri-webkit-smoke/report.rs').read_text())
+    if args.isolation_consumer: source = _isolation.instrument(harness,repo,source)
+    if args.isolation_consumer: shutil.copyfile(harness/'backend-substitution.json',evidence/'backend-substitution.json')
     source += '\nfn main() { run(); }\n'
     (harness/'src/main.rs').write_text(source)
     source_files = ['crates/splitty-tauri/Cargo.toml', 'crates/splitty-tauri/tauri.conf.json',
@@ -337,12 +342,13 @@ impl Native { pub(crate) fn smoke_delivery_handles(&self) -> std::collections::H
                     'crates/splitty-tauri/src/client_ipc/carrier.rs', 'crates/splitty-tauri/src/client_ipc/provider.rs',
                     'frontend/src/lib/protocol/native_socket.ts', 'frontend/src/lib/protocol/tauri_channel.ts']
     source_files += ['scripts/testing/tauri-wkwebview-smoke.py']
-    source_files += [str(path.relative_to(repo)) for path in (repo/'scripts/testing/tauri-webkit-smoke').rglob('*') if path.is_file()]
+    source_files += [str(path.relative_to(repo)) for path in (repo/'scripts/testing/tauri-webkit-smoke').rglob('*') if path.is_file() and '__pycache__' not in path.parts]
+    source_files += ['scripts/testing/tauri-windows-native-smoke/pressure.mjs','frontend/src/lib/terminal/session_client.ts','frontend/src/lib/terminal/attach_registry.ts']
     (evidence/'sources.json').write_text(json.dumps({name:hashlib.sha256((repo/name).read_bytes()).hexdigest() for name in source_files}, indent=2))
     vite = repo/'frontend/node_modules/vite/dist/node/index.js'
     config = f'''import {{ defineConfig }} from {json.dumps(str(vite))};
 export default defineConfig({{ build: {{ outDir: {json.dumps(str(harness/'src'))}, emptyOutDir:false, minify:false,
-lib: {{ entry: {json.dumps(str(repo/'scripts/testing/tauri-webkit-smoke/entry.ts'))}, name:'SplittyRuntimeSmoke', formats:['iife'], fileName:()=> 'smoke.js' }}, target:'es2022' }}, define: {{ __SPLITTY_FULL_UI__: {str(args.full_ui).lower()}, __SPLITTY_SMOKE_RELOADS__: {args.reloads} }} }});
+lib: {{ entry: {json.dumps(str(repo/'scripts/testing/tauri-webkit-smoke/entry.ts'))}, name:'SplittyRuntimeSmoke', formats:['iife'], fileName:()=> 'smoke.js' }}, target:'es2022' }}, define: {{ __SPLITTY_FULL_UI__: {str(args.full_ui).lower()}, __SPLITTY_SMOKE_RELOADS__: {args.reloads}, __SPLITTY_ISOLATION_CONSUMER__: {str(args.isolation_consumer).lower()} }} }});
 '''
     (harness/'vite.config.mjs').write_text(config)
     env = dict(os.environ, CARGO_TARGET_DIR=str(repo/'target'))

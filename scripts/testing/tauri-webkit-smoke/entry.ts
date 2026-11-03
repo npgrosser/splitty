@@ -1,6 +1,11 @@
 // Runs in an actual packaged WebKit document, using the production adapters.
 import { NativeSocket } from '../../../frontend/src/lib/protocol/native_socket.ts';
 import { exerciseFullUi } from './full-ui.ts';
+import { mainIsolation, remoteIsolation, fixtureState } from './isolation.ts';
+import { consumerAdmission } from './consumer.ts';
+import { SessionClient } from '../../../frontend/src/lib/terminal/session_client.ts';
+import { AttachRegistry } from '../../../frontend/src/lib/terminal/attach_registry.ts';
+declare const __SPLITTY_ISOLATION_CONSUMER__: boolean;
 declare const __SPLITTY_FULL_UI__: boolean;
 declare const __SPLITTY_SMOKE_RELOADS__: number;
 import { openTauriChannel } from '../../../frontend/src/lib/protocol/tauri_channel.ts';
@@ -16,6 +21,7 @@ const assert = (condition: unknown, message: string) => { if (!condition) throw 
 let stage = 'initialization';
 let nativeInstance: string | undefined;
 let currentEpoch = 0;
+let remoteDocument = false;
 const network: string[] = [];
 const securityViolations: string[] = [];
 const uiConnectionErrors: string[] = [];
@@ -48,7 +54,7 @@ const OriginalWebSocket = window.WebSocket;
 (window as any).WebSocket = new Proxy(OriginalWebSocket, { construct(target, args, receiver) {
   network.push(String(args[0])); return Reflect.construct(target, args, receiver);
 } });
-const timeout = setTimeout(() => { void report({ error: 'WebKit smoke deadline', stage }); }, __SPLITTY_FULL_UI__ ? 60000 : 20000);
+const timeout = setTimeout(() => { void report({ error: 'WebKit smoke deadline', stage }); }, __SPLITTY_ISOLATION_CONSUMER__ ? 180000 : __SPLITTY_FULL_UI__ ? 60000 : 20000);
 const wait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 void (async () => {
   const epoch = Number(sessionStorage.getItem('smoke-epoch') || '0');
@@ -58,11 +64,15 @@ void (async () => {
   const capsule = state.__SPLITTY_TAURI__;
   assert(capsule, 'production initialization capsule is missing');
   const role = await capsule.ready;
+  remoteDocument = role.role === 'remote';
+  if (__SPLITTY_ISOLATION_CONSUMER__ && remoteDocument) {
+    await remoteIsolation(capsule,role);clearTimeout(timeout);return;
+  }
   assert(role.role === 'main', 'main native role missing');
   stage = 'channel';
   // The production bundle and this independently bundled probe have separate
   // request counters. Reserve a disjoint probe range without changing the app.
-  const probe = __SPLITTY_FULL_UI__ ? { ...capsule.native,
+  const probe = (__SPLITTY_FULL_UI__ || __SPLITTY_ISOLATION_CONSUMER__) ? { ...capsule.native,
     open: (options: unknown, request: number) => capsule.native.open(options, request + 0x40000000),
     cancelOpen: (request: number) => capsule.native.cancelOpen(request + 0x40000000),
   } : capsule.native;
@@ -83,8 +93,18 @@ void (async () => {
     return JSON.parse(reply.body);
   };
   stage = 'full UI';
-  const ui = __SPLITTY_FULL_UI__ ? await exerciseFullUi(request, first) : undefined;
-  if (__SPLITTY_FULL_UI__ && (first || last)) {
+  const ui = __SPLITTY_FULL_UI__ && !__SPLITTY_ISOLATION_CONSUMER__ ? await exerciseFullUi(request, first) : undefined;
+  const isolation = first && __SPLITTY_ISOLATION_CONSUMER__ ? await mainIsolation(capsule,assignment.instance) : undefined;
+  let pressure: unknown;
+  if (first && __SPLITTY_ISOLATION_CONSUMER__) {
+    stage = 'receipt-starved client and healthy work';
+    const sessions = new SessionClient(socket,new AttachRegistry(socket));
+    try { pressure = await consumerAdmission(capsule,socket,request,home=>sessions.uploadFile(new File([
+      Uint8Array.from({length:65537},(_,index)=>index%256)],'webkit-pressure.bin'),undefined,30000,{dir:home})); }
+    finally { sessions.dispose(); }
+  }
+
+  if (__SPLITTY_FULL_UI__ && !__SPLITTY_ISOLATION_CONSUMER__ && (first || last)) {
     stage = 'native heartbeat while full UI is mounted';
     await wait(17000);
     if (failure) throw failure;
@@ -134,7 +154,7 @@ void (async () => {
   assert(network.length === 0, `unexpected network calls: ${network}`);
   const result = { phase: first ? 'first' : last ? 'reloaded' : 'intermediate', epoch, expectedReloads: __SPLITTY_SMOKE_RELOADS__, instance: assignment.instance,
     document: assignment.document, settings: true, workspace: true, terminalBinary: first || last,
-    binaryBytes, terminalPid, network, assetFetches, uiConnectionErrors, fullUi: __SPLITTY_FULL_UI__, ui, securityViolations };
+    binaryBytes, terminalPid, isolationConsumer: __SPLITTY_ISOLATION_CONSUMER__, isolation, pressure, network, assetFetches, uiConnectionErrors, fullUi: __SPLITTY_FULL_UI__ && !__SPLITTY_ISOLATION_CONSUMER__, ui, securityViolations };
   if (!last) {
     sessionStorage.setItem('smoke-epoch', String(epoch + 1));
     stage = 'reload';
@@ -147,6 +167,8 @@ void (async () => {
     clearTimeout(timeout);
     await report(result);
   }
-})().catch(error => { clearTimeout(timeout); void report({ error: String(error), stage, epoch: currentEpoch, instance: nativeInstance, stack: error?.stack, network, assetFetches, uiConnectionErrors, securityViolations, dom: document.body?.innerText.slice(0, 2000) }); });
+})().catch(error => { clearTimeout(timeout); if (__SPLITTY_ISOLATION_CONSUMER__ && remoteDocument) {
+  void fixtureState({kind:'remote',error:String(error),stage});return;
+} void report({ error: String(error), stage, epoch: currentEpoch, instance: nativeInstance, stack: error?.stack, network, assetFetches, uiConnectionErrors, securityViolations, dom: document.body?.innerText.slice(0, 2000) }); });
 
 }

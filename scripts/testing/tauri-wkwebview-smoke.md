@@ -63,3 +63,8 @@ preflight, and runs listener positive controls, actual native-child exposure and
 explicit browser-gateway lifecycle tests. It then runs the full WKWebView smoke
 and uploads evidence even on failure. No release, tag, publish or CI dispatch is
 part of this preparation.
+
+The optional `--isolation-consumer` mode reuses the shared actual-WebView
+[isolation/consumer case](tauri-webkit-smoke/README.md#optional-isolation-and-consumer-case).
+It is separate from `--full-ui` and requires its own reviewed macOS runtime run;
+portable preparation is not WKWebView evidence.

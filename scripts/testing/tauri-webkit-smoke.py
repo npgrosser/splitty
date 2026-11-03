@@ -10,6 +10,7 @@ import argparse
 import contextlib
 import json
 import hashlib
+import importlib.util
 import sys
 import os
 import re
@@ -20,6 +21,10 @@ import subprocess
 import tempfile
 import time
 
+
+_isolation_spec = importlib.util.spec_from_file_location('splitty_unix_isolation_fixture', Path(__file__).with_name('tauri-webkit-smoke')/'isolation_fixture.py')
+_isolation = importlib.util.module_from_spec(_isolation_spec)
+_isolation_spec.loader.exec_module(_isolation)
 
 def replace_once(source, before, after):
     if source.count(before) != 1:
@@ -232,18 +237,21 @@ class IndependentDaemon:
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--evidence-dir', type=Path)
+    parser.add_argument('--prepare-only', action='store_true', help='generate the temporary harness without building or running GUI')
     parser.add_argument('--xvfb', type=Path, default=shutil.which('Xvfb'), help='Xvfb executable; all GUI runs use an isolated display')
     parser.add_argument('--reloads', type=int, default=1, help='actual document reloads (1..64); full UI checks heartbeats in first and last documents')
     parser.add_argument('--coexist-daemon', action='store_true', help='prove app lifetime is independent from a real fixture daemon/keeper job')
+    parser.add_argument('--isolation-consumer', action='store_true', help='actual Main/two-Remote policies and bounded receipt-starved client; fixed fixture backends, no SSH')
     parser.add_argument('--full-ui', action='store_true', help='package frontend/dist and exercise the production Svelte application/assets')
     parser.add_argument('--harness-dir', type=Path, default=Path('/tmp/splitty-webkit-runtime-smoke'))
     args = parser.parse_args()
     if not 1 <= args.reloads <= 64: parser.error('--reloads must be between 1 and 64')
+    if args.isolation_consumer and args.full_ui: parser.error('--isolation-consumer is a separate mode; omit --full-ui')
     repo = Path(__file__).resolve().parents[2]
     harness = args.harness_dir.resolve()
     if sys.platform != 'linux':
         raise RuntimeError('this actual WebKitGTK smoke requires Linux')
-    if not args.xvfb or not args.xvfb.is_file():
+    if not args.prepare_only and (not args.xvfb or not args.xvfb.is_file()):
         raise RuntimeError('an isolated Xvfb executable is required (--xvfb); the user desktop is never used')
     evidence = (args.evidence_dir or Path(tempfile.mkdtemp(prefix='splitty-webkit-evidence-'))).resolve()
     evidence.mkdir(parents=True, exist_ok=True)
@@ -336,6 +344,8 @@ impl Native { pub(crate) fn smoke_delivery_handles(&self) -> std::collections::H
              'app.add_capability(capability::main_window())?;\napp.add_capability(tauri::ipc::CapabilityBuilder::new("smoke-report").window("main").permission("allow-smoke-report").permission("allow-smoke-windows"))?;')
     source = rewrite(source, r'app\.run\(\|app_handle, event\| \{', 'app.run(|app_handle, event| { if let tauri::RunEvent::ExitRequested { code: None, api, .. } = &event { api.prevent_exit(); }', count=2)
     source += '\n' + (repo/'scripts/testing/tauri-webkit-smoke/report.rs').read_text()
+    if args.isolation_consumer: source = _isolation.instrument(harness,repo,source)
+    if args.isolation_consumer: shutil.copyfile(harness/'backend-substitution.json',evidence/'backend-substitution.json')
     source += '\nfn main() { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1"); run(); }\n'
     (harness/'src/main.rs').write_text(source)
     source_files = ['crates/splitty-tauri/Cargo.toml', 'crates/splitty-tauri/tauri.conf.json',
@@ -343,15 +353,20 @@ impl Native { pub(crate) fn smoke_delivery_handles(&self) -> std::collections::H
                     'crates/splitty-tauri/src/client_ipc.rs', 'crates/splitty-tauri/src/client_ipc/bootstrap.js',
                     'crates/splitty-tauri/src/client_ipc/carrier.rs', 'crates/splitty-tauri/src/client_ipc/provider.rs',
                     'frontend/src/lib/protocol/native_socket.ts', 'frontend/src/lib/protocol/tauri_channel.ts']
-    source_files += [str(path.relative_to(repo)) for path in (repo/'scripts/testing/tauri-webkit-smoke').rglob('*') if path.is_file()]
+    source_files += [str(path.relative_to(repo)) for path in (repo/'scripts/testing/tauri-webkit-smoke').rglob('*') if path.is_file() and '__pycache__' not in path.parts]
+    source_files += ['scripts/testing/tauri-windows-native-smoke/pressure.mjs','frontend/src/lib/terminal/session_client.ts','frontend/src/lib/terminal/attach_registry.ts']
     (evidence/'sources.json').write_text(json.dumps({name:hashlib.sha256((repo/name).read_bytes()).hexdigest() for name in source_files}, indent=2))
     vite = repo/'frontend/node_modules/vite/dist/node/index.js'
     config = f'''import {{ defineConfig }} from {json.dumps(str(vite))};
 export default defineConfig({{ build: {{ outDir: {json.dumps(str(harness/'src'))}, emptyOutDir:false, minify:false,
-lib: {{ entry: {json.dumps(str(repo/'scripts/testing/tauri-webkit-smoke/entry.ts'))}, name:'SplittyRuntimeSmoke', formats:['iife'], fileName:()=> 'smoke.js' }}, target:'es2022' }}, define: {{ __SPLITTY_FULL_UI__: {str(args.full_ui).lower()}, __SPLITTY_SMOKE_RELOADS__: {args.reloads} }} }});
+lib: {{ entry: {json.dumps(str(repo/'scripts/testing/tauri-webkit-smoke/entry.ts'))}, name:'SplittyRuntimeSmoke', formats:['iife'], fileName:()=> 'smoke.js' }}, target:'es2022' }}, define: {{ __SPLITTY_FULL_UI__: {str(args.full_ui).lower()}, __SPLITTY_SMOKE_RELOADS__: {args.reloads}, __SPLITTY_ISOLATION_CONSUMER__: {str(args.isolation_consumer).lower()} }} }});
 '''
     (harness/'vite.config.mjs').write_text(config)
     env = dict(os.environ, CARGO_TARGET_DIR=str(repo/'target'))
+    if args.prepare_only:
+        (evidence/'preparation.json').write_text(json.dumps({'runtimeVerified':False,'harness':str(harness),'isolationConsumer':args.isolation_consumer,'backendSubstitution':'two fixed real embedded services; no SSH'}))
+        print(f'Prepared {harness}; actual WebKit runtime UNVERIFIED')
+        return
     for command, logfile in [([str(repo/'frontend/node_modules/.bin/vite'),'build','--config',str(harness/'vite.config.mjs')], 'bundle.log'),
                              (['cargo','build','--manifest-path',str(harness/'Cargo.toml')], 'build.log')]:
         with (evidence/logfile).open('w') as log:
@@ -375,7 +390,8 @@ lib: {{ entry: {json.dumps(str(repo/'scripts/testing/tauri-webkit-smoke/entry.ts
                 shell_processes = {}
                 listener_samples = 0
                 try:
-                    deadline = time.monotonic()+((90 + 6*args.reloads) if args.full_ui else (45+3*args.reloads))
+                    timeout = 180+6*args.reloads if args.isolation_consumer else (90+6*args.reloads if args.full_ui else 45+3*args.reloads)
+                    deadline = time.monotonic()+timeout
                     while child.poll() is None and time.monotonic()<deadline:
                         samples += listeners(child.pid)
                         listener_samples += 1
@@ -404,7 +420,7 @@ lib: {{ entry: {json.dumps(str(repo/'scripts/testing/tauri-webkit-smoke/entry.ts
                     result['ownedShellPids'] = sorted(shell_processes)
                     result['ownedShellPidsExited'] = not any(shell_alive(pid,birth) for pid,birth in shell_processes.items())
                     result['terminalPidsExited'] = terminal_pids_exited
-                    result['mode'] = 'full-ui' if args.full_ui else 'minimal'
+                    result['mode'] = 'isolation-consumer' if args.isolation_consumer else 'full-ui' if args.full_ui else 'minimal'
                     result['packagedAssets'] = {str(path.relative_to(harness/'assets')):hashlib.sha256(path.read_bytes()).hexdigest() for path in (harness/'assets').rglob('*') if path.is_file()}
                     result['tcpListeners'] = samples
                     result['listenerSamples'] = listener_samples

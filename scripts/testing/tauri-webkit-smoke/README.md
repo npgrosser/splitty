@@ -51,3 +51,23 @@ This is Linux WebKit runtime coverage. It does not establish macOS/WebView2
 behavior or a bound on framework allocations performed before application
 validation. Sampling listeners is evidence about the observed run, rather than
 proof that no arbitrarily brief listener could exist.
+
+## Optional isolation and consumer case
+
+`--isolation-consumer` is a separate mode from `--full-ui`, available in both
+the Linux and macOS scripts. It uses actual Main and two Remote WebViews with
+production bootstrap, roles, capabilities, navigation and ephemeral storage.
+Only the two native-fixed remote backend locations are substituted with distinct
+real embedded services; `backend-substitution.json` records the generated source
+hashes. This is no SSH, host-filesystem or additional production-UI proof.
+Editor/navigation OS effects are intercepted and must remain unused. Copied
+public handle checks describe private-capsule rejection, not raw IPC authority.
+
+A receipt-starved client runs beside concurrent healthy API/file work. Existing
+pressure chronology is retained without requiring completion before the slow
+client closes. Replay verifies continued capture; a 32-handle window flood must
+refuse excess work, release a slot, admit a replacement and recover to baseline.
+The final report additionally verifies file bytes and closes both fixture
+runtimes/windows before requiring zero native bytes, handles and admission.
+This is not an engine freeze, renderer RSS or independent global/worker ceiling
+test. Source preparation and compile checks alone leave runtime unverified.

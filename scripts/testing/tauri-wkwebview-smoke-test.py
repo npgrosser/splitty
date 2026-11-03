@@ -61,5 +61,43 @@ class ObserverTests(unittest.TestCase):
         self.assertEqual(smoke.ProcBsdInfo.start_usec.offset, 128)
 
 
+class IsolationPreparationTests(unittest.TestCase):
+    def test_both_native_harnesses_prepare_roles_effect_guards_and_cleanup_without_gui(self):
+        repo=Path(__file__).resolve().parents[2]
+        original=(repo/'crates/splitty-tauri/src/client_ipc/provider.rs').read_bytes()
+        for script in ['tauri-webkit-smoke.py','tauri-wkwebview-smoke.py']:
+            with self.subTest(script=script),tempfile.TemporaryDirectory() as temporary:
+                root=Path(temporary);harness=root/'harness';evidence=root/'evidence'
+                result=subprocess.run(['python3',str(repo/'scripts/testing'/script),'--prepare-only','--isolation-consumer','--harness-dir',str(harness),'--evidence-dir',str(evidence)],text=True,capture_output=True)
+                self.assertEqual(result.returncode,0,result.stderr)
+                main=(harness/'src/main.rs').read_text();provider=(harness/'src/client_ipc/provider.rs').read_text()
+                self.assertIn('catalog::Role::Remote',provider)
+                self.assertIn('negotiation::host_ready',provider)
+                self.assertIn('let _ = client.finish().await',provider)
+                self.assertIn('["fixture-one", "fixture-two"].contains(&target)',main)
+                self.assertIn('smoke_finish_isolation(&app).await?',main)
+                self.assertIn('backend.close().await',main)
+                self.assertIn('smoke_pressure_file(first)',main)
+                self.assertIn('if webview.label()=="main" { smoke_event("confirm")',main)
+                self.assertTrue((harness/'src/remote.rs').is_symlink(),'production remote window builder remains intact')
+                self.assertTrue((harness/'src/client_ipc/bootstrap.js').is_symlink(),'production private bootstrap remains intact')
+                for name,authorization in [('editor','native.main_action(&webview, &auth)?'),('navigation','navigation::Decision')]:
+                    source=(harness/'src'/f'{name}.rs').read_text()
+                    self.assertNotIn('.opener().open_url',source)
+                    self.assertIn('smoke_external_effect',source)
+                self.assertIn('native.main_action(&webview, &auth)?',(harness/'src/editor.rs').read_text())
+                self.assertTrue((evidence/'backend-substitution.json').is_file())
+        self.assertEqual(original,(repo/'crates/splitty-tauri/src/client_ipc/provider.rs').read_bytes())
+    def test_mode_does_not_duplicate_full_ui_or_add_a_scheduling_gate(self):
+        root=Path(__file__).parent
+        entry=(root/'tauri-webkit-smoke/entry.ts').read_text()
+        consumer=(root/'tauri-webkit-smoke/consumer.ts').read_text()
+        self.assertIn('fullUi: __SPLITTY_FULL_UI__ && !__SPLITTY_ISOLATION_CONSUMER__',entry)
+        self.assertIn("observePressure } from '../tauri-windows-native-smoke/pressure.mjs'",consumer)
+        self.assertNotIn('apiRepliesWhileStalled>',consumer)
+        self.assertNotIn('fileCompletedBeforeSlowClose)',consumer)
+        regression=subprocess.run(['node','--test',str(root/'tauri-windows-native-smoke/pressure.test.mjs')],capture_output=True,text=True)
+        self.assertEqual(regression.returncode,0,regression.stdout+regression.stderr)
+
 if __name__ == '__main__':
     unittest.main()

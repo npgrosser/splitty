@@ -54,7 +54,7 @@ test('actual main entry still reports missing capsule with its location/frame me
     MutationObserver: class { observe() {} },
     XMLHttpRequest: class { open() {} },
     setTimeout: () => 1, clearTimeout: () => {},
-    __SPLITTY_FULL_UI__: true, __SPLITTY_SMOKE_RELOADS__: 36,
+    __SPLITTY_FULL_UI__: true, __SPLITTY_SMOKE_RELOADS__: 36, __SPLITTY_ISOLATION_CONSUMER__: false,
   };
   vm.runInNewContext(compiled, context);
   await new Promise(resolve => setImmediate(resolve));
