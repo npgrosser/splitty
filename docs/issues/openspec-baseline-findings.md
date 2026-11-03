@@ -216,14 +216,22 @@ Hardening candidates, not open holes.
   `cli_path_survives_bash_and_zsh_startup_without_editing_user_files` test runs the
   user's Bash profile but cannot find `__splitty_restore_cli_path` or the CLI.
   The same failure occurs on the native-transport branch. The startup code and
-  test are unchanged; this needs a separate shell-integration correction.
+  test are unchanged. Apple's Bash 3.2 startup code shadows `posixly_correct`
+  inside the interactive startup block, bypassing the `ENV` integration path
+  used with `--posix` ([Apple Bash source](https://github.com/apple-oss-distributions/bash/blob/main/bash-3.2/shell.c#L1041)).
+  This needs a separate shell-integration correction that preserves login-shell
+  behavior; substituting `--rcfile` alone does not cover login shells.
 - **The final-output PTY test assumes a background writer survives session-leader exit**
   (reproduced 2026-11-03 on baseline `cc66e97`). On macOS,
   `logs_keep_final_bytes_when_the_process_exits_before_capture_ends` already sees
   output capture complete before the fixture releases its background writer.
-  The same assertion fails on the native-transport branch. Actual Darwin PTY
-  behavior and the fixture's lifetime assumptions need reconciliation; the
-  current test does not establish a product loss-of-final-bytes regression.
+  The same assertion fails on the native-transport branch. Darwin revokes the
+  controlling terminal when its session leader exits, independently of whether
+  the background writer ignores SIGHUP ([Darwin exit source](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_exit.c#L2140)).
+  The fixture should separate deterministic process-result-before-reader-EOF
+  ordering from real PTY final-byte capture before exit. The current test does
+  not establish a product loss-of-final-bytes regression; changing the reader to
+  suppress an actual EOF would be incorrect.
 
 - **A spawned child can hold a port this process just released** (found 2026-10-28). On macOS, Rust sets
   close-on-exec only after `socket()` and `accept()`, and `posix_spawn` copies the parent's descriptors until the

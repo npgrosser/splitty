@@ -344,6 +344,7 @@ impl Native { pub(crate) fn smoke_delivery_handles(&self) -> std::collections::H
     source_files += ['scripts/testing/tauri-wkwebview-smoke.py']
     source_files += [str(path.relative_to(repo)) for path in (repo/'scripts/testing/tauri-webkit-smoke').rglob('*') if path.is_file() and '__pycache__' not in path.parts]
     source_files += ['scripts/testing/tauri-windows-native-smoke/pressure.mjs','frontend/src/lib/terminal/session_client.ts','frontend/src/lib/terminal/attach_registry.ts']
+    source_files += ['crates/splitty-transport/src/peer.rs', 'crates/splitty-transport/src/queue.rs', 'crates/splitty-transport/src/flow.rs']
     (evidence/'sources.json').write_text(json.dumps({name:hashlib.sha256((repo/name).read_bytes()).hexdigest() for name in source_files}, indent=2))
     vite = repo/'frontend/node_modules/vite/dist/node/index.js'
     config = f'''import {{ defineConfig }} from {json.dumps(str(vite))};

@@ -290,6 +290,53 @@ the local native-API state 0 / CIM null listener control or classify the earlier
 SSH observations. The later application run above supplies its own successful
 strict inventory; the self-socket control alone is not an application pass.
 
+## Unix window isolation and receipt-pressure diagnosis
+
+The new actual GTK/WKWebView fixture uses the production window builder,
+bootstrap, permissions and transport with two fixed embedded Remote backends.
+It does not claim SSH deployment coverage. GTK required distinct private
+context keys so each incognito Remote WebView registers the packaged protocol;
+the production fix preserves private contexts and eliminates the blank-window
+failure. Main and both Remote windows subsequently pass opener/named-reference,
+storage, target and local-action isolation checks. The fixture now creates its
+SessionClient before adopting the channel so the real welcome capabilities
+cannot be missed.
+
+The remaining Linux replay failure was reproduced with temporary bounded
+first-close diagnostics at source revision `e443ea3`. Both the deliberately
+stalled channel and a consuming replay channel exhausted the 64-slot ordinary
+control queue. The replay context held approximately 343 KiB, far below its
+byte limit; subsequent “invalid queue transfer” errors were consequences of
+that closure. Each consumed data frame had enqueued a serialized receipt into
+the same queue as ping/cancel, although the admitted data window allows 1024
+frames. A separate instrumented run passed, confirming that a single pass is
+insufficient to establish a fix. These diagnostics were removed after capture.
+The fix stores compact charged receipts in a separate bounded queue and
+serializes only the writer's current receipt under the existing control budget.
+A deterministic regression using actual frames and a blocked writer fails
+before the change and passes afterward. All 51 transport unit, one protocol
+integration and four allocation tests pass, as does all-target clippy. The
+regressions verify 1024 consumed frames, exact original-credit release,
+ping/cancel priority, overflow closure and normal cancellation with zero
+retained bytes. Independent source review covers the final allocation ordering.
+
+The uninstrumented actual Linux run with the fix passes: Main/two-Remote
+isolation, concurrent healthy API/file work, 94,084 replay bytes including the
+post-close marker, 32-stream window saturation/refusal/replacement/recovery,
+one reload and natural app exit. All final bytes, carriers, streams, workers,
+handles and opening counters are zero; observed shell and terminal processes
+exit. The 92 sampled TCP inventories contain no listeners. The healthy work
+starts during the stalled channel's lifetime and completes just after its
+closure; no stronger overlapping-completion claim is made. This fixture uses
+packaged minimal test content and receipt starvation, not the full UI or an
+OS-suspended JavaScript engine.
+
+macOS CI at `d4a53b1` passes the existing full-UI/native exposure checks but fails
+the new fixture on the welcome-order issue corrected locally afterward. The two
+core baseline failures also remain; the step's continue-on-error status must
+not be interpreted as a passing core suite. The final integrated revision
+requires a fresh macOS run.
+
 ## Open merge gates
 
 - Whole-path resource limits: Wry allocates inbound IPC request bodies before
