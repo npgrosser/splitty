@@ -98,6 +98,14 @@ Unicode line separators. Its real renderer checks a hostile literal roundtrip;
 the full IPC smoke still passes binary traffic, frozen-client isolation and zero
 final resource counters. Eleven focused socket tests and the server check pass.
 
+The subsequent CI run at `312cb04` passes Rust, Linux Tauri, frontend,
+Electron, aarch64 and dependency checks. All four CodeQL analyses pass and the
+PR comparison reports no new alerts. The pre-existing shell-profile allocation
+alert remains separate; the comparison result is not a claim that the entire
+repository has no findings. macOS again passes the actual WKWebView and native
+network/lifetime checks, while its mandatory core gate still fails on the two
+reproduced baseline cases.
+
 Three findings do not indicate a vulnerability in their reported contexts:
 
 - `rust/hard-coded-cryptographic-value` in `client_ipc/bootstrap.rs` is a
