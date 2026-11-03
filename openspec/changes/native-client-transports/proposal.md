@@ -40,7 +40,7 @@ Desktop clients and SSH bridges currently depend on a loopback web server even w
 
 Touches the server composition roots, HTTP and WebSocket adapters, CLI discovery/attach, remote handshake/bridge/connect, frontend request/socket adapters, both desktop shells and their packaging. Windows/WSL startup, desktop navigation/CSP/capabilities, popouts, downloads and editor handoffs need explicit acceptance coverage.
 
-The design builds on [persistent daemons](../../../roadmap/05-persistent-daemon.md) and [SSH access](../../../roadmap/05a-remote-connect.md). It accounts for the reverse-forward behavior already merged on `main` and the pending upload cancellation work. The `mobile-ssh-client` plan must consume the same transport contract when implemented; its SSH library, device keys and session-control changes are not implemented here. The `mcp-server` plan retains restricted control-API access rather than acquiring UI-socket authority.
+The design builds on [persistent daemons](../../../roadmap/05-persistent-daemon.md) and [SSH access](../../../roadmap/05a-remote-connect.md). It accounts for the reverse-forward behavior already merged on `main` and the pending upload cancellation work. The `mcp-server` plan retains restricted control-API access rather than acquiring UI-socket authority.
 
 Out of scope: new multi-user access, a public network listener, HTTP content proxying, SSH cryptography or key management, session-control ownership redesign, changes to keeper protocol v1, new mobile platforms, and a guaranteed performance improvement. Terminal, workspace, file-transfer and forwarding behavior stays the same except for the explicit transport, desktop lifetime and CLI compatibility changes above.
 
