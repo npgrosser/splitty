@@ -391,6 +391,14 @@ jobs:
           --full-ui --coexist-daemon --reloads 36
           --evidence-dir "${RUNNER_TEMP}/splitty-macos-native-evidence"
 
+      - name: Verify WKWebView remote isolation and slow consumers
+        timeout-minutes: 6
+        run: >-
+          python3 scripts/testing/tauri-wkwebview-smoke.py
+          --isolation-consumer --reloads 1
+          --harness-dir "${RUNNER_TEMP}/splitty-macos-isolation-harness"
+          --evidence-dir "${RUNNER_TEMP}/splitty-macos-native-evidence/isolation-consumer"
+
       # Distinguish transport regressions from existing platform failures.
       # This diagnostic cannot waive the HEAD suite's mandatory gate below.
       - name: Compare failing macOS core tests with the merge base
