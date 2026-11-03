@@ -1571,10 +1571,9 @@ fn end_kept_sessions() {
         let mut ending = Vec::new();
         for found in keeper::client::find(&keeper::dir::keepers_dir()) {
             let socket = found.socket.clone();
-            let session = found.hello.session_id.clone();
             match found.end() {
                 Ok(()) => ending.push(socket),
-                Err(e) => eprintln!("Cannot end kept session {session}: {e}"),
+                Err(e) => eprintln!("Cannot end kept session: {e}"),
             }
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);

@@ -138,7 +138,7 @@ export class SplittyWebSocket extends SocketHandlers implements ConnSocket {
   }
 
   protected override trace(msg: OutgoingMessage): void {
-    console.log(`[ws] ${msg.type}`, msg);
+    console.log("[ws] %s", msg.type, msg);
   }
 
   dispose(): void {

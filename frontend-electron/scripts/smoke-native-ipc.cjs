@@ -11,6 +11,11 @@ const { NativeProcessBudget } = require('../compiled/native_budget');
 const { installAssets } = require('../compiled/asset_protocol');
 protocol.registerSchemesAsPrivileged([{ scheme: 'splitty', privileges: { standard: true, secure: true, supportFetchAPI: true } }]);
 
+// Values inserted into test scripts stay JSON literals, including when a
+// fixture contains HTML delimiters or JavaScript line separators.
+const scriptValue = value => JSON.stringify(value).replace(/[<>\u2028\u2029]/g,
+  character => '\\u' + character.charCodeAt(0).toString(16).padStart(4, '0'));
+
 const probe = `(async () => {
  const bridge = window.__SPLITTY_ELECTRON__.native;
  const assignment = await bridge.open();
@@ -165,6 +170,9 @@ app.whenReady().then(async () => {
   const clientProbe = fs.readFileSync(path.join(__dirname, 'native-ipc-probe.js'), 'utf8');
   await main.webContents.executeJavaScript(clientProbe);
   const evaluate = expression => main.webContents.executeJavaScript(expression);
+  const hostileValue = {text: '\"\\\n</script><script>globalThis.injected=true</script>\u2028\u2029'};
+  assert.deepEqual(await evaluate(`(${scriptValue(hostileValue)})`), hostileValue);
+  assert.equal(await evaluate('globalThis.injected'), undefined);
   const until = async (check, description) => {
     const deadline = Date.now() + 40_000;
     while (Date.now() < deadline) { if (await check()) return; await new Promise(resolve => setTimeout(resolve, 25)); }
@@ -202,7 +210,7 @@ app.whenReady().then(async () => {
   try {
     const completed = path.join(fixture, 'capture-completed');
     const command = `head -c 67108864 /dev/zero; printf '\\nCAPTURE_COMPLETED\\n'; touch '${completed}'\r`;
-    const sent = await evaluate(`smokeClient.request('session.send', ${JSON.stringify({id: frozenSession, body: {data: command}})})`);
+    const sent = await evaluate(`smokeClient.request('session.send', ${scriptValue({id: frozenSession, body: {data: command}})})`);
     assert.equal(sent.status, 200, sent.body);
     // A multi-chunk arbitrary binary file crosses the real preload/port in
     // both directions while the other renderer remains suspended.
@@ -214,23 +222,23 @@ app.whenReady().then(async () => {
       const bytes = source.subarray(offset, offset + 512 * 1024), last = offset + bytes.length === source.length;
       const upload = {type:'upload',requestId:'file-roundtrip',offset,data:bytes.toString('base64'),
         ...(offset === 0 ? {name:'all-bytes.bin',size:source.length,dir:destination} : {})};
-      const answer = await evaluate(`(async () => { const answer = smokeClient.next('${last ? 'upload_saved' : 'upload_progress'}', 'requestId', 'file-roundtrip'); smokeClient.send(${JSON.stringify(upload)}); return await answer; })()`);
+      const answer = await evaluate(`(async () => { const answer = smokeClient.next('${last ? 'upload_saved' : 'upload_progress'}', 'requestId', 'file-roundtrip'); smokeClient.send(${scriptValue(upload)}); return await answer; })()`);
       if (last) saved = answer.path; else assert.equal(answer.received, offset + bytes.length);
     }
     assert.deepEqual(fs.readFileSync(saved), source);
     const ownSession = await evaluate(`(async () => { smokeClient.send({type:'file.register'}); const created=smokeClient.next('created'); smokeClient.send({type:'create',shell:'/bin/sh',cols:80,rows:24}); const id=(await created).sessionId; const attached=smokeClient.next('attached'); smokeClient.send({type:'attach',id,cols:80,rows:24}); await attached; return id; })()`);
-    await evaluate(`smokeClient.send({type:'input',id:${JSON.stringify(ownSession)},data:${JSON.stringify("printf '\\000\\377\\376\\001'\r")}}); true`);
+    await evaluate(`smokeClient.send({type:'input',id:${scriptValue(ownSession)},data:${scriptValue("printf '\\000\\377\\376\\001'\r")}}); true`);
     await until(() => evaluate('smokeClient.binary.tail.some((byte,i,bytes) => byte === 0 && bytes[i+1] === 255 && bytes[i+2] === 254 && bytes[i+3] === 1)'), 'byte-exact terminal IPC including NUL/non-UTF-8');
     const partial = {type:'upload',requestId:'explicit-cancel',offset:0,name:'cancelled.bin',size:100,dir:destination,data:'AP8='};
-    await evaluate(`(async () => { const progress=smokeClient.next('upload_progress','requestId','explicit-cancel'); smokeClient.send(${JSON.stringify(partial)}); await progress; smokeClient.send({type:'upload_cancel',requestId:'explicit-cancel'}); const attached=smokeClient.next('attached'); smokeClient.send({type:'attach',id:${JSON.stringify(ownSession)},cols:80,rows:24}); await attached; })()`);
+    await evaluate(`(async () => { const progress=smokeClient.next('upload_progress','requestId','explicit-cancel'); smokeClient.send(${scriptValue(partial)}); await progress; smokeClient.send({type:'upload_cancel',requestId:'explicit-cancel'}); const attached=smokeClient.next('attached'); smokeClient.send({type:'attach',id:${scriptValue(ownSession)},cols:80,rows:24}); await attached; })()`);
     assert.deepEqual(fs.readdirSync(destination), ['all-bytes.bin'], 'explicit cancel removes the partial file');
-    await evaluate(`window.offered = smokeClient.request('file.offer', ${JSON.stringify({body: {sessionId: ownSession, path: saved}})}); true`);
+    await evaluate(`window.offered = smokeClient.request('file.offer', ${scriptValue({body: {sessionId: ownSession, path: saved}})}); true`);
     const offer = await evaluate("smokeClient.next('file.offer')");
     const received = [];
     let offset = 0;
-    await evaluate(`smokeClient.send({type:'file.accept',offerId:${JSON.stringify(offer.offerId)}}); true`);
+    await evaluate(`smokeClient.send({type:'file.accept',offerId:${scriptValue(offer.offerId)}}); true`);
     for (;;) {
-      const chunk = await evaluate(`(async () => { const chunk=smokeClient.next('file.chunk'); smokeClient.send({type:'file.read',offerId:${JSON.stringify(offer.offerId)},offset:${offset}}); return await chunk; })()`);
+      const chunk = await evaluate(`(async () => { const chunk=smokeClient.next('file.chunk'); smokeClient.send({type:'file.read',offerId:${scriptValue(offer.offerId)},offset:${offset}}); return await chunk; })()`);
       assert.equal(chunk.offset, offset); const bytes = Buffer.from(chunk.data, 'base64'); received.push(bytes); offset += bytes.length;
       if (chunk.eof) break;
     }
@@ -240,7 +248,7 @@ app.whenReady().then(async () => {
     await frozenConnection.released;
     assert.equal(owner.helper.child.exitCode, null, 'one frozen client cannot close the embedded owner');
     await until(() => fs.existsSync(completed), 'PTY capture continues after the consumer is disconnected');
-    await evaluate(`(async () => { const attached=smokeClient.next('attached','sessionId',${JSON.stringify(frozenSession)}); smokeClient.send({type:'attach',id:${JSON.stringify(frozenSession)},cols:80,rows:24}); await attached; })()`);
+    await evaluate(`(async () => { const attached=smokeClient.next('attached','sessionId',${scriptValue(frozenSession)}); smokeClient.send({type:'attach',id:${scriptValue(frozenSession)},cols:80,rows:24}); await attached; })()`);
     assert.ok(await evaluate("String.fromCharCode(...smokeClient.binary.tail).includes('CAPTURE_COMPLETED')"), 'reattach replays output captured after the slow consumer was gone');
     assert.equal((await evaluate("smokeClient.request('mux.status')")).status, 200);
     assert.ok(maximumData <= 120 * 1024 * 1024 && maximumControl <= 8 * 1024 * 1024);
@@ -258,7 +266,7 @@ app.whenReady().then(async () => {
   await evaluate('window.healthyClient = smokeClient; true');
   await main.webContents.executeJavaScript(clientProbe);
   const abandoned = path.join(fixture, 'abandoned'); fs.mkdirSync(abandoned);
-  await evaluate(`(async () => { const progress=smokeClient.next('upload_progress','requestId','abandoned'); smokeClient.send(${JSON.stringify({type:'upload',requestId:'abandoned',offset:0,name:'abandoned.bin',size:100,dir:abandoned,data:'AP8='})}); await progress; smokeClient.close(); window.smokeClient=window.healthyClient; })()`);
+  await evaluate(`(async () => { const progress=smokeClient.next('upload_progress','requestId','abandoned'); smokeClient.send(${scriptValue({type:'upload',requestId:'abandoned',offset:0,name:'abandoned.bin',size:100,dir:abandoned,data:'AP8='})}); await progress; smokeClient.close(); window.smokeClient=window.healthyClient; })()`);
   await until(() => owner.counts.streams === 1, 'closed upload stream cleanup');
   assert.deepEqual(fs.readdirSync(abandoned), [], 'disconnect removes the unpublished upload');
   const admission = await evaluate(`(async () => {
