@@ -201,7 +201,54 @@ async fn framed_maximum_image_survives_parser_and_worker_admission() {
 #[tokio::test]
 async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catalog() {
     let dir = tempfile::tempdir().unwrap();
-    let state = state(ADDR, dir.path());
+    let host = ScriptedHost::new(dir.path());
+    let mut state = state(ADDR, dir.path());
+    Arc::make_mut(&mut state.service).hub = Arc::new(hub(&host, dir.path()));
+    // Seed visible local management state so forbidden Forget/Stop/Update
+    // operations cannot pass unnoticed merely because their targets are absent.
+    for (operation, body) in [
+        (
+            Operation::HostPreferencesUpdate,
+            json!({"target":"vm1","alias":"Original"}),
+        ),
+        (Operation::HostOrderUpdate, json!({"order":["vm1","vm2"]})),
+        (
+            Operation::RemoteScreensUpdate,
+            json!({"version":1,"screens":[{"target":"vm1","screenId":"original"}]}),
+        ),
+        (
+            Operation::CatalogUpdate,
+            json!({"target":"vm1","screens":[{"id":"original","panes":1}]}),
+        ),
+        (
+            Operation::ForwardPreferencesSave,
+            json!({"target":"vm1","port":5173,"local":5174,"label":"Original"}),
+        ),
+        (
+            Operation::ReversePreferencesSave,
+            json!({"target":"vm1","port":18431,"local":18432}),
+        ),
+    ] {
+        let response = native(&state, operation, json!({"body":body})).await;
+        assert_eq!(
+            response.0,
+            StatusCode::OK,
+            "seed {operation:?}: {response:?}"
+        );
+    }
+    async fn management_state(state: &AppState) -> Vec<(&'static str, (StatusCode, Value))> {
+        let mut snapshot = Vec::new();
+        for operation in crate::service::catalog::OPERATIONS.iter().filter(|entry| {
+            entry.scope == crate::service::catalog::Scope::LocalHub && entry.method == "GET"
+        }) {
+            snapshot.push((
+                operation.name,
+                native(state, operation.operation, json!({})).await,
+            ));
+        }
+        snapshot
+    }
+    let before = management_state(&state).await;
     let (mut peer, server) = framed(&state, Role::Remote).await;
     framed_call(&peer, 1, "mux.status", json!({}));
     let welcome = peer.recv().await.unwrap();
@@ -217,12 +264,123 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
     let status: Value = serde_json::from_str(&reply.body).unwrap();
     assert_eq!(status["instance"], state.instance);
     assert!(status["listenAddr"].is_null());
-    framed_call(&peer, 2, "host.list", json!({}));
-    assert_eq!(framed_reply(&mut peer).await.status, 403);
-    framed_call(&peer, 3, "agents.list", json!({}));
+    let mut id = 1;
+    for operation in crate::service::catalog::OPERATIONS
+        .iter()
+        .filter(|entry| entry.scope == crate::service::catalog::Scope::LocalHub)
+    {
+        let args = if operation.method == "GET" {
+            json!({})
+        } else {
+            let body = match operation.operation {
+                Operation::HostForget => json!({"target":"vm1"}),
+                Operation::HostPreferencesUpdate => json!({"target":"vm1","alias":"Forbidden"}),
+                Operation::HostOrderUpdate => json!({"order":["vm2","vm1"]}),
+                Operation::RemoteScreensUpdate => {
+                    json!({"version":1,"screens":[{"target":"vm2","screenId":"forbidden"}]})
+                }
+                Operation::CatalogUpdate => {
+                    json!({"target":"vm1","screens":[{"id":"forbidden","panes":2}]})
+                }
+                Operation::ForwardOpen => json!({"target":"vm1","port":5173,"local":5175}),
+                Operation::ForwardPreferencesSave => {
+                    json!({"target":"vm1","port":5173,"local":5175,"label":"Forbidden"})
+                }
+                Operation::ForwardStop | Operation::ForwardPreferencesForget => {
+                    json!({"target":"vm1","port":5173})
+                }
+                Operation::ReverseOpen | Operation::ReversePreferencesSave => {
+                    json!({"target":"vm1","port":18431,"local":18433})
+                }
+                Operation::ReverseStop | Operation::ReversePreferencesForget => {
+                    json!({"target":"vm1","port":18431})
+                }
+                _ => panic!(
+                    "new LocalHub mutation needs a meaningful Remote-denial fixture: {}",
+                    operation.name
+                ),
+            };
+            json!({"body":body})
+        };
+        NativeRequest {
+            operation: operation.operation,
+            args: args.as_object().unwrap().clone(),
+        }
+        .validate(Role::Main)
+        .expect("denial input has the allowed role's argument shape");
+        id += 1;
+        framed_call(&peer, id, operation.name, args);
+        let reply = framed_reply(&mut peer).await;
+        assert_eq!(reply.id, id);
+        assert_eq!(reply.status, 403, "{}: {}", operation.name, reply.body);
+        assert_eq!(
+            management_state(&state).await,
+            before,
+            "{} changed local management state",
+            operation.name
+        );
+        assert!(
+            host.asked().is_empty(),
+            "{} invoked a connector: {:?}",
+            operation.name,
+            host.asked()
+        );
+    }
+    // Backend authority remains useful on the same assigned Remote stream.
+    // Compare a real template mutation/read and domain failures with browser
+    // dispatch; these must not be mistaken for forbidden local-hub operations.
+    let browser = crate::http::build_router(state.clone());
+    let template = json!({"name":"Remote template","panes":{"shell":{"command":"printf remote"}},"layout":{"slot":"shell"}});
+    for (operation, args, method, path, body) in [
+        ("home.get", json!({}), "GET", "/api/home/settings", None),
+        ("build.get", json!({}), "GET", "/api/build", None),
+        (
+            "template.save",
+            json!({"slug":"remote-template","body":template}),
+            "POST",
+            "/api/templates/remote-template",
+            Some(template),
+        ),
+        (
+            "template.get",
+            json!({"slug":"remote-template"}),
+            "GET",
+            "/api/templates/remote-template",
+            None,
+        ),
+        (
+            "template.get",
+            json!({"slug":"missing"}),
+            "GET",
+            "/api/templates/missing",
+            None,
+        ),
+        (
+            "session.send",
+            json!({"id":"missing","body":{"data":"hello\n"}}),
+            "POST",
+            "/api/session/missing/send",
+            Some(json!({"data":"hello\n"})),
+        ),
+    ] {
+        id += 1;
+        framed_call(&peer, id, operation, args);
+        let reply = framed_reply(&mut peer).await;
+        let actual = (
+            StatusCode::from_u16(reply.status).unwrap(),
+            serde_json::from_str(&reply.body).unwrap_or_else(|_| json!(reply.body)),
+        );
+        let expected = exchange(&browser, api(method, path, body.as_ref())).await;
+        assert_eq!(actual, expected, "Remote backend parity: {operation}");
+    }
+    id += 1;
+    framed_call(&peer, id, "agents.list", json!({}));
     assert_eq!(framed_reply(&mut peer).await.status, 400);
-    framed_call(&peer, 4, "mux.status", json!({"target":"other-host"}));
+    id += 1;
+    framed_call(&peer, id, "mux.status", json!({"target":"other-host"}));
     assert_eq!(framed_reply(&mut peer).await.status, 400);
+    assert_eq!(management_state(&state).await, before);
+    assert!(host.asked().is_empty());
     peer.shutdown().await;
     server.await.unwrap().unwrap();
     assert!(state.client_state.clients.lock().unwrap().is_empty());
