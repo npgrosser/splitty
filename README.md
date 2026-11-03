@@ -169,7 +169,7 @@ browser downloaded the archive, run
 
 | Connection | Transport | Session lifetime |
 |---|---|---|
-| Desktop, local terminals | IPC to its own backend; child pipes for Electron and WSL | End when the app quits |
+| Desktop, local terminals | Native IPC to an in-process Tauri service on Unix, or owned child pipes for Electron and WSL | End when the app quits |
 | Explicit local daemon | Private Unix socket | Independent of the app |
 | SSH host | SSH data channel to the host’s private socket | Survive disconnects and app exit |
 | Explicit browser access | Loopback HTTP/WebSocket gateway to one selected backend | Follow that backend’s lifetime |
