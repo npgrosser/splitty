@@ -4,6 +4,7 @@ import ctypes
 import importlib.util
 from pathlib import Path
 import unittest
+import tempfile
 
 spec = importlib.util.spec_from_file_location('wkwebview_smoke', Path(__file__).with_name('tauri-wkwebview-smoke.py'))
 smoke = importlib.util.module_from_spec(spec)
@@ -30,6 +31,23 @@ class ObserverTests(unittest.TestCase):
         self.assertIn('NSApplication::sharedApplication(', result)
         self.assertIn('application.windows().iter().filter(|window| window.isVisible())', result)
         self.assertEqual(source[:source.index('async fn smoke_windows')], result[:result.index('async fn smoke_windows')])
+
+    def test_fixture_home_resolves_an_actual_symlinked_temporary_root(self):
+        with tempfile.TemporaryDirectory() as root:
+            root = Path(root).resolve(strict=True)
+            real = root/'actual'
+            real.mkdir()
+            alias = root/'alias'
+            alias.symlink_to(real, target_is_directory=True)
+            with tempfile.TemporaryDirectory(dir=alias) as private:
+                home = smoke.fixture_home(private)
+                self.assertNotEqual(home, Path(private))
+                self.assertEqual(home.parent, real)
+                self.assertTrue(home.is_dir())
+                endpoint = home/'splitty/run/client.sock'
+                endpoint.parent.mkdir(parents=True)
+                self.assertTrue(all(not ancestor.is_symlink() for ancestor in endpoint.parents))
+                self.assertTrue(alias.is_symlink(), 'fixture canonicalization must not alter the alias')
 
     def test_darwin_start_identity_layout_includes_microseconds(self):
         self.assertEqual(ctypes.sizeof(smoke.ProcBsdInfo), 136)

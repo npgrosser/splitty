@@ -146,6 +146,12 @@ def macos_report(source):
 """+source[end:]
 
 
+def fixture_home(private):
+    # macOS /tmp aliases /private/tmp. Keep the native endpoint's strict
+    # ancestor checks intact by supplying the actual private directory path.
+    return Path(private).resolve(strict=True)
+
+
 def run_macos(repo, args, evidence, env):
     (evidence/'platform.json').write_text(json.dumps({
         'runtime':'actual Tauri/Wry WKWebView','os':subprocess.check_output(['/usr/sbin/sysctl','-n','kern.osrelease'],text=True).strip(),
@@ -153,7 +159,7 @@ def run_macos(repo, args, evidence, env):
         'inboundFrameworkAllocationBound':False,'genericCommandReplyRssBound':False,
     },indent=2))
     with tempfile.TemporaryDirectory(prefix='splitty-wk-home-', dir='/tmp') as private:
-        home = Path(private)
+        home = fixture_home(private)
         env = {key:value for key,value in env.items() if not key.startswith('SPLITTY_')}
         env.pop('ZDOTDIR',None)
         env.update(HOME=str(home),XDG_CONFIG_HOME=str(home/'config'),XDG_DATA_HOME=str(home/'data'),
