@@ -464,7 +464,11 @@ mod tests {
             )
             .await
             .unwrap_err();
-            assert_eq!(error.kind(), io::ErrorKind::PermissionDenied);
+            assert_eq!(
+                error.kind(),
+                io::ErrorKind::PermissionDenied,
+                "{code}: {error}"
+            );
             let failure: Value = serde_json::from_str(&error.to_string()).unwrap();
             assert_eq!(failure["code"], code);
             assert!(task.await.unwrap().is_err());

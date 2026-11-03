@@ -72,18 +72,38 @@ pub async fn client_with_host<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     budget: &ConnectionBudget,
     open_host: Option<wire::OpenHost>,
 ) -> io::Result<()> {
-    deadline(async {
-        write.write_all(wire::MAGIC).await?;
-        write_control(
-            write,
-            budget,
-            Kind::Hello,
-            &Hello {
-                transport_version: wire::VERSION,
-                open_host,
-            },
-        )
-        .await?;
+    let mut disconnected_write = None;
+    let result = deadline(async {
+        let sent = async {
+            write.write_all(wire::MAGIC).await?;
+            write_control(
+                write,
+                budget,
+                Kind::Hello,
+                &Hello {
+                    transport_version: wire::VERSION,
+                    open_host,
+                },
+            )
+            .await
+        }
+        .await;
+        if let Err(error) = sent {
+            if !matches!(
+                error.kind(),
+                io::ErrorKind::BrokenPipe
+                    | io::ErrorKind::ConnectionReset
+                    | io::ErrorKind::ConnectionAborted
+                    | io::ErrorKind::UnexpectedEof
+            ) {
+                return Err(error);
+            }
+            // A peer can write an incompatible response and exit before our
+            // first write. Inspect that response under the same fixed deadline
+            // rather than let scheduling turn a protocol failure into retryable
+            // pipe loss. Empty/silent/valid responses retain the write failure.
+            disconnected_write = Some(error);
+        }
         magic(read).await?;
         let hello: Charged<Hello> = expect(read, budget, Kind::Accept).await?;
         if hello.transport_version != wire::VERSION || hello.open_host.is_some() {
@@ -91,7 +111,17 @@ pub async fn client_with_host<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
         Ok(())
     })
-    .await
+    .await;
+    match disconnected_write {
+        Some(error)
+            if !result
+                .as_ref()
+                .is_err_and(|reason| reason.kind() == io::ErrorKind::InvalidData) =>
+        {
+            Err(error)
+        }
+        _ => result,
+    }
 }
 
 pub async fn server<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
@@ -782,6 +812,80 @@ mod tests {
         .unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
         assert_eq!(now.elapsed(), wire::HANDSHAKE_TIMEOUT);
+        assert_eq!(budget.used(), 0);
+    }
+    #[tokio::test(start_paused = true)]
+    async fn incompatible_response_survives_simultaneous_broken_outbound_pipe() {
+        struct BrokenWrite;
+        impl tokio::io::AsyncWrite for BrokenWrite {
+            fn poll_write(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                _: &[u8],
+            ) -> std::task::Poll<io::Result<usize>> {
+                std::task::Poll::Ready(Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "outbound closed",
+                )))
+            }
+            fn poll_flush(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+            fn poll_shutdown(
+                self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                std::task::Poll::Ready(Ok(()))
+            }
+        }
+        let budget = ConnectionBudget::default();
+        let mut valid = wire::MAGIC.to_vec();
+        valid.extend(
+            Frame::json(
+                Kind::Accept,
+                &Hello {
+                    transport_version: wire::VERSION,
+                    open_host: None,
+                },
+            )
+            .unwrap()
+            .encode()
+            .unwrap(),
+        );
+        let mut unsupported = wire::MAGIC.to_vec();
+        unsupported.extend(
+            Frame::json(
+                Kind::Accept,
+                &Hello {
+                    transport_version: wire::VERSION + 1,
+                    open_host: None,
+                },
+            )
+            .unwrap()
+            .encode()
+            .unwrap(),
+        );
+        for (bytes, expected) in [
+            (b"INVALID!".as_slice(), io::ErrorKind::InvalidData),
+            (unsupported.as_slice(), io::ErrorKind::InvalidData),
+            (b"".as_slice(), io::ErrorKind::BrokenPipe),
+            (valid.as_slice(), io::ErrorKind::BrokenPipe),
+        ] {
+            let error = client(&mut &*bytes, &mut BrokenWrite, &budget)
+                .await
+                .unwrap_err();
+            assert_eq!(error.kind(), expected, "{error}");
+        }
+        let (mut silent, _peer) = duplex(64);
+        let start = tokio::time::Instant::now();
+        let error = client(&mut silent, &mut BrokenWrite, &budget)
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert_eq!(start.elapsed(), wire::HANDSHAKE_TIMEOUT);
         assert_eq!(budget.used(), 0);
     }
 }
