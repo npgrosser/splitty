@@ -359,7 +359,7 @@ to Windows/WSL and use its dedicated hosted runs. App exit, real owned-child
 failure/cancellation and surviving independent daemons use the lifecycle
 fixtures described above. “Frozen client” means withheld output consumption;
 no operating-system engine suspension or total-RSS bound is claimed. The
-remaining framework allocation and core-suite gates are not waived.
+framework allocation limitation remains explicit, and the core-suite gate is not waived.
 
 The documentation revision `8521d6b` has the same transport source hashes.
 Its [CI run 41730093388](https://github.com/npgrosser/splitty/actions/runs/41730093388)
@@ -369,14 +369,29 @@ checks; only the same two core baseline tests fail. The isolation run replays
 languages. CI executes the required formatting, workspace/GUI clippy and tests,
 frontend check/test/build, Electron build and architecture checks. The separate
 `openspec validate --specs` command passes all 14 specifications. Final cutover
-and task 9.4 remain open pending resolution of the declared scope/core gates;
+and task 9.6 remain open pending the macOS corrections and final integration;
 this records the checked revision rather than waiving those gates.
+
+## Quantitative memory contract
+
+NCT-8 now explicitly covers application-owned transport data throughout the
+path: reassembly, queues, conversions, retained diagnostics and native IPC
+source/encoding reservations through platform completion or disposal. All
+existing numeric caps, native authority checks and cleanup ownership remain.
+Wry-owned inbound invoke bodies allocated before the handler, generic framework
+replies, unrelated engine storage and total process/renderer RSS are excluded.
+No framework fork is part of this change.
+
+Independent boundary review found no concrete foreign-page or SSH-peer route
+to local authority requiring a Wry fork. A compromised packaged renderer can
+nevertheless exhaust framework storage before application validation. Remote
+windows therefore isolate authority but do not promise availability isolation
+from every other window sharing the desktop process. This limitation is now
+normative in the client-connections delta and explicit in the security and
+architecture documentation, rather than an unfulfilled quantitative claim.
 
 ## Open merge gates
 
-- Whole-path resource limits: Wry allocates inbound IPC request bodies before
-  application validation. Application-owned quotas do not establish a bound on
-  framework allocation, generic invoke replies, JavaScript engine memory or RSS.
 - The current Linux/macOS/Windows WebView isolation and consumer fixtures pass,
   including the integrated receipt fix on Linux and macOS. The macOS core
   baseline failures remain blocking independently of those platform fixtures.
@@ -387,7 +402,7 @@ this records the checked revision rather than waiving those gates.
   pass. Task 5.9 is complete on this combined evidence; actual window-isolation
   and consumer evidence is recorded separately under task 7.6.
 - Migration, conformance and security review must reconcile the remaining task
-  checks, including framework-bound scope, before cutover is approved.
+  checks, including the macOS corrections, before cutover is approved.
 
 ## Windows harness cleanup incident
 

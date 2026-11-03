@@ -146,10 +146,15 @@ encoded IPC output. Tauri output owns its source chunk and encoding reservations
 until evaluation completion or callback destruction; renderer consumption is a
 separate credit. A document check prevents stale output entering a replacement
 page. Closed renderer connections retain their slots until pending invokes settle.
-Incoming Wry request bodies are allocated before application validation, so these
-limits do not establish a bound on every WebView/framework allocation or total
-renderer RSS. Actual platform isolation and resource checks are tracked separately
-from unit coverage. Linux full UI checks cover assets, binary terminal traffic,
+The numeric contract covers application-owned transport buffers and retained IPC
+output. Framework-owned inbound invoke bodies allocated by Wry before validation,
+generic framework replies, unrelated engine storage and total process/renderer
+RSS are outside it. A compromised packaged renderer may exhaust that framework
+storage before validation. Native role checks still restrict its authority, but
+separate remote windows do not guarantee availability of other windows sharing
+the desktop process. This does not relax frame/body limits, transport accounting
+or connection/worker admission. Actual platform isolation and resource checks
+are tracked separately from unit coverage. Linux full UI checks cover assets, binary terminal traffic,
 heartbeat, independent daemon lifetime and absence of app/WebKit TCP listeners.
 Full UI runs also exercise the revised output carrier and parent-owned popout
 cleanup on macOS and Windows/WSL, including WSL with localhost forwarding
@@ -157,8 +162,9 @@ disabled. Fresh Windows sibling/slow-consumer checks also pass the strict
 app/SSH listener inventory, admission recovery and owned-process cleanup. Linux
 Main/two-Remote isolation and receipt-pressure checks pass with zero final
 resource counters; the integrated macOS fixtures now pass these checks too.
-The macOS core baseline failures and whole-framework allocation bound stay
-open; one platform's result does not establish another's behavior. The [verification record](openspec/changes/native-client-transports/verification.md)
+The macOS core baseline failures remain open; the framework limitation above
+is an explicit boundary of the memory contract. One platform's result does not
+establish another's behavior. The [verification record](openspec/changes/native-client-transports/verification.md)
 distinguishes these current runs from excluded historical evidence.
 
 ## Terminal output

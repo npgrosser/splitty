@@ -153,11 +153,13 @@ Test crashes before spawn, between spawn and worker publication, and after publi
 
 Scope reservations to the actual loopback/network context, not just a port number in one config directory. Windows/WSL tests must cover the selected runtime's reachable localhost listeners; where loopback is shared across runtimes, their reservation authority must also be shared through the existing native broker, or sharing must fail with a precise unsupported-environment error. Do not open a registry HTTP service to solve this. No client/control/keeper socket is forwardable through the UI API. The registry is not a defense against arbitrary forwarding tools run by the same OS user.
 
-### NCT-8: Bound the whole path and define failure semantics
+### NCT-8: Bound application-owned transport and define failure semantics
 
-Initial byte limits (provisional, tested before cutover): 16 MiB maximum native frame, 1 MiB API request body unless an existing endpoint has a smaller cap, 64 pending API requests per connection, 32 MiB queued/in-flight bytes per connection and 128 MiB aggregate transport budget per process. Count frame reassembly and IPC delivery buffers; a frame cannot bypass the budget by being fragmented. Preserve existing image/file limits and chunked transfer protocols. Use bounded IPC chunks and delivery credits so Tauri/Chromium's hidden queues cannot grow without limit.
+Initial byte limits (provisional, tested before cutover): 16 MiB maximum native frame, 1 MiB API request body unless an existing endpoint has a smaller cap, 64 pending API requests per connection, 32 MiB queued/in-flight bytes per connection and 128 MiB aggregate transport budget per process. Count frame reassembly and IPC delivery buffers; a frame cannot bypass the budget by being fragmented. Preserve existing image/file limits and chunked transfer protocols. Use bounded IPC chunks and delivery credits to keep application-produced output and its retained delivery reservations bounded. The contract covers application-owned transport buffers throughout the path, including raw chunks, encoding copies and native output reservations through evaluation completion or callback destruction.
 
-Byte budgets do not bound idle descriptors, task state or subprocesses. Add admission ceilings, also provisional, acquired **before** allocating per-client state, dialing or spawning:
+Wry allocates inbound invoke bodies before the application handler, and generic framework replies and unrelated engine storage have separate ownership. These allocations and total process/renderer RSS are excluded from the numeric contract; no Wry fork is part of this change. This exclusion does not release any application-owned reservation early or relax frame/body/request/admission limits. A compromised packaged renderer may exhaust framework storage before validation; role isolation prevents authority transfer but does not guarantee availability of other windows sharing the native process. Remote protocol data alone does not grant renderer script execution.
+
+Byte budgets do not bound idle descriptors, task state or subprocesses. Add admission ceilings, also provisional, acquired **before** allocating application-owned per-client state, dialing or spawning. They do not precede framework ingress allocation outside the handler:
 
 | Resource | Initial ceiling |
 | --- | --- |
@@ -239,7 +241,7 @@ All dated 2026-11-01 and open to review:
 - **NCT-5** (provisional, tbd): mandatory private daemon client endpoint; inherited pipes for Electron/WSL; discovery format 2 and explicit unsafe-path failures.
 - **NCT-6** (provisional, tbd): `serve --daemon` and a local `connect` browser gateway; per-gateway auth/cookie identity; no implicit daemon HTTP or credential minting on sockets.
 - **NCT-7** (provisional, tbd): retain hardened SSH exec bridging, split intentional forwarding supervision, and protect internal listeners with durable reservations that outlive coordinator crashes until local forwarder termination is verified.
-- **NCT-8** (provisional, tbd): bound end-to-end bytes plus connection/handshake/worker admission using the initial ceilings above; no automatic mutation/input replay.
+- **NCT-8** (scope clarified 2026-11-03): bound application-owned transport bytes and connection/handshake/worker admission using the initial ceilings above; framework-owned ingress/generic replies, unrelated engine storage and total RSS are excluded. Retained IPC output stays charged through platform completion/disposal. No automatic mutation/input replay.
 - **NCT-9** (provisional, tbd): full API/feature parity and one coordinated default cutover; explicit incompatibility instead of TCP fallback.
 
 - **NCT-10** (provisional, tbd): local desktop backends are always app-owned embedded services on all platforms; independent local daemons and keepers are left untouched, with persistent access explicit through CLI/browser.

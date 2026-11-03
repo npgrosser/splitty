@@ -77,11 +77,14 @@ Native requests SHALL name supported operations with validated arguments. Unknow
 - **THEN** the broker rejects it before connecting, reading a file or starting a process
 
 ### Requirement: Bounded Delivery
-Native frames SHALL be at most 16 MiB. API bodies SHALL be at most 1 MiB or their existing smaller endpoint limit. Each connection SHALL admit at most 64 pending API requests and 32 MiB of queued/in-flight transport data; all connections together SHALL use at most 128 MiB per process. Reassembly and IPC queues SHALL count against these limits, and incomplete negotiation SHALL hold no application state.
+Native frames SHALL be at most 16 MiB. API bodies SHALL be at most 1 MiB or their existing smaller endpoint limit. Each connection SHALL admit at most 64 pending API requests and 32 MiB of application-owned queued/in-flight transport data; all connections together SHALL reserve at most 128 MiB of such transport data per process. Application-owned reassembly, IPC queues and retained IPC output, including encoding copies through completion or disposal of platform delivery, SHALL count against these limits. Incomplete negotiation SHALL hold no application state.
+
+These numeric allowances do not bound framework-owned inbound invoke bodies allocated before application validation, generic framework command replies, engine storage outside the accounted transport buffers, or total process/renderer memory. These exclusions SHALL NOT relax application frame/body limits, transport-buffer accounting, request limits, connection/worker admission, or native role checks. A compromised packaged renderer can exhaust unaccounted framework storage; isolation of its authority does not guarantee availability of other windows sharing the process.
 
 #### Scenario: Oversized frame
-- **WHEN** a peer announces a frame longer than the limit or exceeds its allowed reassembly budget
-- **THEN** the connection ends without allocating the declared payload or partially applying it
+- **WHEN** a native transport peer announces a frame longer than the limit or exceeds its allowed reassembly budget
+- **THEN** the connection ends before the application allocates the declared transport payload or partially applies it
+- **AND** this preallocation guarantee does not cover framework ingress allocation that precedes the application handler
 
 #### Scenario: Frozen client
 - **WHEN** a client stops consuming output and reaches the delivery limit
@@ -92,7 +95,7 @@ Native frames SHALL be at most 16 MiB. API bodies SHALL be at most 1 MiB or thei
 - **THEN** additional requests are refused with a busy result without starting their operations
 
 ### Requirement: Resource Admission
-Admission SHALL precede per-client allocation, backend dialing and worker spawn, with no unbounded wait queue. Initial ceilings SHALL be:
+Admission SHALL precede application-owned per-client state allocation, backend dialing and worker spawn, with no unbounded wait queue. Framework ingress allocation before the application handler is outside this admission guarantee. Initial ceilings SHALL be:
 
 - 256 accepted transport connections per process, including unauthenticated gateway HTTP and handshakes;
 - 128 live application streams/native handles and 16 pending connection establishments per process;
