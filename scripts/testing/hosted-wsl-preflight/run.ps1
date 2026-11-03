@@ -88,7 +88,7 @@ function Read-Nonce([int]$Port){
  try{
   $task=$client.ConnectAsync('127.0.0.1',$Port)
   if(-not $task.Wait(2000)){throw 'localhost connection timeout'}
-  $task.GetAwaiter().GetResult()
+  [void]$task.GetAwaiter().GetResult()
   $stream=$client.GetStream();$stream.ReadTimeout=2000
   $reader=[IO.StreamReader]::new($stream)
   try{return $reader.ReadLine()}finally{$reader.Dispose()}
@@ -99,7 +99,7 @@ function Test-LocalhostBlocked([int]$Port){
  try{
   $task=$client.ConnectAsync('127.0.0.1',$Port)
   if(-not $task.Wait(2000)){return $true}
-  $task.GetAwaiter().GetResult()
+  [void]$task.GetAwaiter().GetResult()
   # Any established TCP connection fails the negative control, even if its
   # payload is absent or wrong. A read failure is not proof of isolation.
   return $false
@@ -137,7 +137,7 @@ try{
   $accept=$positive.AcceptTcpClientAsync()
   $client=[Net.Sockets.TcpClient]::new();$connect=$client.ConnectAsync('127.0.0.1',$port)
   if(-not $connect.Wait(2000)){throw 'Windows positive-control connect timeout'}
-  $connect.GetAwaiter().GetResult()
+  [void]$connect.GetAwaiter().GetResult()
   if(-not $accept.Wait(2000)){throw 'Windows loopback positive control failed'}
   $peer=$accept.GetAwaiter().GetResult();$peer.Dispose();$client.Dispose()
  }finally{$positive.Stop()}
