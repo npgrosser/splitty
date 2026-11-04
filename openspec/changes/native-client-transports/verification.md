@@ -1,10 +1,23 @@
 # Post-review correction status
 
-The acceptance runs below establish the pre-review commit `8eda9b8`, not the
-review corrections. Tasks 10.1–10.9 track the new acceptance work.
-The PR must not be considered merge-ready until their final integration gate passes.
+Review corrections are implemented at `270e412`. The complete hosted
+[CI run 41846959834](https://github.com/npgrosser/splitty/actions/runs/41846959834)
+and [CodeQL run 41846960005](https://github.com/npgrosser/splitty/actions/runs/41846960005)
+pass for that exact implementation. This includes actual macOS WKWebView
+lifecycle/isolation/consumer execution, core Bash tests, native endpoint checks
+and real SSH crash/keeper migration. Tasks 10.1–10.9 are complete.
 
-Targeted correction results so far:
+The final local workspace suite reports 1,055 passing tests; workspace and GUI
+all-targets clippy and all 97 GUI tests pass. Runtime prerequisites/skip behavior
+of local OS-dependent tests remains unchanged; required hosted cases run explicitly.
+No fresh Windows GUI runtime execution was performed for these corrections.
+The existing Windows runtime evidence below belongs to its named earlier commits;
+pure guard/JS tests and Linux/macOS execution do not establish every WebView2 case.
+
+The remaining sections below this correction record retain the historical
+acceptance evidence for `8eda9b8` and its predecessors, not new execution claims.
+
+Correction validation:
 - Native transport: 53 unit tests pass, including buffered Reply/Text plus
   EOF/Closed, hard revocation/malformed discard and matched-pong timing.
 - Owner cleanup: seven tests pass, including finish/drop escalation with retained
@@ -16,7 +29,7 @@ Targeted correction results so far:
   with nounset/POSIX, scalar/array/sparse prompt commands and startup options.
 - Gateway: 21 integration tests pass, including 64 concurrent calls over one
   native carrier, monotonic IDs, cancellation cleanup and uncertain mutations.
-- Tauri: 96 library tests and 22 capsule JavaScript tests pass, including native
+- Tauri: 97 library tests and 22 capsule JavaScript tests pass, including native
   challenge identity/idempotence, bootstrap deadline and bounded live progress.
 - Frontend check reports zero errors (eight existing warnings); all 1,510 tests
   in 82 suites pass. Frontend and Electron builds pass (58 packaged assets).
