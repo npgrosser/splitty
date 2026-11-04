@@ -43,6 +43,12 @@ Splitty does **not** defend against:
 - Explicit daemons accept UI clients on a private owner-only Unix socket.
   Endpoint paths reject symlinks, stale cleanup checks identity, and both ends
   verify peer ownership (`crates/splitty-server/src/native/endpoint.rs`).
+  Owned group-writable ancestors such as `~/.local` with mode `0775` are
+  supported without changing their permissions. Native endpoint operations
+  and daemon discovery/log access use retained private directory handles;
+  the final directory stays `0700`, and socket/lock files stay `0600`.
+  Symlinks, foreign-owned directories and non-sticky world-writable ancestors
+  are refused. A group writer can still disrupt path availability.
 - Remote connections use SSH exec stdio to the host's private native socket.
   Validated targets cannot inject SSH options. Native negotiation verifies
   the expected daemon instance and protocol before application input.

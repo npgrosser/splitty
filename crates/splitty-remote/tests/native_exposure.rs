@@ -53,38 +53,47 @@ fn identity(pid: u32) -> Option<Identity> {
 #[cfg(target_os = "macos")]
 fn identity(pid: u32) -> Option<Identity> {
     use nix::libc;
-    let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
-    let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).unwrap();
-    // SAFETY: this flavor fills precisely proc_bsdinfo; no saved PID is signaled.
-    let result = unsafe {
-        libc::proc_pidinfo(
-            i32::try_from(pid).unwrap(),
-            libc::PROC_PIDTBSDINFO,
-            0,
-            info.as_mut_ptr().cast(),
-            size,
-        )
-    };
-    if result != size {
-        // An unavailable query must not be mistaken for observed process exit.
-        let missing = unsafe { libc::kill(i32::try_from(pid).unwrap(), 0) } == -1
-            && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
-        assert!(
-            missing,
-            "native worker identity unavailable without exit proof"
-        );
-        return None;
+    let deadline = Instant::now() + WAIT;
+    loop {
+        let mut info = std::mem::MaybeUninit::<libc::proc_bsdinfo>::uninit();
+        let size = i32::try_from(std::mem::size_of::<libc::proc_bsdinfo>()).unwrap();
+        // SAFETY: this flavor fills precisely proc_bsdinfo; no saved PID is signaled.
+        let result = unsafe {
+            libc::proc_pidinfo(
+                i32::try_from(pid).unwrap(),
+                libc::PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr().cast(),
+                size,
+            )
+        };
+        if result != size {
+            // An unavailable query must not be mistaken for observed process exit.
+            let missing = unsafe { libc::kill(i32::try_from(pid).unwrap(), 0) } == -1
+                && io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH);
+            if missing {
+                return None;
+            }
+            // proc_pidinfo may transiently fail while an orphan exits, before
+            // kill(pid, 0) reports ESRCH. Unknown is not exit proof: retry boundedly.
+            assert!(
+                Instant::now() < deadline,
+                "native worker identity unavailable without exit proof"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+            continue;
+        }
+        // SAFETY: the full initialized structure was returned above.
+        let info = unsafe { info.assume_init() };
+        if info.pbi_status == libc::SZOMB {
+            return None;
+        }
+        return Some(Identity {
+            pid,
+            start: info.pbi_start_tvsec,
+            subsecond: info.pbi_start_tvusec,
+        });
     }
-    // SAFETY: the full initialized structure was returned above.
-    let info = unsafe { info.assume_init() };
-    if info.pbi_status == libc::SZOMB {
-        return None;
-    }
-    Some(Identity {
-        pid,
-        start: info.pbi_start_tvsec,
-        subsecond: info.pbi_start_tvusec,
-    })
 }
 
 fn wait(reason: &str, mut ready: impl FnMut() -> bool) {

@@ -686,3 +686,56 @@ that same process handle, never a numeric PID fallback. Its regression passes:
 an unrelated owned process survives, while a detached fixture process exits
 even after the original namespace holder is gone. Independent source review
 found no stale-PID signaling path.
+
+
+## Group-writable parent compatibility (preview 0.2.0-dev.3)
+
+Owned `0775` data/config ancestors now remain unchanged. Native endpoint operations,
+instance locking and daemon discovery/log access pin the owned private directory
+with a no-follow descriptor walk. The final directory remains `0700`; socket,
+lock and log checks retain their owner/type/mode requirements. Publication and
+cleanup use descriptor-relative operations, and conditional discovery cleanup
+checks both the expected record and its opened inode before unlinking.
+
+Independent Claude design and patch reviews informed this correction. Accepted
+findings include raw-byte basename validation (reject trailing slash/dot spellings),
+Linux proc-FD alias preflight, and conditional cleanup through one retained
+directory. The reviewed listener-proof approach was replaced with the simpler
+recommended design: inherit only the verified instance lock and let the child bind
+its own socket before the existing readiness exchange. This removes listener
+address ambiguity and startup reads from queued application clients altogether.
+The macOS implementation uses a dedicated thread's `pthread_fchdir_np`; it never
+changes the process cwd. The arm64 macOS cross-link succeeded; native macOS runtime
+execution is checked by CI, not claimed from a Linux cross-build.
+
+The review also discussed wider filesystem policies. Exact private-directory
+modes and symlink refusal are retained; the prior daemon-directory validator did
+not repair loose modes, so permitting such directories is not part of this fix.
+No NSS/private-group exception or shared-parent chmod is introduced. Single-instance
+locking protects the pinned directory, not a maliciously replaced filesystem
+namespace. A party allowed to rename ancestors can disrupt discovery/availability;
+this correction does not claim to sandbox that party from all account files or
+audit platform ACLs. Existing keeper/control paths and installed-code trust remain
+unchanged.
+
+Targeted regression evidence: descriptor-relative file publication/cleanup and
+native bind/connect/lock tests, a real daemon start/status/stop under `0775` parents,
+and the real installer scripts for both empty homes and pre-existing `0775`
+parents. The strict pinned `cc66e97` historical rollback/migration smoke ran with
+`0775` config/data parents, retaining both original and historical keeper executables,
+shell PIDs, unexported shell state, session IDs and keeper inodes. Parent permissions
+remained unchanged and an unrelated owned process survived. Deployed hosts were
+not mutation fixtures.
+
+Two earlier CI fixture failures are corrected separately from runtime policy:
+confirmed non-kept legacy migration now expects `migration_unavailable`, and the
+macOS reservation fixture retries transient unavailable process observations
+within its existing deadline instead of interpreting them as exit or failing at
+the first inconclusive query. Production exposure reservations remain fail-closed.
+
+Local integrated checks for this correction: workspace clippy and 1,075 Rust
+tests passed; GUI clippy and 101 GUI tests passed; all 15 specs and 8 architecture
+files validated. The OS peer-user smoke now runs below a `0775` parent, and the
+macOS CI gate includes the full start/status/stop lifecycle with group-writable
+config/data parents. Windows packaging and native macOS CI results are recorded
+separately when their artifacts finish.

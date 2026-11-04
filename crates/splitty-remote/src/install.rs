@@ -672,41 +672,62 @@ mod tests {
 
     #[tokio::test]
     async fn a_host_without_splitty_gets_the_server_installed() {
-        let home = home();
-        let host = LocalShell::new(home.path().to_path_buf());
-        let mut announced = false;
-        let prepared = prepare(
-            &host,
-            "0.1.0",
-            |_, _| Ok(Some(payload(true))),
-            |_| announced = true,
-        )
-        .await
-        .expect("prepare");
-        assert!(prepared.uploaded && announced);
-        let dir = version_dir(home.path(), "0.1.0");
-        assert_eq!(
-            prepared.server,
-            Server::Installed {
-                path: dir.join("splitty").display().to_string(),
-                config_dir: None,
+        for shared in [false, true] {
+            let home = home();
+            if shared {
+                for name in [".local", ".local/share", ".config"] {
+                    let path = home.path().join(name);
+                    fs::create_dir_all(&path).unwrap();
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o775)).unwrap();
+                }
             }
-        );
-        assert!(dir.join("shell-integration/bash/splitty.bash").is_file());
-        let mode = fs::metadata(home.path().join(REMOTE_DIR))
-            .expect("dir")
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o077, 0, "owner-only: {mode:o}");
-        let leftovers: Vec<_> = fs::read_dir(home.path().join(REMOTE_DIR))
-            .expect("dir")
-            .filter_map(|e| e.ok().map(|e| e.file_name()))
-            .collect();
-        assert_eq!(leftovers, ["0.1.0"], "no temporary directories left");
-        let run = std::process::Command::new(dir.join("splitty"))
-            .output()
-            .expect("run");
-        assert_eq!(String::from_utf8_lossy(&run.stdout), "splitty 0.0.0-test\n");
+            let host = LocalShell::new(home.path().to_path_buf());
+            let mut announced = false;
+            let prepared = prepare(
+                &host,
+                "0.1.0",
+                |_, _| Ok(Some(payload(true))),
+                |_| announced = true,
+            )
+            .await
+            .expect("prepare");
+            assert!(prepared.uploaded && announced);
+            let dir = version_dir(home.path(), "0.1.0");
+            assert_eq!(
+                prepared.server,
+                Server::Installed {
+                    path: dir.join("splitty").display().to_string(),
+                    config_dir: None,
+                }
+            );
+            assert!(dir.join("shell-integration/bash/splitty.bash").is_file());
+            let mode = fs::metadata(home.path().join(REMOTE_DIR))
+                .expect("dir")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0, "owner-only: {mode:o}");
+            let leftovers: Vec<_> = fs::read_dir(home.path().join(REMOTE_DIR))
+                .expect("dir")
+                .filter_map(|e| e.ok().map(|e| e.file_name()))
+                .collect();
+            assert_eq!(leftovers, ["0.1.0"], "no temporary directories left");
+            let run = std::process::Command::new(dir.join("splitty"))
+                .output()
+                .expect("run");
+            assert_eq!(String::from_utf8_lossy(&run.stdout), "splitty 0.0.0-test\n");
+            if shared {
+                for name in [".local", ".local/share", ".config"] {
+                    assert_eq!(
+                        fs::metadata(home.path().join(name))
+                            .unwrap()
+                            .permissions()
+                            .mode()
+                            & 0o777,
+                        0o775
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]

@@ -2454,7 +2454,15 @@ async fn the_hub_updates_a_host_daemon_of_another_version() {
         let mut socket = hub.open_with(HOST, "&update=1").await;
         let (_, failure) = socket.outcome().await;
         assert_eq!(failure["type"], "remote.error", "{failure}");
-        assert_eq!(failure["code"], "incompatible", "{failure}");
+        assert_eq!(
+            failure["code"],
+            if keeps {
+                "incompatible"
+            } else {
+                "migration_unavailable"
+            },
+            "{failure}"
+        );
         socket.close().await;
         hub.wait_without_ssh();
         assert_eq!(host_daemon_pid(&lab), replacement_pid);

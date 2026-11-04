@@ -39,13 +39,22 @@ async fn another_os_user_cannot_reach_application_data_even_after_modes_are_loos
     // macOS $TMPDIR has private ancestors that would defeat the second,
     // deliberately loosened-mode probe before peer credentials are tested.
     let dir = tempfile::tempdir_in("/tmp").unwrap();
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    let path = dir
-        .path()
-        .canonicalize()
-        .unwrap()
-        .join(endpoint::SOCKET_NAME);
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o775)).unwrap();
+    let private = root.join("private");
+    let path = private.join(endpoint::SOCKET_NAME);
+    let cwd = std::env::current_dir().unwrap();
     let bound = endpoint::bind(&path).await.unwrap();
+    let client = endpoint::connect(&path).await.unwrap();
+    let (peer, _) = bound.listener.accept().await.unwrap();
+    endpoint::verify_peer(&client).unwrap();
+    endpoint::verify_peer(&peer).unwrap();
+    drop((client, peer));
+    assert_eq!(std::env::current_dir().unwrap(), cwd);
+    assert_eq!(
+        std::fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+        0o775
+    );
     let probe = tokio::time::timeout(
         Duration::from_secs(20),
         other_user("import os; print(os.geteuid())", &path).output(),
@@ -97,7 +106,7 @@ sys.exit(17)
 
     // Deliberately damage only this temporary fixture's modes to test the
     // independent credential check. No application frame may be returned.
-    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o755)).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o666)).unwrap();
     let mut command = other_user(
         r#"

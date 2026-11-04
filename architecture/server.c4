@@ -24,7 +24,7 @@ model {
       metadata { module 'splitty_server::service' spec 'control-api' }
     }
     native = component 'native' {
-      description 'Verified native carrier and fixed-role service dispatcher; request generations, bounded concurrent operations, cancellation and shared session identity. The inherited embedded owner pipe keeps one runtime across bounded document/Hub substreams without a client listener.'
+      description 'Verified native carrier and fixed-role service dispatcher; request generations, bounded concurrent operations, cancellation and shared session identity. Private native sockets bind/connect through a pinned directory; the child validates the inherited instance lock and binds its own listener before readiness. The inherited embedded owner pipe keeps one runtime across bounded document/Hub substreams without a client listener.'
       metadata { module 'splitty_server::native' spec 'mux-protocol' }
     }
 
@@ -256,7 +256,7 @@ model {
     main -> control 'socket_path, spawn'
     main -> http 'AppState, routers'
     main -> service 'Explicit embedded or persistent runtime construction'
-    main -> native 'Private listener inheritance, daemon accept loop and owned desktop child pipes'
+    main -> native 'Private instance-lock inheritance, daemon socket binding/accept loop and owned desktop child pipes'
     main -> splitty.transport.wire 'Native discovery transport version'
     main -> splitty.core.auth 'load_or_create, resolve'
     main -> splitty.core.config 'config_dir, load, load_server, themes_dir'

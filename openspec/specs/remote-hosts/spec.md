@@ -106,7 +106,7 @@ After installing a version, the client SHALL remove every other version director
 
 #### Scenario: Legacy daemon
 - **WHEN** a format-2 answering binary discovers a live legacy daemon
-- **THEN** it reports native transport as unsupported without connecting to or replacing the legacy daemon
+- **THEN** it reports native transport as unsupported without opening legacy TCP or replacing the daemon; read-only private owner/keeper probes may assess eligibility for confirmed migration
 
 ### Requirement: Protocol Version
 The server SHALL have a protocol version, an integer that changes when the mux/session application protocol changes incompatibly; it is 1. A daemon SHALL record its protocol version in `daemon.json` (see `server-modes`). A `daemon.json` without it SHALL count as protocol 1. A client that relays the protocol to a host's daemon SHALL use the daemon's protocol version from the handshake to decide whether it can talk to that daemon; it supports its own protocol version and the one before. Native transport support SHALL be negotiated independently; mux compatibility alone SHALL not authorize a legacy TCP fallback.

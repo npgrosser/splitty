@@ -258,6 +258,13 @@ identity and session-keeper requirements still apply. An eligible legacy daemon
 can be migrated through the app's confirmed update action; otherwise use the
 explicit migration described in [CLI documentation](cli.md#splitty-daemon).
 
+Existing `0775` data/config ancestors (for example `~/.local`,
+`~/.local/share` and `~/.config` under umask `0002`) are supported unchanged.
+Splitty creates its own private subdirectories; it does not chmod shared
+parents. The native endpoint and daemon discovery/log paths use pinned
+private directory handles and refuse symlink traversal or foreign ownership.
+This applies to fresh startup and the confirmed legacy recovery action.
+
 After a successful release run, **Cleanup release artifacts** deletes that
 run's Actions artifacts; the files attached to the release remain available.
 New builds retain artifacts for at most three days, including failed releases

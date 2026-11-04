@@ -5,7 +5,12 @@
 //! bidirectional key transformation, deep-merge partial updates, and value
 //! validation with safe fallbacks to defaults.
 
+#[cfg(unix)]
+mod private_dir;
 mod settings;
+
+#[cfg(unix)]
+pub use private_dir::PrivateDir;
 
 pub use settings::*;
 

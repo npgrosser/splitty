@@ -666,11 +666,19 @@ A reverse forward MUST NOT be opened without the user's explicit request, unless
 - **THEN** the request is not served
 
 ### Requirement: Private Native Client Endpoint
-The daemon's client endpoint SHALL be distinct from control, grant and keeper sockets, with a 0700 parent directory and 0600 socket. Both peers SHALL verify the owning user on Linux/macOS. Unsafe owners, symlinks, non-sockets, unsupported filesystems, unreadable credentials and mismatched live instances SHALL be rejected without TCP fallback. No client endpoint path SHALL be injected into pane environments.
+The daemon's client endpoint SHALL be distinct from control, grant and keeper sockets, with a 0700 parent directory and 0600 socket. Both peers SHALL verify the owning user on Linux/macOS. Unsafe owners, symlinks, non-sockets, unsupported filesystems, unreadable credentials and mismatched live instances SHALL be rejected without TCP fallback. No client endpoint path SHALL be injected into pane environments. The presence of group-write permission on an otherwise accepted owned ancestor SHALL NOT alone reject startup or connection. Private-directory identity SHALL bind sensitive filesystem operations so ancestor replacement cannot redirect writes, locks or cleanup. Shared ancestor permissions SHALL remain unchanged; neither a group name nor a current membership list grants an exception to ownership, peer or instance checks.
 
 #### Scenario: Unsafe endpoint
 - **WHEN** the endpoint or its private directory is a symlink, has an unsafe owner or cannot provide peer credentials
 - **THEN** the connection fails before dispatch and no alternative listener opens
+
+#### Scenario: Existing group-writable ancestors
+- **WHEN** a valid private endpoint directory lies below existing owned group-writable ancestors
+- **THEN** startup and connection preserve those permissions while binding sensitive operations to the verified private directory
+
+#### Scenario: Ancestor replaced during an operation
+- **WHEN** a previously verified path is renamed or replaced during endpoint or daemon publication work
+- **THEN** no filesystem mutation follows the replacement and a changed configured identity fails admission rather than granting authority to it
 
 #### Scenario: Another user
 - **WHEN** another OS user reaches the endpoint

@@ -455,10 +455,6 @@ enum DaemonAction {
     /// The daemon process itself, started by `daemon start` (internal)
     #[command(hide = true)]
     Run {
-        /// Inherited descriptor of the listener `daemon start` bound
-        #[arg(long)]
-        listen_fd: i32,
-
         /// Inherited descriptor holding the private daemon instance lock
         #[arg(long)]
         lock_fd: i32,
@@ -1298,7 +1294,7 @@ async fn handle_daemon(action: DaemonAction) {
                     std::process::exit(1);
                 }
             }
-            bind_and_start_daemon().await;
+            lock_and_start_daemon().await;
         }
         DaemonAction::Restart { addr, end_sessions } => {
             if addr.is_some() {
@@ -1325,16 +1321,16 @@ async fn handle_daemon(action: DaemonAction) {
             if end_sessions {
                 end_kept_sessions();
             }
-            bind_and_start_daemon().await;
+            lock_and_start_daemon().await;
         }
-        DaemonAction::Run { listen_fd, lock_fd } => {
+        DaemonAction::Run { lock_fd } => {
             #[cfg(unix)]
             {
-                run_daemon(listen_fd, lock_fd).await;
+                run_daemon(lock_fd).await;
             }
             #[cfg(not(unix))]
             {
-                let _ = (listen_fd, lock_fd);
+                let _ = lock_fd;
                 eprintln!("Daemon mode is only supported on Unix");
                 std::process::exit(1);
             }
@@ -1416,24 +1412,25 @@ async fn handle_daemon(action: DaemonAction) {
     }
 }
 
-/// Bind the mandatory private endpoint and hold its lock before detaching.
-async fn bind_and_start_daemon() {
+/// Hold the instance lock before detaching; the child binds its own endpoint.
+async fn lock_and_start_daemon() {
     #[cfg(unix)]
     {
         let path = splitty_server::native::endpoint::socket_path();
-        let bound = splitty_server::native::endpoint::bind(&path)
-            .await
-            .unwrap_or_else(|error| {
-                eprintln!("Failed to bind native endpoint {}: {error}", path.display());
-                // Another launcher may own the instance before it publishes
-                // discovery. Preserve the lock and let native clients refresh.
-                std::process::exit(if error.kind() == std::io::ErrorKind::WouldBlock {
-                    75
-                } else {
-                    1
-                });
+        let lock = splitty_server::native::endpoint::InstanceLock::acquire(
+            path.parent().expect("native endpoint parent"),
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("Failed to lock native endpoint {}: {error}", path.display());
+            // Another launcher may own the instance before it publishes
+            // discovery. Preserve the lock and let native clients refresh.
+            std::process::exit(if error.kind() == std::io::ErrorKind::WouldBlock {
+                75
+            } else {
+                1
             });
-        if let Err(reason) = start_daemon(bound).await {
+        });
+        if let Err(reason) = start_daemon(lock).await {
             daemon_start_failed(
                 &reason,
                 &splitty_core::config::config_dir().join("daemon.log"),
@@ -1468,7 +1465,7 @@ fn cleanup_stale_daemon(expected: &splitty_core::daemon::DaemonInfo) -> bool {
             Ok(Some(current))
                 if &current == expected && !splitty_core::daemon::is_running(current.pid) =>
             {
-                std::fs::remove_file(splitty_core::daemon::info_path()).is_ok()
+                splitty_core::daemon::remove_info_if(expected).unwrap_or(false)
             }
             _ => false,
         }
@@ -1631,27 +1628,28 @@ fn end_kept_sessions() {
 /// survives, locks held by the other threads stay locked, and the child still
 /// believed it was inside the runtime, so it panicked on its first `block_on`
 /// while this command reported success. A spawned `daemon run` starts from a
-/// clean process image and inherits nothing but the bound listener.
+/// clean process image and deliberately inherits only the instance lock.
 #[cfg(unix)]
-async fn start_daemon(mut bound: splitty_server::native::endpoint::Bound) -> Result<(), String> {
+async fn start_daemon(lock: splitty_server::native::endpoint::InstanceLock) -> Result<(), String> {
     use splitty_core::daemon;
     use std::os::fd::AsRawFd;
-    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::process::CommandExt;
 
     let client_socket = splitty_server::native::endpoint::socket_path();
     let config_dir = splitty_core::config::config_dir();
-    let log_path = config_dir.join("daemon.log");
-
-    let log = daemon::private_directory(&config_dir).and_then(|()| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC | nix::libc::O_NONBLOCK)
-            .open(&log_path)
-    });
-    let log = log.map_err(|error| format!("cannot open daemon log: {error}"))?;
+    let directory = splitty_core::config::PrivateDir::open(&config_dir, true)
+        .map_err(|error| format!("cannot open daemon log directory: {error}"))?;
+    let log = directory
+        .open_file(
+            std::ffi::OsStr::new("daemon.log"),
+            nix::fcntl::OFlag::O_WRONLY
+                | nix::fcntl::OFlag::O_CREAT
+                | nix::fcntl::OFlag::O_APPEND
+                | nix::fcntl::OFlag::O_NONBLOCK,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .map_err(|error| format!("cannot open daemon log: {error}"))?;
+    directory.verify().map_err(|error| error.to_string())?;
     use std::os::unix::fs::MetadataExt;
     let metadata = log.metadata().map_err(|error| error.to_string())?;
     if !metadata.is_file()
@@ -1664,17 +1662,9 @@ async fn start_daemon(mut bound: splitty_server::native::endpoint::Bound) -> Res
     let exe = std::env::current_exe()
         .map_err(|error| format!("cannot locate splitty binary: {error}"))?;
 
-    let listen_fd = bound.listener.as_raw_fd();
-    let lock_fd = bound.guard.lock.file().as_raw_fd();
+    let lock_fd = lock.file().as_raw_fd();
     let mut command = std::process::Command::new(exe);
-    command.args([
-        "daemon",
-        "run",
-        "--listen-fd",
-        &listen_fd.to_string(),
-        "--lock-fd",
-        &lock_fd.to_string(),
-    ]);
+    command.args(["daemon", "run", "--lock-fd", &lock_fd.to_string()]);
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1690,10 +1680,6 @@ async fn start_daemon(mut bound: splitty_server::native::endpoint::Bound) -> Res
             // The one descriptor the daemon inherits on purpose. Cleared in
             // this child only, so nothing else started from here gets it.
             nix::fcntl::fcntl(
-                listen_fd,
-                nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
-            )?;
-            nix::fcntl::fcntl(
                 lock_fd,
                 nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
             )?;
@@ -1704,8 +1690,7 @@ async fn start_daemon(mut bound: splitty_server::native::endpoint::Bound) -> Res
     let mut child = tokio::process::Command::from(command)
         .spawn()
         .map_err(|error| format!("cannot start daemon process: {error}"))?;
-    // The daemon holds its own copy of the listener now.
-    drop(bound.listener);
+    // Keep this copy of the lock through readiness or owned-child cleanup.
 
     let child_pid = child.id();
     let stdout = child.stdout.take().expect("daemon stdout is piped");
@@ -1729,7 +1714,6 @@ async fn start_daemon(mut bound: splitty_server::native::endpoint::Bound) -> Res
     };
     let reason = match tokio::time::timeout(DAEMON_READY_TIMEOUT, readiness).await {
         Ok(Ok(instance)) => {
-            bound.guard.preserve_endpoint();
             emit_line!("SPLITTY_CLIENT_SOCKET={}", client_socket.display());
             emit_line!("SPLITTY_INSTANCE={instance}");
             return Ok(());
@@ -1746,13 +1730,12 @@ async fn start_daemon(mut bound: splitty_server::native::endpoint::Bound) -> Res
     let terminated =
         child.kill().await.is_ok() || child.try_wait().is_ok_and(|status| status.is_some());
     if !terminated {
-        bound.guard.preserve_endpoint();
         return Err(format!("{reason}; daemon exit could not be verified, so its endpoint and discovery were retained"));
     }
-    if daemon::read_info().is_some_and(|info| Some(info.pid) == child_pid) {
-        daemon::remove_info();
+    if let Some(info) = daemon::read_info().filter(|info| Some(info.pid) == child_pid) {
+        let _ = daemon::remove_info_if(&info);
     }
-    drop(bound.guard);
+    let _ = lock.cleanup_socket(&client_socket).await;
     Err(reason)
 }
 
@@ -1797,15 +1780,21 @@ async fn wait_for_daemon_ready(stdout: tokio::process::ChildStdout) -> Result<()
 /// line before it gives up. `daemon.json` is written only after every step that
 /// can fail, so it never names a daemon that is not about to serve.
 #[cfg(unix)]
-async fn run_daemon(listen_fd: i32, lock_fd: i32) {
+async fn run_daemon(lock_fd: i32) {
     use splitty_core::daemon;
 
     tracing::info!("daemon started (pid={})", std::process::id());
 
     let client_path = splitty_server::native::endpoint::socket_path();
-    let bound = splitty_server::native::endpoint::adopt(listen_fd, lock_fd, &client_path)
+    let lock = splitty_server::native::endpoint::adopt_lock(
+        lock_fd,
+        client_path.parent().expect("native endpoint parent"),
+    )
+    .unwrap_or_else(|error| daemon_run_failed(&format!("cannot adopt native lock: {error}")));
+    let bound = splitty_server::native::endpoint::bind_locked(&client_path, lock)
+        .await
         .unwrap_or_else(|error| {
-            daemon_run_failed(&format!("cannot adopt native endpoint: {error}"))
+            daemon_run_failed(&format!("cannot bind native endpoint: {error}"))
         });
 
     // Sessions get `bin/` of the run directory once its `splitty` names this
@@ -1978,7 +1967,7 @@ async fn run_daemon(listen_fd: i32, lock_fd: i32) {
     if let Err(error) = pty_manager.shutdown(true).await {
         tracing::error!("terminal release failed: {error}");
     }
-    daemon::remove_info();
+    let _ = daemon::remove_info_if(&info);
     control_task.shutdown();
     drop(bound.guard);
     tracing::info!("daemon shut down");

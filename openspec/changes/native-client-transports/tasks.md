@@ -203,3 +203,11 @@ The coverage table assigns **every scenario** of each added/modified requirement
 - [x] 13.3 Add the confirmed update-and-connect action to inline hosts and desktop remote launchers in Tauri/Electron, retaining fixed-target document authority and meaningful version/session guidance. Test cancellation, concurrent opens, navigation and one-shot helper/provider intent.
 - [x] 13.4 Independently review process identity, authority, budget and cancellation behavior. Run isolated legacy-to-native migration checks preserving session/keeper/shell identity and private shell state while an unrelated process remains alive; never use deployed hosts as mutation fixtures.
 - [x] 13.5 Reconcile public documentation, protocol/specs and architecture; run appropriate integrated checks, build the final Windows preview and copy its exact installer/checksum to Downloads. Integrate origin/main, update and push the existing PR without merging or creating a release tag.
+
+
+## 14. Existing group-writable parent directories
+
+- [x] 14.1 Replace blanket group-write rejection with retained private-directory handles for native bind/connect, instance locks, socket cleanup, daemon discovery and logs. Preserve final ownership/modes, no-symlink traversal, filesystem checks and peer/instance identity; never chmod shared ancestors or move keeper/control paths.
+- [x] 14.2 Extend unit/in-process tests for owned `0775` ancestors, unchanged permissions, symlink/path replacement, anchored publication/cleanup and lock lifetime; retain unsafe-owner, non-socket and peer-identity refusals. Cover process working-directory isolation on supported platforms.
+- [x] 14.3 Extend existing lifecycle/install/historical smoke coverage for fresh setup and confirmed migration with group-writable data/config ancestors, preserving old keeper/shell identity and private state. Keep deployed hosts unchanged.
+- [ ] 14.4 Review the design/implementation with Claude, reconcile docs/specs/architecture, run integrated checks, assign preview `0.2.0-dev.3`, update the unmerged PR and build/copy a verified Windows installer and checksum to Downloads.

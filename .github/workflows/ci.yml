@@ -378,6 +378,7 @@ jobs:
           SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE: '1'
         run: |
           cargo test --locked -p splitty-remote --test native_exposure -- --exact native_policy_retains_published_worker_after_coordinator_death --nocapture
+          cargo test --locked -p splitty-server --test daemon_lifecycle start_status_control_command_stop -- --exact
           cargo test --locked -p splitty-server --test daemon_lifecycle process_inventory::inventory_observes_owned_ipv4_and_ipv6_listeners -- --exact
           cargo test --locked -p splitty-server --test daemon_lifecycle owned_native_child_pipes_end_only_their_embedded_sessions -- --exact
           cargo test --locked -p splitty-server --test daemon_lifecycle remote_bridge_relays_native_bytes_and_detaches_without_ending_host_sessions -- --exact

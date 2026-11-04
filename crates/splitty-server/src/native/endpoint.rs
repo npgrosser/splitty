@@ -1,13 +1,19 @@
 //! Private native endpoint, separate from owner control and session keepers.
 //! Filesystem checks and peer credentials are required in both directions.
+use nix::{
+    fcntl::OFlag,
+    sys::stat::{FileStat, Mode},
+};
+use splitty_core::config::PrivateDir;
+use std::ffi::OsStr;
 use std::{
-    fs::{self, File, OpenOptions},
+    fs::File,
     io,
     os::{
         fd::{AsFd, AsRawFd},
-        unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+        unix::fs::MetadataExt,
     },
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     time::Duration,
 };
 use tokio::net::{UnixListener, UnixStream};
@@ -24,64 +30,22 @@ pub fn socket_path() -> PathBuf {
     splitty_core::config::run_dir().join(SOCKET_NAME)
 }
 
-/// Validate every ancestor without following a link. Root/owner ancestors may
-/// be traversable; writable shared ancestors require the sticky-bit protection
-/// (for example /tmp), while the final endpoint directory must be owner-only.
-fn directory(dir: &Path, create: bool) -> io::Result<()> {
+/// Pin the private directory before any file or socket operation. Shared
+/// group-writable ancestors may affect availability, never endpoint authority.
+fn directory(dir: &Path, create: bool) -> io::Result<PrivateDir> {
     if !dir.is_absolute() || !splitty_core::config::socket_dir_supported(dir) {
         return Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "native endpoint needs an absolute path on a local Unix filesystem",
         ));
     }
-    let own = nix::unistd::geteuid().as_raw();
-    let mut current = PathBuf::new();
-    for component in dir.components() {
-        match component {
-            Component::RootDir => current.push(component),
-            Component::Normal(name) => current.push(name),
-            _ => {
-                return Err(unsafe_path(
-                    "native endpoint path contains a dot or prefix component",
-                ))
-            }
-        }
-        let meta = match fs::symlink_metadata(&current) {
-            Ok(meta) => meta,
-            Err(error) if create && error.kind() == io::ErrorKind::NotFound => {
-                match fs::DirBuilder::new().mode(0o700).create(&current) {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
-                    Err(error) => return Err(error),
-                }
-                fs::symlink_metadata(&current)?
-            }
-            Err(error) => return Err(error),
-        };
-        if !meta.is_dir() || meta.file_type().is_symlink() || (meta.uid() != own && meta.uid() != 0)
-        {
-            return Err(unsafe_path(format!(
-                "unsafe native endpoint ancestor: {}",
-                current.display()
-            )));
-        }
-        if meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0 {
-            return Err(unsafe_path(format!(
-                "writable native endpoint ancestor: {}",
-                current.display()
-            )));
-        }
-        if current == dir && (meta.uid() != own || meta.mode() & 0o777 != 0o700) {
-            return Err(unsafe_path(
-                "native endpoint directory must belong to this user with mode 0700",
-            ));
-        }
-    }
-    filesystem(dir)
+    let pinned = PrivateDir::open(dir, create)?;
+    filesystem(&pinned)?;
+    Ok(pinned)
 }
 
-fn filesystem(dir: &Path) -> io::Result<()> {
-    let fs = nix::sys::statfs::statfs(dir)?;
+fn filesystem(dir: &PrivateDir) -> io::Result<()> {
+    let fs = nix::sys::statfs::fstatfs(dir.file())?;
     #[cfg(target_os = "linux")]
     {
         use nix::sys::statfs::{FsType, MSDOS_SUPER_MAGIC, NFS_SUPER_MAGIC, SMB_SUPER_MAGIC};
@@ -124,7 +88,7 @@ fn filesystem(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn path_checked(path: &Path, create: bool) -> io::Result<()> {
+fn path_checked(path: &Path, create: bool) -> io::Result<PrivateDir> {
     if path.file_name().is_none() || path.as_os_str().len() > MAX_PATH {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -138,11 +102,11 @@ fn path_checked(path: &Path, create: bool) -> io::Result<()> {
     )
 }
 
-fn socket_metadata(path: &Path) -> io::Result<fs::Metadata> {
-    let meta = fs::symlink_metadata(path)?;
-    if !meta.file_type().is_socket()
-        || meta.uid() != nix::unistd::geteuid().as_raw()
-        || meta.mode() & 0o777 != 0o600
+fn socket_metadata(dir: &PrivateDir, name: &OsStr) -> io::Result<FileStat> {
+    let meta = dir.metadata(name)?;
+    if meta.st_mode & nix::libc::S_IFMT != nix::libc::S_IFSOCK
+        || meta.st_uid != nix::unistd::geteuid().as_raw()
+        || meta.st_mode & 0o777 != 0o600
     {
         return Err(unsafe_path(
             "native endpoint must be an owned 0600 socket, without symlinks",
@@ -151,24 +115,120 @@ fn socket_metadata(path: &Path) -> io::Result<fs::Metadata> {
     Ok(meta)
 }
 
+/// macOS has no bindat/connectat or /proc directory aliases. A dedicated
+/// thread's cwd pins name resolution without changing the process cwd or
+/// leaving a cwd override on an executor thread. The OS discards it on exit.
+#[cfg(target_os = "macos")]
+fn in_directory<T: Send>(
+    dir: &PrivateDir,
+    operation: impl FnOnce() -> io::Result<T> + Send,
+) -> io::Result<T> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("splitty-unix-socket".into())
+            .spawn_scoped(scope, || {
+                // libSystem SPI, available since macOS 10.12. Unlike fchdir this
+                // changes only this dedicated thread's cwd (libpthread/private.h).
+                unsafe extern "C" {
+                    fn pthread_fchdir_np(fd: nix::libc::c_int) -> nix::libc::c_int;
+                }
+                // SAFETY: dir holds a live directory descriptor for this thread's
+                // entire lifetime. No global cwd or borrowed Rust memory changes.
+                if unsafe { pthread_fchdir_np(dir.file().as_raw_fd()) } != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                operation()
+            })?
+            .join()
+            .map_err(|_| io::Error::other("native socket thread panicked"))?
+    })
+}
+
+fn bind_in(dir: &PrivateDir, name: &OsStr) -> io::Result<UnixListener> {
+    #[cfg(target_os = "linux")]
+    let listener = std::os::unix::net::UnixListener::bind(dir.descriptor_path(name)?)?;
+    #[cfg(target_os = "macos")]
+    let listener = in_directory(dir, || {
+        std::os::unix::net::UnixListener::bind(Path::new(name))
+    })?;
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    let listener: std::os::unix::net::UnixListener = {
+        let _ = (dir, name);
+        return Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "unsupported native socket platform",
+        ));
+    };
+    listener.set_nonblocking(true)?;
+    UnixListener::from_std(listener)
+}
+
+async fn connect_in(dir: &PrivateDir, name: &OsStr) -> io::Result<UnixStream> {
+    #[cfg(target_os = "linux")]
+    {
+        UnixStream::connect(dir.descriptor_path(name)?).await
+    }
+    #[cfg(target_os = "macos")]
+    {
+        use nix::{
+            fcntl::{fcntl, FcntlArg},
+            sys::socket::{connect, socket, AddressFamily, SockFlag, SockType, UnixAddr},
+        };
+        use std::os::fd::{FromRawFd, IntoRawFd};
+        let stream = in_directory(dir, || {
+            let fd = socket(
+                AddressFamily::Unix,
+                SockType::Stream,
+                SockFlag::empty(),
+                None,
+            )?;
+            fcntl(
+                fd.as_raw_fd(),
+                FcntlArg::F_SETFD(nix::fcntl::FdFlag::FD_CLOEXEC),
+            )?;
+            fcntl(fd.as_raw_fd(), FcntlArg::F_SETFL(OFlag::O_NONBLOCK))?;
+            match connect(fd.as_raw_fd(), &UnixAddr::new(Path::new(name))?) {
+                Ok(()) | Err(nix::errno::Errno::EINPROGRESS) => {}
+                Err(error) => return Err(error.into()),
+            }
+            // SAFETY: socket() created this owned nonblocking stream; transfer
+            // ownership exactly once to the standard library stream.
+            Ok(unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd.into_raw_fd()) })
+        })?;
+        let stream = UnixStream::from_std(stream)?;
+        stream.writable().await?;
+        if let Some(error) = stream.take_error()? {
+            return Err(error);
+        }
+        Ok(stream)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    {
+        let _ = (dir, name);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "unsupported native socket platform",
+        ))
+    }
+}
+
 /// Closing the file releases the lock only when the last inherited descriptor
 /// closes. There is deliberately no explicit unlock in Drop: a launcher and its
 /// daemon can temporarily share the open file description across exec.
 pub struct InstanceLock {
     file: File,
+    directory: PrivateDir,
 }
 impl InstanceLock {
     pub fn acquire(dir: &Path) -> io::Result<Self> {
-        directory(dir, true)?;
-        let path = dir.join(LOCK_NAME);
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .mode(0o600)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC | nix::libc::O_NONBLOCK)
-            .open(&path)?;
+        Self::in_directory(directory(dir, true)?)
+    }
+    fn in_directory(directory: PrivateDir) -> io::Result<Self> {
+        let file = directory.open_file(
+            OsStr::new(LOCK_NAME),
+            OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_NONBLOCK,
+            Mode::S_IRUSR | Mode::S_IWUSR,
+        )?;
         let meta = file.metadata()?;
         if !meta.is_file()
             || meta.uid() != nix::unistd::geteuid().as_raw()
@@ -184,7 +244,25 @@ impl InstanceLock {
         {
             return Err(io::Error::last_os_error());
         }
-        Ok(Self { file })
+        directory.verify()?;
+        Ok(Self { file, directory })
+    }
+    fn check_path(&self, path: &Path) -> io::Result<()> {
+        if path.parent() != Some(self.directory.path())
+            || path.file_name().is_none()
+            || path.as_os_str().len() > MAX_PATH
+        {
+            return Err(unsafe_path(
+                "socket does not belong to the held instance directory",
+            ));
+        }
+        self.directory.verify()
+    }
+    /// Called only after an owned child has exited, while this launcher still
+    /// holds the instance lock. A live/unverifiable socket is never removed.
+    pub async fn cleanup_socket(&self, path: &Path) -> io::Result<()> {
+        self.check_path(path)?;
+        clear_stale(&self.directory, path.file_name().expect("checked name")).await
     }
     pub fn file(&self) -> &File {
         &self.file
@@ -192,28 +270,19 @@ impl InstanceLock {
 }
 
 pub struct EndpointGuard {
-    path: PathBuf,
-    device: u64,
-    inode: u64,
-    cleanup: bool,
+    name: std::ffi::OsString,
+    device: nix::libc::dev_t,
+    inode: nix::libc::ino_t,
     pub lock: InstanceLock,
-}
-impl EndpointGuard {
-    /// The launched daemon now owns endpoint cleanup and inherited descriptors.
-    pub fn preserve_endpoint(&mut self) {
-        self.cleanup = false;
-    }
 }
 impl Drop for EndpointGuard {
     fn drop(&mut self) {
-        if self.cleanup
-            && fs::symlink_metadata(&self.path).is_ok_and(|meta| {
-                meta.dev() == self.device
-                    && meta.ino() == self.inode
-                    && meta.file_type().is_socket()
-            })
-        {
-            let _ = fs::remove_file(&self.path);
+        if self.lock.directory.metadata(&self.name).is_ok_and(|meta| {
+            meta.st_dev == self.device
+                && meta.st_ino == self.inode
+                && meta.st_mode & nix::libc::S_IFMT == nix::libc::S_IFSOCK
+        }) {
+            let _ = self.lock.directory.remove_file(&self.name);
         }
     }
 }
@@ -222,100 +291,93 @@ pub struct Bound {
     pub guard: EndpointGuard,
 }
 
-/// Take the two descriptors deliberately inherited from `daemon start`.
-/// Validate their types and exact configured paths before taking ownership;
-/// passing arbitrary descriptors to the internal command must fail closed.
-pub fn adopt(listen_fd: i32, lock_fd: i32, path: &Path) -> io::Result<Bound> {
-    use nix::{
-        fcntl::{fcntl, FcntlArg, FdFlag},
-        sys::socket::{getsockopt, sockopt},
-    };
-    use std::os::fd::{BorrowedFd, FromRawFd};
-    if listen_fd < 3 || lock_fd < 3 || listen_fd == lock_fd {
-        return Err(unsafe_path("invalid inherited native descriptors"));
+/// Take only the lock deliberately inherited from `daemon start`. The daemon
+/// binds its own listener after matching this descriptor to the configured
+/// lock inode; no socket-address spelling or connecting proof is required.
+pub fn adopt_lock(lock_fd: i32, dir: &Path) -> io::Result<InstanceLock> {
+    use nix::fcntl::{fcntl, FcntlArg, FdFlag};
+    use std::os::fd::FromRawFd;
+    if lock_fd < 3 {
+        return Err(unsafe_path("invalid inherited lock descriptor"));
     }
-    path_checked(path, false)?;
-    let meta = socket_metadata(path)?;
-    fcntl(listen_fd, FcntlArg::F_GETFD)?;
+    let directory = directory(dir, false)?;
     fcntl(lock_fd, FcntlArg::F_GETFD)?;
-    // SAFETY: F_GETFD verified both descriptors are open. These borrows end
-    // before ownership is transferred below.
-    let socket = unsafe { BorrowedFd::borrow_raw(listen_fd) };
-    if getsockopt(&socket, sockopt::SockType)? != nix::sys::socket::SockType::Stream {
-        return Err(unsafe_path("native listener is not a stream socket"));
-    }
-    let listening = match getsockopt(&socket, sockopt::AcceptConn) {
-        Ok(value) => value,
-        Err(nix::errno::Errno::ENOPROTOOPT) => {
-            nix::sys::socket::listen(&socket, nix::sys::socket::Backlog::MAXCONN).is_ok()
-        }
-        Err(error) => return Err(error.into()),
-    };
-    let address: nix::sys::socket::UnixAddr = nix::sys::socket::getsockname(listen_fd)?;
-    if !listening || address.path() != Some(path) {
-        return Err(unsafe_path(
-            "inherited listener does not name the configured native endpoint",
-        ));
-    }
-    let lock_meta = nix::sys::stat::fstat(lock_fd)?;
-    let lock_path = path.parent().expect("checked parent").join(LOCK_NAME);
-    let on_disk = fs::symlink_metadata(lock_path)?;
-    if !on_disk.is_file()
-        || on_disk.file_type().is_symlink()
-        || on_disk.uid() != nix::unistd::geteuid().as_raw()
-        || on_disk.mode() & 0o777 != 0o600
-        || on_disk.nlink() != 1
-        || lock_meta.st_dev as u64 != on_disk.dev()
-        || lock_meta.st_ino as u64 != on_disk.ino()
+    let held = nix::sys::stat::fstat(lock_fd)?;
+    let disk = directory.metadata(OsStr::new(LOCK_NAME))?;
+    if disk.st_mode & nix::libc::S_IFMT != nix::libc::S_IFREG
+        || disk.st_uid != nix::unistd::geteuid().as_raw()
+        || disk.st_mode & 0o777 != 0o600
+        || disk.st_nlink != 1
+        || held.st_dev != disk.st_dev
+        || held.st_ino != disk.st_ino
     {
         return Err(unsafe_path(
             "inherited instance lock does not name the configured lock",
         ));
     }
-    // SAFETY: lock_fd is an open descriptor verified above. A launcher passes
-    // the same open file description, so reacquiring its lock cannot unlock it.
+    // SAFETY: the verified descriptor is live; flock does not take ownership.
+    // Reacquiring the same inherited open file description keeps its lock.
     if unsafe { nix::libc::flock(lock_fd, nix::libc::LOCK_EX | nix::libc::LOCK_NB) } != 0 {
         return Err(io::Error::last_os_error());
     }
-    fcntl(listen_fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
+    directory.verify()?;
     fcntl(lock_fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
-    // SAFETY: validated descriptors were transferred to this internal command
-    // by its caller; neither is owned elsewhere in this process.
-    let listener = unsafe { std::os::unix::net::UnixListener::from_raw_fd(listen_fd) };
-    let file = unsafe { File::from_raw_fd(lock_fd) };
-    listener.set_nonblocking(true)?;
-    Ok(Bound {
-        listener: UnixListener::from_std(listener)?,
-        guard: EndpointGuard {
-            path: path.to_owned(),
-            device: meta.dev(),
-            inode: meta.ino(),
-            cleanup: true,
-            lock: InstanceLock { file },
-        },
+    // SAFETY: the internal caller transferred this verified descriptor; it
+    // remains caller-owned on every failure above.
+    Ok(InstanceLock {
+        file: unsafe { File::from_raw_fd(lock_fd) },
+        directory,
     })
 }
 
 /// Hold the instance lock before probing/removing a stale socket. A timeout,
 /// permission error or live endpoint is never treated as a stale socket.
 pub async fn bind(path: &Path) -> io::Result<Bound> {
-    path_checked(path, true)?;
-    let lock = InstanceLock::acquire(path.parent().expect("checked parent"))?;
-    match fs::symlink_metadata(path) {
+    let lock = InstanceLock::in_directory(path_checked(path, true)?)?;
+    bind_locked(path, lock).await
+}
+
+pub async fn bind_locked(path: &Path, lock: InstanceLock) -> io::Result<Bound> {
+    lock.check_path(path)?;
+    let dir = &lock.directory;
+    let name = path.file_name().expect("checked name");
+    clear_stale(dir, name).await?;
+    dir.verify()?;
+    let listener = bind_in(dir, name)?;
+    if let Err(error) = dir.private_socket(name) {
+        let _ = dir.remove_file(name);
+        return Err(error);
+    }
+    let meta = socket_metadata(dir, name)?;
+    let bound = Bound {
+        listener,
+        guard: EndpointGuard {
+            name: name.to_owned(),
+            device: meta.st_dev,
+            inode: meta.st_ino,
+            lock,
+        },
+    };
+    bound.guard.lock.directory.verify()?;
+    Ok(bound)
+}
+
+async fn clear_stale(dir: &PrivateDir, name: &OsStr) -> io::Result<()> {
+    match dir.metadata(name) {
         Ok(_) => {
-            let old = socket_metadata(path)?;
-            match tokio::time::timeout(Duration::from_secs(1), UnixStream::connect(path)).await {
+            let old = socket_metadata(dir, name)?;
+            match tokio::time::timeout(Duration::from_secs(1), connect_in(dir, name)).await {
                 Ok(Err(error))
                     if matches!(
                         error.kind(),
                         io::ErrorKind::ConnectionRefused | io::ErrorKind::NotFound
                     ) =>
                 {
-                    let current = socket_metadata(path)?;
-                    if current.dev() != old.dev() || current.ino() != old.ino() {
+                    let current = socket_metadata(dir, name)?;
+                    if current.st_dev != old.st_dev || current.st_ino != old.st_ino {
                         return Err(unsafe_path("native endpoint changed during stale check"));
                     }
-                    fs::remove_file(path)?;
+                    dir.remove_file(name)?;
                 }
                 _ => {
                     return Err(io::Error::new(
@@ -328,22 +390,7 @@ pub async fn bind(path: &Path) -> io::Result<Bound> {
         Err(error) if error.kind() == io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
-    let listener = UnixListener::bind(path)?;
-    if let Err(error) = fs::set_permissions(path, fs::Permissions::from_mode(0o600)) {
-        let _ = fs::remove_file(path);
-        return Err(error);
-    }
-    let meta = socket_metadata(path)?;
-    Ok(Bound {
-        listener,
-        guard: EndpointGuard {
-            path: path.to_owned(),
-            device: meta.dev(),
-            inode: meta.ino(),
-            cleanup: true,
-            lock,
-        },
-    })
+    Ok(())
 }
 
 fn peer_uid(stream: &impl AsFd) -> Option<u32> {
@@ -377,16 +424,18 @@ pub fn verify_peer(stream: &impl AsFd) -> io::Result<()> {
 }
 
 pub async fn connect(path: &Path) -> io::Result<UnixStream> {
-    path_checked(path, false)?;
-    let before = socket_metadata(path)?;
-    let stream = tokio::time::timeout(Duration::from_secs(5), UnixStream::connect(path))
+    let dir = path_checked(path, false)?;
+    let name = path.file_name().expect("checked name");
+    let before = socket_metadata(&dir, name)?;
+    let stream = tokio::time::timeout(Duration::from_secs(5), connect_in(&dir, name))
         .await
         .map_err(|_| {
             io::Error::new(io::ErrorKind::TimedOut, "native endpoint connect timed out")
         })??;
     verify_peer(&stream)?;
-    let after = socket_metadata(path)?;
-    if before.dev() != after.dev() || before.ino() != after.ino() {
+    dir.verify()?;
+    let after = socket_metadata(&dir, name)?;
+    if before.st_dev != after.st_dev || before.st_ino != after.st_ino {
         return Err(unsafe_path("native endpoint changed during connect"));
     }
     Ok(stream)
@@ -395,6 +444,10 @@ pub async fn connect(path: &Path) -> io::Result<UnixStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::{
+        fs::{self, OpenOptions},
+        os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    };
     fn dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
@@ -431,6 +484,62 @@ mod tests {
         assert!(!path.exists());
         bind(&path).await.unwrap();
     }
+    #[tokio::test]
+    async fn group_writable_ancestors_work_without_chmod_or_cwd_changes() {
+        let temp = dir();
+        let parent = temp.path().canonicalize().unwrap().join("shared");
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o775)).unwrap();
+        let path = parent.join("private").join(SOCKET_NAME);
+        let cwd = std::env::current_dir().unwrap();
+        let bound = bind(&path).await.unwrap();
+        let client = connect(&path).await.unwrap();
+        let (server, _) = bound.listener.accept().await.unwrap();
+        verify_peer(&server).unwrap();
+        verify_peer(&client).unwrap();
+        assert_eq!(std::env::current_dir().unwrap(), cwd);
+        assert_eq!(fs::metadata(&parent).unwrap().mode() & 0o777, 0o775);
+    }
+
+    #[tokio::test]
+    async fn pinned_bind_lock_and_cleanup_never_follow_a_replaced_directory() {
+        let temp = dir();
+        let root = temp.path().canonicalize().unwrap();
+        let original = root.join("original");
+        let moved = root.join("moved");
+        let lock = InstanceLock::acquire(&original).unwrap();
+        fs::rename(&original, &moved).unwrap();
+        let replacement = bind(&original.join(SOCKET_NAME)).await.unwrap();
+        assert!(lock.directory.verify().is_err());
+        // Direct platform operation exercises the race *after* the last path
+        // verification: it still binds inside the originally pinned inode.
+        let listener = bind_in(&lock.directory, OsStr::new(SOCKET_NAME)).unwrap();
+        lock.directory
+            .private_socket(OsStr::new(SOCKET_NAME))
+            .unwrap();
+        let meta = socket_metadata(&lock.directory, OsStr::new(SOCKET_NAME)).unwrap();
+        let bound = Bound {
+            listener,
+            guard: EndpointGuard {
+                name: SOCKET_NAME.into(),
+                device: meta.st_dev,
+                inode: meta.st_ino,
+                lock,
+            },
+        };
+        assert!(InstanceLock::acquire(&moved).is_err());
+        let client = connect(&moved.join(SOCKET_NAME)).await.unwrap();
+        let (server, _) = bound.listener.accept().await.unwrap();
+        verify_peer(&client).unwrap();
+        verify_peer(&server).unwrap();
+        drop(bound);
+        assert!(!moved.join(SOCKET_NAME).exists());
+        let client = connect(&original.join(SOCKET_NAME)).await.unwrap();
+        let (server, _) = replacement.listener.accept().await.unwrap();
+        verify_peer(&client).unwrap();
+        verify_peer(&server).unwrap();
+    }
+
     #[tokio::test]
     async fn symlinks_files_unsafe_modes_mounts_and_long_paths_fail_closed() {
         let dir = dir();
@@ -476,29 +585,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn inherited_descriptors_keep_the_instance_locked_after_the_launcher_exits() {
+    async fn inherited_lock_keeps_exclusivity_and_child_binds_after_launcher_exits() {
         use nix::fcntl::{fcntl, FcntlArg, FdFlag};
-        let dir = dir();
-        let path = dir.path().canonicalize().unwrap().join(SOCKET_NAME);
-        let mut parent = bind(&path).await.unwrap();
-        // Atomic CLOEXEC avoids leaking the fixture lock into children spawned
-        // by parallel tests between duplication and adoption.
-        let listen_fd = fcntl(parent.listener.as_raw_fd(), FcntlArg::F_DUPFD_CLOEXEC(3)).unwrap();
-        let lock_fd = fcntl(
-            parent.guard.lock.file().as_raw_fd(),
-            FcntlArg::F_DUPFD_CLOEXEC(3),
-        )
-        .unwrap();
-        let child = adopt(listen_fd, lock_fd, &path).unwrap();
-        for fd in [listen_fd, lock_fd] {
-            assert!(
-                FdFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFD).unwrap())
-                    .contains(FdFlag::FD_CLOEXEC)
-            );
-        }
-        parent.guard.preserve_endpoint();
+        let temp = dir();
+        let root = temp.path().canonicalize().unwrap();
+        let path = root.join(SOCKET_NAME);
+        let parent = InstanceLock::acquire(&root).unwrap();
+        assert!(!path.exists(), "launcher never binds a socket");
+        let fd = fcntl(parent.file().as_raw_fd(), FcntlArg::F_DUPFD_CLOEXEC(3)).unwrap();
+        let child_lock = adopt_lock(fd, &root).unwrap();
+        assert!(
+            FdFlag::from_bits_truncate(fcntl(fd, FcntlArg::F_GETFD).unwrap())
+                .contains(FdFlag::FD_CLOEXEC)
+        );
         drop(parent);
-        assert!(InstanceLock::acquire(path.parent().unwrap()).is_err());
+        assert!(InstanceLock::acquire(&root).is_err());
+        let child = bind_locked(&path, child_lock).await.unwrap();
         let client = connect(&path).await.unwrap();
         let (server, _) = child.listener.accept().await.unwrap();
         verify_peer(&server).unwrap();
@@ -510,31 +612,29 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn adoption_refuses_wrong_lock_path_and_non_native_or_non_listening_descriptors() {
-        let dir = dir();
-        let path = dir.path().canonicalize().unwrap().join(SOCKET_NAME);
+    async fn adoption_refuses_wrong_lock_inode_path_and_descriptor_type_without_consuming_them() {
+        let temp = dir();
+        let root = temp.path().canonicalize().unwrap();
+        let path = root.join(SOCKET_NAME);
         let bound = bind(&path).await.unwrap();
-        let listener = bound.listener.as_raw_fd();
-        let lock = bound.guard.lock.file().as_raw_fd();
-        assert!(adopt(0, lock, &path).is_err());
-        assert!(adopt(listener, listener, &path).is_err());
+        assert!(adopt_lock(0, &root).is_err());
+        assert!(adopt_lock(bound.listener.as_raw_fd(), &root).is_err());
+        let other = root.join("other");
+        let other_lock = InstanceLock::acquire(&other).unwrap();
+        assert!(adopt_lock(other_lock.file().as_raw_fd(), &root).is_err());
+        assert!(adopt_lock(bound.guard.lock.file().as_raw_fd(), &other).is_err());
         let wrong = OpenOptions::new()
             .read(true)
             .write(true)
             .create_new(true)
             .mode(0o600)
-            .open(dir.path().join("wrong.lock"))
+            .open(root.join("wrong.lock"))
             .unwrap();
-        assert!(adopt(listener, wrong.as_raw_fd(), &path).is_err());
-        let tcp = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        assert!(adopt(tcp.as_raw_fd(), lock, &path).is_err());
-        let (a, _b) = std::os::unix::net::UnixStream::pair().unwrap();
-        assert!(adopt(a.as_raw_fd(), lock, &path).is_err());
-        assert!(adopt(listener, lock, &dir.path().join("different.sock")).is_err());
-        // Rejections do not unlink the live endpoint or take these FDs.
+        assert!(adopt_lock(wrong.as_raw_fd(), &root).is_err());
         let client = connect(&path).await.unwrap();
         let (server, _) = bound.listener.accept().await.unwrap();
         verify_peer(&server).unwrap();
         drop(client);
+        assert!(InstanceLock::acquire(&root).is_err());
     }
 }

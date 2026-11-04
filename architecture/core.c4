@@ -31,7 +31,7 @@ model {
     // Configuration and files
 
     config = component 'config' {
-      description 'User and server settings (config.toml, camelCase on the wire), the config directory (or the absolute one SPLITTY_CONFIG_DIR names) and the owner-only file helpers every writer of it uses.'
+      description 'User and server settings (config.toml, camelCase on the wire), the config directory (or the absolute one SPLITTY_CONFIG_DIR names) and owner-only file helpers. PrivateDir pins an owned private directory with a no-follow descriptor walk for native endpoints and daemon discovery/log operations, permitting owned group-writable ancestors unchanged.'
       metadata {
         module 'splitty_core::config'
       }

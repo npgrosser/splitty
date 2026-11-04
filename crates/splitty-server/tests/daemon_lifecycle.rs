@@ -66,6 +66,32 @@ impl Sandbox {
         Self { home, runtime_dir }
     }
 
+    /// Common umask-0002 setup: existing shared data/config parents, while
+    /// Splitty owns private subdirectories. Never repair these parents.
+    fn shared_parents(&self) {
+        use std::os::unix::fs::PermissionsExt;
+        for parent in [
+            self.config_dir().parent().unwrap(),
+            self.run_dir().parent().unwrap().parent().unwrap(),
+        ] {
+            fs::create_dir_all(parent).unwrap();
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o775)).unwrap();
+        }
+    }
+
+    fn assert_shared_parents_unchanged(&self) {
+        use std::os::unix::fs::PermissionsExt;
+        for parent in [
+            self.config_dir().parent().unwrap(),
+            self.run_dir().parent().unwrap().parent().unwrap(),
+        ] {
+            assert_eq!(
+                fs::metadata(parent).unwrap().permissions().mode() & 0o777,
+                0o775
+            );
+        }
+    }
+
     /// Point a command at this sandbox instead of the invoking user's setup.
     fn isolate<'a>(&self, cmd: &'a mut Command) -> &'a mut Command {
         cmd.env(
@@ -900,6 +926,7 @@ impl Drop for ChildGuard {
 #[test]
 fn start_status_control_command_stop() {
     let sandbox = Sandbox::new();
+    sandbox.shared_parents();
 
     let start = sandbox.splitty(&["daemon", "start"]);
     assert!(
@@ -1018,6 +1045,7 @@ fn start_status_control_command_stop() {
         }
     }
 
+    sandbox.assert_shared_parents_unchanged();
     let log = sandbox.daemon_log();
     assert!(
         log.contains("daemon started"),
@@ -1163,7 +1191,7 @@ fn a_live_legacy_record_is_diagnostic_and_never_selects_its_tcp_port() {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
     let directory = sandbox.config_dir();
-    splitty_core::daemon::private_directory(&directory).unwrap();
+    splitty_core::config::PrivateDir::open(&directory, true).unwrap();
     fs::write(sandbox.info_path(), serde_json::to_vec(&serde_json::json!({
         "pid":legacy.0.id(), "port":listener.local_addr().unwrap().port(), "socket":"", "startedAt":"1", "version":"0.0.1", "token":"old-secret"
     })).unwrap()).unwrap();
@@ -1509,31 +1537,15 @@ fn native_child_arguments_and_legacy_bootstrap_input_fail_before_backend_creatio
 }
 
 /// `daemon run` is the process `daemon start` spawns. Started by hand with a
-/// listener, it serves on its own and announces that on stdout.
+/// instance lock, it binds its own endpoint and announces readiness on stdout.
 #[test]
-fn daemon_run_serves_an_inherited_listener() {
+fn daemon_run_serves_after_inheriting_its_instance_lock() {
     let sandbox = Sandbox::new();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    let mut bound = runtime
-        .block_on(splitty_server::native::endpoint::bind(
-            &sandbox.run_dir().join("client.sock"),
-        ))
-        .expect("bind native endpoint");
-    let fd = bound.listener.as_raw_fd();
-    let lock_fd = bound.guard.lock.file().as_raw_fd();
+    let lock = splitty_server::native::endpoint::InstanceLock::acquire(&sandbox.run_dir()).unwrap();
+    let lock_fd = lock.file().as_raw_fd();
 
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_splitty"));
-    cmd.args([
-        "daemon",
-        "run",
-        "--listen-fd",
-        &fd.to_string(),
-        "--lock-fd",
-        &lock_fd.to_string(),
-    ]);
+    cmd.args(["daemon", "run", "--lock-fd", &lock_fd.to_string()]);
     sandbox
         .isolate(&mut cmd)
         .stdout(Stdio::piped())
@@ -1542,10 +1554,6 @@ fn daemon_run_serves_an_inherited_listener() {
     unsafe {
         cmd.pre_exec(move || {
             nix::fcntl::fcntl(
-                fd,
-                nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
-            )?;
-            nix::fcntl::fcntl(
                 lock_fd,
                 nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
             )?;
@@ -1553,8 +1561,7 @@ fn daemon_run_serves_an_inherited_listener() {
         });
     }
     let mut child = ChildGuard(cmd.spawn().expect("spawn daemon run"));
-    bound.guard.preserve_endpoint();
-    drop(bound);
+    drop(lock);
     let pid = child.0.id();
     let stderr_log =
         || fs::read_to_string(sandbox.home.path().join("run.stderr")).unwrap_or_default();
@@ -1598,12 +1605,12 @@ fn daemon_run_serves_an_inherited_listener() {
     );
 }
 
-/// A descriptor that is not a listener is refused with an error line, before
+/// An invalid instance-lock descriptor is refused with an error line, before
 /// anything names the process in `daemon.json`.
 #[test]
-fn daemon_run_refuses_a_descriptor_that_is_not_a_listener() {
+fn daemon_run_refuses_an_invalid_lock_descriptor() {
     let sandbox = Sandbox::new();
-    let out = sandbox.splitty(&["daemon", "run", "--listen-fd", "900", "--lock-fd", "901"]);
+    let out = sandbox.splitty(&["daemon", "run", "--lock-fd", "901"]);
     assert_eq!(out.status.code(), Some(1), "{}", sandbox.describe(&out));
     assert!(
         stdout(&out).starts_with("SPLITTY_DAEMON_ERROR "),
@@ -3789,6 +3796,7 @@ fn a_kept_shell_survives_a_pinned_previous_binary_rollback_and_return() {
         Some(expected.as_str())
     );
     let sandbox = Sandbox::new();
+    sandbox.shared_parents();
 
     // pidfds hold exact fixture generations, including on assertion failure.
     struct Owned(Vec<File>);
@@ -4270,5 +4278,6 @@ fn a_kept_shell_survives_a_pinned_previous_binary_rollback_and_return() {
             .all(|file| matches!(Owned::exited(file), Ok(true)))
     });
     assert_eq!(sandbox.keeper_sockets(), 0);
+    sandbox.assert_shared_parents_unchanged();
     eprintln!("PROVED historical rollback current→{expected}→current: current and historical keeper executables both retain original shell PID, private state, session and keeper inode; unrelated process survives; exact processes exited");
 }

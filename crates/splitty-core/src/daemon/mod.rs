@@ -132,84 +132,50 @@ fn write_record(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::other("missing discovery directory"))?;
-    private_directory(parent)?;
-    let temp = parent.join(format!(".daemon-{}.tmp", uuid::Uuid::new_v4()));
-    let mut options = fs::OpenOptions::new();
-    options.create_new(true).write(true);
+    let temp = format!(".daemon-{}.tmp", uuid::Uuid::new_v4());
     #[cfg(unix)]
     {
-        use std::os::unix::fs::OpenOptionsExt;
-        options
-            .mode(0o600)
-            .custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC);
-    }
-    let result = (|| {
-        let mut file = options.open(&temp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        fs::rename(&temp, path)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp);
-    }
-    result
-}
-
-/// Publication must not follow a configuration-directory symlink or harden a
-/// directory belonging to another user. Existing owner directories may be
-/// traversable; the final directory is required to be private.
-pub fn private_directory(path: &std::path::Path) -> io::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::{
-            os::unix::fs::{DirBuilderExt, MetadataExt},
-            path::Component,
-        };
-        if !path.is_absolute() {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "daemon directory must be absolute",
-            ));
+        use nix::{fcntl::OFlag, sys::stat::Mode};
+        use std::ffi::OsStr;
+        let directory = crate::config::PrivateDir::open(parent, true)?;
+        let result = (|| {
+            let mut file = directory.open_file(
+                OsStr::new(&temp),
+                OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL,
+                Mode::S_IRUSR | Mode::S_IWUSR,
+            )?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            directory.verify()?;
+            directory.rename(
+                OsStr::new(&temp),
+                path.file_name()
+                    .ok_or_else(|| io::Error::other("missing discovery file name"))?,
+            )?;
+            directory.verify()
+        })();
+        if result.is_err() {
+            let _ = directory.remove_file(OsStr::new(&temp));
         }
-        let own = nix::unistd::geteuid().as_raw();
-        let mut part = PathBuf::new();
-        for component in path.components() {
-            if !matches!(component, Component::RootDir | Component::Normal(_)) {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "unsafe daemon directory component",
-                ));
-            }
-            part.push(component);
-            let meta = match fs::symlink_metadata(&part) {
-                Ok(meta) => meta,
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    match fs::DirBuilder::new().mode(0o700).create(&part) {
-                        Ok(()) => {}
-                        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-                        Err(e) => return Err(e),
-                    }
-                    fs::symlink_metadata(&part)?
-                }
-                Err(e) => return Err(e),
-            };
-            if !meta.is_dir()
-                || meta.file_type().is_symlink()
-                || (meta.uid() != own && meta.uid() != 0)
-                || (meta.mode() & 0o022 != 0 && meta.mode() & 0o1000 == 0)
-                || (part == path && (meta.uid() != own || meta.mode() & 0o777 != 0o700))
-            {
-                return Err(io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "unsafe daemon configuration directory",
-                ));
-            }
-        }
-        Ok(())
+        result
     }
     #[cfg(not(unix))]
     {
-        crate::config::ensure_private_dir(path)
+        crate::config::ensure_private_dir(parent)?;
+        let temp = parent.join(temp);
+        let result = (|| {
+            let mut file = fs::OpenOptions::new()
+                .create_new(true)
+                .write(true)
+                .open(&temp)?;
+            file.write_all(bytes)?;
+            file.sync_all()?;
+            fs::rename(&temp, path)
+        })();
+        if result.is_err() {
+            let _ = fs::remove_file(&temp);
+        }
+        result
     }
 }
 
@@ -221,20 +187,35 @@ pub fn read_info() -> Option<DaemonInfo> {
 /// Startup must distinguish absent metadata from damaged live discovery. The
 /// native instance lock remains authoritative even when this record is lost.
 pub fn read_info_checked() -> io::Result<Option<DaemonInfo>> {
-    use std::io::Read;
     let path = info_path();
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(nix::libc::O_NOFOLLOW | nix::libc::O_CLOEXEC | nix::libc::O_NONBLOCK);
-    }
-    let file = match options.open(path) {
+    let directory =
+        match crate::config::PrivateDir::open(path.parent().expect("discovery parent"), false) {
+            Ok(directory) => directory,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error),
+        };
+    #[cfg(unix)]
+    let opened = directory.open_file(
+        path.file_name().expect("discovery name"),
+        nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_NONBLOCK,
+        nix::sys::stat::Mode::empty(),
+    );
+    #[cfg(not(unix))]
+    let opened = fs::File::open(path);
+    let file = match opened {
         Ok(file) => file,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
+    let info = read_record(file)?;
+    #[cfg(unix)]
+    directory.verify()?;
+    Ok(Some(info))
+}
+
+fn read_record(file: fs::File) -> io::Result<DaemonInfo> {
+    use std::io::Read;
     let meta = file.metadata()?;
     if !meta.is_file() || meta.len() > 16 * 1024 {
         return Err(io::Error::new(
@@ -262,7 +243,7 @@ pub fn read_info_checked() -> io::Result<Option<DaemonInfo>> {
     }
     let info: DaemonInfo = serde_json::from_slice(&data)?;
     info.validate()?;
-    Ok(Some(info))
+    Ok(info)
 }
 
 /// What `splitty daemon status --json` prints: the info file of a running daemon, or only
@@ -286,9 +267,45 @@ impl DaemonStatus {
     }
 }
 
-/// Remove the daemon info file. Ignores errors (file may already be gone).
-pub fn remove_info() {
-    let _ = fs::remove_file(info_path());
+/// Remove only the expected publication. Reading and unlinking share the
+/// retained private directory, so an ancestor swap cannot redirect cleanup.
+pub fn remove_info_if(expected: &DaemonInfo) -> io::Result<bool> {
+    #[cfg(unix)]
+    {
+        let directory = crate::config::PrivateDir::open(&config_dir(), false)?;
+        remove_record_if(&directory, expected)
+    }
+    #[cfg(not(unix))]
+    {
+        if read_info_checked()?.as_ref() != Some(expected) {
+            return Ok(false);
+        }
+        fs::remove_file(info_path())?;
+        Ok(true)
+    }
+}
+
+#[cfg(unix)]
+fn remove_record_if(
+    directory: &crate::config::PrivateDir,
+    expected: &DaemonInfo,
+) -> io::Result<bool> {
+    use nix::{fcntl::OFlag, sys::stat::Mode};
+    use std::ffi::OsStr;
+    let name = OsStr::new("daemon.json");
+    let file = directory.open_file(name, OFlag::O_RDONLY | OFlag::O_NONBLOCK, Mode::empty())?;
+    use std::os::fd::AsRawFd;
+    let opened = nix::sys::stat::fstat(file.as_raw_fd())?;
+    if &read_record(file)? != expected {
+        return Ok(false);
+    }
+    directory.verify()?;
+    let current = directory.metadata(name)?;
+    if current.st_dev != opened.st_dev || current.st_ino != opened.st_ino {
+        return Ok(false);
+    }
+    directory.remove_file(name)?;
+    Ok(true)
 }
 
 /// Check if a process with the given PID is alive (signal-0 check).
@@ -704,11 +721,52 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn conditional_discovery_cleanup_keeps_replacements_and_rejects_directory_swaps() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let path = root.join("private");
+        let pinned = crate::config::PrivateDir::open(&path, true).unwrap();
+        let original = info();
+        write_record(
+            &path.join("daemon.json"),
+            &serde_json::to_vec(&original).unwrap(),
+        )
+        .unwrap();
+        let mut replacement = original.clone();
+        replacement.instance = Some("b".repeat(32));
+        write_record(
+            &path.join("daemon.json"),
+            &serde_json::to_vec(&replacement).unwrap(),
+        )
+        .unwrap();
+        assert!(!remove_record_if(&pinned, &original).unwrap());
+        assert!(remove_record_if(&pinned, &replacement).unwrap());
+        write_record(
+            &path.join("daemon.json"),
+            &serde_json::to_vec(&original).unwrap(),
+        )
+        .unwrap();
+        fs::rename(&path, root.join("moved")).unwrap();
+        crate::config::PrivateDir::open(&path, true).unwrap();
+        let bytes = serde_json::to_vec(&replacement).unwrap();
+        write_record(&path.join("daemon.json"), &bytes).unwrap();
+        assert!(remove_record_if(&pinned, &original).is_err());
+        assert_eq!(fs::read(path.join("daemon.json")).unwrap(), bytes);
+        assert!(root.join("moved/daemon.json").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn metadata_publication_is_atomic_private_and_never_follows_a_link() {
         use std::os::unix::fs::{symlink, MetadataExt, PermissionsExt};
         let dir = tempfile::tempdir().unwrap();
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let root = dir.path().canonicalize().unwrap();
+        let shared = root.join("shared");
+        fs::create_dir(&shared).unwrap();
+        fs::set_permissions(&shared, fs::Permissions::from_mode(0o775)).unwrap();
+        let root = shared.join("private");
+        crate::config::PrivateDir::open(&root, true).unwrap();
         let target = root.join("daemon.json");
         let unrelated = root.join("unrelated");
         fs::write(&unrelated, "preserve").unwrap();
@@ -717,6 +775,7 @@ mod tests {
         assert_eq!(fs::read(&unrelated).unwrap(), b"preserve");
         assert_eq!(fs::read(&target).unwrap(), b"complete");
         assert_eq!(fs::metadata(&target).unwrap().mode() & 0o777, 0o600);
+        assert_eq!(fs::metadata(&shared).unwrap().mode() & 0o777, 0o775);
         let linked = root.join("linked");
         symlink(&root, &linked).unwrap();
         assert!(write_record(&linked.join("no-write.json"), b"bad").is_err());

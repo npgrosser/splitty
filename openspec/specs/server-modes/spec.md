@@ -28,7 +28,7 @@ The server SHALL report its mode to clients as `serverMode` with the value `"dae
 - **THEN** the response contains `"serverMode": "embedded"`
 
 ### Requirement: Ephemeral Port And Bind Before Detach
-An explicit browser gateway using port 0 SHALL report the actual OS-assigned loopback port everywhere, including its origin and startup output. A daemon SHALL bind its mandatory private client endpoint and acquire its instance lock before detaching. Failure SHALL be reported in the foreground with no orphan daemon. Native daemon discovery SHALL not invent or require a TCP port.
+An explicit browser gateway using port 0 SHALL report the actual OS-assigned loopback port everywhere, including its origin and startup output. The daemon launcher SHALL acquire the instance lock before starting its detached child and SHALL wait for that child to bind the mandatory private client endpoint and complete native readiness before reporting success. Failure SHALL be reported in the foreground with no orphan daemon. Native daemon discovery SHALL not invent or require a TCP port.
 
 #### Scenario: OS-assigned port reported
 - **WHEN** `splitty serve --addr 127.0.0.1:0` starts
