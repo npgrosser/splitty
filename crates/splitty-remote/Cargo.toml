@@ -13,6 +13,7 @@ thiserror = { workspace = true }
 sha2 = "0.10"
 serde = { workspace = true }
 serde_json = { workspace = true }
+semver = "1"
 rand = { workspace = true }
 # The home directory, for the user's ~/.ssh (known hosts).
 dirs = "6"

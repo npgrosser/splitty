@@ -225,10 +225,11 @@ host's desktop package, and copies it with a SHA-256 checksum to Downloads.
 WSL builds the Windows installer and uses the Windows host's Downloads folder.
 The workflow publishes the GitHub release; the skill does not install the app.
 
-Every release has a version of its own: hosts and the Windows WSL backend
-install a server per version, so a build under an old version would leave their
-older server in place. One command sets the version in `Cargo.toml`,
-`Cargo.lock`, the Tauri and the Electron configuration, commits and tags:
+Every distributed build needs a version of its own: hosts and the Windows WSL
+backend install a server per version. On a remote host, reusing a version can
+replace the payload on disk while leaving an existing daemon of that same
+version running. One command sets the version in `Cargo.toml`, `Cargo.lock`,
+the Tauri and the Electron configuration, commits and tags:
 
 ```bash
 scripts/release.sh 0.1.2
@@ -242,6 +243,19 @@ built; a tag with a suffix (`v0.2.0-rc.1`) becomes a prerelease. The Windows ins
 installed Splitty to update it, and uninstall it from Windows' installed apps.
 The **Windows Tauri (WSL backend)** workflow, started by hand, builds only the
 installer for any commit, as a workflow artifact.
+
+For a branch preview without a release tag, set a distinct prerelease such as
+`0.2.0-dev.1` in `Cargo.toml`, `crates/splitty-tauri/tauri.conf.json` and
+`frontend-electron/package.json`, then run `cargo update --workspace --offline`
+and `scripts/release.sh --check v0.2.0-dev.1`. The check does not create a tag.
+Commit these files and `Cargo.lock` before building a Windows preview. The
+branch name and commit hash do not automatically change the version. Increment
+the prerelease number for each subsequent distributed preview; adding build
+metadata alone does not make a daemon eligible for an automatic update.
+Remote updates follow SemVer precedence: `0.2.0-dev.9` precedes
+`0.2.0-dev.10`, and every `0.2.0` prerelease precedes `0.2.0`. The native
+identity and session-keeper requirements still apply; a legacy daemon needs
+the explicit migration described in [CLI documentation](cli.md#splitty-daemon).
 
 After a successful release run, **Cleanup release artifacts** deletes that
 run's Actions artifacts; the files attached to the release remain available.

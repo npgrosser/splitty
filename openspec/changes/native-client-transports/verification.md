@@ -1,3 +1,39 @@
+# Preview version and daemon upgrade ordering
+
+The native transport preview uses `0.2.0-dev.1` throughout the workspace,
+Tauri/Electron configuration and generated lockfile. Remote installation uses
+`remote/0.2.0-dev.1/`; subsequent distributed previews need distinct versions.
+The commit hash and branch name do not select a new installation version.
+
+Automatic daemon updates now use SemVer precedence, including numeric
+prerelease ordering and prerelease-to-stable upgrades. Build metadata alone
+does not trigger replacement; malformed versions never authorize it. Keeper,
+verifiable native-instance and exact replacement-payload requirements remain
+unchanged. In particular, the version bump does not automatically migrate a
+legacy `0.1.30` daemon.
+
+Local verification for this adjustment:
+
+- All 1,056 reported workspace tests and all 97 GUI library tests pass;
+  workspace and GUI all-targets clippy pass with warnings denied.
+- The supervisor's 11 tests include 24 connection-policy combinations and an
+  explicit refusal to stop or bridge an older daemon without native identity.
+- The existing installation test preserves a running `0.1.30` executable while
+  installing `0.2.0-dev.1` and removing an unused `0.2.0-dev.0` directory.
+- The built CLI reports `splitty 0.2.0-dev.1`; the release script's read-only
+  consistency check passes. Formatting, all 15 main specifications and strict
+  change validation pass.
+- The Electron build passes and packages 58 frontend assets.
+- Independent source review found no blocker in the policy or packaging.
+  Tauri's NSIS configuration preserves the full prerelease for display and
+  version comparison while normalizing numeric Windows metadata to `0.2.0.0`.
+  This was a source check, not a fresh Windows installer or GUI execution.
+
+No release tag is created for this preview adjustment. Earlier platform runtime
+evidence retains the revision and environment limits documented below.
+
+---
+
 # Post-review correction status
 
 Review corrections are implemented at `270e412`. The complete hosted

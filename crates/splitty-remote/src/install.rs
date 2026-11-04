@@ -794,30 +794,32 @@ mod tests {
         // `sleep`, so /proc/<pid>/exe stays the copy.
         let shell = which("sh");
         let mut running = None;
-        for version in ["0.0.1", "0.0.2"] {
+        for version in ["0.1.30", "0.2.0-dev.0"] {
             let dir = version_dir(home.path(), version);
             fs::create_dir_all(&dir).expect("mkdir");
             fs::copy(&shell, dir.join("splitty")).expect("copy sh");
-            if version == "0.0.1" {
+            if version == "0.1.30" {
                 // The daemon of an older version keeps running from here.
                 running = Some(spawn_copied(&dir.join("splitty"), &["-c", "sleep 30; :"]));
             }
         }
         let host = LocalShell::new(home.path().to_path_buf());
-        let result = prepare(&host, "0.1.0", |_, _| Ok(Some(payload(true))), |_| {}).await;
+        let result = prepare(&host, "0.2.0-dev.1", |_, _| Ok(Some(payload(true))), |_| {}).await;
         let mut running = running.expect("running");
         let _ = running.kill();
         let _ = running.wait();
         result.expect("install");
         assert!(
-            version_dir(home.path(), "0.0.1").join("splitty").exists(),
+            version_dir(home.path(), "0.1.30").join("splitty").exists(),
             "in use: kept"
         );
         assert!(
-            !version_dir(home.path(), "0.0.2").exists(),
+            !version_dir(home.path(), "0.2.0-dev.0").exists(),
             "unused: removed"
         );
-        assert!(version_dir(home.path(), "0.1.0").join("splitty").exists());
+        assert!(version_dir(home.path(), "0.2.0-dev.1")
+            .join("splitty")
+            .exists());
     }
 
     /// Start a just-copied executable. Another test thread may fork while the

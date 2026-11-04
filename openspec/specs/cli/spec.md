@@ -267,7 +267,7 @@ Control commands SHALL exit with status 0 on success. On any failure they SHALL 
 ### Requirement: Remote Connect Tunnel
 After target validation, `splitty connect` SHALL use the existing remote installation and noninteractive system-SSH flow, then handshake format 2 with `--ensure-daemon` and no port hint. It SHALL establish a native exec bridge to the host's private daemon endpoint and create its own loopback browser gateway. A free gateway port SHALL not need to match any remote port. No daemon TCP forwarding SHALL be requested. Phase failures SHALL exit with status 1 and clean up owned resources.
 
-A daemon of another version SHALL be reported. The existing automatic update is allowed only when it is older, keeps sessions and the answering installed server matches the client; then stop/start it without ending keepers and renegotiate. Otherwise leave it running and use it only when transport and mux protocols are supported; incompatibility SHALL fail with update guidance rather than HTTP fallback.
+A daemon of another version SHALL be reported. The existing automatic update is allowed only when it is older, keeps sessions, has a verifiable native instance and the answering installed server's version exactly matches the client's; then stop/start it without ending keepers and renegotiate. Version order SHALL follow Semantic Versioning precedence, accepting one optional leading `v`, comparing numeric prerelease identifiers numerically and ignoring build metadata. An invalid version SHALL NOT authorize replacement. Otherwise leave it running and use it only when transport and mux protocols are supported; incompatibility SHALL fail with update guidance rather than HTTP fallback.
 
 #### Scenario: No daemon on the remote
 - **WHEN** the host has no daemon
@@ -300,6 +300,19 @@ A daemon of another version SHALL be reported. The existing automatic update is 
 #### Scenario: Newer daemon, or one whose sessions would end
 - **WHEN** a daemon is newer or cannot preserve sessions
 - **THEN** it is left running and either used compatibly or reported incompatible without a replacement workspace
+
+#### Scenario: Prerelease progression
+- **WHEN** a daemon runs `0.2.0-dev.9` and a client of `0.2.0-dev.10` connects with all other automatic-update requirements met
+- **THEN** the client updates the daemon while preserving its keepers
+
+#### Scenario: Stable release follows its prereleases
+- **WHEN** a daemon runs `0.2.0-dev.1` and a client of `0.2.0` connects with all other automatic-update requirements met
+- **THEN** it updates to the stable version
+- **AND** a client of `0.2.0-dev.1` SHALL NOT automatically replace a daemon of `0.2.0`
+
+#### Scenario: Build metadata or invalid versions
+- **WHEN** client and daemon versions differ only in build metadata, or either version is invalid
+- **THEN** no automatic replacement is authorized by their version strings
 
 ### Requirement: Remote Connect Session Handoff
 After establishing the SSH backend and its own browser listener, `splitty connect` SHALL issue a local single-use bootstrap code and print `SPLITTY_URL=http://127.0.0.1:<port>/?bootstrap=<code>&host=<target>`, percent-encoding the target. It SHALL open that URL unless `--no-open` and keep the gateway and bridge alive until interrupted or reconnect fails permanently. No browser credential SHALL cross SSH. Ctrl+C or SIGTERM SHALL close owned listeners/processes, detach from the daemon and exit with status 0.

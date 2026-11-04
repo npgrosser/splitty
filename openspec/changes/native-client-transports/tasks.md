@@ -184,3 +184,9 @@ The coverage table assigns **every scenario** of each added/modified requirement
 - [x] 10.7 Resolve exposure compatibility and cleanup review points without unregistered gateway fallback or ambiguous-worker release (H1/H2); precisely distinguish proven process-generation replacement. Preserve crash regressions and document unsupported environments.
 - [x] 10.8 Reconcile C4, architecture/development/security/platform documentation and completed upload delta specs; simplify obsolete CI diagnosis while retaining Windows fixture safeguards and mandatory checks (M9/L10). Record intentional dispositions for L5/L7-L9.
 - [x] 10.9 Independently review integrated security/lifecycle changes, run final checks, update verification and PR description, integrate origin/main and push the existing PR branch without merging. Record actual platform evidence and any remaining gates.
+
+## 11. Distinct preview version and upgrade ordering
+
+- [x] 11.1 Assign `0.2.0-dev.1` consistently to the Rust workspace, Tauri and Electron packages and lockfile without creating a release tag. Verify version consistency and document incrementing each distributed preview.
+- [x] 11.2 Apply SemVer precedence to remote daemon updates, including numeric prereleases and stable transitions, ignoring build metadata and rejecting invalid versions for replacement. Extend supervisor in-process tests and the existing installation test; preserve keeper, exact payload and native-instance gates.
+- [x] 11.3 Independently review packaging and update-policy changes, run workspace/GUI checks and Electron build, synchronize CLI specs and record verification. Confirm `origin/main` is included and update the existing PR without merging or publishing a release.

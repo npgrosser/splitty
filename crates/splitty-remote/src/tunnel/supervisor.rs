@@ -119,17 +119,15 @@ pub fn update_plan(
     UpdatePlan::Update
 }
 
-/// Whether version `a` is older than `b`, comparing their dot-separated
-/// numbers. A version that does not parse is never older: nothing is replaced
-/// on a doubt.
+/// Compare SemVer precedence, including prereleases but excluding build
+/// metadata. One optional `v` prefix is accepted; invalid versions never
+/// authorize replacing a daemon.
 fn older(a: &str, b: &str) -> bool {
-    fn numbers(version: &str) -> Option<Vec<u64>> {
-        let core = version.trim_start_matches('v');
-        let core = core.split(['-', '+']).next().unwrap_or(core);
-        core.split('.').map(|part| part.parse().ok()).collect()
+    fn parse(version: &str) -> Result<semver::Version, semver::Error> {
+        semver::Version::parse(version.strip_prefix('v').unwrap_or(version))
     }
-    match (numbers(a), numbers(b)) {
-        (Some(a), Some(b)) => a < b,
+    match (parse(a), parse(b)) {
+        (Ok(a), Ok(b)) => a.cmp_precedence(&b).is_lt(),
         _ => false,
     }
 }
@@ -529,31 +527,89 @@ mod tests {
 
     #[tokio::test]
     async fn only_an_older_kept_daemon_with_the_matching_payload_is_updated() {
-        for (version, keeps, server, update) in [
-            ("0.1.29", true, "0.1.30", true),
-            ("0.1.31", true, "0.1.30", false),
-            ("0.1.29", false, "0.1.30", false),
-            ("0.1.29", true, "0.1.29", false),
-            ("unknown", true, "0.1.30", false),
+        for (version, client, keeps, server, update) in [
+            ("0.1.29", "0.1.30", true, "0.1.30", true),
+            ("0.1.31", "0.1.30", true, "0.1.30", false),
+            ("0.1.29", "0.1.30", false, "0.1.30", false),
+            ("0.1.29", "0.1.30", true, "0.1.29", false),
+            ("unknown", "0.1.30", true, "0.1.30", false),
+            ("0.1.30", "0.2.0-dev.1", true, "0.2.0-dev.1", true),
+            ("0.2.0-dev.1", "0.2.0-dev.2", true, "0.2.0-dev.2", true),
+            ("0.2.0-dev.2", "0.2.0-dev.1", true, "0.2.0-dev.1", false),
+            ("0.2.0-dev.1", "0.2.0", true, "0.2.0", true),
+            ("0.2.0", "0.2.0-dev.1", true, "0.2.0-dev.1", false),
+            ("0.2.0-dev.9", "0.2.0-dev.10", true, "0.2.0-dev.10", true),
+            ("0.2.0-dev.10", "0.2.0-dev.9", true, "0.2.0-dev.9", false),
+            ("0.2.0+aaa", "0.2.0+zzz", true, "0.2.0+zzz", false),
+            ("0.2.0+zzz", "0.2.0+aaa", true, "0.2.0+aaa", false),
+            (
+                "0.2.0-dev.1+aaa",
+                "0.2.0-dev.1+zzz",
+                true,
+                "0.2.0-dev.1+zzz",
+                false,
+            ),
+            ("v0.1.30", "v0.2.0-dev.1", true, "v0.2.0-dev.1", true),
+            ("vv0.1.30", "0.2.0-dev.1", true, "0.2.0-dev.1", false),
+            ("0.2.0-dev.01", "0.2.0", true, "0.2.0", false),
+            ("0.2.0-dev.1", "0.2.0-dev.02", true, "0.2.0-dev.02", false),
+            ("0.1", "0.2.0", true, "0.2.0", false),
+            ("0.1.30", "unknown", true, "unknown", false),
+            ("0.2.0-dev.1", "0.2.0-dev.2", false, "0.2.0-dev.2", false),
+            ("0.2.0-dev.1", "0.2.0-dev.2", true, "0.2.0-dev.1", false),
+            (
+                "0.2.0-dev.1",
+                "0.2.0-dev.2+aaa",
+                true,
+                "0.2.0-dev.2+zzz",
+                false,
+            ),
         ] {
             let mut old = daemon(version);
             old.keeps_sessions = keeps;
             let mut remote = Fake::new(old);
+            remote.version = client;
             remote.server = server;
             if update {
-                remote.daemons.lock().unwrap().push_back(daemon("0.1.30"));
+                remote.daemons.lock().unwrap().push_back(daemon(client));
             }
             let connected = connect(&remote, |_| {}).await.unwrap();
             assert_eq!(
                 connected.daemon.version,
-                if update { "0.1.30" } else { version }
+                if update { client } else { version },
+                "daemon {version}, client {client}, keeps {keeps}, payload {server}"
             );
             let calls = remote.calls.lock().unwrap();
             assert_eq!(calls[0], "admit");
-            assert_eq!(calls.contains(&"stop"), update);
+            assert_eq!(
+                calls.contains(&"stop"),
+                update,
+                "daemon {version}, client {client}, keeps {keeps}, payload {server}"
+            );
             assert_eq!(calls.last(), Some(&"bridge"));
         }
     }
+
+    #[tokio::test]
+    async fn an_older_daemon_without_native_identity_requires_explicit_migration() {
+        for legacy in [false, true] {
+            let mut old = daemon("0.1.30");
+            old.instance = None;
+            old.legacy = legacy;
+            let mut remote = Fake::new(old);
+            remote.version = "0.2.0-dev.1";
+            remote.server = remote.version;
+            assert!(matches!(
+                connect(&remote, |_| {}).await,
+                Err(RemoteError::InvalidAnswer { .. })
+            ));
+            assert_eq!(
+                *remote.calls.lock().unwrap(),
+                ["admit", "prepare", "daemon"]
+            );
+        }
+    }
+
     #[tokio::test]
     async fn incompatible_transport_or_mux_never_opens_a_bridge_or_tcp_fallback() {
         for (transport, protocol, legacy) in

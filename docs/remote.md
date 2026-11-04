@@ -131,6 +131,9 @@ browser launch in both output modes.
   verifiable native identity and the matching installed replacement. The stop
   request names that exact instance. Newer or non-kept daemons remain running
   and require explicit migration on the host.
+  Versions follow SemVer precedence, so `0.2.0-dev.10` can replace
+  `0.2.0-dev.9`, and `0.2.0` can replace either. Build metadata alone does not
+  trigger replacement; an invalid version never authorizes an automatic update.
 - Network loss retries with bounded backoff for at most ten minutes. Host-key,
   authentication and permanent protocol/installation errors require action.
   A rebuilt container can reinstall the server; a restarted host can start its
