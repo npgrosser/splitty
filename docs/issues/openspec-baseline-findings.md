@@ -247,6 +247,51 @@ Hardening candidates, not open holes.
   accepted at that moment open for its lifetime, since the hub's `ssh` children do not close inherited
   descriptors.
 
+### web frontend
+
+Found by the inventory of `frontend/src` for `frontend-client-core` (2026-11-04). The draft change named in each
+entry fixes it; entries without one are small fixes or belong to `frontend-client-core`.
+
+- **An applied template never reaches the server** (`server-templates`). `layout/template_apply.ts` creates
+  every pane with `directSpawn` and sends no op to add it, while the replaced panels send `close_pane`. The
+  server's screen ends up empty, so other windows, the CLI and a reload do not see the template's panes. "Apply in
+  new screen" also assumes the new view mounts within one animation frame (`Workspace.svelte`), and applies
+  nothing when it does not.
+- **A host running a newer version is offered an update** (`hub-host-decisions`). `updateNote` in
+  `remote/update.ts` compares versions with `!==`, while the remote installer never replaces a newer daemon. The
+  Hosts panel always says an update ends the host's screens, even for a daemon that keeps its sessions.
+- **Fractional scroll sensitivities** (`settings-authority`). The xterm settings send steps of 0.1 and 0.5 into
+  integer fields (`terminal.xterm.scrollSensitivity`, `fastScrollSensitivity`), so the update cannot be parsed.
+  This follows from the types and was not reproduced. The window keeps its optimistic value until a reload. Window
+  defaults and slider ranges also differ from the server's (`drawer.sidebarWidth` 240 vs 200; font size, title bar
+  height, scrollbar width).
+- **Settings changes reach no other window** (`settings-authority`). Settings load once at startup.
+- **Each window closes a pane on exit** (`server-derived-pane-state`). `panes/terminal_pane.ts` closes the pane in
+  every window showing it, and in none when no window is open.
+- **Keyboard resizes are not reported.** Ctrl+Shift+Arrow resizes through dockview's `setSize`
+  (`lib/workspace/keyboard_shortcuts.ts`), but the bridge reports only panel moves and divider drags
+  (`lib/connection/screen_binding.ts`), so the server keeps the old sizes.
+- **Floating bounds go stale on the server.** `float_pane` always sends fixed bounds
+  (`layout/group_controls_renderer.ts`), and `move_float` is never sent after a floating group moves or resizes.
+- **Two neighbor searches.** `findNeighborGroup` (`lib/panes.ts`) uses DOM rectangles and counts floating groups,
+  unlike `workspace-model`'s neighbor resolution in the server's grid.
+- **Port bounds differ.** Mod+O accepts any port above 0, the context menu only ports above 1024.
+- **Dropped and pasted paths are inserted differently.** The drop path quotes shell metacharacters
+  (`drop_upload.ts`), the paste path joins raw paths (`image_paste.ts`); there are two batch runners.
+- **Clicking a desktop notification never navigates to its pane.** `setNavigateCallback` (`lib/notifications.ts`)
+  is never called, so the click only focuses the window.
+- **Every outgoing WebSocket message is logged in production.** `trace` in `lib/protocol/websocket.ts` calls
+  `console.log` unconditionally.
+- **The active screen changes without telling the server's hooks.** `createScreen`, `addRemoteScreen` and
+  `removeScreen` in `stores/screens.svelte.ts` set the active screen without `onSetActive`; `removeScreen` picks
+  the neighbor, the server the first screen.
+- **Saved forwards are all-or-nothing.** `parseSavedForwards` (`lib/remote/ports.ts`) rejects the whole list when a
+  host has more than 32, so raising the server's limit would blank saved forwards in older windows.
+- **Dead code.** `DockviewManager.addTerminalPane`, `moveScreen` in the screens store, the UI command
+  `overlay.toggle`, the Drawer's "Templates" placeholder, `SplittyWebSocket.reconnect`, `setAuthState`,
+  `loadTheme`, the unread `terminal.theme` setting, and the identical `getUnreadForPane`/`getUnreadForSession`.
+  `editor_target.ts` exists in `frontend/`, `frontend-electron/` and, in Rust, in the Tauri shell.
+
 ## Stale documentation
 
 - **`docs/protocol.ts`** still describes screen ownership, attach/detach, single-attach, `lastClientId`,

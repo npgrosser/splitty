@@ -65,7 +65,7 @@ Der Nachtrag `remote-forwards-persistence` (manuelle und gespeicherte Dev-Port-W
 
 Aus einem Praxistest auf einem VPS folgten drei Nachträge, alle am 2026-10-14 archiviert: `remote-development-ux` räumt die Bedienung von Hosts und Ports auf; `remote-open-vscode` ergänzt „Open in VS Code“ für den aktuellen Ordner eines Remote-Terminals; `terminal-folder-actions` ergänzt „Copy SSH Path“ und „Open in VS Code“ für lokale Terminals im Browser. Live-Prüfungen auf Windows/macOS und mit installiertem Editor stehen aus.
 
-[Milestone 8](#milestone-8-sessions-unabhängig-vom-server-abgeschlossen) ist abgeschlossen: `terminal-attach`, `session-keepers` und `keeper-host-updates` sind seit 2026-10-28 archiviert, ebenso der Quick Win `session-scratchpad` (108): ein Scratchpad pro Terminal-Session unter dem Pane (`Cmd/Alt+J`), mit der Session gespeichert und für Agents in Panes unsichtbar. Als Nächstes kommt [Milestone 6, Terminal Intelligence](../openspec/changes/terminal-intelligence/proposal.md) in Frage.
+[Milestone 8](#milestone-8-sessions-unabhängig-vom-server-abgeschlossen) ist abgeschlossen: `terminal-attach`, `session-keepers` und `keeper-host-updates` sind seit 2026-10-28 archiviert, ebenso der Quick Win `session-scratchpad` (108): ein Scratchpad pro Terminal-Session unter dem Pane (`Cmd/Alt+J`), mit der Session gespeichert und für Agents in Panes unsichtbar. Vor neuen Features wird die Architektur geradegezogen: **112**, erst die vier Server-Changes (unabhängig voneinander), dann der Client-Kern. Danach kommt [Milestone 6, Terminal Intelligence](../openspec/changes/terminal-intelligence/proposal.md) in Frage.
 
 ## Empfohlene Reihenfolge
 
@@ -138,6 +138,7 @@ Ideen und Features, nicht fest eingeplant, aber vorsortiert. Ausgearbeitete Vorh
 | 108 | Session-Scratchpad | ✅ Done (2026-10-28) | Milestone 1 + 5 |
 | 109 | [Workspace-Restore](../openspec/changes/workspace-restore/proposal.md) | Draft | Milestone 1 + 5, Session-Status und Pane-cwd im Modell (Fundliste) |
 | 110 | [WSL-Installer teilen](../openspec/changes/wsl-install-shared/proposal.md) | Draft | Windows-Tests (CI oder Windows-Rechner) |
+| 112 | [Client-Kern und Fachlogik im Server](../openspec/changes/frontend-client-core/proposal.md) | Draft | — |
 
 **101** macht mehrere gleichzeitige Clients am selben Screen verlässlich. Verbinden können sie sich schon heute (Single-Attach wurde im März 2026 entfernt); es fehlen Layout-Sync für alle Ops, Reihenfolge und Input-Routing. Geteilte Output-Streams (`fix-pty-reader`) und die Resize-Policy (`pty-size-policy`: kleinste Größe der aktiven Clients, sichtbare Markierung, Übernahme) sind erledigt.
 
@@ -158,3 +159,5 @@ Ideen und Features, nicht fest eingeplant, aber vorsortiert. Ausgearbeitete Vorh
 **109** stellt beim Start der App den letzten Workspace wieder her, wie klassische Terminals ihre Fenster und Tabs: Screens, Layout, Arbeitsverzeichnisse und Claude-Code-Sessions per `claude --resume <id>` samt Berechtigungsmodus. Andere Befehle werden nur vorgetippt, nicht ausgeführt. Funktioniert auch ohne Daemon, also auch in der Windows-App. Die Conversation-ID meldet ein opt-in Claude-Code-Hook über den Control-Socket. Ergänzt Daemon und 107, die Prozesse weiterlaufen lassen, statt sie neu zu starten.
 
 **110** installiert das WSL-Backend der Windows-App mit dem Installer aus `splitty-remote` (über `wsl.exe` statt `ssh`), in dieselben Versionsverzeichnisse mit Aufräumen. Zurückgestellt aus `remote-install` (D7), weil es sich hier nur typprüfen, nicht unter Windows testen lässt.
+
+**112** trennt das Web-Frontend in einen UI-freien Client-Kern (`frontend/src/core/`, ohne DOM, Svelte, Dockview, Emulator und Shell-API, vom Build erzwungen), Plattform-Ports und Views. Vorher ziehen vier unabhängige Changes Fachlogik aus dem Fenster in den Server: `server-templates` (Templates anwenden und extrahieren), `server-derived-pane-state` (Screen-Namen, Pane-Titel, Busy-Flag, Close-on-Exit, Replay-Filter), `settings-authority` (Defaults, Grenzen, Validierung, Änderungs-Event) und `hub-host-decisions` (Update-Angebot, Retry, Host-Verzeichnis, Katalog, Forward-Feed). Danach kann eine zweite UI (Mobile-Renderer, native Desktop-UI) nur noch Views schreiben. Bestandsaufnahme und Reihenfolge stehen im Design.
