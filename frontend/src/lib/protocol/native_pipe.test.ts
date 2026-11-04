@@ -2,7 +2,7 @@ import { PassThrough, Writable } from "node:stream";
 import { setImmediate as nextTurn } from "node:timers/promises";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { NativeProcessBudget } from "../../../../frontend-electron/src/native_budget.ts";
-import { NativePipe, validateNativeReady, type NativeReady } from "../../../../frontend-electron/src/native_pipe.ts";
+import { HOST_PREPARATION_MS, NativePipe, validateNativeReady, type NativeReady } from "../../../../frontend-electron/src/native_pipe.ts";
 import { NativeKind as K, NATIVE_MAGIC, NativeFrameDecoder, dataFrame, encodeNativeFrame, type NativeFrame } from "./native_wire.ts";
 
 const encode = new TextEncoder();
@@ -92,6 +92,31 @@ describe("native helper pipe", () => {
     const partial = fixture(); partial.start(); partial.read.write(encodeNativeFrame(data()).subarray(0, 6));
     expect(partial.process.counts.data).toBe(28); vi.advanceTimersByTime(60_000);
     expect(partial.closed).toHaveBeenCalled(); expect(partial.process.counts.data).toBe(0);
+  });
+  it("allows a slow host installation past two minutes while retaining a fixed preparation deadline", async () => {
+    vi.useFakeTimers();
+    const host = fixture({ target: "vm" });
+    host.read.write(NATIVE_MAGIC); host.input(control(K.accept, { transportVersion: 1 }));
+    vi.advanceTimersByTime(180_000);
+    expect(host.closed).not.toHaveBeenCalled();
+    const ready: NativeReady = { ...identity, purpose: { kind: "host", target: "vm" } };
+    host.input(control(K.ready, ready));
+    await expect(host.pipe.ready).resolves.toEqual(ready);
+    host.pipe.activate(host.receive);
+    host.pipe.close();
+
+    const stalled = fixture({ target: "vm" });
+    stalled.read.write(NATIVE_MAGIC); stalled.input(control(K.accept, { transportVersion: 1 }));
+    for (let elapsed = 60_000; elapsed < HOST_PREPARATION_MS; elapsed += 60_000) {
+      vi.advanceTimersByTime(60_000);
+      stalled.input(control(K.progress, { phase: "install", message: "waiting" }));
+    }
+    expect(stalled.closed).not.toHaveBeenCalled();
+    vi.advanceTimersByTime(60_000);
+    await expect(stalled.pipe.ready).rejects.toThrow("preparation timed out");
+    // A physical Node write keeps its lease until its callback completes.
+    await tick();
+    expect(stalled.process.counts).toEqual({ data: 0, controls: 0, workers: 0 });
   });
   it("holds outgoing memory until both pipe delivery and the backend receipt", async () => {
     const f = fixture(); f.start(); await tick();

@@ -925,14 +925,27 @@ impl Drop for ChildGuard {
 
 #[test]
 fn start_status_control_command_stop() {
+    use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new();
     sandbox.shared_parents();
+    // Only the real start command proves repair happens before discovery,
+    // instance-lock acquisition and the detached child's startup.
+    fs::create_dir_all(sandbox.config_dir()).unwrap();
+    fs::set_permissions(sandbox.config_dir(), fs::Permissions::from_mode(0o755)).unwrap();
 
     let start = sandbox.splitty(&["daemon", "start"]);
     assert!(
         start.status.success(),
         "daemon start failed\n{}",
         sandbox.describe(&start)
+    );
+    assert_eq!(
+        fs::metadata(sandbox.config_dir())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
     );
     let info = sandbox
         .read_info()
@@ -2118,6 +2131,7 @@ fn json_of(out: &Output, sandbox: &Sandbox) -> serde_json::Value {
 /// shows the subcommand, its JSON and the daemon it starts.
 #[test]
 fn remote_handshake_reports_the_host_and_starts_its_daemon() {
+    use std::os::unix::fs::PermissionsExt;
     let sandbox = Sandbox::new();
 
     let idle = json_of(&sandbox.splitty(&["remote-handshake", "--json"]), &sandbox);
@@ -2141,10 +2155,37 @@ fn remote_handshake_reports_the_host_and_starts_its_daemon() {
     );
     assert_eq!(idle["screens"], serde_json::json!([]), "{idle}");
 
+    sandbox.shared_parents();
+    fs::create_dir_all(sandbox.config_dir()).unwrap();
+    fs::set_permissions(sandbox.config_dir(), fs::Permissions::from_mode(0o755)).unwrap();
+    let readonly = sandbox.splitty(&["remote-handshake", "--json"]);
+    assert!(
+        !readonly.status.success(),
+        "unsafe discovery must remain read-only"
+    );
+    assert_eq!(
+        fs::metadata(sandbox.config_dir())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o755
+    );
+    assert!(!sandbox.info_path().exists());
+
     let started = json_of(
         &sandbox.splitty(&["remote-handshake", "--json", "--ensure-daemon"]),
         &sandbox,
     );
+    assert_eq!(
+        fs::metadata(sandbox.config_dir())
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777,
+        0o700
+    );
+    sandbox.assert_shared_parents_unchanged();
     let daemon = &started["daemon"];
     assert_eq!(daemon["running"], true, "{started}");
     assert_eq!(daemon["started"], true, "{started}");
@@ -2187,6 +2228,43 @@ fn remote_handshake_reports_the_host_and_starts_its_daemon() {
     fs::write(sandbox.info_path(), info.to_string()).expect("rewrite daemon.json");
     let older = json_of(&sandbox.splitty(&["remote-handshake", "--json"]), &sandbox);
     assert_eq!(older["daemon"]["protocol"], 1, "{older}");
+}
+
+// Smoke: these entry points must refuse unsafe configuration before any
+// subsystem can repair it, write discovery or start a replacement process.
+#[test]
+fn daemon_start_and_ensure_refuse_writable_config_directories() {
+    use std::os::unix::fs::PermissionsExt;
+    let sandbox = Sandbox::new();
+    sandbox.shared_parents();
+    fs::create_dir_all(sandbox.config_dir()).unwrap();
+    for mode in [0o775, 0o777] {
+        fs::set_permissions(sandbox.config_dir(), fs::Permissions::from_mode(mode)).unwrap();
+        for args in [
+            vec!["daemon", "start"],
+            vec!["daemon", "restart"],
+            vec!["remote-handshake", "--json", "--ensure-daemon"],
+        ] {
+            let out = sandbox.splitty(&args);
+            assert!(!out.status.success(), "{}", sandbox.describe(&out));
+            assert!(
+                stderr(&out).contains("daemon configuration"),
+                "{}",
+                sandbox.describe(&out)
+            );
+            assert_eq!(
+                fs::metadata(sandbox.config_dir())
+                    .unwrap()
+                    .permissions()
+                    .mode()
+                    & 0o777,
+                mode
+            );
+            assert!(!sandbox.info_path().exists());
+            assert!(!sandbox.run_dir().exists());
+        }
+    }
+    sandbox.assert_shared_parents_unchanged();
 }
 
 /// Stops the daemon a configuration directory of its own names, after a test.

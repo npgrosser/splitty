@@ -30,7 +30,7 @@ use splitty_transport::{
     queue,
     worker::Worker,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::process::{ChildStderr, Command};
 use tokio::task::JoinHandle;
 
@@ -527,6 +527,75 @@ pub async fn run_with_input(
 
 const SETUP_STDOUT: usize = 1024 * 1024;
 const SETUP_TIMEOUT: Duration = Duration::from_secs(120);
+const UPLOAD_TIMEOUT: Duration = Duration::from_secs(8 * 60);
+const UPLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// Fixed host-preparation ceiling, including an install upload and command
+/// completion. Connector and desktop wrappers must not use a shorter deadline.
+pub const PREPARE_TIMEOUT: Duration = UPLOAD_TIMEOUT.saturating_add(SETUP_TIMEOUT);
+
+fn timed_out(message: &'static str) -> io::Error {
+    io::Error::new(io::ErrorKind::TimedOut, message)
+}
+
+/// Only successful stdin writes count as upload progress. Output or a remote
+/// progress message cannot keep a stalled upload alive.
+async fn upload(mut stdin: impl AsyncWrite + Unpin, mut input: &[u8]) -> io::Result<()> {
+    tokio::time::timeout(UPLOAD_TIMEOUT, async {
+        while !input.is_empty() {
+            let count = tokio::time::timeout(UPLOAD_IDLE_TIMEOUT, stdin.write(input))
+                .await
+                .map_err(|_| timed_out("SSH upload made no write progress for 60 seconds"))??;
+            if count == 0 {
+                return Err(io::Error::new(
+                    io::ErrorKind::WriteZero,
+                    "SSH upload stopped accepting input",
+                ));
+            }
+            input = &input[count..];
+        }
+        tokio::time::timeout(UPLOAD_IDLE_TIMEOUT, stdin.shutdown())
+            .await
+            .map_err(|_| timed_out("SSH upload stdin did not close"))?
+    })
+    .await
+    .map_err(|_| timed_out("SSH upload exceeded its eight-minute deadline"))?
+}
+
+type SetupCapture = (io::Result<()>, Vec<u8>, Vec<u8>, ExitStatus);
+
+/// Drain both outputs while uploading. Once stdin is finished, require command
+/// completion within the ordinary setup deadline, including on early rejection.
+async fn capture_setup(
+    stdin: Option<impl AsyncWrite + Unpin>,
+    input: Option<Vec<u8>>,
+    stdout: impl AsyncRead + Unpin,
+    stderr: impl AsyncRead + Unpin,
+    exited: impl Future<Output = io::Result<ExitStatus>>,
+) -> io::Result<SetupCapture> {
+    let (sent, written) = tokio::sync::oneshot::channel();
+    let write = async move {
+        let result = match (stdin, input) {
+            (Some(stdin), Some(input)) => upload(stdin, &input).await,
+            _ => Ok(()),
+        };
+        let _ = sent.send(());
+        // Preserve a command's diagnostic when it deliberately stops reading.
+        // Other write failures, including idle/total timeout, end setup now.
+        match result {
+            Err(error) if error.kind() != io::ErrorKind::BrokenPipe => Err(error),
+            result => Ok(result),
+        }
+    };
+    let deadline = async {
+        let _ = written.await;
+        tokio::time::sleep(SETUP_TIMEOUT).await;
+    };
+    tokio::select! {
+        result = async { tokio::try_join!(write, setup_output(stdout), diagnostic_tail(stderr), exited) } => result,
+        _ = deadline => Err(timed_out("SSH setup exceeded its completion deadline")),
+    }
+}
 
 async fn run_admitted(
     command: &mut Command,
@@ -589,26 +658,10 @@ async fn run_context(
     let stderr = child
         .stderr()
         .ok_or_else(|| io::Error::other("missing SSH stderr pipe"))?;
-    let write = async move {
-        if let (Some(mut stdin), Some(input)) = (stdin, input) {
-            stdin.write_all(&input).await?;
-            stdin.shutdown().await?;
-        }
-        Ok::<(), io::Error>(())
-    };
-    let collect = async {
-        tokio::try_join!(
-            async { Ok::<_, io::Error>(write.await) },
-            setup_output(stdout),
-            diagnostic_tail(stderr),
-            child.wait()
-        )
-    };
     let mut closing = context.closing();
     let result = tokio::select! { biased;
         _ = closing.wait_for(|closed| *closed) => Err(io::Error::new(io::ErrorKind::BrokenPipe, "SSH owner closed")),
-        result = tokio::time::timeout(SETUP_TIMEOUT, collect) => result
-            .unwrap_or_else(|_| Err(io::Error::new(io::ErrorKind::TimedOut, "SSH setup exceeded its deadline"))),
+        result = capture_setup(stdin, input, stdout, stderr, child.wait()) => result,
     };
     let (written, stdout, stderr, status) = match result {
         Ok(output) => output,
@@ -876,6 +929,125 @@ pub async fn run_checked<E: Executor>(
 mod tests {
     use super::*;
 
+    #[cfg(any(unix, windows))]
+    fn success() -> ExitStatus {
+        #[cfg(unix)]
+        use std::os::unix::process::ExitStatusExt;
+        #[cfg(windows)]
+        use std::os::windows::process::ExitStatusExt;
+        ExitStatus::from_raw(0)
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test(start_paused = true)]
+    async fn progressing_upload_can_outlive_two_minutes_and_preserves_every_byte() {
+        let (stdin, mut receiver) = tokio::io::duplex(1);
+        let input = b"slow upload".to_vec();
+        let expected = input.clone();
+        let started = tokio::time::Instant::now();
+        let exited = async {
+            let mut received = Vec::new();
+            loop {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                let mut byte = [0];
+                if receiver.read(&mut byte).await? == 0 {
+                    break;
+                }
+                received.extend_from_slice(&byte);
+            }
+            assert_eq!(received, expected);
+            Ok(success())
+        };
+        let (written, _, _, status) = capture_setup(
+            Some(stdin),
+            Some(input),
+            tokio::io::empty(),
+            tokio::io::empty(),
+            exited,
+        )
+        .await
+        .unwrap();
+        written.unwrap();
+        assert!(status.success());
+        assert!(started.elapsed() > SETUP_TIMEOUT);
+        assert!(started.elapsed() < PREPARE_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn upload_idle_timeout_ignores_output_activity() {
+        let (stdin, _not_reading) = tokio::io::duplex(1);
+        let (mut noise, stdout) = tokio::io::duplex(64);
+        let started = tokio::time::Instant::now();
+        let chatter = async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(10)).await;
+                noise.write_all(b"still alive").await.unwrap();
+            }
+        };
+        let capture = capture_setup(
+            Some(stdin),
+            Some(vec![1; 4]),
+            stdout,
+            tokio::io::empty(),
+            std::future::pending::<io::Result<ExitStatus>>(),
+        );
+        let error = tokio::select! {
+            result = capture => result.unwrap_err(),
+            _ = chatter => unreachable!(),
+        };
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("no write progress"));
+        assert_eq!(started.elapsed(), UPLOAD_IDLE_TIMEOUT);
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test(start_paused = true)]
+    async fn upload_has_a_hard_deadline_even_with_continued_write_progress() {
+        let (stdin, mut receiver) = tokio::io::duplex(1);
+        let started = tokio::time::Instant::now();
+        let exited = async {
+            loop {
+                tokio::time::sleep(Duration::from_secs(20)).await;
+                let mut byte = [0];
+                if receiver.read(&mut byte).await? == 0 {
+                    break;
+                }
+            }
+            Ok(success())
+        };
+        let error = capture_setup(
+            Some(stdin),
+            Some(vec![1; 100]),
+            tokio::io::empty(),
+            tokio::io::empty(),
+            exited,
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("eight-minute"));
+        assert_eq!(started.elapsed(), UPLOAD_TIMEOUT);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn completed_upload_and_bodyless_setup_keep_the_short_completion_deadline() {
+        for input in [None, Some(b"payload".to_vec())] {
+            let started = tokio::time::Instant::now();
+            let error = capture_setup(
+                Some(tokio::io::sink()),
+                input,
+                tokio::io::empty(),
+                tokio::io::empty(),
+                std::future::pending::<io::Result<ExitStatus>>(),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+            assert!(error.to_string().contains("completion deadline"));
+            assert_eq!(started.elapsed(), SETUP_TIMEOUT);
+        }
+    }
+
     #[tokio::test]
     async fn cancelling_a_stderr_wait_aborts_the_drain_even_before_its_first_poll() {
         use std::sync::{
@@ -1063,7 +1235,14 @@ mod tests {
             pid
         };
         let (result, pid) = tokio::join!(
-            run_context(&mut command, None, &admission, &context),
+            // The worker never reads stdin: cancellation must interrupt the
+            // upload immediately, then observe exit before releasing capacity.
+            run_context(
+                &mut command,
+                Some(vec![0; 2 * 1024 * 1024]),
+                &admission,
+                &context
+            ),
             cancel
         );
         assert_eq!(result.unwrap_err().kind(), io::ErrorKind::BrokenPipe);

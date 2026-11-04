@@ -176,7 +176,9 @@ const nativeBridge = {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         nativeOpens.delete(request); ipcRenderer.send("native:cancel-open", { request, document: documentToken }); reject(Error("Native backend preparation timed out"));
-      }, 125_000);
+      // Host opens may include an install upload. Main owns the shorter local
+      // deadline and the fixed ten-minute host deadline; this is a final guard.
+      }, 605_000);
       nativeOpens.set(request, { resolve, reject, timer, progress });
       void nativeDocument().then(document => {
         const pending = nativeOpens.get(request);

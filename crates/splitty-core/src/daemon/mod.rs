@@ -137,7 +137,7 @@ fn write_record(path: &std::path::Path, bytes: &[u8]) -> io::Result<()> {
     {
         use nix::{fcntl::OFlag, sys::stat::Mode};
         use std::ffi::OsStr;
-        let directory = crate::config::PrivateDir::open(parent, true)?;
+        let directory = crate::config::PrivateDir::prepare_config(parent)?;
         let result = (|| {
             let mut file = directory.open_file(
                 OsStr::new(&temp),

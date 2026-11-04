@@ -6,6 +6,9 @@ processes alive while your computer sleeps or disconnects. Your computer only
 displays them. Nothing has to be installed on the host beforehand: the client
 installs a matching Splitty server through SSH.
 
+The [connection diagrams](networking.md) show the local/remote process boundaries,
+where listeners exist and which sessions survive a disconnect.
+
 There are three ways to look at a host:
 
 | Way | Where | Needs locally |
@@ -68,6 +71,32 @@ The other direction: a service on this machine (a local API, a database, a model
 - **Stop**, **Remember**, **Resume** and **Forget** work as for forwarded ports. A remembered share starts again only when its host connects; **Start** on a remembered share that is not running starts it now. A lost connection frees the host's port within about a minute, and a running share is rebuilt on the same port.
 - Reverse sharing is unavailable on Windows and WSL: their reachable localhost services have no shared Splitty reservation authority. It fails before starting SSH, including with mirrored networking. Forwarding a host service to this machine remains available.
 - On Linux, reservation coordination requires the initial PID and user namespaces and a verifiable common root mount view. Unsupported or ambiguous namespace environments fail with an explicit error. The reservation registry coordinates Splitty processes of the same OS account across configuration directories; it does not restrict other forwarding tools or processes running as that user.
+
+### Forwarding registry requirements
+
+On native Linux and macOS, reverse shares and explicit `serve`/`connect` browser
+gateways use one persistent registry rooted in the OS account's home directory:
+`.local/state/splitty/exposure` on Linux and
+`Library/Application Support/Splitty/exposure` on macOS. `HOME`, XDG variables and
+`SPLITTY_CONFIG_DIR` do not select a separate registry.
+
+Every ancestor must be a directory owned by the account or root, without a
+symlink or non-sticky group/world-write permission. The final registry directory
+must belong to the account with mode `0700`, and its files must be private owned
+regular files with mode `0600`. Supported persistent local filesystem semantics
+and a verifiable shared process/network view are required as well.
+
+For example, an existing `.local` or `.local/state` with mode `0775` prevents a
+native Linux browser gateway or reverse share from starting. This applies even
+when the gateway itself starts no share: another Splitty process may already be
+sharing its prospective port. Splitty does not chmod shared parent directories
+or bypass the registry. This restriction is separate from native terminal
+connections, which support owned `0775` ancestors through pinned endpoint
+directories and peer checks.
+
+Windows and WSL instead refuse reverse sharing entirely; their explicit browser
+gateways and forward-to-local application ports remain available. Their policy
+is not a fallback for an unsupported or unreadable native Linux registry.
 
 ## Remote windows
 
@@ -145,6 +174,12 @@ browser launch in both output modes.
   from every other HTTP service on the same hostname.
 
 ## Installing Splitty on hosts
+
+Preparing a host terminal connection has a fixed ten-minute ceiling. An archive upload may take up
+to eight minutes, but sixty seconds without a successful write to the owned SSH
+stdin pipe aborts it. After stdin closes, the install command has up to two
+minutes to finish. Progress reports do not renew these limits. Native framing
+and service handshakes retain their separate five-second deadlines.
 
 - On a Linux or macOS host without Splitty (or with another version), the client installs its own server first, through SSH, to `~/.local/share/splitty/remote/<version>/` (checksum verified on the host; nothing is downloaded there). It needs a payload: the released static `splitty` (`splitty-wsl-x86_64.tar.gz`) installs itself on x86_64 hosts and carries the servers for aarch64 hosts and for Macs (Apple silicon and Intel); any build takes one from `SPLITTY_REMOTE_PAYLOAD=<archive>`, an archive as `packaging/windows/build-wsl-payload.sh <repo> <out> [commit] [x86_64|aarch64|darwin-aarch64|darwin-x86_64]` builds it (on Linux, the macOS ones cross-built with a pinned zig that `packaging/zig-toolchain.sh` fetches; on a Mac, all four without zig).
 - Without a payload, `splitty` must be in the `PATH` of non-interactive SSH sessions on the remote machine, which often comes from `~/.profile` rather than `~/.bashrc`; `ssh user@remote-host splitty --version` shows whether it is.

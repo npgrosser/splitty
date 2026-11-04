@@ -259,6 +259,35 @@ Only a deliberate editor action in the trusted hub UI SHALL dispatch a local VS 
 - **WHEN** a hub remote terminal link, Splitty's generic URL helper or a native navigation guard receives a `vscode:`, `zed:` or `sftp:` URI
 - **THEN** the generic opener refuses it and no editor dispatch is invoked
 
+### Requirement: Credential Files Are Owner-Only
+On Unix, the Splitty config directory SHALL have mode 0700, and every writer MUST create it with that mode or repair an existing directory to it. The `auth-token` and `daemon.json` files MUST have mode 0600, be written atomically so they are never observable partially written or with a looser mode, and an existing `auth-token` with a looser mode MUST be repaired to 0600 when it is read. `daemon.json` MUST NOT contain any credential (its contents are defined in `server-modes`), and a `token` key left by an older version MUST be ignored.
+
+Authorized daemon start, restart and remote-handshake ensure SHALL prepare the config directory before discovery. They MAY tighten an owned final directory that has no group/world write bits through its verified descriptor. Symlinks, foreign-owned final directories and group/world-writable final directories SHALL be refused without chmod or daemon startup; shared ancestor permissions SHALL remain unchanged. Read-only discovery SHALL NOT repair directory modes.
+
+#### Scenario: Directory left behind by an older version
+- **WHEN** the config directory exists with mode 0755 and the server starts
+- **THEN** the directory ends up with mode 0700
+
+#### Scenario: Token file with loose permissions
+- **WHEN** an existing `auth-token` has mode 0644
+- **THEN** the server keeps its value and changes its mode to 0600
+
+#### Scenario: Daemon info contents
+- **WHEN** a daemon writes `daemon.json`
+- **THEN** the file has mode 0600 and contains no token
+
+#### Scenario: Read-only discovery of a loose config directory
+- **WHEN** the owned config directory has mode 0755 and a remote handshake has no ensure option
+- **THEN** it refuses unsafe discovery without changing the mode or starting a daemon
+
+#### Scenario: Config repair preserves shared ancestors
+- **WHEN** daemon start or an ensuring handshake finds an owned 0755 config directory below owned 0775 ancestors
+- **THEN** only the config directory becomes 0700, and daemon discovery/start continues through the verified private path
+
+#### Scenario: Writable final config directory
+- **WHEN** daemon start, restart or an ensuring handshake encounters a final config directory with group or world write permission
+- **THEN** it refuses before discovery/start and leaves that directory and its ancestors unchanged
+
 ## ADDED Requirements
 
 ### Requirement: Private Native Client Endpoint

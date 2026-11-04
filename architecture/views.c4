@@ -41,6 +41,16 @@ views {
     include splitty.transport.*
   }
 
+  view connections {
+    title 'Connection components'
+    description 'Code dependencies implementing native, browser and SSH connections. These are modules, not runtime processes; docs/networking.md shows the physical transports and their lifetimes.'
+    include splitty.web, splitty.desktop.client_ipc, splitty.server.http, splitty.server.native, splitty.server.hub, splitty.server.host, splitty.remote.owner, splitty.remote.tunnel, splitty.remote.bridge, splitty.remote.ssh, remote_host
+    autoLayout LeftRight
+    style element.tag = #external {
+      color muted
+    }
+  }
+
   view server of splitty.server {
     title 'splitty-server components'
     description 'The components of the splitty binary and the core components they use. The composition root view shows what main uses.'

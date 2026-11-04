@@ -264,6 +264,25 @@ All dated 2026-11-01 and open to review:
 
 ## Post-review implementation decisions
 
+Final review corrections preserve strict native endpoint opens while permitting
+explicit config preparation to tighten only an owned final directory with no
+group/world write bits. The operation pins the directory before chmod, checks
+its identity and does not change ancestors. Authorized daemon start and remote
+ensure prepare it before discovery; a read-only probe does not repair it.
+
+An install upload gets at most eight minutes with a sixty-second write-idle
+deadline refreshed only by bytes accepted by the owned SSH stdin writer. After
+stdin completes, setup output/process completion gets the ordinary two minutes.
+The whole host preparation is bounded by ten minutes across native, browser and
+Electron wrappers; progress messages cannot extend it. Framing/service handshake
+deadlines remain five seconds. Cancellation still kills/reaps only owned workers
+and retains admission until exit is observed.
+
+The exposure registry retains its stricter ancestor rules. Descriptor-relative
+operations alone cannot prove that a newly starting process sees an existing
+registry after an ancestor rename, so group-writable registry paths remain a
+documented unsupported condition rather than an unregistered gateway fallback.
+
 The accepted corrections retain the original authority and memory boundaries.
 Orderly native EOF/Closed drains accepted frames; revocation/protocol errors still
 abort them immediately. Owner substream cleanup waits five seconds for its

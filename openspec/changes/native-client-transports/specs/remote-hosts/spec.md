@@ -73,3 +73,28 @@ The host SHALL revalidate the conditional proof immediately before signaling onl
 #### Scenario: Migration result is lost
 - **WHEN** SSH ends after a confirmed migration might have begun
 - **THEN** migration is not replayed automatically; an ordinary later connection may discover the result without another migration request
+
+### Requirement: Bounded Host Preparation
+Preparing a host terminal connection SHALL have a fixed ten-minute ceiling shared by native, browser and desktop client paths. An install payload upload MAY exceed the ordinary two-minute command deadline while writes progress; it SHALL stop after at most eight minutes or sixty seconds without a successful stdin write. After stdin completes, command output/process completion SHALL have at most two minutes. No-input setup commands SHALL retain that two-minute bound. Preparation messages and unrelated stdout/stderr activity SHALL NOT extend upload or overall preparation deadlines. Framing and service negotiation SHALL retain their five-second limits.
+
+Cancellation or a deadline SHALL terminate only the attempt's owned workers and retain admission until their exit is observed. It SHALL NOT repeat admitted mutations or weaken checksum verification before installation publication.
+
+#### Scenario: Slow progressing installation
+- **WHEN** an initial payload upload takes more than two minutes but progresses within its idle and total limits
+- **THEN** the preparation wrappers allow it to finish and proceed to verified daemon discovery
+
+#### Scenario: Stalled upload with output activity
+- **WHEN** the stdin upload makes no write progress for sixty seconds while the process still produces output
+- **THEN** setup fails and its owned worker is terminated and reaped before releasing worker capacity
+
+#### Scenario: Continuously progressing upload exceeds total limit
+- **WHEN** upload writes keep progressing but the upload takes eight minutes
+- **THEN** setup fails without renewing its deadline from progress
+
+#### Scenario: Upload finished but command stalls
+- **WHEN** stdin has completed and the command does not finish within two minutes
+- **THEN** setup fails rather than consuming the remaining host-preparation allowance indefinitely
+
+#### Scenario: Preparation cancelled during upload
+- **WHEN** the owning connection or document is cancelled while stdin is blocked
+- **THEN** setup is cancelled immediately and worker capacity remains reserved until exit is observed

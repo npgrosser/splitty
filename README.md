@@ -252,6 +252,7 @@ vulnerabilities privately through
 | [`SECURITY.md`](SECURITY.md) | Threat model and guarantees |
 | [Known issues](docs/known-issues.md) | Upstream bugs and platform quirks, with workarounds |
 | [Architecture](docs/architecture.md) | How the server, protocol and UI fit together |
+| [Connections and networking](docs/networking.md) | Visual guides to IPC, SSH, browser gateways, listeners and session lifetime |
 | [Development](docs/development.md) | Building, packaging and releasing |
 | [Roadmap](roadmap/README.md) | Milestones and what comes next (German) |
 

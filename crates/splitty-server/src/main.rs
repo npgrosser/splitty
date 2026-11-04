@@ -1273,6 +1273,7 @@ async fn handle_daemon(action: DaemonAction) {
                 eprintln!("daemon start has no TCP listener or browser token; use splitty serve --daemon --addr <loopback-address> for browser access");
                 std::process::exit(2);
             }
+            prepare_daemon_config();
             match daemon::read_info_checked() {
                 Ok(Some(info)) if daemon::is_running(info.pid) => {
                     if info.legacy() {
@@ -1301,6 +1302,7 @@ async fn handle_daemon(action: DaemonAction) {
                 eprintln!("daemon restart has no TCP listener; use splitty serve --daemon --addr <loopback-address>");
                 std::process::exit(2);
             }
+            prepare_daemon_config();
             let existing = checked_daemon_for_action();
             if let Some(info) = existing.as_ref().filter(|i| daemon::is_running(i.pid)) {
                 if !info.keeps_sessions && !end_sessions {
@@ -1442,6 +1444,13 @@ async fn lock_and_start_daemon() {
         eprintln!("Daemon mode is only supported on Unix");
         std::process::exit(1);
     }
+}
+
+fn prepare_daemon_config() {
+    splitty_core::config::prepare_daemon_config_dir().unwrap_or_else(|error| {
+        eprintln!("Cannot prepare daemon configuration: {error}");
+        std::process::exit(1);
+    });
 }
 
 fn checked_daemon_for_action() -> Option<splitty_core::daemon::DaemonInfo> {
@@ -1637,7 +1646,7 @@ async fn start_daemon(lock: splitty_server::native::endpoint::InstanceLock) -> R
 
     let client_socket = splitty_server::native::endpoint::socket_path();
     let config_dir = splitty_core::config::config_dir();
-    let directory = splitty_core::config::PrivateDir::open(&config_dir, true)
+    let directory = splitty_core::config::PrivateDir::prepare_config(&config_dir)
         .map_err(|error| format!("cannot open daemon log directory: {error}"))?;
     let log = directory
         .open_file(
@@ -1791,6 +1800,9 @@ async fn run_daemon(lock_fd: i32) {
         client_path.parent().expect("native endpoint parent"),
     )
     .unwrap_or_else(|error| daemon_run_failed(&format!("cannot adopt native lock: {error}")));
+    splitty_core::config::prepare_daemon_config_dir().unwrap_or_else(|error| {
+        daemon_run_failed(&format!("cannot prepare daemon configuration: {error}"))
+    });
     let bound = splitty_server::native::endpoint::bind_locked(&client_path, lock)
         .await
         .unwrap_or_else(|error| {

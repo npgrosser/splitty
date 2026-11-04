@@ -34,3 +34,22 @@ it("routes preload progress only to the current document's pending request and f
   ipcRenderer.emit("native:failed", {}, { request: "first", message: "failed" }); await failed;
   report("first"); expect(first).toHaveBeenCalledOnce(); expect(vi.getTimerCount()).toBe(0);
 });
+
+it("keeps a host upload open past two minutes but cancels at its fixed outer deadline", async () => {
+  vi.useFakeTimers();
+  const ipcRenderer = Object.assign(new EventEmitter(), { send: vi.fn(), invoke: vi.fn() });
+  let bridge!: ElectronNativeBridge;
+  const electron = { ipcRenderer, contextBridge: { exposeInMainWorld: (_name: string, value: { native: ElectronNativeBridge }) => { bridge = value.native; } } };
+  runInNewContext(source, { exports: {}, require: (name: string) => { if (name !== "electron") throw Error(name); return electron; },
+    process: { platform: "linux" }, setTimeout, clearTimeout, setInterval, clearInterval });
+  ipcRenderer.emit("native:document", {}, { document: "doc-one" });
+  const opening = bridge.open({ target: "vm" }, "upload");
+  const timeout = expect(opening).rejects.toThrow("preparation timed out");
+  await vi.advanceTimersByTimeAsync(180_000);
+  expect(ipcRenderer.send).not.toHaveBeenCalledWith("native:cancel-open", expect.anything());
+  ipcRenderer.emit("native:progress", {}, { request: "upload", document: "doc-one", phase: "install", message: "Uploading" });
+  await vi.advanceTimersByTimeAsync(425_000);
+  await timeout;
+  expect(ipcRenderer.send).toHaveBeenCalledWith("native:cancel-open", { request: "upload", document: "doc-one" });
+  expect(vi.getTimerCount()).toBe(0);
+});

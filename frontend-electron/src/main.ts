@@ -3,6 +3,7 @@ import { NativeOwner } from "./native_owner";
 import { startNativeHelper } from "./native_helper";
 import { readWindowSettings, readKnownHosts } from "./native_settings";
 import type { PipeEvents, NativeClosed } from "./native_pipe";
+import { HOST_PREPARATION_MS } from "./native_pipe";
 import { installAssets } from "./asset_protocol";
 import { isPackagedDocument } from "./navigation";
 import { isPackagedBlob, rememberDownload, savedDownload } from "./downloads";
@@ -477,7 +478,7 @@ function reopenRemote(entry: RemoteWindow, requester: WebContents, document: str
     for (const helper of entry.helpers) helper.pipe.close({ code: "cancelled", retryable: false, message });
     fail(Error(message));
   };
-  const deadline = setTimeout(() => stop("The remote workspace startup timed out"), 125_000);
+  const deadline = setTimeout(() => stop("The remote workspace startup timed out"), HOST_PREPARATION_MS + 5000);
   let successful = false;
   const promise = usable.then(() => { successful = true; return { ok: true } as const; })
     .catch(error => openFailure(error instanceof Error ? error.message : String(error)))

@@ -56,6 +56,10 @@ impl Error {
 pub async fn run(ensure_daemon: bool) -> Result<Handshake, Error> {
     let executable =
         std::env::current_exe().map_err(|e| format!("cannot locate the splitty binary: {e}"))?;
+    if ensure_daemon {
+        splitty_core::config::prepare_daemon_config_dir()
+            .map_err(|error| format!("cannot prepare daemon configuration: {error}"))?;
+    }
     let mut info = super::running_daemon()?;
     let mut started = false;
     if info.is_none() && ensure_daemon {

@@ -709,8 +709,11 @@ changes the process cwd. The arm64 macOS cross-link succeeded; native macOS runt
 execution is checked by CI, not claimed from a Linux cross-build.
 
 The review also discussed wider filesystem policies. Exact private-directory
-modes and symlink refusal are retained; the prior daemon-directory validator did
-not repair loose modes, so permitting such directories is not part of this fix.
+modes and symlink refusal are retained. The prior run-directory validator did
+not repair loose modes, but the main-branch config-directory writers did repair
+an owned 0755 directory. Final review identified that separate config regression;
+the follow-up restores explicit descriptor-based config repair before authorized
+daemon startup/discovery while leaving endpoint opens strict.
 No NSS/private-group exception or shared-parent chmod is introduced. Single-instance
 locking protects the pinned directory, not a maliciously replaced filesystem
 namespace. A party allowed to rename ancestors can disrupt discovery/availability;
@@ -770,3 +773,75 @@ crossed. It never restores over an unexpected record or different instance.
 The strict real-SSH test and its clippy target then passed locally. This follow-up
 changes tests and verification records only; the delivered production binaries
 remain exactly those of `1730dd5`. Hosted CI reruns on that follow-up.
+
+## Final config/upload corrections and connection diagrams
+
+Authorized daemon start, restart and ensure now prepare an existing owned
+config directory before strict discovery. Only a final directory without
+group/world write permission may be tightened to `0700`, through its retained
+descriptor and followed by identity verification. Ordinary endpoint opens and
+read-only discovery remain strict. Unit and lifecycle cases cover an existing
+`0755` config directory under unchanged `0775` ancestors, idempotence, preserved
+contents, path replacement, symlink refusal and unchanged unsafe final modes.
+
+Install uploads now allow eight minutes overall, with a sixty-second write-idle
+limit. Successful stdin writes are the only idle-progress signal. Command
+completion retains its two-minute limit after stdin finishes; no-input setup
+keeps that same two-minute limit. Host terminal preparation wrappers share a
+fixed ten-minute ceiling, while native framing/service handshakes keep five
+seconds. Electron host opens and the sandboxed preload guard use matching
+ceilings; local preparation remains shorter. Paused-time tests cover uploads
+beyond two minutes, byte preservation, stalls despite output, the hard upload
+limit and completion stalls. The real owned-worker cancellation test now blocks
+on a large stdin upload and verifies observed process exit and restored capacity.
+
+The focused Claude review found no blocker in these corrections. This was a
+read-only review, not another review of the entire PR or an independent test
+run. Remaining deadline limits are explicit: the outer preparation clock includes
+probing and can expire before all inner allowances are consumed; upload idle
+time includes a blocked SSH channel setup. Forward/reverse operation deadlines
+remain separate. A reverse-share installation on a very slow or unprepared host
+can outlast the API's three-minute wait, yielding an uncertain result while the
+mutation continues; callers must inspect current state rather than replay it.
+The extra preload guard can also expire first if helper startup consumes its
+slack, through the existing cancellation path. No mutation replay or exposure
+registry policy was relaxed.
+
+Integrated testing corrected two test assumptions. The inherited-lock test
+now waits within a fixed deadline for final descriptor release, retrying only
+`WouldBlock`; assertions of exclusivity while handles are held remain immediate.
+A parallel PTY fork can briefly inherit close-on-exec descriptors before exec,
+which is consistent with the observed late release; the specific inheriting
+process was not captured. The real-SSH reconnect test now captures the supervised
+bridge before an API request opens its separate persistent carrier. It kills
+that exact bridge and verifies reconnect, session-cookie reuse, daemon replacement
+and final descendant cleanup. This test also becomes a required SSH-lab CI step
+so an unavailable fixture cannot silently skip it. Production lock and carrier
+lifetime rules are unchanged.
+
+`docs/networking.md` provides three Mermaid runtime diagrams: the desktop/host
+overview, explicit browser backend selection and the SSH setup-to-disconnect
+sequence. They distinguish listeners, authentication boundaries and session
+lifetime. The new LikeC4 `connections` view maps the implementing modules, with
+links between the two representations. All three Mermaid diagrams were rendered
+and visually inspected, as was the LikeC4 view. PNG/SVG exports were produced
+outside the repository; the Markdown remains the editable source. Registry
+documentation explicitly distinguishes native endpoint support for owned
+`0775` ancestors from the stricter shared forwarding-registry requirements.
+
+The prior `b65ac4e` head passed all seven hosted CI jobs and CodeQL (runs
+`41896088532` and `41896088500`). Those results predate these corrections.
+The Windows installer remains the `1730dd5` artifact described above; this
+correction does not produce a new installer or claim fresh Windows/macOS GUI
+runtime execution.
+
+Final local checks for this correction: formatting and workspace clippy pass;
+the workspace run reports 1,083 passing Rust tests, including the architecture
+dependency check. The isolated SSH lab was supplied for that run; reconnect and
+daemon-version migration also passed with the lab required rather than skippable. Platform-specific
+runtime guards keep their normal limits on WSL; native exposure and macOS checks
+remain hosted CI gates. Frontend check reports zero errors and eight existing
+warnings; all 82 suites / 1,520 tests pass, as do frontend and Electron builds.
+All 15 specs, the change and eight LikeC4 source files validate. A Windows MSVC
+cross-check of `splitty-remote --tests` passes with two existing test-only dead-code
+warnings; this establishes compilation, not Windows runtime execution.

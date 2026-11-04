@@ -13,7 +13,6 @@ use std::{
     collections::HashMap,
     io,
     sync::{Arc, Mutex},
-    time::Duration,
 };
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -274,7 +273,7 @@ impl Owner {
             result = async {
                 negotiation::client(&mut read, &mut write, &stream_context.budget).await?;
                 negotiation::accept(&mut read, &mut write, &stream_context.budget, negotiation::Expected {
-                    instance: None, purpose: &purpose, mux_protocol: self.mux, preparation: Duration::from_secs(600),
+                    instance: None, purpose: &purpose, mux_protocol: self.mux, preparation: crate::ssh::PREPARE_TIMEOUT,
                 }, progress).await
             } => result,
         };
@@ -480,6 +479,7 @@ impl Drop for Connection {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
     fn peers() -> (Peer, Peer) {
         let ready = wire::Ready {
             generation: 1,

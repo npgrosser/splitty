@@ -1014,7 +1014,7 @@ impl Connect {
         }
     }
 
-    fn kill_tunnel(&self) {
+    fn tunnel_pid(&self) -> i32 {
         let tunnels: Vec<_> = self
             .ssh_children()
             .into_iter()
@@ -1030,7 +1030,11 @@ impl Connect {
             1,
             "exactly one ssh should hold the tunnel: {tunnels:?}"
         );
-        kill(Pid::from_raw(tunnels[0]), Signal::SIGKILL).expect("kill ssh");
+        tunnels[0]
+    }
+
+    fn kill_tunnel(&self) {
+        kill(Pid::from_raw(self.tunnel_pid()), Signal::SIGKILL).expect("kill ssh");
     }
 
     fn kill_forward(&self, remote: u16) -> i32 {
@@ -1189,12 +1193,17 @@ fn connect_reconnects_and_hands_over_sessions_through_real_ssh() {
     );
 
     connect.assert_native_gateway(port);
+    // Capture the supervised bridge before the first API call opens its own
+    // persistent shared carrier. Both are legitimate remote-bridge processes;
+    // only the supervised one drives the reconnect events asserted below.
+    let tunnel = connect.tunnel_pid();
     let (port, cookie) = sign_in(&url);
     let (status, response) = http(port, "GET", "/api/mux/state", Some(&cookie), None);
     assert_eq!(status, 200, "{response}");
 
     // The ssh process dies; the same daemon is still there.
-    connect.kill_tunnel();
+    assert!(connect.ssh_children().contains(&tunnel));
+    kill(Pid::from_raw(tunnel), Signal::SIGKILL).expect("kill supervised ssh");
     let lines = connect.until("SSH tunnel restored.");
     assert!(
         !lines.iter().any(|line| line.starts_with("SPLITTY_URL=")),

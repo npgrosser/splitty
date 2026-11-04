@@ -2,7 +2,7 @@
 //! ancestors are namespace/liveness concerns, not authority to its contents.
 use nix::{
     fcntl::{openat, renameat, AtFlags, OFlag},
-    sys::stat::{fchmodat, fstat, fstatat, mkdirat, FchmodatFlags, FileStat, Mode},
+    sys::stat::{fchmod, fchmodat, fstat, fstatat, mkdirat, FchmodatFlags, FileStat, Mode},
     unistd::{unlinkat, UnlinkatFlags},
 };
 use std::{
@@ -37,6 +37,22 @@ pub struct PrivateDir {
 
 impl PrivateDir {
     pub fn open(path: &Path, create: bool) -> io::Result<Self> {
+        Self::open_directory(path, create, false)
+    }
+
+    /// Authorized config writers may tighten a directory left readable by an
+    /// older version. Never repair endpoints, shared ancestors or a directory
+    /// whose entries another user could replace.
+    pub fn prepare_config(path: &Path) -> io::Result<Self> {
+        if path.file_name().is_none() {
+            return Err(denied("configuration must name a directory below the root"));
+        }
+        let directory = Self::open_directory(path, true, true)?;
+        directory.verify()?;
+        Ok(directory)
+    }
+
+    fn open_directory(path: &Path, create: bool, repair_config: bool) -> io::Result<Self> {
         if !path.is_absolute() {
             return Err(denied("private directory must be absolute"));
         }
@@ -54,20 +70,27 @@ impl PrivateDir {
             current.push(part);
             let parent = file.as_ref().map(AsRawFd::as_raw_fd);
             let name = part.as_os_str();
-            let descriptor = match openat(parent, name, directory_flags(), Mode::empty()) {
+            // O_PATH/O_SEARCH remain sufficient for ancestors. The final
+            // config descriptor must support fchmod without reopening a path.
+            let flags = if repair_config && current == path {
+                OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC
+            } else {
+                directory_flags()
+            };
+            let descriptor = match openat(parent, name, flags, Mode::empty()) {
                 Ok(descriptor) => descriptor,
                 Err(nix::errno::Errno::ENOENT) if create => {
                     match mkdirat(parent, name, Mode::S_IRWXU) {
                         Ok(()) | Err(nix::errno::Errno::EEXIST) => {}
                         Err(error) => return Err(error.into()),
                     }
-                    openat(parent, name, directory_flags(), Mode::empty())?
+                    openat(parent, name, flags, Mode::empty())?
                 }
                 Err(error) => return Err(error.into()),
             };
             // SAFETY: openat returned a new descriptor owned by this call.
             let opened = unsafe { File::from_raw_fd(descriptor) };
-            let meta = fstat(opened.as_raw_fd())?;
+            let mut meta = fstat(opened.as_raw_fd())?;
             if meta.st_mode & nix::libc::S_IFMT != nix::libc::S_IFDIR
                 || (meta.st_uid != own && meta.st_uid != 0)
                 || (meta.st_mode & 0o002 != 0 && meta.st_mode & 0o1000 == 0)
@@ -77,10 +100,20 @@ impl PrivateDir {
                     current.display()
                 )));
             }
-            if current == path && (meta.st_uid != own || meta.st_mode & 0o777 != 0o700) {
-                return Err(denied(
-                    "private directory must belong to this user with mode 0700",
-                ));
+            if current == path {
+                if repair_config
+                    && meta.st_uid == own
+                    && meta.st_mode & 0o022 == 0
+                    && meta.st_mode & 0o777 != 0o700
+                {
+                    fchmod(opened.as_raw_fd(), Mode::S_IRWXU)?;
+                    meta = fstat(opened.as_raw_fd())?;
+                }
+                if meta.st_uid != own || meta.st_mode & 0o777 != 0o700 {
+                    return Err(denied(
+                        "private directory must belong to this user with mode 0700",
+                    ));
+                }
             }
             file = Some(opened);
         }
@@ -204,6 +237,78 @@ impl PrivateDir {
 mod tests {
     use super::*;
     use std::{fs, io::Write, os::unix::fs::PermissionsExt};
+
+    #[test]
+    fn config_repair_tightens_only_the_owned_final_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().canonicalize().unwrap().join("shared");
+        let config = parent.join("config");
+        fs::create_dir_all(&config).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o775)).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o755)).unwrap();
+        fs::write(config.join("config.toml"), b"# preserved\n").unwrap();
+        assert!(PrivateDir::open(&config, false).is_err());
+        assert!(PrivateDir::open(&config, true).is_err());
+        let before = fs::metadata(&config).unwrap();
+        let pinned = PrivateDir::prepare_config(&config).unwrap();
+        use std::os::unix::fs::MetadataExt;
+        let after = pinned.file().metadata().unwrap();
+        assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+        assert_eq!(after.permissions().mode() & 0o777, 0o700);
+        assert_eq!(
+            fs::read(config.join("config.toml")).unwrap(),
+            b"# preserved\n"
+        );
+        assert_eq!(
+            fs::metadata(&parent).unwrap().permissions().mode() & 0o777,
+            0o775
+        );
+        pinned.verify().unwrap();
+        PrivateDir::prepare_config(&config).unwrap();
+
+        // A later name replacement never redirects operations through the
+        // retained descriptor, including a handle returned by config repair.
+        let moved = parent.join("original");
+        fs::rename(&config, &moved).unwrap();
+        fs::create_dir(&config).unwrap();
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
+        fs::write(config.join("config.toml"), b"replacement").unwrap();
+        assert!(pinned.verify().is_err());
+        pinned.remove_file(OsStr::new("config.toml")).unwrap();
+        assert!(!moved.join("config.toml").exists());
+        assert_eq!(
+            fs::read(config.join("config.toml")).unwrap(),
+            b"replacement"
+        );
+    }
+
+    #[test]
+    fn config_repair_refuses_writable_contents_and_symlinks_without_chmod() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let config = root.join("config");
+        fs::create_dir(&config).unwrap();
+        for mode in [0o770, 0o775, 0o777, 0o1707] {
+            fs::set_permissions(&config, fs::Permissions::from_mode(mode)).unwrap();
+            assert!(
+                PrivateDir::prepare_config(&config).is_err(),
+                "mode {mode:o}"
+            );
+            assert_eq!(
+                fs::metadata(&config).unwrap().permissions().mode() & 0o7777,
+                mode
+            );
+        }
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o755)).unwrap();
+        std::os::unix::fs::symlink(&config, root.join("alias")).unwrap();
+        assert!(PrivateDir::prepare_config(&root.join("alias")).is_err());
+        assert_eq!(
+            fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        assert!(PrivateDir::prepare_config(&root.join("alias/child")).is_err());
+        assert!(!config.join("child").exists());
+    }
 
     #[test]
     fn group_writable_parents_are_preserved_and_operations_keep_the_original_directory() {

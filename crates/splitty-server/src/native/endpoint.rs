@@ -608,7 +608,23 @@ mod tests {
         drop(server);
         drop(child);
         assert!(!path.exists());
-        bind(&path).await.unwrap();
+        // Parallel PTY tests may briefly inherit CLOEXEC descriptors between
+        // fork and exec. The lock correctly lasts until the final inherited
+        // descriptor closes, not just until this test drops its own handles.
+        let replacement = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match InstanceLock::acquire(&root) {
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                    result => return result,
+                }
+            }
+        })
+        .await
+        .expect("the final inherited lock descriptor closes")
+        .unwrap();
+        bind_locked(&path, replacement).await.unwrap();
     }
 
     #[tokio::test]

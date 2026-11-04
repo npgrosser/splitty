@@ -219,6 +219,8 @@ The server SHALL NOT print the process token, a session id or a ticket on stdout
 ### Requirement: Credential Files Are Owner-Only
 On Unix, the Splitty config directory SHALL have mode 0700, and every writer MUST create it with that mode or repair an existing directory to it. The `auth-token` and `daemon.json` files MUST have mode 0600, be written atomically so they are never observable partially written or with a looser mode, and an existing `auth-token` with a looser mode MUST be repaired to 0600 when it is read. `daemon.json` MUST NOT contain any credential (its contents are defined in `server-modes`), and a `token` key left by an older version MUST be ignored.
 
+Authorized daemon start, restart and remote-handshake ensure SHALL prepare the config directory before discovery. They MAY tighten an owned final directory that has no group/world write bits through its verified descriptor. Symlinks, foreign-owned final directories and group/world-writable final directories SHALL be refused without chmod or daemon startup; shared ancestor permissions SHALL remain unchanged. Read-only discovery SHALL NOT repair directory modes.
+
 #### Scenario: Directory left behind by an older version
 - **WHEN** the config directory exists with mode 0755 and the server starts
 - **THEN** the directory ends up with mode 0700
@@ -230,6 +232,18 @@ On Unix, the Splitty config directory SHALL have mode 0700, and every writer MUS
 #### Scenario: Daemon info contents
 - **WHEN** a daemon writes `daemon.json`
 - **THEN** the file has mode 0600 and contains no token
+
+#### Scenario: Read-only discovery of a loose config directory
+- **WHEN** the owned config directory has mode 0755 and a remote handshake has no ensure option
+- **THEN** it refuses unsafe discovery without changing the mode or starting a daemon
+
+#### Scenario: Config repair preserves shared ancestors
+- **WHEN** daemon start or an ensuring handshake finds an owned 0755 config directory below owned 0775 ancestors
+- **THEN** only the config directory becomes 0700, and daemon discovery/start continues through the verified private path
+
+#### Scenario: Writable final config directory
+- **WHEN** daemon start, restart or an ensuring handshake encounters a final config directory with group or world write permission
+- **THEN** it refuses before discovery/start and leaves that directory and its ancestors unchanged
 
 ### Requirement: Owner-Only Control Socket
 Each server process SHALL offer a local control channel as a Unix socket. A daemon's socket SHALL be `daemon.sock` in its run directory: `$SPLITTY_CONFIG_DIR/run/` when `SPLITTY_CONFIG_DIR` names a configuration directory (see `server-modes`), otherwise `<user data dir>/splitty/run/`. Any other server's socket SHALL be `<pid>.sock` in `$SPLITTY_CONFIG_DIR/run/` when `SPLITTY_CONFIG_DIR` names a configuration directory, otherwise in `$XDG_RUNTIME_DIR/splitty/` (or `<user data dir>/splitty/run/` when `XDG_RUNTIME_DIR` is unset or relative). The socket's directory MUST have mode 0700 and the socket mode 0600. On Linux and macOS, the server MUST drop any connection whose peer user id differs from its own effective user id, and MUST also drop it when the peer credentials cannot be read. The channel requires no credential and applies no Host or Origin check: filesystem permissions and the peer check are its authorization. The server MUST refuse to place the socket under `/mnt/` or `/media/`; failing to create the socket MUST NOT stop the server and MUST NOT cause any credential to be handed to panes instead. `splitty serve` and the daemon SHALL remove their socket file on graceful shutdown.

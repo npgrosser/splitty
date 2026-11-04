@@ -37,6 +37,9 @@ Splitty does **not** defend against:
 
 ## Network boundary
 
+The [connection diagrams](docs/networking.md) show the runtime paths, listeners
+and lifetime boundaries summarized here.
+
 - Desktop-local connections use in-process IPC or app-owned child pipes. They
   start no UI TCP listener, read no browser credential, and never adopt an
   independently started daemon or its keeper sessions.
@@ -71,6 +74,17 @@ process never starts a reverse share. Unsupported container/mount/filesystem
 views fail before binding; an isolated network namespace alone does not establish
 shared reservation authority among all processes that can reach its loopback.
 Native desktop and daemon transports do not require a browser gateway.
+The registry is rooted in the OS account's persistent home, independently of
+`HOME`, XDG and Splitty configuration overrides: `.local/state/splitty/exposure`
+on Linux or `Library/Application Support/Splitty/exposure` on macOS. Its ancestor
+walk rejects symlinks, foreign owners and non-sticky group/world-write bits; the
+owned final directory is `0700` and its single-link regular files are `0600`.
+Consequently, a `0775` `.local` can be valid for a native client endpoint while
+being refused for browser gateways and reverse sharing. Splitty does not change
+shared parent modes. Pinning a directory for one process cannot establish that
+a later process uses the same registry after an ancestor is renamed; relaxing
+this rule requires a shared authority across those processes, not only safer
+individual file operations.
 A positively different immutable process birth identity in the same verified
 machine/boot/PID view permits release of the old worker generation. UID changes,
 unknown publication state and elapsed time do not. Cleanup bookkeeping exhaustion

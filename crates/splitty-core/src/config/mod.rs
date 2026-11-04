@@ -43,6 +43,15 @@ pub fn config_dir() -> PathBuf {
         .join("splitty")
 }
 
+/// Prepare configuration before an explicitly requested daemon start/ensure.
+/// Read-only discovery must keep using strict directory validation instead.
+pub fn prepare_daemon_config_dir() -> std::io::Result<()> {
+    #[cfg(unix)]
+    return PrivateDir::prepare_config(&config_dir()).map(drop);
+    #[cfg(not(unix))]
+    ensure_private_dir(&config_dir())
+}
+
 /// Create a directory if needed and make sure it is private to the owner.
 ///
 /// Every writer of `~/.config/splitty` must go through this

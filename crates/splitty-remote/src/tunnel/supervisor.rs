@@ -10,7 +10,7 @@ use std::{future::Future, time::Duration};
 use tokio::time::{sleep, Instant};
 
 pub const GIVE_UP_AFTER: Duration = Duration::from_secs(10 * 60);
-pub const PREPARE_TIMEOUT: Duration = Duration::from_secs(120);
+pub use crate::ssh::PREPARE_TIMEOUT;
 
 pub trait Remote: Sync {
     type Client: Send;
@@ -522,6 +522,7 @@ mod tests {
         active: Arc<AtomicUsize>,
         errors: Mutex<VecDeque<RemoteError>>,
         stalled: AtomicBool,
+        prepare_delay: Duration,
         reject: AtomicBool,
         update: AtomicBool,
         migration_error: Mutex<Option<RemoteError>>,
@@ -538,6 +539,7 @@ mod tests {
                 active: Arc::default(),
                 errors: Mutex::default(),
                 stalled: AtomicBool::new(false),
+                prepare_delay: Duration::ZERO,
                 reject: AtomicBool::new(false),
                 update: AtomicBool::new(false),
                 migration_error: Mutex::new(None),
@@ -579,6 +581,7 @@ mod tests {
         async fn prepare(&self, on_install: impl FnOnce(&str) + Send) -> Result<(), RemoteError> {
             self.calls.lock().unwrap().push("prepare");
             on_install("x86_64");
+            tokio::time::sleep(self.prepare_delay).await;
             if self.stalled.load(Ordering::SeqCst) {
                 std::future::pending::<()>().await;
             }
@@ -978,6 +981,20 @@ mod tests {
         assert_eq!(
             (0..6).map(|n| backoff(n).as_secs()).collect::<Vec<_>>(),
             [1, 2, 4, 8, 10, 10]
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn initial_installation_can_progress_beyond_the_old_two_minute_limit() {
+        let mut remote = Fake::new(daemon("0.1.30"));
+        remote.prepare_delay = Duration::from_secs(180);
+        let start = Instant::now();
+        let connected = connect(&remote, |_| {}).await.unwrap();
+        assert_eq!(start.elapsed(), remote.prepare_delay);
+        assert_eq!(connected.daemon.version, "0.1.30");
+        assert_eq!(
+            remote.calls.lock().unwrap().as_slice(),
+            ["admit", "prepare", "daemon", "bridge"]
         );
     }
 

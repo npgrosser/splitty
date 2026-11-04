@@ -20,6 +20,9 @@ export interface PipeEvents {
   closed(value: NativeClosed): void;
 }
 const utf8 = new TextDecoder("utf-8", { fatal: true });
+// Matches splitty_remote::tunnel::PREPARE_TIMEOUT; only assigned host streams
+// need the install-upload allowance. Progress cannot renew either deadline.
+export const HOST_PREPARATION_MS = 600_000;
 const encoder = new TextEncoder();
 const hex = (bytes: Uint8Array): string => Buffer.from(bytes).toString("hex");
 function record(value: unknown, keys: string[]): asserts value is Record<string, unknown> {
@@ -220,7 +223,7 @@ export class NativePipe {
       const value = json(frame); record(value, ["transportVersion"]);
       if (value.transportVersion !== 1) throw Error("Unsupported native transport version");
       release(); this.stage = "ready";
-      this.setDeadline(120_000, "Native backend preparation timed out"); return;
+      this.setDeadline(this.target === undefined ? 120_000 : HOST_PREPARATION_MS, "Native backend preparation timed out"); return;
     }
     if (this.stage === "ready") {
       if (frame.kind === NativeKind.progress) {

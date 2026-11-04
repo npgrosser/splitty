@@ -117,13 +117,14 @@ jobs:
           fi
           unshare --user --map-current-user --keep-caps --net true
 
-      - name: Require real SSH forwarding crash and kept-session migration
+      - name: Require real SSH reconnect, forwarding crash and kept-session migration
         env:
           SPLITTY_TEST_SSHD_ROOT: ${{ runner.temp }}/splitty-sshd/root
           SPLITTY_TEST_REQUIRE_SSH_LAB: '1'
           SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE: '1'
         run: |
           cargo test --locked -p splitty-server --test remote_connect fixture_cleanup_refuses_processes_outside_its_network_namespace -- --exact --nocapture
+          cargo test --locked -p splitty-server --test remote_connect connect_reconnects_and_hands_over_sessions_through_real_ssh -- --exact --nocapture
           cargo test --locked -p splitty-server --test remote_connect exposure_crash::a_published_reverse_worker_blocks_gateway_reuse_after_its_coordinator_is_killed -- --exact --nocapture
           cargo test --locked -p splitty-server --test remote_connect the_hub_updates_a_host_daemon_of_another_version -- --exact --nocapture
 
