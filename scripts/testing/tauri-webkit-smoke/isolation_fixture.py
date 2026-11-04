@@ -26,7 +26,7 @@ def instrument(harness,repo,source):
                     return Ok(Backend::Service(Box::new(client)));
                 }
 '''
-    provider=once(provider,'                let result = tunnel::open(',hook+'                let result = tunnel::open(')
+    provider=once(provider,'                let result = tunnel::open_with_update(',hook+'                let result = tunnel::open_with_update(')
     path=harness/'src/client_ipc/provider.rs';path.unlink();path.write_text(provider)
     carrier=harness/'src/client_ipc/carrier.rs'
     carrier.write_text(once(carrier.read_text(), '        let _ = ended.await;', '''        let ending = ended.await;

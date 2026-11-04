@@ -44,7 +44,27 @@ All 1,518 frontend tests pass; frontend check reports zero errors and eight
 existing warnings. The Electron build packages 58 assets, its remote lifecycle
 smoke passes with owned child cleanup, and all eight architecture files and 15
 main specifications validate. Strict change validation, formatting and version
-consistency pass. Windows packaging is recorded with completed delivery below.
+consistency pass.
+
+Windows x64 NSIS preview `Splitty_0.2.0-dev.2_x64-setup.exe` was built locally
+from implementation commit `73dc2d311de48dac646ad1709b8815dfd7a800d7`, without
+skipping the frontend or Windows unit-test gates. All 92 Windows tests pass.
+The clean staging checkout matches that commit; all four fresh backend archives
+match their SHA256 sidecars. The extracted x64 backend and Windows application/
+installer metadata report `0.2.0-dev.2`. The exact installer and checksum were
+copied to the host's Downloads folder, without installing or launching the app.
+Installer SHA256:
+`af265cd5944a24d7973d0f4a403c03a46ee22439d5839023680c31460812867a`.
+The earlier diagnostic-only build of this preview version was not distributed.
+No fresh Windows GUI runtime execution is claimed for this recovery feature.
+
+Hosted CI at the implementation commit exposed a stale smoke-instrumentation
+anchor (`tunnel::open` renamed to `open_with_update`) before macOS compilation.
+The shared GTK/WKWebView fixture now uses the current entry point; all nine
+portable preparation tests and WKWebView prepare-only pass. This follow-up
+changes test tooling and verification records only, so the installer above
+contains the final production code. The new hosted run is separate evidence;
+local validation does not claim that it has completed.
 
 ---
 
