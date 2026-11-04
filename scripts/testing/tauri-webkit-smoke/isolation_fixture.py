@@ -57,10 +57,6 @@ impl Broker { pub(crate) fn smoke_counts(&self)->serde_json::Value {
         path=harness/'src'/(name+'.rs');text=path.read_text();start=text.index(begin);stop=text.index(end,start)+len(end)
         path.unlink();path.write_text((text[:start]+replacement+'\n'+text[stop:]).replace('use tauri_plugin_opener::OpenerExt;',''))
     source=source.replace('smoke_report, smoke_windows, native_bootstrap_begin,','smoke_report, smoke_windows, smoke_state, native_bootstrap_begin,')
-    source=once(source,'smoke_event("begin");','if webview.label()=="main" { smoke_event("begin"); }')
-    source=once(source,'smoke_event("confirm"); smoke_proofs().lock().unwrap().push(proof.clone());','if webview.label()=="main" { smoke_event("confirm"); smoke_proofs().lock().unwrap().push(proof.clone()); }')
-    for event in ['started','finished']:
-        source=once(source,f'smoke_event("{event}");',f'if window.label()=="main" {{ smoke_event("{event}"); }}')
     if source.count('app.add_capability(capability::main_window())?;') != 2: raise RuntimeError('main capability anchors changed')
     source=source.replace('app.add_capability(capability::main_window())?;', '''app.add_capability(capability::main_window())?;
 app.add_capability(tauri::ipc::CapabilityBuilder::new("smoke-isolation-state").window("main").window("remote-*").local(true).permission("allow-smoke-state"))?;''')

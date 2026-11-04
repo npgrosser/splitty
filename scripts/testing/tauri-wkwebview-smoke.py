@@ -332,6 +332,7 @@ impl Native { pub(crate) fn smoke_delivery_handles(&self) -> std::collections::H
              'app.add_capability(capability::main_window())?;\napp.add_capability(tauri::ipc::CapabilityBuilder::new("smoke-report").window("main").permission("allow-smoke-report").permission("allow-smoke-windows"))?;')
     source = rewrite(source, r'app\.run\(\|app_handle, event\| \{', 'app.run(|app_handle, event| { if let tauri::RunEvent::ExitRequested { code: None, api, .. } = &event { api.prevent_exit(); }', count=2)
     source += '\n' + macos_report((repo/'scripts/testing/tauri-webkit-smoke/report.rs').read_text())
+    source = _shared.scope_main_observations(source)
     if args.isolation_consumer: source = _isolation.instrument(harness,repo,source)
     if args.isolation_consumer: shutil.copyfile(harness/'backend-substitution.json',evidence/'backend-substitution.json')
     source += '\nfn main() { run(); }\n'
@@ -341,7 +342,7 @@ impl Native { pub(crate) fn smoke_delivery_handles(&self) -> std::collections::H
                     'crates/splitty-tauri/src/client_ipc.rs', 'crates/splitty-tauri/src/client_ipc/bootstrap.js',
                     'crates/splitty-tauri/src/client_ipc/carrier.rs', 'crates/splitty-tauri/src/client_ipc/provider.rs',
                     'frontend/src/lib/protocol/native_socket.ts', 'frontend/src/lib/protocol/tauri_channel.ts']
-    source_files += ['scripts/testing/tauri-wkwebview-smoke.py']
+    source_files += ['scripts/testing/tauri-wkwebview-smoke.py', 'scripts/testing/tauri-webkit-smoke.py']
     source_files += [str(path.relative_to(repo)) for path in (repo/'scripts/testing/tauri-webkit-smoke').rglob('*') if path.is_file() and '__pycache__' not in path.parts]
     source_files += ['scripts/testing/tauri-windows-native-smoke/pressure.mjs','frontend/src/lib/terminal/session_client.ts','frontend/src/lib/terminal/attach_registry.ts']
     source_files += ['crates/splitty-transport/src/peer.rs', 'crates/splitty-transport/src/queue.rs', 'crates/splitty-transport/src/flow.rs']

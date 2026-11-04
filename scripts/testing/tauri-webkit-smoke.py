@@ -45,6 +45,18 @@ def observe_function(source, name, statement):
     return source[:body]+'\n'+statement+'\n'+source[body:]
 
 
+def scope_main_observations(source):
+    # Popouts and remote windows use the same production bootstrap hooks. Their
+    # proofs/events must not be counted as additional main-document reloads.
+    source = replace_once(source, 'smoke_event("begin");', 'if webview.label()=="main" { smoke_event("begin"); }')
+    source = replace_once(source, 'smoke_event("confirm"); smoke_proofs().lock().unwrap().push(proof.clone());',
+        'if webview.label()=="main" { smoke_event("confirm"); smoke_proofs().lock().unwrap().push(proof.clone()); }')
+    for event in ['started', 'finished']:
+        source = replace_once(source, f'smoke_event("{event}");', f'if window.label()=="main" {{ smoke_event("{event}"); }}')
+    return replace_once(source, 'smoke_event(&format!("navigation:{}",url));',
+        'if nav_label=="main" { smoke_event(&format!("navigation:{}",url)); }')
+
+
 def descendants(root):
     found = {root}
     changed = True
@@ -344,6 +356,7 @@ impl Native { pub(crate) fn smoke_delivery_handles(&self) -> std::collections::H
              'app.add_capability(capability::main_window())?;\napp.add_capability(tauri::ipc::CapabilityBuilder::new("smoke-report").window("main").permission("allow-smoke-report").permission("allow-smoke-windows"))?;')
     source = rewrite(source, r'app\.run\(\|app_handle, event\| \{', 'app.run(|app_handle, event| { if let tauri::RunEvent::ExitRequested { code: None, api, .. } = &event { api.prevent_exit(); }', count=2)
     source += '\n' + (repo/'scripts/testing/tauri-webkit-smoke/report.rs').read_text()
+    source = scope_main_observations(source)
     if args.isolation_consumer: source = _isolation.instrument(harness,repo,source)
     if args.isolation_consumer: shutil.copyfile(harness/'backend-substitution.json',evidence/'backend-substitution.json')
     source += '\nfn main() { std::env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1"); run(); }\n'

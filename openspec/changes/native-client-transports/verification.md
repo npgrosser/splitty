@@ -845,3 +845,23 @@ warnings; all 82 suites / 1,520 tests pass, as do frontend and Electron builds.
 All 15 specs, the change and eight LikeC4 source files validate. A Windows MSVC
 cross-check of `splitty-remote --tests` passes with two existing test-only dead-code
 warnings; this establishes compilation, not Windows runtime execution.
+
+### Hosted full-UI observer correction
+
+On `c9840b3`, all six other CI jobs and all CodeQL analyses passed. The macOS
+job passed its unit/native boundary checks but failed the full-UI WKWebView
+report: it counted 38 bootstrap sequences/proofs for 37 main-window documents.
+The additional sequence belongs to the deliberately opened popout; the main
+document IDs skip that separately allocated document. All 36 reloads, terminal
+output, stable quotas, zero final resources, shell exit and independent-daemon
+coexistence succeeded, but the exact sequence/proof-count predicates failed.
+
+The generated observer now scopes events and proofs to the `main` window in
+every mode, using the same filtering previously limited to isolation-consumer
+mode. Both GTK and WKWebView use the shared instrumentation. Exact counts,
+stale-proof authorization assertions and the separate popout lifecycle checks
+remain unchanged. Production sources and runtime policy are untouched. The
+portable preparation regression now generates both full-UI and isolation modes
+for both platforms; it failed for both full-UI variants before the correction
+and all nine tests pass afterward. Fresh actual WKWebView execution remains the
+hosted acceptance gate for this test-only correction.

@@ -2,6 +2,7 @@
 """Portable observer/preparation checks; these never claim WKWebView coverage."""
 import ctypes
 import importlib.util
+import itertools
 from pathlib import Path
 import unittest
 from unittest import mock
@@ -80,12 +81,25 @@ class IsolationPreparationTests(unittest.TestCase):
     def test_both_native_harnesses_prepare_roles_effect_guards_and_cleanup_without_gui(self):
         repo=Path(__file__).resolve().parents[2]
         original=(repo/'crates/splitty-tauri/src/client_ipc/provider.rs').read_bytes()
-        for script in ['tauri-webkit-smoke.py','tauri-wkwebview-smoke.py']:
-            with self.subTest(script=script),tempfile.TemporaryDirectory() as temporary:
+        for script, mode in itertools.product(['tauri-webkit-smoke.py','tauri-wkwebview-smoke.py'], ['--full-ui', '--isolation-consumer']):
+            with self.subTest(script=script, mode=mode),tempfile.TemporaryDirectory() as temporary:
                 root=Path(temporary);harness=root/'harness';evidence=root/'evidence'
-                result=subprocess.run(['python3',str(repo/'scripts/testing'/script),'--prepare-only','--isolation-consumer','--harness-dir',str(harness),'--evidence-dir',str(evidence)],text=True,capture_output=True)
+                result=subprocess.run(['python3',str(repo/'scripts/testing'/script),'--prepare-only',mode,'--harness-dir',str(harness),'--evidence-dir',str(evidence)],text=True,capture_output=True)
                 self.assertEqual(result.returncode,0,result.stderr)
                 main=(harness/'src/main.rs').read_text();provider=(harness/'src/client_ipc/provider.rs').read_text()
+                # Every mode opens other windows. Only main-window callbacks
+                # and proofs belong to the main document's reload assertions.
+                self.assertIn('if webview.label()=="main" { smoke_event("begin"); }',main)
+                self.assertIn('if webview.label()=="main" { smoke_event("confirm"); smoke_proofs().lock().unwrap().push(proof.clone()); }',main)
+                for event in ['started', 'finished']:
+                    self.assertIn(f'if window.label()=="main" {{ smoke_event("{event}"); }}',main)
+                self.assertIn('proofs.len() == expected_epochs',main)
+                self.assertIn('callbacks.len() == 4 * expected_epochs',main)
+                self.assertTrue((harness/'src/remote.rs').is_symlink(),'production remote window builder remains intact')
+                self.assertTrue((harness/'src/client_ipc/bootstrap.js').is_symlink(),'production private bootstrap remains intact')
+                if mode == '--full-ui':
+                    self.assertFalse((evidence/'backend-substitution.json').exists())
+                    continue
                 self.assertIn('catalog::Role::Remote',provider)
                 self.assertIn('negotiation::host_ready',provider)
                 self.assertIn('let _ = client.finish().await',provider)
@@ -93,9 +107,6 @@ class IsolationPreparationTests(unittest.TestCase):
                 self.assertIn('smoke_finish_isolation(&app).await?',main)
                 self.assertIn('backend.close().await',main)
                 self.assertIn('smoke_pressure_file(first)',main)
-                self.assertIn('if webview.label()=="main" { smoke_event("confirm")',main)
-                self.assertTrue((harness/'src/remote.rs').is_symlink(),'production remote window builder remains intact')
-                self.assertTrue((harness/'src/client_ipc/bootstrap.js').is_symlink(),'production private bootstrap remains intact')
                 for name,authorization in [('editor','native.main_action(&webview, &auth)?'),('navigation','navigation::Decision')]:
                     source=(harness/'src'/f'{name}.rs').read_text()
                     self.assertNotIn('.opener().open_url',source)
