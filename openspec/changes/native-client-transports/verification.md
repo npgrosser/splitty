@@ -865,3 +865,38 @@ portable preparation regression now generates both full-UI and isolation modes
 for both platforms; it failed for both full-UI variants before the correction
 and all nine tests pass afterward. Fresh actual WKWebView execution remains the
 hosted acceptance gate for this test-only correction.
+
+### Darwin process-group stop race
+
+On `5237f46`, both actual WKWebView modes passed: the full UI completed all
+36 reloads with exact main-window bootstrap counts, rejected stale proofs and
+zero final resources, and the separate isolation/consumer mode passed. All six
+other CI jobs and CodeQL also passed. The final macOS core gate still failed on
+the previously recorded intermittent managed-input stop error (`killpg` returning
+`EPERM` after signalling the owned leader), so that head was not merge-ready.
+
+Apple's [group-signalling implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c)
+excludes zombies and can report `EPERM` when no signalable member remains.
+The macOS-only correction recognizes just a proved sole exited leader: the
+existing `waitid(WNOWAIT)` must confirm that owned child's exit, and a complete
+group listing must contain exactly its retained PID. A fixed two-PID buffer
+distinguishes that result from additional or truncated members. The
+[kernel enumeration](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c)
+includes live and zombie members without UID filtering; the
+[libproc wrapper](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.c)
+returns a PID count. The leader is not reaped until the existing lifecycle
+finishes. Any additional member, failed/empty/full listing, unconfirmed exit or
+other signal error preserves the error. This deliberately does not classify
+groups containing additional zombies as empty.
+
+A deterministic Darwin regression retains an actual exited child, refuses the
+exception while it is alive or has another live group member, checks the real
+group syscall plus explicit `EPERM` classification, and preserves other errors
+and the exact exit result. Fixture waits are bounded and both children retain
+cleanup guards. The backpressure case now explicitly execs its sleeping process
+so it tests input pressure without incidental shell-child topology. Independent
+source review found no blocking issue. Linux lifecycle/backpressure tests pass,
+followed by all 1,083 reported workspace tests with the real SSH lab supplied,
+formatting and workspace clippy. The macOS core test target passes cross-check
+and all-target clippy. Actual Darwin execution is required from the hosted macOS
+job before calling this resolved.

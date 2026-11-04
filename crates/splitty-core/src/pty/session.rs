@@ -1645,7 +1645,7 @@ mod tests {
             vec![
                 "/bin/sh".into(),
                 "-c".into(),
-                "stty raw -echo; printf READY; sleep 30".into(),
+                "stty raw -echo; printf READY; exec sleep 30".into(),
             ],
         )
         .expect("job");

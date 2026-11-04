@@ -219,6 +219,45 @@ struct UnixChild {
 }
 
 #[cfg(unix)]
+impl UnixChild {
+    fn group_signal_result(
+        &mut self,
+        sig: nix::sys::signal::Signal,
+        result: Result<(), nix::errno::Errno>,
+    ) -> Result<(), String> {
+        match result {
+            Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+            #[cfg(target_os = "macos")]
+            Err(nix::errno::Errno::EPERM) if self.group_has_only_exited_leader() => Ok(()),
+            Err(error) => Err(format!(
+                "killpg owned leader group {} with {sig:?}: {error}",
+                self.pid
+            )),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn group_has_only_exited_leader(&mut self) -> bool {
+        // Darwin excludes zombies from killpg and can return EPERM after our
+        // direct signal already ended the leader. WNOWAIT keeps that exact PID
+        // owned. Exit alone is insufficient: another group member might still
+        // be alive but inaccessible. Accept only a complete, sole-leader list.
+        if !matches!(self.observe(), Ok(Some(_))) {
+            return false;
+        }
+        let mut members: [nix::libc::pid_t; 2] = [0; 2];
+        let size = i32::try_from(std::mem::size_of_val(&members)).expect("two PID buffer size");
+        // SAFETY: the buffer is writable for exactly `size` bytes. libproc lists
+        // both live and zombie members without filtering by UID and returns a
+        // PID count. Two slots distinguish a sole member from truncated lists.
+        let count = unsafe {
+            nix::libc::proc_listpgrppids(self.pid.as_raw(), members.as_mut_ptr().cast(), size)
+        };
+        count == 1 && members[0] == self.pid.as_raw()
+    }
+}
+
+#[cfg(unix)]
 impl OwnedProcess for UnixChild {
     fn observe(&mut self) -> Result<Option<ProcessResult>, String> {
         // nix 0.29 exposes waitid on Linux but not macOS. Both provide the POSIX
@@ -293,14 +332,7 @@ impl OwnedProcess for UnixChild {
             Err(error) => return Err(format!("kill owned leader {pid} with {sig:?}: {error}")),
         }
         if leader {
-            match killpg(pid, sig) {
-                Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-                Err(error) => {
-                    return Err(format!(
-                        "killpg owned leader group {pid} with {sig:?}: {error}"
-                    ))
-                }
-            }
+            self.group_signal_result(sig, killpg(pid, sig))?;
         }
         Ok(())
     }
