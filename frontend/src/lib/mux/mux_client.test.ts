@@ -29,14 +29,16 @@ describe("MuxClient", () => {
     expect(socket.sentOfType("mux.op").map((m) => m.screenId)).toEqual(["screen-x", "screen-a", "screen-b"]);
   });
 
-  it("holds create_screen again after the connection dropped, until the next welcome", () => {
+  it("discards create_screen while disconnected instead of replaying it on the next welcome", () => {
     welcome();
     socket.drop();
     mux.sendOp("screen-c", createScreenOp("screen-c"));
     expect(socket.sentOfType("mux.op")).toEqual([]);
 
     welcome();
-    expect(socket.sentOfType("mux.op").map((m) => m.screenId)).toEqual(["screen-c"]);
+    expect(socket.sentOfType("mux.op")).toEqual([]);
+    mux.sendOp("screen-d", createScreenOp("screen-d"));
+    expect(socket.sentOfType("mux.op").map((m) => m.screenId)).toEqual(["screen-d"]);
   });
 
   it("keeps the welcome's state and hands its screens to the handler", () => {
@@ -169,4 +171,9 @@ describe("MuxClient", () => {
     socket.message({ type: "mux.nudge", reason: "late", screenId: "screen-1" });
     expect(seen).toEqual([]);
   });
+});
+
+it("revokes pane-spawn waits on disconnect before a timeout can trigger a fallback create", async () => {
+  const wait = mux.waitForPaneSpawned("p"); const failed = expect(wait).rejects.toThrow("outcome is unknown");
+  socket.drop(); socket.message({ type: "mux.pane_spawned", paneId: "p", sessionId: "late" }); await failed;
 });

@@ -57,7 +57,7 @@ impl Default for Preferences {
 }
 
 pub struct Store {
-    path: PathBuf,
+    path: Option<PathBuf>,
     document: Preferences,
 }
 
@@ -85,7 +85,17 @@ impl Store {
                 Preferences::default()
             }
         };
-        Self { path, document }
+        Self {
+            path: Some(path),
+            document,
+        }
+    }
+
+    pub fn transient() -> Self {
+        Self {
+            path: None,
+            document: Preferences::default(),
+        }
     }
 
     pub fn list(&self) -> Preferences {
@@ -136,9 +146,11 @@ impl Store {
     }
 
     fn commit(&mut self, next: Preferences) -> Result<(), ForwardError> {
-        let mut bytes = serde_json::to_vec_pretty(&next).map_err(std::io::Error::other)?;
-        bytes.push(b'\n');
-        hosts::write_private(&self.path, FILE, &bytes)?;
+        if let Some(path) = &self.path {
+            let mut bytes = serde_json::to_vec_pretty(&next).map_err(std::io::Error::other)?;
+            bytes.push(b'\n');
+            hosts::write_private(path, FILE, &bytes)?;
+        }
         self.document = next;
         Ok(())
     }

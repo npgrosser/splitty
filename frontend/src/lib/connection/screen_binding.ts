@@ -199,6 +199,20 @@ export function sessionForPane(api: DockviewApi, paneId: string): TerminalSessio
   return bindingForApi(api)?.sessionForPane(paneId);
 }
 
+/** Clipboard reads are asynchronous input: keep both the selected terminal
+ * and its connection generation fixed until the read completes. */
+export async function pasteClipboardToPane(api: DockviewApi, paneId: string, expected = sessionForPane(api, paneId)): Promise<void> {
+  const binding = bindingForApi(api);
+  if (!binding || !expected || sessionForPane(api, paneId) !== expected) return;
+  try {
+    const current = binding.conn.sessions.captureConnection();
+    const text = await navigator.clipboard.readText();
+    current();
+    if (bindingForApi(api) !== binding || sessionForPane(api, paneId) !== expected) return;
+    if (text) expected.emulator.paste(text);
+  } catch { /* Permission failure, disconnect or disposed view discards this input. */ }
+}
+
 // ── Dockview Bridge ──
 
 /** How long after a drop or a divider drag the grid is read and sent. */

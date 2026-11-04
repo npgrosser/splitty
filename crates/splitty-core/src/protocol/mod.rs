@@ -20,10 +20,14 @@ pub use messages::*;
 /// when a client of the previous version could no longer talk to this server;
 /// a client that relays the protocol supports its own version and the one
 /// before (see the `remote-hosts` spec). Recorded in `daemon.json`.
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = splitty_transport::wire::MUX_PROTOCOL_VERSION;
 
 /// Trait for sending protocol events and binary data to connected clients.
 pub trait Sender: Send + Sync {
+    fn delivery_context(&self) -> splitty_transport::queue::Context {
+        splitty_transport::queue::Context::default()
+    }
+    fn close(&self) {}
     fn send(&self, event: &ServerEvent) -> Result<(), Box<dyn std::error::Error + Send + Sync>>;
     fn send_binary(
         &self,

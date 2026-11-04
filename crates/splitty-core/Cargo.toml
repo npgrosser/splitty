@@ -9,6 +9,7 @@ publish = false
 testing = []
 
 [dependencies]
+splitty-transport = { path = "../splitty-transport" }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

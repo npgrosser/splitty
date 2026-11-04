@@ -102,6 +102,7 @@ fn observed_exit_wins_a_queued_stop_without_signalling_reused_identity() {
     let (result, replies) = drive(
         &mut FakeProcess(kernel.clone()),
         rx,
+        &std::sync::atomic::AtomicBool::new(false),
         Duration::ZERO,
         Duration::ZERO,
     );
@@ -128,6 +129,7 @@ fn failed_signalling_and_unconfirmed_stop_are_errors_not_success() {
             drive(
                 &mut FakeProcess(worker_kernel),
                 rx,
+                &std::sync::atomic::AtomicBool::new(false),
                 Duration::ZERO,
                 Duration::ZERO,
             )
@@ -148,4 +150,70 @@ fn failed_signalling_and_unconfirmed_stop_are_errors_not_success() {
         assert!(replies.is_empty(), "the failed stop was answered already");
         assert!(kernel.lock().expect("kernel").reaped);
     }
+}
+
+#[test]
+#[cfg(target_os = "macos")]
+fn darwin_group_permission_error_requires_an_exited_sole_owned_leader() {
+    use nix::{errno::Errno, sys::signal::Signal, unistd::Pid};
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    // A pipe controls exit without sleeps, and the test remains the sole reaper.
+    let mut child = Command::new("/bin/sh")
+        .args(["-c", "read value; exit 0"])
+        .stdin(Stdio::piped())
+        .process_group(0)
+        .spawn()
+        .unwrap();
+    let gate = child.stdin.take().unwrap();
+    let pid = Pid::from_raw(i32::try_from(child.id()).unwrap());
+    let mut owned = UnixChild {
+        child: ChildGuard(Some(Box::new(child))),
+        pid,
+        terminal: None,
+    };
+    let denied = Err(Errno::EPERM);
+    assert!(owned.group_signal_result(Signal::SIGTERM, denied).is_err());
+
+    let mut member = Command::new("/bin/sh")
+        .args(["-c", "read value; exit 0"])
+        .stdin(Stdio::piped())
+        .process_group(pid.as_raw())
+        .spawn()
+        .unwrap();
+    let member_gate = member.stdin.take().unwrap();
+    let mut member = ChildGuard(Some(Box::new(member)));
+    drop(gate);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while owned.observe().unwrap().is_none() {
+        assert!(Instant::now() < deadline, "leader did not exit");
+        std::thread::sleep(TICK);
+    }
+    // An exited leader does not excuse an inaccessible additional member.
+    assert!(owned.group_signal_result(Signal::SIGTERM, denied).is_err());
+    assert!(member.0.as_mut().unwrap().try_wait().unwrap().is_none());
+    drop(member_gate);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let status = loop {
+        if let Some(status) = member.0.as_mut().unwrap().try_wait().unwrap() {
+            break status;
+        }
+        assert!(Instant::now() < deadline, "additional member did not exit");
+        std::thread::sleep(TICK);
+    };
+    assert!(status.success());
+    member.0.take();
+
+    // Only the unreaped leader remains. Exercise the actual Darwin syscall and
+    // the EPERM classification even if a future kernel fixes zombie signalling.
+    let result = nix::sys::signal::killpg(pid, Signal::SIGTERM);
+    assert!(matches!(result, Ok(()) | Err(Errno::EPERM)));
+    owned.group_signal_result(Signal::SIGTERM, result).unwrap();
+    owned.group_signal_result(Signal::SIGKILL, denied).unwrap();
+    assert!(owned
+        .group_signal_result(Signal::SIGTERM, Err(Errno::EACCES))
+        .is_err());
+    assert_eq!(owned.observe().unwrap().unwrap().exit_code, Some(0));
+    owned.reap().unwrap();
 }

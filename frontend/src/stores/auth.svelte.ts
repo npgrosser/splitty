@@ -1,13 +1,22 @@
 // Authentication is the local server's: the page's session cookie and the
 // socket of the local connection. Another connection failing never changes
 // this state.
-import { socket } from "../lib/protocol/websocket.ts";
+import { socket, rootAssignment } from "../lib/protocol/connection.ts";
 import { exchangeBootstrap, exchangeToken } from "../lib/protocol/http.ts";
+import { NativeConnectionError } from "../lib/protocol/native_socket.ts";
 
 export type AuthState = "checking" | "needsToken" | "connected" | "reconnecting";
 
 let authState = $state<AuthState>("checking");
 let authError = $state(false);
+let connectionError = $state<string | null>(null);
+let reloadRequired = $state(false);
+export function getConnectionError(): string | null { return connectionError; }
+export function getConnectionRetryLabel(): string { return reloadRequired ? "Reload" : "Reconnect"; }
+export function retryConnection(): void {
+  if (reloadRequired) { window.location.reload(); return; }
+  connectionError = null; socket.reconnect();
+}
 
 export function getAuthState(): AuthState {
   return authState;
@@ -39,11 +48,14 @@ function clearCredentialFromUrl(): void {
 
 /** Enter a token manually — the plain-browser path, where no launcher ran. */
 export async function handleTokenSubmit(token: string): Promise<void> {
+  if (rootAssignment) return;
   authState = "checking";
   authError = false;
 
   if (await exchangeToken(token)) {
-    void socket.connect();
+    // A gateway may have restarted with a different fixed backend. Rebuild the
+    // document's assignment before importing any workspace/role-dependent UI.
+    window.location.reload();
   } else {
     authState = "needsToken";
     authError = true;
@@ -68,6 +80,7 @@ export async function handleTokenSubmit(token: string): Promise<void> {
  * connect attempt in [`initAuth`].
  */
 export async function establishSession(): Promise<void> {
+  if (rootAssignment) return;
   const bootstrap = new URLSearchParams(window.location.search).get("bootstrap");
   if (!bootstrap) return;
 
@@ -78,6 +91,8 @@ export async function establishSession(): Promise<void> {
 /** Wire socket callbacks and connect. */
 export function initAuth(): void {
   socket.onConnected = () => {
+    connectionError = null;
+    reloadRequired = false;
     authState = "connected";
     authError = false;
   };
@@ -89,5 +104,12 @@ export function initAuth(): void {
     authState = "reconnecting";
   };
 
+  if ("onConnectionError" in socket) socket.onConnectionError = error => {
+    reloadRequired = error instanceof NativeConnectionError && error.code === "assignment";
+    let message = error.message;
+    try { const failure = JSON.parse(message); if (failure?.type === "remote.error" && typeof failure.message === "string") message = failure.message + (typeof failure.hint === "string" ? `\n${failure.hint}` : ""); } catch { /* Ordinary transport diagnostic. */ }
+    connectionError = message;
+    authState = "reconnecting";
+  };
   void socket.connect();
 }

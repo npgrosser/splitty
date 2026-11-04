@@ -54,7 +54,6 @@ pub struct WslSetupProgress {
 #[serde(rename_all = "camelCase")]
 pub struct WslStartResult {
     pub distro: String,
-    pub url: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,24 +145,82 @@ fn compatibility_reason(version: u32, architecture: &str, os_id: Option<&str>) -
     }
 }
 
+/// Provisioning output is text on separate short-lived pipes. Drain excess
+/// bytes without retaining them so a verbose command cannot block its writer.
+fn read_bounded(mut reader: impl std::io::Read, limit: usize) -> Vec<u8> {
+    let mut captured = Vec::with_capacity(limit.min(1024));
+    let mut buffer = [0_u8; 1024];
+    loop {
+        match reader.read(&mut buffer) {
+            Ok(0) | Err(_) => return captured,
+            Ok(count) if captured.len() < limit => {
+                let remaining = limit - captured.len();
+                captured.extend_from_slice(&buffer[..count.min(remaining)]);
+            }
+            Ok(_) => {}
+        }
+    }
+}
+
+/// Poll only the child owned by this command. Cancellation observes exit before
+/// releasing setup; it never addresses a WSL distribution or another process.
+fn wait_owned_command(
+    child: &mut splitty_transport::worker::BlockingWorker,
+    timeout: std::time::Duration,
+    cancelled: impl Fn() -> bool,
+) -> Result<std::process::ExitStatus, String> {
+    let deadline = std::time::Instant::now() + timeout;
+    let error = loop {
+        if cancelled() {
+            break "WSL startup was cancelled".to_string();
+        }
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(25));
+            }
+            Ok(None) => break format!("wsl.exe timed out after {} seconds", timeout.as_secs()),
+            Err(error) => break format!("could not wait for wsl.exe: {error}"),
+        }
+    };
+    let _ = child.kill();
+    child
+        .wait()
+        .map_err(|wait| format!("{error}; could not reap owned wsl.exe: {wait}"))?;
+    Err(error)
+}
+
+/// Each argument is passed directly to wsl.exe, including distribution and
+/// executable paths. No shell can reinterpret either value.
+fn native_backend_arguments<'a>(distro: &'a str, binary: &'a str) -> [&'a str; 10] {
+    [
+        "-d",
+        distro,
+        "--exec",
+        binary,
+        "desktop-backend",
+        "--transport",
+        "native-v1",
+        "--backend",
+        "embedded",
+        "--owner",
+    ]
+}
+
 #[cfg(target_os = "windows")]
 pub(crate) mod platform {
     use super::*;
     use sha2::{Digest, Sha256};
-    use std::collections::VecDeque;
     use std::ffi::OsString;
     use std::fs;
-    use std::io::{BufRead, BufReader, Read, Write};
-    use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream};
+    use std::io::{BufReader, Write};
     use std::path::{Path, PathBuf};
-    use std::process::{Child, ChildStdin, Command, Stdio};
-    use std::sync::{mpsc, Arc, Mutex};
-    use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+    use std::process::{Command, Stdio};
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tauri::{AppHandle, Emitter, Manager};
 
     const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
-    const START_TIMEOUT: Duration = Duration::from_secs(30);
-    const FORWARDING_TIMEOUT: Duration = Duration::from_secs(5);
     const STDERR_LIMIT: usize = 8 * 1024;
     const ARCHIVE_NAME: &str = "splitty-wsl-x86_64.tar.gz";
     const CHECKSUM_NAME: &str = "splitty-wsl-x86_64.tar.gz.sha256";
@@ -183,7 +240,24 @@ pub(crate) mod platform {
         ) -> Result<ProcessOutput, String>;
     }
 
-    struct SystemWsl;
+    #[derive(Default)]
+    struct SystemWsl {
+        cancellation: Option<splitty_transport::queue::Context>,
+    }
+
+    impl SystemWsl {
+        fn check_cancelled(&self) -> Result<(), String> {
+            if self
+                .cancellation
+                .as_ref()
+                .is_some_and(|context| context.is_closed())
+            {
+                Err("WSL startup was cancelled".to_string())
+            } else {
+                Ok(())
+            }
+        }
+    }
 
     fn wsl_command() -> Command {
         use std::os::windows::process::CommandExt;
@@ -201,6 +275,7 @@ pub(crate) mod platform {
             input: Option<&[u8]>,
             timeout: Duration,
         ) -> Result<ProcessOutput, String> {
+            self.check_cancelled()?;
             let mut command = wsl_command();
             command
                 .args(arguments)
@@ -212,7 +287,7 @@ pub(crate) mod platform {
                 command.stdin(Stdio::null());
             }
 
-            let mut child = command.spawn().map_err(|error| {
+            let mut child = splitty_transport::worker::BlockingWorker::spawn(&mut command, &splitty_transport::admission::Admission::global()).map_err(|error| {
                 if error.kind() == std::io::ErrorKind::NotFound {
                     "WSL is not installed. Install it from an elevated PowerShell with `wsl --install -d Ubuntu`.".to_string()
                 } else {
@@ -220,50 +295,30 @@ pub(crate) mod platform {
                 }
             })?;
 
-            let stdout = child.stdout.take().expect("piped stdout");
-            let stderr = child.stderr.take().expect("piped stderr");
-            let stdout_reader = std::thread::spawn(move || {
-                let mut bytes = Vec::new();
-                let _ = BufReader::new(stdout).read_to_end(&mut bytes);
-                bytes
-            });
+            let stdout = child.stdout().expect("piped stdout");
+            let stderr = child.stderr().expect("piped stderr");
+            let stdout_reader =
+                std::thread::spawn(move || read_bounded(BufReader::new(stdout), 64 * 1024));
             let stderr_reader =
                 std::thread::spawn(move || read_bounded(BufReader::new(stderr), STDERR_LIMIT + 1));
 
             let stdin_writer = input.map(|bytes| {
-                let mut stdin = child.stdin.take().expect("piped stdin");
+                let mut stdin = child.stdin().expect("piped stdin");
                 let bytes = bytes.to_vec();
                 std::thread::spawn(move || stdin.write_all(&bytes))
             });
 
-            let deadline = Instant::now() + timeout;
-            let status = loop {
-                match child.try_wait() {
-                    Ok(Some(status)) => break status,
-                    Ok(None) if Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(25));
-                    }
-                    Ok(None) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        if let Some(writer) = stdin_writer {
-                            let _ = writer.join();
-                        }
-                        return Err(format!(
-                            "wsl.exe timed out after {} seconds",
-                            timeout.as_secs()
-                        ));
-                    }
-                    Err(error) => {
-                        let _ = child.kill();
-                        let _ = child.wait();
-                        if let Some(writer) = stdin_writer {
-                            let _ = writer.join();
-                        }
-                        return Err(format!("could not wait for wsl.exe: {error}"));
-                    }
+            let status =
+                wait_owned_command(&mut child, timeout, || self.check_cancelled().is_err());
+            if let Err(error) = status {
+                if let Some(writer) = stdin_writer {
+                    let _ = writer.join();
                 }
-            };
+                let _ = stdout_reader.join();
+                let _ = stderr_reader.join();
+                return Err(error);
+            }
+            let status = status?;
 
             let stdout = stdout_reader.join().unwrap_or_default();
             let stderr = stderr_reader.join().unwrap_or_default();
@@ -285,21 +340,6 @@ pub(crate) mod platform {
                 stdout,
                 stderr,
             })
-        }
-    }
-
-    fn read_bounded(mut reader: impl Read, limit: usize) -> Vec<u8> {
-        let mut captured = Vec::with_capacity(limit.min(1024));
-        let mut buffer = [0_u8; 1024];
-        loop {
-            match reader.read(&mut buffer) {
-                Ok(0) | Err(_) => return captured,
-                Ok(count) if captured.len() < limit => {
-                    let remaining = limit - captured.len();
-                    captured.extend_from_slice(&buffer[..count.min(remaining)]);
-                }
-                Ok(_) => {}
-            }
         }
     }
 
@@ -557,9 +597,12 @@ fi
         }
     }
 
-    fn provision_backend(app: &AppHandle, distro: &str) -> Result<String, String> {
-        let executor = SystemWsl;
-        ensure_non_root(&executor, distro)?;
+    fn provision_backend(
+        app: &AppHandle,
+        distro: &str,
+        executor: &dyn WslExecutor,
+    ) -> Result<String, String> {
+        ensure_non_root(executor, distro)?;
         let archive_path = resource_file(app, ARCHIVE_NAME)?;
         let checksum_path = resource_file(app, CHECKSUM_NAME)?;
         let expected = fs::read_to_string(&checksum_path)
@@ -572,7 +615,7 @@ fi
             return Err("bundled WSL backend checksum is invalid".to_string());
         }
 
-        if let Some(binary) = installed_backend(&executor, distro, &expected)? {
+        if let Some(binary) = installed_backend(executor, distro, &expected)? {
             return Ok(binary);
         }
 
@@ -583,7 +626,7 @@ fi
             return Err("bundled WSL backend checksum verification failed".to_string());
         }
 
-        let home_output = execute_checked(&executor, distro, &["printenv", "HOME"], None)?;
+        let home_output = execute_checked(executor, distro, &["printenv", "HOME"], None)?;
         let home = decode_wsl_output(&home_output.stdout).trim().to_string();
         if !home.starts_with('/') || home.contains('\0') {
             return Err(format!("WSL returned an invalid HOME path: {home:?}"));
@@ -599,7 +642,7 @@ fi
             format!("Installing backend in {distro}…"),
         );
 
-        execute_checked(&executor, distro, &["mkdir", "-p", &base], None)?;
+        execute_checked(executor, distro, &["mkdir", "-p", &base], None)?;
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -614,31 +657,31 @@ fi
         let link_path = format!("{base}/.{payload_name}.link");
 
         let provision = (|| {
-            execute_checked(&executor, distro, &["mkdir", &payload_path], None)?;
+            execute_checked(executor, distro, &["mkdir", &payload_path], None)?;
             execute_checked(
-                &executor,
+                executor,
                 distro,
                 &["tar", "-xzf", "-", "-C", &payload_path],
                 Some(&archive),
             )?;
             let payload_binary = format!("{payload_path}/splitty");
             let payload_marker = format!("{payload_path}/.archive-sha256");
-            execute_checked(&executor, distro, &["chmod", "755", &payload_binary], None)?;
+            execute_checked(executor, distro, &["chmod", "755", &payload_binary], None)?;
             execute_checked(
-                &executor,
+                executor,
                 distro,
                 &["tee", &payload_marker],
                 Some(expected.as_bytes()),
             )?;
-            execute_checked(&executor, distro, &["test", "-x", &payload_binary], None)?;
+            execute_checked(executor, distro, &["test", "-x", &payload_binary], None)?;
             execute_checked(
-                &executor,
+                executor,
                 distro,
                 &["ln", "-s", &payload_name, &link_path],
                 None,
             )?;
             execute_checked(
-                &executor,
+                executor,
                 distro,
                 &["mv", "-Tf", &link_path, &final_path],
                 None,
@@ -647,30 +690,22 @@ fi
         })();
 
         if provision.is_err() {
-            let _ = execute_checked(&executor, distro, &["rm", "-rf", &payload_path], None);
-            let _ = execute_checked(&executor, distro, &["rm", "-f", &link_path], None);
+            let _ = execute_checked(executor, distro, &["rm", "-rf", &payload_path], None);
+            let _ = execute_checked(executor, distro, &["rm", "-f", &link_path], None);
         }
         provision
     }
 
     struct BackendBridge {
-        child: Child,
-        stdin: Option<ChildStdin>,
-        _stderr_thread: std::thread::JoinHandle<()>,
-        url: String,
-        port: u16,
+        owner: Arc<splitty_remote::owner::Owner>,
         distro: String,
     }
 
     pub struct WindowsWslState {
         bridge: Mutex<Option<BackendBridge>>,
         startup: Mutex<()>,
-        /// Origins the main window may navigate to, i.e. the running backend's.
-        /// Empty until the backend is up, so the setup page cannot be swapped
-        /// for an arbitrary loopback page in the meantime (see `navigation`).
-        backend_origins: Mutex<Vec<String>>,
-        /// The backend ports whose origin the main window's capability names.
-        granted_ports: Mutex<Vec<u16>>,
+        operations: Arc<splitty_transport::budget::Budget>,
+        cancellation: splitty_transport::queue::Context,
     }
 
     impl WindowsWslState {
@@ -678,67 +713,59 @@ fi
             Self {
                 bridge: Mutex::new(None),
                 startup: Mutex::new(()),
-                backend_origins: Mutex::new(Vec::new()),
-                granted_ports: Mutex::new(Vec::new()),
+                operations: splitty_transport::budget::Budget::new(
+                    splitty_transport::admission::DOMAIN_OPENING,
+                ),
+                cancellation: splitty_transport::queue::Context::default(),
             }
         }
 
-        /// The origins of the running backend, for the navigation guard.
-        pub fn backend_origins(&self) -> Vec<String> {
-            self.backend_origins
+        /// Documents open independent streams on this app-owned service. Closing
+        /// or reloading one document must never close the owner carrier.
+        pub fn owner(&self) -> Result<Arc<splitty_remote::owner::Owner>, String> {
+            self.bridge
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .clone()
-        }
-
-        /// Admit the backend on `port`: the main window's native commands on
-        /// its exact origin (once per port, see `capability`), and its origins
-        /// for the navigation guard.
-        fn set_backend_port(&self, app: &AppHandle, port: u16) -> Result<(), String> {
-            let mut granted = self
-                .granted_ports
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !granted.contains(&port) {
-                app.add_capability(crate::capability::main_window(port))
-                    .map_err(|error| {
-                        format!("could not grant the Splitty UI its native commands: {error}")
-                    })?;
-                granted.push(port);
-            }
-            *self
-                .backend_origins
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                crate::navigation::backend_origins(port);
-            Ok(())
+                .as_ref()
+                .filter(|bridge| !bridge.owner.is_closed())
+                .map(|bridge| Arc::clone(&bridge.owner))
+                .ok_or_else(|| "The WSL backend is not running".to_string())
         }
 
         pub fn shutdown(&self) {
-            let mut slot = self
+            // Wake active provisioning before waiting for serialized startup.
+            self.cancellation.close();
+            {
+                let _startup = self
+                    .startup
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                self.close_bridge();
+            }
+            // Queued starts must be able to acquire the mutex, observe closed,
+            // and release their actual task permit. Detection/switch tasks also
+            // hold these permits until their owned child and readers finish.
+            let deadline = std::time::Instant::now() + Duration::from_secs(3);
+            while self.operations.used() != 0 {
+                if std::time::Instant::now() >= deadline {
+                    tracing::warn!("WSL operation cleanup did not finish before the exit deadline");
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+
+        fn close_bridge(&self) {
+            let bridge = self
                 .bridge
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            let Some(mut bridge) = slot.take() else {
-                return;
-            };
-
-            // Closing the pipe sends EOF to `--desktop-stdio` in WSL.
-            drop(bridge.stdin.take());
-            let deadline = Instant::now() + Duration::from_secs(3);
-            loop {
-                match bridge.child.try_wait() {
-                    Ok(Some(_)) => return,
-                    Ok(None) if Instant::now() < deadline => {
-                        std::thread::sleep(Duration::from_millis(50));
-                    }
-                    _ => break,
-                }
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take();
+            if let Some(bridge) = bridge {
+                // Owner closes its input and bounds cleanup before killing and
+                // reaping only its wsl.exe child; never terminate a distribution.
+                tauri::async_runtime::block_on(bridge.owner.close());
             }
-            // Kill only the remaining wsl.exe bridge process. Never terminate
-            // the distribution, which could contain unrelated user processes.
-            let _ = bridge.child.kill();
-            let _ = bridge.child.wait();
         }
     }
 
@@ -753,243 +780,82 @@ fi
         );
     }
 
-    fn stderr_reader(
-        stderr: impl Read + Send + 'static,
-        captured: Arc<Mutex<VecDeque<u8>>>,
-    ) -> std::thread::JoinHandle<()> {
-        std::thread::spawn(move || {
-            let mut reader = BufReader::new(stderr);
-            let mut buffer = [0_u8; 1024];
-            loop {
-                match reader.read(&mut buffer) {
-                    Ok(0) | Err(_) => break,
-                    Ok(count) => {
-                        let mut target = captured
-                            .lock()
-                            .unwrap_or_else(|poisoned| poisoned.into_inner());
-                        for byte in &buffer[..count] {
-                            if target.len() == STDERR_LIMIT {
-                                target.pop_front();
-                            }
-                            target.push_back(*byte);
-                        }
-                    }
-                }
-            }
-        })
-    }
-
-    fn bridge_stderr(captured: &Arc<Mutex<VecDeque<u8>>>) -> String {
-        let bytes: Vec<u8> = captured
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .iter()
-            .copied()
-            .collect();
-        limited_text(&bytes)
-    }
-
-    /// Strip credential values out of a backend stdout line before logging it.
-    ///
-    /// The bridge mirrors the backend's stdout into `tracing::debug!`, and that
-    /// stream ends up in support bundles and issue reports. It carries the
-    /// bootstrap code and the launch URL, so it was a standing credential
-    /// disclosure (security review SR-04).
-    ///
-    /// Redacting by key rather than dropping the lines keeps the log useful for
-    /// diagnosing startup: which markers arrived, and in what order, is exactly
-    /// what one needs to see, and the values never are.
-    fn redact_credentials(line: &str) -> String {
-        const SENSITIVE_PREFIXES: [&str; 3] =
-            ["SPLITTY_BOOTSTRAP=", "SPLITTY_TOKEN=", "SPLITTY_URL="];
-
-        for prefix in SENSITIVE_PREFIXES {
-            if line.starts_with(prefix) {
-                return format!("{prefix}<redacted>");
-            }
-        }
-        line.to_string()
-    }
-
-    fn start_bridge(distro: &str, binary: &str) -> Result<BackendBridge, String> {
-        // Re-checked here and not only at provisioning time: the distribution's
-        // default user can be changed between setup and a later launch (SR-19).
-        ensure_non_root(&SystemWsl, distro)?;
-
-        let mut child = wsl_command()
-            .args([
-                "-d",
-                distro,
-                "--exec",
-                binary,
-                "serve",
-                "--addr",
-                "127.0.0.1:0",
-                "--oneshot-token",
-                "--desktop-stdio",
-            ])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|error| format!("could not start Splitty in WSL: {error}"))?;
-        let stdin = child.stdin.take().ok_or("wsl.exe did not expose stdin")?;
-        let stdout = child.stdout.take().ok_or("wsl.exe did not expose stdout")?;
-        let stderr = child.stderr.take().ok_or("wsl.exe did not expose stderr")?;
-        let captured_stderr = Arc::new(Mutex::new(VecDeque::new()));
-        let stderr_thread = stderr_reader(stderr, captured_stderr.clone());
-
-        let (line_sender, line_receiver) = mpsc::channel();
-        std::thread::spawn(move || {
-            for line in BufReader::new(stdout).lines() {
-                match line {
-                    Ok(line) => {
-                        tracing::debug!(target: "splitty_wsl", "{}", redact_credentials(&line));
-                        let _ = line_sender.send(line);
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
-
-        let deadline = Instant::now() + START_TIMEOUT;
-        let mut port = None;
-        let mut bootstrap = None;
-        let mut url = None;
-        while Instant::now() < deadline && (port.is_none() || bootstrap.is_none() || url.is_none())
-        {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("could not inspect WSL backend: {error}"))?
-            {
-                let _ = stderr_thread.join();
-                return Err(format!(
-                    "Splitty exited before it was ready ({status}): {}",
-                    bridge_stderr(&captured_stderr)
-                ));
-            }
-            match line_receiver.recv_timeout(Duration::from_millis(100)) {
-                Ok(line) => {
-                    if let Some(value) = line.strip_prefix("SPLITTY_PORT=") {
-                        port = value.trim().parse::<u16>().ok();
-                    } else if let Some(value) = line.strip_prefix("SPLITTY_BOOTSTRAP=") {
-                        bootstrap = Some(value.trim().to_string());
-                    } else if let Some(value) = line.strip_prefix("SPLITTY_URL=") {
-                        url = Some(value.trim().to_string());
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {}
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-            }
-        }
-
-        let (port, bootstrap, url) = match (port, bootstrap, url) {
-            (Some(port), Some(bootstrap), Some(url)) => (port, bootstrap, url),
-            _ => {
-                drop(stdin);
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stderr_thread.join();
-                return Err(format!(
-                    "Splitty did not report a listening address within {} seconds: {}",
-                    START_TIMEOUT.as_secs(),
-                    bridge_stderr(&captured_stderr)
-                ));
-            }
-        };
-        // The URL carries a single-use bootstrap code, not the process token
-        // (security review SR-04). Verifying it byte for byte
-        // keeps the existing guarantee that the backend cannot talk this
-        // launcher into navigating anywhere but its own loopback port.
-        let expected_url = format!("http://127.0.0.1:{port}/?bootstrap={bootstrap}&desktop=1");
-        if url != expected_url {
-            drop(stdin);
-            let _ = child.kill();
-            let _ = child.wait();
-            let _ = stderr_thread.join();
-            return Err("Splitty returned an invalid localhost URL".to_string());
-        }
-
-        let address = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port);
-        let forwarding_deadline = Instant::now() + FORWARDING_TIMEOUT;
-        while TcpStream::connect_timeout(&address, Duration::from_millis(250)).is_err() {
-            if let Some(status) = child
-                .try_wait()
-                .map_err(|error| format!("could not inspect WSL backend: {error}"))?
-            {
-                let _ = stderr_thread.join();
-                return Err(format!(
-                    "Splitty exited before Windows localhost forwarding was ready ({status}): {}",
-                    bridge_stderr(&captured_stderr)
-                ));
-            }
-            if Instant::now() >= forwarding_deadline {
-                drop(stdin);
-                let _ = child.kill();
-                let _ = child.wait();
-                let _ = stderr_thread.join();
-                return Err(
-                    "The backend is running, but Windows cannot reach WSL localhost. Enable WSL localhost forwarding and try again."
-                        .to_string(),
-                );
-            }
-            std::thread::sleep(Duration::from_millis(100));
-        }
-
+    fn start_bridge(
+        distro: &str,
+        binary: &str,
+        executor: &SystemWsl,
+        context: splitty_transport::queue::Context,
+    ) -> Result<BackendBridge, String> {
+        // Provisioning uses separate short-lived commands. From here stdout is
+        // exclusively binary native-v1 traffic, never decoded or logged as text.
+        ensure_non_root(executor, distro)?;
+        let mut command: tokio::process::Command = wsl_command().into();
+        command.args(native_backend_arguments(distro, binary));
+        let owner = tauri::async_runtime::block_on(splitty_remote::owner::Owner::spawn_context(
+            command, 1, context,
+        ))
+        .map_err(|error| format!("could not start native Splitty in WSL: {error}"))?;
         Ok(BackendBridge {
-            child,
-            stdin: Some(stdin),
-            _stderr_thread: stderr_thread,
-            url,
-            port,
+            owner,
             distro: distro.to_string(),
         })
     }
 
-    #[tauri::command]
     pub fn wsl_setup_state(app: AppHandle) -> Result<WindowsDesktopState, String> {
         read_config(&app)
     }
 
-    #[tauri::command]
     pub async fn wsl_list_distributions(app: AppHandle) -> Result<Vec<WslDistribution>, String> {
+        let state = app.state::<Arc<WindowsWslState>>().inner().clone();
+        let permit = state
+            .operations
+            .acquire(1)
+            .map_err(|_| "WSL operation capacity exhausted")?;
         emit_progress(&app, SetupStage::Detecting, "Detecting WSL distributions…");
-        tauri::async_runtime::spawn_blocking(move || detect_with(&SystemWsl))
-            .await
-            .map_err(|error| format!("WSL detection task failed: {error}"))?
+        tauri::async_runtime::spawn_blocking(move || {
+            let _permit = permit;
+            detect_with(&SystemWsl {
+                cancellation: Some(state.cancellation.clone()),
+            })
+        })
+        .await
+        .map_err(|error| format!("WSL detection task failed: {error}"))?
     }
 
-    #[tauri::command]
     pub async fn wsl_start_backend(
         app: AppHandle,
         state: tauri::State<'_, Arc<WindowsWslState>>,
         distro: Option<String>,
     ) -> Result<WslStartResult, String> {
         let state = Arc::clone(state.inner());
+        let permit = state
+            .operations
+            .acquire(1)
+            .map_err(|_| "WSL operation capacity exhausted")?;
         tauri::async_runtime::spawn_blocking(move || {
+            let _permit = permit;
             let _startup = state
                 .startup
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let executor = SystemWsl {
+                cancellation: Some(state.cancellation.clone()),
+            };
+            executor.check_cancelled()?;
             let config = read_config(&app)?;
             let distro = distro
                 .or(config.pending_distro.clone())
                 .or(config.selected_distro.clone())
                 .ok_or("Select a supported WSL distribution first")?;
 
-            if let Some(existing) = state
+            if state
                 .bridge
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .as_mut()
+                .as_ref()
+                .is_some_and(|existing| existing.distro == distro && !existing.owner.is_closed())
             {
-                if existing.distro == distro && existing.child.try_wait().ok().flatten().is_none() {
-                    state.set_backend_port(&app, existing.port)?;
-                    return Ok(WslStartResult {
-                        distro,
-                        url: existing.url.clone(),
-                    });
-                }
+                return Ok(WslStartResult { distro });
             }
 
             // A saved selection was fully validated when it was chosen. Avoid
@@ -997,7 +863,7 @@ fi
             // WSL processes) on every ordinary application launch.
             if saved_distribution(&config) != Some(distro.as_str()) {
                 emit_progress(&app, SetupStage::Detecting, format!("Checking {distro}…"));
-                let distributions = detect_with(&SystemWsl)?;
+                let distributions = detect_with(&executor)?;
                 let selected = distributions
                     .iter()
                     .find(|candidate| candidate.name == distro)
@@ -1015,45 +881,54 @@ fi
                 SetupStage::Starting,
                 format!("Preparing backend in {distro}…"),
             );
-            let binary = provision_backend(&app, &distro)?;
+            let binary = provision_backend(&app, &distro, &executor)?;
             emit_progress(
                 &app,
                 SetupStage::Starting,
                 format!("Starting backend in {distro}…"),
             );
-            let bridge = start_bridge(&distro, &binary)?;
-            let url = bridge.url.clone();
-            // Before the URL goes back to the page: the setup page navigates to
-            // it as soon as it arrives, and the guard and the capability must
-            // already know it.
-            state.set_backend_port(&app, bridge.port)?;
-
+            // Revoke the old owner and await its child before launching another.
+            // The startup mutex keeps duplicate starts and app exit serialized.
+            state.close_bridge();
+            let bridge = start_bridge(&distro, &binary, &executor, state.cancellation.clone())?;
+            if let Err(error) = executor.check_cancelled() {
+                tauri::async_runtime::block_on(bridge.owner.close());
+                return Err(error);
+            }
             let mut promoted = config;
             promoted.selected_distro = Some(distro.clone());
             promoted.pending_distro = None;
-            write_config(&app, &promoted)?;
+            if let Err(error) = write_config(&app, &promoted) {
+                tauri::async_runtime::block_on(bridge.owner.close());
+                return Err(error);
+            }
 
             let mut slot = state
                 .bridge
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if let Some(mut old) = slot.replace(bridge) {
-                drop(old.stdin.take());
-                let _ = old.child.kill();
-                let _ = old.child.wait();
-            }
+            *slot = Some(bridge);
+            drop(slot);
             emit_progress(&app, SetupStage::Ready, format!("{distro} is ready"));
-            Ok(WslStartResult { distro, url })
+            Ok(WslStartResult { distro })
         })
         .await
         .map_err(|error| format!("WSL startup task failed: {error}"))?
     }
 
-    #[tauri::command]
     pub async fn wsl_switch_distribution(app: AppHandle, distro: String) -> Result<(), String> {
         let restart_handle = app.clone();
+        let state = app.state::<Arc<WindowsWslState>>().inner().clone();
+        let permit = state
+            .operations
+            .acquire(1)
+            .map_err(|_| "WSL operation capacity exhausted")?;
         tauri::async_runtime::spawn_blocking(move || {
-            let distributions = detect_with(&SystemWsl)?;
+            let _permit = permit;
+            let executor = SystemWsl {
+                cancellation: Some(state.cancellation.clone()),
+            };
+            let distributions = detect_with(&executor)?;
             let selected = distributions
                 .iter()
                 .find(|candidate| candidate.name == distro)
@@ -1064,6 +939,7 @@ fi
                     .clone()
                     .unwrap_or_else(|| "distribution is unsupported".to_string()));
             }
+            ensure_non_root(&executor, &distro)?;
             let mut config = read_config(&app)?;
             config.pending_distro = Some(distro);
             write_config(&app, &config)
@@ -1076,6 +952,7 @@ fi
     #[cfg(test)]
     mod tests {
         use super::*;
+        use std::collections::VecDeque;
 
         struct FakeWsl {
             outputs: Mutex<VecDeque<Result<ProcessOutput, String>>>,
@@ -1098,6 +975,27 @@ fi
             ) -> Result<ProcessOutput, String> {
                 self.outputs.lock().unwrap().pop_front().unwrap()
             }
+        }
+
+        #[test]
+        fn cancelled_setup_refuses_commands_before_spawning_wsl() {
+            let cancellation = splitty_transport::queue::Context::default();
+            let executor = SystemWsl {
+                cancellation: Some(cancellation.clone()),
+            };
+            cancellation.close();
+            let result = executor.execute(&[], None, COMMAND_TIMEOUT);
+            assert!(result
+                .err()
+                .is_some_and(|error| error.contains("cancelled")));
+        }
+
+        #[test]
+        fn shutdown_closes_setup_context_even_without_a_bridge() {
+            let state = WindowsWslState::new();
+            state.shutdown();
+            assert!(state.cancellation.is_closed());
+            assert!(state.owner().is_err());
         }
 
         /// SR-19: a distribution whose default user is root must be refused.
@@ -1127,29 +1025,6 @@ fi
         fn unparseable_uid_is_rejected() {
             let fake = FakeWsl::new(vec![success("not-a-number\n")]);
             assert!(ensure_non_root(&fake, "Ubuntu").is_err());
-        }
-
-        /// SR-04: the bridge mirrors backend stdout into the debug log, which
-        /// ends up in support bundles. Credential-bearing lines must be redacted.
-        #[test]
-        fn backend_stdout_credentials_are_redacted_in_logs() {
-            assert_eq!(
-                redact_credentials("SPLITTY_BOOTSTRAP=abc123"),
-                "SPLITTY_BOOTSTRAP=<redacted>",
-            );
-            assert_eq!(
-                redact_credentials("SPLITTY_URL=http://127.0.0.1:1/?bootstrap=abc"),
-                "SPLITTY_URL=<redacted>",
-            );
-            assert_eq!(
-                redact_credentials("SPLITTY_TOKEN=abc"),
-                "SPLITTY_TOKEN=<redacted>"
-            );
-            // Non-credential diagnostics stay readable.
-            assert_eq!(
-                redact_credentials("SPLITTY_PORT=45299"),
-                "SPLITTY_PORT=45299"
-            );
         }
 
         fn success(stdout: impl Into<Vec<u8>>) -> Result<ProcessOutput, String> {
@@ -1217,6 +1092,80 @@ mod tests {
             bytes.extend(word.to_le_bytes());
         }
         bytes
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cancellation_reaps_only_the_owned_command_without_waiting_for_timeout() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        use std::time::{Duration, Instant};
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let signal = Arc::clone(&cancellation);
+        let admission = splitty_transport::admission::Admission::default();
+        let mut owned = splitty_transport::worker::BlockingWorker::spawn(
+            std::process::Command::new("sleep").arg("30"),
+            &admission,
+        )
+        .unwrap();
+        let mut unrelated = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let cancel = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(30));
+            signal.store(true, Ordering::SeqCst);
+        });
+        let started = Instant::now();
+        let result = wait_owned_command(&mut owned, Duration::from_secs(15), || {
+            cancellation.load(Ordering::SeqCst)
+        });
+        let owned_exited = owned.try_wait().unwrap().is_some();
+        let unrelated_running = unrelated.try_wait().unwrap().is_none();
+        let _ = unrelated.kill();
+        let _ = unrelated.wait();
+        cancel.join().unwrap();
+        assert!(result
+            .err()
+            .is_some_and(|error| error.contains("cancelled")));
+        assert!(owned_exited);
+        assert_eq!(admission.counts().workers, 0);
+        assert!(unrelated_running);
+        assert!(started.elapsed() < Duration::from_secs(3));
+    }
+
+    #[test]
+    fn provisioning_output_is_bounded_and_fully_drained() {
+        let bytes = [0_u8, 0xff, b'\n', 0xfe, b'x'];
+        let mut input = std::io::Cursor::new(bytes);
+        assert_eq!(read_bounded(&mut input, 3), bytes[..3]);
+        assert_eq!(input.position(), 5);
+        let mut input = std::io::Cursor::new(bytes);
+        assert!(read_bounded(&mut input, 0).is_empty());
+        assert_eq!(input.position(), 5);
+    }
+
+    #[test]
+    fn native_command_uses_raw_owner_pipes_without_a_shell_or_listener() {
+        let distro = "Ubuntu Dev; $(ignored)";
+        let binary = "/home/me/a path/splitty";
+        assert_eq!(
+            native_backend_arguments(distro, binary),
+            [
+                "-d",
+                distro,
+                "--exec",
+                binary,
+                "desktop-backend",
+                "--transport",
+                "native-v1",
+                "--backend",
+                "embedded",
+                "--owner",
+            ]
+        );
     }
 
     #[test]

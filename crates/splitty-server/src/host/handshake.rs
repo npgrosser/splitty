@@ -1,29 +1,92 @@
-//! `splitty remote-handshake --json [--ensure-daemon --port <port>]`: this
+//! `splitty remote-handshake --json [--ensure-daemon]`: this
 //! host's server, its daemon and its screens, for a client, in one call.
 
 use splitty_remote::handshake::{
     DaemonState, Handshake, RunningDaemon, Screen, ServerInfo, FORMAT,
 };
 
-/// The handshake, starting a missing daemon on `127.0.0.1:<ensure_port>`
-/// first when asked. The error is the reason to print.
-pub async fn run(ensure_port: Option<u16>) -> Result<Handshake, String> {
+#[derive(Debug, thiserror::Error)]
+pub enum Error {
+    #[error("daemon changed or disconnected during discovery; refresh discovery")]
+    DiscoveryChanged,
+    #[error("{0}")]
+    Failed(String),
+}
+impl From<String> for Error {
+    fn from(message: String) -> Self {
+        Self::Failed(message)
+    }
+}
+impl From<&str> for Error {
+    fn from(message: &str) -> Self {
+        Self::Failed(message.into())
+    }
+}
+impl Error {
+    pub fn exit_code(&self) -> i32 {
+        if matches!(self, Self::DiscoveryChanged) {
+            75
+        } else {
+            1
+        }
+    }
+    fn native(error: std::io::Error) -> Self {
+        use std::io::ErrorKind;
+        if splitty_transport::negotiation::stale_instance(&error)
+            || matches!(
+                error.kind(),
+                ErrorKind::NotFound
+                    | ErrorKind::ConnectionRefused
+                    | ErrorKind::ConnectionReset
+                    | ErrorKind::ConnectionAborted
+                    | ErrorKind::UnexpectedEof
+                    | ErrorKind::BrokenPipe
+                    | ErrorKind::TimedOut
+            )
+        {
+            Self::DiscoveryChanged
+        } else {
+            Self::Failed(error.to_string())
+        }
+    }
+}
+
+/// Report the answering binary and daemon separately. Ensuring a missing
+/// daemon creates only its private endpoint; a live daemon is never replaced.
+pub async fn run(ensure_daemon: bool) -> Result<Handshake, Error> {
     let executable =
         std::env::current_exe().map_err(|e| format!("cannot locate the splitty binary: {e}"))?;
-    let mut info = super::running_daemon();
+    if ensure_daemon {
+        splitty_core::config::prepare_daemon_config_dir()
+            .map_err(|error| format!("cannot prepare daemon configuration: {error}"))?;
+    }
+    let mut info = super::running_daemon()?;
     let mut started = false;
-    if let (None, Some(port)) = (&info, ensure_port) {
-        start_daemon(&executable, port).await?;
-        info = super::running_daemon();
+    if info.is_none() && ensure_daemon {
+        start_daemon(&executable).await?;
+        info = super::running_daemon()?;
         if info.is_none() {
-            return Err("the daemon reported ready but is not running".to_owned());
+            return Err(Error::DiscoveryChanged);
         }
         started = true;
     }
 
     let screens = match &info {
-        Some(info) => screens(info).await?,
+        Some(info)
+            if !info.legacy()
+                && info.transport_version == Some(u32::from(splitty_transport::wire::VERSION))
+                && (info.protocol == splitty_core::protocol::PROTOCOL_VERSION
+                    || splitty_core::protocol::PROTOCOL_VERSION.checked_sub(1)
+                        == Some(info.protocol)) =>
+        {
+            screens(info).await?
+        }
+        Some(_) => Vec::new(),
         None => Vec::new(),
+    };
+    let legacy_migration = match &info {
+        Some(info) if info.legacy() => Some(super::migration::probe(info).await),
+        _ => None,
     };
     Ok(Handshake {
         handshake: FORMAT,
@@ -31,12 +94,16 @@ pub async fn run(ensure_port: Option<u16>) -> Result<Handshake, String> {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             protocol: splitty_core::protocol::PROTOCOL_VERSION,
             path: executable.display().to_string(),
+            transport_versions: vec![splitty_transport::wire::VERSION],
         },
         daemon: DaemonState {
             running: info.is_some(),
             daemon: info.map(|info| RunningDaemon {
+                legacy: info.legacy(),
+                legacy_migration,
                 pid: info.pid,
-                port: info.port,
+                instance: info.instance,
+                transport_version: info.transport_version,
                 version: info.version,
                 protocol: info.protocol,
                 started_at: info.started_at,
@@ -50,15 +117,17 @@ pub async fn run(ensure_port: Option<u16>) -> Result<Handshake, String> {
 
 /// `daemon start` of this very binary, so its readiness wait and its errors
 /// apply unchanged; its output stays off the handshake's.
-async fn start_daemon(executable: &std::path::Path, port: u16) -> Result<(), String> {
-    let output = tokio::process::Command::new(executable)
-        .args(["daemon", "start", "--addr", &format!("127.0.0.1:{port}")])
-        .stdin(std::process::Stdio::null())
-        .output()
+async fn start_daemon(executable: &std::path::Path) -> Result<(), Error> {
+    let mut command = tokio::process::Command::new(executable);
+    command.args(["daemon", "start"]);
+    let output = splitty_remote::ssh::run_with_input(command, None)
         .await
         .map_err(|e| format!("cannot run daemon start: {e}"))?;
     if output.status.success() {
         return Ok(());
+    }
+    if output.status.code() == Some(75) {
+        return Err(Error::DiscoveryChanged);
     }
     let stderr = String::from_utf8_lossy(&output.stderr);
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -67,14 +136,32 @@ async fn start_daemon(executable: &std::path::Path, port: u16) -> Result<(), Str
     } else {
         stderr
     };
-    Err(reason.trim().to_owned())
+    Err(reason.trim().to_owned().into())
 }
 
-async fn screens(info: &splitty_core::daemon::DaemonInfo) -> Result<Vec<Screen>, String> {
-    let server = super::reach(info)?;
-    let value = crate::cli::api_get(&server, "/api/mux/screens")
-        .await
-        .map_err(|e| format!("the daemon did not list its screens: {e}"))?;
+#[cfg(unix)]
+async fn screens(info: &splitty_core::daemon::DaemonInfo) -> Result<Vec<Screen>, Error> {
+    let (value, _decoded): (serde_json::Value, _) = {
+        let connector = crate::native::client::Connector::default();
+        let mut client = connector.local(info).await.map_err(Error::native)?;
+        let result = client
+            .request(
+                crate::service::catalog::Operation::MuxScreens,
+                serde_json::Map::new(),
+            )
+            .await;
+        let budget = client.sender().context().budget;
+        client.shutdown().await;
+        let reply = result.map_err(Error::native)?;
+        if reply.status != 200 {
+            return Err(format!("the daemon could not list screens: {}", reply.body).into());
+        }
+        let lease = splitty_transport::codec::reserve_json(reply.body.as_bytes(), &budget, false)
+            .map_err(Error::native)?;
+        let value =
+            serde_json::from_str(&reply.body).map_err(|e| format!("invalid screen list: {e}"))?;
+        (value, lease)
+    };
     let list = value
         .as_array()
         .ok_or("the daemon's screen list is not a list")?;
@@ -91,4 +178,41 @@ async fn screens(info: &splitty_core::daemon::DaemonInfo) -> Result<Vec<Screen>,
             })
         })
         .collect())
+}
+
+#[cfg(not(unix))]
+async fn screens(_info: &splitty_core::daemon::DaemonInfo) -> Result<Vec<Screen>, Error> {
+    Err("native daemon discovery requires Unix".into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn discovery_races_remain_retryable_but_invalid_ownership_and_protocol_do_not() {
+        use std::io::{Error as IoError, ErrorKind};
+        assert_eq!(
+            Error::native(IoError::new(
+                ErrorKind::InvalidData,
+                splitty_transport::negotiation::StaleInstance
+            ))
+            .exit_code(),
+            75
+        );
+        for kind in [
+            ErrorKind::NotFound,
+            ErrorKind::ConnectionRefused,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::UnexpectedEof,
+        ] {
+            assert_eq!(Error::native(IoError::from(kind)).exit_code(), 75);
+        }
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::InvalidData,
+            ErrorKind::Unsupported,
+        ] {
+            assert_eq!(Error::native(IoError::from(kind)).exit_code(), 1);
+        }
+    }
 }

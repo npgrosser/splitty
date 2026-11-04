@@ -11,11 +11,17 @@ use serde::Serialize;
 use splitty_remote::handshake::{HandshakeError, Screen};
 use splitty_remote::install::InstallError;
 use splitty_remote::ssh::{self, SshError, TargetError};
-use splitty_remote::tunnel::{PortTunnelError, ReverseTunnelError};
+use splitty_remote::tunnel::{MigrationOffer, PortTunnelError, ReverseTunnelError};
 
 /// Why a socket failed before the relay.
 #[derive(Debug, thiserror::Error)]
 pub enum HubError {
+    #[error("{error}")]
+    Retained {
+        #[source]
+        error: Box<HubError>,
+        allocation: Box<splitty_transport::budget::Lease>,
+    },
     #[error(transparent)]
     Target(#[from] TargetError),
 
@@ -51,6 +57,17 @@ pub enum HubError {
         screens: Vec<Screen>,
     },
 
+    #[error("{host} runs legacy Splitty {}; update to {} to connect while preserving its {} kept session(s).", offer.from_version, offer.to_version, offer.sessions)]
+    MigrationRequired { host: String, offer: MigrationOffer },
+
+    #[error("{message}")]
+    MigrationUnavailable { message: String },
+
+    // A migration may have reached the host even when its reply was lost.
+    // The client must inspect fresh state before explicitly trying again.
+    #[error("The requested server migration could not be confirmed: {0}. Reconnect to inspect the host before requesting migration again.")]
+    MigrationFailed(Box<HubError>),
+
     /// `update=1`, but the host has no server of this version to start
     /// instead: none is installed, and this client carries none for it.
     #[error(
@@ -73,8 +90,20 @@ pub enum HubError {
     #[error("{host} still runs Splitty {version}: its daemon did not stop in time.")]
     NotStopped { host: String, version: String },
 
-    #[error("No local port is free for the daemon's port hint ({0}).")]
-    Port(io::Error),
+    #[error("Native connection capacity exhausted: {0}")]
+    Capacity(String),
+
+    #[error("Native host preparation exceeded its deadline.")]
+    PreparationTimeout,
+
+    #[error("{message}")]
+    UpdateRefused { message: String },
+
+    #[error("The daemon on {host} does not support native transport v1; explicitly update it on the host.")]
+    NativeTransport { host: String },
+
+    #[error("Native bridge failed: {0}")]
+    NativeBridge(io::Error),
 
     /// The bridge could not be started, or ended before the daemon's first
     /// message.
@@ -90,6 +119,9 @@ pub enum HubError {
 
     #[error("No local port is free for the forward ({0}).")]
     ForwardPort(io::Error),
+
+    #[error("local port {port} cannot be shared: {error}")]
+    LocalShare { port: u16, error: io::Error },
 
     /// The host cannot tell which user a connection comes from.
     #[error("Sharing a port needs a Linux host; {host} runs {kernel}.")]
@@ -117,9 +149,11 @@ pub enum Code {
     Auth,
     Unreachable,
     UnsupportedHost,
+    UnsupportedEnvironment,
     Install,
     Daemon,
     Incompatible,
+    MigrationUnavailable,
     Bridge,
     /// Only in the answers of `/api/remote/forwards`: the forward's `ssh`
     /// ran, but the forward failed.
@@ -136,9 +170,11 @@ impl Code {
             Code::Auth => "auth",
             Code::Unreachable => "unreachable",
             Code::UnsupportedHost => "unsupported_host",
+            Code::UnsupportedEnvironment => "unsupported_environment",
             Code::Install => "install",
             Code::Daemon => "daemon",
             Code::Incompatible => "incompatible",
+            Code::MigrationUnavailable => "migration_unavailable",
             Code::Bridge => "bridge",
             Code::Forward => "forward",
             Code::Internal => "internal",
@@ -149,6 +185,8 @@ impl Code {
 /// What a `remote.error` carries besides its `type`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Failure {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub migration: Option<MigrationOffer>,
     pub code: Code,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -172,6 +210,7 @@ pub struct Failure {
 impl Failure {
     fn new(code: Code, message: String, hint: Option<String>) -> Self {
         Self {
+            migration: None,
             code,
             message,
             hint,
@@ -251,10 +290,104 @@ fn too_old(error: &SshError) -> bool {
             && (stderr.contains("'remote-handshake'") || stderr.contains("'--json'")))
 }
 
+fn native_bridge_failure(host: &str, error: &io::Error) -> Failure {
+    if let Some(failure) = splitty_remote::bridge::ssh_failure(host, error)
+        .as_ref()
+        .and_then(|error| connection_failure(host, error))
+    {
+        return failure;
+    }
+    let transient = splitty_remote::bridge::stale_instance(error)
+        || matches!(
+            error.kind(),
+            io::ErrorKind::ConnectionRefused
+                | io::ErrorKind::ConnectionReset
+                | io::ErrorKind::ConnectionAborted
+                | io::ErrorKind::BrokenPipe
+                | io::ErrorKind::UnexpectedEof
+                | io::ErrorKind::TimedOut
+                | io::ErrorKind::WouldBlock
+        );
+    Failure::new(
+        if transient {
+            Code::Bridge
+        } else {
+            Code::Incompatible
+        },
+        format!("Native bridge failed: {error}"),
+        None,
+    )
+}
+
 impl HubError {
+    pub fn failure_budgeted(
+        &self,
+        host: &str,
+        budget: &splitty_transport::budget::ConnectionBudget,
+    ) -> io::Result<splitty_transport::budget::Charged<Failure>> {
+        if let Self::Retained { error, .. } = self {
+            return error.failure_budgeted(host, budget);
+        }
+        let screens = match self {
+            Self::Incompatible { screens, .. } => screens.iter().try_fold(
+                screens.len() * std::mem::size_of::<Screen>(),
+                |bytes, screen| {
+                    bytes
+                        .checked_add(screen.id.len())
+                        .and_then(|bytes| {
+                            bytes.checked_add(screen.name.as_ref().map_or(0, String::len))
+                        })
+                        .ok_or_else(|| io::Error::other("failure metadata exceeds capacity"))
+                },
+            )?,
+            _ => 0,
+        };
+        let bytes = splitty_transport::budget::display_size(self)?
+            .checked_add(host.len())
+            .and_then(|bytes| bytes.checked_add(screens))
+            .and_then(|bytes| bytes.checked_mul(8))
+            .and_then(|bytes| bytes.checked_add(4096))
+            .ok_or_else(|| io::Error::other("failure exceeds capacity"))?;
+        budget
+            .charge(bytes, false, || self.failure(host))
+            .map_err(|error| io::Error::new(io::ErrorKind::WouldBlock, error))
+    }
+    pub fn unsupported_environment(&self) -> bool {
+        if let Self::Retained { error, .. } = self {
+            return error.unsupported_environment();
+        }
+        matches!(self, Self::LocalShare { error, .. } | Self::Reverse(ReverseTunnelError::Reservation(error))
+            if error.kind() == io::ErrorKind::Unsupported)
+    }
+    pub fn busy(&self) -> bool {
+        if let Self::Retained { error, .. } = self {
+            return error.busy();
+        }
+        match self {
+            Self::Capacity(_) => true,
+            Self::NativeBridge(error)
+            | Self::LocalShare { error, .. }
+            | Self::Reverse(ReverseTunnelError::Reservation(error)) => {
+                error.kind() == io::ErrorKind::WouldBlock
+            }
+            Self::Install(InstallError::Ssh(SshError::Spawn(error)))
+            | Self::Handshake(HandshakeError::Ssh(SshError::Spawn(error)))
+            | Self::Stop(SshError::Spawn(error))
+            | Self::Bridge(SshError::Spawn(error))
+            | Self::Forward(PortTunnelError::Ssh(SshError::Spawn(error)))
+            | Self::Reverse(ReverseTunnelError::Ssh(SshError::Spawn(error)))
+            | Self::RelayPrepare(SshError::Spawn(error)) => {
+                error.kind() == io::ErrorKind::WouldBlock
+            }
+            _ => false,
+        }
+    }
     /// The `remote.error` for this failure on `host` (the target as the client
     /// sent it).
     pub fn failure(&self, host: &str) -> Failure {
+        if let Self::Retained { error, .. } = self {
+            return error.failure(host);
+        }
         let ssh_error = match self {
             HubError::Install(InstallError::Ssh(error))
             | HubError::Handshake(HandshakeError::Ssh(error))
@@ -274,6 +407,7 @@ impl HubError {
         }
 
         match self {
+            HubError::Retained { error, .. } => error.failure(host),
             HubError::Target(error) => Failure::new(Code::InvalidTarget, error.to_string(), None),
             HubError::Install(InstallError::UnsupportedKernel { .. }) => {
                 Failure::new(Code::UnsupportedHost, self.to_string(), None)
@@ -332,6 +466,15 @@ impl HubError {
                     ..Failure::new(Code::Incompatible, self.to_string(), Some(hint))
                 }
             }
+            HubError::MigrationRequired { offer, .. } => Failure {
+                migration: Some(offer.clone()),
+                version: Some(offer.from_version.clone()),
+                keeps_sessions: Some(true),
+                ..Failure::new(Code::Incompatible, self.to_string(), None)
+            },
+            HubError::MigrationUnavailable { .. } | HubError::MigrationFailed(_) => {
+                Failure::new(Code::MigrationUnavailable, self.to_string(), None)
+            }
             HubError::NoUpdate { arch, .. } => Failure::new(
                 Code::UnsupportedHost,
                 self.to_string(),
@@ -347,7 +490,12 @@ impl HubError {
                 None,
             ),
             HubError::NotStopped { .. } => Failure::new(Code::Daemon, self.to_string(), None),
-            HubError::Port(_) => Failure::new(Code::Internal, self.to_string(), None),
+            HubError::Capacity(_) => Failure::new(Code::Internal, self.to_string(), None),
+            HubError::PreparationTimeout => Failure::new(Code::Unreachable, self.to_string(), None),
+            HubError::UpdateRefused { .. } | HubError::NativeTransport { .. } => {
+                Failure::new(Code::Incompatible, self.to_string(), None)
+            }
+            HubError::NativeBridge(error) => native_bridge_failure(host, error),
             HubError::Bridge(error) => Failure::new(
                 Code::Bridge,
                 format!("The bridge to {host} ended before its daemon answered: {error}"),
@@ -368,6 +516,16 @@ impl HubError {
                 None,
             ),
             HubError::ForwardPort(_) => Failure::new(Code::Internal, self.to_string(), None),
+            HubError::LocalShare { error, .. }
+            | HubError::Reverse(ReverseTunnelError::Reservation(error)) => Failure::new(
+                if error.kind() == io::ErrorKind::Unsupported {
+                    Code::UnsupportedEnvironment
+                } else {
+                    Code::Forward
+                },
+                self.to_string(),
+                None,
+            ),
             HubError::ReverseUnsupported { .. } => {
                 Failure::new(Code::UnsupportedHost, self.to_string(), None)
             }
@@ -418,6 +576,7 @@ mod tests {
 
     fn failed(status: i32, stderr: &str) -> SshError {
         SshError::Failed {
+            allocation: None,
             message: format!("ssh to vm failed: {stderr}"),
             status: Some(status),
             stderr: stderr.to_owned(),
@@ -438,6 +597,48 @@ mod tests {
 
     fn code(error: HubError) -> Code {
         error.failure("vm").code
+    }
+
+    #[tokio::test]
+    async fn copied_failure_screens_remain_charged_after_source_metadata_is_gone() {
+        let budget = splitty_transport::budget::ConnectionBudget::default();
+        let document = serde_json::json!({"handshake":2,"server":{"version":"1","protocol":1,"path":"/bin/splitty","transportVersions":[1]},
+            "daemon":{"running":true,"pid":1,"instance":"0123456789abcdef0123456789abcdef","transportVersion":1,"version":"1","protocol":3,"startedAt":"1"},
+            "screens":[{"id":"screen","name":"retained screen","panes":2}]});
+        let raw = serde_json::to_vec(&document).unwrap();
+        let (metadata, reservation) =
+            splitty_remote::handshake::parse_budgeted("vm", &raw, &budget)
+                .unwrap()
+                .into_parts();
+        let error = HubError::Retained {
+            allocation: Box::new(reservation),
+            error: Box::new(HubError::Incompatible {
+                host: "vm".into(),
+                version: metadata.daemon.daemon.unwrap().version,
+                protocol: 3,
+                keeps_sessions: false,
+                ours: 1,
+                screens: metadata.screens,
+            }),
+        };
+        let source = budget.used();
+        let failure = error.failure_budgeted("vm", &budget).unwrap();
+        assert!(budget.used() > source);
+        drop(error);
+        assert_eq!(
+            failure.screens.as_ref().unwrap()[0].name.as_deref(),
+            Some("retained screen")
+        );
+        assert!(budget.used() > 0);
+        let task = tokio::spawn(async move {
+            let _failure = failure;
+            std::future::pending::<()>().await;
+        });
+        tokio::task::yield_now().await;
+        assert!(budget.used() > 0);
+        task.abort();
+        let _ = task.await;
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]
@@ -511,6 +712,7 @@ mod tests {
     fn hosts_splitty_cannot_serve_are_unsupported() {
         assert_eq!(
             code(HubError::Install(InstallError::UnsupportedKernel {
+                allocation: None,
                 host: "vm".into(),
                 kernel: "Darwin".into()
             })),
@@ -518,7 +720,8 @@ mod tests {
         );
         assert_eq!(
             code(HubError::Install(InstallError::Ssh(SshError::NotFound {
-                host: "vm".into()
+                host: "vm".into(),
+                allocation: None
             }))),
             Code::UnsupportedHost
         );
@@ -545,12 +748,17 @@ mod tests {
     #[test]
     fn failed_installs_and_daemons_are_named() {
         for error in [
-            InstallError::Checksum { host: "vm".into() },
+            InstallError::Checksum {
+                host: "vm".into(),
+                allocation: None,
+            },
             InstallError::DoesNotRun {
+                allocation: None,
                 host: "vm".into(),
                 arch: "x86_64".into(),
             },
             InstallError::InvalidProbe {
+                allocation: None,
                 host: "vm".into(),
                 detail: "x".into(),
             },
@@ -580,6 +788,7 @@ mod tests {
         );
         assert_eq!(
             code(HubError::Handshake(HandshakeError::Invalid {
+                allocation: None,
                 host: "vm".into(),
                 detail: "x".into()
             })),
@@ -694,10 +903,7 @@ mod tests {
             }),
             Code::Bridge
         );
-        assert_eq!(
-            code(HubError::Port(io::Error::from(io::ErrorKind::AddrInUse))),
-            Code::Internal
-        );
+        assert_eq!(code(HubError::Capacity("full".into())), Code::Internal);
     }
 
     /// `/api/remote/forwards`: ssh's own failures as everywhere, a host whose
@@ -769,6 +975,7 @@ mod tests {
             Code::Install,
             Code::Daemon,
             Code::Incompatible,
+            Code::MigrationUnavailable,
             Code::Bridge,
             Code::Forward,
             Code::Internal,

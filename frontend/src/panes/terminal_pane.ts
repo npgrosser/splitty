@@ -242,12 +242,14 @@ export class TerminalPaneRenderer implements IContentRenderer {
         if (conn.mux.scratchpads && !this.scratchpad) {
           conn.scratchpads.link(api.id, s.id);
           this.scratchpad = new ScratchpadArea({
+            captureConnection: () => s.client.captureConnection(),
             paneId: api.id,
             sessionId: s.id,
             store: conn.scratchpads,
             screenId: () => binding.wireId,
             saveImage: (data) => s.client.saveImage(data),
-            uploadFile: (file, onProgress) => s.client.uploadFile(file, onProgress),
+            uploadFile: (file, onProgress, options) => s.client.uploadFile(file, onProgress, undefined, options),
+            uploadContext: () => ({ host: conn.label, cwd: s.lastCwd, supported: s.client.uploadControl }),
             focusTerminal: () => this.session?.emulator.focus(),
           });
           this.element.appendChild(this.scratchpad.element);

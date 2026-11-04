@@ -177,7 +177,7 @@ describe("RemoteSocket before remote.ready", () => {
     r.socket.send({ type: "editor.result", requestId: "req-1", outcome: "dispatched" });
     r.socket.send({ type: "resize", id: "sess-1", cols: 80, rows: 24 });
     r.hub.ready();
-    expect(r.hub.sent).toEqual([{ type: "resize", id: "sess-1", cols: 80, rows: 24 }]);
+    expect(r.hub.sent).toEqual([]);
   });
 
   it.each([
@@ -271,6 +271,24 @@ describe("RemoteSocket before remote.ready", () => {
     r.socket.retry();
     await settle();
     expect(r.hubs.map((h) => h.update)).toEqual([false, true, false]);
+  });
+
+  it("retains a positive migration offer and treats blocked migration as terminal", async () => {
+    const r = rig();
+    r.socket.connect(); await settle();
+    const migration = { available: true, fromVersion: "0.1.27", toVersion: "0.2.0-dev.2", sessions: 2 };
+    r.hub.json({ type: "remote.error", code: "incompatible", message: "Update required",
+      migration: { ...migration, token: "never-renderer-authority" } });
+    expect(r.socket.state.error?.migration).toEqual(migration);
+    r.socket.retry({ update: true }); await settle();
+    r.hub.json({ type: "remote.error", code: "migration_unavailable", message: "The keeper could not be verified" });
+    r.hub.end(1000);
+    expect(r.socket.state.error).toEqual({ code: "migration_unavailable", message: "The keeper could not be verified" });
+    expect(retryable("migration_unavailable")).toBe(false);
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(r.hubs.map(hub => hub.update)).toEqual([false, true]);
+    r.socket.retry(); await settle();
+    expect(r.hub.update).toBe(false);
   });
 
   it("updates a connected host of another version with a new attempt, which only it carries", async () => {

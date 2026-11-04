@@ -61,7 +61,7 @@ beforeEach(() => {
   invoke.mockReset().mockResolvedValue(undefined);
   vi.stubGlobal("window", {
     location: { assign, search: "" },
-    __TAURI_INTERNALS__: { invoke }, __SPLITTY_ELECTRON__: { invoke },
+    __SPLITTY_TAURI__: { invoke }, __SPLITTY_ELECTRON__: { invoke },
   });
 });
 afterEach(() => {
@@ -339,4 +339,19 @@ describe("pane scratchpad entry", () => {
     unregister();
     expect(menu("pane", api).some((item) => item.label.endsWith("Scratchpad"))).toBe(false);
   });
+});
+
+it.each(["disconnect", "rebind"])("discards clipboard input when its target changes during the read: %s", async change => {
+  let finish!: (text: string) => void;
+  vi.stubGlobal("navigator", { clipboard: { readText: vi.fn(() => new Promise<string>(resolve => { finish = resolve; })) } });
+  const original = screen("local");
+  const paste = vi.spyOn(original.session.emulator, "paste");
+  const item = paneMenuItems(paneId, original.api).find(item => item.label === "Paste")!;
+  const pending = item.action();
+  if (change === "disconnect") original.socket.drop();
+  else { const replacement = screen("host:vm2"); registerScreenApi(original.api, replacement.binding); }
+  finish("stale clipboard input"); await pending;
+  expect(paste).not.toHaveBeenCalled();
+  expect(original.socket.sentOfType("input")).toEqual([]);
+  for (const server of servers) expect(server.socket.sentOfType("input")).toEqual([]);
 });

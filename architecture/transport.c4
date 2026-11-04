@@ -1,0 +1,63 @@
+model {
+  extend splitty.transport {
+    wire = component 'wire' {
+      description 'Native transport version, frame kinds, generation and delivery receipts, negotiation and operation envelopes. Independent of mux protocol and backend authority.'
+      metadata { module 'splitty_transport::wire' spec 'mux-protocol' }
+    }
+    budget = component 'budget' {
+      description 'Process and connection wire-byte quotas, counted through reassembly and delivery; reserved capacity for control messages and test-visible high-water counters.'
+      metadata { module 'splitty_transport::budget' }
+    }
+    codec = component 'codec' {
+      description 'Kind and big-endian length framing; validates kind and length and acquires budget before payload allocation, with a fixed incomplete-frame deadline. Admits decoded JSON structure, string scratch and typed error formatting before parsing; sealed control schemas reject duplicate fields and release parser scratch after conversion.'
+      metadata { module 'splitty_transport::codec' spec 'mux-protocol' }
+    }
+    negotiation = component 'negotiation' {
+      description 'Separate framing and service handshakes with fixed deadlines, instance/purpose verification and bounded preparation.'
+      metadata { module 'splitty_transport::negotiation' }
+    }
+    requests = component 'requests' {
+      description 'Generation-scoped increasing request IDs, pending ceilings, deadlines and cancellation without freeing still-running mutation slots.'
+      metadata { module 'splitty_transport::requests' }
+    }
+    queue = component 'queue' {
+      description 'Ordered item/byte-bounded queues with admission before allocation; child backend scopes share the budget and synchronously inherit parent revocation without treating backend failure as owner cancellation. Pending receives recheck ownership before delivering queued data.'
+      metadata { module 'splitty_transport::queue' }
+    }
+    flow = component 'flow' {
+      description 'Generation-bound single-use receipt ledger retains charges until writer completion and recipient consumption, including fragmented IPC.'
+      metadata { module 'splitty_transport::flow' }
+    }
+    admission = component 'admission' {
+      description 'Nonwaiting carrier, stream and pending-open ceilings, with trusted backend and document/session quota objects.'
+      metadata { module 'splitty_transport::admission' }
+    }
+    worker = component 'worker' {
+      description 'Admit before spawning transport children and keep capacity until local exit is observed, including cancellation.'
+      metadata { module 'splitty_transport::worker' }
+    }
+    peer = component 'peer' {
+      description 'Admitted full-duplex carrier with one persistent reader/writer, separate bounded controls, receipt consumption and liveness; each resumed write checks owner revocation. Confirmed data waits for peer consumption so owned substream relays can bound each producer independently.'
+      metadata { module 'splitty_transport::peer' }
+    }
+    budget -> wire 'Default hard ceilings and control reservations'
+    codec -> wire 'Frame kinds, limits, delivery header and deadlines'
+    codec -> budget 'Admission before reassembly, retained charges'
+    negotiation -> wire 'Handshake envelopes and service identity'
+    negotiation -> codec 'Validated control frames'
+    negotiation -> budget 'Bound handshake frames and parsing; retain service, progress and diagnostic charges'
+    requests -> wire 'Pending request ceiling'
+    queue -> budget 'Retain queued and in-flight byte leases'
+    flow -> budget 'Share a lease between the active writer and receipt ledger'
+    flow -> queue 'Bound outstanding receipt metadata'
+    flow -> wire 'Delivery and credit envelopes'
+    admission -> budget 'Atomic RAII resource permits and counters'
+    worker -> admission 'Acquire worker capacity before spawn'
+    worker -> budget 'Retain the permit through exit observation'
+    peer -> budget 'Transfer charged frames from reassembly through consumption'
+    peer -> codec 'Persistent partial reads and one ordered writer'
+    peer -> flow 'Keep bytes charged until write and peer consumption complete'
+    peer -> queue 'Bound input/output and reserved control queues'
+    peer -> wire 'Admitted generation, envelopes and liveness deadlines'
+  }
+}

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-native-cancel-open"
+description = "Enables the native_cancel_open command without any pre-configured scope."
+commands.allow = ["native_cancel_open"]
+
+[[permission]]
+identifier = "deny-native-cancel-open"
+description = "Denies the native_cancel_open command without any pre-configured scope."
+commands.deny = ["native_cancel_open"]

@@ -1,6 +1,8 @@
 // The local server's side of remote screens: its known hosts, the targets it
 // accepts, and the hub socket (`docs/protocol.ts`, section 10).
 
+import { rootAssignment, nativeHostOpener } from "../protocol/connection.ts";
+import { NativeHubSocket } from "./native_hub.ts";
 import { apiFetch, fetchWsTicket } from "../protocol/http.ts";
 import { isPlausibleTarget } from "../host_picker.ts";
 import { parseKnownHosts, type KnownHost } from "./known_hosts.ts";
@@ -46,6 +48,11 @@ export function hubUrl(
 
 /** A hub socket to `target` through the server that served this page. */
 export function openRemoteSocket(target: string): RemoteSocket {
+  if (rootAssignment) {
+    const open = nativeHostOpener, document = rootAssignment.document;
+    if (!open) throw Error("This window cannot open another host");
+    return new RemoteSocket(target, { openNative: (to, { update }) => new NativeHubSocket(to, update, document, open) });
+  }
   return new RemoteSocket(target, {
     fetchTicket: fetchWsTicket,
     open: (to, ticket, { update }) => {

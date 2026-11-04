@@ -4,7 +4,7 @@ vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: vi.fn() }));
 const notice = vi.hoisted(() => ({ error: vi.fn() }));
 vi.mock("svelte-sonner", () => ({ toast: notice }));
 
-async function browser(globals: Record<string, unknown> = {}) {
+async function browser(globals: Record<string, unknown> = {}, assigned?: { shell: "electron" | "tauri"; role?: "main" | "remote" }) {
   vi.resetModules();
   const popup = {
     opener: {} as unknown,
@@ -15,6 +15,7 @@ async function browser(globals: Record<string, unknown> = {}) {
   };
   const open = vi.fn(() => popup);
   vi.stubGlobal("window", { location: { search: "", origin: "http://127.0.0.1:9800" }, matchMedia: () => ({ matches: false }), open, ...globals });
+  if (assigned) (await import("./platform.ts")).assignPlatform(assigned.shell, assigned.role ?? "main");
   return { popup, open, ...(await import("./window.ts")) };
 }
 
@@ -66,7 +67,7 @@ describe("reserved external browser tabs", () => {
   it("allows blocked-popup fallback and never reserves a browser tab in a native shell", async () => {
     const blocked = await browser({ open: vi.fn(() => null) });
     expect(blocked.reserveExternalOpen()).toBeUndefined();
-    const native = await browser({ __SPLITTY_ELECTRON__: {} });
+    const native = await browser({ __SPLITTY_ELECTRON__: {} }, { shell: "electron" });
     expect(native.reserveExternalOpen()).toBeUndefined();
     expect(native.open).not.toHaveBeenCalled();
   });
@@ -102,10 +103,10 @@ describe("reserved external browser tabs", () => {
     expect(popup.location.replace).toHaveBeenCalledOnce();
   });
 
-  it.each(["electron", "tauri"])("keeps the %s system-browser opener and never reserves a native popup", async (shell) => {
+  it.each(["electron", "tauri"] as const)("keeps the %s system-browser opener and never reserves a native popup", async (shell) => {
     const invoke = vi.fn(() => Promise.resolve());
-    const bridge = shell === "electron" ? "__SPLITTY_ELECTRON__" : "__TAURI_INTERNALS__";
-    const { open, reserveExternalOpen, openExternalTarget, tauriReady } = await browser({ [bridge]: { invoke } });
+    const bridge = shell === "electron" ? "__SPLITTY_ELECTRON__" : "__SPLITTY_TAURI__";
+    const { open, reserveExternalOpen, openExternalTarget, tauriReady } = await browser({ [bridge]: { invoke } }, { shell });
     await tauriReady;
     expect(reserveExternalOpen()).toBeUndefined();
     expect(openExternalTarget({ url: "https://localhost:15173/app?x=1#top" })).toBe(true);
@@ -118,15 +119,34 @@ describe("reserved external browser tabs", () => {
     expect(open).not.toHaveBeenCalled();
   });
 
-  it.each(["electron", "tauri"])("says when the %s opener refused a link instead of doing nothing", async (shell) => {
+  it.each(["electron", "tauri"] as const)("says when the %s opener refused a link instead of doing nothing", async (shell) => {
     notice.error.mockClear();
     const invoke = vi.fn(() => Promise.reject(new Error("Not allowed to open url")));
-    const bridge = shell === "electron" ? "__SPLITTY_ELECTRON__" : "__TAURI_INTERNALS__";
-    const { openExternalTarget, tauriReady } = await browser({ [bridge]: { invoke } });
+    const bridge = shell === "electron" ? "__SPLITTY_ELECTRON__" : "__SPLITTY_TAURI__";
+    const { openExternalTarget, tauriReady } = await browser({ [bridge]: { invoke } }, { shell });
     await tauriReady;
     vi.spyOn(console, "warn").mockImplementation(() => {});
     expect(openExternalTarget({ url: "https://example.com/" })).toBe(true);
     await vi.waitFor(() => expect(notice.error).toHaveBeenCalledOnce());
     expect(notice.error.mock.calls[0][1].description).toContain("Not allowed to open url");
+  });
+
+  it.each(["electron", "tauri"] as const)("hands remote %s web links to navigation without invoking a native command or creating a blank child", async shell => {
+    const invoke = vi.fn();
+    const bridge = shell === "electron" ? "__SPLITTY_ELECTRON__" : "__SPLITTY_TAURI__";
+    const { open, reserveExternalOpen, openExternalTarget } = await browser({ [bridge]: { invoke } }, { shell, role: "remote" });
+    expect(reserveExternalOpen()).toBeUndefined();
+    expect(openExternalTarget({ url: "https://example.com/docs?q=1#top" })).toBe(true);
+    expect(open).toHaveBeenCalledExactlyOnceWith("https://example.com/docs?q=1#top", "_blank", "noopener,noreferrer");
+    expect(invoke).not.toHaveBeenCalled();
+    expect(openExternalTarget({ url: "file:///tmp/private" })).toBe(false);
+    expect(openExternalTarget({ url: "vscode://file/tmp/private" })).toBe(false);
+    expect(open).toHaveBeenCalledOnce();
+  });
+
+  it("does not select native navigation from a forged shell global", async () => {
+    const { open, reserveExternalOpen } = await browser({ __SPLITTY_ELECTRON__: {} });
+    reserveExternalOpen();
+    expect(open).toHaveBeenCalledWith("", "_blank");
   });
 });

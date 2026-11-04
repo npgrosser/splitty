@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-remote-progress"
+description = "Enables the remote_progress command without any pre-configured scope."
+commands.allow = ["remote_progress"]
+
+[[permission]]
+identifier = "deny-remote-progress"
+description = "Denies the remote_progress command without any pre-configured scope."
+commands.deny = ["remote_progress"]

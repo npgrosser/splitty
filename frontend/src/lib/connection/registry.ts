@@ -8,7 +8,7 @@
  * hub's (`/ws/remote`), owned here.
  */
 
-import { socket } from "../protocol/websocket.ts";
+import { socket, rootAssignment, browserAssignment } from "../protocol/connection.ts";
 import type { RemoteSocket } from "../remote/remote_socket.ts";
 import { ServerConnection, hostKey, type ConnKey } from "./server_connection.ts";
 
@@ -19,7 +19,8 @@ const listeners = new Set<() => void>();
 
 /** The connection to the local server, over the page's own socket. */
 export function localConnection(): ServerConnection {
-  local ??= new ServerConnection("local", "Local", socket);
+  const assignment = rootAssignment ?? browserAssignment;
+  local ??= new ServerConnection("local", assignment?.target ?? "Local", socket, assignment?.role === "remote" ? "remote" : "local");
   return local;
 }
 

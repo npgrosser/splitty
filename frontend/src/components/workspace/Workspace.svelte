@@ -32,7 +32,7 @@
   import {
     connectionFor, connections, ensureRemote, forEachConnection, remoteSocketFor, removeConnection, subscribeConnections,
   } from "../../lib/connection/registry.ts";
-  import { sessionForPane } from "../../lib/connection/screen_binding.ts";
+  import { sessionForPane, pasteClipboardToPane } from "../../lib/connection/screen_binding.ts";
   import { resolveCommandTarget } from "../../lib/connection/routing.ts";
   import {
     LocalScreenSync, ScreenViews, connectScreenSync, screenMuxHooks, type ScreenSyncPolicy,
@@ -460,6 +460,7 @@
       .map((s) => ({ wireId: s.wireId, panes: views.api(s.id)?.panels.length || undefined }));
     const { error, ready } = socket.state;
     const warning = updateWarning(target, {
+      migration: error?.migration,
       hostVersion: error?.version ?? ready?.daemon.version,
       hostProtocol: error?.protocol ?? ready?.daemon.protocol,
       keepsSessions: error?.keepsSessions ?? ready?.daemon.keepsSessions,
@@ -604,9 +605,7 @@
         break;
       }
       case "pane.paste":
-        navigator.clipboard.readText().then((text) => {
-          if (text) sessionForPane(api, paneId)?.emulator.paste(text);
-        });
+        void pasteClipboardToPane(api, paneId);
         break;
       case "pane.clear":
         sessionForPane(api, paneId)?.emulator.clear();

@@ -13,6 +13,7 @@ import type { TerminalEmulator } from "./terminal_emulator.ts";
 import type { SessionClient } from "./session_client.ts";
 import { AttachTransferredError, type AttachedSession } from "./attach_registry.ts";
 import { TerminalSession, type CreateSessionOptions } from "./terminal_session.ts";
+import { createDropUpload } from "./drop_upload_view.ts";
 import { attachImagePaste, progressNotice, reportImageFailure } from "./image_paste.ts";
 
 /**
@@ -21,7 +22,25 @@ import { attachImagePaste, progressNotice, reportImageFailure } from "./image_pa
  */
 function wireImagePaste(container: HTMLElement, session: TerminalSession): void {
   let alive = true;
+  const captureConnection = () => {
+    const current = session.client.captureConnection();
+    return () => {
+      if (!alive) throw Error("The terminal is no longer available.");
+      current();
+    };
+  };
+  const uploads = createDropUpload(container, {
+    captureConnection,
+    uploadFile: (file, progress, options) => session.client.uploadFile(file, progress, undefined, options),
+    paste: (text) => { if (alive) session.emulator.paste(text); },
+  }, () => ({
+    host: connections().find((conn) => conn.sessions === session.client)?.label ?? "This server",
+    cwd: session.lastCwd,
+    supported: session.client.uploadControl,
+  }));
   const detachPaste = attachImagePaste(container, {
+    captureConnection,
+    dropFiles: uploads.drop,
     saveImage: (data) => session.client.saveImage(data),
     uploadFile: (file, onProgress) => session.client.uploadFile(file, onProgress),
     paste: (text) => { if (alive) session.emulator.paste(text); },
@@ -32,6 +51,7 @@ function wireImagePaste(container: HTMLElement, session: TerminalSession): void 
   session.own(() => {
     alive = false;
     detachPaste();
+    uploads.dispose();
   });
 }
 

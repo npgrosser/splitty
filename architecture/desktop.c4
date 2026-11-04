@@ -15,10 +15,15 @@ model {
     }
 
     app = component 'app' {
-      description 'Composition root of the desktop app (lib.rs): windows, navigation, capabilities and remote commands; on macOS/Linux a daemon (the running one, or one started for kept sessions with the executable their keepers run) or an embedded server with explicit managed-job shutdown; on Windows the WSL bridge.'
+      description 'Composition root of the desktop app (lib.rs): windows, navigation, capabilities and remote commands; on macOS/Linux an always app-owned embedded runtime with explicit session/job shutdown and no daemon or keeper discovery; on Windows the WSL bridge.'
       metadata {
         module 'splitty_tauri_lib'
       }
+    }
+
+    client_ipc = component 'client_ipc' {
+      description 'Native-owned document proofs, fixed backend/window policies and connection admission; bounded byte channels and a direction-checked relay to an assigned native service or child; revokes stale documents while retaining slots through actual cleanup.'
+      metadata { module 'splitty_tauri_lib::client_ipc' spec 'access-control' }
     }
 
     editor = component 'editor' {
@@ -46,14 +51,14 @@ model {
     }
 
     navigation = component 'navigation' {
-      description 'Where the windows may navigate and what they open externally: never foreign content in the privileged main window, and a remote window pinned to its tunnel origin, without the bundled pages or new windows.'
+      description 'Exact packaged entries by native document role; bounded app-owned popout windows tied to the current parent document, with native close/navigation teardown and no independent command grant; main-only blob downloads and external web links; remote windows never execute host content.'
       metadata {
         module 'splitty_tauri_lib::navigation'
       }
     }
 
     capability = component 'capability' {
-      description 'The main window\'s capability, added at runtime once the backend\'s port is known: exactly the commands the UI invokes (window controls, its own webview zoom for the zoom shortcuts, title bar color, WSL, remote windows, editors, showing a saved download), for the window main on the exact origin http://127.0.0.1:<port> only, one per port.'
+      description 'Packaged main and remote window capabilities: main shell controls and document-authenticated application commands; remote windows receive only the assigned native transport surface, without network-origin grants.'
       metadata {
         module 'splitty_tauri_lib::capability'
         spec 'access-control'
@@ -61,7 +66,7 @@ model {
     }
 
     remote = component 'remote' {
-      description 'Remote windows: the commands remote_hosts, remote_open and remote_cancel with progress to the calling window; the registry of one window per target with one shared attempt; the window remote-<n> (no capability, incognito, pinned navigation, native decorations, title by connection state) and the task that runs the connect flow and supervises its tunnel until the window is destroyed.'
+      description 'Packaged remote windows with fixed-host native providers; coalesced opens and cancellation, bounded progress watches, document-owned launcher requests, private storage and reconnect state without navigation.'
       metadata {
         module 'splitty_tauri_lib::remote'
         spec 'desktop-remote'
@@ -69,50 +74,68 @@ model {
     }
 
     windows_wsl = component 'windows_wsl' {
-      description 'Windows bridge: picks the WSL 2 distribution, installs the bundled static server per version with a checksum, starts it with --desktop-stdio and binds its lifetime to the app.'
+      description 'Windows bridge: provisions the selected WSL 2 distribution with checksums and starts one app-owned native owner helper over raw pipes; cancels owned provisioning before awaiting startup and never kills unrelated WSL work.'
       metadata {
         module 'splitty_tauri_lib::windows_wsl'
         spec 'server-modes'
       }
     }
 
+    app -> client_ipc 'Native window policy, private bootstrap and IPC providers'
+    client_ipc -> navigation 'Exact packaged document authority before command dispatch'
+    client_ipc -> splitty.remote.owner 'App-owned WSL helper connection'
+    client_ipc -> splitty.remote.install 'Native SSH payload selection'
+    client_ipc -> splitty.remote.tunnel 'Port-free SSH preparation with charged progress'
+    editor -> client_ipc 'Document proof and main-only shell action'
+    downloads -> client_ipc 'Document-owned download reveal'
+    remote -> splitty.transport.admission 'Bound initial remote launcher work before spawning tasks'
+    remote -> splitty.transport.budget 'Retain the bounded latest progress snapshot through consumption'
+    remote -> splitty.transport.wire 'Typed connection preparation progress'
+    remote -> client_ipc 'Fixed host providers and current launcher proof'
+    remote -> app 'Guarded packaged remote window construction'
+    windows_wsl -> splitty.remote.owner 'Persistent app-owned helper over wsl.exe pipes'
+    windows_wsl -> splitty.transport.admission 'Bound WSL operations before spawning blocking tasks'
+    windows_wsl -> splitty.transport.budget 'Retain operation permits through actual blocking task completion'
+    windows_wsl -> splitty.transport.worker 'Share global worker admission and observed-exit cleanup for synchronous WSL provisioning'
+    windows_wsl -> splitty.transport.queue 'Revoke provisioning and negotiation before waiting for startup cleanup'
     app_main -> app 'run'
-    app -> navigation 'navigation, new_window, follow, backend_origins'
+    app -> splitty.server.service 'Shared owned embedded Runtime and awaited shutdown'
+    app -> navigation 'Packaged role navigation, external links and blob download guards'
     app -> login_path 'adopt'
     app -> capability 'main_window'
     app -> editor 'open_remote_editor, open_local_editor'
     app -> downloads 'Downloads, reveal_download'
     editor -> splitty.remote.ssh 'SshTarget'
+    client_ipc -> splitty.remote.ssh 'Validate main-window host intent and retain fixed remote targets'
+    client_ipc -> splitty.transport.admission 'Share native handle/opening ceilings'
+    client_ipc -> splitty.transport.queue 'Revoke each connection context on document/backend change'
+    client_ipc -> splitty.transport.negotiation 'Validate assigned service readiness before exposing a live handle'
+    client_ipc -> splitty.transport.wire 'Assigned purpose and service identity'
+    client_ipc -> splitty.transport.budget 'Prepaid bounded chunk storage and payload lease transfer'
+    client_ipc -> splitty.transport.peer 'Ordered framing, direction-checked relay and awaited shutdown'
+    client_ipc -> splitty.transport.codec 'Real byte-channel regression fixtures'
+    client_ipc -> splitty.transport.flow 'Consumption credits in byte-channel regression fixtures'
+    client_ipc -> splitty.remote.bridge 'Owned native child connection and observed process exit'
+    client_ipc -> splitty.server.native 'Assigned embedded native client and awaited service cleanup'
+    client_ipc -> splitty.server.service 'Embedded runtime and role in native stream regression tests'
+    client_ipc -> splitty.core.pty 'Local terminals in the isolated embedded stream regression'
     app -> remote 'Remotes, remote_hosts, remote_open, remote_cancel'
     app -> windows_wsl 'WindowsWslState, distribution list, start and switch'
-    windows_wsl -> navigation 'backend_origins'
-    windows_wsl -> capability 'main_window'
-    remote -> navigation 'remote_navigation, remote_new_window, tunnel_origin, follow'
+    remote -> navigation 'Native-assigned remote document role'
 
     // Into splitty-remote (every platform)
 
     remote -> splitty.remote.tunnel 'open, supervise, Connected, Event, Failure, Progress, GIVE_UP_AFTER'
     remote -> splitty.remote.hosts 'known, record_recent, default_ssh_dir, KnownHost'
     remote -> splitty.remote.ssh 'Ssh, SshTarget'
-    remote -> splitty.remote.install 'payload_for'
 
     // Into the core and the server (macOS and Linux)
 
-    app -> splitty.core.auth 'resolve'
-    app -> splitty.core.config 'HomeConfig, load, load_server, config_dir, themes_dir'
-    app -> splitty.core.daemon 'read_info, is_running, remove_info'
-    app -> splitty.core.keeper 'client::find, dir::keepers_dir: a daemon for kept sessions, with the executable their keepers run'
-    app -> splitty.core.effect_runner 'EffectRunner, EnvContext'
-    app -> splitty.core.mux 'Store'
-    app -> splitty.core.protocol 'Dispatcher, NotificationEngine, SizeConfig'
-    app -> splitty.core.pty 'Backend, Manager'
-    app -> splitty.core.shell_profiles 'state_from_settings'
-    app -> splitty.core.template 'FileStore'
+    app -> splitty.core.config 'HomeConfig, load and themes_dir for initial window appearance'
+    app -> splitty.core.pty 'LocalTerminals for app-owned sessions, never keeper adoption'
     app -> splitty.core.theme 'resolve_theme'
-    app -> splitty.server.cli 'ServerInfo, api_post (bootstrap from a running daemon)'
-    app -> splitty.server.control 'socket_path, spawn'
-    app -> splitty.server.http 'AppState, SessionStore, allowed_origins, build_router_with_frontend'
-    app -> splitty.server.ws 'WsState'
+    app -> splitty.server.cli 'In-process lifetime tests query the owned control socket'
+    app -> splitty.server.control 'Per-process owner socket for the embedded runtime'
     remote -> splitty.core.config 'config_dir (recent hosts, shared with the CLI)'
   }
 }

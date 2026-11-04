@@ -33,6 +33,7 @@
   import { getLocalVersion, hostViews } from "../../stores/connections.svelte.ts";
   import { hostPortLists, hostShareLists, portForwarding, reverseForwarding } from "../../stores/ports.svelte.ts";
   import HostsPanel from "./HostsPanel.svelte";
+  import { isRemoteSession } from "../../lib/platform.ts";
   import { remoteWindows } from "../../lib/remoteWindows.ts";
   import { unclaimedEscape } from "./inline_focus.ts";
   import SortableList from "../ui/SortableList.svelte";
@@ -621,14 +622,17 @@
           <span class="drawer-new-icon">{@render plusIcon()}</span>
           <span>New screen</span>
         </button>
+        {#if !isRemoteSession}
         <button class="drawer-new-more" title="New screen on a host…" aria-label="New screen on a host…" aria-haspopup="menu" onclick={openNewMenu}>
           <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 6l4 4 4-4" stroke="currentColor" stroke-width="1.6" fill="none" stroke-linecap="round" stroke-linejoin="round" /></svg>
         </button>
+        {/if}
       </div>
 
       <div class="drawer-spacer"></div>
 
       <nav class="drawer-nav">
+        {#if !isRemoteSession}
         <button
           class="drawer-nav-item"
           class:active={drawerState === "hosts"}
@@ -637,6 +641,7 @@
           <span class="drawer-nav-icon">{@render serverIcon(15)}</span>
           <span>Hosts</span>
         </button>
+        {/if}
         <button
           class="drawer-nav-item"
           class:active={drawerState === "templates"}
@@ -678,7 +683,7 @@
           <div class="drawer-placeholder">
             <span class="drawer-placeholder-text">Use {shortcutKey("templates")} for templates</span>
           </div>
-        {:else if activePanel === "hosts"}
+        {:else if activePanel === "hosts" && !isRemoteSession}
           <HostsPanel
             groups={groups.filter((group) => !group.hidden)}
             {onSetHostAlias}
@@ -694,7 +699,7 @@
             {onBrowseHost}
             onNewHostScreen={(target) => { onNewHostScreen(target, true); closePanel(); }}
             onConnectNew={() => { closePanel(); setRemoteScreenPickerOpen(true); }}
-            onUpdateHost={(host) => { closePanel(); onUpdateHost(host); }}
+            {onUpdateHost}
             onOpenWindow={remoteWindows.available ? (target) => { closePanel(); setHostPickerOpen(true, target); } : undefined}
           />
         {/if}

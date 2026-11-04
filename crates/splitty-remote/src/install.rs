@@ -16,6 +16,7 @@ use std::io;
 use std::path::PathBuf;
 
 use sha2::{Digest, Sha256};
+use splitty_transport::budget::{ConnectionBudget, Lease};
 
 use crate::ssh::{is_sha256, is_version, run_checked, CommandLine, Executor, SshError};
 
@@ -70,10 +71,18 @@ pub enum InstallError {
     Ssh(#[from] SshError),
 
     #[error("{host} runs {kernel}; Splitty supports Linux and macOS hosts only")]
-    UnsupportedKernel { host: String, kernel: String },
+    UnsupportedKernel {
+        host: String,
+        kernel: String,
+        allocation: Option<Box<Lease>>,
+    },
 
     #[error("{host} gave an unexpected answer to the probe: {detail}")]
-    InvalidProbe { host: String, detail: String },
+    InvalidProbe {
+        host: String,
+        detail: String,
+        allocation: Option<Box<Lease>>,
+    },
 
     #[error("version {0:?} cannot be installed (unexpected characters)")]
     InvalidVersion(String),
@@ -85,19 +94,29 @@ pub enum InstallError {
     SelfPayload(String),
 
     #[error("the server arrived corrupted on {host} (checksum mismatch); nothing was installed")]
-    Checksum { host: String },
+    Checksum {
+        host: String,
+        allocation: Option<Box<Lease>>,
+    },
 
     #[error(
         "{host} has neither sha256sum nor shasum to verify the server's checksum; \
          nothing was installed"
     )]
-    NoChecksumTool { host: String },
+    NoChecksumTool {
+        host: String,
+        allocation: Option<Box<Lease>>,
+    },
 
     #[error(
         "the server does not run on {host} ({arch}); nothing was installed. \
          Is the payload built for that architecture?"
     )]
-    DoesNotRun { host: String, arch: String },
+    DoesNotRun {
+        host: String,
+        arch: String,
+        allocation: Option<Box<Lease>>,
+    },
 }
 
 /// What the probe found on the host.
@@ -112,23 +131,49 @@ pub struct Probe {
 
 /// Parse the probe's output, checking `$HOME` before it is ever used.
 pub fn parse_probe(host: &str, stdout: &[u8]) -> Result<Probe, InstallError> {
-    let invalid = |detail: &str| InstallError::InvalidProbe {
-        host: host.to_owned(),
-        detail: detail.to_owned(),
+    parse_probe_budgeted(host, stdout, &ConnectionBudget::default())
+}
+
+fn diagnostic_storage(budget: &ConnectionBudget, bytes: usize) -> Result<Box<Lease>, InstallError> {
+    budget
+        .reserve(
+            bytes + std::mem::size_of::<InstallError>() + std::mem::size_of::<Lease>(),
+            false,
+        )
+        .map(Box::new)
+        .map_err(|error| SshError::Spawn(io::Error::new(io::ErrorKind::WouldBlock, error)).into())
+}
+
+fn parse_probe_budgeted(
+    host: &str,
+    stdout: &[u8],
+    budget: &ConnectionBudget,
+) -> Result<Probe, InstallError> {
+    let invalid = |detail: &str| {
+        let allocation = match diagnostic_storage(budget, host.len() + detail.len()) {
+            Ok(storage) => storage,
+            Err(error) => return error,
+        };
+        InstallError::InvalidProbe {
+            host: host.to_owned(),
+            detail: detail.to_owned(),
+            allocation: Some(allocation),
+        }
     };
     let text = std::str::from_utf8(stdout).map_err(|_| invalid("not UTF-8"))?;
-    let lines: Vec<&str> = text
-        .strip_suffix('\n')
-        .unwrap_or(text)
-        .split('\n')
-        .collect();
-    let (kernel, arch, home, marker) = match lines[..] {
-        [kernel, arch, home] => (kernel, arch, home, None),
-        [kernel, arch, home, marker] => (kernel, arch, home, Some(marker)),
-        _ => return Err(invalid("expected three or four lines")),
+    let mut lines = text.strip_suffix('\n').unwrap_or(text).split('\n');
+    let (Some(kernel), Some(arch), Some(home)) = (lines.next(), lines.next(), lines.next()) else {
+        return Err(invalid("expected three or four lines"));
     };
-    if kernel.is_empty() || arch.is_empty() {
-        return Err(invalid("no kernel or architecture"));
+    let marker = lines.next();
+    if lines.next().is_some() {
+        return Err(invalid("expected three or four lines"));
+    }
+    if kernel.is_empty() || arch.is_empty() || kernel.len() > 256 || arch.len() > 256 {
+        return Err(invalid("invalid kernel or architecture"));
+    }
+    if marker.is_some_and(|marker| marker.len() > 64) {
+        return Err(invalid("invalid checksum marker"));
     }
     if !home.starts_with('/') || home.len() > 4096 || home.chars().any(char::is_control) {
         return Err(invalid("the home directory is not an absolute path"));
@@ -355,11 +400,15 @@ pub async fn prepare<E: Executor>(
         .word("splitty-probe")
         .value(version);
     let output = run_checked(executor, &probe_line, None).await?;
-    let probe = parse_probe(executor.host(), &output.stdout)?;
+    let budget = executor.budget();
+    let probe = parse_probe_budgeted(executor.host(), &output.stdout, &budget)?;
     if !KERNELS.contains(&probe.kernel.as_str()) {
+        let allocation =
+            diagnostic_storage(&budget, executor.host().len() + probe.kernel.capacity())?;
         return Err(InstallError::UnsupportedKernel {
             host: executor.host().to_owned(),
             kernel: probe.kernel,
+            allocation: Some(allocation),
         });
     }
     let installed = Server::Installed {
@@ -406,22 +455,39 @@ pub async fn prepare<E: Executor>(
             uploaded: true,
             had_payload: true,
         }),
-        Err(SshError::Failed {
-            status: Some(3), ..
-        }) => Err(InstallError::Checksum {
-            host: executor.host().to_owned(),
-        }),
-        Err(SshError::Failed {
-            status: Some(4), ..
-        }) => Err(InstallError::DoesNotRun {
-            host: executor.host().to_owned(),
-            arch: probe.arch,
-        }),
-        Err(SshError::Failed {
-            status: Some(5), ..
-        }) => Err(InstallError::NoChecksumTool {
-            host: executor.host().to_owned(),
-        }),
+        Err(
+            source @ SshError::Failed {
+                status: Some(3..=5),
+                ..
+            },
+        ) => {
+            let status = match &source {
+                SshError::Failed { status, .. } => *status,
+                _ => unreachable!(),
+            };
+            let allocation = Some(diagnostic_storage(
+                &budget,
+                executor.host().len()
+                    + if status == Some(4) {
+                        probe.arch.capacity()
+                    } else {
+                        0
+                    },
+            )?);
+            let host = executor.host().to_owned();
+            let error = match status {
+                Some(3) => InstallError::Checksum { host, allocation },
+                Some(4) => InstallError::DoesNotRun {
+                    host,
+                    arch: probe.arch,
+                    allocation,
+                },
+                Some(5) => InstallError::NoChecksumTool { host, allocation },
+                _ => unreachable!(),
+            };
+            drop(source);
+            Err(error)
+        }
         Err(error) => Err(error.into()),
     }
 }
@@ -432,7 +498,6 @@ mod tests {
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::Path;
-    use std::process::Output;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     /// A "host" that is this machine's `sh` with its own `HOME`: the real
@@ -465,7 +530,11 @@ mod tests {
             "user@vm"
         }
 
-        async fn run(&self, line: &CommandLine, input: Option<Vec<u8>>) -> io::Result<Output> {
+        async fn run(
+            &self,
+            line: &CommandLine,
+            input: Option<Vec<u8>>,
+        ) -> io::Result<crate::ssh::CapturedOutput> {
             let input = input.map(|mut bytes| {
                 self.uploads.fetch_add(1, Ordering::SeqCst);
                 if self.corrupt {
@@ -520,6 +589,18 @@ mod tests {
 
     fn version_dir(home: &Path, version: &str) -> PathBuf {
         home.join(REMOTE_DIR).join(version)
+    }
+
+    #[test]
+    fn malformed_probe_line_floods_and_oversized_identity_fields_are_rejected() {
+        assert!(parse_probe("vm", &vec![b'\n'; 1024 * 1024]).is_err());
+        for stdout in [
+            format!("{}\nx86_64\n/home/me\n", "K".repeat(257)),
+            format!("Linux\n{}\n/home/me\n", "a".repeat(257)),
+            format!("Linux\nx86_64\n/home/me\n{}\n", "m".repeat(65)),
+        ] {
+            assert!(parse_probe("vm", stdout.as_bytes()).is_err());
+        }
     }
 
     #[test]
@@ -591,41 +672,62 @@ mod tests {
 
     #[tokio::test]
     async fn a_host_without_splitty_gets_the_server_installed() {
-        let home = home();
-        let host = LocalShell::new(home.path().to_path_buf());
-        let mut announced = false;
-        let prepared = prepare(
-            &host,
-            "0.1.0",
-            |_, _| Ok(Some(payload(true))),
-            |_| announced = true,
-        )
-        .await
-        .expect("prepare");
-        assert!(prepared.uploaded && announced);
-        let dir = version_dir(home.path(), "0.1.0");
-        assert_eq!(
-            prepared.server,
-            Server::Installed {
-                path: dir.join("splitty").display().to_string(),
-                config_dir: None,
+        for shared in [false, true] {
+            let home = home();
+            if shared {
+                for name in [".local", ".local/share", ".config"] {
+                    let path = home.path().join(name);
+                    fs::create_dir_all(&path).unwrap();
+                    fs::set_permissions(path, fs::Permissions::from_mode(0o775)).unwrap();
+                }
             }
-        );
-        assert!(dir.join("shell-integration/bash/splitty.bash").is_file());
-        let mode = fs::metadata(home.path().join(REMOTE_DIR))
-            .expect("dir")
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o077, 0, "owner-only: {mode:o}");
-        let leftovers: Vec<_> = fs::read_dir(home.path().join(REMOTE_DIR))
-            .expect("dir")
-            .filter_map(|e| e.ok().map(|e| e.file_name()))
-            .collect();
-        assert_eq!(leftovers, ["0.1.0"], "no temporary directories left");
-        let run = std::process::Command::new(dir.join("splitty"))
-            .output()
-            .expect("run");
-        assert_eq!(String::from_utf8_lossy(&run.stdout), "splitty 0.0.0-test\n");
+            let host = LocalShell::new(home.path().to_path_buf());
+            let mut announced = false;
+            let prepared = prepare(
+                &host,
+                "0.1.0",
+                |_, _| Ok(Some(payload(true))),
+                |_| announced = true,
+            )
+            .await
+            .expect("prepare");
+            assert!(prepared.uploaded && announced);
+            let dir = version_dir(home.path(), "0.1.0");
+            assert_eq!(
+                prepared.server,
+                Server::Installed {
+                    path: dir.join("splitty").display().to_string(),
+                    config_dir: None,
+                }
+            );
+            assert!(dir.join("shell-integration/bash/splitty.bash").is_file());
+            let mode = fs::metadata(home.path().join(REMOTE_DIR))
+                .expect("dir")
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0, "owner-only: {mode:o}");
+            let leftovers: Vec<_> = fs::read_dir(home.path().join(REMOTE_DIR))
+                .expect("dir")
+                .filter_map(|e| e.ok().map(|e| e.file_name()))
+                .collect();
+            assert_eq!(leftovers, ["0.1.0"], "no temporary directories left");
+            let run = std::process::Command::new(dir.join("splitty"))
+                .output()
+                .expect("run");
+            assert_eq!(String::from_utf8_lossy(&run.stdout), "splitty 0.0.0-test\n");
+            if shared {
+                for name in [".local", ".local/share", ".config"] {
+                    assert_eq!(
+                        fs::metadata(home.path().join(name))
+                            .unwrap()
+                            .permissions()
+                            .mode()
+                            & 0o777,
+                        0o775
+                    );
+                }
+            }
+        }
     }
 
     #[tokio::test]
@@ -713,30 +815,32 @@ mod tests {
         // `sleep`, so /proc/<pid>/exe stays the copy.
         let shell = which("sh");
         let mut running = None;
-        for version in ["0.0.1", "0.0.2"] {
+        for version in ["0.1.30", "0.2.0-dev.0"] {
             let dir = version_dir(home.path(), version);
             fs::create_dir_all(&dir).expect("mkdir");
             fs::copy(&shell, dir.join("splitty")).expect("copy sh");
-            if version == "0.0.1" {
+            if version == "0.1.30" {
                 // The daemon of an older version keeps running from here.
                 running = Some(spawn_copied(&dir.join("splitty"), &["-c", "sleep 30; :"]));
             }
         }
         let host = LocalShell::new(home.path().to_path_buf());
-        let result = prepare(&host, "0.1.0", |_, _| Ok(Some(payload(true))), |_| {}).await;
+        let result = prepare(&host, "0.2.0-dev.1", |_, _| Ok(Some(payload(true))), |_| {}).await;
         let mut running = running.expect("running");
         let _ = running.kill();
         let _ = running.wait();
         result.expect("install");
         assert!(
-            version_dir(home.path(), "0.0.1").join("splitty").exists(),
+            version_dir(home.path(), "0.1.30").join("splitty").exists(),
             "in use: kept"
         );
         assert!(
-            !version_dir(home.path(), "0.0.2").exists(),
+            !version_dir(home.path(), "0.2.0-dev.0").exists(),
             "unused: removed"
         );
-        assert!(version_dir(home.path(), "0.1.0").join("splitty").exists());
+        assert!(version_dir(home.path(), "0.2.0-dev.1")
+            .join("splitty")
+            .exists());
     }
 
     /// Start a just-copied executable. Another test thread may fork while the
@@ -930,12 +1034,129 @@ mod tests {
     /// A host whose `uname -s` is neither Linux nor Darwin.
     struct OtherKernel;
 
+    struct InstallationFailure {
+        budget: ConnectionBudget,
+        status: i32,
+    }
+    impl Executor for InstallationFailure {
+        fn host(&self) -> &str {
+            "vm"
+        }
+        fn budget(&self) -> ConnectionBudget {
+            self.budget.clone()
+        }
+        async fn run(
+            &self,
+            line: &CommandLine,
+            _: Option<Vec<u8>>,
+        ) -> io::Result<crate::ssh::CapturedOutput> {
+            use std::os::unix::process::ExitStatusExt;
+            self.budget
+                .charge(256, false, || {
+                    let probe = line.as_str().contains("splitty-probe");
+                    std::process::Output {
+                        status: std::process::ExitStatus::from_raw(if probe {
+                            0
+                        } else {
+                            self.status << 8
+                        }),
+                        stdout: if probe {
+                            b"Linux\nx86_64\n/fixture\n".to_vec()
+                        } else {
+                            Vec::new()
+                        },
+                        stderr: if probe {
+                            Vec::new()
+                        } else {
+                            b"installation refused".to_vec()
+                        },
+                    }
+                })
+                .map_err(io::Error::other)
+        }
+    }
+
+    #[tokio::test]
+    async fn installation_status_errors_keep_owner_reservations_after_capture_drops() {
+        for status in [3, 4, 5] {
+            let budget = ConnectionBudget::default();
+            let error = prepare(
+                &InstallationFailure {
+                    budget: budget.clone(),
+                    status,
+                },
+                "0.1.0",
+                |_, _| Ok(Some(payload(true))),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+            assert!(matches!(
+                (&error, status),
+                (
+                    InstallError::Checksum {
+                        allocation: Some(_),
+                        ..
+                    },
+                    3
+                ) | (
+                    InstallError::DoesNotRun {
+                        allocation: Some(_),
+                        ..
+                    },
+                    4
+                ) | (
+                    InstallError::NoChecksumTool {
+                        allocation: Some(_),
+                        ..
+                    },
+                    5
+                )
+            ));
+            assert!(budget.used() > 0);
+            drop(error);
+            assert_eq!(budget.used(), 0);
+        }
+    }
+
+    #[test]
+    fn probe_errors_keep_their_owner_budget_and_refuse_exhaustion() {
+        let budget = ConnectionBudget::default();
+        let error = parse_probe_budgeted("vm", b"invalid", &budget).unwrap_err();
+        assert!(matches!(
+            &error,
+            InstallError::InvalidProbe {
+                allocation: Some(_),
+                ..
+            }
+        ));
+        assert!(budget.used() > 0);
+        drop(error);
+        assert_eq!(budget.used(), 0);
+        let held = budget
+            .reserve(
+                splitty_transport::wire::CONNECTION_BYTES
+                    - splitty_transport::wire::CONNECTION_CONTROL_BYTES,
+                false,
+            )
+            .unwrap();
+        assert!(
+            matches!(parse_probe_budgeted("vm", b"invalid", &budget), Err(InstallError::Ssh(SshError::Spawn(error))) if error.kind() == io::ErrorKind::WouldBlock)
+        );
+        drop(held);
+        assert_eq!(budget.used(), 0);
+    }
+
     impl Executor for OtherKernel {
         fn host(&self) -> &str {
             "mac"
         }
 
-        async fn run(&self, line: &CommandLine, input: Option<Vec<u8>>) -> io::Result<Output> {
+        async fn run(
+            &self,
+            line: &CommandLine,
+            input: Option<Vec<u8>>,
+        ) -> io::Result<crate::ssh::CapturedOutput> {
             assert!(input.is_none(), "nothing may be uploaded");
             assert!(line.as_str().contains("splitty-probe"));
             let mut command = tokio::process::Command::new("printf");

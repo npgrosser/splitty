@@ -1,3 +1,4 @@
+import { invokeTauri } from "./tauri_invoke.ts";
 import type { DockviewApi } from "dockview-core";
 import { toast } from "svelte-sonner";
 import type { ContextMenuItem } from "../stores/ui.svelte.ts";
@@ -84,7 +85,7 @@ async function handoff(editor: Editor, remote: boolean, uri: string, cwd: string
     } else {
       const input = remote ? { editor, target, cwd } : { editor, cwd, wslDistro: getLocalWslDistro() };
       if (shellKind === "tauri") {
-        await (window as any).__TAURI_INTERNALS__.invoke(remote ? "open_remote_editor" : "open_local_editor", input);
+        await invokeTauri(remote ? "open_remote_editor" : "open_local_editor", input);
       } else {
         await (window as any).__SPLITTY_ELECTRON__.invoke(remote ? "editor:open-remote" : "editor:open-local", input);
       }

@@ -5,11 +5,12 @@ members = [
     "crates/splitty-server",
     "crates/splitty-tauri",
     "crates/splitty-remote",
+    "crates/splitty-transport",
     "architecture/check",
 ]
 
 [workspace.package]
-version = "0.1.30"
+version = "0.2.0-dev.3"
 edition = "2021"
 license = "MIT"
 

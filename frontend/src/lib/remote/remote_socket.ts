@@ -8,9 +8,8 @@
  * daemon's own and reaches the connection's handlers, except `remote.*`: only
  * a host could send one then, to fake the hub's progress or errors.
  *
- * Messages sent while the socket does not relay wait in a queue and go out at
- * the next `remote.ready`. Typed input never waits, so nothing typed reaches a
- * host late.
+ * Only explicit state-resync reads may wait for the first ready event. Input
+ * and mutations never wait and cannot cross into another connection generation.
  *
  * A connection that drops after `remote.ready` (the hub's close code 4001, or
  * any other close) reconnects on its own: a fresh ticket per attempt, a delay
@@ -26,13 +25,14 @@
  */
 
 import type { IncomingMessage, OutgoingMessage } from "../protocol/types.ts";
-import { belongsToConnection, SocketHandlers, type ConnSocket } from "../protocol/socket.ts";
+import { SocketHandlers, type ConnSocket } from "../protocol/socket.ts";
 import { MAX_NAME, MAX_TEXT, MAX_TITLE, plainLines, plainText } from "../protocol/untrusted.ts";
+import { migrationOffer, type MigrationOffer } from "./update.ts";
 
 /** The hub's error codes (`docs/protocol.ts`, RemoteErrorCode). */
 export type RemoteErrorCode =
-  | "invalid_target" | "host_key" | "auth" | "unreachable" | "unsupported_host"
-  | "install" | "daemon" | "incompatible" | "bridge" | "internal";
+  | "invalid_target" | "host_key" | "auth" | "unreachable" | "unsupported_host" | "unsupported_environment"
+  | "install" | "daemon" | "incompatible" | "migration_unavailable" | "bridge" | "internal";
 
 /**
  * Why an attempt failed: the hub's code, or the client's own when the hub
@@ -43,6 +43,9 @@ export type RemoteErrorCode =
 export type RemoteFailureCode = RemoteErrorCode | "ticket" | "closed" | "protocol";
 
 export interface RemoteFailure {
+  migration?: MigrationOffer;
+  /** A native protocol/assignment rejection may only tighten retry policy. */
+  retryable?: boolean;
   code: RemoteFailureCode;
   /** The hub's message; may carry `ssh`'s error output, as plain text. */
   message: string;
@@ -114,9 +117,11 @@ export interface HubWebSocket {
 
 export interface RemoteSocketDeps {
   /** A single-use ticket from the local server, or null. */
-  fetchTicket(): Promise<string | null>;
+  fetchTicket?(): Promise<string | null>;
   /** Open `/ws/remote` for `target` with `ticket`, with `update=1` when `update` is set. */
-  open(target: string, ticket: string, options: { update: boolean }): HubWebSocket;
+  open?(target: string, ticket: string, options: { update: boolean }): HubWebSocket;
+  /** A broker-assigned host stream; browser authentication is never consulted. */
+  openNative?(target: string, options: { update: boolean }): HubWebSocket;
   now?(): number;
   random?(): number;
 }
@@ -132,8 +137,8 @@ export const MAX_QUEUE = 256;
 const OPEN = 1;
 
 const HUB_CODES: readonly RemoteErrorCode[] = [
-  "invalid_target", "host_key", "auth", "unreachable", "unsupported_host",
-  "install", "daemon", "incompatible", "bridge", "internal",
+  "invalid_target", "host_key", "auth", "unreachable", "unsupported_host", "unsupported_environment",
+  "install", "daemon", "incompatible", "migration_unavailable", "bridge", "internal",
 ];
 
 /** Whether another attempt can help: the hub's transient codes and the client's own. */
@@ -234,8 +239,8 @@ export class RemoteSocket extends SocketHandlers implements ConnSocket {
       this.ws.send(JSON.stringify(msg));
       return;
     }
-    // Input, images, uploads, file offers and editor messages belong to this connection; never replay them.
-    if (msg.type === "input" || belongsToConnection(msg)) return;
+    // A read can be repeated deliberately; connection effects cannot be replayed.
+    if (msg.type !== "mux.resync") return;
     if (this.queue.length >= MAX_QUEUE) this.queue.shift();
     this.queue.push(msg);
   }
@@ -277,26 +282,25 @@ export class RemoteSocket extends SocketHandlers implements ConnSocket {
     this.fetching = true;
     this.update({ phase: this.droppedAt === undefined ? "connecting" : "reconnecting", progress: [] });
 
-    let ticket: string | null;
-    try {
-      ticket = await this.deps.fetchTicket();
-    } catch {
-      ticket = null;
-    }
-    if (id !== this.attemptId) return;
-    this.fetching = false;
-    if (!ticket) {
-      this.failed({ code: "ticket", message: "The local Splitty server gave no ticket for the connection." });
-      return;
-    }
-
     let ws: HubWebSocket;
     try {
-      ws = this.deps.open(this.target, ticket, { update });
+      if (this.deps.openNative) {
+        ws = this.deps.openNative(this.target, { update });
+      } else {
+        const ticket = await this.deps.fetchTicket?.();
+        if (id !== this.attemptId) return;
+        if (!ticket || !this.deps.open) {
+          this.failed({ code: "ticket", message: "The local Splitty server gave no ticket for the connection." });
+          return;
+        }
+        ws = this.deps.open(this.target, ticket, { update });
+      }
     } catch (err) {
-      this.failed({ code: "closed", message: `The connection could not be opened: ${String(err)}` });
+      if (id === this.attemptId) this.failed({ code: "closed", message: `The connection could not be opened: ${String(err)}` });
       return;
     }
+    if (id !== this.attemptId) { ws.close(); return; }
+    this.fetching = false;
     ws.binaryType = "arraybuffer";
     this.ws = ws;
     this.relaying = false;
@@ -377,7 +381,7 @@ export class RemoteSocket extends SocketHandlers implements ConnSocket {
       // The first connect: the user decides. The progress shows how far it got.
       this.queue = [];
       this.update({ phase: "failed", error });
-    } else if (!retryable(error.code)) {
+    } else if (error.retryable === false || !retryable(error.code)) {
       this.update({ phase: "failed", progress: [], error });
     } else if (this.now() - this.droppedAt >= GIVE_UP_AFTER) {
       this.update({ phase: "offline", progress: [], error });
@@ -463,11 +467,14 @@ export function hostScreens(value: unknown): HostScreen[] {
 function failure(msg: Raw): RemoteFailure {
   const code = HUB_CODES.find((c) => c === msg.code) ?? "internal";
   const result: RemoteFailure = { code, message: plainLines(msg.message, MAX_TEXT) };
+  if (typeof msg.retryable === "boolean") result.retryable = msg.retryable;
   const hint = plainText(msg.hint, MAX_TEXT);
   if (hint) result.hint = hint;
   if (typeof msg.version === "string") result.version = plainText(msg.version, MAX_TITLE);
   if (typeof msg.protocol === "number") result.protocol = msg.protocol;
   if (typeof msg.keepsSessions === "boolean") result.keepsSessions = msg.keepsSessions;
   if (Array.isArray(msg.screens)) result.screens = hostScreens(msg.screens);
+  const migration = migrationOffer(msg.migration);
+  if (migration) result.migration = migration;
   return result;
 }

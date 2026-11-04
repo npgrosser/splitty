@@ -53,7 +53,7 @@ remote, with what runs in it.
   port, such as a dev server. Forward it with a click; `localhost` links in
   remote terminals then open through the forward.
 - **Plain SSH.** Splitty connects with your `ssh` and its configuration, and
-  never listens on the network.
+  needs no exposed Splitty port on the host.
 
 More in [Remote development](docs/remote.md).
 
@@ -142,7 +142,7 @@ things on top:
 | `splitty attach` | Shows a session in a plain terminal, without the UI |
 | `splitty connect user@host` | Opens a host in the browser, without the desktop app |
 | `splitty serve` | Serves the UI to a browser on this machine |
-| `splitty daemon start` | Keeps local sessions running while the app is closed (macOS, Linux) |
+| `splitty daemon start` | Starts an independent persistent local backend (macOS, Linux) |
 | `splitty open <path>` | From inside a pane: opens a file in your editor |
 | `splitty run`, `splitty logs` | Managed background processes, mostly for agents |
 
@@ -167,24 +167,19 @@ browser downloaded the archive, run
 
 ## How it works
 
-```
-  clients                      local server                         remote host
- ┌────────────────┐  HTTP+WS  ┌────────────────────────┐   SSH    ┌──────────────────────┐
- │ desktop app    │──────────▶│ splitty                │─────────▶│ splitty daemon       │
- │ browser tab    │ 127.0.0.1 │ embedded or daemon     │  relay   │ on its own loopback  │
- │ splitty attach │           │ layout, sessions, jobs │          │ layout, sessions     │
- └────────────────┘           └───┬─────────────▲──────┘          └───┬──────────────────┘
-                                  │ PTYs        │ Unix socket         │ PTYs
-                                  ▼             │                     ▼
-                           shells, agents ── splitty CLI        shells, agents
-```
+| Connection | Transport | Session lifetime |
+|---|---|---|
+| Desktop, local terminals | Native IPC to an in-process Tauri service on Unix, or owned child pipes for Electron and WSL | End when the app quits |
+| Explicit local daemon | Private Unix socket | Independent of the app |
+| SSH host | SSH data channel to the host’s private socket | Survive disconnects and app exit |
+| Explicit browser access | Loopback HTTP/WebSocket gateway to one selected backend | Follow that backend’s lifetime |
 
 - The server holds the layout and the terminals, so several windows can show
   the same screens and stay in sync.
-- The desktop app runs its own server, which ends with the app; on macOS and
-  Linux it uses a running `splitty daemon` instead. On a host, Splitty always
-  runs as a daemon and keeps each session in a small keeper process, so
-  sessions survive a restart or update of the daemon.
+- The desktop app owns its local backend and closes its local sessions when
+  you quit. A separately started daemon runs independently. On an SSH host,
+  Splitty runs as a daemon and keeps each session in a small keeper process,
+  so sessions survive disconnects and daemon restarts or updates.
 - For remote screens, the local server is a hub: it installs and starts
   Splitty on the host and relays it over SSH.
 - The server is Rust (Tokio, Axum, portable-pty); the UI is Svelte 5 with
@@ -225,10 +220,11 @@ The settings (Ctrl+,) are saved in `config.toml` in `~/.config/splitty/`
 ## Security
 
 Whoever controls Splitty gets a shell with your rights, so it is built to be
-reachable only by you. The server listens only on loopback, and other machines
-are reached over SSH. The UI signs in with single-use codes and `HttpOnly`
-cookies, requests from other origins are refused, and shells in panes never
-receive a credential. Processes running as your own user are not isolated from
+reachable only by you. Desktop connections use IPC or pipes; daemons use
+private Unix sockets, and remote connections travel over SSH. Only explicit
+browser access starts a loopback HTTP/WebSocket gateway, with single-use
+sign-in codes, `HttpOnly` cookies and origin checks. Shells in panes never
+receive a browser credential. Processes running as your own user are not isolated from
 Splitty, as with tmux.
 
 The full model is in [`SECURITY.md`](SECURITY.md). Please report
@@ -256,6 +252,7 @@ vulnerabilities privately through
 | [`SECURITY.md`](SECURITY.md) | Threat model and guarantees |
 | [Known issues](docs/known-issues.md) | Upstream bugs and platform quirks, with workarounds |
 | [Architecture](docs/architecture.md) | How the server, protocol and UI fit together |
+| [Connections and networking](docs/networking.md) | Visual guides to IPC, SSH, browser gateways, listeners and session lifetime |
 | [Development](docs/development.md) | Building, packaging and releasing |
 | [Roadmap](roadmap/README.md) | Milestones and what comes next (German) |
 
@@ -266,6 +263,7 @@ You need Rust (stable), Node.js 24 with pnpm, and for the desktop app the
 
 ```bash
 make dev                  # server with the embedded UI on 127.0.0.1:9800, rebuilt on changes
+make dev-tauri            # packaged desktop UI with rebuilds, native IPC
 make install-tauri        # desktop app; on Linux also splitty in ~/.local/bin
 make install-no-gui       # only splitty, to ~/.local/bin
 ```

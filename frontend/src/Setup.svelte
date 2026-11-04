@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { invoke } from "@tauri-apps/api/core";
+  import { invokeTauri as invoke } from "./lib/tauri_invoke.ts";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { remoteWindows } from "./lib/remoteWindows.ts";
@@ -28,7 +28,6 @@
 
   interface StartResult {
     distro: string;
-    url: string;
   }
 
   const stages: Stage[] = ["detecting", "provisioning", "starting", "ready"];
@@ -42,7 +41,7 @@
   let returning = $state(true);
   let pickerOpen = $state(false);
   /** The backend became ready while the host picker was open. */
-  let pendingBackendUrl = "";
+  let pendingBackend = false;
   let unlisten: UnlistenFn | undefined;
 
   const stageIndex = $derived(stages.indexOf(stage));
@@ -136,13 +135,13 @@
     stage = "ready";
     message = `${result.distro} is ready`;
     // Leaving the page would drop the picker and an open in flight with it.
-    if (pickerOpen) pendingBackendUrl = result.url;
-    else window.location.replace(result.url);
+    if (pickerOpen) pendingBackend = true;
+    else await invoke("wsl_open_backend");
   }
 
   function closePicker() {
     pickerOpen = false;
-    if (pendingBackendUrl) window.location.replace(pendingBackendUrl);
+    if (pendingBackend) { pendingBackend = false; void invoke("wsl_open_backend").catch(cause => { error = String(cause); }); }
   }
 
   function readableError(cause: unknown): string {

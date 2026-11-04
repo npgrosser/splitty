@@ -1,0 +1,52 @@
+/** Batch transfers shared by the pane and scratchpad drop dialog. */
+import { MAX_FILE_BYTES, quoteUploadPath } from "./image_paste.ts";
+import type { UploadOptions } from "./session_client.ts";
+
+export interface DropUploadTarget {
+  captureConnection?(): () => void;
+  uploadFile(file: File, progress: ((received: number) => void) | undefined, options: UploadOptions): Promise<string>;
+  paste(text: string): void;
+}
+
+export interface DropProgress {
+  stored: number;
+  total: number;
+  index: number;
+  completed: number;
+}
+
+export { quoteUploadPath };
+
+export function uploadProblem(files: readonly File[]): string | undefined {
+  const tooLarge = files.find((file) => file.size > MAX_FILE_BYTES);
+  return tooLarge ? `${tooLarge.name || "A file"} is larger than 512 MB.` : undefined;
+}
+
+export async function uploadDroppedFiles(
+  files: readonly File[], target: DropUploadTarget,
+  options: UploadOptions & { insert: boolean },
+  progress: (value: DropProgress) => void,
+): Promise<void> {
+  const problem = uploadProblem(files);
+  if (problem) throw new Error(problem);
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  let stored = 0;
+  const paths: string[] = [];
+  const current = target.captureConnection?.() ?? (() => {});
+  current();
+  for (const [index, file] of files.entries()) {
+    current();
+    options.signal?.throwIfAborted();
+    progress({ stored, total, index, completed: paths.length });
+    const path = await target.uploadFile(file, (received) => {
+      progress({ stored: stored + received, total, index, completed: paths.length });
+    }, options);
+    current();
+    paths.push(path);
+    stored += file.size;
+    progress({ stored, total, index, completed: paths.length });
+  }
+  current();
+  options.signal?.throwIfAborted();
+  if (options.insert && paths.length) target.paste(paths.map(quoteUploadPath).join(" "));
+}

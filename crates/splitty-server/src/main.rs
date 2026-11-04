@@ -11,13 +11,11 @@
 //! shared `AppState`, wires up the PTY manager, notification engine, and mux store,
 //! then launches the Axum HTTP server with graceful shutdown on Ctrl+C.
 
-use splitty_server::{cli, control, http, ws};
+use splitty_server::{cli, control, http};
 
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::Arc;
 
 use clap::{Parser, Subcommand};
-use splitty_core::mux::Store;
-use splitty_core::protocol::notify::NotificationEngine;
 use splitty_core::pty::Backend;
 
 /// Emit one machine-readable startup line, surviving a launcher that stopped
@@ -54,11 +52,11 @@ struct Cli {
 /// Global options for CLI control commands (server discovery).
 #[derive(clap::Args, Clone)]
 struct CtlOpts {
-    /// Server address (overrides auto-discovery)
+    /// Explicit HTTP gateway address (otherwise use local native discovery)
     #[arg(long, global = true)]
     addr: Option<String>,
 
-    /// Auth token (overrides auto-discovery)
+    /// Token for an explicitly selected HTTP gateway
     #[arg(long, global = true)]
     token: Option<String>,
 }
@@ -67,8 +65,30 @@ struct CtlOpts {
 enum Commands {
     #[command(flatten)]
     JobControl(cli::jobs::Commands),
-    /// Start the server with embedded frontend (opens browser UI)
+    /// Own a desktop backend over inherited native pipes (internal)
+    #[command(name = "desktop-backend", hide = true)]
+    DesktopBackend {
+        #[arg(long, value_parser = ["native-v1"])]
+        transport: String,
+        #[arg(long, value_parser = ["embedded", "ssh"])]
+        backend: String,
+        #[arg(long, required_if_eq("backend", "ssh"), value_parser = splitty_remote::ssh::SshTarget::parse)]
+        target: Option<splitty_remote::ssh::SshTarget>,
+        /// Record an explicit desktop host-open intent after successful admission
+        #[arg(long, requires = "target", conflicts_with = "owner")]
+        remember_target: bool,
+        /// One explicit initial SSH update; never retained for reconnection
+        #[arg(long, requires = "target", conflicts_with = "owner")]
+        update: bool,
+        /// Keep one embedded service across independent native substreams
+        #[arg(long, conflicts_with = "target")]
+        owner: bool,
+    },
+    /// Start an explicit browser gateway
     Serve {
+        /// Serve a browser gateway for the existing native daemon
+        #[arg(long, conflicts_with = "desktop_stdio")]
+        daemon: bool,
         /// Address to listen on
         #[arg(long, env = "SPLITTY_ADDR", default_value = "127.0.0.1:9800")]
         addr: String,
@@ -91,7 +111,7 @@ enum Commands {
         #[arg(long)]
         open: bool,
 
-        /// Shut down when the desktop bridge closes stdin
+        /// Removed: desktop launchers use the native child entry point
         #[arg(long, hide = true)]
         desktop_stdio: bool,
     },
@@ -102,11 +122,11 @@ enum Commands {
         action: DaemonAction,
     },
 
-    /// Connect to a remote Splitty daemon via SSH tunnel
+    /// Open a local browser gateway to a remote daemon over native SSH pipes
     ///
-    /// Asks the host's `splitty` for its daemon, forwards the daemon's port to
-    /// 127.0.0.1 here and opens a session in the browser. The tunnel is rebuilt
-    /// when it drops; Ctrl+C ends it. The target is recorded as a recent host.
+    /// Installs/discovers the host's private daemon and opens a local browser
+    /// session. SSH reconnects preserve the gateway URL and browser session;
+    /// Ctrl+C closes the gateway. The host's sessions keep running.
     Connect {
         /// SSH target (e.g., user@host)
         target: String,
@@ -115,7 +135,7 @@ enum Commands {
         #[arg(long)]
         no_open: bool,
 
-        /// Forward ports of the host as well, in the same tunnel: PORT or
+        /// Forward host application ports over separate SSH workers: PORT or
         /// LOCAL:REMOTE, comma-separated, repeatable. Each is bound to
         /// 127.0.0.1 here, takes another free port when its own is busy, and is
         /// announced as http://localhost:<port>
@@ -282,22 +302,29 @@ enum Commands {
     /// Describe this host to a client over SSH (internal)
     ///
     /// Prints one JSON object: this server, the daemon and its screens. With
-    /// `--ensure-daemon`, a missing daemon is started on 127.0.0.1:<port>.
+    /// `--ensure-daemon`, a missing daemon starts with its private endpoint.
     #[command(name = "remote-handshake", hide = true)]
     RemoteHandshake {
         #[arg(long, required = true)]
         json: bool,
 
-        #[arg(long, requires = "port")]
-        ensure_daemon: bool,
-
         #[arg(long)]
-        port: Option<u16>,
+        ensure_daemon: bool,
     },
 
-    /// Relay the daemon's WebSocket over stdin and stdout (internal)
+    /// Explicitly migrate a verified keeper-backed legacy daemon (internal)
+    #[command(name = "remote-migrate", hide = true)]
+    RemoteMigrate {
+        #[arg(long)]
+        expected: String,
+    },
+
+    /// Relay the private daemon endpoint over native stdin/stdout (internal)
     #[command(name = "remote-bridge", hide = true)]
-    RemoteBridge,
+    RemoteBridge {
+        #[arg(long, value_parser = ["native-v1"])]
+        transport: String,
+    },
 
     /// Serve the host side of a reverse forward (internal)
     ///
@@ -381,14 +408,12 @@ enum RelayAction {
 enum DaemonAction {
     /// Start the daemon in the background
     Start {
-        /// Address to listen on
-        #[arg(long, env = "SPLITTY_ADDR", default_value = "127.0.0.1:9800")]
-        addr: String,
+        /// Removed: use `serve --daemon --addr` for an explicit browser gateway
+        #[arg(long, hide = true)]
+        addr: Option<String>,
 
-        /// Process token for CLI callers (read from the token file if not
-        /// provided). Note that values passed here are visible in the process
-        /// list; prefer the token file.
-        #[arg(long)]
+        /// Removed: browser tokens belong only to explicit gateways
+        #[arg(long, hide = true)]
         token: Option<String>,
 
         /// Removed: direct remote mode is refused. Use `splitty connect`.
@@ -401,6 +426,9 @@ enum DaemonAction {
         /// Also end every kept session, also when no daemon runs
         #[arg(long)]
         end_sessions: bool,
+        /// Stop only this verified native daemon instance (internal update).
+        #[arg(long, hide = true, conflicts_with = "end_sessions")]
+        if_instance: Option<String>,
     },
 
     /// Stop the running daemon and start this binary's in its place, keeping
@@ -418,8 +446,8 @@ enum DaemonAction {
 
     /// Show daemon status
     Status {
-        /// Print one JSON object (`running`, and pid, port, socket, startedAt
-        /// and version of a running daemon), for scripts and `splitty connect`
+        /// Print running state and format-2 native discovery, without tokens
+        /// or a TCP port; stopped daemons may report surviving keepers
         #[arg(long)]
         json: bool,
     },
@@ -427,13 +455,9 @@ enum DaemonAction {
     /// The daemon process itself, started by `daemon start` (internal)
     #[command(hide = true)]
     Run {
-        /// Inherited descriptor of the listener `daemon start` bound
+        /// Inherited descriptor holding the private daemon instance lock
         #[arg(long)]
-        listen_fd: i32,
-
-        /// Process token passed on from `daemon start --token`
-        #[arg(long)]
-        token: Option<String>,
+        lock_fd: i32,
     },
 }
 
@@ -537,134 +561,6 @@ fn resolve_loopback_bind(addr: &str, remote: bool) -> std::net::SocketAddr {
     resolved[0]
 }
 
-fn build_state(
-    addr: &str,
-    token: String,
-    server_mode: &str,
-    initial_state: Option<splitty_core::mux::WorkspaceState>,
-    terminals: Arc<dyn splitty_core::pty::terminal::TerminalFactory>,
-    control_socket: &std::path::Path,
-) -> (http::AppState, Arc<splitty_core::pty::manager::Manager>) {
-    let config = splitty_core::config::load();
-    let shell_profiles = Arc::new(RwLock::new(
-        splitty_core::shell_profiles::state_from_settings(&config.shells),
-    ));
-    let server_config = splitty_core::config::load_server();
-    let themes_dir = splitty_core::config::themes_dir();
-
-    let template_store = match splitty_core::template::FileStore::new_default() {
-        Ok(store) => Arc::new(store),
-        Err(e) => {
-            tracing::warn!("failed to create template store: {e}, using fallback");
-            Arc::new(splitty_core::template::FileStore::new(
-                splitty_core::config::config_dir().join("templates"),
-            ))
-        }
-    };
-
-    // Create PTY backend and protocol dispatcher
-    let pty_manager = Arc::new(splitty_core::pty::manager::Manager::with_terminals(
-        shell_profiles.clone(),
-        terminals,
-    ));
-    let mut dispatcher = splitty_core::protocol::dispatcher::Dispatcher::new(pty_manager.clone());
-    dispatcher.configure_sizes(splitty_core::protocol::sizing::SizeConfig::from_settings(
-        &config.terminal.size_policy,
-        config.terminal.size_idle_seconds,
-    ));
-
-    // Spawned shells learn the path to the local control socket, not a network
-    // address and master token (security review SR-05).
-    dispatcher.env = splitty_core::mux::effect_runner::EnvContext {
-        control_socket: control_socket.to_string_lossy().into_owned(),
-    };
-
-    // Create notification broadcast channel and engine
-    let (notify_tx, _) = tokio::sync::broadcast::channel::<String>(256);
-    let tx = notify_tx.clone();
-    let engine = NotificationEngine::new(Box::new(move |event| {
-        if let Ok(json) = serde_json::to_string(&event) {
-            let _ = tx.send(json);
-        }
-    }));
-
-    dispatcher.notify = Some(Arc::new(Mutex::new(engine)));
-    let dispatcher = Arc::new(dispatcher);
-
-    let mut initial_state = initial_state;
-    if let (Some(state), Some(default_profile)) = (
-        initial_state.as_mut(),
-        shell_profiles
-            .read()
-            .unwrap()
-            .default_profile()
-            .map(|p| p.id.clone()),
-    ) {
-        for screen in state.screens.values_mut() {
-            for session in screen.sessions.values_mut() {
-                if session.shell_profile_id.is_none() && session.shell.is_none() {
-                    session.shell_profile_id = Some(default_profile.clone());
-                }
-            }
-        }
-    }
-
-    let mut mux_store = match initial_state {
-        Some(state) => Store::with_state(state),
-        None => Store::new(),
-    };
-
-    if server_mode == "daemon" {
-        mux_store.set_on_change(|state| {
-            if let Err(e) = splitty_core::daemon::save_state(state) {
-                tracing::warn!("failed to persist workspace state: {e}");
-            }
-        });
-    }
-
-    let mux_store = Arc::new(mux_store);
-
-    // Create effect runner for mux-driven PTY lifecycle
-    let effect_runner = Arc::new(splitty_core::mux::effect_runner::EffectRunner::new(
-        pty_manager.clone() as Arc<dyn splitty_core::pty::Backend>,
-    ));
-    let env = dispatcher.env.clone();
-
-    let ws_state = Arc::new(ws::WsState::new(
-        mux_store.clone(),
-        dispatcher,
-        shell_profiles.clone(),
-        effect_runner,
-        env,
-        notify_tx,
-        server_mode.to_string(),
-    ));
-
-    let app_state = http::AppState {
-        token,
-        sessions: Arc::new(http::session::SessionStore::new()),
-        allowed_origins: Arc::new(http::allowed_origins(addr)),
-        mux_store,
-        ws_state,
-        config: Arc::new(RwLock::new(config)),
-        shell_profiles,
-        server_config: Arc::new(RwLock::new(server_config)),
-        template_store,
-        themes_dir,
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        commit: option_env!("SPLITTY_COMMIT")
-            .unwrap_or("unknown")
-            .to_string(),
-        build_time: option_env!("SPLITTY_BUILD_TIME")
-            .unwrap_or("unknown")
-            .to_string(),
-        listen_addr: addr.to_string(),
-        server_mode: server_mode.to_string(),
-    };
-
-    (app_state, pty_manager)
-}
-
 fn main() {
     // Before a reinstall can move the binary away (see `cli_path`).
     splitty_core::pty::cli_path::remember_executable();
@@ -675,6 +571,15 @@ fn main() {
         .nth(1)
         .is_some_and(|arg| arg == "session-keeper")
     {
+        // Keep the no-runtime fast path inside the same owner-command gate.
+        // Scoped callers must not reach a keeper's inherited control socket.
+        if std::env::var_os("SPLITTY_AGENT_SOCK").is_some_and(|s| !s.is_empty()) {
+            eprintln!("Error: administrative commands are unavailable under an agent grant");
+            std::process::exit(2);
+        }
+        if let Err(error) = Cli::try_parse() {
+            error.exit();
+        }
         run_session_keeper();
     }
     tokio::runtime::Builder::new_multi_thread()
@@ -713,11 +618,30 @@ fn run_session_keeper() -> ! {
     }
 }
 
+fn grant_command_allowed(command: &Commands) -> bool {
+    match command {
+        Commands::JobControl(command) => !command.is_admin(),
+        Commands::Split { .. }
+        | Commands::NewScreen { .. }
+        | Commands::ClosePane { .. }
+        | Commands::CloseScreen { .. }
+        | Commands::RenameScreen { .. }
+        | Commands::ListScreens { .. }
+        | Commands::ListPanes { .. }
+        | Commands::Status { .. }
+        | Commands::SendKeys { .. } => true,
+        _ => false,
+    }
+}
+
 async fn async_main() {
+    let framed_stdio = std::env::args()
+        .nth(1)
+        .is_some_and(|command| matches!(command.as_str(), "desktop-backend" | "remote-bridge"));
     let cli = match Cli::try_parse() {
         Ok(cli) => cli,
         Err(error) => {
-            if error.exit_code() != 0 && std::env::args().any(|a| a == "--json") {
+            if !framed_stdio && error.exit_code() != 0 && std::env::args().any(|a| a == "--json") {
                 println!(
                     "{}",
                     serde_json::json!({"code":"usage","error":error.to_string()})
@@ -729,19 +653,7 @@ async fn async_main() {
         }
     };
     if std::env::var_os("SPLITTY_AGENT_SOCK").is_some_and(|s| !s.is_empty()) {
-        let allowed = match &cli.command {
-            Commands::JobControl(command) => !command.is_admin(),
-            Commands::Split { .. }
-            | Commands::NewScreen { .. }
-            | Commands::ClosePane { .. }
-            | Commands::CloseScreen { .. }
-            | Commands::RenameScreen { .. }
-            | Commands::ListScreens { .. }
-            | Commands::ListPanes { .. }
-            | Commands::Status { .. }
-            | Commands::SendKeys { .. } => true,
-            _ => false,
-        };
+        let allowed = grant_command_allowed(&cli.command);
         if !allowed {
             let error = "administrative commands are unavailable under an agent grant";
             if std::env::args().any(|a| a == "--json") {
@@ -764,6 +676,10 @@ async fn async_main() {
             | Commands::RemoteHosts { .. }
             | Commands::JobControl(_)
             | Commands::Attach { .. }
+            | Commands::DesktopBackend { .. }
+            | Commands::RemoteBridge { .. }
+            | Commands::RemoteHandshake { .. }
+            | Commands::RemoteMigrate { .. }
     ) {
         // The daemon's stdout is its readiness handshake with `daemon start`;
         // its logs go to stderr, which `daemon start` points at daemon.log.
@@ -778,6 +694,57 @@ async fn async_main() {
     }
 
     match cli.command {
+        Commands::DesktopBackend {
+            transport: _,
+            backend,
+            target,
+            owner,
+            remember_target,
+            update,
+        } => {
+            let result = match (backend.as_str(), target, owner, remember_target, update) {
+                ("embedded", None, true, false, false) => {
+                    splitty_server::native::helper::owner::embedded(
+                        tokio::io::stdin(),
+                        tokio::io::stdout(),
+                        connect_shutdown(),
+                    )
+                    .await
+                }
+                ("embedded", None, false, false, false) => {
+                    splitty_server::native::helper::embedded(
+                        tokio::io::stdin(),
+                        tokio::io::stdout(),
+                        connect_shutdown(),
+                    )
+                    .await
+                }
+                ("ssh", Some(target), false, remember, update) => {
+                    splitty_server::native::helper::ssh(
+                        tokio::io::stdin(),
+                        tokio::io::stdout(),
+                        target,
+                        remember,
+                        update,
+                        connect_shutdown(),
+                    )
+                    .await
+                }
+                _ => {
+                    eprintln!("desktop backend: --target is required only for --backend ssh");
+                    std::process::exit(2);
+                }
+            };
+            let cleanup = splitty_server::native::helper::settle_workers().await;
+            if let Err(error) = result.and(cleanup) {
+                eprintln!("desktop backend: {error}");
+                std::process::exit(1);
+            }
+            // Owned service cleanup is complete. Tokio's stdin implementation
+            // may still have a blocking read when stdout failed first; do not
+            // wait for that unrelated read during runtime teardown.
+            std::process::exit(0);
+        }
         Commands::SessionKeeper => {
             // Dispatched in `main` before the runtime starts.
             #[cfg(unix)]
@@ -795,6 +762,7 @@ async fn async_main() {
             }
         }
         Commands::Serve {
+            daemon,
             addr,
             token,
             oneshot_token,
@@ -802,56 +770,33 @@ async fn async_main() {
             open,
             desktop_stdio,
         } => {
-            let token = resolve_token(token, oneshot_token);
-            let bind_addr = resolve_loopback_bind(&addr, remote);
-            let listener = tokio::net::TcpListener::bind(bind_addr).await.unwrap();
-            let local_addr = listener.local_addr().unwrap();
-            let (state, pty) = build_state(
-                &local_addr.to_string(),
-                token.clone(),
-                "embedded",
-                None,
-                Arc::new(splitty_core::pty::terminal::LocalTerminals),
-                &control::socket_path(),
-            );
-            // A single-use bootstrap code, not the process token
-            // (security review SR-04). The launcher navigates to
-            // this URL once; the page immediately exchanges the code for an
-            // HttpOnly session cookie and clears the address bar. Capturing the
-            // URL afterwards — from a log, a screenshot, a crash report — yields
-            // a code that has already been spent.
-            let bootstrap = state.sessions.issue_bootstrap();
-            let sessions = state.sessions.clone();
-            let jobs = state.ws_state.jobs.clone();
-            let control_task = control::spawn(state.clone());
-            let app = http::build_router_with_frontend(state);
-
-            let url = format!("http://{local_addr}/?bootstrap={bootstrap}&desktop=1");
-
-            // Machine-readable output
-            emit_line!("SPLITTY_PORT={}", local_addr.port());
-            emit_line!("SPLITTY_BOOTSTRAP={bootstrap}");
-            emit_line!("SPLITTY_URL={url}");
-
-            // No token or bootstrap fragment in the log line: this stream is
-            // captured by the Windows launcher's debug logging and ends up in
-            // support bundles.
-            tracing::info!("splitty (serve) listening on {}", local_addr);
-
-            if open {
-                if let Err(e) = open::that(&url) {
-                    tracing::warn!("failed to open browser: {e}");
-                }
+            if desktop_stdio {
+                eprintln!("serve --desktop-stdio was removed; desktop launchers must use `desktop-backend --transport native-v1 --backend embedded`");
+                std::process::exit(2);
             }
-
-            axum::serve(listener, app)
-                .with_graceful_shutdown(serve_shutdown_signal(desktop_stdio, pty, sessions, jobs))
-                .await
-                .unwrap();
-
-            control_task.shutdown();
-            tracing::info!("server shut down");
+            let bind_addr = resolve_loopback_bind(&addr, remote);
+            if daemon {
+                #[cfg(unix)]
+                if let Err(error) =
+                    serve_daemon_gateway(bind_addr, token, oneshot_token, open).await
+                {
+                    eprintln!("Cannot serve the daemon: {error}");
+                    std::process::exit(1);
+                }
+                #[cfg(not(unix))]
+                {
+                    eprintln!("Native daemon browser access requires Unix; use WSL on Windows.");
+                    std::process::exit(1);
+                }
+                return;
+            }
+            if let Err(error) = serve_embedded_gateway(bind_addr, token, oneshot_token, open).await
+            {
+                eprintln!("Cannot serve the embedded workspace: {error}");
+                std::process::exit(1);
+            }
         }
+
         Commands::Daemon { action } => {
             handle_daemon(action).await;
         }
@@ -1108,13 +1053,8 @@ async fn async_main() {
             .await;
         }
 
-        Commands::RemoteHandshake {
-            ensure_daemon,
-            port,
-            ..
-        } => {
-            let ensure = port.filter(|_| ensure_daemon);
-            match splitty_server::host::handshake::run(ensure).await {
+        Commands::RemoteHandshake { ensure_daemon, .. } => {
+            match splitty_server::host::handshake::run(ensure_daemon).await {
                 Ok(handshake) => match serde_json::to_string(&handshake) {
                     Ok(line) => emit_line!("{line}"),
                     Err(e) => {
@@ -1124,15 +1064,32 @@ async fn async_main() {
                 },
                 Err(reason) => {
                     eprintln!("{reason}");
-                    std::process::exit(1);
+                    std::process::exit(reason.exit_code());
                 }
             }
         }
-        Commands::RemoteBridge => {
+        Commands::RemoteMigrate { expected } => {
+            if let Err(reason) = splitty_server::host::migration::migrate(&expected).await {
+                eprintln!("{reason}");
+                std::process::exit(reason.exit_code());
+            }
+            // A concurrent start is discovered before binding; native starts
+            // additionally serialize through the existing endpoint lock.
+            handle_daemon(DaemonAction::Start {
+                addr: None,
+                token: None,
+                remote: false,
+            })
+            .await;
+        }
+        Commands::RemoteBridge { transport: _ } => {
             if let Err(reason) = splitty_server::host::bridge::run().await {
                 eprintln!("{reason}");
                 std::process::exit(1);
             }
+            // A failed output pipe can leave Tokio's blocking stdin read alive.
+            // Carrier cleanup is complete; no daemon or keeper belongs to us.
+            std::process::exit(0);
         }
         Commands::RemoteRelay { action } => match action {
             RelayAction::Prepare => match splitty_server::host::relay::prepare() {
@@ -1155,15 +1112,9 @@ async fn async_main() {
                 // through the control socket. Minting a browser session is a
                 // privileged act, and the token lives in a 0600 file the user
                 // owns — a process running inside a pane has no way to get it.
-                let addr = match ctl.addr.clone() {
-                    Some(addr) => addr,
-                    None => {
-                        let info = splitty_core::daemon::read_info()
-                            .filter(|info| splitty_core::daemon::is_running(info.pid))
-                            .ok_or(cli::CliError::NoServer)?;
-                        format!("127.0.0.1:{}", info.port)
-                    }
-                };
+                let addr = ctl.addr.clone().ok_or_else(|| cli::CliError::Failed(
+                    "issue-bootstrap needs --addr for an explicit browser gateway (splitty serve --daemon)".into()
+                ))?;
                 let token = match ctl.token.clone() {
                     Some(token) => token,
                     None => splitty_core::auth::load_or_create()
@@ -1309,84 +1260,6 @@ async fn shutdown_signal() {
     }
 }
 
-async fn serve_shutdown_signal(
-    desktop_stdio: bool,
-    pty: Arc<splitty_core::pty::manager::Manager>,
-    sessions: Arc<http::session::SessionStore>,
-    jobs: Arc<splitty_server::jobs::Jobs>,
-) {
-    if !desktop_stdio {
-        shutdown_signal().await;
-        jobs.shutdown().await;
-        pty.close_all();
-        return;
-    }
-
-    tokio::select! {
-        _ = shutdown_signal() => {}
-        result = wait_for_eof(tokio::io::stdin(), Some(sessions)) => {
-            if let Err(error) = result {
-                tracing::warn!("desktop stdin failed: {error}");
-            } else {
-                tracing::info!("desktop bridge closed stdin, shutting down...");
-            }
-        }
-    }
-    jobs.shutdown().await;
-    pty.close_all();
-}
-
-/// Serve the native launcher's control channel until it closes stdin.
-///
-/// Originally this only waited for EOF. It now also answers one request:
-/// a line reading `bootstrap` mints a fresh single-use code and writes
-/// `SPLITTY_BOOTSTRAP=<code>` back on stdout.
-///
-/// That request exists because of SR-03: `wsl_start_backend` used to hand the
-/// frontend the *stored* launch URL whenever the backend was already running,
-/// which meant a reusable credential was returned to any caller that could
-/// invoke the command. Codes are single-use now, so a stored URL is worthless
-/// on re-entry — the launcher has to ask for a new one, and this is the channel
-/// it asks on. It is inherently trustworthy: only the process that spawned the
-/// backend holds the write end of its stdin.
-async fn wait_for_eof<R>(
-    mut reader: R,
-    sessions: Option<Arc<http::session::SessionStore>>,
-) -> std::io::Result<()>
-where
-    R: tokio::io::AsyncRead + Unpin,
-{
-    use tokio::io::AsyncReadExt;
-
-    let mut buffer = [0_u8; 256];
-    let mut pending = String::new();
-
-    loop {
-        let read = reader.read(&mut buffer).await?;
-        if read == 0 {
-            return Ok(());
-        }
-
-        let Some(sessions) = sessions.as_ref() else {
-            continue;
-        };
-
-        pending.push_str(&String::from_utf8_lossy(&buffer[..read]));
-        while let Some(newline) = pending.find('\n') {
-            let line: String = pending.drain(..=newline).collect();
-            if line.trim() == "bootstrap" {
-                emit_line!("SPLITTY_BOOTSTRAP={}", sessions.issue_bootstrap());
-            }
-        }
-
-        // Bound the buffer so a launcher that never sends a newline cannot grow
-        // it without limit.
-        if pending.len() > 4096 {
-            pending.clear();
-        }
-    }
-}
-
 async fn handle_daemon(action: DaemonAction) {
     use splitty_core::daemon;
 
@@ -1396,59 +1269,104 @@ async fn handle_daemon(action: DaemonAction) {
             token,
             remote,
         } => {
-            // Check if daemon is already running
-            if let Some(info) = daemon::read_info() {
-                if daemon::is_running(info.pid) {
-                    println!(
-                        "Daemon already running (pid={}, port={})",
-                        info.pid, info.port
-                    );
+            if addr.is_some() || token.is_some() || remote {
+                eprintln!("daemon start has no TCP listener or browser token; use splitty serve --daemon --addr <loopback-address> for browser access");
+                std::process::exit(2);
+            }
+            prepare_daemon_config();
+            match daemon::read_info_checked() {
+                Ok(Some(info)) if daemon::is_running(info.pid) => {
+                    if info.legacy() {
+                        println!("Daemon already running (pid={}, legacy transport; explicit migration required)", info.pid);
+                    } else {
+                        println!(
+                            "Daemon already running (pid={}, clientSocket={})",
+                            info.pid,
+                            info.client_socket.as_deref().unwrap_or_default()
+                        );
+                    }
                     return;
                 }
-                // Stale info file — clean up
-                daemon::remove_info();
+                // Stale publication is replaced only after acquiring the instance lock.
+                Ok(Some(_)) => {}
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("Cannot safely start a daemon: cannot verify {}: {error}. Inspect the existing daemon before replacing its discovery record.", daemon::info_path().display());
+                    std::process::exit(1);
+                }
             }
-            bind_and_start_daemon(&addr, token, remote).await;
+            lock_and_start_daemon().await;
         }
         DaemonAction::Restart { addr, end_sessions } => {
-            let stopped = stop_daemon();
+            if addr.is_some() {
+                eprintln!("daemon restart has no TCP listener; use splitty serve --daemon --addr <loopback-address>");
+                std::process::exit(2);
+            }
+            prepare_daemon_config();
+            let existing = checked_daemon_for_action();
+            if let Some(info) = existing.as_ref().filter(|i| daemon::is_running(i.pid)) {
+                if !info.keeps_sessions && !end_sessions {
+                    eprintln!("This legacy daemon cannot preserve sessions across a restart. End them deliberately with daemon restart --end-sessions.");
+                    std::process::exit(1);
+                }
+            }
+            if let Some(pid) = stop_daemon(existing) {
+                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(8);
+                while daemon::is_running(pid) && tokio::time::Instant::now() < deadline {
+                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                }
+                if daemon::is_running(pid) {
+                    eprintln!("Daemon {pid} has not exited; refusing to start a replacement");
+                    std::process::exit(1);
+                }
+            }
             if end_sessions {
                 end_kept_sessions();
             }
-            let addr = addr
-                .or_else(|| stopped.map(|port| format!("127.0.0.1:{port}")))
-                .or_else(|| std::env::var("SPLITTY_ADDR").ok())
-                .unwrap_or_else(|| "127.0.0.1:9800".to_owned());
-            bind_and_start_daemon(&addr, None, false).await;
+            lock_and_start_daemon().await;
         }
-        DaemonAction::Run { listen_fd, token } => {
+        DaemonAction::Run { lock_fd } => {
             #[cfg(unix)]
             {
-                run_daemon(listen_fd, token).await;
+                run_daemon(lock_fd).await;
             }
-
             #[cfg(not(unix))]
             {
-                let _ = (listen_fd, token);
+                let _ = lock_fd;
                 eprintln!("Daemon mode is only supported on Unix");
                 std::process::exit(1);
             }
         }
-        DaemonAction::Stop { end_sessions } => {
-            stop_daemon();
+        DaemonAction::Stop {
+            end_sessions,
+            if_instance,
+        } => {
+            if let Some(instance) = if_instance {
+                match stop_daemon_instance(&instance).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        eprintln!("Daemon instance changed; refresh discovery.");
+                        std::process::exit(75);
+                    }
+                    Err(error) => {
+                        eprintln!("Cannot safely update the daemon: {error}");
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                stop_daemon(checked_daemon_for_action());
+            }
             if end_sessions {
                 end_kept_sessions();
             }
         }
         DaemonAction::Status { json } => {
-            let info = daemon::read_info();
-            let stale = info
-                .as_ref()
-                .is_some_and(|info| !daemon::is_running(info.pid));
-            if stale {
-                daemon::remove_info();
-            }
-            let running = info.filter(|_| !stale);
+            let info = checked_daemon_for_action();
+            let stale = info.as_ref().filter(|info| !daemon::is_running(info.pid));
+            let cleaned = stale.is_some_and(cleanup_stale_daemon);
+            // A starting daemon may have published while cleanup was trying
+            // the lock. Report fresh discovery without deleting its record.
+            let running = checked_daemon_for_action().filter(|info| daemon::is_running(info.pid));
 
             if json {
                 match serde_json::to_string(&daemon::DaemonStatus::of(running)) {
@@ -1462,7 +1380,7 @@ async fn handle_daemon(action: DaemonAction) {
             }
 
             let Some(info) = running else {
-                if stale {
+                if cleaned {
                     println!("No daemon running (stale info file cleaned up)");
                 } else {
                     println!("No daemon running");
@@ -1484,50 +1402,166 @@ async fn handle_daemon(action: DaemonAction) {
 
             println!("Daemon running:");
             println!("  PID:     {}", info.pid);
-            println!("  Port:    {}", info.port);
+            if info.legacy() {
+                println!("  Legacy:  explicit migration required");
+            }
+            if let Some(path) = &info.client_socket {
+                println!("  Client:  {path}");
+            }
             println!("  Started: {}", info.started_at);
             println!("  Version: {}", info.version);
         }
     }
 }
 
-/// Bind `addr` in the foreground and start a daemon on it: a busy port fails
-/// here and leaves no background process behind. The loopback invariant is
-/// enforced here too: the daemon is the long-lived, most likely to be
-/// misconfigured entry point.
-async fn bind_and_start_daemon(addr: &str, token: Option<String>, remote: bool) {
-    let bind_addr = resolve_loopback_bind(addr, remote);
-    let std_listener = std::net::TcpListener::bind(bind_addr).unwrap_or_else(|e| {
-        eprintln!("Failed to bind {addr}: {e}");
-        std::process::exit(1);
-    });
-
+/// Hold the instance lock before detaching; the child binds its own endpoint.
+async fn lock_and_start_daemon() {
     #[cfg(unix)]
     {
-        start_daemon(std_listener, token).await;
+        let path = splitty_server::native::endpoint::socket_path();
+        let lock = splitty_server::native::endpoint::InstanceLock::acquire(
+            path.parent().expect("native endpoint parent"),
+        )
+        .unwrap_or_else(|error| {
+            eprintln!("Failed to lock native endpoint {}: {error}", path.display());
+            // Another launcher may own the instance before it publishes
+            // discovery. Preserve the lock and let native clients refresh.
+            std::process::exit(if error.kind() == std::io::ErrorKind::WouldBlock {
+                75
+            } else {
+                1
+            });
+        });
+        if let Err(reason) = start_daemon(lock).await {
+            daemon_start_failed(
+                &reason,
+                &splitty_core::config::config_dir().join("daemon.log"),
+            );
+        }
     }
-
     #[cfg(not(unix))]
     {
-        let _ = (std_listener, token);
         eprintln!("Daemon mode is only supported on Unix");
         std::process::exit(1);
     }
 }
 
-/// Ask the running daemon to stop, wait up to about two seconds and say how it
-/// went. The port of a daemon that stopped, so a restart can take it again.
-fn stop_daemon() -> Option<u16> {
+fn prepare_daemon_config() {
+    splitty_core::config::prepare_daemon_config_dir().unwrap_or_else(|error| {
+        eprintln!("Cannot prepare daemon configuration: {error}");
+        std::process::exit(1);
+    });
+}
+
+fn checked_daemon_for_action() -> Option<splitty_core::daemon::DaemonInfo> {
+    splitty_core::daemon::read_info_checked().unwrap_or_else(|error| {
+        eprintln!("Cannot verify daemon discovery: cannot verify {}: {error}. Inspect the existing daemon before replacing its discovery record.", splitty_core::daemon::info_path().display());
+        std::process::exit(1);
+    })
+}
+
+/// An old status/stop read must never unlink publication by a newer start.
+/// Native writers hold this same lock until their final cleanup has ended.
+fn cleanup_stale_daemon(expected: &splitty_core::daemon::DaemonInfo) -> bool {
+    #[cfg(unix)]
+    {
+        let directory = splitty_core::config::run_dir();
+        let _lock = match splitty_server::native::endpoint::InstanceLock::acquire(&directory) {
+            Ok(lock) => lock,
+            Err(_) => return false,
+        };
+        match splitty_core::daemon::read_info_checked() {
+            Ok(Some(current))
+                if &current == expected && !splitty_core::daemon::is_running(current.pid) =>
+            {
+                splitty_core::daemon::remove_info_if(expected).unwrap_or(false)
+            }
+            _ => false,
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = expected;
+        false
+    }
+}
+
+/// Compare at both ends: discovery chooses an owner socket, and the accepting
+/// daemon checks its own immutable instance before initiating its own shutdown.
+/// No PID signal or legacy fallback is safe for a conditional remote update.
+async fn stop_daemon_instance(instance: &str) -> Result<bool, String> {
+    use splitty_core::daemon;
+    if instance.len() != 32
+        || !instance
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err("invalid expected daemon instance".into());
+    }
+    let Some(info) = daemon::read_info_checked().map_err(|error| error.to_string())? else {
+        return Ok(false);
+    };
+    if info.instance.as_deref() != Some(instance) {
+        return Ok(false);
+    }
+    if info.socket.is_empty() {
+        return Err(
+            "the daemon's owner socket is unavailable; explicitly restart it on the host".into(),
+        );
+    }
+    let server = cli::ServerInfo {
+        transport: cli::Transport::LocalSocket(info.socket),
+        source: "verified daemon update",
+    };
+    let response = cli::request_within(
+        &server,
+        "POST",
+        "/api/daemon/stop",
+        Some(serde_json::json!({"instance":instance})),
+        Some(std::time::Duration::from_secs(5)),
+    )
+    .await;
+    match response {
+        Ok((409, _)) => return Ok(false),
+        Ok((200, ref body)) if body["stopping"] == instance => {},
+        Ok((status, _)) => return Err(format!("the daemon cannot confirm instance-bound shutdown (status {status}); explicitly restart it on the host")),
+        Err(error) => {
+            // A confirmed old-instance disappearance is sufficient even when
+            // the owner listener closed before its acknowledgement was read.
+            let current = daemon::read_info_checked().map_err(|e| e.to_string())?;
+            if current.as_ref().and_then(|info| info.instance.as_deref()) != Some(instance) { return Ok(false); }
+            return Err(error.to_string());
+        }
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let current = daemon::read_info_checked().map_err(|error| error.to_string())?;
+        if current.as_ref().and_then(|info| info.instance.as_deref()) != Some(instance) {
+            return Ok(true);
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err("the checked daemon did not stop within its deadline".into());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+}
+
+/// Stop the already checked daemon. Do not reread discovery between a restart's
+/// preservation check and its effects; malformed discovery is never absence.
+fn stop_daemon(info: Option<splitty_core::daemon::DaemonInfo>) -> Option<u32> {
     use splitty_core::daemon;
 
-    let Some(info) = daemon::read_info() else {
+    let Some(info) = info else {
         println!("No daemon running");
         return None;
     };
 
     if !daemon::is_running(info.pid) {
-        println!("No daemon running (stale info file cleaned up)");
-        daemon::remove_info();
+        if cleanup_stale_daemon(&info) {
+            println!("No daemon running (stale info file cleaned up)");
+        } else {
+            println!("No daemon running");
+        }
         return None;
     }
 
@@ -1541,7 +1575,7 @@ fn stop_daemon() -> Option<u16> {
         };
         if let Err(e) = signal::kill(Pid::from_raw(pid), signal::Signal::SIGTERM) {
             eprintln!("Failed to send SIGTERM to pid {}: {e}", info.pid);
-            return None;
+            std::process::exit(1);
         }
 
         // Wait briefly for process to exit
@@ -1549,14 +1583,14 @@ fn stop_daemon() -> Option<u16> {
             std::thread::sleep(std::time::Duration::from_millis(100));
             if !daemon::is_running(info.pid) {
                 println!("Daemon stopped (pid={})", info.pid);
-                return Some(info.port);
+                return Some(info.pid);
             }
         }
         println!(
             "Sent SIGTERM to pid {} (may still be shutting down)",
             info.pid
         );
-        None
+        Some(info.pid)
     }
 
     #[cfg(not(unix))]
@@ -1576,10 +1610,9 @@ fn end_kept_sessions() {
         let mut ending = Vec::new();
         for found in keeper::client::find(&keeper::dir::keepers_dir()) {
             let socket = found.socket.clone();
-            let session = found.hello.session_id.clone();
             match found.end() {
                 Ok(()) => ending.push(socket),
-                Err(e) => eprintln!("Cannot end kept session {session}: {e}"),
+                Err(e) => eprintln!("Cannot end kept session: {e}"),
             }
         }
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
@@ -1604,39 +1637,43 @@ fn end_kept_sessions() {
 /// survives, locks held by the other threads stay locked, and the child still
 /// believed it was inside the runtime, so it panicked on its first `block_on`
 /// while this command reported success. A spawned `daemon run` starts from a
-/// clean process image and inherits nothing but the bound listener.
+/// clean process image and deliberately inherits only the instance lock.
 #[cfg(unix)]
-async fn start_daemon(listener: std::net::TcpListener, token: Option<String>) {
+async fn start_daemon(lock: splitty_server::native::endpoint::InstanceLock) -> Result<(), String> {
     use splitty_core::daemon;
     use std::os::fd::AsRawFd;
-    use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::process::CommandExt;
 
-    let port = listener.local_addr().unwrap().port();
+    let client_socket = splitty_server::native::endpoint::socket_path();
     let config_dir = splitty_core::config::config_dir();
-    let log_path = config_dir.join("daemon.log");
-
-    let log = splitty_core::config::ensure_private_dir(&config_dir).and_then(|()| {
-        std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .mode(0o600)
-            .open(&log_path)
-    });
-    let log = log
-        .unwrap_or_else(|e| daemon_start_failed(&format!("cannot open the log: {e}"), &log_path));
-    let exe = std::env::current_exe().unwrap_or_else(|e| {
-        daemon_start_failed(&format!("cannot locate the splitty binary: {e}"), &log_path)
-    });
-
-    let listen_fd = listener.as_raw_fd();
-    let mut command = std::process::Command::new(exe);
-    command.args(["daemon", "run", "--listen-fd", &listen_fd.to_string()]);
-    if let Some(token) = token.filter(|t| !t.is_empty()) {
-        // Visible in the process list for the daemon's lifetime, as it was
-        // when the daemon was forked and kept this command's arguments.
-        command.args(["--token", &token]);
+    let directory = splitty_core::config::PrivateDir::prepare_config(&config_dir)
+        .map_err(|error| format!("cannot open daemon log directory: {error}"))?;
+    let log = directory
+        .open_file(
+            std::ffi::OsStr::new("daemon.log"),
+            nix::fcntl::OFlag::O_WRONLY
+                | nix::fcntl::OFlag::O_CREAT
+                | nix::fcntl::OFlag::O_APPEND
+                | nix::fcntl::OFlag::O_NONBLOCK,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )
+        .map_err(|error| format!("cannot open daemon log: {error}"))?;
+    directory.verify().map_err(|error| error.to_string())?;
+    use std::os::unix::fs::MetadataExt;
+    let metadata = log.metadata().map_err(|error| error.to_string())?;
+    if !metadata.is_file()
+        || metadata.uid() != nix::unistd::geteuid().as_raw()
+        || metadata.nlink() != 1
+        || metadata.mode() & 0o777 != 0o600
+    {
+        return Err("daemon log must be an owned 0600 regular file without hardlinks".into());
     }
+    let exe = std::env::current_exe()
+        .map_err(|error| format!("cannot locate splitty binary: {error}"))?;
+
+    let lock_fd = lock.file().as_raw_fd();
+    let mut command = std::process::Command::new(exe);
+    command.args(["daemon", "run", "--lock-fd", &lock_fd.to_string()]);
     command
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
@@ -1652,7 +1689,7 @@ async fn start_daemon(listener: std::net::TcpListener, token: Option<String>) {
             // The one descriptor the daemon inherits on purpose. Cleared in
             // this child only, so nothing else started from here gets it.
             nix::fcntl::fcntl(
-                listen_fd,
+                lock_fd,
                 nix::fcntl::FcntlArg::F_SETFD(nix::fcntl::FdFlag::empty()),
             )?;
             Ok(())
@@ -1661,39 +1698,54 @@ async fn start_daemon(listener: std::net::TcpListener, token: Option<String>) {
 
     let mut child = tokio::process::Command::from(command)
         .spawn()
-        .unwrap_or_else(|e| {
-            daemon_start_failed(&format!("cannot start the daemon process: {e}"), &log_path)
-        });
-    // The daemon holds its own copy of the listener now.
-    drop(listener);
+        .map_err(|error| format!("cannot start daemon process: {error}"))?;
+    // Keep this copy of the lock through readiness or owned-child cleanup.
 
     let child_pid = child.id();
     let stdout = child.stdout.take().expect("daemon stdout is piped");
-    let reason =
-        match tokio::time::timeout(DAEMON_READY_TIMEOUT, wait_for_daemon_ready(stdout)).await {
-            Ok(Ok(())) => {
-                // Printed only now, so a launcher that reads it can rely on the
-                // daemon serving. No credential here (security review SR-04):
-                // local clients authorise through the control socket, and a
-                // deliberate remote client uses `--addr` with an explicitly
-                // supplied token.
-                emit_line!("SPLITTY_PORT={port}");
-                return;
-            }
-            Ok(Err(reason)) => reason,
-            Err(_) => format!(
-                "the daemon did not report ready within {} s",
-                DAEMON_READY_TIMEOUT.as_secs()
-            ),
-        };
+    let readiness = async {
+        wait_for_daemon_ready(stdout).await?;
+        let info = daemon::read_info_checked()
+            .map_err(|error| error.to_string())?
+            .filter(|info| {
+                Some(info.pid) == child_pid
+                    && info.client_socket.as_deref() == client_socket.to_str()
+            })
+            .ok_or_else(|| "daemon readiness does not match its discovery record".to_owned())?;
+        // Prove native negotiation, not merely that the child printed a line.
+        let client = splitty_server::native::client::Connector::default()
+            .local(&info)
+            .await
+            .map_err(|error| format!("daemon endpoint did not become ready: {error}"))?;
+        let instance = client.ready.instance.clone();
+        client.shutdown().await;
+        Ok::<_, String>(instance)
+    };
+    let reason = match tokio::time::timeout(DAEMON_READY_TIMEOUT, readiness).await {
+        Ok(Ok(instance)) => {
+            emit_line!("SPLITTY_CLIENT_SOCKET={}", client_socket.display());
+            emit_line!("SPLITTY_INSTANCE={instance}");
+            return Ok(());
+        }
+        Ok(Err(reason)) => reason,
+        Err(_) => format!(
+            "the daemon did not report ready within {} s",
+            DAEMON_READY_TIMEOUT.as_secs()
+        ),
+    };
 
     // Exited or hung: either way it must neither linger unregistered nor stay
     // registered without serving.
-    let _ = child.kill().await;
-    if daemon::read_info().is_some_and(|info| Some(info.pid) == child_pid) {
-        daemon::remove_info();
+    let terminated =
+        child.kill().await.is_ok() || child.try_wait().is_ok_and(|status| status.is_some());
+    if !terminated {
+        return Err(format!("{reason}; daemon exit could not be verified, so its endpoint and discovery were retained"));
     }
-    daemon_start_failed(&reason, &log_path);
+    if let Some(info) = daemon::read_info().filter(|info| Some(info.pid) == child_pid) {
+        let _ = daemon::remove_info_if(&info);
+    }
+    let _ = lock.cleanup_socket(&client_socket).await;
+    Err(reason)
 }
 
 #[cfg(unix)]
@@ -1709,23 +1761,24 @@ fn daemon_start_failed(reason: &str, log_path: &std::path::Path) -> ! {
 /// on its error line or when it exits without either.
 #[cfg(unix)]
 async fn wait_for_daemon_ready(stdout: tokio::process::ChildStdout) -> Result<(), String> {
-    use tokio::io::AsyncBufReadExt;
-
-    let mut lines = tokio::io::BufReader::new(stdout).lines();
-    loop {
-        match lines.next_line().await {
-            Ok(Some(line)) => {
-                if line.starts_with(DAEMON_READY) {
-                    return Ok(());
-                }
-                if let Some(reason) = line.strip_prefix(DAEMON_ERROR) {
-                    return Err(reason.trim().to_string());
-                }
-            }
-            Ok(None) => return Err("the daemon exited during startup".to_string()),
-            Err(e) => return Err(format!("cannot read the daemon's startup output: {e}")),
-        }
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    let mut reader = tokio::io::BufReader::new(stdout).take(4097);
+    let mut bytes = Vec::new();
+    reader
+        .read_until(b'\n', &mut bytes)
+        .await
+        .map_err(|error| format!("cannot read daemon startup: {error}"))?;
+    if bytes.len() > 4096 || !bytes.ends_with(b"\n") {
+        return Err("daemon exited or sent an invalid startup line".into());
     }
+    let line = std::str::from_utf8(&bytes).map_err(|_| "invalid daemon startup encoding")?;
+    if line.starts_with(&format!("{DAEMON_READY} pid=")) {
+        return Ok(());
+    }
+    if let Some(reason) = line.strip_prefix(DAEMON_ERROR) {
+        return Err(reason.trim().into());
+    }
+    Err("unexpected daemon startup output".into())
 }
 
 /// The daemon process: `daemon run`, started by [`start_daemon`].
@@ -1736,18 +1789,25 @@ async fn wait_for_daemon_ready(stdout: tokio::process::ChildStdout) -> Result<()
 /// line before it gives up. `daemon.json` is written only after every step that
 /// can fail, so it never names a daemon that is not about to serve.
 #[cfg(unix)]
-async fn run_daemon(listen_fd: i32, token: Option<String>) {
+async fn run_daemon(lock_fd: i32) {
     use splitty_core::daemon;
 
     tracing::info!("daemon started (pid={})", std::process::id());
 
-    let (listener, local_addr) = adopt_listener(listen_fd).unwrap_or_else(|e| {
-        daemon_run_failed(&format!(
-            "cannot use the inherited listener (fd {listen_fd}): {e}"
-        ))
+    let client_path = splitty_server::native::endpoint::socket_path();
+    let lock = splitty_server::native::endpoint::adopt_lock(
+        lock_fd,
+        client_path.parent().expect("native endpoint parent"),
+    )
+    .unwrap_or_else(|error| daemon_run_failed(&format!("cannot adopt native lock: {error}")));
+    splitty_core::config::prepare_daemon_config_dir().unwrap_or_else(|error| {
+        daemon_run_failed(&format!("cannot prepare daemon configuration: {error}"))
     });
-
-    let token = resolve_token(token, false);
+    let bound = splitty_server::native::endpoint::bind_locked(&client_path, lock)
+        .await
+        .unwrap_or_else(|error| {
+            daemon_run_failed(&format!("cannot bind native endpoint: {error}"))
+        });
 
     // Sessions get `bin/` of the run directory once its `splitty` names this
     // daemon's CLI, so shells that outlive an update find the new one.
@@ -1787,27 +1847,31 @@ async fn run_daemon(listen_fd: i32, token: Option<String>) {
     }
 
     let control_path = control::daemon_socket_path();
-    let terminals: Arc<dyn splitty_core::pty::terminal::TerminalFactory> =
-        match std::env::current_exe() {
-            Ok(executable) => Arc::new(splitty_core::keeper::client::Keepers::new(
-                keepers_dir,
-                Arc::new(splitty_core::keeper::client::ProcessLauncher::new(
-                    executable,
-                )),
-            )),
-            Err(e) => {
-                tracing::warn!("sessions run in the daemon and end with it: {e}");
-                Arc::new(splitty_core::pty::terminal::LocalTerminals)
-            }
-        };
-    let (state, pty_manager) = build_state(
-        &local_addr.to_string(),
-        token,
+    let executable = std::env::current_exe().unwrap_or_else(|error| {
+        daemon_run_failed(&format!("cannot locate keeper executable: {error}"))
+    });
+    let terminals = Arc::new(splitty_core::keeper::client::Keepers::new(
+        keepers_dir,
+        Arc::new(splitty_core::keeper::client::ProcessLauncher::new(
+            executable,
+        )),
+    ));
+    let runtime = splitty_server::service::runtime::build(
         "daemon",
         initial_state.clone(),
         terminals,
         &control_path,
     );
+    let pty_manager = runtime.pty;
+    let service = runtime.state;
+    // The owner-control adapter has no HTTP listener or browser credentials.
+    let state = http::AppState {
+        service: service.clone(),
+        token: String::new(),
+        listen_addr: String::new(),
+        sessions: Arc::new(http::session::SessionStore::new()),
+        allowed_origins: Arc::new(Vec::new()),
+    };
 
     // Sessions on the adopted keepers, with their buffered output, before any
     // client can attach. A keeper the workspace does not know becomes a
@@ -1830,7 +1894,7 @@ async fn run_daemon(listen_fd: i32, token: Option<String>) {
             tracing::warn!(%session, "cannot adopt a kept session: {e}");
         }
     }
-    state.ws_state.jobs.resume_adopted();
+    state.client_state.jobs.resume_adopted();
 
     // The daemon is the case where the control socket matters most: it is
     // the long-lived server the in-shell CLI discovers through daemon.json.
@@ -1838,7 +1902,11 @@ async fn run_daemon(listen_fd: i32, token: Option<String>) {
 
     let info = daemon::DaemonInfo {
         pid: std::process::id(),
-        port: local_addr.port(),
+        format: Some(2),
+        port: None,
+        client_socket: Some(client_path.to_string_lossy().into_owned()),
+        instance: Some(service.instance.clone()),
+        transport_version: Some(u32::from(splitty_transport::wire::VERSION)),
         // Empty when the socket could not be bound: discovery skips an empty
         // path instead of failing on one that does not exist.
         socket: control_task
@@ -1850,14 +1918,6 @@ async fn run_daemon(listen_fd: i32, token: Option<String>) {
         protocol: splitty_core::protocol::PROTOCOL_VERSION,
         keeps_sessions: true,
     };
-    if let Err(e) = daemon::write_info(&info) {
-        control_task.shutdown();
-        daemon_run_failed(&format!(
-            "cannot write {}: {e}",
-            daemon::info_path().display()
-        ));
-    }
-
     // Restore the sessions no keeper kept from persisted state
     if let Some(ref ws) = initial_state {
         let effects = daemon::restore_effects(ws, |id| pty_manager.get(id).is_some());
@@ -1881,22 +1941,31 @@ async fn run_daemon(listen_fd: i32, token: Option<String>) {
     }
 
     let mux_store = state.mux_store.clone();
-    let jobs = state.ws_state.jobs.clone();
-    let app = http::build_router_with_frontend(state);
+    let jobs = state.client_state.jobs.clone();
+    if let Err(e) = daemon::write_info(&info) {
+        jobs.release().await;
+        if let Err(error) = pty_manager.shutdown(true).await {
+            tracing::error!("terminal release failed: {error}");
+        }
+        control_task.shutdown();
+        drop(bound.guard);
+        daemon_run_failed(&format!(
+            "cannot write {}: {e}",
+            daemon::info_path().display()
+        ));
+    }
 
     emit_line!("{DAEMON_READY} pid={}", std::process::id());
-    // `daemon start` stops reading after that line. Anything written to stdout
-    // later goes to the log rather than into a pipe nobody reads.
     let _ = nix::unistd::dup2(2, 1);
-    tracing::info!("splitty (daemon) listening on {local_addr}");
-
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            daemon_shutdown_signal().await;
-            jobs.release().await;
-        })
-        .await
-        .unwrap();
+    tracing::info!("splitty daemon serving {}", client_path.display());
+    let owner_shutdown = service.owner_shutdown.clone();
+    let shutdown = async {
+        tokio::select! { _ = daemon_shutdown_signal() => {}, _ = owner_shutdown.notified() => {} }
+    };
+    if let Err(error) = splitty_server::native::listen(bound.listener, service, shutdown).await {
+        tracing::error!(%error, "native daemon listener ended");
+    }
+    jobs.release().await;
 
     // Persist final state before exit
     let final_state = mux_store.get_workspace_state();
@@ -1907,9 +1976,12 @@ async fn run_daemon(listen_fd: i32, token: Option<String>) {
     // the next daemon, and a session that runs in this process hangs up. Left
     // to the runtime's teardown, a session still referenced by a client
     // connection kept its shell alive, and the runtime waited for it forever.
-    pty_manager.release_all();
-    daemon::remove_info();
+    if let Err(error) = pty_manager.shutdown(true).await {
+        tracing::error!("terminal release failed: {error}");
+    }
+    let _ = daemon::remove_info_if(&info);
     control_task.shutdown();
+    drop(bound.guard);
     tracing::info!("daemon shut down");
 }
 
@@ -1919,63 +1991,6 @@ fn daemon_run_failed(reason: &str) -> ! {
     tracing::error!("daemon failed to start: {reason}");
     emit_line!("{DAEMON_ERROR} {}", reason.replace('\n', " "));
     std::process::exit(1);
-}
-
-/// Take over the listening socket `daemon start` bound and passed down.
-///
-/// `daemon run` can also be started by hand with any descriptor, so it is
-/// checked before ownership is taken: it must be an open, listening TCP socket
-/// on loopback, the same invariant `resolve_loopback_bind` enforces.
-#[cfg(unix)]
-fn adopt_listener(fd: i32) -> std::io::Result<(tokio::net::TcpListener, std::net::SocketAddr)> {
-    use std::io::{Error, ErrorKind};
-    use std::os::fd::{BorrowedFd, FromRawFd};
-
-    use nix::fcntl::{fcntl, FcntlArg, FdFlag};
-    use nix::sys::socket::{getsockopt, sockopt};
-
-    if fd < 3 {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "not a listening socket",
-        ));
-    }
-    // Fails with EBADF unless the descriptor is open.
-    fcntl(fd, FcntlArg::F_GETFD)?;
-    // SAFETY: open, as just checked, and borrowed for this call only.
-    let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-    let listening = match getsockopt(&borrowed, sockopt::AcceptConn) {
-        Ok(listening) => listening,
-        // macOS answers SO_ACCEPTCONN with ENOPROTOOPT. There a stream socket
-        // on which listen() succeeds is taken: listen() leaves a listening
-        // socket listening and fails on a connected one.
-        Err(nix::errno::Errno::ENOPROTOOPT) => {
-            getsockopt(&borrowed, sockopt::SockType)? == nix::sys::socket::SockType::Stream
-                && nix::sys::socket::listen(&borrowed, nix::sys::socket::Backlog::MAXCONN).is_ok()
-        }
-        Err(error) => return Err(error.into()),
-    };
-    if !listening {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            "not a listening socket",
-        ));
-    }
-    // Shells started in panes must not inherit it: a listener that outlives
-    // the daemon would keep its port bound.
-    fcntl(fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC))?;
-
-    // SAFETY: an open listening socket that nothing else in this process owns.
-    let listener = unsafe { std::net::TcpListener::from_raw_fd(fd) };
-    let local_addr = listener.local_addr()?;
-    if !local_addr.ip().is_loopback() {
-        return Err(Error::new(
-            ErrorKind::InvalidInput,
-            format!("refusing to serve on {local_addr}: Splitty listens on loopback only"),
-        ));
-    }
-    listener.set_nonblocking(true)?;
-    Ok((tokio::net::TcpListener::from_std(listener)?, local_addr))
 }
 
 /// Shutdown signal handler for daemon mode (handles both SIGTERM and SIGINT).
@@ -2110,79 +2125,383 @@ fn open_in_browser(json: bool, host: &str, url: &str) {
     }
 }
 
+/// A deliberately exposed browser workspace owns its service but keeps all
+/// browser state at the gateway, using the same native operation boundary.
+async fn serve_embedded_gateway(
+    address: std::net::SocketAddr,
+    token: Option<String>,
+    oneshot: bool,
+    open: bool,
+) -> Result<(), String> {
+    if address.ip() != std::net::Ipv4Addr::LOCALHOST
+        && address.ip() != std::net::Ipv6Addr::LOCALHOST
+    {
+        return Err("browser gateways require 127.0.0.1 or ::1".into());
+    }
+    let listener = splitty_remote::tunnel::exposure::bind_gateway(address)
+        .await
+        .map_err(|error| format!("cannot bind {address}: {error}"))?;
+    let address = listener.local_addr().map_err(|error| error.to_string())?;
+    let browser = http::BrowserState::new(address, resolve_token(token, oneshot))
+        .map_err(|error| error.to_string())?;
+    let runtime = splitty_server::service::runtime::build(
+        "embedded",
+        None,
+        Arc::new(splitty_core::pty::terminal::LocalTerminals),
+        &control::socket_path(),
+    );
+    let state = http::AppState {
+        service: runtime.state.clone(),
+        token: String::new(),
+        sessions: Arc::new(http::session::SessionStore::new()),
+        listen_addr: String::new(),
+        allowed_origins: Arc::new(Vec::new()),
+    };
+    let control_task = control::spawn(state);
+    let backend = http::gateway::Backend::embedded(runtime.state.clone());
+    let bootstrap = browser.sessions.issue_bootstrap();
+    let url = format!("http://{address}/?bootstrap={bootstrap}&desktop=1");
+    let app = http::gateway::router(backend.clone(), browser);
+    emit_line!("SPLITTY_PORT={}", address.port());
+    emit_line!("SPLITTY_BOOTSTRAP={bootstrap}");
+    emit_line!("SPLITTY_URL={url}");
+    tracing::info!("splitty (serve) listening on {address}");
+    if open {
+        if let Err(error) = open::that(&url) {
+            tracing::warn!(%error, "could not open browser");
+        }
+    }
+    let result = http::server::serve_registered(listener, app, shutdown_signal()).await;
+    backend.close();
+    let cleanup = runtime.close().await;
+    control_task.shutdown();
+    tracing::info!("server shut down");
+    result.and(cleanup).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
+async fn serve_daemon_gateway(
+    address: std::net::SocketAddr,
+    token: Option<String>,
+    oneshot: bool,
+    open: bool,
+) -> Result<(), String> {
+    use splitty_core::daemon;
+    let info = daemon::read_info_checked().map_err(|error| error.to_string())?
+        .filter(|info| daemon::is_running(info.pid))
+        .ok_or("no daemon is running; start one with `splitty daemon start`, or use plain `splitty serve`")?;
+    let connector = splitty_server::native::client::Connector::default();
+    let client = connector
+        .local(&info)
+        .await
+        .map_err(|error| error.to_string())?;
+    let backend = http::gateway::Backend::daemon(info);
+    let listener = splitty_remote::tunnel::exposure::bind_gateway(address)
+        .await
+        .map_err(|error| error.to_string())?;
+    let address = listener.local_addr().map_err(|error| error.to_string())?;
+    let browser = http::BrowserState::new(address, resolve_token(token, oneshot))
+        .map_err(|error| error.to_string())?;
+    let bootstrap = browser.sessions.issue_bootstrap();
+    let url = format!("http://{address}/?bootstrap={bootstrap}&desktop=1");
+    let app = http::gateway::router(backend.clone(), browser);
+    let (stop, stopped) = tokio::sync::oneshot::channel();
+    let mut server = tokio::spawn(async move {
+        http::server::serve_registered(listener, app, async {
+            let _ = stopped.await;
+        })
+        .await
+    });
+    emit_line!("SPLITTY_PORT={}", address.port());
+    emit_line!("SPLITTY_BOOTSTRAP={bootstrap}");
+    emit_line!("SPLITTY_URL={url}");
+    if open {
+        if let Err(error) = open::that(&url) {
+            tracing::warn!(%error, "could not open browser");
+        }
+    }
+    let outcome = tokio::select! { biased;
+        _ = connect_shutdown() => Ok(()),
+        result = monitor_daemon_gateway(backend.clone(), client, connector) => result,
+        result = &mut server => Err(format!("browser gateway ended: {result:?}")),
+    };
+    backend.set_daemon(None);
+    let _ = stop.send(());
+    if !server.is_finished()
+        && tokio::time::timeout(std::time::Duration::from_secs(5), &mut server)
+            .await
+            .is_err()
+    {
+        server.abort();
+    }
+    outcome
+}
+
+#[cfg(unix)]
+async fn monitor_daemon_gateway(
+    backend: Arc<http::gateway::Backend>,
+    mut client: splitty_server::native::client::Client,
+    connector: splitty_server::native::client::Connector,
+) -> Result<(), String> {
+    use splitty_core::daemon;
+    loop {
+        while client.recv().await.is_some() {}
+        backend.set_daemon(None);
+        if let Err(error) = client.finish().await {
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::InvalidData
+                    | std::io::ErrorKind::Unsupported
+                    | std::io::ErrorKind::PermissionDenied
+            ) {
+                return Err(error.to_string());
+            }
+        }
+        let deadline = tokio::time::Instant::now() + splitty_remote::tunnel::GIVE_UP_AFTER;
+        let mut failures = 0;
+        loop {
+            if tokio::time::Instant::now() >= deadline {
+                return Err("timed out waiting for the daemon to return; start it with `splitty daemon start`".into());
+            }
+            let info = daemon::read_info_checked()
+                .map_err(|error| format!("cannot verify daemon discovery: {error}"))?
+                .filter(|info| daemon::is_running(info.pid));
+            if let Some(info) = info {
+                let attempt = tokio::time::timeout_at(deadline, connector.local(&info)).await;
+                match attempt {
+                    Ok(Ok(next)) => {
+                        client = next;
+                        backend.set_daemon(Some(info));
+                        break;
+                    }
+                    Ok(Err(error))
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::Unsupported
+                        ) =>
+                    {
+                        return Err(error.to_string())
+                    }
+                    Ok(Err(error))
+                        if error.kind() == std::io::ErrorKind::InvalidData
+                            && !splitty_transport::negotiation::stale_instance(&error) =>
+                    {
+                        return Err(error.to_string())
+                    }
+                    _ => {}
+                }
+            }
+            let delay = splitty_remote::tunnel::backoff(failures)
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now()));
+            failures += 1;
+            tokio::time::sleep(delay).await;
+        }
+    }
+}
+
 async fn handle_connect(target: &str, forward: &[String], open: bool, json: bool) {
     use splitty_remote::tunnel::{self, ConnectEvent};
     use splitty_remote::{hosts, install, ssh};
 
     let target =
         ssh::SshTarget::parse(target).unwrap_or_else(|e| connect_rejected(json, e.to_string()));
-    let forwards =
+    let requested_forwards =
         tunnel::parse_forwards(forward).unwrap_or_else(|e| connect_rejected(json, e.to_string()));
     let host = target.as_str().to_owned();
     let report = |event: ConnectEvent| report_connect(json, &host, &event);
     let mut shutdown = std::pin::pin!(connect_shutdown());
 
-    // The host gets this client's own server when it lacks it; then every
-    // command runs that server by its absolute path. Dropping the flow on
-    // Ctrl+C kills any ssh it started.
-    let flow = tunnel::open_forwarding(
-        ssh::Ssh::new(target.clone()),
-        env!("CARGO_PKG_VERSION"),
-        install::payload_for,
-        forwards,
-        |progress| report(progress.into()),
+    if requested_forwards.len() > 32 {
+        connect_rejected(json, "at most 32 development forwards are supported".into());
+    }
+    let assignment = splitty_transport::admission::Assignment::new(
+        splitty_transport::admission::Backend::new(),
+        splitty_transport::admission::Domain::new(),
     );
-    let (remote, connected) = tokio::select! {
-        result = flow => match result {
-            Ok(opened) => opened,
-            Err(error) => connect_failed(json, &host, &error),
+    let mut flow = Box::pin(tunnel::open(
+        ssh::Ssh::stdio_only(target.clone()),
+        env!("CARGO_PKG_VERSION"),
+        splitty_core::protocol::PROTOCOL_VERSION,
+        install::payload_for,
+        assignment,
+        |progress| {
+            let (event, _storage) = progress.map(ConnectEvent::from).into_parts();
+            report(event);
         },
-        () = &mut shutdown => {
+    ));
+    let opening = tokio::select! {
+        result = &mut flow => Some(result),
+        () = &mut shutdown => None,
+    };
+    drop(flow);
+    let (remote, connected) = match opening {
+        Some(Ok(connection)) => connection,
+        Some(Err(error)) => {
+            let _ = splitty_server::native::helper::settle_workers().await;
+            connect_failed(json, &host, &error);
+        }
+        None => {
+            let _ = splitty_server::native::helper::settle_workers().await;
             report(ConnectEvent::Closed);
             return;
         }
     };
-
-    // Before the URL is printed, so whoever reads it finds the host recorded.
-    if let Err(error) = hosts::record_recent(&splitty_core::config::config_dir(), &target) {
-        let message = format!("Could not record {host} as a recent host: {error}");
-        if json {
-            report(ConnectEvent::Notice { message });
-        } else {
-            eprintln!("warning: {message}");
-        }
-    }
-    report(ConnectEvent::Ready {
-        url: connected.url.clone(),
-        port: connected.daemon.port,
-    });
-    for forward in &connected.forwards {
-        report((*forward).into());
-    }
-    if !json {
-        println!("SSH tunnel active. Press Ctrl+C to disconnect.");
-    }
-    if open {
-        open_in_browser(json, &host, &connected.url);
-    }
-
-    let on_event = |event: tunnel::Event| {
-        let event = ConnectEvent::from_event(&host, event);
-        report_connect(json, &host, &event);
-        if let (ConnectEvent::Url { url }, true) = (&event, open) {
-            open_in_browser(json, &host, url);
+    let remote = Arc::new(remote);
+    let backend = http::gateway::Backend::remote(remote.clone());
+    backend.set_remote(Some(connected.daemon.clone()));
+    // An explicit gateway owns a local listener, assets and credentials. No
+    // reusable browser credential is obtained from or sent to the SSH host.
+    let listener = match splitty_remote::tunnel::exposure::bind_gateway(std::net::SocketAddr::from(
+        (std::net::Ipv4Addr::LOCALHOST, 0),
+    ))
+    .await
+    {
+        Ok(listener) => listener,
+        Err(error) => {
+            drop(connected);
+            let _ = splitty_server::native::helper::settle_workers().await;
+            connect_failed(
+                json,
+                &host,
+                &tunnel::RemoteError::PortUnavailable {
+                    port: 0,
+                    source: error,
+                },
+            );
         }
     };
-    let supervised = tunnel::supervise(
-        &remote,
-        connected,
-        tunnel::GIVE_UP_AFTER,
-        &mut shutdown,
-        on_event,
-    );
-    match supervised.await {
-        Ok(()) => report(ConnectEvent::Closed),
-        Err(error) => connect_failed(json, &host, &error),
+    let address = listener.local_addr().expect("bound browser gateway");
+    let browser = http::BrowserState::new(
+        address,
+        splitty_core::auth::generate_oneshot().expect("browser process token"),
+    )
+    .expect("canonical loopback gateway");
+    let sessions = browser.sessions.clone();
+    let (stop_http, http_stopped) = tokio::sync::oneshot::channel();
+    let router = http::gateway::router(backend.clone(), browser);
+    let mut gateway = tokio::spawn(async move {
+        http::server::serve_registered(listener, router, async {
+            let _ = http_stopped.await;
+        })
+        .await
+    });
+    let forwards =
+        splitty_server::hub::Forwards::transient(Arc::new(splitty_server::hub::SshConnector));
+    let mut failure = None;
+    let mut cancelled = false;
+    let mut announced_forwards = Vec::new();
+    for requested in requested_forwards {
+        let reserved = tunnel::reserve(requested);
+        let (mapping, reservation) = match reserved {
+            Ok(reserved) => reserved,
+            Err(error) => {
+                failure = Some(tunnel::RemoteError::Forward(error.to_string()));
+                break;
+            }
+        };
+        drop(reservation);
+        let opened = tokio::select! {
+            _ = &mut shutdown => None,
+            result = forwards.open(&host, i64::from(mapping.remote), Some(i64::from(mapping.local)), false) => Some(result),
+        };
+        match opened {
+            Some(Ok(info)) => announced_forwards.push(tunnel::Forward {
+                remote: mapping.remote,
+                local: info.local,
+                asked: mapping.asked,
+            }),
+            Some(Err(error)) => {
+                failure = Some(tunnel::RemoteError::Forward(error.to_string()));
+                break;
+            }
+            None => {
+                cancelled = true;
+                break;
+            }
+        }
+    }
+    if failure.is_none() && !cancelled {
+        if let Err(error) = hosts::record_recent(&splitty_core::config::config_dir(), &target) {
+            report(ConnectEvent::Notice {
+                message: format!("Could not record {host} as a recent host: {error}"),
+            });
+        }
+        let url = tunnel::session_url(address.port(), &sessions.issue_bootstrap(), &host);
+        report(ConnectEvent::Ready {
+            url: url.clone(),
+            port: address.port(),
+        });
+        for forward in announced_forwards {
+            report(forward.into());
+        }
+        if !json {
+            println!("Browser gateway active. Press Ctrl+C to disconnect.");
+        }
+        if open {
+            open_in_browser(json, &host, &url);
+        }
+        let supervised = tunnel::supervise(
+            remote.as_ref(),
+            connected,
+            tunnel::GIVE_UP_AFTER,
+            &mut shutdown,
+            |mut connection| {
+                let backend = backend.clone();
+                let host = host.clone();
+                async move {
+                    backend.set_remote(Some(connection.daemon.clone()));
+                    while connection.client.recv().await.is_some() {}
+                    backend.set_remote(None);
+                    let (result, ended) = connection.client.finish().await;
+                    let result = match result {
+                        Err(error) if splitty_remote::bridge::protocol_failure(&error) => {
+                            return Err(tunnel::RemoteError::Native(error))
+                        }
+                        result => result,
+                    };
+                    if let Ok(status) = ended.status {
+                        if status.code() == Some(255) {
+                            return Err(tunnel::RemoteError::Ssh(ssh::classify(
+                                &host,
+                                status,
+                                &ended.stderr,
+                            )));
+                        }
+                    }
+                    result
+                        .map(|()| ended.stderr.to_string())
+                        .map_err(tunnel::RemoteError::Native)
+                }
+            },
+            |event| {
+                if matches!(event, tunnel::Event::Lost { .. }) {
+                    backend.set_remote(None);
+                }
+                report(ConnectEvent::from_event(&host, event));
+            },
+        );
+        tokio::pin!(supervised);
+        failure = tokio::select! {
+            result = &mut supervised => result.err(),
+            result = &mut gateway => Some(tunnel::RemoteError::Native(std::io::Error::other(format!("browser gateway ended: {result:?}")))),
+        };
+    } else {
+        drop(connected);
+    }
+    backend.set_remote(None);
+    let _ = stop_http.send(());
+    forwards.close().await;
+    if !gateway.is_finished()
+        && tokio::time::timeout(std::time::Duration::from_secs(5), &mut gateway)
+            .await
+            .is_err()
+    {
+        gateway.abort();
+    }
+    let _ = splitty_server::native::helper::settle_workers().await;
+    match failure {
+        Some(error) => connect_failed(json, &host, &error),
+        None => report(ConnectEvent::Closed),
     }
 }
 
@@ -2197,54 +2516,55 @@ fn chrono_now() -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::wait_for_eof;
-    use std::sync::Arc;
-    use tokio::io::AsyncWriteExt;
-
-    #[tokio::test]
-    async fn desktop_stdio_waits_until_eof() {
-        let (mut writer, reader) = tokio::io::duplex(32);
-        let waiter = tokio::spawn(wait_for_eof(reader, None));
-
-        writer.write_all(b"keepalive").await.unwrap();
-        assert!(!waiter.is_finished());
-        drop(writer);
-
-        waiter.await.unwrap().unwrap();
-    }
-
-    /// The launcher can ask for a fresh bootstrap code over the same channel.
-    ///
-    /// This is what lets a re-entry into an already-running backend get a usable
-    /// credential without the launcher ever holding a reusable one (SR-03/SR-04).
-    #[tokio::test]
-    async fn desktop_stdio_issues_a_fresh_bootstrap_on_request() {
-        let sessions = Arc::new(crate::http::session::SessionStore::new());
-        let (mut writer, reader) = tokio::io::duplex(64);
-        let waiter = tokio::spawn(wait_for_eof(reader, Some(sessions.clone())));
-
-        writer.write_all(b"bootstrap\n").await.unwrap();
-
-        // Give the reader a chance to mint the code before asserting.
-        for _ in 0..100 {
-            tokio::task::yield_now().await;
-        }
-
-        assert_eq!(
-            sessions.pending_bootstrap_count(),
-            1,
-            "a `bootstrap` line should mint exactly one code",
-        );
-
-        drop(writer);
-        waiter.await.unwrap().unwrap();
-    }
-}
-
-#[cfg(test)]
 mod editor_cli_tests {
     use super::*;
+    #[test]
+    fn native_helpers_and_all_owner_entry_points_are_unavailable_to_grants() {
+        for args in [
+            vec![
+                "desktop-backend",
+                "--transport",
+                "native-v1",
+                "--backend",
+                "embedded",
+            ],
+            vec![
+                "desktop-backend",
+                "--transport",
+                "native-v1",
+                "--backend",
+                "ssh",
+                "--target",
+                "user@vm",
+            ],
+            vec!["remote-bridge", "--transport", "native-v1"],
+            vec!["remote-handshake", "--json"],
+            vec!["remote-migrate", "--expected", "invalid"],
+            vec!["session-keeper"],
+            vec!["daemon", "start"],
+            vec!["attach"],
+            vec!["serve"],
+            vec!["issue-bootstrap"],
+        ] {
+            let parsed = Cli::try_parse_from(std::iter::once("splitty").chain(args)).unwrap();
+            assert!(!grant_command_allowed(&parsed.command));
+        }
+        let scoped = Cli::try_parse_from(["splitty", "list-screens", "--json"]).unwrap();
+        assert!(grant_command_allowed(&scoped.command));
+        assert!(
+            Cli::try_parse_from(["splitty", "desktop-backend", "--backend", "embedded"]).is_err()
+        );
+        assert!(Cli::try_parse_from([
+            "splitty",
+            "desktop-backend",
+            "--transport",
+            "legacy",
+            "--backend",
+            "embedded"
+        ])
+        .is_err());
+    }
+
     #[test]
     fn open_defaults_and_explicit_editor_and_path() {
         let cli = Cli::try_parse_from(["splitty", "open", "--session", "s1"]).expect("parse");
@@ -2294,7 +2614,10 @@ mod keeper_cli_tests {
         assert!(matches!(
             cli.command,
             Commands::Daemon {
-                action: DaemonAction::Stop { end_sessions: true }
+                action: DaemonAction::Stop {
+                    end_sessions: true,
+                    ..
+                }
             }
         ));
         let cli = Cli::try_parse_from(["splitty", "daemon", "stop"]).expect("parse");
@@ -2302,7 +2625,8 @@ mod keeper_cli_tests {
             cli.command,
             Commands::Daemon {
                 action: DaemonAction::Stop {
-                    end_sessions: false
+                    end_sessions: false,
+                    ..
                 }
             }
         ));

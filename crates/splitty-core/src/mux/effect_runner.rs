@@ -249,11 +249,14 @@ mod tests {
         fn session_id(&self) -> &str {
             &self.id
         }
-        fn subscribe(&self) -> crate::pty::Subscription {
+        fn subscribe_with(
+            &self,
+            context: splitty_transport::queue::Context,
+        ) -> crate::pty::Subscription {
             // The sender is dropped right away: no output, already ended.
-            let (_tx, receiver) = tokio::sync::mpsc::unbounded_channel();
+            let (_tx, receiver) = context.channel(1);
             crate::pty::Subscription {
-                snapshot: Vec::new(),
+                snapshot: Default::default(),
                 receiver,
             }
         }

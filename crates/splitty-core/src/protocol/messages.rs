@@ -23,6 +23,8 @@ pub const MSG_CLOSE: &str = "close";
 pub const MSG_SAVE_IMAGE: &str = "save_image";
 /// One chunk of a file uploaded to this server (`protocol::upload`).
 pub const MSG_UPLOAD: &str = "upload";
+/// Discard an unfinished upload owned by this connection.
+pub const MSG_UPLOAD_CANCEL: &str = "upload_cancel";
 /// The connection's user acted (`takeover`: use its sizes now).
 pub const MSG_ACTIVITY: &str = "activity";
 /// The connection is not in use until its next `activity`.

@@ -370,8 +370,12 @@ interface SaveImage {
  * failed upload, and an unfinished one when its connection closes, is
  * removed. Older servers answer `error` "unknown message type: upload".
  */
+/** upload-control-v1: dir selects an existing absolute directory. The server
+ * stages privately there, then publishes without overwriting any entry. */
 interface Upload {
   type: "upload";
+  /** First chunk only, omitted for temporary storage. */
+  dir?: string;
   /** Names the upload; echoed by every answer. */
   requestId: string;
   /** Where in the file `data` starts: the bytes received so far. */
@@ -382,6 +386,13 @@ interface Upload {
   name?: string;
   /** First chunk only: the file's length in bytes. */
   size?: number;
+}
+
+/** upload-control-v1: idempotently discard this connection's unfinished upload.
+ * No response. Completed files remain. Never queued across reconnects. */
+interface UploadCancel {
+  type: "upload_cancel";
+  requestId: string;
 }
 
 // --- Mux Messages (new in Milestone 1) ---
@@ -456,6 +467,7 @@ type ClientMessage =
   | SessionClose
   | SaveImage
   | Upload
+  | UploadCancel
   | MuxConnect
   | MuxAttach
   | MuxDetach
@@ -685,7 +697,7 @@ interface MuxWelcome extends ServerEvent {
   clientId: string;
   screens: ScreenInfo[];
   serverMode?: "embedded" | "daemon";
-  capabilities?: string[]; // includes "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1" and "tab-select-v1"; absent on old servers
+  capabilities?: string[]; // includes "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1" and "tab-select-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -1515,10 +1527,12 @@ type RemoteErrorCode =
   | "unsupported_host" // not Linux, no POSIX sh, or no server for its architecture
   //                      (with update=1: none of the local server's version to update
   //                      to; the daemon keeps running)
+  | "unsupported_environment" // local loopback/process reservation authority is unavailable; no SSH started
   | "install" //          the upload, its checksum or the unpacked server failed
   | "daemon" //           the handshake or the daemon start failed (with update=1 also:
   //                      the stop failed, or the old daemon had not ended yet)
   | "incompatible" //     the daemon's protocol is outside the window; it keeps running
+  | "migration_unavailable" // legacy migration cannot be verified; no update is offered
   | "bridge" //           remote-bridge ended before the daemon's first message
   | "forward" //          only from /api/remote/forwards: the forward failed, or the
   //                      host's SSH configuration forwards ports itself
@@ -1537,6 +1551,18 @@ interface RemoteError {
   keepsSessions?: boolean;
   /** For `incompatible`: the daemon's screens, as in `remote.ready`, which an update would end unless it keeps them. */
   screens?: { id: string; name?: string; panes: number }[];
+  /** Positive, native-verified offer; needs a new explicit confirmation.
+   * Conditional host proof tokens never become renderer-selected authority.
+   */
+  migration?: LegacyMigrationOffer;
+}
+
+interface LegacyMigrationOffer {
+  available: true;
+  fromVersion: string;
+  toVersion: string;
+  /** Keeper-backed sessions observed by the host's read-only preflight. */
+  sessions: number;
 }
 
 type RemoteHubMessage = RemoteProgress | RemoteReady | RemoteError;
@@ -1880,7 +1906,7 @@ interface RemoteForwardFailure {
   error: string;
   code?: RemoteForwardConflictCode | ReverseForwardConflictCode
     | "storage_failure" | "internal"
-    | "host_key" | "auth" | "unreachable" | "unsupported_host" | "forward";
+    | "host_key" | "auth" | "unreachable" | "unsupported_host" | "unsupported_environment" | "forward";
   hint?: string;
 }
 
@@ -2028,7 +2054,8 @@ interface LocalEditorFolder {
 
 
 // Confirmed external-editor requests (editor-open-v1 in mux.welcome).
-// POST /api/editor/open, authenticated HTTP or owner socket only, not grants.
+// POST /api/editor/open or native editor.open; authenticated browser/native UI
+// or owner socket, never grants.
 // Resolves on the originating server; only regular files/folders are accepted.
 export interface EditorOpenRequest {
   sessionId: string;
@@ -2051,7 +2078,8 @@ export type EditorServerMessage =
 
 // Files offered to the windows of a session (file-offer-v1 in mux.welcome),
 // by `splitty download <file>` in a pane. POST /api/file/offer, authenticated
-// HTTP or owner socket only, not grants. The server opens the regular file
+// Native file.offer, authenticated HTTP or owner socket, never grants.
+// The server opens the regular file
 // (links followed, at most 512 MiB) and keeps it open: the window reads the
 // file as it was at offer time.
 export interface FileOfferRequest {
@@ -2086,3 +2114,244 @@ export type FileServerMessage =
 // Dedicated desktop commands remain open_local_editor / open_remote_editor
 // (Electron editor:open-local / editor:open-remote) with {cwd,editor,target?,
 // wslDistro?,kind?:"file"|"folder"}; kind defaults to folder for old callers.
+
+// GET /api/client-assignment: browser-gateway-only, authenticated by its local
+// session cookie or owner bearer after Host/Origin/Fetch Metadata guards.
+// Cache-Control: no-store. Available while the fixed backend reconnects; no
+// upstream request. Queries cannot change this assignment. The browser reads
+// it before constructing its workspace. All subsequent API/ticket requests send
+// X-Splitty-Gateway with this public ID (the isolated cookie name, not its secret).
+// A mismatch returns 409 + X-Splitty-Gateway-Changed: 1 before dispatch; the page
+// revokes pending delivery and reloads. CLI callers without the header retain
+// ordinary authentication. Tickets are valid only at their issuing gateway.
+export type BrowserClientAssignment =
+  | { gateway: string; role: "main" }
+  | { gateway: string; role: "remote"; target: string };
+
+/** Public desktop document assignment, returned only after native caller and
+ * readiness checks. The private shell proof/capsule is not part of this value.
+ * handle/document are opaque; query parameters never construct them or select
+ * a role. Requests, replies and credits belong to this document and generation.
+ * Main-window host streams also carry role=remote and their fixed target.
+ */
+export interface NativeDocumentAssignment {
+  handle: string;
+  document: string;
+  generation: number;
+  instance: string;
+  role: "main" | "remote";
+  target?: string; // required for role=remote; absent for a direct main stream
+}
+
+// Native service operations. The checked method/path, role, size and deadline
+// mapping lives in native-operations.json. Unknown operations/arguments and
+// authority fields (URL, socket, method, headers, role, backend) are rejected.
+// Argument strings are data for the named operation, never routing authority.
+// body has the same domain schema/validation as the mapped browser endpoint.
+export type NativeCall =
+  | { operation: "home.get"; args?: { } }
+  | { operation: "home.update"; args: { body: unknown; } }
+  | { operation: "theme.get"; args?: { name?: string; } }
+  | { operation: "theme.list"; args?: { } }
+  | { operation: "shellProfiles.get"; args?: { } }
+  | { operation: "shellProfiles.update"; args: { body: unknown; } }
+  | { operation: "serverSettings.get"; args?: { } }
+  | { operation: "serverSettings.update"; args: { body: unknown; } }
+  | { operation: "template.list"; args?: { } }
+  | { operation: "template.get"; args: { slug: string; } }
+  | { operation: "template.save"; args: { slug: string; body: unknown; } }
+  | { operation: "template.delete"; args: { slug: string; } }
+  | { operation: "build.get"; args?: { } }
+  | { operation: "stats.get"; args?: { } }
+  | { operation: "command.send"; args: { body: unknown; } }
+  | { operation: "mux.state"; args?: { } }
+  | { operation: "mux.screens"; args?: { } }
+  | { operation: "mux.screen"; args: { id: string; } }
+  | { operation: "mux.op"; args: { body: unknown; } }
+  | { operation: "mux.neighbor"; args?: { screen?: string; pane?: string; dir?: string; } }
+  | { operation: "mux.status"; args?: { } }
+  | { operation: "session.send"; args: { id: string; body: unknown; } }
+  | { operation: "editor.open"; args: { body: unknown; } }
+  | { operation: "file.offer"; args: { body: unknown; } }
+  | { operation: "job.list"; args?: { } }
+  | { operation: "job.launch"; args: { body: unknown; } }
+  | { operation: "job.inspect"; args: { id: string; } }
+  | { operation: "job.logs"; args: { id: string; cursor?: string; tail?: string; limit?: string; waitMs?: string; format?: string; } }
+  | { operation: "job.input"; args: { id: string; body: unknown; } }
+  | { operation: "job.stop"; args: { id: string; } }
+  | { operation: "job.forget"; args: { id: string; } }
+  | { operation: "host.list"; args?: { } }
+  | { operation: "host.forget"; args: { body: unknown; } }
+  | { operation: "hostPreferences.get"; args?: { } }
+  | { operation: "hostPreferences.update"; args: { body: unknown; } }
+  | { operation: "hostOrder.get"; args?: { } }
+  | { operation: "hostOrder.update"; args: { body: unknown; } }
+  | { operation: "remoteScreens.get"; args?: { } }
+  | { operation: "remoteScreens.update"; args: { body: unknown; } }
+  | { operation: "catalog.get"; args?: { } }
+  | { operation: "catalog.update"; args: { body: unknown; } }
+  | { operation: "forward.list"; args?: { } }
+  | { operation: "forward.open"; args: { body: unknown; } }
+  | { operation: "forward.stop"; args: { body: unknown; } }
+  | { operation: "forwardPreferences.get"; args?: { } }
+  | { operation: "forwardPreferences.save"; args: { body: unknown; } }
+  | { operation: "forwardPreferences.forget"; args: { body: unknown; } }
+  | { operation: "reverse.list"; args?: { } }
+  | { operation: "reverse.open"; args: { body: unknown; } }
+  | { operation: "reverse.stop"; args: { body: unknown; } }
+  | { operation: "reversePreferences.get"; args?: { } }
+  | { operation: "reversePreferences.save"; args: { body: unknown; } }
+  | { operation: "reversePreferences.forget"; args: { body: unknown; } };
+export type NativeOperation = NativeCall["operation"];
+
+/** `remote-handshake --json [--ensure-daemon]`, executed only on the SSH host.
+ * Binary and running service identity are independent. A host path is never a
+ * local destination; the connector uses its own prepared remote executable.
+ * Legacy TCP fields may be read for diagnosis but confer no native capability.
+ * Exit 75 means discovery changed during the read and can be refreshed.
+ */
+export interface RemoteHandshakeV2 {
+  handshake: 2;
+  server: {
+    version: string;
+    protocol: number;
+    path: string;
+    transportVersions: number[];
+  };
+  daemon:
+    | { running: false }
+    | ({
+        running: true;
+        pid: number;
+        version: string;
+        protocol: number;
+        startedAt: string;
+        keepsSessions: boolean;
+        started: boolean;
+      } & (
+        | { legacy?: false; instance: string; transportVersion: number; legacyMigration?: never }
+        | { legacy: true; instance?: never; transportVersion?: never; legacyMigration?:
+            | { status: "ready"; token: string; sessions: number }
+            | { status: "blocked"; message: string } }
+      ));
+  screens: { id: string; name?: string; panes: number }[];
+}
+
+/** `remote-migrate --expected <token>` is an internal, explicitly confirmed
+ * host command using the installed replacement binary and its configuration.
+ * The 64-character lowercase hexadecimal token binds the observed legacy
+ * daemon process generation and record; it is not a bearer credential.
+ * The host revalidates identity and keepers before signaling. Exit 75 means
+ * stale proof; any potentially executed migration is never replayed by the
+ * client. A fresh native handshake verifies successful replacement.
+ */
+
+/** Owner Unix socket only, excluded from the browser and native UI catalog.
+ * POST /api/daemon/stop compares this immutable instance with the accepting
+ * daemon before asking that daemon to shut itself down. A mismatch is 409;
+ * success is {stopping: instance}. No PID signal or alternate backend fallback.
+ */
+export interface StopDaemonInstance { instance: string; }
+
+/** Native transport v1 (independent of the mux version).
+ * Stream carriers begin with 53 50 4c 49 54 54 59 01 (SPLITTY + 01), then
+ * a Hello from the client; the server returns the same magic and Accept.
+ * Every following frame is [kind:u8, payloadLength:u32be, payload]. The 16 MiB
+ * ceiling includes this five-byte header; control frames are at most 4096 bytes.
+ * Text/Binary/Request/Reply wrap their payload as
+ * [generation:u32be, application bytes, receipt:16 random bytes]. Text and API envelopes are UTF-8 JSON. Binary is the existing
+ * opaque session binary message, including NUL and non-UTF-8 terminal bytes.
+ * Other kinds contain only the JSON shape below. Unknown kinds/fields fail.
+ *
+ * Accept completes framing, not admission. A helper can send Progress during
+ * bounded backend preparation. Ready identifies a verified service; ReadyAccept
+ * acknowledges that exact instance/generation before any application input.
+ * Each framing/service handshake has a five-second deadline. Mux compatibility
+ * is checked independently. A host purpose describes an already assigned host;
+ * receiving it never grants the peer permission to select a local backend.
+ *
+ * Receipt credits acknowledge consumption, once, within their generation.
+ * Unpredictable trailing receipts prevent guessed credits or a partial first
+ * IPC chunk from releasing undelivered bytes. Charges cover reassembly, queues and in-flight data until consumption;
+ * peers cannot increase limits. IPC chunks are at most 64 KiB. Application order
+ * is preserved; bounded reserved control capacity carries credit/cancel/ping.
+ * The first direct event remains mux.welcome. Host streams retain remote.progress
+ * and remote.ready before mux.welcome. Golden bytes: native-transport-v1.json.
+ */
+export const NativeFrameKind = {
+  Hello: 0, Text: 1, Binary: 2, Accept: 3, Ready: 4, Request: 5, Reply: 6,
+  Cancel: 7, Ping: 8, Pong: 9, Credit: 10, Progress: 11, Closed: 12, ReadyAccept: 13,
+} as const;
+export interface NativeHello {
+  transportVersion: 1;
+  // Only a main broker or authenticated local gateway may request this on the
+  // private owner endpoint. Direct/SSH remote carriers reject it before effects.
+  // ownerInstance pins the local hub before it opens the separate host stream.
+  openHost?: { ownerInstance: string; target: string; update: boolean };
+}
+export interface NativeLimits {
+  frameBytes: number; // <= 16 MiB, includes header
+  apiBytes: number; // <= 1 MiB, smaller per-operation limits still apply
+  pendingRequests: number; // <= 64
+  connectionBytes: number; // <= 32 MiB, process aggregate <= 128 MiB
+}
+export interface NativeReady {
+  generation: number; // nonzero u32, replaced on backend reconnect
+  instance: string; // 32 lowercase hex characters; verified against discovery
+  muxProtocol: number;
+  purpose: { kind: "direct" } | { kind: "host"; target: string } | { kind: "owner" };
+  limits: NativeLimits;
+}
+export interface NativeReadyAccept { generation: number; instance: string }
+// Only `desktop-backend --backend embedded --owner` admits the launcher-owned
+// owner purpose. It never appears on a daemon socket, SSH bridge or renderer
+// port. Its Text frames carry the commands/results below, not mux operations.
+// Binary application bytes are a big-endian u32 stream id followed by 1..65536
+// opaque bytes of that stream's independently negotiated native-v1 connection.
+// Each id increases across the app lifetime and is never reused. At most 32
+// streams, including cleanup, exist; each outgoing stream chunk waits for its
+// normal unpredictable native delivery receipt. Allocated duplex/scratch
+// buffers are charged as well as framed queued/in-flight bytes.
+export interface NativeOwnerOpen { type: "open"; id: number; target?: string; update?: boolean }
+export interface NativeOwnerClosed { type: "closed"; id: number; message: string; retryable: boolean }
+// Closing uses NativeCancel on RESERVED CONTROL capacity, with id identifying
+// the substream. Up to 32 cancellations may precede their queued Open; such an
+// Open is rejected without service/SSH effects. Closing one stream never ends
+// the owned service. Only closing the outer owner pipe ends local sessions/jobs.
+// Owner commands are <=4096 UTF-8 bytes, including their metadata. Invalid host
+// arguments reject only their Open; they never shut down other local streams.
+export type NativeRequest = NativeCall & { id: number }; // increasing nonzero u32 per generation
+export interface NativeReply {
+  id: number;
+  status: number;
+  contentType: "json" | "text" | "empty";
+  body: string; // serialized JSON or UTF-8 text, no arbitrary response headers
+  uncertain?: boolean; // cancellation/loss does not undo an admitted mutation
+}
+export interface NativeCancel { generation: number; id: number }
+// Reserved controls can overtake an API frame. Up to 64 future cancellations
+// are remembered within their generation; they receive 499/uncertain:false and
+// their later request never starts. An already admitted mutation receives
+// uncertain:true; its capacity remains occupied until the task completes.
+export interface NativePing { nonce: number } // Pong echoes the nonce
+export interface NativeCredit { generation: number; receipt: string } // 32 lowercase hex characters
+export interface NativeProgress { phase: string; message: string }
+export interface NativeClosed {
+  code: "incompatible" | "busy" | "timeout" | "protocol" | "backendLost" | "closed" | "internal";
+  message: string;
+  retryable: boolean;
+}
+
+// GET /api/mux/status and native mux.status describe the terminal service.
+// A browser gateway reports its own address at startup, not in this object.
+export interface ServiceStatus {
+  serverMode: "embedded" | "daemon";
+  capabilities: string[];
+  version: string;
+  screens: number;
+  sessions: number;
+  activeScreen: string | null;
+  listenAddr: null;
+  instance: string;
+  transportVersion: 1;
+}

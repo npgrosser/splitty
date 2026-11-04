@@ -1,0 +1,902 @@
+# Confirmed legacy recovery (`0.2.0-dev.2`)
+
+An eligible legacy Linux daemon now offers an explicit update-and-connect action.
+The main launcher, inline remote screen and host directory require confirmation;
+ordinary connect/Retry never migrates a legacy daemon. The native launcher/hub
+consumes intent once before the mutating SSH command. An uncertain result is not
+replayed, and a fresh handshake must identify the intended native replacement.
+
+The installed host binary pins a pidfd, verifies its private owner socket and
+actual process generation, and reads bounded live workspace/keeper inventories.
+Daemon-owned PTY masters block migration, including terminals missing from the
+workspace snapshot. Migration revalidates discovery and process identity before
+SIGTERM and refuses a competing daemon publication observed afterward. It never
+claims keepers during inspection, opens TCP, ends sessions explicitly or escalates
+to a forced kill. Unsupported identity/platform checks, including legacy macOS,
+produce a blocked reason. Existing native updates retain their instance gate.
+
+This is preflight, not a freeze of other legacy clients: preservation covers the
+checked keeper-backed sessions. Legacy clients do not participate in the native
+instance lock, so the check cannot serialize their concurrent startup. The UI
+retains this bounded promise. Renderer-visible offers contain versions/counts,
+never a process selector or conditional migration token.
+
+The strict isolated historical test uses the actual `cc66e97` artifact and SHA256
+recorded below (version `0.1.30`). It exercises current → historical daemon →
+confirmed migration → current. It also starts a second terminal under the old
+daemon and verifies that its keeper executes the historical binary. Both shells
+retain their original PID, unexported variable, session ID and keeper inode after
+migration, including the historical keeper process. An unrelated owned process
+survives.
+Read-only discovery leaves the old daemon unchanged; missing keepers, wrong owner
+identity, changed discovery and replayed proof are refused. A separate test
+rejects an unmapped direct PTY without signalling its owner. This is evidence for
+the pinned historical implementation, not every historical release package.
+No deployed host was migrated or restarted for validation. Independent backend
+and UI reviews found no remaining blocker after descriptor bounds, publication
+checks and host-directory confirmation lifetime corrections.
+
+Local integrated checks pass: 1,070 reported workspace tests, 101 GUI library
+tests, workspace/GUI all-targets clippy with warnings denied, and 22 bootstrap
+JavaScript tests. Optional platform fixtures retain their existing prerequisite
+behavior; the historical migration fixture above runs with strict requirements.
+All 1,518 frontend tests pass; frontend check reports zero errors and eight
+existing warnings. The Electron build packages 58 assets, its remote lifecycle
+smoke passes with owned child cleanup, and all eight architecture files and 15
+main specifications validate. Strict change validation, formatting and version
+consistency pass.
+
+Windows x64 NSIS preview `Splitty_0.2.0-dev.2_x64-setup.exe` was built locally
+from implementation commit `73dc2d311de48dac646ad1709b8815dfd7a800d7`, without
+skipping the frontend or Windows unit-test gates. All 92 Windows tests pass.
+The clean staging checkout matches that commit; all four fresh backend archives
+match their SHA256 sidecars. The extracted x64 backend and Windows application/
+installer metadata report `0.2.0-dev.2`. The exact installer and checksum were
+copied to the host's Downloads folder, without installing or launching the app.
+Installer SHA256:
+`af265cd5944a24d7973d0f4a403c03a46ee22439d5839023680c31460812867a`.
+The earlier diagnostic-only build of this preview version was not distributed.
+No fresh Windows GUI runtime execution is claimed for this recovery feature.
+
+Hosted CI at the implementation commit exposed a stale smoke-instrumentation
+anchor (`tunnel::open` renamed to `open_with_update`) before macOS compilation.
+The shared GTK/WKWebView fixture now uses the current entry point; all nine
+portable preparation tests and WKWebView prepare-only pass. This follow-up
+changes test tooling and verification records only, so the installer above
+contains the final production code. The new hosted run is separate evidence;
+local validation does not claim that it has completed.
+
+---
+
+# Failed backend diagnostics (`0.2.0-dev.2`)
+
+Failed native preparation closes IO before returning its error. Diagnostic
+delivery now checks the original unrevoked document/attempt independently of
+that IO state and awaits evaluation before completing the invoke. Cancellation,
+navigation, destruction and shutdown still revoke reporting authority; ordinary
+IO remains closed. Evaluation retains its source, encoding and admission
+ownership until actual callback completion/drop, including after timeout.
+
+The regression executes a real provider failure and covers completion,
+cancellation, navigation and destruction. All 157 reported remote tests,
+98 GUI tests and 22 bootstrap JavaScript tests pass; workspace and GUI
+all-targets clippy pass with warnings denied. Independent review found no
+authority, delivery-ordering or accounting blocker. Version files consistently
+identify `0.2.0-dev.2`.
+
+Legacy keeper-backed daemon failures now explain using the newly installed
+binary for an explicit restart without ending sessions. This correction does
+not authorize automatic legacy migration or restart any deployed daemon.
+
+---
+
+# Preview version and daemon upgrade ordering
+
+The first native transport preview used `0.2.0-dev.1` throughout the workspace,
+Tauri/Electron configuration and generated lockfile. Its remote installation uses
+`remote/0.2.0-dev.1/`; subsequent distributed previews need distinct versions.
+The commit hash and branch name do not select a new installation version.
+
+Automatic daemon updates now use SemVer precedence, including numeric
+prerelease ordering and prerelease-to-stable upgrades. Build metadata alone
+does not trigger replacement; malformed versions never authorize it. Keeper,
+verifiable native-instance and exact replacement-payload requirements remain
+unchanged. In particular, the version bump does not automatically migrate a
+legacy `0.1.30` daemon.
+
+Local verification for this adjustment:
+
+- All 1,056 reported workspace tests and all 97 GUI library tests pass;
+  workspace and GUI all-targets clippy pass with warnings denied.
+- The supervisor's 11 tests include 24 connection-policy combinations and an
+  explicit refusal to stop or bridge an older daemon without native identity.
+- The existing installation test preserves a running `0.1.30` executable while
+  installing `0.2.0-dev.1` and removing an unused `0.2.0-dev.0` directory.
+- The built CLI reports `splitty 0.2.0-dev.1`; the release script's read-only
+  consistency check passes. Formatting, all 15 main specifications and strict
+  change validation pass.
+- The Electron build passes and packages 58 frontend assets.
+- Independent source review found no blocker in the policy or packaging.
+  Tauri's NSIS configuration preserves the full prerelease for display and
+  version comparison while normalizing numeric Windows metadata to `0.2.0.0`.
+  This was a source check, not a fresh Windows installer or GUI execution.
+
+No release tag is created for this preview adjustment. Earlier platform runtime
+evidence retains the revision and environment limits documented below.
+
+---
+
+# Post-review correction status
+
+Review corrections are implemented at `270e412`. The complete hosted
+[CI run 41846959834](https://github.com/npgrosser/splitty/actions/runs/41846959834)
+and [CodeQL run 41846960005](https://github.com/npgrosser/splitty/actions/runs/41846960005)
+pass for that exact implementation. This includes actual macOS WKWebView
+lifecycle/isolation/consumer execution, core Bash tests, native endpoint checks
+and real SSH crash/keeper migration. Tasks 10.1–10.9 are complete.
+
+The final local workspace suite reports 1,055 passing tests; workspace and GUI
+all-targets clippy and all 97 GUI tests pass. Runtime prerequisites/skip behavior
+of local OS-dependent tests remains unchanged; required hosted cases run explicitly.
+No fresh Windows GUI runtime execution was performed for these corrections.
+The existing Windows runtime evidence below belongs to its named earlier commits;
+pure guard/JS tests and Linux/macOS execution do not establish every WebView2 case.
+
+The remaining sections below this correction record retain the historical
+acceptance evidence for `8eda9b8` and its predecessors, not new execution claims.
+
+Correction validation:
+- Native transport: 53 unit tests pass, including buffered Reply/Text plus
+  EOF/Closed, hard revocation/malformed discard and matched-pong timing.
+- Owner cleanup: seven tests pass, including finish/drop escalation with retained
+  capacity until cleanup acknowledgement and a healthy owner after normal close.
+- Exposure: 13 targeted tests pass, including crash boundaries and immutable
+  birth replacement versus unknown/UID-only identity changes.
+- All 15 main specifications validate after upload-delta synchronization.
+- Bash/core session regressions: 28 tests pass, including actual first prompts
+  with nounset/POSIX, scalar/array/sparse prompt commands and startup options.
+- Gateway: 21 integration tests pass, including 64 concurrent calls over one
+  native carrier, monotonic IDs, cancellation cleanup and uncertain mutations.
+- Tauri: 97 library tests and 22 capsule JavaScript tests pass, including native
+  challenge identity/idempotence, bootstrap deadline and bounded live progress.
+- Frontend check reports zero errors (eight existing warnings); all 1,510 tests
+  in 82 suites pass. Frontend and Electron builds pass (58 packaged assets).
+- Pure Windows guard checks (23) and WKWebView harness preparation tests (nine)
+  pass; these are not fresh Windows/macOS GUI execution evidence.
+- Independent source review found no blocker in registry birth proof, native
+  orderly close, owner escalation or the revised native challenge. A late
+  preparation/provider-removal race found in review is corrected and tested.
+
+Review dispositions: unsupported Linux registry views remain unsupported for
+browser gateways; network isolation alone does not establish common authority.
+Unknown spawn/publication and cleanup overflow remain fail-closed. The compact
+EOF delivery remains accounted; request IDs consumed on Busy are intentional;
+negotiated frame minima already guard subtraction. No unrelated helper extraction
+or unconditional Electron dependency was introduced. Windows standalone fixture
+safeguards remain enabled; obsolete macOS baseline-comparison diagnostics were
+removed while the mandatory final core-test gate remains.
+
+---
+
+# Native transport verification status
+
+Implementation and all 58 planned tasks are complete. The PR remains subject to
+independent review; the checks below record their exact revisions and limits.
+
+## Implemented behavior
+
+| Entry | Transport | Session lifetime |
+| --- | --- | --- |
+| Local desktop | Owned in-process service or inherited child pipes | Ends with the app |
+| Independent local daemon | Private Unix socket | Independent of the app |
+| SSH host | SSH exec/stdio to the host's private socket | Survives client disconnect |
+| Explicit browser gateway | HTTP/WebSocket to the selected backend | Follows that backend |
+
+Desktop documents load packaged assets and receive an assigned backend through
+native authority tied to the window and document generation. Browser access
+requires an explicit gateway. Local desktop startup does not adopt a separately
+running daemon. Pending upload destination/cancellation work is a prerequisite
+and retains cancellation and generation semantics across the transport change.
+
+## Final integration acceptance
+
+The application-owned memory boundary is settled in NCT-8; framework ingress and
+total RSS are explicitly excluded without relaxing transport/output accounting or
+native authority. Independent security review accepted this boundary. Main specs
+are synchronized with the implementation (15 spec validations pass), including the
+fail-closed corrupt-discovery behavior. Architecture checks pass in both directions.
+
+Two separate corrections address the macOS core acceptance failures:
+
+- `50470d1` replaces the Apple-incompatible POSIX/ENV bootstrap with startup before
+  the first prompt or explicitly interactive command. It preserves login state,
+  profile selection, inherited startup variables and first-prompt hooks. History
+  file access is deferred until profile settings are applied, avoiding premature
+  truncation. Profile-preloaded history is retained without a second automatic
+  read; this documented integration boundary avoids emulating every Bash history
+  initialization detail. Independent Bash review found no remaining blocker.
+- `bff1069` separates process completion from reader EOF using a controlled reader
+  through the production output reader, and retains real-PTY final-byte/exit-status
+  coverage without requiring a Darwin background writer to outlive its session
+  leader. Production EOF behavior is unchanged.
+
+All 27 targeted session tests, core all-target clippy, formatting and diff checks
+pass locally. [CI run 41734365955](https://github.com/npgrosser/splitty/actions/runs/41734365955)
+at `8a55cd3` passes the complete macOS job: 398 core tests with the actual system
+Bash, 90 GUI tests, 12 real-child cleanup cases and all native boundary and
+WKWebView checks. Linux core also passes all 410 tests. The complete UI runs
+37 document generations with 305 empty TCP inventory samples; the separate
+isolation fixture replays 94,114 bytes with its marker, completes healthy file/API
+work during the stalled stream, refuses excess handles and recovers admission.
+Both end with zero application resources, exited owned terminals and app status 0.
+All 28 recorded source hashes in each fixture match the reviewed sources.
+Independent daemon/keeper discovery and the original shell remain usable.
+
+The Rust workspace job encountered one unchanged baseline test assertion that
+tried to rebind an already released ephemeral port. Its log cannot identify the
+competing occupant. Cleanup ownership was reviewed; the test now observes the
+actual owned listener's disposal instead of global port availability after release.
+A temporary fault injection that leaves that listener alive fails the new assertion.
+All 14 forwarding tests and targeted clippy pass. The correction is committed
+as `f76a7d3` and independently reviewed; the final local workspace clippy and
+all 1,045 reported workspace tests pass. Optional OS-dependent tests may skip
+locally when their prerequisites are unavailable; the explicit hosted native/SSH
+and Windows/WSL evidence remains the platform acceptance record. IPv6 conflict, Down state and saved-port immutability checks remain intact.
+Prior baseline reproductions below are historical evidence, not waived tests.
+
+## Earlier runs and investigations
+
+The following sections record results at their named revisions. References to
+then-open gates are historical; current acceptance is recorded above and below.
+
+- Linux CI workspace tests excluding the GUI: 1,024 reported passing; optional
+  OS tests can skip at runtime, so individual platform evidence is listed
+  separately below. Workspace clippy passed.
+  Subsequent shared-budget CAS changes passed their targeted tests. Rust 1.99
+  workspace and GUI all-target clippy also pass after constant-chunk lint fixes.
+  The dependency audit passes after updating yanked async-executor 1.14.0 to
+  1.14.1.
+- Frontend: 1,502 tests passed (also repeated from a fresh checkout with both frontend
+  and Electron adapter dependencies installed); check completed with zero errors and eight existing
+  warnings; production build passed. Electron build, packaged-asset execution and
+  real IPC smoke passed, including frozen-client quotas and final zero counters.
+- Final Linux GUI source checks: 89 library tests, all-target clippy, 19 private
+  bootstrap regressions and formatting pass. The remote admission tests include
+  coalesced request floods, cancellation and repeated document replacement.
+- Linux Tauri/WebKit: actual packaged full UI passed 37 document generations,
+  binary traffic, heartbeat, stale-proof denial, popout lifecycle and independent
+  daemon/keeper coexistence. Application resource counters reached zero; sampled
+  app/WebKit TCP inventories were empty. GUI runs use an isolated Xvfb display.
+- Native Windows MSVC tests and WebView2 setup-role checks passed. Actual WSL
+  fixtures passed binary PTY/API/file traffic, distribution switch, restart and
+  independent guest-worker preservation. Fixtures override configuration and
+  distribution discovery; they do not establish ordinary host inventory.
+  Fresh setup and remote-only runs using the reviewed kernel Job driver now pass:
+  fixed remote authority, actual Windows OpenSSH, binary PTY/API traffic, daemon
+  replacement/reconnect, reattachment to the same shell, rejected offline input
+  and shell survival after app exit. Both runs end naturally with zero remaining
+  Job members before cleanup and zero owned handles afterward. Listener checks
+  are sampled, not proof of continuous absence. A fresh guarded WSL run also
+  passes distribution A, production switch/restart to B, binary PTY traffic and
+  a byte-checked 1,048,833-byte file transfer. Both app instances exit naturally
+  with zero remaining Job members; their helper/PTY ends, while independent
+  guest sentinels preserve their start identities and answer fresh nonces. Both
+  temporary distributions are removed and owned handle counts return to zero.
+- Actual Windows WebView2 also passes the production full-UI mode: packaged
+  CSS/font/WASM, Ghostty canvas, native settings and three bounded popout
+  lifecycle checks. Direct popout commands are denied while parent-mediated
+  calls remain allowed in the shared trust domain. The existing binary PTY and
+  1,048,833-byte upload checks pass alongside the real UI. UI-error, backend
+  HTTP/WebSocket and clipboard-attempt observations are empty. Both app
+  instances exit naturally; their Jobs are empty before cleanup, owned handles
+  return to zero, independent guest sentinels answer fresh nonces, and both
+  temporary distributions are removed. The last popout closes at app exit;
+  this is not Windows parent-reload or sibling-remote isolation evidence.
+- Actual macOS [CI at `b88933f`](https://github.com/npgrosser/splitty/actions/runs/41717039859)
+  passes GUI all-target clippy and all 90 GUI library tests. All twelve real-child
+  native bridge failure/cancellation regressions pass, including the owner
+  cleanup and held-stderr deadline cases;
+  these exercise controlled carriers, not permanent system-SSH reconnect failure.
+  Private endpoint peer-user checks, native forwarding reservation, IPv4/IPv6
+  listener positive controls, owned-helper lifetime and explicit gateway
+  replacement also pass. Two core failures (Bash CLI PATH restoration and the
+  background-writer PTY fixture) reproduce on exact baseline `cc66e97`; they
+  remain failing checks and are recorded in the baseline findings. The earlier
+  managed-stop failure recurs intermittently: the new diagnostic identifies
+  `killpg` on the owned leader's group returning `EPERM`. That remains open;
+  no blanket permission-error suppression was added.
+- Actual macOS WKWebView now passes the full packaged UI through 37 document
+  generations: styles/fonts, Ghostty WASM/canvas, binary terminal data, settings,
+  direct popout denial, parent-mediated operations and native window cleanup.
+  All generations keep the same owned service instance. There are no observed
+  HTTP/WebSocket backend requests or TCP listeners (309 inventory samples).
+  Final application byte/stream/carrier/worker/handle/open counters are zero;
+  owned shells exit. A real separate daemon keeps unchanged discovery and
+  keeper sockets, and the same original shell accepts input after app exit.
+  Fixture fixes canonicalize the private home and restrict an inherited test
+  probe to the top packaged workspace; production authority checks remain
+  unchanged. These passing runtime checks do not waive the core failure gate.
+
+- Subsequent isolation-fixture preparation found a Windows navigation effect
+  mismatch: a rejected packaged HTTP-origin target could reach the system
+  opener. The shared fallback now blocks internal asset authorities before
+  external HTTP(S) handling, while preserving exact role entry permissions and
+  genuine external links. Six focused navigation tests and GUI library clippy
+  pass; independent source review found no authority expansion. The new
+  Windows isolation run will verify actual named-window behavior separately.
+
+These results describe the runs performed, not proof that every requirement is
+complete. Final source checks and platform results must be reconciled before
+marking the change ready.
+
+## CodeQL review
+
+The pull-request findings were checked against the actual data flow, with an
+independent security review. The WebSocket trace now uses a constant format
+string; keeper-stop diagnostics omit the session identifier. The Electron IPC
+smoke encodes script values as JSON literals with escaped HTML delimiters and
+Unicode line separators. Its real renderer checks a hostile literal roundtrip;
+the full IPC smoke still passes binary traffic, frozen-client isolation and zero
+final resource counters. Eleven focused socket tests and the server check pass.
+
+The subsequent CI run at `312cb04` passes Rust, Linux Tauri, frontend,
+Electron, aarch64 and dependency checks. All four CodeQL analyses pass and the
+PR comparison reports no new alerts. The pre-existing shell-profile allocation
+alert remains separate; the comparison result is not a claim that the entire
+repository has no findings. macOS again passes the actual WKWebView and native
+network/lifetime checks, while its mandatory core gate still fails on the two
+reproduced baseline cases.
+
+The later run at `4eb7e72` passes frontend, Electron, Linux Tauri, aarch64,
+dependency and CodeQL checks. Its Rust lifecycle suite fails
+`rust_embedded_owner_shares_runtime_across_reload_and_reaps_its_jobs`: the
+managed job PID remained visible after owner shutdown. The cause is a 500 ms
+helper termination grace racing its own 500 ms PTY cleanup grace. Owner helpers
+now use a shared shutdown deadline selected from trusted policy before
+negotiation; stderr draining consumes that same deadline. Ordinary SSH relay
+policy is unchanged. The new real-child regression fails before the fix and
+passes afterward; a held-stderr case, the five owner tests, all twelve bridge
+tests and the actual helper/job-reaping smoke pass. Targeted all-target clippy
+and independent source review pass. Process/worker ownership is retained until
+actual exit; these timing tests do not establish a hard deadline under OS
+failure. The complete Rust CI job passes at `5d25bf9` in
+[run 41709472218](https://github.com/npgrosser/splitty/actions/runs/41709472218),
+alongside frontend, Electron, Linux Tauri, aarch64 and dependency checks. Its
+CodeQL analyses also pass. macOS passes all 90 GUI tests, all twelve bridge
+regressions and its native endpoint/lifetime/gateway and packaged UI checks.
+Its core gate still fails the same two baseline cases, both reproduced against
+the merge base in this run; those failures remain open.
+
+The Windows isolation fixture subsequently exposed a fatal native-endpoint
+`EAGAIN` during remote preparation. A targeted smoke now reproduces the same
+classification gap by holding the real private instance lock before discovery
+publication. Native daemon start reports temporary contention with exit 75,
+and remote handshake preserves the existing typed discovery-refresh result.
+The client retains its existing bounded refresh policy; corrupt discovery
+still fails permanently and no lock or live endpoint is replaced. The extended
+lifecycle smoke passes and independent source review passes. This establishes
+the classification fix, not the identity of the lock holder in the original
+Windows run or completion of the outstanding Windows isolation check.
+
+Three findings do not indicate a vulnerability in their reported contexts:
+
+- `rust/hard-coded-cryptographic-value` in `client_ipc/bootstrap.rs` is a
+  deterministic JSON-escaping fixture under `#[cfg(test)]`. It is not used by a
+  running app. Production document nonces use `crypto.getRandomValues`;
+  native bootstrap/challenge/proof values use `rand::random`.
+- The same query at `tauri::generate_handler!` identifies generated `"nonce"`
+  argument lookup keys. Tauri's `CommandArg::from_command` deserializes the
+  actual value from the invocation payload; the static key is not a nonce.
+- `rust/path-injection` in `service/operations.rs::post_editor_open` identifies
+  an intentionally owner-selected absolute host path. The operation checks the
+  live session and path syntax, obtains metadata, and sends a confirmation
+  request to a registered attached client. It does not read file contents or
+  launch an editor. Browser authentication, private owner-socket access and
+  native assigned-backend authority apply before dispatch; restricted agent
+  sockets do not expose this operation. The client still requires a deliberate
+  local confirmation and derives the host from its connection. Confining this
+  operation to a repository root would remove its specified behavior.
+
+These dispositions apply to the specific findings, not to all uses of nonces or
+filesystem paths. They do not waive the remaining resource or platform gates.
+
+## Migration evidence
+
+| Case | Evidence | Limit |
+| --- | --- | --- |
+| Compatible native daemon | Private endpoint/negotiation tests and actual daemon client smoke | Remaining desktop platform cells are tracked separately. |
+| Older kept daemon update | `the_hub_updates_a_host_daemon_of_another_version` passed through actual isolated OpenSSH and real daemon replacement, preserving keeper socket identity and the original shell PID/private state through fresh nonce-bearing output | The old version/protocol is simulated in discovery metadata; this is not execution of a historical release binary. |
+| Incompatible non-kept/newer daemon | Supervisor and HTTP policy tests plus the extended real-SSH `the_hub_updates_a_host_daemon_of_another_version`: explicit updates refuse both cases without replacing discovery, daemon PID or keeper sockets; fresh native input/output proves the original shell remains usable | Version/protocol differences are simulated in valid discovery metadata; remaining desktop platform checks stay open. |
+| Supported client downgrade | The real-SSH test reuses a compatible newer-version daemon and proves original shell state; the historical rollback smoke runs current → actual `cc66e97` server → current and proves the same shell PID, private variable, session ID and keeper inode | Version-policy simulation and actual previous-implementation rollback are distinct checks; the historical artifact is locally built from the pinned revision, not a downloaded release package. |
+| Stale/corrupt/legacy discovery | Daemon lifecycle `native_discovery_loss_corruption_and_concurrent_start_cannot_replace_a_live_daemon` and `a_live_legacy_record_is_diagnostic_and_never_selects_its_tcp_port` | Legacy ownership uncertainty refuses implicit replacement. |
+| Explicit restart and keeper adoption | `a_shell_outlives_stop_restart_update_and_crash_of_its_daemon`, explicit daemon gateway replacement and the pinned historical rollback smoke | Keepers are real processes; the historical check covers the exact prior implementation listed below. |
+| Local app with independent daemon | Actual Linux Tauri/Electron and macOS WKWebView coexistence smokes; owned-child pipe lifecycle smoke | The complete Windows matrix remains a separate gate. |
+
+The Linux historical rollback smoke uses an artifact built from exact revision
+`cc66e97024f1013cc2abad1727ba9378db2200af`, with SHA256
+`3af8b58d33d3408c9b89a32ffac97d51f1fe6838a2e6e5a64be0564c8ebb82b5`.
+Source archive, lockfile, compiler and binary provenance were recorded separately.
+The strict run passes in a private Bubblewrap PID/user/network namespace with
+read-only executable mounts and private temporary storage. It fixes the fixture
+shell to `/bin/sh` and checks the actual executable; inherited interactive-shell
+startup is not part of this lifecycle test. All captured process generations
+exit and no keeper sockets remain. The old implementation's explicit ephemeral
+browser listener stays inside the private network namespace; current native
+clients never fall back to it. This verifies an ordinary supervised run, not
+supervisor death during Bubblewrap's early pre-exec setup.
+
+The catalog/role audit found no remaining native HTTP/token fallback. All 53
+operations (31 backend and 22 local hub) and 12 adapter-only routes have checked
+classifications. Remaining TCP binds and browser credentials belong to explicit
+browser gateways or requested development forwards; native commands retain
+assigned-window/document checks. Static classification and native/browser
+conformance tests cover enumerated operations,
+credential-route refusal and assigned-host restrictions. The expanded framed
+Remote-role test rejects all 22 LocalHub operations with 403, verifies nine
+management-state views after each refusal and observes zero connector calls.
+Allowed backend reads, a real template mutation and missing-object errors
+match browser results on that same Remote stream; all 15 conformance cases
+pass. This does not close unchecked platform conformance cells.
+
+Retained SSH diagnostics now keep source-byte charges through missing-command,
+old-CLI, installation-status, invalid-probe and unsupported-kernel conversions.
+Drop/exhaustion tests pass with 149 remote unit tests and 11 hub failure tests;
+remote/server all-target clippy passes. Fixed-size setup metadata is separately
+bounded by length and setup admission; the transport ledger is not a total
+process RSS or trusted deployment-archive bound.
+
+## Windows isolation and consumer-pressure fixture
+
+The hosted isolation/consumer run at `6b08775` passes
+[run 41720162085](https://github.com/npgrosser/splitty/actions/runs/41720162085).
+Setup/Main and two Remote windows pass opener/named-window/storage isolation,
+foreign target/handle denial, independent slow-client closure, healthy API/file
+completion on the unchanged connection, and 32-handle saturation/refusal/
+replacement/recovery. Original write → open → attach ordering is retained:
+write/open at 1793740944716 ms precede attach at 1793740944723 ms; the attached
+stream delivers 94,084 bytes including the actual post-close marker. Diagnostic
+awaits follow attach. Binary PTY and both file SHA checks pass.
+
+The strict listener gate passes with no listener/unknown-state rows and no
+provider error. Bounded known non-listening observations are retained separately.
+The app exits naturally with code 0; local helpers/PTYs exit, the remote daemon
+survives until fixture teardown, independent sentinels preserve identity and
+answer fresh nonces, both app distributions are removed, and owned handles reach
+zero. The outer control distribution is also removed and the original WSL
+configuration absence is restored. This scenario uses forwarding enabled for
+its explicit SSH listener; disabled-forwarding evidence is separate below.
+
+Earlier local `a52fde175fc7` remains an overall failure on unclassified listener
+rows, despite passing its functional workload. Local native-API state 0 / CIM
+null controls and the earlier `c92108c1f378` replay-marker failure remain
+unexplained. The hosted result establishes the original-order case on a valid
+measurement environment; it does not identify those earlier failure causes.
+Copied-handle denial is a capsule check; stale Setup-proof denial is a broker
+diagnostic. The slow client withholds receipts rather than freezing an engine;
+global/worker ceilings are observed but not independently saturated.
+[Fixture instructions and evidence limits](../../../scripts/testing/tauri-windows-native-smoke/README.md)
+retain these distinctions.
+
+## Native Windows app with localhost forwarding disabled
+
+The separate diagnostic branch at `dfe1996`, including production revision
+`6464f3b`, passes GitHub [run 41712473304](https://github.com/npgrosser/splitty/actions/runs/41712473304).
+Linux builds the production assets, backend and private rootfs from the same
+revision; the Windows runner verifies their digests and lockfile provenance.
+The existing full-UI fixture runs under NAT with `localhostForwarding=false`.
+Matching guest/Windows nonce responses first prove forwarding works when
+enabled. Guest-positive/Windows-blocked controls then enclose the actual app
+run, while configuration bytes remain unchanged.
+
+The actual WebView2 app loads production CSS, font and WASM, renders the Ghostty
+canvas, persists settings and passes the bounded shared-popout checks. Binary
+PTY traffic and a 1,048,833-byte transfer pass; its independently checked SHA256
+is `2863365348a5ef27b6035a51ff1783a1303e28f78045001face85bee49b8caae`.
+Duplicate start retains the first owner; distribution switching performs a real
+app restart. Both app instances exit naturally, owned helpers/PTYs exit, sampled
+app and guest listener inventories are empty, independent fixture workers
+survive, and owned handles return to zero. Both app distributions and the
+control distribution are removed; configuration restoration and cleanup pass.
+
+This establishes the disabled-forwarding application case of task 7.6. It does
+not establish sibling-remote isolation, the remaining consumer-pressure cases,
+whole-framework memory bounds or continuous TCP-listener absence. The separate
+local SSH listener observation remains unresolved and is not waived by this run.
+
+## Hosted Windows TCP measurement control
+
+The isolated diagnostic at `58ed0ce` passes GitHub
+[run 41717658574](https://github.com/npgrosser/splitty/actions/runs/41717658574)
+on a fresh Windows 2025 runner. It creates only its own IPv4/IPv6 loopback
+listeners and connected peers. `GetExtendedTcpTable`, raw CIM properties and
+`Get-NetTCPConnection` agree: listener state 2 and established state 5, with
+matching endpoints. Independent decoder controls pass and every owned socket
+is closed. The retained helper matches the earlier local candidate exactly
+after checkout CRLF normalization.
+
+This validates the decoder on the hosted runner. It does not explain or waive
+the local native-API state 0 / CIM null listener control or classify the earlier
+SSH observations. The later application run above supplies its own successful
+strict inventory; the self-socket control alone is not an application pass.
+
+## Unix window isolation and receipt-pressure diagnosis
+
+The new actual GTK/WKWebView fixture uses the production window builder,
+bootstrap, permissions and transport with two fixed embedded Remote backends.
+It does not claim SSH deployment coverage. GTK required distinct private
+context keys so each incognito Remote WebView registers the packaged protocol;
+the production fix preserves private contexts and eliminates the blank-window
+failure. Main and both Remote windows subsequently pass opener/named-reference,
+storage, target and local-action isolation checks. The fixture now creates its
+SessionClient before adopting the channel so the real welcome capabilities
+cannot be missed.
+
+The remaining Linux replay failure was reproduced with temporary bounded
+first-close diagnostics at source revision `e443ea3`. Both the deliberately
+stalled channel and a consuming replay channel exhausted the 64-slot ordinary
+control queue. The replay context held approximately 343 KiB, far below its
+byte limit; subsequent “invalid queue transfer” errors were consequences of
+that closure. Each consumed data frame had enqueued a serialized receipt into
+the same queue as ping/cancel, although the admitted data window allows 1024
+frames. A separate instrumented run passed, confirming that a single pass is
+insufficient to establish a fix. These diagnostics were removed after capture.
+The fix stores compact charged receipts in a separate bounded queue and
+serializes only the writer's current receipt under the existing control budget.
+A deterministic regression using actual frames and a blocked writer fails
+before the change and passes afterward. All 51 transport unit, one protocol
+integration and four allocation tests pass, as does all-target clippy. The
+regressions verify 1024 consumed frames, exact original-credit release,
+ping/cancel priority, overflow closure and normal cancellation with zero
+retained bytes. Independent source review covers the final allocation ordering.
+
+The uninstrumented actual Linux run with the fix passes: Main/two-Remote
+isolation, concurrent healthy API/file work, 94,084 replay bytes including the
+post-close marker, 32-stream window saturation/refusal/replacement/recovery,
+one reload and natural app exit. All final bytes, carriers, streams, workers,
+handles and opening counters are zero; observed shell and terminal processes
+exit. The 92 sampled TCP inventories contain no listeners. The healthy work
+starts during the stalled channel's lifetime and completes just after its
+closure; no stronger overlapping-completion claim is made. This fixture uses
+packaged minimal test content and receipt starvation, not the full UI or an
+OS-suspended JavaScript engine.
+
+The integrated macOS run at `cb51fa7` passes both actual WKWebView fixtures
+([CI run 41727093381](https://github.com/npgrosser/splitty/actions/runs/41727093381)).
+The production full UI completes 37 document generations. The separate
+Main/two-Remote isolation/consumer run replays 94,112 bytes including the
+post-close marker; 258 healthy API replies and the verified file transfer
+complete while the slow consumer is still stalled. Window saturation,
+refusal/replacement/recovery and final resource counters pass. Both apps exit
+naturally with all observed shell/terminal processes gone; 324 full-UI and 151
+isolation-run TCP samples contain no listeners. The recorded transport source
+hashes match `cb51fa7`. Cookie-positive and whole-engine/RSS claims remain
+excluded, as in the other minimal isolation fixtures.
+
+The same run passes 90 GUI tests, 12 real-child carrier cleanup cases,
+private-endpoint peer-user checks and native exposure/gateway positive controls.
+All non-macOS CI jobs and CodeQL pass. The macOS core suite still reports 389
+passed and two failed; both failures reproduce on exact baseline `cc66e97`.
+The explicit final gate correctly keeps the overall CI result red. The core
+step's continue-on-error status must not be interpreted as a passing core suite.
+No new functional platform failure is waived by the passing WebView evidence.
+
+Task 7.6 is complete on the combined platform evidence, not on any single
+smoke result. Packaged assets and binary traffic use the full-UI runs; the
+separate minimal fixtures establish remote/setup authority, consumer isolation
+and admission recovery. Disabled forwarding and distribution switching apply
+to Windows/WSL and use its dedicated hosted runs. App exit, real owned-child
+failure/cancellation and surviving independent daemons use the lifecycle
+fixtures described above. “Frozen client” means withheld output consumption;
+no operating-system engine suspension or total-RSS bound is claimed. The
+framework allocation limitation remains explicit, and the core-suite gate is not waived.
+
+The documentation revision `8521d6b` has the same transport source hashes.
+Its [CI run 41730093388](https://github.com/npgrosser/splitty/actions/runs/41730093388)
+again passes every non-macOS job, both WKWebView fixtures and native boundary
+checks; only the same two core baseline tests fail. The isolation run replays
+94,114 bytes with its marker and zero final resources. CodeQL passes all four
+languages. CI executes the required formatting, workspace/GUI clippy and tests,
+frontend check/test/build, Electron build and architecture checks. The separate
+`openspec validate --specs` command passes all 14 specifications. Final cutover
+and task 9.6 remain open pending the macOS corrections and final integration;
+this records the checked revision rather than waiving those gates.
+
+## Quantitative memory contract
+
+NCT-8 now explicitly covers application-owned transport data throughout the
+path: reassembly, queues, conversions, retained diagnostics and native IPC
+source/encoding reservations through platform completion or disposal. All
+existing numeric caps, native authority checks and cleanup ownership remain.
+Wry-owned inbound invoke bodies allocated before the handler, generic framework
+replies, unrelated engine storage and total process/renderer RSS are excluded.
+No framework fork is part of this change.
+
+Independent boundary review found no concrete foreign-page or SSH-peer route
+to local authority requiring a Wry fork. A compromised packaged renderer can
+nevertheless exhaust framework storage before application validation. Remote
+windows therefore isolate authority but do not promise availability isolation
+from every other window sharing the desktop process. This limitation is now
+normative in the synchronized client-connections specification and explicit in the security and
+architecture documentation, rather than an unfulfilled quantitative claim.
+
+## Completed acceptance gates
+
+- Linux/macOS/Windows WebView isolation and consumer fixtures pass, including
+  the integrated receipt fix on Linux and macOS. Actual macOS core acceptance
+  and the final workspace rerun after the forwarding-test correction pass.
+- The strict native Linux reservation test passed with an actual surviving
+  worker after coordinator SIGKILL, IPv4/IPv6 gateway exclusion and reuse only
+  after observed worker exit. The real SSH/hostile-peer crash variant and
+  native macOS positive controls and the hosted Windows app/SSH inventory now
+  pass. Task 5.9 is complete on this combined evidence; actual window-isolation
+  and consumer evidence is recorded separately under task 7.6.
+- Final integration and documentation review close tasks 9.5 and 9.6. Formatting,
+  workspace clippy/tests and all 15 main-spec validations pass locally. The passing
+  GUI/frontend/Electron jobs in run 41734365955 cover unchanged application
+  sources; CodeQL run 41734365900 also passes. The branch CI repeats these checks
+  after the test-only correction. No failing acceptance test is waived.
+
+## Windows harness cleanup incident
+
+The process inventory followed historical parent PIDs without validating the
+parent generation and lifetime. PID reuse caused unrelated Firefox processes
+to be classified as fixture descendants, and cleanup attempted to terminate
+them. All 28 recorded Firefox/crash-helper PIDs were subsequently absent.
+Individual termination results were not captured, so direct termination cannot
+be distinguished from descendants exiting with their parent.
+
+Prior Windows process-tree cleanup inventories are not evidence of safe
+isolation. The first replacement candidate was rejected: even birth-time checks
+cannot prove parent ownership from a mixed-time process enumeration. It was
+removed before use.
+
+The reviewed replacement creates private kernel Jobs, launches each fixture root
+suspended, assigns its exact handle before resuming, and disables breakaway.
+Cleanup uses only retained Job handles or the exact newly created suspended
+process handle on assignment failure. No PID-only or recursive `taskkill /T`
+cleanup remains. Fresh console tests cover descendants, unrelated fixture
+preservation, breakaway refusal, assignment failure and zero retained handles.
+Fresh setup, remote-only and guarded WSL switch GUI runs then passed with
+natural app exit before cleanup. Old TEMP driver copies must not be
+executed. Socket inventories remain sampled observations.
+
+The earlier Windows SSH PTY assertion failure was a fixture omission: it did not
+reattach its SessionClient after reconnect. Adding the same explicit attach used
+by the client restored the assertion for the original shell, without a product
+behavior change or weaker assertion.
+
+## Fixture target and cleanup hardening
+
+A subsequent Windows sentinel preflight exposed unconditional quoting of WSL
+flags: WSL attempted the literal `-d` command in the default distribution and
+failed before the intended script ran. This invalidates that preflight; it is
+not a successful guest lifecycle check. Conditional Windows argument quoting
+and first-action exact `WSL_DISTRO_NAME` checks now guard every guest command,
+including the copied app's deployment and backend launch paths. Independent
+source review and eight pure guard regressions pass. A fresh single-distribution sentinel then passed actual WSL argument parsing
+and exact guest identity/nonce checks. Its retained Job was intentionally
+stopped, with no remaining members or handles, and its sole temporary
+distribution was removed. The independently cleared full WSL rerun also passes, including the production
+switch/restart path and independent guest preservation. The earlier interrupted
+build attempt never reached GUI execution and is not counted as a runtime pass.
+
+The Linux SSH fixture now pins its private network namespace and resolves each
+cleanup candidate to a pidfd before checking namespace membership. Signals use
+that same process handle, never a numeric PID fallback. Its regression passes:
+an unrelated owned process survives, while a detached fixture process exits
+even after the original namespace holder is gone. Independent source review
+found no stale-PID signaling path.
+
+
+## Group-writable parent compatibility (preview 0.2.0-dev.3)
+
+Owned `0775` data/config ancestors now remain unchanged. Native endpoint operations,
+instance locking and daemon discovery/log access pin the owned private directory
+with a no-follow descriptor walk. The final directory remains `0700`; socket,
+lock and log checks retain their owner/type/mode requirements. Publication and
+cleanup use descriptor-relative operations, and conditional discovery cleanup
+checks both the expected record and its opened inode before unlinking.
+
+Independent Claude design and patch reviews informed this correction. Accepted
+findings include raw-byte basename validation (reject trailing slash/dot spellings),
+Linux proc-FD alias preflight, and conditional cleanup through one retained
+directory. The reviewed listener-proof approach was replaced with the simpler
+recommended design: inherit only the verified instance lock and let the child bind
+its own socket before the existing readiness exchange. This removes listener
+address ambiguity and startup reads from queued application clients altogether.
+The macOS implementation uses a dedicated thread's `pthread_fchdir_np`; it never
+changes the process cwd. The arm64 macOS cross-link succeeded; native macOS runtime
+execution is checked by CI, not claimed from a Linux cross-build.
+
+The review also discussed wider filesystem policies. Exact private-directory
+modes and symlink refusal are retained. The prior run-directory validator did
+not repair loose modes, but the main-branch config-directory writers did repair
+an owned 0755 directory. Final review identified that separate config regression;
+the follow-up restores explicit descriptor-based config repair before authorized
+daemon startup/discovery while leaving endpoint opens strict.
+No NSS/private-group exception or shared-parent chmod is introduced. Single-instance
+locking protects the pinned directory, not a maliciously replaced filesystem
+namespace. A party allowed to rename ancestors can disrupt discovery/availability;
+this correction does not claim to sandbox that party from all account files or
+audit platform ACLs. Existing keeper/control paths and installed-code trust remain
+unchanged.
+
+Targeted regression evidence: descriptor-relative file publication/cleanup and
+native bind/connect/lock tests, a real daemon start/status/stop under `0775` parents,
+and the real installer scripts for both empty homes and pre-existing `0775`
+parents. The strict pinned `cc66e97` historical rollback/migration smoke ran with
+`0775` config/data parents, retaining both original and historical keeper executables,
+shell PIDs, unexported shell state, session IDs and keeper inodes. Parent permissions
+remained unchanged and an unrelated owned process survived. Deployed hosts were
+not mutation fixtures.
+
+Two earlier CI fixture failures are corrected separately from runtime policy:
+confirmed non-kept legacy migration now expects `migration_unavailable`, and the
+macOS reservation fixture retries transient unavailable process observations
+within its existing deadline instead of interpreting them as exit or failing at
+the first inconclusive query. Production exposure reservations remain fail-closed.
+
+Local integrated checks for this correction: workspace clippy and 1,075 Rust
+tests passed; GUI clippy and 101 GUI tests passed; all 15 specs and 8 architecture
+files validated. The OS peer-user smoke now runs below a `0775` parent, and the
+macOS CI gate includes the full start/status/stop lifecycle with group-writable
+config/data parents. Windows packaging and native macOS CI results are recorded
+separately when their artifacts finish.
+
+
+### Delivered preview and hosted follow-up
+
+The Windows x64 installer `Splitty_0.2.0-dev.3_x64-setup.exe` was built from
+`1730dd55af15ae3a1b41947517a8ba04980aa441` with all 92 Windows unit tests and fresh
+frontend check/build gates. All four packaged payload checksums, backend version,
+Windows product metadata and artifact timestamps were verified. The installer
+and checksum sidecar were copied to Downloads; no installation or GUI launch was
+performed. Installer SHA256:
+`6d463f96f78ef3b416366f7a27e14cfa985aca05021b7cf4c71a5aeee7dda09a`.
+
+The exact packaged Linux x64 payload (SHA256
+`670a08b0834d91aa88ee059d53aca6c0790ecd908224da3c41b382513a8f2079`)
+was installed using the production installer script in isolated PID/network
+namespaces. Both an empty home and pre-existing `0775` `.local`, `.local/share`
+and `.config` passed install, daemon startup, native handshake and clean exit;
+existing parent modes stayed `0775`. The advertised backend was `0.2.0-dev.3`.
+
+Hosted CI run `41892409194` passed the full macOS runtime job, including the new
+private-directory/native-peer/lifecycle cases and WKWebView smoke, as well as
+frontend, Electron, static aarch64 and dependency checks. The Linux GUI job timed
+out downloading WebKitGTK from its Ubuntu mirror before compilation. The strict
+real-SSH update fixture exposed an interaction with its synthetic version record:
+shutdown now intentionally refuses to delete a changed publication. The fixture
+restores its exact original record only at the matching conditional-stop SSH
+boundary, after version-policy selection, and asserts that this boundary was
+crossed. It never restores over an unexpected record or different instance.
+The strict real-SSH test and its clippy target then passed locally. This follow-up
+changes tests and verification records only; the delivered production binaries
+remain exactly those of `1730dd5`. Hosted CI reruns on that follow-up.
+
+## Final config/upload corrections and connection diagrams
+
+Authorized daemon start, restart and ensure now prepare an existing owned
+config directory before strict discovery. Only a final directory without
+group/world write permission may be tightened to `0700`, through its retained
+descriptor and followed by identity verification. Ordinary endpoint opens and
+read-only discovery remain strict. Unit and lifecycle cases cover an existing
+`0755` config directory under unchanged `0775` ancestors, idempotence, preserved
+contents, path replacement, symlink refusal and unchanged unsafe final modes.
+
+Install uploads now allow eight minutes overall, with a sixty-second write-idle
+limit. Successful stdin writes are the only idle-progress signal. Command
+completion retains its two-minute limit after stdin finishes; no-input setup
+keeps that same two-minute limit. Host terminal preparation wrappers share a
+fixed ten-minute ceiling, while native framing/service handshakes keep five
+seconds. Electron host opens and the sandboxed preload guard use matching
+ceilings; local preparation remains shorter. Paused-time tests cover uploads
+beyond two minutes, byte preservation, stalls despite output, the hard upload
+limit and completion stalls. The real owned-worker cancellation test now blocks
+on a large stdin upload and verifies observed process exit and restored capacity.
+
+The focused Claude review found no blocker in these corrections. This was a
+read-only review, not another review of the entire PR or an independent test
+run. Remaining deadline limits are explicit: the outer preparation clock includes
+probing and can expire before all inner allowances are consumed; upload idle
+time includes a blocked SSH channel setup. Forward/reverse operation deadlines
+remain separate. A reverse-share installation on a very slow or unprepared host
+can outlast the API's three-minute wait, yielding an uncertain result while the
+mutation continues; callers must inspect current state rather than replay it.
+The extra preload guard can also expire first if helper startup consumes its
+slack, through the existing cancellation path. No mutation replay or exposure
+registry policy was relaxed.
+
+Integrated testing corrected two test assumptions. The inherited-lock test
+now waits within a fixed deadline for final descriptor release, retrying only
+`WouldBlock`; assertions of exclusivity while handles are held remain immediate.
+A parallel PTY fork can briefly inherit close-on-exec descriptors before exec,
+which is consistent with the observed late release; the specific inheriting
+process was not captured. The real-SSH reconnect test now captures the supervised
+bridge before an API request opens its separate persistent carrier. It kills
+that exact bridge and verifies reconnect, session-cookie reuse, daemon replacement
+and final descendant cleanup. This test also becomes a required SSH-lab CI step
+so an unavailable fixture cannot silently skip it. Production lock and carrier
+lifetime rules are unchanged.
+
+`docs/networking.md` provides three Mermaid runtime diagrams: the desktop/host
+overview, explicit browser backend selection and the SSH setup-to-disconnect
+sequence. They distinguish listeners, authentication boundaries and session
+lifetime. The new LikeC4 `connections` view maps the implementing modules, with
+links between the two representations. All three Mermaid diagrams were rendered
+and visually inspected, as was the LikeC4 view. PNG/SVG exports were produced
+outside the repository; the Markdown remains the editable source. Registry
+documentation explicitly distinguishes native endpoint support for owned
+`0775` ancestors from the stricter shared forwarding-registry requirements.
+
+The prior `b65ac4e` head passed all seven hosted CI jobs and CodeQL (runs
+`41896088532` and `41896088500`). Those results predate these corrections.
+The Windows installer remains the `1730dd5` artifact described above; this
+correction does not produce a new installer or claim fresh Windows/macOS GUI
+runtime execution.
+
+Final local checks for this correction: formatting and workspace clippy pass;
+the workspace run reports 1,083 passing Rust tests, including the architecture
+dependency check. The isolated SSH lab was supplied for that run; reconnect and
+daemon-version migration also passed with the lab required rather than skippable. Platform-specific
+runtime guards keep their normal limits on WSL; native exposure and macOS checks
+remain hosted CI gates. Frontend check reports zero errors and eight existing
+warnings; all 82 suites / 1,520 tests pass, as do frontend and Electron builds.
+All 15 specs, the change and eight LikeC4 source files validate. A Windows MSVC
+cross-check of `splitty-remote --tests` passes with two existing test-only dead-code
+warnings; this establishes compilation, not Windows runtime execution.
+
+### Hosted full-UI observer correction
+
+On `c9840b3`, all six other CI jobs and all CodeQL analyses passed. The macOS
+job passed its unit/native boundary checks but failed the full-UI WKWebView
+report: it counted 38 bootstrap sequences/proofs for 37 main-window documents.
+The additional sequence belongs to the deliberately opened popout; the main
+document IDs skip that separately allocated document. All 36 reloads, terminal
+output, stable quotas, zero final resources, shell exit and independent-daemon
+coexistence succeeded, but the exact sequence/proof-count predicates failed.
+
+The generated observer now scopes events and proofs to the `main` window in
+every mode, using the same filtering previously limited to isolation-consumer
+mode. Both GTK and WKWebView use the shared instrumentation. Exact counts,
+stale-proof authorization assertions and the separate popout lifecycle checks
+remain unchanged. Production sources and runtime policy are untouched. The
+portable preparation regression now generates both full-UI and isolation modes
+for both platforms; it failed for both full-UI variants before the correction
+and all nine tests pass afterward. Fresh actual WKWebView execution remains the
+hosted acceptance gate for this test-only correction.
+
+### Darwin process-group stop race
+
+On `5237f46`, both actual WKWebView modes passed: the full UI completed all
+36 reloads with exact main-window bootstrap counts, rejected stale proofs and
+zero final resources, and the separate isolation/consumer mode passed. All six
+other CI jobs and CodeQL also passed. The final macOS core gate still failed on
+the previously recorded intermittent managed-input stop error (`killpg` returning
+`EPERM` after signalling the owned leader), so that head was not merge-ready.
+
+Apple's [group-signalling implementation](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/kern_sig.c)
+excludes zombies and can report `EPERM` when no signalable member remains.
+The macOS-only correction recognizes just a proved sole exited leader: the
+existing `waitid(WNOWAIT)` must confirm that owned child's exit, and a complete
+group listing must contain exactly its retained PID. A fixed two-PID buffer
+distinguishes that result from additional or truncated members. The
+[kernel enumeration](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/kern/proc_info.c)
+includes live and zombie members without UID filtering; the
+[libproc wrapper](https://github.com/apple-oss-distributions/xnu/blob/main/libsyscall/wrappers/libproc/libproc.c)
+returns a PID count. The leader is not reaped until the existing lifecycle
+finishes. Any additional member, failed/empty/full listing, unconfirmed exit or
+other signal error preserves the error. This deliberately does not classify
+groups containing additional zombies as empty.
+
+A deterministic Darwin regression retains an actual exited child, refuses the
+exception while it is alive or has another live group member, checks the real
+group syscall plus explicit `EPERM` classification, and preserves other errors
+and the exact exit result. Fixture waits are bounded and both children retain
+cleanup guards. The backpressure case now explicitly execs its sleeping process
+so it tests input pressure without incidental shell-child topology. Independent
+source review found no blocking issue. Linux lifecycle/backpressure tests pass,
+followed by all 1,083 reported workspace tests with the real SSH lab supplied,
+formatting and workspace clippy. The macOS core test target passes cross-check
+and all-target clippy. Actual Darwin execution is required from the hosted macOS
+job before calling this resolved.

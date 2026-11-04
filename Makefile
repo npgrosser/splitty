@@ -44,9 +44,9 @@ dev:
 	cargo watch -i frontend/ -i frontend-electron/ -x 'run -p splitty-server -- serve'
 
 dev-tauri: frontend/node_modules
-	@cd frontend && node_modules/.bin/vite --port 1420 --strictPort & VITE_PID=$$!; \
-	trap "kill $$VITE_PID 2>/dev/null; wait $$VITE_PID 2>/dev/null" EXIT INT TERM; \
-	sleep 1; \
+	cd frontend && pnpm build
+	@(cd frontend && exec node_modules/.bin/vite build --watch) & FRONTEND_WATCH_PID=$$!; \
+	trap "kill $$FRONTEND_WATCH_PID 2>/dev/null; wait $$FRONTEND_WATCH_PID 2>/dev/null" EXIT INT TERM; \
 	cd crates/splitty-tauri && cargo tauri dev
 
 # --- Test ---

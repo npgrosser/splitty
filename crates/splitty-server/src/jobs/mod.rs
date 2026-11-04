@@ -19,7 +19,7 @@ use std::sync::{
 };
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::{
-    broadcast, watch, Mutex as AsyncMutex, OwnedMutexGuard, OwnedRwLockReadGuard, RwLock, Semaphore,
+    watch, Mutex as AsyncMutex, OwnedMutexGuard, OwnedRwLockReadGuard, RwLock, Semaphore,
 };
 
 pub const CAPABILITY: &str = "managed-jobs-v1";
@@ -174,7 +174,7 @@ pub struct Jobs {
     runner: Arc<EffectRunner>,
     env: EnvContext,
     registry: Mutex<Registry>,
-    events: broadcast::Sender<String>,
+    events: splitty_core::protocol::notify::NotificationBus,
     readers: Arc<Semaphore>,
     closing: AtomicBool,
     validation: Arc<Semaphore>,
@@ -206,7 +206,7 @@ impl Jobs {
         backend: Arc<dyn Backend>,
         runner: Arc<EffectRunner>,
         env: EnvContext,
-        events: broadcast::Sender<String>,
+        events: splitty_core::protocol::notify::NotificationBus,
     ) -> Arc<Self> {
         let jobs = store
             .jobs()
@@ -229,9 +229,7 @@ impl Jobs {
         })
     }
     fn event(&self, event: ServerEvent) {
-        if let Ok(text) = serde_json::to_string(&event) {
-            let _ = self.events.send(text);
-        }
+        self.events.send(&event);
     }
     fn nudge(&self, job: &JobRecord) {
         self.event(ServerEvent::mux_nudge(

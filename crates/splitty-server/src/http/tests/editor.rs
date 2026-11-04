@@ -1,5 +1,6 @@
 //! In-process router and real WebSocket protocol coverage, without a child server.
 use super::*;
+use axum::response::IntoResponse;
 
 async fn message_type(socket: &mut Socket, expected: &str) -> serde_json::Value {
     loop {
@@ -26,6 +27,11 @@ async fn send(socket: &mut Socket, value: serde_json::Value) {
 
 #[tokio::test]
 async fn editor_request_uses_registered_attached_websocket_and_owner_route() {
+    run_editor_request_uses_registered_attached_websocket_and_owner_route(false).await;
+    run_editor_request_uses_registered_attached_websocket_and_owner_route(true).await;
+}
+
+async fn run_editor_request_uses_registered_attached_websocket_and_owner_route(native: bool) {
     use splitty_core::pty::testing::pty_available;
     if !pty_available() {
         return;
@@ -33,7 +39,7 @@ async fn editor_request_uses_registered_attached_websocket_and_owner_route() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = Served::start(hub(&host, dir.path()), dir.path()).await;
-    let mut socket = served.open_local().await;
+    let mut socket = served.open_local_for(native).await;
     let welcome = message_type(&mut socket, "mux.welcome").await;
     assert!(welcome["capabilities"]
         .as_array()
@@ -61,7 +67,21 @@ async fn editor_request_uses_registered_attached_websocket_and_owner_route() {
     let worker = {
         let app = control.clone();
         let input = input.clone();
+        let state = served.state.clone();
         tokio::spawn(async move {
+            if native {
+                return state
+                    .service
+                    .execute(
+                        crate::service::catalog::Request {
+                            operation: crate::service::catalog::Operation::EditorOpen,
+                            args: json!({"body":input}).as_object().expect("args").clone(),
+                        },
+                        crate::service::catalog::Role::Main,
+                    )
+                    .await
+                    .into_response();
+            }
             app.oneshot(
                 Request::post("/api/editor/open")
                     .header("content-type", "application/json")
@@ -119,7 +139,7 @@ async fn editor_request_uses_registered_attached_websocket_and_owner_route() {
     assert_eq!(response.status().as_u16(), 401);
     served
         .state
-        .ws_state
+        .client_state
         .dispatcher
         .backend()
         .close(session)

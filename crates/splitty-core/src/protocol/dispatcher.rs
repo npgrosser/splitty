@@ -185,6 +185,18 @@ impl Connection {
             .collect()
     }
 
+    /// Preserve the decoded request's lease when image work leaves the async
+    /// handler. Moving its Base64 data avoids a second full-image copy.
+    pub async fn handle_charged(&self, request: splitty_transport::budget::Charged<Request>) {
+        if request.msg_type == MSG_SAVE_IMAGE {
+            let (request, lease) = request.into_parts();
+            self.save_image_data(&request.request_id, lease.charge(request.data))
+                .await;
+        } else {
+            self.handle(&request).await;
+        }
+    }
+
     /// Route a request to the appropriate handler.
     pub async fn handle(&self, req: &Request) {
         match req.msg_type.as_str() {
@@ -196,6 +208,12 @@ impl Connection {
             MSG_CLOSE => self.handle_close(req).await,
             MSG_SAVE_IMAGE => self.handle_save_image(req).await,
             MSG_UPLOAD => self.handle_upload(req).await,
+            MSG_UPLOAD_CANCEL => {
+                self.uploads
+                    .lock()
+                    .expect("uploads")
+                    .remove(&req.request_id);
+            }
             MSG_ACTIVITY => {
                 self.dispatcher
                     .sizes
@@ -336,7 +354,7 @@ impl Connection {
         self.stop_stream(&sid).await;
         // The session's reader runs from spawn, so the shell may already have
         // printed: the snapshot carries that, the receiver everything later.
-        let subscription = session.subscribe();
+        let subscription = session.subscribe_with(self.sender.delivery_context());
         // The creating connection shows the session at the size it asked for.
         let mut sizes = self.dispatcher.sizes.subscribe(&sid);
         if req.cols > 0 && req.rows > 0 {
@@ -435,7 +453,7 @@ impl Connection {
         // remounted while its first attach was still in flight): the old
         // stream is stopped first, so none of its output follows this replay.
         self.stop_stream(&sid).await;
-        let mut subscription = session.subscribe();
+        let mut subscription = session.subscribe_with(self.sender.delivery_context());
 
         // The size first, so the client's terminal has it before the replay.
         let mut sizes = self.dispatcher.sizes.subscribe(&sid);
@@ -607,22 +625,61 @@ impl Connection {
     /// Store a pasted image and answer with its path (`image_saved`) or why it
     /// was not stored (`image_failed`), echoing the request's id.
     async fn handle_save_image(&self, req: &Request) {
+        if req.data.len() > paste::MAX_ENCODED_LEN {
+            self.image_result(&req.request_id, Err(PasteError::TooLarge));
+            return;
+        }
+        let context = self.sender.delivery_context();
+        let Ok(encoded) = context
+            .budget
+            .charge(req.data.len(), false, || req.data.clone())
+        else {
+            self.sender.close();
+            return;
+        };
+        self.save_image_data(&req.request_id, encoded).await;
+    }
+
+    async fn save_image_data(
+        &self,
+        request_id: &str,
+        encoded: splitty_transport::budget::Charged<Vec<u8>>,
+    ) {
+        // A shared guard also covers metadata still borrowed by this handler
+        // when its data buffer moves to a worker. Cancellation cannot release
+        // the charge while that worker is still reading it.
+        let (encoded, encoded_lease) = encoded.into_parts();
+        let encoded_lease = Arc::new(encoded_lease);
         let result = match self.dispatcher.paste_dir.clone() {
-            // Refused before the copy below, so a huge message is not copied.
-            _ if req.data.len() > paste::MAX_ENCODED_LEN => Err(PasteError::TooLarge),
+            _ if encoded.len() > paste::MAX_ENCODED_LEN => Err(PasteError::TooLarge),
             None => Err(PasteError::NoDirectory),
             Some(dir) => {
-                let encoded = req.data.clone();
-                tokio::task::spawn_blocking(move || paste::save_base64(&dir, &encoded))
-                    .await
-                    .unwrap_or_else(|error| Err(PasteError::Io(std::io::Error::other(error))))
+                let context = self.sender.delivery_context();
+                let Ok(raw_lease) = context.budget.reserve(encoded.len().div_ceil(4) * 3, false)
+                else {
+                    self.sender.close();
+                    return;
+                };
+                let worker_lease = encoded_lease.clone();
+                tokio::task::spawn_blocking(move || {
+                    let _leases = (worker_lease, raw_lease);
+                    let result = paste::save_base64(&dir, &encoded);
+                    drop(encoded);
+                    result
+                })
+                .await
+                .unwrap_or_else(|error| Err(PasteError::Io(std::io::Error::other(error))))
             }
         };
+        self.image_result(request_id, result);
+    }
+
+    fn image_result(&self, request_id: &str, result: Result<PathBuf, PasteError>) {
         let event = match result {
-            Ok(path) => ServerEvent::image_saved(&req.request_id, path.to_string_lossy()),
+            Ok(path) => ServerEvent::image_saved(request_id, path.to_string_lossy()),
             Err(error) => {
-                warn!(request_id = %req.request_id, %error, "a pasted image was not stored");
-                ServerEvent::image_failed(&req.request_id, error.to_string())
+                warn!(%request_id, %error, "a pasted image was not stored");
+                ServerEvent::image_failed(request_id, error.to_string())
             }
         };
         let _ = self.sender.send(&event);
@@ -661,6 +718,17 @@ impl Connection {
             .lock()
             .expect("uploads")
             .remove(&req.request_id);
+        if req.data.len() > upload::MAX_CHUNK_ENCODED_LEN {
+            return Err(UploadError::ChunkTooLarge);
+        }
+        let context = self.sender.delivery_context();
+        let raw_lease = context
+            .budget
+            .reserve(req.data.len().div_ceil(4) * 3, false)
+            .map_err(|error| {
+                self.sender.close();
+                UploadError::Io(std::io::Error::other(error))
+            })?;
         let bytes = upload::decode_chunk(&req.data)?;
         let mut upload = match current {
             Some(upload) => upload,
@@ -673,24 +741,45 @@ impl Connection {
                 if size > upload::MAX_FILE_BYTES {
                     return Err(UploadError::TooLarge);
                 }
-                let store = self
-                    .dispatcher
-                    .paste_dir
-                    .clone()
-                    .ok_or(UploadError::NoDirectory)?;
-                let name = req.name.clone();
-                tokio::task::spawn_blocking(move || Upload::begin(&store, &name, size))
-                    .await
-                    .map_err(|error| UploadError::Io(std::io::Error::other(error)))??
+                let store = self.dispatcher.paste_dir.clone();
+                let metadata = context
+                    .budget
+                    .charge(req.name.len().saturating_add(req.dir.len()), false, || {
+                        (req.name.clone(), req.dir.clone())
+                    })
+                    .map_err(|error| {
+                        self.sender.close();
+                        UploadError::Io(std::io::Error::other(error))
+                    })?;
+                tokio::task::spawn_blocking(move || {
+                    // Capture the whole guard: Rust's disjoint closure capture
+                    // would otherwise move only `.value`, leaving its lease
+                    // in the cancellable caller.
+                    let metadata = metadata;
+                    let (name, dir) = &metadata.value;
+                    if dir.is_empty() {
+                        Upload::begin(&store.ok_or(UploadError::NoDirectory)?, name, size)
+                    } else {
+                        Upload::begin_in_directory(std::path::Path::new(dir), name, size)
+                    }
+                })
+                .await
+                .map_err(|error| UploadError::Io(std::io::Error::other(error)))??
             }
         };
         let offset = req.offset;
-        let upload =
-            tokio::task::spawn_blocking(move || upload.append(offset, &bytes).map(|()| upload))
-                .await
-                .map_err(|error| UploadError::Io(std::io::Error::other(error)))??;
+        let upload = tokio::task::spawn_blocking(move || {
+            let _raw_lease = raw_lease;
+            let result = upload.append(offset, &bytes).map(|()| upload);
+            drop(bytes);
+            result
+        })
+        .await
+        .map_err(|error| UploadError::Io(std::io::Error::other(error)))??;
         if upload.is_complete() {
-            return Ok(Some(upload.finish()));
+            return tokio::task::spawn_blocking(move || upload.finish().map(Some))
+                .await
+                .map_err(|error| UploadError::Io(std::io::Error::other(error)))?;
         }
         self.uploads
             .lock()
@@ -700,9 +789,12 @@ impl Connection {
     }
 
     /// Replay buffered output in binary frames of at most [`REPLAY_CHUNK`].
-    fn send_snapshot(&self, sid: &str, snapshot: Vec<u8>) {
+    fn send_snapshot(&self, sid: &str, snapshot: splitty_transport::budget::Charged<Vec<u8>>) {
         for chunk in snapshot.chunks(REPLAY_CHUNK) {
-            let _ = self.sender.send_binary(sid, chunk);
+            if self.sender.send_binary(sid, chunk).is_err() {
+                self.sender.close();
+                break;
+            }
         }
     }
 
@@ -796,9 +888,10 @@ async fn stream_output(
             _ = cancel.cancelled() => return,
             chunk = receiver.recv(), if !output_ended => match chunk {
                 Some(chunk) => {
-                    let _ = sender.send_binary(session.session_id(), &chunk);
+                    if sender.send_binary(session.session_id(), &chunk).is_err() { sender.close(); return; }
                 }
                 None => {
+                    if receiver.context().is_closed() { sender.close(); return; }
                     output_ended = true;
                     deadline.get_or_insert_with(|| tokio::time::Instant::now() + EXIT_GRACE);
                 }
@@ -1054,7 +1147,7 @@ mod tests {
     #[derive(Default)]
     struct MockOutput {
         history: Vec<u8>,
-        subscribers: Vec<tokio::sync::mpsc::UnboundedSender<Arc<[u8]>>>,
+        subscribers: Vec<splitty_transport::queue::Sender<Arc<[u8]>>>,
     }
 
     impl MockSession {
@@ -1091,7 +1184,7 @@ mod tests {
             let chunk: Arc<[u8]> = Arc::from(data);
             output
                 .subscribers
-                .retain(|tx| tx.send(Arc::clone(&chunk)).is_ok());
+                .retain(|tx| tx.send(data.len(), false, || Arc::clone(&chunk)).is_ok());
         }
     }
 
@@ -1101,12 +1194,15 @@ mod tests {
             &self.id
         }
 
-        fn subscribe(&self) -> Subscription {
-            let (tx, receiver) = tokio::sync::mpsc::unbounded_channel();
+        fn subscribe_with(&self, context: splitty_transport::queue::Context) -> Subscription {
+            let (tx, receiver) = context.channel(splitty_transport::queue::QUEUE_ITEMS);
             let snapshot = {
                 let mut output = self.output.lock().unwrap();
                 output.subscribers.push(tx);
-                output.history.clone()
+                context
+                    .budget
+                    .charge(output.history.len(), false, || output.history.clone())
+                    .unwrap()
             };
             if !self.print_on_subscribe.is_empty() {
                 self.print(&self.print_on_subscribe);
@@ -1252,6 +1348,7 @@ mod tests {
     // ---- Mock Sender ----
 
     struct MockSender {
+        context: splitty_transport::queue::Context,
         events: Mutex<Vec<ServerEvent>>,
         binary_chunks: Mutex<Vec<(String, Vec<u8>)>>,
         /// "binary", or the event's wire type, in the order sent.
@@ -1265,6 +1362,7 @@ mod tests {
     impl MockSender {
         fn new() -> Self {
             Self {
+                context: splitty_transport::queue::Context::default(),
                 events: Mutex::new(Vec::new()),
                 binary_chunks: Mutex::new(Vec::new()),
                 order: Mutex::new(Vec::new()),
@@ -1301,6 +1399,9 @@ mod tests {
     }
 
     impl Sender for MockSender {
+        fn delivery_context(&self) -> splitty_transport::queue::Context {
+            self.context.clone()
+        }
         fn send(
             &self,
             event: &ServerEvent,
@@ -1769,6 +1870,76 @@ mod tests {
         Arc::new(dispatcher).new_connection(sender)
     }
 
+    #[test]
+    fn cancelled_transfer_workers_retain_only_their_live_reservations_until_completion() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .max_blocking_threads(1)
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            for image in [true, false] {
+                let tmp = tempfile::tempdir().unwrap();
+                let sender = Arc::new(MockSender::new());
+                let budget = sender.context.budget.clone();
+                let conn = paste_connection(tmp.path(), sender);
+                // Occupy the only blocking thread so the real image task queues.
+                // Dropping release on any panic also unblocks runtime cleanup.
+                let (release, blocked) = std::sync::mpsc::channel::<()>();
+                let (started, starting) = tokio::sync::oneshot::channel();
+                let blocker = tokio::task::spawn_blocking(move || {
+                    let _ = started.send(());
+                    let _ = blocked.recv();
+                });
+                starting.await.unwrap();
+                let encoded = encode_base64(&[PNG_SIGNATURE, &[1; 1024]].concat());
+                let encoded_size = encoded.len();
+                let mut request = save_image("cancelled", encoded);
+                let metadata = if image {
+                    0
+                } else {
+                    request.msg_type = MSG_UPLOAD.into();
+                    request.name = "partial.png".into();
+                    request.dir = tmp.path().to_str().unwrap().into();
+                    request.size = Some(2048);
+                    request.name.len() + request.dir.len()
+                };
+                let expected = encoded_size + encoded_size.div_ceil(4) * 3 + 2 * metadata;
+                let request = budget
+                    .reserve(encoded_size + metadata, false)
+                    .unwrap()
+                    .charge(request);
+                let task = tokio::spawn(async move {
+                    conn.handle_charged(request).await;
+                });
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while budget.used() != expected {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                task.abort();
+                assert!(task.await.unwrap_err().is_cancelled());
+                assert_eq!(
+                    budget.used(),
+                    if image { expected } else { metadata },
+                    "only allocations owned by the queued worker survive caller cancellation"
+                );
+                drop(release);
+                blocker.await.unwrap();
+                tokio::time::timeout(Duration::from_secs(2), async {
+                    while budget.used() != 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert_eq!(budget.data.high_water(), expected);
+            }
+        });
+    }
+
     /// terminal-sessions, Image Upload, A screenshot: the PNG is stored with
     /// mode 0600 and the answer carries the request id and the absolute path.
     #[tokio::test]
@@ -1914,6 +2085,38 @@ mod tests {
         assert_eq!(std::fs::read(path).unwrap(), [first, second].concat());
     }
 
+    #[tokio::test]
+    async fn upload_destination_and_cancel_are_owned_by_the_connection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("paste");
+        let sender = Arc::new(MockSender::new());
+        let conn = paste_connection(&dir, sender.clone());
+        let other = paste_connection(&dir, Arc::new(MockSender::new()));
+        let mut request = upload_chunk("durable", 0, b"a", Some(("file.txt", 2)));
+        request.dir = tmp.path().to_string_lossy().into_owned();
+        conn.handle(&request).await;
+        let cancel = Request {
+            msg_type: MSG_UPLOAD_CANCEL.into(),
+            request_id: "durable".into(),
+            ..Request::default()
+        };
+        other.handle(&cancel).await;
+        assert_eq!(upload_dirs(tmp.path()).len(), 1);
+        conn.handle(&cancel).await;
+        conn.handle(&cancel).await;
+        assert!(upload_dirs(tmp.path()).is_empty());
+        assert!(!tmp.path().join("file.txt").exists());
+        request.size = Some(1);
+        conn.handle(&request).await;
+        conn.handle(&cancel).await;
+        assert_eq!(std::fs::read(tmp.path().join("file.txt")).unwrap(), b"a");
+        let events = sender.events();
+        assert!(matches!(
+            events.last(),
+            Some(ServerEvent::UploadSaved { .. })
+        ));
+    }
+
     /// terminal-sessions, Chunked File Uploads, Chunk out of order: the upload
     /// fails and nothing of it remains; a chunk that starts no upload and a
     /// fifth upload at once fail too.
@@ -1995,9 +2198,15 @@ mod tests {
         ))
         .await;
         assert_eq!(upload_dirs(&dir).len(), 1);
+        let mut durable = upload_chunk("durable", 0, b"a", Some(("partial", 2)));
+        durable.dir = tmp.path().to_string_lossy().into_owned();
+        conn.handle(&durable).await;
+        assert_eq!(upload_dirs(tmp.path()).len(), 1);
         conn.close();
 
         assert!(upload_dirs(&dir).is_empty());
+        assert!(upload_dirs(tmp.path()).is_empty());
+        assert!(!tmp.path().join("partial").exists());
     }
 
     /// An empty file is one first chunk with no data.

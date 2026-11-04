@@ -41,10 +41,8 @@
       </h2>
 
       <p class="dialog-text">
-        Paste the token from
-        <code class="dialog-code">
-          ~/.config/splitty/auth-token
-        </code>
+        Paste the access token for this browser gateway, or open a fresh
+        sign-in link from the command that started it.
       </p>
 
       {#if error}

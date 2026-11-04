@@ -5,12 +5,16 @@
 //! binary; [`handshake`] runs it and reads the answer.
 
 use serde::{Deserialize, Serialize};
+use splitty_transport::{
+    budget::{Charged, ConnectionBudget, Lease},
+    codec,
+};
 
 use crate::install::Server;
 use crate::ssh::{run_checked, Executor, SshError};
 
 /// The format version of [`Handshake`].
-pub const FORMAT: u32 = 1;
+pub const FORMAT: u32 = 2;
 
 /// The answer of `splitty remote-handshake --json`. Unknown fields are
 /// ignored, so a newer host can add some.
@@ -25,10 +29,12 @@ pub struct Handshake {
 
 /// The server that answered.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct ServerInfo {
     pub version: String,
     pub protocol: u32,
     pub path: String,
+    pub transport_versions: Vec<u16>,
 }
 
 /// Whether a daemon runs, and which.
@@ -43,17 +49,43 @@ pub struct DaemonState {
 #[serde(rename_all = "camelCase")]
 pub struct RunningDaemon {
     pub pid: u32,
-    pub port: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub legacy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_migration: Option<LegacyMigration>,
     pub version: String,
     pub protocol: u32,
     pub started_at: String,
-    /// Whether its sessions outlive it in session keepers, so that a restart
-    /// or an update ends none. False for a host that does not say.
+    /// Whether it is configured to use session keepers. Legacy migration also
+    /// verifies the actual inventory; this flag alone cannot prove that every
+    /// running terminal has a keeper. False for a host that does not say.
     #[serde(default)]
     pub keeps_sessions: bool,
     /// Whether this handshake started it.
     #[serde(default)]
     pub started: bool,
+}
+
+/// Read-only legacy migration eligibility. The process token is consumed only
+/// by the installed host binary, never used as a renderer credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum LegacyMigration {
+    Ready { token: String, sessions: u32 },
+    Blocked { message: String },
+}
+
+pub const LEGACY_MIGRATION_MESSAGE_LIMIT: usize = 1024;
+
+pub fn valid_migration_token(token: &str) -> bool {
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -71,14 +103,41 @@ pub enum HandshakeError {
     Ssh(#[from] SshError),
 
     #[error("{host} gave an unexpected handshake: {detail}")]
-    Invalid { host: String, detail: String },
+    Invalid {
+        host: String,
+        detail: String,
+        allocation: Option<Box<Lease>>,
+    },
 }
 
 /// Parse the handshake's output.
-pub fn parse(host: &str, stdout: &[u8]) -> Result<Handshake, HandshakeError> {
-    let invalid = |detail: String| HandshakeError::Invalid {
+#[cfg(test)]
+fn parse(host: &str, stdout: &[u8]) -> Result<Handshake, HandshakeError> {
+    parse_budgeted(host, stdout, &ConnectionBudget::default()).map(|value| value.into_parts().0)
+}
+pub fn parse_budgeted(
+    host: &str,
+    stdout: &[u8],
+    budget: &ConnectionBudget,
+) -> Result<Charged<Handshake>, HandshakeError> {
+    let bytes = codec::json_typed_allocation_bound(stdout)
+        .map_err(|error| HandshakeError::Ssh(SshError::Spawn(error)))?
+        .checked_add(4 * host.len())
+        .ok_or_else(|| {
+            HandshakeError::Ssh(SshError::Spawn(std::io::Error::other(
+                "handshake capacity overflow",
+            )))
+        })?;
+    let mut lease = Some(budget.reserve(bytes, false).map_err(|error| {
+        HandshakeError::Ssh(SshError::Spawn(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            error,
+        )))
+    })?);
+    let mut invalid = |detail: String| HandshakeError::Invalid {
         host: host.to_owned(),
         detail,
+        allocation: lease.take().map(Box::new),
     };
     let handshake: Handshake = serde_json::from_slice(stdout)
         .map_err(|e| invalid(format!("not the expected JSON ({e})")))?;
@@ -88,104 +147,266 @@ pub fn parse(host: &str, stdout: &[u8]) -> Result<Handshake, HandshakeError> {
             handshake.handshake
         )));
     }
+    if !handshake.server.path.starts_with('/')
+        || handshake.server.path.contains('\0')
+        || handshake.server.transport_versions.is_empty()
+        || handshake.server.transport_versions.len() > 16
+        || handshake.server.transport_versions.contains(&0)
+    {
+        return Err(invalid(
+            "invalid answering server identity or transport capabilities".into(),
+        ));
+    }
     match &handshake.daemon {
         DaemonState {
             running: true,
-            daemon: None,
-        } => return Err(invalid("a running daemon without its details".to_owned())),
-        DaemonState {
-            running: true,
             daemon: Some(daemon),
-        } if daemon.port == 0 => return Err(invalid("the daemon reported port 0".to_owned())),
-        _ => {}
+        } => {
+            if daemon.pid == 0 || i32::try_from(daemon.pid).is_err() {
+                return Err(invalid("invalid daemon PID".into()));
+            }
+            if daemon.legacy {
+                if daemon.instance.is_some() || daemon.transport_version.is_some() || daemon.started
+                {
+                    return Err(invalid(
+                        "legacy daemon claims native service identity".into(),
+                    ));
+                }
+                if let Some(migration) = &daemon.legacy_migration {
+                    let valid = match migration {
+                        LegacyMigration::Ready { token, .. } => {
+                            daemon.keeps_sessions && valid_migration_token(token)
+                        }
+                        LegacyMigration::Blocked { message } => {
+                            !message.is_empty() && message.len() <= LEGACY_MIGRATION_MESSAGE_LIMIT
+                        }
+                    };
+                    if !valid {
+                        return Err(invalid("invalid legacy migration eligibility".into()));
+                    }
+                }
+            } else if !daemon.instance.as_deref().is_some_and(valid_instance)
+                || !daemon.transport_version.is_some_and(|version| version > 0)
+                || daemon.legacy_migration.is_some()
+            {
+                return Err(invalid(
+                    "native daemon lacks a valid instance or transport version".into(),
+                ));
+            }
+        }
+        DaemonState {
+            running: false,
+            daemon: None,
+        } if handshake.screens.is_empty() => {}
+        _ => return Err(invalid("inconsistent daemon state or screens".into())),
     }
-    Ok(handshake)
+    Ok(lease
+        .take()
+        .expect("handshake reservation")
+        .charge(handshake))
 }
 
-/// Run the handshake on the host with `server`; with `ensure_port`, a missing
-/// daemon is started on `127.0.0.1:<port>` first.
+fn valid_instance(instance: &str) -> bool {
+    instance.len() == 32
+        && instance
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+impl RunningDaemon {
+    pub fn supports_native(&self) -> bool {
+        !self.legacy
+            && self.transport_version == Some(u32::from(splitty_transport::wire::VERSION))
+            && self.instance.as_deref().is_some_and(valid_instance)
+    }
+    pub fn supports_mux(&self, current: u32) -> bool {
+        self.protocol == current || current.checked_sub(1) == Some(self.protocol)
+    }
+}
+
+/// Request format 2. Ensuring a daemon never asks it to bind a TCP port or
+/// replace a running process; update policy belongs to the connector.
 pub async fn handshake<E: Executor>(
     executor: &E,
     server: &Server,
-    ensure_port: Option<u16>,
-) -> Result<Handshake, HandshakeError> {
+    ensure_daemon: bool,
+) -> Result<Charged<Handshake>, HandshakeError> {
     let mut line = server.command().word("remote-handshake").word("--json");
-    if let Some(port) = ensure_port {
-        line = line
-            .word("--ensure-daemon")
-            .word("--port")
-            .value(&port.to_string());
+    if ensure_daemon {
+        line = line.word("--ensure-daemon");
     }
     let output = run_checked(executor, &line, None).await?;
-    parse(executor.host(), &output.stdout)
+    parse_budgeted(executor.host(), &output.stdout, &executor.budget())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    const EXAMPLE: &str = r#"{"handshake":2,"server":{"version":"0.1.30","protocol":1,"path":"/home/me/.local/share/splitty/remote/0.1.30/splitty","transportVersions":[1]},"daemon":{"running":true,"pid":4711,"instance":"0123456789abcdef0123456789abcdef","transportVersion":1,"version":"0.1.29","protocol":1,"startedAt":"1760","keepsSessions":true,"started":false,"legacy":false},"screens":[{"id":"s1","name":"main","panes":3},{"id":"s2","panes":1}],"later":"ignored"}"#;
 
-    const EXAMPLE: &str = r#"{"handshake":1,
-     "server":{"version":"0.1.0","protocol":1,"path":"/home/u/.local/share/splitty/remote/0.1.0/splitty"},
-     "daemon":{"running":true,"pid":4711,"port":9811,"version":"0.1.0","protocol":1,"startedAt":"1760","started":true},
-     "screens":[{"id":"s1","name":"main","panes":3},{"id":"s2","panes":1}],
-     "later":"ignored"}"#;
-
-    #[test]
-    fn the_example_of_format_1_parses() {
-        let handshake = parse("vm", EXAMPLE.as_bytes()).expect("handshake");
-        let daemon = handshake.daemon.daemon.expect("running daemon");
-        assert_eq!(
-            (daemon.pid, daemon.port, daemon.started),
-            (4711, 9811, true)
-        );
-        assert_eq!(daemon.started_at, "1760");
+    #[tokio::test]
+    async fn typed_metadata_and_invalid_diagnostics_keep_their_owner_leases() {
+        let budget = ConnectionBudget::default();
+        let answer = parse_budgeted("host", EXAMPLE.as_bytes(), &budget).unwrap();
+        assert_eq!(answer.screens.len(), 2);
+        assert!(budget.used() > 0);
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _answer = answer;
+            let _ = started.send(());
+            std::future::pending::<()>().await;
+        });
+        waiting.await.unwrap();
         assert!(
-            !daemon.keeps_sessions,
-            "a host that does not say keeps none"
+            budget.used() > 0,
+            "metadata remains owned across suspension"
         );
-        assert_eq!(handshake.server.protocol, 1);
-        assert_eq!(handshake.screens.len(), 2);
-        assert_eq!(handshake.screens[1].name, None);
+        task.abort();
+        let _ = task.await;
+        assert_eq!(budget.used(), 0);
+        let error = parse_budgeted("host", br#"{"handshake":"wrong type"}"#, &budget).unwrap_err();
+        assert!(matches!(
+            &error,
+            HandshakeError::Invalid {
+                allocation: Some(_),
+                ..
+            }
+        ));
+        assert!(
+            budget.used() > 0,
+            "serde-derived error keeps parser/formatting capacity"
+        );
+        drop(error);
+        assert_eq!(budget.used(), 0);
+        let held = budget
+            .reserve(
+                splitty_transport::wire::CONNECTION_BYTES
+                    - splitty_transport::wire::CONNECTION_CONTROL_BYTES,
+                false,
+            )
+            .unwrap();
+        assert!(
+            matches!(parse_budgeted("host", EXAMPLE.as_bytes(), &budget), Err(HandshakeError::Ssh(SshError::Spawn(error))) if error.kind() == std::io::ErrorKind::WouldBlock)
+        );
+        drop(held);
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]
-    fn a_daemon_that_keeps_its_sessions_says_so() {
-        let text = EXAMPLE.replace(
-            r#""started":true"#,
-            r#""keepsSessions":true,"started":true"#,
-        );
-        let handshake = parse("vm", text.as_bytes()).expect("handshake");
-        let daemon = handshake.daemon.daemon.expect("running daemon");
+    fn format_two_separates_the_answering_binary_and_the_running_service() {
+        let answer = parse("host", EXAMPLE.as_bytes()).unwrap();
+        assert_eq!(answer.server.version, "0.1.30");
+        assert_eq!(answer.server.transport_versions, [1]);
+        let daemon = answer.daemon.daemon.as_ref().unwrap();
+        assert_eq!(daemon.version, "0.1.29");
         assert!(daemon.keeps_sessions);
-        let round_trip = serde_json::to_value(&daemon).expect("serialize");
-        assert_eq!(round_trip["keepsSessions"], true);
+        assert!(daemon.supports_native());
+        assert!(daemon.supports_mux(1));
+        assert_eq!(answer.screens.len(), 2);
+        let json = serde_json::to_value(&answer).unwrap();
+        assert!(json["daemon"].get("port").is_none());
+        assert!(json["daemon"].get("clientSocket").is_none());
     }
 
     #[test]
-    fn a_host_without_a_daemon_parses() {
-        let text = r#"{"handshake":1,"server":{"version":"0.1.0","protocol":1,"path":"/p"},"daemon":{"running":false},"screens":[]}"#;
-        let handshake = parse("vm", text.as_bytes()).expect("handshake");
-        assert!(!handshake.daemon.running);
-        assert!(handshake.daemon.daemon.is_none());
-        let round_trip = serde_json::to_string(&handshake).expect("serialize");
-        assert_eq!(round_trip, text);
+    fn absent_and_legacy_daemons_do_not_acquire_native_capabilities() {
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        value["daemon"] = serde_json::json!({"running":false});
+        value["screens"] = serde_json::json!([]);
+        let absent = parse("host", &serde_json::to_vec(&value).unwrap()).unwrap();
+        assert!(absent.daemon.daemon.is_none());
+        value["daemon"] = serde_json::json!({"running":true,"pid":4711,"version":"0.1.0","protocol":1,"startedAt":"1","legacy":true,"port":9811});
+        let legacy = parse("host", &serde_json::to_vec(&value).unwrap())
+            .unwrap()
+            .daemon
+            .daemon
+            .unwrap();
+        assert!(legacy.legacy);
+        assert!(!legacy.keeps_sessions);
+        assert!(!legacy.supports_native());
+        assert!(
+            legacy.supports_mux(1),
+            "mux compatibility never authorizes a TCP fallback"
+        );
     }
 
     #[test]
-    fn inconsistent_answers_are_rejected() {
-        for text in [
-            r#"{"handshake":2,"server":{"version":"x","protocol":1,"path":"/p"},"daemon":{"running":false}}"#,
-            r#"{"handshake":1,"server":{"version":"x","protocol":1,"path":"/p"},"daemon":{"running":true}}"#,
-            r#"{"handshake":1,"server":{"version":"x","protocol":1,"path":"/p"},"daemon":{"running":true,"pid":1,"port":0,"version":"x","protocol":1,"startedAt":"1"}}"#,
-            "Daemon running:",
+    fn migration_offers_are_bounded_and_only_legacy_keepers_can_be_ready() {
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        value["daemon"]["legacyMigration"] = serde_json::json!({
+            "status":"ready", "token":"a".repeat(64), "sessions":2
+        });
+        let parse_value =
+            |value: &serde_json::Value| parse("host", &serde_json::to_vec(value).unwrap());
+        assert!(parse_value(&value).is_err(), "native daemons never migrate");
+        value["daemon"]["legacy"] = true.into();
+        value["daemon"].as_object_mut().unwrap().remove("instance");
+        value["daemon"]
+            .as_object_mut()
+            .unwrap()
+            .remove("transportVersion");
+        let ready = parse_value(&value).unwrap();
+        assert!(matches!(
+            ready.daemon.daemon.unwrap().legacy_migration,
+            Some(LegacyMigration::Ready { sessions: 2, .. })
+        ));
+        for token in ["a".repeat(63), "A".repeat(64), "g".repeat(64)] {
+            let mut malformed = value.clone();
+            malformed["daemon"]["legacyMigration"]["token"] = token.into();
+            assert!(parse_value(&malformed).is_err());
+        }
+        value["daemon"]["keepsSessions"] = false.into();
+        assert!(parse_value(&value).is_err());
+        value["daemon"]["legacyMigration"] = serde_json::json!({
+            "status":"blocked", "message":"Restart the daemon explicitly on the host."
+        });
+        assert!(parse_value(&value).is_ok());
+        for message in [
+            String::new(),
+            "x".repeat(LEGACY_MIGRATION_MESSAGE_LIMIT + 1),
         ] {
+            value["daemon"]["legacyMigration"]["message"] = message.into();
+            assert!(parse_value(&value).is_err());
+        }
+    }
+
+    #[test]
+    fn mux_and_transport_support_are_independent() {
+        let mut daemon = parse("host", EXAMPLE.as_bytes())
+            .unwrap()
+            .daemon
+            .daemon
+            .unwrap();
+        daemon.protocol = 2;
+        assert!(daemon.supports_native());
+        assert!(!daemon.supports_mux(1));
+        daemon.protocol = 0;
+        assert!(daemon.supports_mux(1));
+        daemon.transport_version = Some(999);
+        assert!(!daemon.supports_native());
+        assert!(daemon.supports_mux(1));
+    }
+
+    #[test]
+    fn inconsistent_or_legacy_format_answers_are_refused() {
+        let base: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        for (pointer, replacement) in [
+            ("/handshake", serde_json::json!(1)),
+            ("/daemon/instance", serde_json::json!("bad")),
+            ("/daemon/pid", serde_json::json!(0)),
+            ("/daemon/transportVersion", serde_json::json!(0)),
+            ("/daemon/legacy", serde_json::json!(true)),
+            ("/daemon/running", serde_json::json!(false)),
+            ("/server/path", serde_json::json!("relative")),
+            ("/server/transportVersions", serde_json::json!([])),
+        ] {
+            let mut value = base.clone();
+            *value.pointer_mut(pointer).unwrap() = replacement;
             assert!(
-                matches!(
-                    parse("vm", text.as_bytes()),
-                    Err(HandshakeError::Invalid { .. })
-                ),
-                "{text}"
+                parse("host", &serde_json::to_vec(&value).unwrap()).is_err(),
+                "{pointer}"
             );
         }
+        assert!(parse("host", b"Daemon running:").is_err());
     }
 }

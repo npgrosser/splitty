@@ -107,9 +107,15 @@ function savedPath(path: unknown): string | null {
   return plainText(path, MAX_IMAGE_PATH) === path ? path : null;
 }
 
+export interface UploadOptions {
+  dir?: string;
+  signal?: AbortSignal;
+}
+
 export class SessionClient {
   /** Home directory reported by this server, used for ~ substitution in paths. */
   homeDir = "";
+  uploadControl = false;
   /** This server decides PTY sizes (`pty-size-v1` in its latest welcome). */
   sizing = false;
 
@@ -118,6 +124,11 @@ export class SessionClient {
   /** Pane → the key of its screen in the window. */
   private readonly paneToScreen = new Map<string, string>();
   private createQueue: Promise<unknown> = Promise.resolve();
+  private epoch = 0;
+  private transferGeneration = 0;
+  private disposed = false;
+  private queuedCreates = 0;
+  private pendingWaits = new Set<() => void>();
   private readonly metadataListeners = new Set<() => void>();
   private metadataDirty = false;
   /** The latest PTY size of each session, also before its view is wired. */
@@ -131,43 +142,62 @@ export class SessionClient {
   ) {
     const unsubMessage = socket.onMessage((msg) => this.route(msg));
     // Sizes of a lost connection are stale; an attach on the next one gets its own.
-    const unsubDisconnect = socket.onDisconnect(() => this.sizes.clear());
+    const unsubDisconnect = socket.onDisconnect(() => this.endConnection());
     this.unsubscribe = () => {
       unsubMessage();
       unsubDisconnect();
     };
   }
 
+  /** Capture one user operation's connection before asynchronous file reads or
+   * a multi-file batch. Reconnect never turns its remaining work into new input. */
+  captureConnection(): () => void {
+    const generation = this.transferGeneration;
+    const current = () => {
+      if (this.disposed || generation !== this.transferGeneration) throw new ImageSaveError("The connection changed during the transfer.");
+    };
+    current();
+    return current;
+  }
+
   // ── Create Queue ──
   // Serialize "create" requests so each one gets its own "created" response.
 
   requestSession(req: SessionRequest): Promise<SessionCreation> {
-    const next = this.createQueue.catch(() => undefined).then(
-      () =>
-        new Promise<SessionCreation>((resolve, reject) => {
-          const timeout = setTimeout(() => {
-            unsub();
-            reject(new Error("Timeout waiting for session creation"));
-          }, this.createTimeoutMs);
-
-          const unsub = this.socket.onMessage((msg: OutgoingMessage) => {
-            if (msg.type === "created") {
-              clearTimeout(timeout);
-              unsub();
+    if (this.disposed || this.queuedCreates >= 64) return Promise.reject(new Error("Session creation is unavailable or busy."));
+    const epoch = this.epoch;
+    this.queuedCreates++;
+    const next = this.createQueue.catch(() => undefined).then(() => {
+      if (this.disposed || epoch !== this.epoch) throw new Error("Connection changed before session creation; the request was not sent.");
+      return new Promise<SessionCreation>((resolve, reject) => {
+        const finish = (settle: () => void) => {
+          clearTimeout(timeout); unsub(); this.pendingWaits.delete(cancel); settle();
+        };
+        const cancel = () => finish(() => reject(new Error("Connection ended before session creation was confirmed; its outcome is unknown.")));
+        const timeout = setTimeout(() => finish(() => reject(new Error("Timeout waiting for session creation"))), this.createTimeoutMs);
+        const unsub = this.socket.onMessage((msg: OutgoingMessage) => {
+          if (msg.type === "created") {
+            finish(() => {
               if (typeof msg.homeDir === "string" && msg.homeDir) this.homeDir = msg.homeDir;
               resolve({ sessionId: msg.sessionId, shellProfileId: msg.shellProfileId });
-            } else if (msg.type === "error" && !msg.sessionId && msg.error !== UNKNOWN_SAVE_IMAGE && msg.error !== UNKNOWN_UPLOAD) {
-              clearTimeout(timeout);
-              unsub();
-              reject(new Error(String(msg.error)));
-            }
-          });
-
-          this.socket.send({ type: "create", ...req });
-        }),
-    );
+            });
+          } else if (msg.type === "error" && !msg.sessionId && msg.error !== UNKNOWN_SAVE_IMAGE && msg.error !== UNKNOWN_UPLOAD) {
+            finish(() => reject(new Error(String(msg.error))));
+          }
+        });
+        this.pendingWaits.add(cancel);
+        this.socket.send({ type: "create", ...req });
+      });
+    }).finally(() => { this.queuedCreates--; });
     this.createQueue = next;
     return next;
+  }
+
+  private endConnection(): void {
+    this.epoch++;
+    this.transferGeneration++;
+    this.sizes.clear();
+    for (const cancel of [...this.pendingWaits]) cancel();
   }
 
   // ── Pasted Images ──
@@ -182,8 +212,10 @@ export class SessionClient {
       const finish = (settle: () => void) => {
         clearTimeout(timeout);
         unsub();
+        this.pendingWaits.delete(cancel);
         settle();
       };
+      const cancel = () => finish(() => reject(new ImageSaveError("The connection was lost while saving the image.")));
       const timeout = setTimeout(() => finish(() => reject(new ImageSaveError("The server did not answer."))), timeoutMs);
       const unsub = this.socket.onMessage((msg: OutgoingMessage) => {
         if (msg.type === "image_saved" && msg.requestId === id) {
@@ -195,6 +227,7 @@ export class SessionClient {
           finish(() => reject(new ImageSaveError("This server's Splitty is too old to take images.", true)));
         }
       });
+      this.pendingWaits.add(cancel);
       this.socket.send({ type: "save_image", requestId: id, data });
     });
   }
@@ -211,24 +244,45 @@ export class SessionClient {
     file: Blob & { readonly name: string },
     onProgress?: (received: number) => void,
     timeoutMs = UPLOAD_CHUNK_TIMEOUT_MS,
+    options: UploadOptions = {},
   ): Promise<string> {
     if (file.size > MAX_UPLOAD_BYTES) throw new ImageSaveError(`${file.name || "The file"} is larger than 512 MB.`);
+    if ((options.dir !== undefined || options.signal) && !this.uploadControl) {
+      throw new ImageSaveError("Update this host's Splitty to choose upload destinations and cancel uploads.", true);
+    }
+    const epoch = this.epoch;
+    const current = this.captureConnection();
+    const sameConnection = () => { current(); if (this.disposed || epoch !== this.epoch) throw new ImageSaveError("The connection changed during the upload."); };
+    sameConnection();
+    const { signal } = options;
+    signal?.throwIfAborted();
     const id = requestId("up");
+    let started = false;
     let offset = 0;
-    for (;;) {
-      const bytes = new Uint8Array(await file.slice(offset, offset + UPLOAD_CHUNK_BYTES).arrayBuffer());
-      const end = offset + bytes.length;
-      const chunk: Extract<IncomingMessage, { type: "upload" }> = { type: "upload", requestId: id, offset, data: toBase64(bytes) };
-      if (offset === 0) Object.assign(chunk, { name: file.name, size: file.size });
-      const answer = await this.uploadChunk(chunk, timeoutMs);
-      if (answer.saved !== undefined) {
-        if (end !== file.size) throw new ImageSaveError("The server stored the file before all of it was sent.");
-        onProgress?.(file.size);
-        return answer.saved;
+    try {
+      for (;;) {
+        sameConnection();
+        signal?.throwIfAborted();
+        const bytes = new Uint8Array(await file.slice(offset, offset + UPLOAD_CHUNK_BYTES).arrayBuffer());
+        signal?.throwIfAborted();
+        sameConnection();
+        const end = offset + bytes.length;
+        const chunk: Extract<IncomingMessage, { type: "upload" }> = { type: "upload", requestId: id, offset, data: toBase64(bytes) };
+        if (offset === 0) Object.assign(chunk, { name: file.name, size: file.size, ...(options.dir !== undefined ? { dir: options.dir } : {}) });
+        started = true;
+        const answer = await this.uploadChunk(chunk, timeoutMs, signal);
+        if (answer.saved !== undefined) {
+          if (end !== file.size) throw new ImageSaveError("The server stored the file before all of it was sent.");
+          onProgress?.(file.size);
+          return answer.saved;
+        }
+        if (answer.received !== end || end >= file.size) throw new ImageSaveError("The server lost track of the upload.");
+        onProgress?.(end);
+        offset = end;
       }
-      if (answer.received !== end || end >= file.size) throw new ImageSaveError("The server lost track of the upload.");
-      onProgress?.(end);
-      offset = end;
+    } catch (error) {
+      if (started && this.uploadControl && epoch === this.epoch) this.socket.send({ type: "upload_cancel", requestId: id });
+      throw error;
     }
   }
 
@@ -236,9 +290,11 @@ export class SessionClient {
   private uploadChunk(
     chunk: Extract<IncomingMessage, { type: "upload" }>,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<{ received?: number; saved?: string }> {
     return new Promise((resolve, reject) => {
       const finish = (settle: () => void) => {
+        signal?.removeEventListener("abort", abort);
         clearTimeout(timeout);
         unsubMessage();
         unsubDisconnect();
@@ -259,7 +315,10 @@ export class SessionClient {
           finish(() => reject(new ImageSaveError("This server's Splitty is too old to take files.", true)));
         }
       });
-      this.socket.send(chunk);
+      const abort = () => finish(() => reject(signal?.reason ?? new DOMException("Upload cancelled", "AbortError")));
+      signal?.addEventListener("abort", abort, { once: true });
+      if (signal?.aborted) abort();
+      else this.socket.send(chunk);
     });
   }
 
@@ -341,6 +400,8 @@ export class SessionClient {
 
   /** Stop routing; the sessions are left to their views. */
   dispose(): void {
+    this.disposed = true;
+    this.endConnection();
     this.unsubscribe();
     this.metadataListeners.clear();
   }
@@ -350,6 +411,8 @@ export class SessionClient {
   private route(msg: OutgoingMessage): void {
     switch (msg.type) {
       case "mux.welcome":
+        this.transferGeneration++;
+        this.uploadControl = Array.isArray(msg.capabilities) && msg.capabilities.includes("upload-control-v1");
         this.sizing = Array.isArray(msg.capabilities) && msg.capabilities.includes(SIZE_CAPABILITY);
         break;
       case "size": {

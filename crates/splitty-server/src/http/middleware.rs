@@ -12,8 +12,8 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use super::session::{cookie_value, SESSION_COOKIE};
-use super::AppState;
+use super::session::cookie_value;
+use super::BrowserState;
 
 /// Authentication middleware.
 ///
@@ -37,7 +37,7 @@ use super::AppState;
 /// `/ws` and `/ws/remote` are exempt here because they authenticate with a
 /// single-use ticket instead; see `session.rs`.
 pub async fn require_token(
-    State(state): State<AppState>,
+    State(state): State<BrowserState>,
     request: Request,
     next: Next,
 ) -> Response {
@@ -69,8 +69,8 @@ pub async fn require_token(
     next.run(request).await
 }
 
-fn authenticated(state: &AppState, request: &Request) -> bool {
-    if let Some(session) = cookie_value(request, SESSION_COOKIE) {
+fn authenticated(state: &BrowserState, request: &Request) -> bool {
+    if let Some(session) = cookie_value(request, state.sessions.cookie_name()) {
         if state.sessions.session_valid(&session) {
             return true;
         }
@@ -132,7 +132,7 @@ pub fn origin_allowed(request: &Request, allowed: &[String]) -> Option<bool> {
 /// [`fetch_site_allowed`], which catches the requests that carry no `Origin`
 /// but do carry the cookie.
 pub async fn require_origin(
-    State(state): State<AppState>,
+    State(state): State<BrowserState>,
     request: Request,
     next: Next,
 ) -> Response {

@@ -1,17 +1,20 @@
 # Remote development
 
 Splitty reaches other machines only over SSH. On the host it runs its own
-daemon, bound to the host's loopback, which keeps screens, panes and
+daemon, reached through a private Unix socket, which keeps screens, panes and
 processes alive while your computer sleeps or disconnects. Your computer only
 displays them. Nothing has to be installed on the host beforehand: the client
-installs a matching Splitty server over the same SSH connection.
+installs a matching Splitty server through SSH.
+
+The [connection diagrams](networking.md) show the local/remote process boundaries,
+where listeners exist and which sessions survive a disconnect.
 
 There are three ways to look at a host:
 
 | Way | Where | Needs locally |
 |---|---|---|
 | [Remote screens](#remote-screens) | Screens of the host next to your local screens, in the same window | The local Splitty server (desktop app on macOS/Linux, the WSL backend on Windows, or `splitty serve`) |
-| [Remote windows](#remote-windows) | A window of its own per host, like VS Code's remote windows | Only the desktop app; no local server and no WSL on Windows |
+| [Remote windows](#remote-windows) | A window of its own per host, like VS Code's remote windows | The desktop app and SSH; the remote window connects directly to the host, without WSL on Windows |
 | [`splitty connect`](#splitty-connect) | Your browser | The `splitty` command |
 
 Host keys are checked strictly in all three: connect to a new host once with
@@ -41,7 +44,7 @@ A window can show screens of other hosts next to its local ones: the arrow next 
 - **Closing** a remote screen (the × in the screen list) detaches it without asking: it leaves the window and everything keeps running on the host. A notice says so and offers **Reopen**. The trash button next to it **ends** the screen there, with its panes and their processes, and asks in the row the first time. Quitting, closing the window or reloading only detaches, and running processes on a host never hold up quitting.
 - **Remembered:** the local server remembers the window's remote screens. After a reload or a restart of the app they are back in the screen list in their host groups, with a hollow dot until you connect: a remote screen connects only when you open it, or when its host is connected for another screen anyway, so an unreachable host does not slow the start. A remembered screen the host no longer has says so, with **Remove**.
 - **Getting back:** **Hosts** at the bottom of the drawer (or a click on a host's line) lists every host you used, connected or not. Unfold one to connect and see its running screens; **Open** attaches to an existing screen, and **New screen** creates another on that host. Disconnected hosts show the last seen names and pane counts, saved by the local server across restarts. Reading this list never connects hosts at startup. Browsing a host keeps its connection until you fold it or close the panel; open screens also keep it connected. A screen that no longer exists is reported as missing, never recreated silently.
-- **Updates:** a host whose Splitty is another version than yours says "update available" in its tooltip, and its entry under **Hosts** offers **Update…** while it is connected; new features such as pasting images need it. A host too old or too new to use shows **Update now…** in its screens. Both ask first, naming the versions and how many screens and panes end on the host (or that the count is not known, when that Splitty cannot report it). After you confirm, the host's Splitty stops and your version starts. A host daemon with [session keepers](cli.md#splitty-daemon) hands its sessions over to the new version; an older one ends its processes.
+- **Updates:** the host menu offers an update for another server version. Eligible older native daemons update through their verified service identity. For a compatible legacy Linux daemon, the app offers **Update server and connect** after checking its process identity and session keepers. Confirming applies to one attempt; ordinary Retry never migrates a legacy daemon. The dialog names both versions and explains that keeper-managed sessions continue while clients reconnect. If migration cannot be verified, including for legacy macOS daemons, the app explains the reason and leaves the daemon running. Newer daemons and daemons without session keepers are not replaced by this flow.
 - On Windows the local server runs in WSL, so remote screens use WSL's `ssh`, keys and SSH configuration.
 
 ## Ports
@@ -63,51 +66,121 @@ The other direction: a service on this machine (a local API, a database, a model
 
 - Each host in **Hosts** has **Shared with this host** and **Share a local port**. Enter the local port and, optionally, the port it gets on the host (empty: the same number). Nothing is shared without that click; detected ports, links and reconnects never start a share.
 - On the host, the port listens on `127.0.0.1` and `::1` only, and Splitty accepts a connection only from a program running as the user you log in as. Other users on the host, and other machines, cannot reach it, whatever the server's `GatewayPorts` says. Programs running as you on the host can, and most local services ask for no password: share only what you would let those programs use. The form says so, and warns more strongly for ports usually used by SSH, Docker, Kubernetes, Remote Desktop or VNC.
-- Only `localhost` of this machine is shared, one port per share, never another machine of your network. The port of the Splitty server you are using is refused.
+- Only `localhost` of this machine is shared, one port per share, never another machine of your network. Every active Splitty browser gateway in the supported local reservation domain is refused, including gateways from another configuration directory. A gateway also refuses a port already reserved for sharing.
 - Linux hosts only for now: the owner check reads `/proc` on the host. A Mac host answers “Not supported on this host”. A port already in use on the host fails with “Port in use on the host”; nothing on the host is stopped.
 - **Stop**, **Remember**, **Resume** and **Forget** work as for forwarded ports. A remembered share starts again only when its host connects; **Start** on a remembered share that is not running starts it now. A lost connection frees the host's port within about a minute, and a running share is rebuilt on the same port.
-- On Windows, the local Splitty server runs in WSL. With WSL's `mirrored` networking, Windows services on `localhost` are reachable from WSL and can be shared; with the default NAT networking, only services inside WSL are.
+- Reverse sharing is unavailable on Windows and WSL: their reachable localhost services have no shared Splitty reservation authority. It fails before starting SSH, including with mirrored networking. Forwarding a host service to this machine remains available.
+- On Linux, reservation coordination requires the initial PID and user namespaces and a verifiable common root mount view. Unsupported or ambiguous namespace environments fail with an explicit error. The reservation registry coordinates Splitty processes of the same OS account across configuration directories; it does not restrict other forwarding tools or processes running as that user.
+
+### Forwarding registry requirements
+
+On native Linux and macOS, reverse shares and explicit `serve`/`connect` browser
+gateways use one persistent registry rooted in the OS account's home directory:
+`.local/state/splitty/exposure` on Linux and
+`Library/Application Support/Splitty/exposure` on macOS. `HOME`, XDG variables and
+`SPLITTY_CONFIG_DIR` do not select a separate registry.
+
+Every ancestor must be a directory owned by the account or root, without a
+symlink or non-sticky group/world-write permission. The final registry directory
+must belong to the account with mode `0700`, and its files must be private owned
+regular files with mode `0600`. Supported persistent local filesystem semantics
+and a verifiable shared process/network view are required as well.
+
+For example, an existing `.local` or `.local/state` with mode `0775` prevents a
+native Linux browser gateway or reverse share from starting. This applies even
+when the gateway itself starts no share: another Splitty process may already be
+sharing its prospective port. Splitty does not chmod shared parent directories
+or bypass the registry. This restriction is separate from native terminal
+connections, which support owned `0775` ancestors through pinned endpoint
+directories and peer checks.
+
+Windows and WSL instead refuse reverse sharing entirely; their explicit browser
+gateways and forward-to-local application ports remain available. Their policy
+is not a fallback for an unsupported or unreadable native Linux registry.
 
 ## Remote windows
 
-The desktop apps (the Tauri app on Windows, macOS and Linux, and the Electron app on Linux) open a host in a window of its own, without any local server: **New window** in the host's entry under **Hosts** in the drawer, **New window on a host…** under the arrow next to **New screen**, **Open host in new window…** in the command palette (Cmd+Shift+P, Alt+Shift+P on Linux and Windows), or **Connect to host…** on the Windows app's setup page. The picker lists your recent hosts and the hosts of `~/.ssh/config` (DevPod's workspaces, for example) and accepts any `[user@]host[:port]`. The app then does what `splitty connect` does: it installs its server on the host when it lacks it, starts the daemon there and holds the SSH tunnel. The window opens once the host's UI is ready; until then the picker shows the progress, or the error with what to do about it. Started from the Dock, the Finder or a desktop launcher, the Tauri app on macOS and Linux first takes `PATH` from your login shell (at most 5 seconds), so a `ProxyCommand` in `~/.ssh/config` that runs, say, `gcloud` from Homebrew works as it does in a terminal.
+The desktop apps (the Tauri app on Windows, macOS and Linux, and the Electron app on Linux) open a host in a window of its own, without using the app's local terminal backend: **New window** in the host's entry under **Hosts** in the drawer, **New window on a host…** under the arrow next to **New screen**, **Open host in new window…** in the command palette (Cmd+Shift+P, Alt+Shift+P on Linux and Windows), or **Connect to host…** on the Windows app's setup page. The picker lists your recent hosts and the hosts of `~/.ssh/config` (DevPod's workspaces, for example) and accepts any `[user@]host[:port]`. The app then does what `splitty connect` does: it installs its server on the host when it lacks it, starts the daemon there and holds a native SSH data connection. The window uses the packaged UI and appears once the host connection is ready; until then the picker shows the progress, or the error with what to do about it. Started from the Dock, the Finder or a desktop launcher, the Tauri app on macOS and Linux first takes `PATH` from your login shell (at most 5 seconds), so a `ProxyCommand` in `~/.ssh/config` that runs, say, `gcloud` from Homebrew works as it does in a terminal.
 
-- One window per host: opening the host again focuses its window. The title names the host and says `(reconnecting…)` while the tunnel is rebuilt. After a restart of the host's daemon, the window loads a new session by itself.
-- After 10 minutes without a tunnel, the title says `(disconnected)`; opening the host again reconnects the same window.
-- Closing the window ends the tunnel, never the host's daemon or its sessions.
-- The window shows code that comes from the host, so it gets what a web page in a separate browser profile gets: no native functions of the app, a cookie store of its own that is kept in memory only, no navigation away from the host (links open in your browser) and no pop-out windows. Its title bar is the system's. It cannot hand files or folders to your local editor.
+- One window per host: opening the host again focuses its window. The title names the host and says `(reconnecting…)` while the connection is rebuilt. After a restart of the host's daemon, the same document reconnects and reattaches its sessions.
+- After 10 minutes without a connection, the title says `(disconnected)`; opening the host again reconnects the same window.
+- Closing the window ends its SSH connection, never the host's daemon or its sessions.
+- The window loads packaged UI and can connect only to its assigned host. It has private ephemeral storage, no local-backend or editor/reveal access, and no pop-out windows. Web links open in your browser; its title bar is the system's. Host data never supplies executable UI.
 
 **Windows without WSL.** Remote windows need no WSL: they use Windows OpenSSH (`ssh.exe`, `%USERPROFILE%\.ssh` and the Windows ssh-agent), so the Windows keys and SSH configuration apply, including the entries DevPod Desktop writes. On a machine without WSL, the setup page offers **Connect to host…** next to setting up WSL, and stays open as a launcher; the app quits when its last window closes. WSL remains the way to work locally. The Windows app keeps its recent hosts in its own configuration directory.
 
 ## `splitty connect`
 
-Opens a host's Splitty in your browser through an SSH tunnel:
+Opens a local browser gateway connected to one host over SSH:
 
 ```bash
 splitty connect user@remote-host
 ```
 
-`connect` asks the remote `splitty` for its daemon (`splitty remote-handshake --json`), forwards the same port on your machine to the remote loopback address (bound to `127.0.0.1` only, whatever `GatewayPorts` says), verifies the tunnel, asks the remote host for a single-use launch code (`splitty issue-bootstrap`), and opens the UI in your browser. No long-lived credential crosses the wire. `--no-open` prints the URL (`SPLITTY_URL=…`) without opening a browser.
+The command installs or locates the host's server, asks for format-2 discovery
+(`remote-handshake --json --ensure-daemon`), and opens a native bridge over SSH
+stdin/stdout to its private daemon socket. The host opens no terminal-service
+TCP listener. Your machine owns the browser listener, UI assets and one-use
+launch code; browser credentials are created locally and never sent to the
+host. `--no-open` prints the URL (`SPLITTY_URL=…`) without opening a browser.
 
-`--forward` forwards ports of the host as well, in the same SSH connection, for the dev servers and web APIs you run there:
+The gateway chooses a free local port independently of the host. Its address,
+cookie name and browser session store stay the same while SSH reconnects or the
+host daemon is replaced. Existing tabs reconnect through that gateway. No new
+URL or host-issued browser credential is needed.
+
+`--forward` additionally opens the requested development ports through separate
+owned SSH connections:
 
 ```bash
 # Ports 3000 and 5173 of the host on the same ports here, its port 80 on 8080
 splitty connect user@remote-host --forward 3000,5173 --forward 8080:80
 ```
 
-Each forward is bound to `127.0.0.1` here and reaches `localhost:<port>` on the host, so a dev server that listens only on IPv6 there works too. When the port is taken here (on `127.0.0.1` or `::1`), the forward uses any free port and `connect` says so. `connect` prints each one as `Forwarding http://localhost:<port> -> <host>:<port>` and keeps it on its port while it rebuilds a dropped tunnel. Open forwarded servers as `localhost`, as announced, not as `127.0.0.1`: Splitty's session cookie belongs to `127.0.0.1`, so a dev server opened as `localhost` never receives it.
+Each forward binds `127.0.0.1` here and reaches `localhost:<port>` on the host,
+including an IPv6-only host service. An occupied requested port gets a free
+alternate; `connect` announces the actual mapping as
+`Forwarding http://localhost:<port> -> <host>:<port>` and rebuilds it on that
+port after a drop. Open forwarded servers as `localhost`, as announced; the
+canonical gateway launch URL uses `127.0.0.1`. No Splitty credentials are added
+to forwarded application traffic. Ctrl+C ends the gateway and its requested
+forwards while the host daemon and sessions keep running.
 
-`--json` prints one JSON object per line on standard output instead of text, for programs that run `connect` (the Electron shell does): `{"event":"progress","step":"install|daemon|started|tunnel","message":…}`, `notice` (`message`), `ready` (`url`, `port`), one `forward` per `--forward` port after it (`remote`, `local`, `url`), `lost` (`message`), `retry` (`message`, `retryIn` in seconds), `restored`, `url` (`url`, a new session after the remote daemon restarted), `failed` (`message`, and `hint` where there is an instruction) right before exit status 1 (or 2 for a target or `--forward` list it rejects), and `closed` right before exit status 0. Everything else, including opening the browser unless `--no-open`, stays the same.
+`--json` prints one JSON object per line instead of text: `progress`
+(`step`: `install|daemon|started|tunnel`, `message`), `notice` (`message`),
+`ready` (`url`, `port`), one `forward` after it for each requested mapping
+(`remote`, `local`, `url`), `lost` (`message`), `retry` (`message`, `retryIn`
+in seconds), `restored`, `failed` (`message`, optional `hint`) and `closed`.
+Daemon replacement reports `restored` with the original gateway URL. A failure
+exits with 1, rejected arguments with 2, and Ctrl+C with 0. `--no-open` controls
+browser launch in both output modes.
 
-- When no daemon runs on the host, `connect` starts one, on a port that is free on both ends. A daemon older than the client that keeps its sessions (one with session keepers) is updated on the way: `connect` stops it and starts its own version, which takes the sessions over. Any other daemon of another version keeps running; `connect` says so and how to update it.
-- The local port must be free; if you run a local daemon on the same port, start the remote one with `--addr 127.0.0.1:<port>`.
-- When the tunnel drops (sleep, network change), `connect` rebuilds it and the open tab reconnects. If the remote daemon was restarted meanwhile, it prints a new URL and opens it; after a reboot of the host it starts the daemon again (and reinstalls the server when a rebuilt container lost it). After 10 minutes without a tunnel it gives up with exit status 1; Ctrl+C ends it with 0.
-- Every successful `connect` records its target as a recent host, in `~/.config/splitty/recent-hosts.json` (the last 20, most recent first).
-- Use a separate browser profile for remote sessions, or a remote window of the desktop app, which has a cookie store of its own: browsers do not separate cookies by port, so every server on `127.0.0.1` sees the session cookies of the others.
+- If no daemon runs, the command starts one at the host's private endpoint.
+  An older daemon can be updated automatically only when it has keepers, a
+  verifiable native identity and the matching installed replacement. The stop
+  request names that exact instance. Newer or non-kept daemons remain running
+  and require explicit migration on the host.
+  Versions follow SemVer precedence, so `0.2.0-dev.10` can replace
+  `0.2.0-dev.9`, and `0.2.0` can replace either. Build metadata alone does not
+  trigger replacement; an invalid version never authorizes an automatic update.
+- Network loss retries with bounded backoff for at most ten minutes. Host-key,
+  authentication and permanent protocol/installation errors require action.
+  A rebuilt container can reinstall the server; a restarted host can start its
+  daemon again, without changing the local browser origin.
+- Successful connections record the target in
+  `~/.config/splitty/recent-hosts.json` (the last 20, most recent first).
+- Gateways have separate cookie names and credential stores. Browser cookies
+  are still scoped by hostname rather than port; this does not isolate them
+  from every other HTTP service on the same hostname.
 
 ## Installing Splitty on hosts
 
-- On a Linux or macOS host without Splitty (or with another version), the client installs its own server first, over the same SSH connection, to `~/.local/share/splitty/remote/<version>/` (checksum verified on the host; nothing is downloaded there). It needs a payload: the released static `splitty` (`splitty-wsl-x86_64.tar.gz`) installs itself on x86_64 hosts and carries the servers for aarch64 hosts and for Macs (Apple silicon and Intel); any build takes one from `SPLITTY_REMOTE_PAYLOAD=<archive>`, an archive as `packaging/windows/build-wsl-payload.sh <repo> <out> [commit] [x86_64|aarch64|darwin-aarch64|darwin-x86_64]` builds it (on Linux, the macOS ones cross-built with a pinned zig that `packaging/zig-toolchain.sh` fetches; on a Mac, all four without zig).
+Preparing a host terminal connection has a fixed ten-minute ceiling. An archive upload may take up
+to eight minutes, but sixty seconds without a successful write to the owned SSH
+stdin pipe aborts it. After stdin closes, the install command has up to two
+minutes to finish. Progress reports do not renew these limits. Native framing
+and service handshakes retain their separate five-second deadlines.
+
+- On a Linux or macOS host without Splitty (or with another version), the client installs its own server first, through SSH, to `~/.local/share/splitty/remote/<version>/` (checksum verified on the host; nothing is downloaded there). It needs a payload: the released static `splitty` (`splitty-wsl-x86_64.tar.gz`) installs itself on x86_64 hosts and carries the servers for aarch64 hosts and for Macs (Apple silicon and Intel); any build takes one from `SPLITTY_REMOTE_PAYLOAD=<archive>`, an archive as `packaging/windows/build-wsl-payload.sh <repo> <out> [commit] [x86_64|aarch64|darwin-aarch64|darwin-x86_64]` builds it (on Linux, the macOS ones cross-built with a pinned zig that `packaging/zig-toolchain.sh` fetches; on a Mac, all four without zig).
 - Without a payload, `splitty` must be in the `PATH` of non-interactive SSH sessions on the remote machine, which often comes from `~/.profile` rather than `~/.bashrc`; `ssh user@remote-host splitty --version` shows whether it is.
-- On a Mac, the server `connect` or the hub installed keeps its own directory, `~/.config/splitty` (it runs with `SPLITTY_CONFIG_DIR` set to it): its daemon, sessions and token stay apart from a Splitty desktop app on that Mac, which keeps `~/Library/Application Support/splitty`. Updating the host from elsewhere never stops the app's sessions, and the app never attaches to that daemon.
+- On a Mac, the server `connect` or the hub installed keeps its own directory, `~/.config/splitty` (it runs with `SPLITTY_CONFIG_DIR` set to it): its daemon, sessions and private endpoints stay apart from a Splitty desktop app on that Mac, which keeps `~/Library/Application Support/splitty`. Updating the host from elsewhere never stops the app's sessions, and the app never attaches to that daemon.

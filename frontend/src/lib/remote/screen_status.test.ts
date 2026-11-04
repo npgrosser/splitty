@@ -52,6 +52,7 @@ describe("remoteScreenStatus", () => {
     expect(offersUpdate(remoteScreenStatus("vm1", incompatible, plain, []))).toBe(true);
     for (const state of [
       host("failed", { error: { code: "unsupported_host", message: "" } }),
+      host("failed", { error: { code: "migration_unavailable", message: "A keeper cannot be verified" } }),
       host("offline", { error: { code: "incompatible", message: "" } }),
       host("ready"),
       undefined,

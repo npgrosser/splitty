@@ -7,18 +7,18 @@
 //! host's port that relay to the local port, as the host's relay would.
 
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 
 use futures::future::BoxFuture;
 use splitty_core::protocol::PROTOCOL_VERSION;
-use splitty_remote::bridge::{encode, Bridge, Frame};
-use splitty_remote::handshake::{self, Handshake};
+use splitty_remote::bridge::NativeBridge;
+use splitty_remote::handshake::{self, Handshake, RunningDaemon};
 use splitty_remote::install::{Prepared, Probe, Server};
 use splitty_remote::ssh::{SshError, SshTarget};
 use splitty_remote::tunnel::{PortReservation, PortTunnelError, ReverseTunnelError};
+use splitty_transport::{admission, negotiation, wire};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
@@ -45,6 +45,8 @@ struct Daemon {
     version: String,
     protocol: u32,
     keeps_sessions: bool,
+    legacy: bool,
+    legacy_migration: Option<handshake::LegacyMigration>,
 }
 
 /// A host whose answers a test sets. Clones share the host's daemon and what
@@ -52,6 +54,8 @@ struct Daemon {
 #[derive(Clone)]
 pub struct ScriptedHost {
     prepare: Prepare,
+    preparation_gate: Option<Arc<ForwardGate>>,
+    preparation_cleanup: Option<Arc<ForwardGate>>,
     /// The version of the server the handshake runs, which also starts the
     /// daemon when none runs.
     server_version: &'static str,
@@ -59,10 +63,9 @@ pub struct ScriptedHost {
     protocol: u32,
     /// Whether `daemon stop` ends the daemon.
     stops: bool,
-    /// The bridge, run by `sh -c`; `$1` is a file with the daemon's
-    /// [`WELCOME`] as a frame.
-    bridge: &'static str,
-    welcome: Arc<PathBuf>,
+    /// An optional failure script, run instead of the native fixture.
+    bridge: Option<&'static str>,
+    welcome: &'static str,
     daemon: Arc<Mutex<Option<Daemon>>>,
     asked: Arc<Mutex<Vec<String>>>,
     bridge_pid: Arc<Mutex<Option<u32>>>,
@@ -73,6 +76,8 @@ pub struct ScriptedHost {
     failing_forwards: Arc<AtomicUsize>,
     /// What ends the running forward of each port of the host.
     forwards: Arc<Mutex<HashMap<u16, Arc<Notify>>>>,
+    /// Weak witnesses live exactly as long as each real local listener.
+    forward_listeners: Arc<Mutex<Vec<ListenerWitness>>>,
     forward_gates: Arc<Mutex<HashMap<u16, Arc<ForwardGate>>>>,
     stop_gates: Arc<Mutex<HashMap<u16, Arc<ForwardGate>>>>,
     /// The kernel the probe reports.
@@ -90,26 +95,23 @@ impl ScriptedHost {
     /// A host without Splitty: this version is installed, the handshake
     /// starts a daemon of it with one screen, and the bridge greets with
     /// [`WELCOME`] and then echoes every frame. `dir` holds its files.
-    pub fn new(dir: &std::path::Path) -> Self {
-        let welcome = dir.join("welcome.frame");
-        std::fs::write(
-            &welcome,
-            encode(&Frame::Text(WELCOME.to_owned())).expect("frame"),
-        )
-        .expect("write the welcome frame");
+    pub fn new(_dir: &std::path::Path) -> Self {
         Self {
             prepare: Prepare::Installs("x86_64"),
+            preparation_gate: None,
+            preparation_cleanup: None,
             server_version: VERSION,
             protocol: PROTOCOL_VERSION,
             stops: true,
-            bridge: r#"cat "$1" && exec cat"#,
-            welcome: Arc::new(welcome),
+            bridge: None,
+            welcome: WELCOME,
             daemon: Arc::default(),
             asked: Arc::default(),
             bridge_pid: Arc::default(),
             forward_fails: None,
             failing_forwards: Arc::default(),
             forwards: Arc::default(),
+            forward_listeners: Arc::default(),
             forward_gates: Arc::default(),
             stop_gates: Arc::default(),
             kernel: "Linux",
@@ -122,6 +124,15 @@ impl ScriptedHost {
     /// The probe reports `kernel`, such as `Darwin`.
     pub fn with_kernel(mut self, kernel: &'static str) -> Self {
         self.kernel = kernel;
+        self
+    }
+
+    pub fn with_preparation_gate(mut self, gate: Arc<ForwardGate>) -> Self {
+        self.preparation_gate = Some(gate);
+        self
+    }
+    pub fn with_preparation_cleanup(mut self, gate: Arc<ForwardGate>) -> Self {
+        self.preparation_cleanup = Some(gate);
         self
     }
 
@@ -173,6 +184,8 @@ impl ScriptedHost {
             version: version.to_owned(),
             protocol,
             keeps_sessions: false,
+            legacy: false,
+            legacy_migration: None,
         });
         self
     }
@@ -184,6 +197,19 @@ impl ScriptedHost {
             version: version.to_owned(),
             protocol,
             keeps_sessions: true,
+            legacy: false,
+            legacy_migration: None,
+        });
+        self
+    }
+
+    pub fn with_legacy_daemon(self, migration: Option<handshake::LegacyMigration>) -> Self {
+        *self.daemon.lock().expect("daemon") = Some(Daemon {
+            version: "0.1.27".into(),
+            protocol: PROTOCOL_VERSION,
+            keeps_sessions: true,
+            legacy: true,
+            legacy_migration: migration,
         });
         self
     }
@@ -195,8 +221,13 @@ impl ScriptedHost {
         self
     }
 
+    pub fn with_welcome(mut self, welcome: &'static str) -> Self {
+        self.welcome = welcome;
+        self
+    }
+
     pub fn with_bridge(mut self, script: &'static str) -> Self {
-        self.bridge = script;
+        self.bridge = Some(script);
         self
     }
 
@@ -225,6 +256,23 @@ impl ScriptedHost {
         gate
     }
 
+    /// Counts of (created, still live) listener descriptors for this host's
+    /// remote port, including failed setup attempts. This observes owned
+    /// sockets, independently of published hub state.
+    pub fn forward_listener_counts(&self, remote: u16) -> (usize, usize) {
+        self.forward_listeners
+            .lock()
+            .expect("forward listeners")
+            .iter()
+            .filter(|witness| witness.remote == remote)
+            .fold((0, 0), |(created, live), witness| {
+                (
+                    created + 1,
+                    live + usize::from(witness.alive.strong_count() > 0),
+                )
+            })
+    }
+
     /// The next `count` forwards fail, as if the host were unreachable.
     pub fn fail_next_forwards(&self, count: usize) {
         self.failing_forwards.store(count, Ordering::SeqCst);
@@ -239,7 +287,7 @@ impl ScriptedHost {
     }
 
     /// What the hub asked the host, in order: `prepare <target>`,
-    /// `handshake <port hint>`, `stop`, `bridge`, `forward <port> at <local
+    /// `handshake`, `stop`, `bridge`, `forward <port> at <local
     /// port>`, `reverse <target> <port> from <local port>`.
     pub fn asked(&self) -> Vec<String> {
         self.asked.lock().expect("asked").clone()
@@ -265,6 +313,7 @@ impl Connector for ScriptedHost {
         &'a self,
         target: &'a SshTarget,
         on_install: Box<dyn FnOnce(&str) + Send + 'a>,
+        context: &'a splitty_transport::queue::Context,
     ) -> BoxFuture<'a, Result<Prepared, HubError>> {
         Box::pin(async move {
             self.ask(format!("prepare {}", target.as_str()));
@@ -280,6 +329,20 @@ impl Connector for ScriptedHost {
                     return Err(HubError::Install(error.into()));
                 }
             };
+            if let Some(gate) = &self.preparation_gate {
+                gate.entered.notify_one();
+                let mut closing = context.closing();
+                tokio::select! { biased;
+                    _ = async { let _ = closing.wait_for(|closed| *closed).await; } => {
+                        if let Some(cleanup) = &self.preparation_cleanup {
+                            cleanup.entered.notify_one();
+                            cleanup.release.notified().await;
+                        }
+                        return Err(HubError::NativeBridge(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "setup owner closed")));
+                    },
+                    _ = gate.release.notified() => {},
+                }
+            }
             Ok(Prepared {
                 server: Server::Installed {
                     path: format!("/home/u/.local/share/splitty/remote/{VERSION}/splitty"),
@@ -301,10 +364,16 @@ impl Connector for ScriptedHost {
         &'a self,
         target: &'a SshTarget,
         _prepared: &'a Prepared,
-        port_hint: u16,
-    ) -> BoxFuture<'a, Result<Handshake, HubError>> {
+        context: &'a splitty_transport::queue::Context,
+    ) -> BoxFuture<'a, Result<splitty_transport::budget::Charged<Handshake>, HubError>> {
         Box::pin(async move {
-            self.ask(format!("handshake {port_hint}"));
+            if context.is_closed() {
+                return Err(HubError::NativeBridge(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "setup owner closed",
+                )));
+            }
+            self.ask("handshake".into());
             let (daemon, started) = {
                 let mut running = self.daemon.lock().expect("daemon");
                 let started = running.is_none();
@@ -313,21 +382,28 @@ impl Connector for ScriptedHost {
                     version: self.server_version.to_owned(),
                     protocol: self.protocol,
                     keeps_sessions: true,
+                    legacy: false,
+                    legacy_migration: None,
                 });
                 (daemon.clone(), started)
             };
             let answer = serde_json::json!({
-                "handshake": 1,
-                "server": {"version": self.server_version, "protocol": self.protocol, "path": "/p"},
+                "handshake": 2,
+                "server": {"version": self.server_version, "protocol": self.protocol, "path": "/p", "transportVersions":[1]},
                 "daemon": {
-                    "running": true, "pid": 4711, "port": port_hint, "version": daemon.version,
+                    "running": true, "pid": 4711, "instance": if daemon.legacy { None } else { Some("0123456789abcdef0123456789abcdef") }, "transportVersion": if daemon.legacy { None } else { Some(1) }, "version": daemon.version,
+                    "legacy": daemon.legacy, "legacyMigration": daemon.legacy_migration,
                     "protocol": daemon.protocol, "startedAt": "1760",
                     "keepsSessions": daemon.keeps_sessions, "started": started,
                 },
                 "screens": [{"id": "s1", "name": "api", "panes": 3}],
             });
             let answer = serde_json::to_vec(&answer).expect("JSON");
-            Ok(handshake::parse(target.as_str(), &answer)?)
+            Ok(handshake::parse_budgeted(
+                target.as_str(),
+                &answer,
+                &context.budget,
+            )?)
         })
     }
 
@@ -335,8 +411,16 @@ impl Connector for ScriptedHost {
         &'a self,
         _target: &'a SshTarget,
         _server: &'a Server,
+        _daemon: &'a RunningDaemon,
+        context: &'a splitty_transport::queue::Context,
     ) -> BoxFuture<'a, Result<(), HubError>> {
         Box::pin(async move {
+            if context.is_closed() {
+                return Err(HubError::NativeBridge(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "setup owner closed",
+                )));
+            }
             self.ask("stop".to_owned());
             if self.stops {
                 *self.daemon.lock().expect("daemon") = None;
@@ -345,18 +429,82 @@ impl Connector for ScriptedHost {
         })
     }
 
-    fn bridge(&self, _target: &SshTarget, _server: &Server) -> Result<Bridge, HubError> {
-        self.ask("bridge".to_owned());
-        let mut command = tokio::process::Command::new("sh");
-        command
-            .arg("-c")
-            .arg(self.bridge)
-            .arg("bridge")
-            .arg(self.welcome.as_path());
-        let mut bridge =
-            Bridge::spawn(command).map_err(|e| HubError::Bridge(SshError::Spawn(e)))?;
-        *self.bridge_pid.lock().expect("bridge pid") = bridge.process().id();
-        Ok(bridge)
+    fn migrate_legacy<'a>(
+        &'a self,
+        _target: &'a SshTarget,
+        _server: &'a Server,
+        _daemon: &'a RunningDaemon,
+        context: &'a splitty_transport::queue::Context,
+    ) -> BoxFuture<'a, Result<(), HubError>> {
+        Box::pin(async move {
+            if context.is_closed() {
+                return Err(HubError::NativeBridge(
+                    std::io::ErrorKind::BrokenPipe.into(),
+                ));
+            }
+            self.ask("migrate".into());
+            if self.stops {
+                *self.daemon.lock().expect("daemon") = None;
+            } else {
+                return Err(HubError::Stop(SshError::Spawn(
+                    std::io::ErrorKind::ConnectionReset.into(),
+                )));
+            }
+            Ok(())
+        })
+    }
+
+    fn bridge<'a>(
+        &'a self,
+        _target: &'a SshTarget,
+        _server: &'a Server,
+        daemon: &'a RunningDaemon,
+        capacity: (admission::Carrier, admission::Opening),
+        context: &'a splitty_transport::queue::Context,
+    ) -> BoxFuture<'a, Result<NativeBridge, HubError>> {
+        Box::pin(async move {
+            self.ask("bridge".to_owned());
+            let mut command = if let Some(script) = self.bridge {
+                let mut command = tokio::process::Command::new("sh");
+                command.args(["-c", script]);
+                command
+            } else {
+                let ready = wire::Ready {
+                    generation: 1,
+                    instance: daemon.instance.clone().unwrap(),
+                    mux_protocol: daemon.protocol,
+                    purpose: wire::Purpose::Direct,
+                    limits: wire::Limits::default(),
+                };
+                let mut command = tokio::process::Command::new("python3");
+                command
+                    .args([
+                        "-u",
+                        "-c",
+                        include_str!("../../../splitty-remote/tests/native_bridge.py"),
+                    ])
+                    .arg(serde_json::to_string(&ready).unwrap())
+                    .arg(self.welcome);
+                command
+            };
+            command.kill_on_drop(true);
+            let bridge = NativeBridge::spawn_context(
+                command,
+                capacity,
+                negotiation::Expected {
+                    instance: daemon.instance.as_deref(),
+                    purpose: &wire::Purpose::Direct,
+                    mux_protocol: daemon.protocol,
+                    preparation: wire::HANDSHAKE_TIMEOUT,
+                },
+                context.clone(),
+                |_| {},
+            )
+            .await
+            .map_err(HubError::NativeBridge)?;
+            *self.bridge_pid.lock().expect("bridge pid") = bridge.id();
+            Ok(bridge)
+        })
     }
 
     fn forward<'a>(
@@ -392,16 +540,29 @@ impl Connector for ScriptedHost {
                 return Err(HubError::Forward(PortTunnelError::Ssh(error)));
             }
 
-            drop(local);
-            let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
-                .await
+            // This in-process fake can inherit the reservation itself. Dropping
+            // and rebinding introduced unrelated ephemeral-port races between
+            // parallel fixtures; real SSH handoff is covered by process tests.
+            let listener = local.into_listener().map_err(HubError::ForwardPort)?;
+            listener
+                .set_nonblocking(true)
                 .map_err(HubError::ForwardPort)?;
+            let listener =
+                tokio::net::TcpListener::from_std(listener).map_err(HubError::ForwardPort)?;
+            let alive = Arc::new(());
+            self.forward_listeners
+                .lock()
+                .expect("forward listeners")
+                .push(ListenerWitness {
+                    remote,
+                    alive: Arc::downgrade(&alive),
+                });
+            let listener = ObservedListener {
+                socket: listener,
+                _alive: alive,
+            };
             let answer = format!("forwarded {remote}\n");
-            let listener = tokio::spawn(async move {
-                while let Ok((mut stream, _)) = listener.accept().await {
-                    let _ = stream.write_all(answer.as_bytes()).await;
-                }
-            });
+            let listener = tokio::spawn(listener.serve(answer));
             let ended = Arc::new(Notify::new());
             self.forwards
                 .lock()
@@ -416,11 +577,19 @@ impl Connector for ScriptedHost {
         })
     }
 
+    fn reserve_share(
+        &self,
+        _local: u16,
+    ) -> BoxFuture<'_, Result<Option<splitty_remote::tunnel::exposure::Share>, HubError>> {
+        Box::pin(async { Ok(None) })
+    }
+
     fn reverse<'a>(
         &'a self,
         target: &'a SshTarget,
         local: u16,
         port: u16,
+        _share: Option<&'a splitty_remote::tunnel::exposure::Share>,
     ) -> BoxFuture<'a, Result<Box<dyn Forwarding>, HubError>> {
         Box::pin(self.scripted_reverse(target, local, port))
     }
@@ -492,6 +661,26 @@ impl ScriptedHost {
             remote: port,
             stop_gates: Arc::default(),
         }) as Box<dyn Forwarding>)
+    }
+}
+
+struct ListenerWitness {
+    remote: u16,
+    alive: Weak<()>,
+}
+
+/// Fields drop in declaration order: the descriptor closes before its witness
+/// disappears, including when Tokio drops an aborted listener task.
+struct ObservedListener {
+    socket: tokio::net::TcpListener,
+    _alive: Arc<()>,
+}
+
+impl ObservedListener {
+    async fn serve(self, answer: String) {
+        while let Ok((mut stream, _)) = self.socket.accept().await {
+            let _ = stream.write_all(answer.as_bytes()).await;
+        }
     }
 }
 

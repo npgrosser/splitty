@@ -13,6 +13,7 @@ use super::ProcessResult;
 const TICK: Duration = Duration::from_millis(20);
 const GRACE: Duration = Duration::from_secs(3);
 const CONFIRM: Duration = Duration::from_secs(2);
+const OWNED_GRACE: Duration = Duration::from_millis(500);
 
 type StopReply = oneshot::Sender<Result<ProcessResult, String>>;
 
@@ -50,6 +51,7 @@ pub(crate) struct Lifecycle {
     control: mpsc::SyncSender<Control>,
     result: Arc<Mutex<Option<ProcessResult>>>,
     done: watch::Receiver<bool>,
+    shutdown: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Owns cleanup until the lifecycle worker has consumed the child.
@@ -99,10 +101,12 @@ impl Lifecycle {
         let result = Arc::new(Mutex::new(None));
         let result_out = Arc::clone(&result);
         let (done_tx, done) = watch::channel(false);
+        let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stopping = shutdown.clone();
         std::thread::Builder::new()
             .name("pty-lifecycle".into())
             .spawn(move || {
-                let (outcome, replies) = supervise(child, rx, terminal);
+                let (outcome, replies) = supervise(child, rx, terminal, &stopping);
                 *result_out.lock().expect("process result lock") = Some(outcome.clone());
                 done_tx.send_replace(true);
                 for reply in replies {
@@ -117,6 +121,7 @@ impl Lifecycle {
             control: tx,
             result,
             done,
+            shutdown,
         })
     }
 
@@ -126,6 +131,38 @@ impl Lifecycle {
 
     pub fn result(&self) -> Option<ProcessResult> {
         self.result.lock().expect("process result lock").clone()
+    }
+
+    /// Shutdown has reserved capacity independent of repeated stop requests.
+    /// The sole PID owner observes this flag on its next supervision tick.
+    pub fn begin_shutdown(&self) {
+        self.shutdown
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    pub async fn shutdown(&self) -> io::Result<ProcessResult> {
+        self.begin_shutdown();
+        let mut done = self.done();
+        tokio::time::timeout(
+            OWNED_GRACE + CONFIRM + TICK * 2,
+            done.wait_for(|done| *done),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "could not confirm owned terminal termination",
+            )
+        })?
+        .map_err(|error| io::Error::other(error.to_string()))?;
+        let result = self
+            .result()
+            .ok_or_else(|| io::Error::other("missing terminal exit result"))?;
+        if let Some(error) = &result.error {
+            Err(io::Error::other(error.clone()))
+        } else {
+            Ok(result)
+        }
     }
 
     pub fn close(&self, managed: bool) -> io::Result<()> {
@@ -179,6 +216,45 @@ struct UnixChild {
     child: ChildGuard,
     pid: nix::unistd::Pid,
     terminal: Terminal,
+}
+
+#[cfg(unix)]
+impl UnixChild {
+    fn group_signal_result(
+        &mut self,
+        sig: nix::sys::signal::Signal,
+        result: Result<(), nix::errno::Errno>,
+    ) -> Result<(), String> {
+        match result {
+            Ok(()) | Err(nix::errno::Errno::ESRCH) => Ok(()),
+            #[cfg(target_os = "macos")]
+            Err(nix::errno::Errno::EPERM) if self.group_has_only_exited_leader() => Ok(()),
+            Err(error) => Err(format!(
+                "killpg owned leader group {} with {sig:?}: {error}",
+                self.pid
+            )),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn group_has_only_exited_leader(&mut self) -> bool {
+        // Darwin excludes zombies from killpg and can return EPERM after our
+        // direct signal already ended the leader. WNOWAIT keeps that exact PID
+        // owned. Exit alone is insufficient: another group member might still
+        // be alive but inaccessible. Accept only a complete, sole-leader list.
+        if !matches!(self.observe(), Ok(Some(_))) {
+            return false;
+        }
+        let mut members: [nix::libc::pid_t; 2] = [0; 2];
+        let size = i32::try_from(std::mem::size_of_val(&members)).expect("two PID buffer size");
+        // SAFETY: the buffer is writable for exactly `size` bytes. libproc lists
+        // both live and zombie members without filtering by UID and returns a
+        // PID count. Two slots distinguish a sole member from truncated lists.
+        let count = unsafe {
+            nix::libc::proc_listpgrppids(self.pid.as_raw(), members.as_mut_ptr().cast(), size)
+        };
+        count == 1 && members[0] == self.pid.as_raw()
+    }
 }
 
 #[cfg(unix)]
@@ -237,16 +313,14 @@ impl OwnedProcess for UnixChild {
     }
 
     fn signal(&mut self, sig: nix::sys::signal::Signal) -> Result<(), String> {
-        use nix::sys::signal::{kill, killpg, Signal};
+        use nix::sys::signal::{kill, killpg};
         use nix::unistd::{getpgid, getsid, tcgetpgrp};
         let pid = self.pid;
         // Ordinary terminal close also hangs up a foreground job. Resolve it now
         // from our owned terminal, not from a PID saved by a UI/proc-info poll.
-        if sig == Signal::SIGHUP {
-            if let Some(foreground) = self.terminal.as_ref().and_then(|fd| tcgetpgrp(fd).ok()) {
-                if foreground != pid && getsid(Some(foreground)).ok() == Some(pid) {
-                    let _ = killpg(foreground, sig);
-                }
+        if let Some(foreground) = self.terminal.as_ref().and_then(|fd| tcgetpgrp(fd).ok()) {
+            if foreground != pid && getsid(Some(foreground)).ok() == Some(pid) {
+                let _ = killpg(foreground, sig);
             }
         }
         // The process before its group: macOS signals a group member by member,
@@ -255,13 +329,10 @@ impl OwnedProcess for UnixChild {
         let leader = getpgid(Some(pid)).ok() == Some(pid);
         match kill(pid, sig) {
             Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-            Err(error) => return Err(error.to_string()),
+            Err(error) => return Err(format!("kill owned leader {pid} with {sig:?}: {error}")),
         }
         if leader {
-            match killpg(pid, sig) {
-                Ok(()) | Err(nix::errno::Errno::ESRCH) => {}
-                Err(error) => return Err(error.to_string()),
-            }
+            self.group_signal_result(sig, killpg(pid, sig))?;
         }
         Ok(())
     }
@@ -284,7 +355,12 @@ impl OwnedProcess for UnixChild {
 }
 
 #[cfg(unix)]
-fn supervise(child: ChildGuard, control: mpsc::Receiver<Control>, terminal: Terminal) -> Ended {
+fn supervise(
+    child: ChildGuard,
+    control: mpsc::Receiver<Control>,
+    terminal: Terminal,
+    shutdown: &std::sync::atomic::AtomicBool,
+) -> Ended {
     let Some(pid) = child
         .0
         .as_ref()
@@ -306,6 +382,7 @@ fn supervise(child: ChildGuard, control: mpsc::Receiver<Control>, terminal: Term
             terminal,
         },
         control,
+        shutdown,
         GRACE,
         CONFIRM,
     )
@@ -315,7 +392,8 @@ fn supervise(child: ChildGuard, control: mpsc::Receiver<Control>, terminal: Term
 fn drive(
     process: &mut impl OwnedProcess,
     control: mpsc::Receiver<Control>,
-    grace: Duration,
+    shutdown: &std::sync::atomic::AtomicBool,
+    mut grace: Duration,
     confirm: Duration,
 ) -> Ended {
     use nix::sys::signal::Signal;
@@ -323,6 +401,7 @@ fn drive(
     let mut escalated = false;
     let mut replies: Vec<StopReply> = Vec::new();
     let mut disconnected = false;
+    let mut owned_shutdown = false;
     loop {
         let observed = match process.observe() {
             Ok(observed) => observed,
@@ -336,6 +415,14 @@ fn drive(
                 return (outcome, replies);
             }
         };
+        if !owned_shutdown && shutdown.load(std::sync::atomic::Ordering::Acquire) {
+            owned_shutdown = true;
+            grace = grace.min(OWNED_GRACE);
+            if !escalated {
+                let _ = process.signal(Signal::SIGTERM);
+            }
+            stopping.get_or_insert_with(Instant::now);
+        }
         if let Some(started) = stopping {
             if !escalated && started.elapsed() >= grace {
                 if let Err(error) = process.signal(Signal::SIGKILL) {
@@ -379,6 +466,9 @@ fn drive(
         match request {
             Some(Control::Hangup) => {
                 let _ = process.signal(Signal::SIGHUP);
+                // Keep ownership through escalation even when a closed pane
+                // retains a session reference until its output is drained.
+                stopping.get_or_insert_with(Instant::now);
             }
             Some(Control::Stop(reply)) => {
                 if let Some(reply) = reply {
@@ -403,6 +493,7 @@ fn supervise(
     mut child: ChildGuard,
     control: mpsc::Receiver<Control>,
     _terminal: Terminal,
+    shutdown: &std::sync::atomic::AtomicBool,
 ) -> Ended {
     let mut replies: Vec<StopReply> = Vec::new();
     loop {
@@ -436,6 +527,9 @@ fn supervise(
                 let _ = child.0.as_mut().expect("owned child").kill();
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if shutdown.load(std::sync::atomic::Ordering::Acquire) {
+            let _ = child.0.as_mut().expect("owned child").kill();
         }
     }
 }

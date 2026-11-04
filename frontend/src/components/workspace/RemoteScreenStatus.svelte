@@ -111,7 +111,7 @@
           <button class="remote-status-btn" onclick={() => copy(failure.copy)}>{copied ? "Copied" : "Copy"}</button>
           {#if offersUpdate(status)}
             <button class="remote-status-btn" onclick={onRetry}>Retry</button>
-            <button class="remote-status-btn remote-status-primary" onclick={onUpdate}>Update now…</button>
+            <button class="remote-status-btn remote-status-primary" onclick={onUpdate}>{status.error.migration ? "Update server and connect…" : "Update now…"}</button>
           {:else}
             <button class="remote-status-btn remote-status-primary" onclick={onRetry}>Retry</button>
           {/if}

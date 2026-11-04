@@ -62,8 +62,11 @@ system browser, and the desktop shells refuse to render other origins (SR-27).
 
 **SR-03.** No subframes remain. Tauri skips its ACL for custom commands unless
 the app declares a manifest; `crates/splitty-tauri/build.rs` now declares all of
-them, and `capabilities/` grants them per context: `wsl_start_backend`, which
-hands out a bootstrap URL, only to the bundled setup page.
+them. Runtime capabilities grant the packaged main window its shell commands
+and remote windows only their assigned native transport. Each application
+command also checks the actual WebView and private current-document proof;
+`wsl_start_backend` requires the native setup policy and returns no URL or
+browser credential.
 
 **SR-04.** Split into a single-use bootstrap code (120 s, SR-32), an `HttpOnly`
 `SameSite=Strict` session cookie, single-use 10 s WebSocket tickets and a
@@ -91,8 +94,25 @@ access goes through `splitty connect` over SSH.
 
 **SR-08.** The fetchers were deleted with SR-01.
 
-**SR-09.** The proxy is gone; JSON bodies are capped by Axum's 2 MB default.
-Residual: an authenticated client can still send large terminal input.
+**SR-09.** The proxy is gone. Native framing, API bodies, admitted streams and
+retained application/carrier buffers have explicit byte and admission limits
+(`splitty-transport`, `client_session`, desktop native carriers and the browser
+gateway). Tauri output retains the source and encoding reservations through
+actual native evaluation completion or callback destruction, with independent
+renderer-consumption credit; stale document output is rejected. Retired renderer
+records retain capacity until their normal/cleanup invokes settle. Residual: Wry allocates inbound request bodies before application
+validation. Application bounds therefore do not prove a bound on every framework
+allocation. The actual Linux WebKit and macOS WKWebView full UI runs cover assets, native traffic,
+heartbeat, reload, popouts, independent daemon lifetime and final zero resource
+counters. Native MSVC tests, WebView2 setup-role checks and actual WSL pipe
+traffic/switch checks pass. Following a PID-reuse bug in the Windows harness,
+cleanup now uses private kernel Jobs with assignment before process start.
+Fresh setup and remote-only SSH recovery runs pass. A later WSL quoting
+failure prompted exact guest-identity guards. Their isolated runtime preflight
+and guarded WSL switch/restart rerun pass. Prior process-tree cleanup claims remain invalid. The pre-review platform acceptance matrix passed at its recorded revisions;
+review corrections require their own validation. Whole-framework allocation
+bounds remain outside the application-owned transport contract. See the
+[verification status](../../openspec/changes/native-client-transports/verification.md).
 
 **SR-10.** CI runs `cargo deny check advisories bans sources` and `pnpm audit`
 for both frontends on every push and weekly; Dependabot proposes updates
@@ -111,7 +131,7 @@ anything runs; "layout only" strips them (`frontend/src/lib/template_guard.ts`).
 **SR-13.** `SshTarget::parse` rejects option-like targets, including Unicode
 dashes (`option_like_targets_are_rejected`); `ExitOnForwardFailure` and
 `BatchMode` are pinned, the local port stays reserved until `ssh` starts, and
-the forward is verified before a URL is printed (`crates/splitty-server/src/tunnel.rs`).
+the forward is verified before a URL is printed (`crates/splitty-remote/src/ssh.rs` and `tunnel/forward.rs`).
 
 **SR-14.** `SECURITY.md` was rewritten so every claim points at a test. SR-33
 found remaining inaccuracies.
@@ -148,7 +168,9 @@ are capped at 64 KiB of UTF-8
 shell (`spa_fallback_still_serves_the_app`).
 
 **SR-24.** `/api/bootstrap` exists only on the token-authenticated HTTP path,
-never on the control socket.
+never on the control, native-client, keeper or agent socket. Browser gateways
+own their session stores and instance-specific cookie names; desktop startup
+and SSH bridges neither read a browser token nor mint browser credentials.
 
 **SR-25.** CI builds and tests the Tauri shell for Windows and Linux.
 
@@ -159,15 +181,15 @@ WebView2 popup inside Splitty. The capability now scopes the opener to
 
 **SR-27.** Terminal output is untrusted, and ghostty-web opens OSC 8 hyperlinks
 with a bare `window.open`, bypassing `openExternalTarget`. Both desktop shells
-now decide every navigation and new-window request natively: the backend
-origin and app popouts stay in the window, other web URLs go to the system
+now decide every navigation and new-window request natively: assigned packaged
+entries and parent-owned popouts stay in the app, other web URLs go to the system
 browser, everything else is dropped (`crates/splitty-tauri/src/navigation.rs`
 with unit tests; `hardenWebContents` in `frontend-electron/src/main.ts`). App
 responses carry COOP and CORP `same-origin`.
 
 **SR-28.** Electron 35.7.5 had 37 open Electron/Chromium advisories. Upgraded
 to 44; a permission handler allows only notifications and clipboard writes, and
-only for the backend origin; fuses disable `ELECTRON_RUN_AS_NODE`,
+only for allowed packaged documents; fuses disable `ELECTRON_RUN_AS_NODE`,
 `NODE_OPTIONS` and inspector flags and load app code only from an
 integrity-checked asar.
 

@@ -1,111 +1,32 @@
-//! The frames of `splitty remote-bridge`: the host daemon's WebSocket
-//! messages, carried over the bridge's standard input and output.
-//!
-//! One frame is one message: a kind byte (1 text, 2 binary), the length as a
-//! big-endian `u32`, then the payload. Both ends use this module; [`Bridge`]
-//! is the client's end, which runs the bridge on a host through `ssh`.
+//! Owned native-v1 SSH/desktop pipes: negotiated service identity, bounded
+//! delivery credit and one child lifetime. Browser credentials and TCP listeners
+//! do not belong to this transport.
 
 use std::io;
 use std::process::{ExitStatus, Stdio};
 use std::time::Duration;
 
-use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout, Command};
+use splitty_transport::{
+    admission,
+    budget::{Charged, ConnectionBudget, Lease},
+    negotiation,
+    peer::{Incoming, Peer, Sender},
+    queue, wire,
+    worker::Worker,
+};
+use tokio::io::{AsyncRead, BufReader, ReadBuf};
+use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::task::JoinHandle;
-use tokio::time::timeout;
+use tokio::time::{timeout, Instant};
 
 use crate::install::Server;
-use crate::ssh::{keep_end, kept_end, Ssh, SshTarget};
+use crate::ssh::{diagnostic_budget, keep_end, kept_end, kept_end_for, Diagnostic, Ssh, SshTarget};
 
-/// The largest payload a frame may carry.
-pub const MAX_FRAME: usize = 16 * 1024 * 1024;
-
-const TEXT: u8 = 1;
-const BINARY: u8 = 2;
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Frame {
-    Text(String),
-    Binary(Vec<u8>),
-}
-
-/// The bytes of one frame.
-pub fn encode(frame: &Frame) -> io::Result<Vec<u8>> {
-    let (kind, payload) = match frame {
-        Frame::Text(text) => (TEXT, text.as_bytes()),
-        Frame::Binary(bytes) => (BINARY, bytes.as_slice()),
-    };
-    let length = u32::try_from(payload.len())
-        .ok()
-        .filter(|_| payload.len() <= MAX_FRAME)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "frame too large"))?;
-    let mut bytes = Vec::with_capacity(5 + payload.len());
-    bytes.push(kind);
-    bytes.extend_from_slice(&length.to_be_bytes());
-    bytes.extend_from_slice(payload);
-    Ok(bytes)
-}
-
-/// Write one frame and flush it.
-pub async fn write_frame<W: AsyncWrite + Unpin>(writer: &mut W, frame: &Frame) -> io::Result<()> {
-    writer.write_all(&encode(frame)?).await?;
-    writer.flush().await
-}
-
-/// Read one frame; `None` when the input ends cleanly between frames.
-pub async fn read_frame<R: AsyncRead + Unpin>(reader: &mut R) -> io::Result<Option<Frame>> {
-    let mut kind = [0u8; 1];
-    if reader.read(&mut kind).await? == 0 {
-        return Ok(None);
-    }
-    let mut length = [0u8; 4];
-    reader.read_exact(&mut length).await?;
-    let length = u32::from_be_bytes(length) as usize;
-    if length > MAX_FRAME {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "frame too large",
-        ));
-    }
-    let mut payload = vec![0u8; length];
-    reader.read_exact(&mut payload).await?;
-    match kind[0] {
-        TEXT => String::from_utf8(payload)
-            .map(|text| Some(Frame::Text(text)))
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "text frame is not UTF-8")),
-        BINARY => Ok(Some(Frame::Binary(payload))),
-        other => Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("unknown frame kind {other}"),
-        )),
-    }
-}
-
-/// `splitty remote-bridge` on a host, run as a child process: frames go to its
-/// standard input and come from its standard output, and the end of its error
-/// output is kept for a message. The process is killed when the bridge, or its
-/// [`BridgeProcess`] after [`Bridge::split`], is dropped.
-pub struct Bridge {
-    sender: BridgeSender,
-    receiver: BridgeReceiver,
-    process: BridgeProcess,
-}
-
-/// The half of a [`Bridge`] that sends frames to the host. Dropping it ends
-/// the bridge's input, which ends the bridge cleanly.
-pub struct BridgeSender {
-    stdin: ChildStdin,
-}
-
-/// The half of a [`Bridge`] that receives the host's frames.
-pub struct BridgeReceiver {
-    stdout: BufReader<ChildStdout>,
-}
-
-/// The process of a [`Bridge`].
+/// The owned child and its bounded diagnostic drain.
 pub struct BridgeProcess {
-    child: Child,
-    stderr: Option<JoinHandle<String>>,
+    child: Worker,
+    stderr: Option<JoinHandle<Diagnostic>>,
+    budget: ConnectionBudget,
 }
 
 /// How a bridge's process ended.
@@ -114,84 +35,386 @@ pub struct Ended {
     /// Its exit status, unless waiting for it failed.
     pub status: io::Result<ExitStatus>,
     /// The end of its error output, trimmed.
-    pub stderr: String,
+    pub stderr: Diagnostic,
+    /// Owner budget used for any derived retained diagnostics.
+    pub budget: ConnectionBudget,
 }
 
-impl Bridge {
-    /// `splitty remote-bridge` on `target`, run by `server`, over a
-    /// connection that carries nothing but the bridge's standard input and
-    /// output ([`Ssh::stdio_only`]). Needs a Tokio runtime.
-    pub fn open(target: &SshTarget, server: &Server) -> io::Result<Self> {
-        Self::spawn(open_command(&Ssh::stdio_only(target.clone()), server))
+#[derive(Debug)]
+struct OpenFailure {
+    source: io::Error,
+    ended: Ended,
+}
+impl std::fmt::Display for OpenFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.source)?;
+        if !self.ended.stderr.is_empty() {
+            write!(f, ": {}", self.ended.stderr)?;
+        }
+        Ok(())
+    }
+}
+impl std::error::Error for OpenFailure {}
+
+/// Keep SSH authentication/host-key diagnostics typed across pipe negotiation.
+/// A framing error is not mistaken for an executable-spawn failure.
+pub fn ssh_failure(host: &str, error: &io::Error) -> Option<crate::ssh::SshError> {
+    // An observed framing/identity failure is more precise than a generic
+    // process exit255. Keep stale identity typed for rediscovery too.
+    if protocol_failure(error) || stale_instance(error) {
+        return None;
+    }
+    let failure = error.get_ref()?.downcast_ref::<OpenFailure>()?;
+    let status = failure.ended.status.as_ref().ok()?;
+    (status.code() == Some(255)).then(|| {
+        crate::ssh::classify_budgeted(host, *status, &failure.ended.stderr, &failure.ended.budget)
+    })
+}
+
+pub fn stale_instance(error: &io::Error) -> bool {
+    let source = error
+        .get_ref()
+        .and_then(|source| source.downcast_ref::<OpenFailure>())
+        .map_or(error, |failure| &failure.source);
+    negotiation::stale_instance(source)
+}
+
+pub fn protocol_failure(error: &io::Error) -> bool {
+    !stale_instance(error)
+        && matches!(
+            error.kind(),
+            io::ErrorKind::InvalidData
+                | io::ErrorKind::InvalidInput
+                | io::ErrorKind::Unsupported
+                | io::ErrorKind::PermissionDenied
+        )
+}
+
+// The buffer reservation belongs to the reader itself, including while a
+// peer task is being cancelled after its process owner has been dropped.
+struct BridgeOutput {
+    inner: BufReader<ChildStdout>,
+    _bytes: Lease,
+}
+impl AsyncRead for BridgeOutput {
+    fn poll_read(
+        mut self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> std::task::Poll<io::Result<()>> {
+        std::pin::Pin::new(&mut self.inner).poll_read(cx, buffer)
+    }
+}
+
+#[cfg(test)]
+fn spawn_pipes(command: Command) -> io::Result<(ChildStdin, BridgeOutput, BridgeProcess)> {
+    spawn_pipes_budgeted(command, &ConnectionBudget::default())
+}
+
+fn spawn_pipes_budgeted(
+    mut command: Command,
+    budget: &ConnectionBudget,
+) -> io::Result<(ChildStdin, BridgeOutput, BridgeProcess)> {
+    const READER_BYTES: usize = 8192;
+    command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let diagnostic_bytes = diagnostic_budget(budget)?;
+    let reader_bytes = budget
+        .reserve(READER_BYTES, false)
+        .map_err(|error| io::Error::new(io::ErrorKind::WouldBlock, error))?;
+    let mut child = Worker::spawn(&mut command, &admission::Admission::global())?;
+    let not_piped = || io::Error::other("the bridge's standard streams are not piped");
+    let stdin = child.stdin().ok_or_else(not_piped)?;
+    let stdout = child.stdout().ok_or_else(not_piped)?;
+    let stderr = child
+        .stderr()
+        .map(|stderr| tokio::spawn(keep_end(stderr, diagnostic_bytes)));
+    let reader = BridgeOutput {
+        inner: BufReader::with_capacity(READER_BYTES, stdout),
+        _bytes: reader_bytes,
+    };
+    Ok((
+        stdin,
+        reader,
+        BridgeProcess {
+            child,
+            stderr,
+            budget: budget.clone(),
+        },
+    ))
+}
+
+/// A negotiated native exec bridge. It uses the shared framing, admission,
+/// delivery-credit and liveness implementation, including for API operations.
+pub struct NativeBridge {
+    ready: Option<Charged<wire::Ready>>,
+    live: Option<NativeConnection>,
+}
+
+struct NativeConnection {
+    peer: Option<Peer>,
+    owner_watch: Option<JoinHandle<()>>,
+    process: BridgeProcess,
+    owner_cleanup: bool,
+    _carrier: admission::Carrier,
+    opening: Option<admission::Opening>,
+    stream: Option<admission::Stream>,
+}
+
+impl NativeConnection {
+    async fn finish(mut self) -> (io::Result<()>, Ended) {
+        // Pipe/task shutdown and diagnostics consume the same app-owned exit
+        // budget. Reserve a small margin within the public three-second bound.
+        let owner_deadline = self
+            .owner_cleanup
+            .then(|| Instant::now() + Duration::from_millis(2900));
+        let result = match self.peer.take() {
+            Some(peer) => peer.finish().await,
+            None => Ok(()),
+        };
+        if let Some(watch) = self.owner_watch.take() {
+            let _ = watch.await;
+        }
+        let ended = match owner_deadline {
+            Some(deadline) => self.process.finish_owner(deadline).await,
+            None => self.process.finish(Duration::from_millis(500)).await,
+        };
+        (result, ended)
+    }
+}
+
+impl NativeBridge {
+    /// `assignment` comes from the owning broker, never from host metadata.
+    /// Expected instance and mux version come from a checked host handshake.
+    pub async fn open(
+        target: &SshTarget,
+        server: &Server,
+        assignment: admission::Assignment,
+        expected: negotiation::Expected<'_>,
+    ) -> io::Result<Self> {
+        let admission = admission::Admission::global();
+        let carrier = admission.carrier().map_err(io::Error::other)?;
+        let opening = admission.begin(assignment).map_err(io::Error::other)?;
+        Self::open_admitted(target, server, (carrier, opening), expected).await
     }
 
-    /// Run `command` as a bridge, with its standard streams piped. Needs a
-    /// Tokio runtime.
-    pub fn spawn(mut command: Command) -> io::Result<Self> {
-        let mut child = command
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()?;
-        let not_piped = || io::Error::other("the bridge's standard streams are not piped");
-        let stdin = child.stdin.take().ok_or_else(not_piped)?;
-        let stdout = child.stdout.take().ok_or_else(not_piped)?;
-        let stderr = child
-            .stderr
-            .take()
-            .map(|stderr| tokio::spawn(keep_end(stderr)));
-        Ok(Self {
-            sender: BridgeSender { stdin },
-            receiver: BridgeReceiver {
-                stdout: BufReader::new(stdout),
-            },
-            process: BridgeProcess { child, stderr },
-        })
+    pub async fn open_admitted(
+        target: &SshTarget,
+        server: &Server,
+        capacity: (admission::Carrier, admission::Opening),
+        expected: negotiation::Expected<'_>,
+    ) -> io::Result<Self> {
+        let ssh = Ssh::stdio_only(target.clone());
+        Self::open_with_ssh(&ssh, server, capacity, expected).await
     }
 
-    pub async fn send(&mut self, frame: &Frame) -> io::Result<()> {
-        self.sender.send(frame).await
+    pub async fn open_context(
+        target: &SshTarget,
+        server: &Server,
+        capacity: (admission::Carrier, admission::Opening),
+        context: queue::Context,
+        expected: negotiation::Expected<'_>,
+    ) -> io::Result<Self> {
+        let ssh = Ssh::stdio_only(target.clone()).with_context(context);
+        Self::open_with_ssh(&ssh, server, capacity, expected).await
     }
 
-    /// The next frame from the host; `None` when the bridge's output ended.
-    pub async fn recv(&mut self) -> io::Result<Option<Frame>> {
-        self.receiver.recv().await
+    pub(crate) async fn open_with_ssh(
+        ssh: &Ssh,
+        server: &Server,
+        capacity: (admission::Carrier, admission::Opening),
+        expected: negotiation::Expected<'_>,
+    ) -> io::Result<Self> {
+        let command = open_command(ssh, server);
+        Self::spawn_context(command, capacity, expected, ssh.context(), |_| {}).await
     }
 
-    pub fn process(&mut self) -> &mut BridgeProcess {
-        &mut self.process
+    /// Also used by owned desktop helpers; the caller constructs the executable
+    /// and arguments without interpreting a renderer-provided command line.
+    pub async fn spawn(
+        command: Command,
+        assignment: admission::Assignment,
+        expected: negotiation::Expected<'_>,
+        progress: impl FnMut(Charged<wire::Progress>),
+    ) -> io::Result<Self> {
+        let admission = admission::Admission::global();
+        let carrier = admission.carrier().map_err(io::Error::other)?;
+        let opening = admission.begin(assignment).map_err(io::Error::other)?;
+        Self::spawn_admitted(command, (carrier, opening), expected, progress).await
     }
 
-    /// Its halves, to send and receive at the same time.
-    pub fn split(self) -> (BridgeSender, BridgeReceiver, BridgeProcess) {
-        (self.sender, self.receiver, self.process)
+    pub async fn spawn_admitted(
+        command: Command,
+        (carrier, opening): (admission::Carrier, admission::Opening),
+        expected: negotiation::Expected<'_>,
+        progress: impl FnMut(Charged<wire::Progress>),
+    ) -> io::Result<Self> {
+        Self::spawn_context(
+            command,
+            (carrier, opening),
+            expected,
+            queue::Context::default(),
+            progress,
+        )
+        .await
+    }
+
+    /// Desktop brokers supply their document-owned context so revocation also
+    /// interrupts child preparation, and IPC and pipe bytes share one budget.
+    pub async fn spawn_context(
+        command: Command,
+        (carrier, opening): (admission::Carrier, admission::Opening),
+        expected: negotiation::Expected<'_>,
+        context: queue::Context,
+        progress: impl FnMut(Charged<wire::Progress>),
+    ) -> io::Result<Self> {
+        if context.is_closed() {
+            return Err(io::Error::new(
+                io::ErrorKind::BrokenPipe,
+                "native owner closed",
+            ));
+        }
+        // All opening/carrier and OS-worker capacity is held before spawning.
+        let (mut input, mut output, process) = spawn_pipes_budgeted(command, &context.budget)?;
+        let mut bridge = Self {
+            ready: None,
+            live: Some(NativeConnection {
+                peer: None,
+                owner_watch: None,
+                process,
+                owner_cleanup: matches!(expected.purpose, wire::Purpose::Owner),
+                _carrier: carrier,
+                opening: Some(opening),
+                stream: None,
+            }),
+        };
+        let mut closing = context.closing();
+        let result = tokio::select! { biased;
+            _ = closing.wait_for(|closed| *closed) => Err(io::Error::new(io::ErrorKind::BrokenPipe, "native owner closed")),
+            ready = async {
+                negotiation::client(&mut output, &mut input, &context.budget).await?;
+                negotiation::accept(&mut output, &mut input, &context.budget, expected, progress).await
+            } => ready,
+        };
+        // A progress callback can revoke the owner during the same poll that
+        // consumes an already-buffered Ready; select does not repoll close.
+        let result = result.and_then(|ready| {
+            if context.is_closed() {
+                Err(io::Error::new(
+                    io::ErrorKind::BrokenPipe,
+                    "native owner closed",
+                ))
+            } else {
+                Ok(ready)
+            }
+        });
+        let ready = match result {
+            Ok(ready) => ready,
+            Err(error) => {
+                drop(input);
+                drop(output);
+                let (_, ended) = bridge.finish().await;
+                return Err(io::Error::new(
+                    error.kind(),
+                    OpenFailure {
+                        source: error,
+                        ended,
+                    },
+                ));
+            }
+        };
+        let live = bridge.live.as_mut().expect("owned bridge");
+        live.stream = Some(
+            live.opening
+                .take()
+                .expect("opening capacity")
+                .admit()
+                .map_err(io::Error::other)?,
+        );
+        // Owner cancellation flows into this hop, not backwards. A malformed
+        // host frame must remain a reportable backend failure rather than
+        // masquerading as cancellation of the document preparing that host.
+        let peer_context = context.child();
+        let peer_closing = peer_context.clone();
+        live.owner_watch = Some(tokio::spawn(async move {
+            let mut owner = context.closing();
+            let mut peer = peer_closing.closing();
+            tokio::select! { biased;
+                _ = owner.wait_for(|closed| *closed) => peer_closing.close(),
+                _ = peer.wait_for(|closed| *closed) => {},
+            }
+        }));
+        live.peer = Some(Peer::start(output, input, &ready, peer_context));
+        bridge.ready = Some(ready);
+        Ok(bridge)
+    }
+
+    pub fn ready(&self) -> &wire::Ready {
+        self.ready.as_ref().expect("admitted native bridge")
+    }
+    pub fn sender(&self) -> Sender {
+        self.live
+            .as_ref()
+            .and_then(|live| live.peer.as_ref())
+            .expect("admitted native bridge")
+            .sender
+            .clone()
+    }
+    pub async fn recv(&mut self) -> Option<Charged<Incoming>> {
+        self.live.as_mut()?.peer.as_mut()?.recv().await
+    }
+    pub fn id(&self) -> Option<u32> {
+        self.live.as_ref().and_then(|live| live.process.id())
+    }
+    pub async fn finish(mut self) -> (io::Result<()>, Ended) {
+        let live = self.live.take().expect("owned bridge");
+        // Abandoning a completion wait must not release the stream/carrier
+        // before peer cleanup and observed child exit. The worker alone only
+        // retains the OS-worker quota, not the surrounding connection slots.
+        match tokio::spawn(live.finish()).await {
+            Ok(ended) => ended,
+            Err(error) => (
+                Err(io::Error::other("native cleanup task failed")),
+                Ended {
+                    status: Err(io::Error::other(error)),
+                    stderr: Default::default(),
+                    budget: ConnectionBudget::default(),
+                },
+            ),
+        }
+    }
+}
+
+impl Drop for NativeBridge {
+    fn drop(&mut self) {
+        if let Some(live) = self.live.take() {
+            if let Some(peer) = &live.peer {
+                peer.sender.close();
+            }
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                runtime.spawn(async move {
+                    let _ = live.finish().await;
+                });
+            }
+        }
     }
 }
 
 /// `ssh <options> <target> -- '<server>' remote-bridge`.
 fn open_command(ssh: &Ssh, server: &Server) -> Command {
-    let line = server.command().word("remote-bridge");
+    let line = server
+        .command()
+        .word("remote-bridge")
+        .word("--transport")
+        .word("native-v1");
     let mut command = ssh.command();
     command
         .arg(ssh.target().as_str())
         .arg("--")
         .arg(line.as_str());
     command
-}
-
-impl BridgeSender {
-    pub async fn send(&mut self, frame: &Frame) -> io::Result<()> {
-        write_frame(&mut self.stdin, frame).await
-    }
-}
-
-impl BridgeReceiver {
-    /// The next frame; `None` when the output ended between frames. Not
-    /// cancel-safe: a frame read halfway is lost.
-    pub async fn recv(&mut self) -> io::Result<Option<Frame>> {
-        read_frame(&mut self.stdout).await
-    }
 }
 
 impl BridgeProcess {
@@ -204,7 +427,11 @@ impl BridgeProcess {
     pub async fn ended(&mut self) -> Ended {
         let status = self.child.wait().await;
         let stderr = kept_end(self.stderr.take()).await;
-        Ended { status, stderr }
+        Ended {
+            status,
+            stderr,
+            budget: self.budget.clone(),
+        }
     }
 
     /// Kill the process and wait for it.
@@ -214,7 +441,28 @@ impl BridgeProcess {
         self.ended().await
     }
 
-    /// End a bridge whose [`BridgeSender`] is dropped: it gets `grace` to
+    async fn finish_owner(&mut self, deadline: Instant) -> Ended {
+        // Owned PTY lifecycle retains its child through a 500ms escalation
+        // grace before reaping. The relay's identical 500ms kill races cleanup.
+        let grace =
+            Duration::from_millis(2750).min(deadline.saturating_duration_since(Instant::now()));
+        let status = match timeout(grace, self.child.wait()).await {
+            Ok(status) => status,
+            Err(_) => {
+                let _ = self.child.start_kill();
+                self.child.wait().await
+            }
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let stderr = kept_end_for(self.stderr.take(), remaining).await;
+        Ended {
+            status,
+            stderr,
+            budget: self.budget.clone(),
+        }
+    }
+
+    /// End a bridge whose input is closed: it gets `grace` to
     /// finish on its own, then it is killed.
     pub async fn finish(&mut self, grace: Duration) -> Ended {
         match timeout(grace, self.child.wait()).await {
@@ -224,49 +472,18 @@ impl BridgeProcess {
     }
 }
 
+impl Drop for BridgeProcess {
+    fn drop(&mut self) {
+        if let Some(task) = self.stderr.take() {
+            task.abort();
+        }
+        // Worker retains its capacity until its reaper observes exit.
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[tokio::test]
-    async fn frames_round_trip_in_order() {
-        let frames = [
-            Frame::Text(r#"{"type":"mux.resync"}"#.into()),
-            Frame::Binary(vec![0, 1, 2, 255]),
-            Frame::Text(String::new()),
-            Frame::Binary(Vec::new()),
-        ];
-        let mut bytes = Vec::new();
-        for frame in &frames {
-            write_frame(&mut bytes, frame).await.expect("write");
-        }
-        assert_eq!(&bytes[..5], [1, 0, 0, 0, 21]);
-        let mut reader = bytes.as_slice();
-        for frame in &frames {
-            assert_eq!(
-                read_frame(&mut reader).await.expect("read").as_ref(),
-                Some(frame)
-            );
-        }
-        assert_eq!(read_frame(&mut reader).await.expect("end"), None);
-    }
-
-    #[tokio::test]
-    async fn oversized_unknown_and_truncated_frames_are_errors() {
-        let mut oversized = vec![2u8];
-        oversized.extend_from_slice(&((MAX_FRAME + 1) as u32).to_be_bytes());
-        assert!(read_frame(&mut oversized.as_slice()).await.is_err());
-        assert!(encode(&Frame::Binary(vec![0; MAX_FRAME + 1])).is_err());
-
-        let unknown = [9u8, 0, 0, 0, 0];
-        assert!(read_frame(&mut unknown.as_slice()).await.is_err());
-
-        let truncated = [1u8, 0, 0, 0, 5, b'a'];
-        assert!(read_frame(&mut truncated.as_slice()).await.is_err());
-
-        let bad_text = [1u8, 0, 0, 0, 1, 0xff];
-        assert!(read_frame(&mut bad_text.as_slice()).await.is_err());
-    }
 
     /// The bridge runs the installed server by its quoted path, over a
     /// connection that forwards nothing.
@@ -287,7 +504,7 @@ mod tests {
         expected.extend([
             "user@vm".to_owned(),
             "--".to_owned(),
-            r"'/home/it'\''s me/.local/share/splitty/remote/0.1.0/splitty' remote-bridge"
+            r"'/home/it'\''s me/.local/share/splitty/remote/0.1.0/splitty' remote-bridge --transport native-v1"
                 .to_owned(),
         ]);
         assert_eq!(args, expected);
@@ -300,40 +517,568 @@ mod tests {
         command
     }
 
-    /// `cat` echoes every frame: what goes in comes back, in order, and the end
-    /// of the input ends the bridge cleanly.
     #[cfg(unix)]
     #[tokio::test]
-    async fn a_bridge_carries_frames_both_ways_and_ends_with_its_input() {
-        let mut bridge = Bridge::spawn(sh("exec cat")).expect("spawn");
-        let frames = [
-            Frame::Text(r#"{"type":"mux.resync"}"#.into()),
-            Frame::Binary(vec![0, 1, 2, 255]),
-        ];
-        for frame in &frames {
-            bridge.send(frame).await.expect("send");
-        }
-        for frame in &frames {
-            assert_eq!(bridge.recv().await.expect("recv").as_ref(), Some(frame));
-        }
+    async fn a_native_bridge_negotiates_and_relays_in_order_until_pipe_eof() {
+        let ready = wire::Ready {
+            generation: 1,
+            instance: "a".repeat(32),
+            mux_protocol: 1,
+            purpose: wire::Purpose::Direct,
+            limits: wire::Limits::default(),
+        };
+        let mut command = Command::new("python3");
+        command
+            .args(["-u", "-c", include_str!("../tests/native_bridge.py")])
+            .arg(serde_json::to_string(&ready).unwrap())
+            .arg(r#"{"type":"mux.welcome"}"#);
+        let context = queue::Context::default();
+        let admission = admission::Admission::global();
+        let capacity = (
+            admission.carrier().unwrap(),
+            admission
+                .begin(admission::Assignment::new(
+                    admission::Backend::new(),
+                    admission::Domain::new(),
+                ))
+                .unwrap(),
+        );
+        let mut bridge = NativeBridge::spawn_context(
+            command,
+            capacity,
+            negotiation::Expected {
+                instance: Some(&ready.instance),
+                purpose: &ready.purpose,
+                mux_protocol: 1,
+                preparation: wire::HANDSHAKE_TIMEOUT,
+            },
+            context.clone(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(bridge.ready(), &ready);
+        assert!(std::sync::Arc::ptr_eq(
+            &context.budget.data,
+            &bridge.sender().context().budget.data
+        ));
+        assert!(std::sync::Arc::ptr_eq(
+            &context.budget.control,
+            &bridge.sender().context().budget.control
+        ));
+        let welcome = bridge.recv().await.unwrap();
+        assert_eq!(
+            welcome.frame.application().unwrap().1,
+            br#"{"type":"mux.welcome"}"#
+        );
+        drop(welcome);
+        let input = br#"{"type":"input","sessionId":"p","data":"test"}"#;
+        bridge.sender().data(wire::Kind::Text, input).unwrap();
+        let echo = bridge.recv().await.unwrap();
+        assert_eq!(echo.frame.application().unwrap().1, input);
+        drop(echo);
+        let binary = bridge.recv().await.unwrap();
+        assert_eq!(binary.frame.kind, wire::Kind::Binary);
+        assert_eq!(binary.frame.application().unwrap().1, &[0, 1, 2, 255]);
+        drop(binary);
+        let (result, ended) = bridge.finish().await;
+        result.unwrap();
+        assert!(ended.status.unwrap().success(), "{}", ended.stderr);
+    }
 
-        let (sender, mut receiver, mut process) = bridge.split();
-        drop(sender);
-        assert_eq!(receiver.recv().await.expect("end"), None);
-        let ended = process.finish(Duration::from_secs(10)).await;
-        assert!(ended.status.expect("status").success());
+    /// The app-owned helper must finish its lifecycle reaper after EOF. An
+    /// ordinary SSH relay retains the shorter teardown grace.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn embedded_owner_cleanup_outlives_the_ordinary_relay_grace() {
+        for (purpose, cleans_up) in [(wire::Purpose::Owner, true), (wire::Purpose::Direct, false)] {
+            let directory = tempfile::tempdir().unwrap();
+            let marker = directory.path().join("cleaned");
+            let ready = wire::Ready {
+                generation: 1,
+                instance: "a".repeat(32),
+                mux_protocol: 1,
+                purpose,
+                limits: wire::Limits::default(),
+            };
+            let mut command = Command::new("python3");
+            command
+                .args(["-u", "-c", include_str!("../tests/native_bridge.py")])
+                .arg(serde_json::to_string(&ready).unwrap())
+                .arg("__OWNER_CLEANUP__")
+                .arg(&marker);
+            let admission = admission::Admission::global();
+            let capacity = (
+                admission.carrier().unwrap(),
+                admission
+                    .begin(admission::Assignment::new(
+                        admission::Backend::new(),
+                        admission::Domain::new(),
+                    ))
+                    .unwrap(),
+            );
+            let context = queue::Context::default();
+            let bridge = NativeBridge::spawn_context(
+                command,
+                capacity,
+                negotiation::Expected {
+                    instance: Some(&ready.instance),
+                    purpose: &ready.purpose,
+                    mux_protocol: 1,
+                    preparation: wire::HANDSHAKE_TIMEOUT,
+                },
+                context.clone(),
+                |_| {},
+            )
+            .await
+            .unwrap();
+            let (_, ended) = tokio::time::timeout(Duration::from_secs(3), bridge.finish())
+                .await
+                .unwrap();
+            assert_eq!(
+                ended.status.as_ref().unwrap().success(),
+                cleans_up,
+                "{ended:?}"
+            );
+            assert_eq!(
+                marker.exists(),
+                cleans_up,
+                "only owner cleanup completes before observed child exit"
+            );
+            drop(ended);
+            assert_eq!(context.budget.used(), 0);
+        }
+    }
+
+    /// A second exact owned process holds a real stderr pipe open. Its drain
+    /// must consume the owner's remaining deadline, not add two more seconds.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owner_exit_deadline_includes_a_stderr_pipe_held_open_after_child_exit() {
+        let ready = wire::Ready {
+            generation: 1,
+            instance: "a".repeat(32),
+            mux_protocol: 1,
+            purpose: wire::Purpose::Owner,
+            limits: wire::Limits::default(),
+        };
+        let mut command = Command::new("python3");
+        command
+            .args(["-u", "-c", include_str!("../tests/native_bridge.py")])
+            .arg(serde_json::to_string(&ready).unwrap())
+            .arg("__IGNORE_EOF__");
+        let admission = admission::Admission::global();
+        let capacity = (
+            admission.carrier().unwrap(),
+            admission
+                .begin(admission::Assignment::new(
+                    admission::Backend::new(),
+                    admission::Domain::new(),
+                ))
+                .unwrap(),
+        );
+        let context = queue::Context::default();
+        let mut bridge = NativeBridge::spawn_context(
+            command,
+            capacity,
+            negotiation::Expected {
+                instance: None,
+                purpose: &ready.purpose,
+                mux_protocol: 1,
+                preparation: wire::HANDSHAKE_TIMEOUT,
+            },
+            context.clone(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let mut holder = Command::new("sleep")
+            .arg("30")
+            .stderr(Stdio::piped())
+            .kill_on_drop(true)
+            .spawn()
+            .unwrap();
+        let process = &mut bridge.live.as_mut().unwrap().process;
+        let original = process.stderr.take().unwrap();
+        original.abort();
+        let _ = original.await;
+        process.stderr = Some(tokio::spawn(keep_end(
+            holder.stderr.take().unwrap(),
+            diagnostic_budget(&context.budget).unwrap(),
+        )));
+        let result = tokio::time::timeout(Duration::from_secs(3), bridge.finish()).await;
+        // Retain the exact holder handle and reap it even if the assertion fails.
+        holder.kill().await.unwrap();
+        let (_, ended) =
+            result.expect("child exit plus pending stderr drain fit the owner deadline");
+        assert!(!ended.status.as_ref().unwrap().success());
+        drop(ended);
+        assert_eq!(
+            context.budget.used(),
+            0,
+            "aborted drain releases its actual storage"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn backend_failure_does_not_revoke_its_owner_but_owner_close_rejects_input_immediately() {
+        for malformed in [true, false] {
+            let ready = wire::Ready {
+                generation: 1,
+                instance: "a".repeat(32),
+                mux_protocol: 1,
+                purpose: wire::Purpose::Direct,
+                limits: wire::Limits::default(),
+            };
+            let mut command = Command::new("python3");
+            command
+                .args(["-u", "-c", include_str!("../tests/native_bridge.py")])
+                .arg(serde_json::to_string(&ready).unwrap())
+                .arg(if malformed {
+                    "__INVALID_FRAME_EXIT_255__"
+                } else {
+                    "__IGNORE_EOF__"
+                });
+            let context = queue::Context::default();
+            let admission = std::sync::Arc::new(admission::Admission::default());
+            let capacity = (
+                admission.carrier().unwrap(),
+                admission
+                    .begin(admission::Assignment::new(
+                        admission::Backend::new(),
+                        admission::Domain::new(),
+                    ))
+                    .unwrap(),
+            );
+            let mut bridge = NativeBridge::spawn_context(
+                command,
+                capacity,
+                negotiation::Expected {
+                    instance: Some(&ready.instance),
+                    purpose: &ready.purpose,
+                    mux_protocol: 1,
+                    preparation: wire::HANDSHAKE_TIMEOUT,
+                },
+                context.clone(),
+                |_| {},
+            )
+            .await
+            .unwrap();
+            if malformed {
+                assert!(tokio::time::timeout(Duration::from_secs(3), bridge.recv())
+                    .await
+                    .unwrap()
+                    .is_none());
+                assert!(
+                    !context.is_closed(),
+                    "the owner can still deliver the backend error"
+                );
+                let (result, ended) = bridge.finish().await;
+                assert_eq!(result.unwrap_err().kind(), io::ErrorKind::InvalidData);
+                assert!(ended.status.is_ok());
+            } else {
+                context.close();
+                assert!(
+                    bridge.sender().data(wire::Kind::Text, b"stale").is_err(),
+                    "revocation needs no watcher scheduling turn"
+                );
+                let _ = bridge.finish().await;
+            }
+            assert_eq!(context.budget.used(), 0);
+            assert_eq!(admission.counts().streams, 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn abandoned_finish_wait_keeps_connection_slots_until_child_exit() {
+        let ready = wire::Ready {
+            generation: 1,
+            instance: "a".repeat(32),
+            mux_protocol: 1,
+            purpose: wire::Purpose::Direct,
+            limits: wire::Limits::default(),
+        };
+        let mut command = Command::new("python3");
+        command
+            .args(["-u", "-c", include_str!("../tests/native_bridge.py")])
+            .arg(serde_json::to_string(&ready).unwrap())
+            .arg("__IGNORE_EOF__");
+        let context = queue::Context::default();
+        let admission = std::sync::Arc::new(admission::Admission::default());
+        let capacity = (
+            admission.carrier().unwrap(),
+            admission
+                .begin(admission::Assignment::new(
+                    admission::Backend::new(),
+                    admission::Domain::new(),
+                ))
+                .unwrap(),
+        );
+        let bridge = NativeBridge::spawn_context(
+            command,
+            capacity,
+            negotiation::Expected {
+                instance: Some(&ready.instance),
+                purpose: &ready.purpose,
+                mux_protocol: 1,
+                preparation: wire::HANDSHAKE_TIMEOUT,
+            },
+            context.clone(),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        let pid = bridge.id().unwrap();
+        let peer_context = bridge.sender().context();
+        let wait = tokio::spawn(bridge.finish());
+        let mut closing = peer_context.closing();
+        closing.wait_for(|closed| *closed).await.unwrap();
+        wait.abort();
+        let _ = wait.await;
+        assert_eq!(admission.counts().carriers, 1);
+        assert_eq!(admission.counts().streams, 1);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while admission.counts().carriers != 0 || context.budget.used() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("background cleanup finishes despite abandoned completion wait");
+        assert_eq!(admission.counts().streams, 0);
+        assert!(!Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stderr(Stdio::null())
+            .status()
+            .await
+            .unwrap()
+            .success());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bridge_buffers_are_admitted_before_spawn_and_retained_by_their_consumers() {
+        use splitty_transport::budget::ProcessBudget;
+        let total = 1024 * 1024;
+        let aggregate = ProcessBudget::new(total, 0);
+        let budget = ConnectionBudget::new(aggregate.clone(), total, 0);
+        let held = aggregate.data.acquire(total).unwrap();
+        let fixture = tempfile::tempdir().unwrap();
+        let marker = fixture.path().join("started");
+        let mut command = Command::new("touch");
+        command.arg(&marker);
+        let error = match spawn_pipes_budgeted(command, &budget) {
+            Ok(_) => panic!("a full byte budget must refuse the child"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::WouldBlock);
+        assert!(!marker.exists());
+        assert_eq!(budget.used(), 0);
+        drop(held);
+        let mut command = Command::new("python3");
+        command.args(["-c", "import sys; sys.stderr.buffer.write(b'\\xff' * 8192)"]);
+        let (input, output, mut process) = spawn_pipes_budgeted(command, &budget).unwrap();
+        drop(input);
+        let ended = process.ended().await;
+        assert!(ended.status.as_ref().unwrap().success());
+        drop(process);
+        assert_eq!(ended.stderr.as_str(), "\u{fffd}".repeat(8192));
+        let diagnostic_bytes = ended.stderr.capacity() + std::mem::size_of::<String>();
+        assert_eq!(budget.used(), 8192 + diagnostic_bytes);
+        drop(output);
+        assert_eq!(
+            aggregate.used(),
+            diagnostic_bytes,
+            "process exit does not release an unconsumed diagnostic"
+        );
+        drop(ended);
+        assert_eq!(aggregate.used(), 0);
+
+        let (input, output, process) = spawn_pipes_budgeted(sh("exec sleep 30"), &budget).unwrap();
+        drop((input, output, process));
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while aggregate.used() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("aborted stderr readers release their storage after cancellation");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn owner_revocation_rejects_spawn_and_reaps_an_incomplete_bridge() {
+        use splitty_transport::budget::ProcessBudget;
+        let aggregate = ProcessBudget::new(wire::PROCESS_BYTES, wire::PROCESS_CONTROL_BYTES);
+        let context = queue::Context::new(ConnectionBudget::new(
+            aggregate.clone(),
+            wire::CONNECTION_BYTES,
+            wire::CONNECTION_CONTROL_BYTES,
+        ));
+        let capacity = std::sync::Arc::new(admission::Admission::default());
+        let reserve = || {
+            (
+                capacity.carrier().unwrap(),
+                capacity
+                    .begin(admission::Assignment::new(
+                        admission::Backend::new(),
+                        admission::Domain::new(),
+                    ))
+                    .unwrap(),
+            )
+        };
+        let expected = || negotiation::Expected {
+            instance: None,
+            purpose: &wire::Purpose::Direct,
+            mux_protocol: 1,
+            preparation: wire::HANDSHAKE_TIMEOUT,
+        };
+        let fixture = tempfile::tempdir().unwrap();
+        let marker = fixture.path().join("child.pid");
+        let command = || {
+            let mut child = Command::new("sh");
+            child
+                .args(["-c", "echo $$ > \"$1\"; exec sleep 30", "sh"])
+                .arg(&marker);
+            child
+        };
+        let closed = queue::Context::default();
+        closed.close();
+        let error =
+            match NativeBridge::spawn_context(command(), reserve(), expected(), closed, |_| {})
+                .await
+            {
+                Ok(_) => panic!("revoked owner must not spawn"),
+                Err(error) => error,
+            };
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        assert!(!marker.exists());
+        assert_eq!(capacity.counts().carriers, 0);
+        assert_eq!(capacity.counts().streams, 0);
+        let pending =
+            NativeBridge::spawn_context(command(), reserve(), expected(), context.clone(), |_| {});
+        let cancel = async {
+            let pid = tokio::time::timeout(Duration::from_secs(3), async {
+                loop {
+                    if let Ok(pid) = tokio::fs::read_to_string(&marker).await {
+                        if let Ok(pid) = pid.trim().parse::<u32>() {
+                            break pid;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("child started");
+            context.close();
+            pid
+        };
+        let (result, pid) = tokio::join!(pending, cancel);
+        let error = match result {
+            Ok(_) => panic!("revoked handshake admitted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        let failure = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<OpenFailure>()
+            .unwrap();
+        assert!(!failure.ended.status.as_ref().unwrap().success());
+        assert!(
+            !Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .stderr(Stdio::null())
+                .status()
+                .await
+                .unwrap()
+                .success(),
+            "cleanup observed child exit before returning"
+        );
+        drop(error);
+        assert_eq!(aggregate.used(), 0);
+        assert_eq!(capacity.counts().carriers, 0);
+        assert_eq!(capacity.counts().streams, 0);
+        assert_eq!(capacity.counts().opening, 0);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn revocation_in_progress_rejects_buffered_ready_and_reaps_before_return() {
+        let ready = wire::Ready {
+            generation: 1,
+            instance: "a".repeat(32),
+            mux_protocol: 1,
+            purpose: wire::Purpose::Direct,
+            limits: wire::Limits::default(),
+        };
+        let mut command = Command::new("python3");
+        command
+            .args(["-u", "-c", include_str!("../tests/native_bridge.py")])
+            .arg(serde_json::to_string(&ready).unwrap())
+            .arg("__REVOKE_DURING_PROGRESS__");
+        let context = queue::Context::default();
+        let admission = std::sync::Arc::new(admission::Admission::default());
+        let capacity = (
+            admission.carrier().unwrap(),
+            admission
+                .begin(admission::Assignment::new(
+                    admission::Backend::new(),
+                    admission::Domain::new(),
+                ))
+                .unwrap(),
+        );
+        let mut reported = false;
+        let result = NativeBridge::spawn_context(
+            command,
+            capacity,
+            negotiation::Expected {
+                instance: Some(&ready.instance),
+                purpose: &ready.purpose,
+                mux_protocol: 1,
+                preparation: wire::HANDSHAKE_TIMEOUT,
+            },
+            context.clone(),
+            |_| {
+                reported = true;
+                context.close();
+            },
+        )
+        .await;
+        assert!(reported);
+        let error = match result {
+            Ok(_) => panic!("revoked buffered Ready admitted"),
+            Err(error) => error,
+        };
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+        let failure = error
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<OpenFailure>()
+            .unwrap();
+        assert!(
+            !failure.ended.status.as_ref().unwrap().success(),
+            "cleanup awaited the uncooperative child"
+        );
+        drop(error);
+        assert_eq!(admission.counts().carriers, 0);
+        assert_eq!(admission.counts().streams, 0);
+        assert_eq!(admission.counts().opening, 0);
+        assert_eq!(context.budget.used(), 0);
     }
 
     /// What the host's bridge says when it fails is kept for the message.
     #[cfg(unix)]
     #[tokio::test]
     async fn a_failed_bridge_leaves_its_status_and_error_output() {
-        let mut bridge = Bridge::spawn(sh(
+        let (input, output, mut process) = spawn_pipes(sh(
             "echo 'No Splitty daemon is running on this host.' >&2; exit 1",
         ))
         .expect("spawn");
-        assert_eq!(bridge.recv().await.expect("end"), None);
-        let ended = bridge.process().ended().await;
+        drop(input);
+        drop(output);
+        let ended = process.ended().await;
         assert_eq!(ended.status.expect("status").code(), Some(1));
         assert_eq!(ended.stderr, "No Splitty daemon is running on this host.");
     }
@@ -342,12 +1087,14 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn the_end_of_a_long_error_output_is_kept() {
-        let mut bridge = Bridge::spawn(sh(
+        let (input, output, mut process) = spawn_pipes(sh(
             "i=0; while [ $i -lt 2000 ]; do echo 'debug1: noise' >&2; i=$((i+1)); done; \
              echo 'the reason' >&2",
         ))
         .expect("spawn");
-        let ended = bridge.process().ended().await;
+        drop(input);
+        drop(output);
+        let ended = process.ended().await;
         assert!(
             ended.stderr.len() <= crate::ssh::STDERR_KEPT,
             "{}",
@@ -361,9 +1108,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn a_bridge_that_ignores_its_input_is_killed() {
-        let bridge = Bridge::spawn(sh("exec sleep 30")).expect("spawn");
-        let (sender, _receiver, mut process) = bridge.split();
-        drop(sender);
+        let (input, output, mut process) = spawn_pipes(sh("exec sleep 30")).expect("spawn");
+        drop(input);
+        drop(output);
         let started = std::time::Instant::now();
         let ended = process.finish(Duration::from_millis(200)).await;
         assert!(!ended.status.expect("status").success(), "killed");

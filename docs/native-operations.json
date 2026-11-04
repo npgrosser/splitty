@@ -1,0 +1,632 @@
+{
+  "operations": [
+    {
+      "operation": "home.get",
+      "method": "GET",
+      "path": "/api/home/settings",
+      "scope": "backend",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "home.update",
+      "method": "PATCH",
+      "path": "/api/home/settings",
+      "scope": "backend",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "theme.get",
+      "method": "GET",
+      "path": "/api/home/theme",
+      "scope": "backend",
+      "arguments": [
+        "name?"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "theme.list",
+      "method": "GET",
+      "path": "/api/home/themes",
+      "scope": "backend",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "shellProfiles.get",
+      "method": "GET",
+      "path": "/api/shell-profiles",
+      "scope": "backend",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "shellProfiles.update",
+      "method": "PUT",
+      "path": "/api/shell-profiles",
+      "scope": "backend",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "serverSettings.get",
+      "method": "GET",
+      "path": "/api/server/settings",
+      "scope": "backend",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "serverSettings.update",
+      "method": "PATCH",
+      "path": "/api/server/settings",
+      "scope": "backend",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "template.list",
+      "method": "GET",
+      "path": "/api/templates",
+      "scope": "backend",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "template.get",
+      "method": "GET",
+      "path": "/api/templates/{slug}",
+      "scope": "backend",
+      "arguments": [
+        "slug"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "template.save",
+      "method": "POST",
+      "path": "/api/templates/{slug}",
+      "scope": "backend",
+      "arguments": [
+        "slug",
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "template.delete",
+      "method": "DELETE",
+      "path": "/api/templates/{slug}",
+      "scope": "backend",
+      "arguments": [
+        "slug"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "build.get",
+      "method": "GET",
+      "path": "/api/build",
+      "scope": "backend",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "stats.get",
+      "method": "GET",
+      "path": "/api/stats",
+      "scope": "backend",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "command.send",
+      "method": "POST",
+      "path": "/api/command",
+      "scope": "backend",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "mux.state",
+      "method": "GET",
+      "path": "/api/mux/state",
+      "scope": "backend",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "mux.screens",
+      "method": "GET",
+      "path": "/api/mux/screens",
+      "scope": "backend",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "mux.screen",
+      "method": "GET",
+      "path": "/api/mux/screen/{id}",
+      "scope": "backend",
+      "arguments": [
+        "id"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "mux.op",
+      "method": "POST",
+      "path": "/api/mux/op",
+      "scope": "backend",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "mux.neighbor",
+      "method": "GET",
+      "path": "/api/mux/neighbor",
+      "scope": "backend",
+      "arguments": [
+        "screen?",
+        "pane?",
+        "dir?"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "mux.status",
+      "method": "GET",
+      "path": "/api/mux/status",
+      "scope": "backend",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "session.send",
+      "method": "POST",
+      "path": "/api/session/{id}/send",
+      "scope": "backend",
+      "arguments": [
+        "id",
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "editor.open",
+      "method": "POST",
+      "path": "/api/editor/open",
+      "scope": "backend",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "registration",
+      "deadlineMs": 35000
+    },
+    {
+      "operation": "file.offer",
+      "method": "POST",
+      "path": "/api/file/offer",
+      "scope": "backend",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "registration",
+      "deadlineMs": null
+    },
+    {
+      "operation": "job.list",
+      "method": "GET",
+      "path": "/api/jobs",
+      "scope": "backend",
+      "arguments": [],
+      "maxBodyBytes": 131072,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "job.launch",
+      "method": "POST",
+      "path": "/api/jobs",
+      "scope": "backend",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 131072,
+      "cancellation": "mutation",
+      "deadlineMs": 15000
+    },
+    {
+      "operation": "job.inspect",
+      "method": "GET",
+      "path": "/api/jobs/{id}",
+      "scope": "backend",
+      "arguments": [
+        "id"
+      ],
+      "maxBodyBytes": 131072,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "job.logs",
+      "method": "GET",
+      "path": "/api/jobs/{id}/logs",
+      "scope": "backend",
+      "arguments": [
+        "id",
+        "cursor?",
+        "tail?",
+        "limit?",
+        "waitMs?",
+        "format?"
+      ],
+      "maxBodyBytes": 131072,
+      "cancellation": "read",
+      "deadlineMs": 35000
+    },
+    {
+      "operation": "job.input",
+      "method": "POST",
+      "path": "/api/jobs/{id}/input",
+      "scope": "backend",
+      "arguments": [
+        "id",
+        "body"
+      ],
+      "maxBodyBytes": 131072,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "job.stop",
+      "method": "POST",
+      "path": "/api/jobs/{id}/stop",
+      "scope": "backend",
+      "arguments": [
+        "id"
+      ],
+      "maxBodyBytes": 131072,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "job.forget",
+      "method": "POST",
+      "path": "/api/jobs/{id}/forget",
+      "scope": "backend",
+      "arguments": [
+        "id"
+      ],
+      "maxBodyBytes": 131072,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "host.list",
+      "method": "GET",
+      "path": "/api/remote/hosts",
+      "scope": "localHub",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "host.forget",
+      "method": "DELETE",
+      "path": "/api/remote/hosts",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "hostPreferences.get",
+      "method": "GET",
+      "path": "/api/remote/host-preferences",
+      "scope": "localHub",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "hostPreferences.update",
+      "method": "PUT",
+      "path": "/api/remote/host-preferences",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "hostOrder.get",
+      "method": "GET",
+      "path": "/api/remote/host-order",
+      "scope": "localHub",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "hostOrder.update",
+      "method": "PUT",
+      "path": "/api/remote/host-order",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "remoteScreens.get",
+      "method": "GET",
+      "path": "/api/remote/screens",
+      "scope": "localHub",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "remoteScreens.update",
+      "method": "PUT",
+      "path": "/api/remote/screens",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "catalog.get",
+      "method": "GET",
+      "path": "/api/remote/catalog",
+      "scope": "localHub",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "catalog.update",
+      "method": "PUT",
+      "path": "/api/remote/catalog",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "forward.list",
+      "method": "GET",
+      "path": "/api/remote/forwards",
+      "scope": "localHub",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "forward.open",
+      "method": "POST",
+      "path": "/api/remote/forwards",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 180000
+    },
+    {
+      "operation": "forward.stop",
+      "method": "DELETE",
+      "path": "/api/remote/forwards",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 180000
+    },
+    {
+      "operation": "forwardPreferences.get",
+      "method": "GET",
+      "path": "/api/remote/forward-preferences",
+      "scope": "localHub",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "forwardPreferences.save",
+      "method": "PUT",
+      "path": "/api/remote/forward-preferences",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "forwardPreferences.forget",
+      "method": "DELETE",
+      "path": "/api/remote/forward-preferences",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "reverse.list",
+      "method": "GET",
+      "path": "/api/remote/reverse-forwards",
+      "scope": "localHub",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "reverse.open",
+      "method": "POST",
+      "path": "/api/remote/reverse-forwards",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 180000
+    },
+    {
+      "operation": "reverse.stop",
+      "method": "DELETE",
+      "path": "/api/remote/reverse-forwards",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 180000
+    },
+    {
+      "operation": "reversePreferences.get",
+      "method": "GET",
+      "path": "/api/remote/reverse-forward-preferences",
+      "scope": "localHub",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "reversePreferences.save",
+      "method": "PUT",
+      "path": "/api/remote/reverse-forward-preferences",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "reversePreferences.forget",
+      "method": "DELETE",
+      "path": "/api/remote/reverse-forward-preferences",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    }
+  ],
+  "sessionOperations": [
+    "create",
+    "attach",
+    "detach",
+    "input",
+    "resize",
+    "close",
+    "save_image",
+    "upload",
+    "upload_cancel",
+    "activity",
+    "idle",
+    "hide",
+    "mux.op",
+    "mux.resync",
+    "editor.register",
+    "editor.result",
+    "file.register",
+    "file.accept",
+    "file.decline",
+    "file.read"
+  ]
+}

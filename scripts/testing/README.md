@@ -53,7 +53,7 @@ nine fields are mandatory; unknown fields are rejected:
 ```json
 {
   "hubUrl": "http://127.0.0.1:30001",
-  "cookie": "splitty-session=<fresh HubServer session value>",
+  "cookie": "splitty-session-<gateway instance>=<fresh HubServer session value>",
   "target": "splittyhost",
   "remote": 30002,
   "local": 30003,
@@ -250,7 +250,12 @@ cargo test -p splitty-server --test remote_connect \
 ```
 
 If sshd is unpacked instead of installed at `/usr/sbin/sshd`, also set
-`SPLITTY_TEST_SSHD_ROOT` to its package root. The existing lab prerequisites
+`SPLITTY_TEST_SSHD_ROOT` to its package root. Set
+`SPLITTY_TEST_REQUIRE_SSH_LAB=1` when a missing lab must fail rather than skip.
+The native forwarding crash check additionally uses
+`SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE=1` to reject unsupported environments as
+positive evidence. CI unpacks its SSH server privately and runs it only through
+the isolated lab; it does not install a host SSH service. The existing lab prerequisites
 (`ssh`, `ssh-keygen`, `unshare`, `nsenter`, `ip` and permitted local sockets/user
 namespaces) must work, and the browser hook additionally requires `node` and
 `python3`. Use private test XDG directories; no user preview is an acceptable
@@ -296,3 +301,20 @@ entry point. Its result explicitly says `browserLaunched: false` and
 (`--test-isolation=none`) and cover input rejection/redaction only, not browser
 behavior. Use a Node version that supports `--test-isolation=none`, or invoke the
 test file directly.
+
+## Native endpoint identity smoke
+
+`cargo test -p splitty-server --test native_endpoint -- --nocapture` connects as
+an actual different OS user (`nobody`), using WSL interop or noninteractive sudo.
+It first verifies private directory/socket permissions, then loosens only the
+temporary fixture's modes and verifies that the server rejects peer credentials
+before any application bytes. Without a usable alternate-user launcher it prints
+an unavailable diagnostic; such a run does not establish OS enforcement.
+
+The endpoint unit tests separately cover both connection directions, unavailable
+credentials, unsafe paths and mounts, stale sockets, descriptor adoption and the
+instance lock. Linux runtime success does not substitute for a macOS run.
+
+### Native listener inventory
+
+The HTTP/daemon/remote-connect process smokes share `crates/splitty-server/tests/support/listeners.rs`. On Linux it joins each process's socket descriptors to both TCP listener tables; on macOS it uses `lsof` and requires a live process and a valid inspection result. An unavailable inspection is a failure, not proof of zero listeners. The detector has a real IPv4/IPv6 listener check. Explicit gateways must own exactly their advertised loopback listener before and after reconnect; native daemon/helper/SSH carriers must own none. These checks are currently verified on Linux. CLI failure smokes also inspect every live member of an isolated command process group after bind refusal, initial SSH failure, permanent reconnect failure and normal shutdown. Group membership survives reparenting; exited zombies are not live workers. Failure fixtures write diagnostics to regular files and bound leader exit separately, so an orphan holding inherited descriptors cannot hide from the subsequent group check. A real-child regression covers that distinction. Independent daemon survival requires a non-zombie state and the same process birth identity. These fixtures use known SSH/proxy commands that remain in that group; they do not prove cleanup of arbitrary user commands that deliberately detach into another session. The Electron remote smoke inventories active helper/SSH listeners and checks observed PID/birth identities at quit, including replaced helpers. It does not claim an exhaustive inventory of unobserved detached descendants. macOS runtime execution remains outstanding.

@@ -1,30 +1,14 @@
-//! Tauri desktop shell for Splitty.
-//!
-//! This crate bootstraps the Splitty desktop application by:
-//! 1. Resolving (or generating) an authentication token.
-//! 2. Loading user configuration and resolving the active theme to set the
-//!    window background color before the webview appears.
-//! 3. Spawning the backend on a random localhost port: embedded on macOS/Linux,
-//!    with the login shell's `PATH` when the desktop started the app (`login_path`),
-//!    or through the lifecycle-bound WSL bridge on Windows.
-//! 4. Opening a Tauri webview window pointed at the local server URL.
-//!
-//! The application UI communicates with the backend over HTTP/WebSocket. Tauri
-//! IPC is limited to native window integration, the Windows WSL setup flow and
-//! opening hosts in remote windows (`remote`), explicit editor handoff (`editor`)
-//! and showing a saved download (`downloads`), and granted to the main window
-//! only on its backend's exact origin (`capability`). Every navigation and
-//! new-window request of a window passes the guard in `navigation`.
+//! Packaged desktop shell with native document authority and IPC streams.
+//! Unix desktops own an in-process terminal service; Windows owns one WSL
+//! helper. Remote windows use SSH exec pipes. No UI network listener starts.
 
 use std::sync::Arc;
 
 use tauri::window::Color;
 use tauri::{AppHandle, Manager, WebviewUrl, WebviewWindowBuilder, Wry};
 
-#[cfg(not(target_os = "windows"))]
-use std::sync::RwLock;
-
 mod capability;
+mod client_ipc;
 mod downloads;
 mod editor;
 #[cfg(not(target_os = "windows"))]
@@ -34,76 +18,236 @@ mod remote;
 #[cfg(any(target_os = "windows", test))]
 mod windows_wsl;
 
-/// Attach the navigation, new-window and download guards to the main window.
-///
-/// `origins` is asked for the backend origins on every request: they are fixed
-/// for the embedded server, and only known once the WSL backend is up on
-/// Windows. `local_app` admits the bundled setup page.
-fn guard_window<'a, M: Manager<Wry>>(
+use client_ipc::{
+    carrier::{Auth, Native},
+    provider::Provider,
+    BackendId, Policy,
+};
+use navigation::DocumentRole;
+
+fn role(policy: &Policy) -> DocumentRole {
+    match policy {
+        Policy::Main { .. } => DocumentRole::Main,
+        Policy::Remote { .. } => DocumentRole::Remote,
+        Policy::Setup => DocumentRole::Setup,
+    }
+}
+fn challenge(
+    webview: &tauri::Webview,
+    native: &Native,
+    value: client_ipc::Challenge,
+) -> Result<(), String> {
+    let receiver = native
+        .broker
+        .bootstrap_receiver(webview.label())
+        .map_err(|_| "native window unavailable")?;
+    webview
+        .eval(client_ipc::bootstrap::challenge_script(
+            &receiver,
+            value.generation,
+            value.token,
+        ))
+        .map_err(|e| e.to_string())
+}
+#[tauri::command]
+fn native_bootstrap_begin(
+    webview: tauri::Webview,
+    native: tauri::State<'_, Arc<Native>>,
+    bootstrap: [u8; 32],
+) -> Result<(), String> {
+    let policy = native
+        .broker
+        .registered_policy(webview.label())
+        .map_err(|_| "native window unavailable")?;
+    if !navigation::packaged_entry(&webview.url().map_err(|e| e.to_string())?, role(&policy)) {
+        return Err("native document denied".into());
+    }
+    if let Some(value) = native
+        .broker
+        .bootstrap_begin(webview.label(), &bootstrap)
+        .map_err(|_| "native bootstrap denied")?
+    {
+        challenge(&webview, &native, value)?;
+    }
+    Ok(())
+}
+#[tauri::command]
+fn native_bootstrap_confirm(
+    webview: tauri::Webview,
+    native: tauri::State<'_, Arc<Native>>,
+    bootstrap: [u8; 32],
+    generation: u64,
+    challenge: [u8; 32],
+) -> Result<serde_json::Value, String> {
+    let policy = native
+        .broker
+        .registered_policy(webview.label())
+        .map_err(|_| "native window unavailable")?;
+    if !navigation::packaged_entry(&webview.url().map_err(|e| e.to_string())?, role(&policy)) {
+        return Err("native document denied".into());
+    }
+    let (proof, policy) = native
+        .broker
+        .bootstrap_confirm(webview.label(), &bootstrap, generation, &challenge)
+        .map_err(|_| "native bootstrap denied")?;
+    let (role, target) = match policy {
+        Policy::Main { .. } => ("main", None),
+        Policy::Setup => ("setup", None),
+        Policy::Remote { target, .. } => ("remote", Some(target.as_str().to_owned())),
+    };
+    Ok(
+        serde_json::json!({"auth":{"document":proof.document,"secret":proof.secret()},"role":role,"target":target}),
+    )
+}
+
+/// The native registration fixes the role. Only packaged main documents get
+/// a private capsule; popouts share their parent's explicit frontend objects.
+pub(crate) fn configure_window<'a, M: Manager<Wry>>(
     builder: WebviewWindowBuilder<'a, Wry, M>,
     app: AppHandle,
-    origins: impl Fn() -> Vec<String> + Clone + Send + Sync + 'static,
-    local_app: bool,
+    label: &str,
+    initial_role: DocumentRole,
 ) -> WebviewWindowBuilder<'a, Wry, M> {
-    let navigation_app = app.clone();
-    let navigation_origins = origins.clone();
-    let download_origins = origins.clone();
-    let downloads = Arc::clone(app.state::<Arc<downloads::Downloads>>().inner());
-
+    let native = app.state::<Arc<Native>>().inner().clone();
+    let key = native
+        .broker
+        .bootstrap_key(label)
+        .expect("registered native window");
+    let entry = if initial_role == DocumentRole::Setup {
+        "setup.html"
+    } else {
+        "index.html"
+    };
+    #[cfg(target_os = "windows")]
+    let entry = format!("http://tauri.localhost/{entry}");
+    #[cfg(not(target_os = "windows"))]
+    let entry = format!("tauri://localhost/{entry}");
+    let script = client_ipc::bootstrap::script(
+        key,
+        &native
+            .broker
+            .bootstrap_receiver(label)
+            .expect("registered window"),
+        &entry,
+    );
+    let nav_native = native.clone();
+    let popouts = app.state::<Arc<navigation::Popouts>>().inner().clone();
+    let nav_popouts = popouts.clone();
+    let new_popouts = popouts.clone();
+    let nav_label = label.to_owned();
+    let nav_app = app.clone();
+    let new_native = native.clone();
+    let new_label = label.to_owned();
+    let new_app = app.clone();
+    let downloads = app.state::<Arc<downloads::Downloads>>().inner().clone();
+    let download_native = native.clone();
     builder
+        .initialization_script(script)
         .on_navigation(move |url| {
-            let decision = navigation::navigation(url, &navigation_origins(), local_app);
-            navigation::follow(&navigation_app, url, decision)
-        })
-        .on_new_window(move |url, _features| {
-            let decision = navigation::new_window(&url, &origins());
-            navigation::follow_new_window(&app, &url, decision)
-        })
-        // Files saved from a pane (`splitty download`) go where the webview
-        // saves downloads, and are remembered to be shown; anything else is
-        // refused.
-        .on_download(move |_webview, event| match event {
-            tauri::webview::DownloadEvent::Requested { url, destination } => {
-                let allowed = navigation::download(&url, &download_origins());
-                if allowed {
-                    downloads.requested(url.as_str(), destination);
-                } else {
-                    tracing::warn!("refused a download of a {}: URL", url.scheme());
-                }
-                allowed
+            let Ok(policy) = nav_native.broker.registered_policy(&nav_label) else {
+                return false;
+            };
+            let decision = navigation::packaged_navigation(url, role(&policy));
+            if decision == navigation::Decision::Allow {
+                nav_popouts.revoke_parent(&nav_app, &nav_label, || {
+                    nav_native.broker.navigating(&nav_label)
+                });
             }
-            tauri::webview::DownloadEvent::Finished { url, path, success } => {
-                if !success {
-                    tracing::warn!("a download did not finish");
-                }
-                downloads.finished(url.as_str(), path, success);
-                true
+            navigation::follow(&nav_app, url, decision)
+        })
+        .on_new_window(move |url, features| {
+            let decision = new_native
+                .broker
+                .registered_policy(&new_label)
+                .map(|policy| navigation::packaged_new_window(&url, role(&policy)))
+                .unwrap_or(navigation::Decision::Block);
+            if decision == navigation::Decision::Allow {
+                let Some(document) = new_native.broker.current_document(&new_label) else {
+                    return tauri::webview::NewWindowResponse::Deny;
+                };
+                let broker = new_native.broker.clone();
+                let parent = new_label.clone();
+                new_popouts.open(
+                    &new_app,
+                    &new_label,
+                    document,
+                    features,
+                    Arc::new(move || broker.current_document(&parent) == Some(document)),
+                )
+            } else {
+                navigation::follow_new_window(&new_app, &url, decision)
             }
-            _ => true,
+        })
+        .on_page_load(move |window, payload| {
+            let Ok(policy) = native.broker.registered_policy(window.label()) else {
+                return;
+            };
+            if !navigation::packaged_entry(payload.url(), role(&policy)) {
+                popouts.revoke_parent(window.app_handle(), window.label(), || {
+                    native.broker.navigating(window.label())
+                });
+                return;
+            }
+            match payload.event() {
+                // on_navigation revoked the previous epoch. Initialization may
+                // run before this commit event, so preserve its pending nonce.
+                tauri::webview::PageLoadEvent::Started => {
+                    let _ = native.broker.bootstrap_committed(window.label());
+                }
+                tauri::webview::PageLoadEvent::Finished => {
+                    if let Ok(Some(value)) = native.broker.bootstrap_loaded(window.label()) {
+                        let _ = challenge(window.as_ref(), &native, value);
+                    }
+                }
+            }
+        })
+        .on_download(move |webview, event| {
+            let label = webview.label();
+            let Some(document) = download_native.broker.current_document(label) else {
+                return false;
+            };
+            let Ok(policy) = download_native.broker.registered_policy(label) else {
+                return false;
+            };
+            let owner = downloads::Owner {
+                window: label.to_owned(),
+                document,
+            };
+            match event {
+                tauri::webview::DownloadEvent::Requested { url, destination } => {
+                    if !navigation::packaged_download(&url, role(&policy)) {
+                        return false;
+                    }
+                    downloads.requested(owner, url.as_str(), destination);
+                    true
+                }
+                tauri::webview::DownloadEvent::Finished { url, path, success } => {
+                    downloads.finished(&owner, url.as_str(), path, success);
+                    true
+                }
+                _ => false,
+            }
         })
 }
 
 #[tauri::command]
-fn set_title_bar_color(window: tauri::Window, r: u8, g: u8, b: u8) {
+fn set_title_bar_color(
+    window: tauri::Window,
+    webview: tauri::Webview,
+    native: tauri::State<'_, Arc<Native>>,
+    auth: Auth,
+    r: u8,
+    g: u8,
+    b: u8,
+) -> Result<(), String> {
+    native.main_action(&webview, &auth)?;
     #[cfg(target_os = "macos")]
-    {
-        use cocoa::appkit::{NSColor, NSWindow};
-        use cocoa::base::{id, nil};
-
-        let ns_window = window.ns_window().unwrap() as id;
-        unsafe {
-            let color = NSColor::colorWithRed_green_blue_alpha_(
-                nil,
-                r as f64 / 255.0,
-                g as f64 / 255.0,
-                b as f64 / 255.0,
-                1.0,
-            );
-            ns_window.setBackgroundColor_(color);
-        }
-    }
+    window
+        .set_background_color(Some(Color(r, g, b, 255)))
+        .map_err(|error| error.to_string())?;
 
     let _ = (window, r, g, b);
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -121,9 +265,132 @@ pub fn run() {
     }
 }
 
+#[tauri::command]
+fn close_popout(
+    app: AppHandle,
+    webview: tauri::Webview,
+    native: tauri::State<'_, Arc<Native>>,
+    popouts: tauri::State<'_, Arc<navigation::Popouts>>,
+    auth: Auth,
+    label: String,
+) -> Result<(), String> {
+    if label.len() > 64 {
+        return Err("native popout close denied".into());
+    }
+    let proof = native.authenticate(&webview, &auth)?;
+    native
+        .broker
+        .main_action(webview.label(), &proof)
+        .map_err(|_| "native popout close denied")?;
+    popouts.close_owned(&app, webview.label(), proof.document, &label, || {
+        native.broker.main_action(webview.label(), &proof).is_ok()
+    })
+}
+
+#[cfg(target_os = "windows")]
+mod windows_commands {
+    use super::*;
+    use windows_wsl::{platform, WindowsDesktopState, WslDistribution, WslStartResult};
+    #[tauri::command]
+    pub(crate) fn wsl_setup_state(
+        app: AppHandle,
+        webview: tauri::Webview,
+        native: tauri::State<'_, Arc<Native>>,
+        auth: Auth,
+    ) -> Result<WindowsDesktopState, String> {
+        native.launcher_action(&webview, &auth)?;
+        platform::wsl_setup_state(app)
+    }
+    #[tauri::command]
+    pub(crate) async fn wsl_list_distributions(
+        app: AppHandle,
+        webview: tauri::Webview,
+        native: tauri::State<'_, Arc<Native>>,
+        auth: Auth,
+    ) -> Result<Vec<WslDistribution>, String> {
+        native.launcher_action(&webview, &auth)?;
+        platform::wsl_list_distributions(app).await
+    }
+    #[tauri::command]
+    pub(crate) async fn wsl_start_backend(
+        app: AppHandle,
+        webview: tauri::Webview,
+        native: tauri::State<'_, Arc<Native>>,
+        auth: Auth,
+        state: tauri::State<'_, Arc<platform::WindowsWslState>>,
+        distro: Option<String>,
+    ) -> Result<WslStartResult, String> {
+        let proof = native.authenticate(&webview, &auth)?;
+        native
+            .broker
+            .setup_action(webview.label(), &proof)
+            .map_err(|_| "setup document required")?;
+        let result = platform::wsl_start_backend(app, state, distro).await?;
+        native
+            .broker
+            .authorize(webview.label(), &proof)
+            .map_err(|_| "setup document closed")?;
+        Ok(result)
+    }
+    #[tauri::command]
+    pub(crate) fn wsl_open_backend(
+        app: AppHandle,
+        webview: tauri::Webview,
+        native: tauri::State<'_, Arc<Native>>,
+        auth: Auth,
+        state: tauri::State<'_, Arc<platform::WindowsWslState>>,
+    ) -> Result<(), String> {
+        let proof = native.authenticate(&webview, &auth)?;
+        native
+            .broker
+            .setup_action(webview.label(), &proof)
+            .map_err(|_| "setup document required")?;
+        let window = app
+            .get_webview_window(webview.label())
+            .ok_or("main window closed")?;
+        let owner = state.owner()?;
+        let backend = BackendId::new();
+        native
+            .broker
+            .replace_setup(webview.label(), &proof, backend, || {
+                native.provider(backend, Arc::new(Provider::owned(owner)));
+            })
+            .map_err(|_| "setup document closed")?;
+        // Destruction after the atomic broker/provider commit removes the
+        // provider too. A failed navigation must not leave an unusable grant.
+        if let Err(error) = window.navigate(
+            "http://tauri.localhost/index.html"
+                .parse()
+                .expect("packaged entry"),
+        ) {
+            native.destroyed(webview.label());
+            native.remove_provider(backend);
+            let _ = window.destroy();
+            return Err(error.to_string());
+        }
+        Ok(())
+    }
+    #[tauri::command]
+    pub(crate) async fn wsl_switch_distribution(
+        app: AppHandle,
+        webview: tauri::Webview,
+        native: tauri::State<'_, Arc<Native>>,
+        auth: Auth,
+        distro: String,
+    ) -> Result<(), String> {
+        native.main_action(&webview, &auth)?;
+        platform::wsl_switch_distribution(app, distro).await
+    }
+}
+
 #[cfg(target_os = "windows")]
 fn run_windows() {
     let state = Arc::new(windows_wsl::platform::WindowsWslState::new());
+    let native = Arc::new(Native::default());
+    native
+        .broker
+        .register("main", Policy::Setup)
+        .expect("setup policy");
     let app = tauri::Builder::default()
         // Tauri requires the single-instance plugin to be initialized first.
         .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
@@ -134,15 +401,38 @@ fn run_windows() {
             }
         }))
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                window.state::<Arc<navigation::Popouts>>().destroyed(
+                    window.app_handle(),
+                    window.label(),
+                    || window.state::<Arc<Native>>().destroyed(window.label()),
+                );
+            }
+        })
         .manage(state)
+        .manage(native)
+        .manage(Arc::new(navigation::Popouts::default()))
         .manage(Arc::new(remote::Remotes::default()))
         .manage(Arc::new(downloads::Downloads::default()))
         .invoke_handler(tauri::generate_handler![
             set_title_bar_color,
-            windows_wsl::platform::wsl_setup_state,
-            windows_wsl::platform::wsl_list_distributions,
-            windows_wsl::platform::wsl_start_backend,
-            windows_wsl::platform::wsl_switch_distribution,
+            close_popout,
+            native_bootstrap_begin,
+            native_bootstrap_confirm,
+            client_ipc::carrier::native_open,
+            client_ipc::carrier::native_cancel_open,
+            client_ipc::carrier::native_start,
+            client_ipc::carrier::native_write,
+            client_ipc::carrier::native_consumed,
+            client_ipc::carrier::native_close,
+            windows_commands::wsl_setup_state,
+            windows_commands::wsl_list_distributions,
+            windows_commands::wsl_start_backend,
+            windows_commands::wsl_open_backend,
+            windows_commands::wsl_switch_distribution,
+            remote::native_connection_state,
+            remote::remote_progress,
             remote::remote_hosts,
             remote::remote_open,
             remote::remote_cancel,
@@ -152,10 +442,8 @@ fn run_windows() {
         ])
         .setup(|app| {
             let handle = app.handle().clone();
-            let state = Arc::clone(
-                app.state::<Arc<windows_wsl::platform::WindowsWslState>>()
-                    .inner(),
-            );
+            app.add_capability(capability::main_window())?;
+            app.add_capability(capability::remote_windows())?;
             let builder =
                 WebviewWindowBuilder::new(app, "main", WebviewUrl::App("setup.html".into()))
                     .title("Splitty")
@@ -164,7 +452,7 @@ fn run_windows() {
                     .decorations(false)
                     .disable_drag_drop_handler()
                     .background_color(Color(18, 18, 20, 255));
-            guard_window(builder, handle, move || state.backend_origins(), true).build()?;
+            configure_window(builder, handle, "main", DocumentRole::Setup).build()?;
             Ok(())
         })
         .build(tauri::generate_context!())
@@ -175,6 +463,7 @@ fn run_windows() {
             event,
             tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
         ) {
+            app_handle.state::<Arc<Native>>().shutdown();
             app_handle
                 .state::<Arc<windows_wsl::platform::WindowsWslState>>()
                 .shutdown();
@@ -187,19 +476,6 @@ fn run_windows() {
 
 #[cfg(not(target_os = "windows"))]
 fn run_embedded() {
-    // Resolve token
-    let token = match splitty_core::auth::resolve("") {
-        Ok((t, source)) => {
-            tracing::info!("using token from {source}");
-            t
-        }
-        Err(_) => {
-            let mut buf = [0u8; 16];
-            rand::Rng::fill(&mut rand::thread_rng(), &mut buf);
-            hex::encode(buf)
-        }
-    };
-
     // Load config + theme early so we can set the window background color
     let config = splitty_core::config::load();
     let bg_color = resolve_title_bar_color(&config);
@@ -207,41 +483,46 @@ fn run_embedded() {
     #[cfg(target_os = "macos")]
     let native_title_bar_uses_override = native_title_bar_uses_override(&config);
 
-    // A running daemon, or one started for the kept sessions of an earlier
-    // daemon, before an embedded server.
-    let (port, bootstrap, embedded) = match daemon_for_app() {
-        Some(info) => {
-            tracing::info!(
-                "connecting to the daemon (pid={}, port={})",
-                info.pid,
-                info.port
-            );
-            match bootstrap_from_daemon(info.port, &token) {
-                Some(code) => (info.port, code, None),
-                None => {
-                    tracing::warn!(
-                        "daemon did not issue a bootstrap code, starting embedded server"
-                    );
-                    start_embedded_server(token, config)
-                }
-            }
-        }
-        None => start_embedded_server(token, config),
-    };
-
-    // A single-use bootstrap code, not the process token (security review
-    // SR-04). The page exchanges it for an HttpOnly session cookie
-    // and clears the address bar; capturing this URL afterwards is worthless.
-    let url = format!("http://127.0.0.1:{port}/?bootstrap={bootstrap}&desktop=1");
-    let backend_origins = navigation::backend_origins(port);
+    // Desktop-local work always belongs to this app. An independent daemon
+    // and its keepers have no influence on startup or shutdown.
+    let (service, embedded) = start_local_backend();
+    let native = Arc::new(Native::default());
+    let backend = BackendId::new();
+    native.provider(backend, Arc::new(Provider::embedded(service)));
+    native
+        .broker
+        .register("main", Policy::Main { backend })
+        .expect("main policy");
 
     let app = tauri::Builder::default()
         .manage(embedded)
+        .manage(native)
+        .manage(Arc::new(navigation::Popouts::default()))
         .plugin(tauri_plugin_opener::init())
+        .on_window_event(|window, event| {
+            if matches!(event, tauri::WindowEvent::Destroyed) {
+                window.state::<Arc<navigation::Popouts>>().destroyed(
+                    window.app_handle(),
+                    window.label(),
+                    || window.state::<Arc<Native>>().destroyed(window.label()),
+                );
+            }
+        })
         .manage(Arc::new(remote::Remotes::default()))
         .manage(Arc::new(downloads::Downloads::default()))
         .invoke_handler(tauri::generate_handler![
             set_title_bar_color,
+            close_popout,
+            native_bootstrap_begin,
+            native_bootstrap_confirm,
+            client_ipc::carrier::native_open,
+            client_ipc::carrier::native_cancel_open,
+            client_ipc::carrier::native_start,
+            client_ipc::carrier::native_write,
+            client_ipc::carrier::native_consumed,
+            client_ipc::carrier::native_close,
+            remote::native_connection_state,
+            remote::remote_progress,
             remote::remote_hosts,
             remote::remote_open,
             remote::remote_cancel,
@@ -250,18 +531,16 @@ fn run_embedded() {
             downloads::reveal_download,
         ])
         .setup(move |app| {
-            // Before the window loads the backend: its page gets the native
-            // commands on exactly this origin.
-            app.add_capability(capability::main_window(port))?;
+            app.add_capability(capability::main_window())?;
+            app.add_capability(capability::remote_windows())?;
             let handle = app.handle().clone();
             let builder =
-                WebviewWindowBuilder::new(app, "main", WebviewUrl::External(url.parse().unwrap()))
+                WebviewWindowBuilder::new(app, "main", WebviewUrl::App("index.html".into()))
                     .title("Splitty")
                     .inner_size(1200.0, 800.0)
                     .disable_drag_drop_handler()
                     .background_color(bg_color);
-            let origins = backend_origins.clone();
-            let mut builder = guard_window(builder, handle, move || origins.clone(), false);
+            let mut builder = configure_window(builder, handle, "main", DocumentRole::Main);
 
             #[cfg(target_os = "macos")]
             if native_title_bar_uses_override {
@@ -292,20 +571,10 @@ fn run_embedded() {
 
             #[cfg(target_os = "macos")]
             if native_title_bar_uses_override {
-                use cocoa::appkit::{NSColor, NSWindow};
-                use cocoa::base::{id, nil};
-
-                let ns_window = window.as_ref().window().ns_window().unwrap() as id;
-                unsafe {
-                    let color = NSColor::colorWithRed_green_blue_alpha_(
-                        nil,
-                        bg_color.0 as f64 / 255.0,
-                        bg_color.1 as f64 / 255.0,
-                        bg_color.2 as f64 / 255.0,
-                        1.0,
-                    );
-                    ns_window.setBackgroundColor_(color);
-                }
+                window
+                    .as_ref()
+                    .window()
+                    .set_background_color(Some(Color(bg_color.0, bg_color.1, bg_color.2, 255)))?;
             }
 
             Ok(())
@@ -315,145 +584,14 @@ fn run_embedded() {
 
     app.run(|app_handle, event| {
         if matches!(event, tauri::RunEvent::Exit) {
+            app_handle.state::<Arc<Native>>().shutdown();
             app_handle.state::<Arc<remote::Remotes>>().shutdown();
-            if let Some(server) = app_handle
-                .state::<Option<EmbeddedServer>>()
-                .inner()
-                .as_ref()
-            {
-                server.shutdown();
-            }
+            app_handle.state::<EmbeddedServer>().shutdown();
         }
     });
 }
 
-/// The daemon the app connects to: the running one, or, when none runs but
-/// sessions of an earlier daemon are kept (`session-keepers`), a daemon
-/// started for them with the executable those keepers run.
-#[cfg(not(target_os = "windows"))]
-fn daemon_for_app() -> Option<splitty_core::daemon::DaemonInfo> {
-    if let Some(info) = splitty_core::daemon::read_info() {
-        if splitty_core::daemon::is_running(info.pid) {
-            return Some(info);
-        }
-        tracing::info!("stale daemon info found");
-        splitty_core::daemon::remove_info();
-    }
-    #[cfg(unix)]
-    {
-        let kept = splitty_core::keeper::client::find(&splitty_core::keeper::dir::keepers_dir());
-        let executable = executable_for_kept(
-            kept.iter().map(|keeper| keeper.hello.executable.clone()),
-            |path| std::path::Path::new(path).is_file(),
-            splitty_in_path,
-        )?;
-        drop(kept);
-        tracing::info!(
-            "sessions are kept without a daemon; starting one with {}",
-            executable.display()
-        );
-        start_daemon_for_kept(&executable)
-    }
-    #[cfg(not(unix))]
-    None
-}
-
-/// The executable to start a daemon for kept sessions with: the first that a
-/// keeper runs and that still exists, else `splitty` from the `PATH`; none
-/// without kept sessions.
-#[cfg(any(unix, test))]
-fn executable_for_kept(
-    executables: impl IntoIterator<Item = String>,
-    exists: impl Fn(&str) -> bool,
-    from_path: impl FnOnce() -> Option<std::path::PathBuf>,
-) -> Option<std::path::PathBuf> {
-    let executables: Vec<String> = executables.into_iter().collect();
-    if executables.is_empty() {
-        return None;
-    }
-    executables
-        .iter()
-        .find(|path| !path.is_empty() && exists(path))
-        .map(std::path::PathBuf::from)
-        .or_else(from_path)
-}
-
-/// `splitty` from the `PATH`, the login shell's on macOS and Linux.
-#[cfg(unix)]
-fn splitty_in_path() -> Option<std::path::PathBuf> {
-    use std::os::unix::fs::PermissionsExt;
-    let path = std::env::var_os("PATH")?;
-    std::env::split_paths(&path)
-        .map(|dir| dir.join("splitty"))
-        .find(|candidate| {
-            std::fs::metadata(candidate)
-                .is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
-        })
-}
-
-/// `daemon start` with `executable`, on the default address and else on one
-/// the system assigns; the daemon once it serves. The command returns only
-/// once its daemon serves, within its own 10-second limit.
-#[cfg(unix)]
-fn start_daemon_for_kept(executable: &std::path::Path) -> Option<splitty_core::daemon::DaemonInfo> {
-    for extra in [&[][..], &["--addr", "127.0.0.1:0"][..]] {
-        let started = std::process::Command::new(executable)
-            .args(["daemon", "start"])
-            .args(extra)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status();
-        match started {
-            Ok(status) if status.success() => {
-                if let Some(info) = splitty_core::daemon::read_info()
-                    .filter(|info| splitty_core::daemon::is_running(info.pid))
-                {
-                    return Some(info);
-                }
-            }
-            Ok(status) => tracing::warn!("daemon start for the kept sessions failed: {status}"),
-            Err(error) => tracing::warn!("cannot run {}: {error}", executable.display()),
-        }
-    }
-    tracing::warn!("the kept sessions wait; starting an embedded server");
-    None
-}
-
-/// Ask an already-running daemon for a single-use bootstrap code.
-///
-/// Uses the process token from its 0600 file. Deliberately not the control
-/// socket: minting a browser session must stay off the channel that is offered
-/// to every pane (see `splitty_server::http::session::issue_bootstrap`).
-#[cfg(not(target_os = "windows"))]
-fn bootstrap_from_daemon(port: u16, token: &str) -> Option<String> {
-    // Reuses the CLI's request path rather than opening a second HTTP client
-    // here: one implementation of "talk to a Splitty server", already covered by
-    // the server crate's tests.
-    let server = splitty_server::cli::ServerInfo {
-        transport: splitty_server::cli::Transport::Tcp {
-            addr: format!("127.0.0.1:{port}"),
-            token: token.to_string(),
-        },
-        source: "token file",
-    };
-
-    let response = tokio::runtime::Runtime::new()
-        .ok()?
-        .block_on(splitty_server::cli::api_post(
-            &server,
-            "/api/bootstrap",
-            serde_json::json!({}),
-        ))
-        .ok()?;
-
-    response
-        .get("bootstrap")
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
-}
-
-/// Start the in-process server and return its port plus a bootstrap code.
+/// App-owned embedded service shutdown, without a network listener.
 ///
 /// Windows has no embedded backend — it runs the server inside WSL through the
 /// bridge in `windows_wsl` — and `axum` is not even a dependency there, so this
@@ -508,7 +646,29 @@ fn embedded_managed_jobs_start_and_shutdown_with_the_shared_service() {
         return;
     }
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
-    let (port, _, server) = start_embedded_server("test-token".into(), Default::default());
+    // Live but incompatible discovery, an unrelated keeper and a token file
+    // must remain untouched. Listening sentinels detect even attempted dials.
+    let config = splitty_core::config::config_dir();
+    let run = splitty_core::config::run_dir();
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::create_dir_all(run.join("keepers")).unwrap();
+    let daemon_socket = run.join("client.sock");
+    let keeper_socket = run.join("keepers/independent.sock");
+    let daemon = std::os::unix::net::UnixListener::bind(&daemon_socket).unwrap();
+    let keeper = std::os::unix::net::UnixListener::bind(&keeper_socket).unwrap();
+    daemon.set_nonblocking(true).unwrap();
+    keeper.set_nonblocking(true).unwrap();
+    let discovery = serde_json::json!({"pid":std::process::id(), "format":2,
+        "clientSocket":daemon_socket, "instance":"a".repeat(32), "transportVersion":999,
+        "socket":run.join("daemon.sock"), "version":"999.0.0", "protocol":999,
+        "keepsSessions":true,"startedAt":"fixture"})
+    .to_string();
+    let discovery_path = config.join("daemon.json");
+    let token_path = config.join("auth-token");
+    std::fs::write(&discovery_path, &discovery).unwrap();
+    std::fs::write(&token_path, "independent credential").unwrap();
+    let (service, server) = start_local_backend();
+    let instance = service.instance.clone();
     let owner = splitty_server::cli::ServerInfo {
         transport: splitty_server::cli::Transport::LocalSocket(
             splitty_server::control::socket_path()
@@ -519,19 +679,67 @@ fn embedded_managed_jobs_start_and_shutdown_with_the_shared_service() {
     };
     let (grant,job)=runtime.block_on(async {
         let grant=splitty_server::cli::api_post(&owner,"/api/agents",serde_json::json!({"name":"embedded"})).await.expect("grant");
-        let job=splitty_server::cli::api_post(&owner,"/api/jobs",serde_json::json!({"requestId":"f5b1fc42-44f9-41df-9148-65a1fbdba804","cwd":std::env::var("HOME").expect("fixture home"),"argv":["/bin/sh","-c","read line"],"placement":{"kind":"screen"}})).await.expect("job");
+        let job=splitty_server::cli::api_post(&owner,"/api/jobs",serde_json::json!({"requestId":"f5b1fc42-44f9-41df-9148-65a1fbdba804","cwd":std::env::var("HOME").expect("fixture home"),"argv":["/bin/sh","-c","echo $$ > job.pid; read line"],"placement":{"kind":"screen"}})).await.expect("job");
         (grant,job)
     });
     assert_eq!(job["state"], "running");
-    server.expect("owned embedded server").shutdown();
+    let pid_file = std::path::PathBuf::from(std::env::var("HOME").unwrap()).join("job.pid");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let pid = loop {
+        if let Ok(contents) = std::fs::read_to_string(&pid_file) {
+            if let Ok(pid) = contents.trim().parse::<u32>() {
+                break pid;
+            }
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "job did not publish its PID"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let alive = || {
+        std::process::Command::new("/bin/kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .expect("probe job process")
+            .success()
+    };
+    assert!(alive(), "the job must be alive before app shutdown");
+    server.shutdown();
+    assert!(!alive(), "app shutdown left its managed job running");
     assert!(!std::path::Path::new(grant["socket"].as_str().expect("socket")).exists());
-    assert!(std::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, port)).is_err());
-    let (_, _, new) = start_embedded_server("test-token".into(), Default::default());
+    let (next, new) = start_local_backend();
+    assert_ne!(next.instance, instance);
     let list = runtime
         .block_on(splitty_server::cli::api_get(&owner, "/api/jobs"))
         .expect("new service");
     assert_eq!(list["jobs"], serde_json::json!([]));
-    new.expect("replacement server").shutdown();
+    new.shutdown();
+    assert_eq!(std::fs::read_to_string(&discovery_path).unwrap(), discovery);
+    for stale in [
+        "not valid JSON",
+        r#"{"pid":4294967295,"port":1,"version":"old","protocol":1,"socket":"unused","startedAt":"fixture"}"#,
+    ] {
+        std::fs::write(&discovery_path, stale).unwrap();
+        let (_, backend) = start_local_backend();
+        backend.shutdown();
+        assert_eq!(std::fs::read_to_string(&discovery_path).unwrap(), stale);
+    }
+    assert_eq!(
+        std::fs::read_to_string(token_path).unwrap(),
+        "independent credential"
+    );
+    assert!(daemon_socket.exists() && keeper_socket.exists());
+    assert_eq!(
+        daemon.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
+        keeper.accept().unwrap_err().kind(),
+        std::io::ErrorKind::WouldBlock
+    );
 }
 #[cfg(not(target_os = "windows"))]
 impl EmbeddedServer {
@@ -550,138 +758,49 @@ impl EmbeddedServer {
     }
 }
 #[cfg(not(target_os = "windows"))]
-fn start_embedded_server(
-    token: String,
-    config: splitty_core::config::HomeConfig,
-) -> (u16, String, Option<EmbeddedServer>) {
-    let token_clone = token.clone();
-    let (port_tx, port_rx) = std::sync::mpsc::channel();
+fn start_local_backend() -> (Arc<splitty_server::service::State>, EmbeddedServer) {
+    let (state_tx, state_rx) = std::sync::mpsc::channel();
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel();
     let (done_tx, done_rx) = std::sync::mpsc::channel();
-
     std::thread::spawn(move || {
-        let rt = tokio::runtime::Runtime::new().unwrap();
+        let rt = tokio::runtime::Runtime::new().expect("embedded runtime");
         rt.block_on(async move {
-            let template_store = match splitty_core::template::FileStore::new_default() {
-                Ok(store) => Arc::new(store),
-                Err(e) => {
-                    tracing::warn!("failed to create template store: {e}");
-                    Arc::new(splitty_core::template::FileStore::new(
-                        splitty_core::config::config_dir().join("templates"),
-                    ))
-                }
-            };
-
-            let shell_profiles = Arc::new(RwLock::new(
-                splitty_core::shell_profiles::state_from_settings(&config.shells),
-            ));
-            let pty_manager = Arc::new(splitty_core::pty::manager::Manager::with_shell_profiles(
-                shell_profiles.clone(),
-            ));
-            let mut dispatcher =
-                splitty_core::protocol::dispatcher::Dispatcher::new(pty_manager.clone());
-            dispatcher.configure_sizes(splitty_core::protocol::sizing::SizeConfig::from_settings(
-                &config.terminal.size_policy,
-                config.terminal.size_idle_seconds,
-            ));
-
-            let (notify_tx, _) = tokio::sync::broadcast::channel::<String>(256);
-            let tx = notify_tx.clone();
-            let engine =
-                splitty_core::protocol::notify::NotificationEngine::new(Box::new(move |event| {
-                    if let Ok(json) = serde_json::to_string(&event) {
-                        let _ = tx.send(json);
-                    }
-                }));
-
-            dispatcher.notify = Some(Arc::new(std::sync::Mutex::new(engine)));
-            // Spawned shells learn the control socket path, never a credential
-            // (security review SR-05).
-            dispatcher.env = splitty_core::mux::effect_runner::EnvContext {
-                control_socket: splitty_server::control::socket_path()
-                    .to_string_lossy()
-                    .into_owned(),
-            };
-            let env = dispatcher.env.clone();
-            let dispatcher = Arc::new(dispatcher);
-
-            let effect_runner = Arc::new(splitty_core::mux::effect_runner::EffectRunner::new(
-                pty_manager as Arc<dyn splitty_core::pty::Backend>,
-            ));
-
-            let mux_store = Arc::new(splitty_core::mux::Store::new());
-            let ws_state = Arc::new(splitty_server::ws::WsState::new(
-                mux_store.clone(),
-                dispatcher,
-                shell_profiles.clone(),
-                effect_runner,
-                env,
-                notify_tx,
-                "embedded".to_string(),
-            ));
-
-            // Bind before building state: the origin allowlist is derived from
-            // the port actually in use, and binding to port 0 only reveals it
-            // afterwards. Building state first would produce an allowlist that
-            // matches nothing and lock the UI out of its own API.
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let listen_addr = listener.local_addr().unwrap();
-            let port = listen_addr.port();
-
-            let state = splitty_server::http::AppState {
-                token: token_clone.clone(),
-                sessions: Arc::new(splitty_server::http::session::SessionStore::new()),
-                allowed_origins: Arc::new(splitty_server::http::allowed_origins(
-                    &listen_addr.to_string(),
-                )),
-                mux_store,
-                ws_state,
-                config: Arc::new(RwLock::new(config)),
-                shell_profiles,
-                server_config: Arc::new(RwLock::new(splitty_core::config::load_server())),
-                template_store,
-                themes_dir: splitty_core::config::themes_dir(),
-                version: env!("CARGO_PKG_VERSION").to_string(),
-                commit: option_env!("SPLITTY_COMMIT")
-                    .unwrap_or("unknown")
-                    .to_string(),
-                build_time: option_env!("SPLITTY_BUILD_TIME")
-                    .unwrap_or("unknown")
-                    .to_string(),
-                listen_addr: listen_addr.to_string(),
-                server_mode: "embedded".to_string(),
-            };
-
-            let bootstrap = state.sessions.issue_bootstrap();
-            let jobs = state.ws_state.jobs.clone();
-            let backend = state.ws_state.dispatcher.backend().clone();
-            let control = splitty_server::control::spawn(state.clone());
-            let app = splitty_server::http::build_router_with_frontend(state);
-
-            let _ = port_tx.send((port, bootstrap));
-
-            tracing::info!("tauri backend on port {port}");
-            axum::serve(listener, app)
-                .with_graceful_shutdown(async move {
-                    let _ = stop_rx.await;
-                    jobs.shutdown().await;
-                    backend.close_all();
-                })
-                .await
-                .unwrap();
+            let control_path = splitty_server::control::socket_path();
+            let backend = splitty_server::service::runtime::build(
+                "embedded",
+                None,
+                Arc::new(splitty_core::pty::terminal::LocalTerminals),
+                &control_path,
+            );
+            let control =
+                splitty_server::control::spawn_service(backend.state.clone(), control_path);
+            if state_tx.send(backend.state.clone()).is_ok() {
+                let _ = stop_rx.await;
+            }
+            for client in backend
+                .state
+                .client_state
+                .clients
+                .lock()
+                .expect("clients")
+                .values()
+            {
+                client.sender.close();
+            }
+            if let Err(error) = backend.close().await {
+                tracing::warn!(%error,"owned local service shutdown failed");
+            }
             control.shutdown();
             let _ = done_tx.send(());
         });
     });
-
-    let (port, bootstrap) = port_rx.recv().expect("failed to get server port");
+    let state = state_rx.recv().expect("embedded service startup");
     (
-        port,
-        bootstrap,
-        Some(EmbeddedServer {
+        state,
+        EmbeddedServer {
             stop: std::sync::Mutex::new(Some(stop_tx)),
             done: std::sync::Mutex::new(done_rx),
-        }),
+        },
     )
 }
 
@@ -716,38 +835,4 @@ fn parse_hex_color(hex: &str) -> Color {
     } else {
         Color(24, 24, 24, 255)
     }
-}
-
-/// `server-modes`, Desktop App Hosting On macOS And Linux: kept sessions get
-/// a daemon of the executable their keepers run, else `splitty` from the
-/// `PATH`; without kept sessions, nothing is started.
-#[cfg(test)]
-#[test]
-fn kept_sessions_choose_the_executable_their_keepers_run() {
-    let from_path = || Some(std::path::PathBuf::from("/usr/local/bin/splitty"));
-    let exists = |path: &str| path == "/opt/splitty/0.1.18/splitty";
-    assert_eq!(
-        executable_for_kept(
-            [
-                "/gone/splitty".to_owned(),
-                "/opt/splitty/0.1.18/splitty".to_owned()
-            ],
-            exists,
-            || panic!("the keepers' own executable comes first"),
-        ),
-        Some(std::path::PathBuf::from("/opt/splitty/0.1.18/splitty"))
-    );
-    assert_eq!(
-        executable_for_kept(
-            ["/gone/splitty".to_owned(), String::new()],
-            exists,
-            from_path
-        ),
-        Some(std::path::PathBuf::from("/usr/local/bin/splitty")),
-        "an executable that is gone, or none named by an older keeper"
-    );
-    assert_eq!(
-        executable_for_kept(Vec::<String>::new(), exists, || panic!("nothing kept")),
-        None
-    );
 }

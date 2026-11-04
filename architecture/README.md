@@ -7,15 +7,21 @@ model with the code in both directions, so it can be trusted without reading imp
 (ops model, shadow mode, the two protocol paths, server modes) are explained in
 `../docs/architecture.md`; behavior lives in `../openspec/specs/`.
 
+For runtime paths, network listeners and session lifetimes, start with the
+[connection diagrams](../docs/networking.md). The `connections` view below maps
+those paths to their implementing modules; it does not turn library containers
+into operating-system processes.
+
 | File | Content |
 | --- | --- |
 | `specification.c4` | Element kinds (`actor`, `system`, `container`, `store`, `component`) and tags (`planned`, `external`) |
 | `landscape.c4` | People, external systems, the system `splitty` with its containers and stores |
 | `core.c4` | The components of `splitty-core` and their relationships |
+| `transport.c4` | Platform-neutral native framing, negotiation and resource accounting |
 | `server.c4` | The components of `splitty-server` (the `splitty` binary) and their relationships, also into the core |
 | `remote.c4` | The components of `splitty-remote` (SSH, install, handshake, bridge, tunnel, known hosts) and their relationships |
 | `desktop.c4` | The components of `splitty-gui` (the Tauri app) and their relationships, also into the core and the server |
-| `views.c4` | Context, containers, the components of each crate, and one view per composition root |
+| `views.c4` | Context, containers, connection components, the components of each crate, and one view per composition root |
 | `check/` | The workspace crate `splitty-architecture`, whose test runs the check |
 
 ## Setup

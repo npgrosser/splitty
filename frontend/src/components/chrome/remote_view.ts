@@ -74,6 +74,7 @@ export function shareStatus(row: ShareRow): string {
   if (row.error) {
     return row.error.code === "host_port_conflict" ? "Port in use on the host"
       : row.error.code === "unsupported_host" ? "Not supported on this host"
+      : row.error.code === "unsupported_environment" ? "Not supported in this local environment"
       : row.saved?.lastError ? "Share failed" : "Action failed";
   }
   if (row.saved?.enabled === false) return "Paused";

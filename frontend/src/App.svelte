@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { getAuthState, getAuthError, handleTokenSubmit, initAuth } from "./stores/auth.svelte.ts";
+  import { getAuthState, getAuthError, getConnectionError, getConnectionRetryLabel, retryConnection, handleTokenSubmit, initAuth } from "./stores/auth.svelte.ts";
   import { settings } from "./stores/settings.svelte.ts";
   import { getTheme, subscribeTheme } from "./lib/theme.ts";
   import { onCloseRequest, runningOnQuit, scratchpadsOnQuit, hostScreensOpen, type CloseRequest, type RunningProcess } from "./lib/close_guard.ts";
@@ -135,6 +135,8 @@
 
   const authState = $derived(getAuthState());
   const authError = $derived(getAuthError());
+  const connectionError = $derived(getConnectionError());
+  const connectionRetryLabel = $derived(getConnectionRetryLabel());
 </script>
 
 <div
@@ -200,6 +202,12 @@
   {#if isPWA}
     <div class="pwa-titlebar">
       <span class="pwa-titlebar-title">{windowTitle}</span>
+    </div>
+  {/if}
+
+  {#if connectionError}
+    <div role="alert" class="flex gap-3 items-center p-3">
+      <span>{connectionError}</span><button onclick={retryConnection}>{connectionRetryLabel}</button>
     </div>
   {/if}
 

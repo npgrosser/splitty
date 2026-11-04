@@ -11,5 +11,6 @@ pub mod bridge;
 pub mod handshake;
 pub mod hosts;
 pub mod install;
+pub mod owner;
 pub mod ssh;
 pub mod tunnel;

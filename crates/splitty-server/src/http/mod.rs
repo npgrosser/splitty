@@ -6,18 +6,65 @@
 //! Middleware is applied in order: localhost guard, origin check, then
 //! authentication — see `apply_middleware`.
 
+mod browser_wire;
+pub mod gateway;
 pub mod jobs;
 pub mod middleware;
 pub mod routes;
+pub mod server;
 pub mod session;
 #[cfg(all(test, unix))]
 mod tests;
 
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use axum::Router;
 
-use crate::ws;
+/// Authentication and asset policy of one explicit browser adapter. Contains
+/// no terminal service, host connector or upstream credential.
+#[derive(Clone)]
+pub struct BrowserState {
+    pub token: String,
+    pub sessions: Arc<session::SessionStore>,
+    pub allowed_origins: Arc<Vec<String>>,
+    pub listen_addr: String,
+}
+impl BrowserState {
+    pub fn new(address: std::net::SocketAddr, token: String) -> std::io::Result<Self> {
+        if address.ip() != std::net::Ipv4Addr::LOCALHOST
+            && address.ip() != std::net::Ipv6Addr::LOCALHOST
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "browser gateways require 127.0.0.1 or ::1",
+            ));
+        }
+        Ok(Self {
+            token,
+            sessions: Arc::new(session::SessionStore::isolated()),
+            allowed_origins: Arc::new(canonical_origins(address)),
+            listen_addr: address.to_string(),
+        })
+    }
+}
+
+fn canonical_origins(address: std::net::SocketAddr) -> Vec<String> {
+    vec![
+        format!("http://{address}"),
+        format!("http://localhost:{}", address.port()),
+    ]
+}
+
+impl axum::extract::FromRef<AppState> for BrowserState {
+    fn from_ref(state: &AppState) -> Self {
+        Self {
+            token: state.token.clone(),
+            sessions: state.sessions.clone(),
+            allowed_origins: state.allowed_origins.clone(),
+            listen_addr: state.listen_addr.clone(),
+        }
+    }
+}
 
 /// Shared application state, passed to all handlers via Axum's State extractor.
 #[derive(Clone)]
@@ -33,22 +80,33 @@ pub struct AppState {
     /// outside this list is by definition not the Splitty UI. Built by
     /// [`allowed_origins`] from the address actually bound.
     pub allowed_origins: Arc<Vec<String>>,
-    pub mux_store: Arc<splitty_core::mux::Store>,
-    pub ws_state: Arc<ws::WsState>,
-    pub config: Arc<RwLock<splitty_core::config::HomeConfig>>,
-    pub shell_profiles: Arc<RwLock<splitty_core::shell_profiles::ShellProfilesState>>,
-    pub server_config: Arc<RwLock<splitty_core::config::ServerConfig>>,
-    pub template_store: Arc<splitty_core::template::FileStore>,
-    pub themes_dir: std::path::PathBuf,
-    /// Build info
-    pub version: String,
-    pub commit: String,
-    pub build_time: String,
-    /// The address the server is listening on. Feeds the CSP `connect-src` and
-    /// the stats endpoint.
+    pub service: Arc<crate::service::State>,
+    /// The browser adapter's address, used for CSP and origin checks.
     pub listen_addr: String,
-    /// Server mode: "embedded" (dies with window) or "daemon" (persistent).
-    pub server_mode: String,
+}
+
+impl std::ops::Deref for AppState {
+    type Target = crate::service::State;
+
+    fn deref(&self) -> &Self::Target {
+        &self.service
+    }
+}
+
+impl axum::response::IntoResponse for crate::service::reply::Reply {
+    fn into_response(self) -> axum::response::Response {
+        use axum::http::{header::CONTENT_TYPE, HeaderValue, StatusCode};
+        let status = StatusCode::from_u16(self.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+        let content_type = self.content_type;
+        let body = axum::body::Bytes::from_owner(self.into_body());
+        let mut response = (status, body).into_response();
+        if let Some(content_type) = content_type {
+            response
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+        }
+        response
+    }
 }
 
 /// The origins the UI is served from, derived from the address actually bound.
@@ -56,30 +114,12 @@ pub struct AppState {
 /// Both spellings of loopback are included because a user may reach the app
 /// through either, and both are the same origin from the server's point of view.
 ///
-/// In debug builds the Vite dev server's origin is added as well: `make
-/// dev-tauri` serves the UI from `http://localhost:1420` and proxies `/api` and
-/// `/ws` through to this server, so the requests arrive carrying that origin.
-/// This is compiled out of release builds rather than being a runtime switch, so
-/// a shipped binary has no way to widen its own origin policy.
+/// Desktop clients load packaged assets and do not add browser origins.
 pub fn allowed_origins(listen_addr: &str) -> Vec<String> {
-    let port = listen_addr
-        .rsplit(':')
-        .next()
-        .and_then(|p| p.parse::<u16>().ok());
-
-    let mut origins = Vec::new();
-    if let Some(port) = port {
-        origins.push(format!("http://127.0.0.1:{port}"));
-        origins.push(format!("http://localhost:{port}"));
-    }
-
-    #[cfg(debug_assertions)]
-    {
-        origins.push("http://localhost:1420".to_string());
-        origins.push("http://127.0.0.1:1420".to_string());
-    }
-
-    origins
+    listen_addr
+        .parse::<std::net::SocketAddr>()
+        .map(canonical_origins)
+        .unwrap_or_default()
 }
 
 /// Apply the shared middleware stack.
@@ -99,12 +139,19 @@ pub fn allowed_origins(listen_addr: &str) -> Vec<String> {
 /// was on. The UI is same-origin with the API, so it needs no CORS headers at
 /// all, and emitting none is the strictest correct answer.
 fn apply_middleware(app: Router<AppState>, state: &AppState) -> Router<AppState> {
+    use axum::extract::FromRef;
+    // Register the already-bound browser listener before any adapter can ask
+    // the shared hub to open or remember a reverse forward. Native operations
+    // must have the same exclusion even when no HTTP handler ran first.
+    if let Ok(address) = state.listen_addr.parse::<std::net::SocketAddr>() {
+        state.service.hub.reserve_local_port(address.port());
+    }
     app.layer(axum::middleware::from_fn_with_state(
-        state.clone(),
+        BrowserState::from_ref(state),
         middleware::require_token,
     ))
     .layer(axum::middleware::from_fn_with_state(
-        state.clone(),
+        BrowserState::from_ref(state),
         middleware::require_origin,
     ))
     .layer(axum::middleware::from_fn(middleware::require_localhost))
@@ -112,8 +159,8 @@ fn apply_middleware(app: Router<AppState>, state: &AppState) -> Router<AppState>
 
 /// Build the full Axum router with all routes and middleware.
 pub fn build_router(state: AppState) -> Router {
-    let app = routes::api_routes().merge(jobs::routes(
-        Arc::downgrade(&state.ws_state.jobs),
+    let app = routes::api_routes_with(state.service.hub.clone()).merge(jobs::routes(
+        Arc::downgrade(&state.client_state.jobs),
         crate::jobs::Actor::User,
     ));
     apply_middleware(app, &state).with_state(state)
@@ -121,9 +168,9 @@ pub fn build_router(state: AppState) -> Router {
 
 /// Build the router with API routes + embedded frontend (SPA fallback).
 pub fn build_router_with_frontend(state: AppState) -> Router {
-    let app = routes::api_routes()
+    let app = routes::api_routes_with(state.service.hub.clone())
         .merge(jobs::routes(
-            Arc::downgrade(&state.ws_state.jobs),
+            Arc::downgrade(&state.client_state.jobs),
             crate::jobs::Actor::User,
         ))
         .fallback(routes::serve_frontend);
@@ -146,7 +193,7 @@ pub fn build_router_with_frontend(state: AppState) -> Router {
 pub fn build_control_router(state: AppState) -> Router {
     routes::control_routes()
         .merge(jobs::routes(
-            Arc::downgrade(&state.ws_state.jobs),
+            Arc::downgrade(&state.client_state.jobs),
             crate::jobs::Actor::User,
         ))
         .merge(jobs::admin_routes())

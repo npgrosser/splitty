@@ -49,7 +49,7 @@ use axum::{
 use serde::Deserialize;
 use serde_json::json;
 
-use super::AppState;
+use super::BrowserState;
 
 /// How long a WebSocket ticket stays valid.
 ///
@@ -79,6 +79,7 @@ pub const SESSION_COOKIE: &str = "splitty-session";
 #[derive(Default)]
 pub struct SessionStore {
     inner: Mutex<Inner>,
+    cookie_name: Option<String>,
 }
 
 #[derive(Default)]
@@ -94,6 +95,20 @@ struct Inner {
 impl SessionStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    pub fn isolated() -> Self {
+        Self {
+            cookie_name: Some(format!(
+                "{SESSION_COOKIE}-{}",
+                crate::service::new_instance()
+            )),
+            ..Self::default()
+        }
+    }
+
+    pub fn cookie_name(&self) -> &str {
+        self.cookie_name.as_deref().unwrap_or(SESSION_COOKIE)
     }
 
     /// Mint a bootstrap code for a launcher to embed in the URL it opens.
@@ -216,7 +231,7 @@ pub struct BootstrapRequest {
 /// Neither replaces the origin check — `SameSite` treats every `127.0.0.1:*`
 /// port as the same site — they are layers, not alternatives.
 pub async fn exchange_bootstrap(
-    State(state): State<AppState>,
+    State(state): State<BrowserState>,
     Json(body): Json<BootstrapRequest>,
 ) -> Response {
     let session = if !body.bootstrap.is_empty() {
@@ -235,7 +250,10 @@ pub async fn exchange_bootstrap(
             .into_response();
     };
 
-    let cookie = format!("{SESSION_COOKIE}={session}; Path=/; HttpOnly; SameSite=Strict");
+    let cookie = format!(
+        "{}={session}; Path=/; HttpOnly; SameSite=Strict",
+        state.sessions.cookie_name()
+    );
     (
         StatusCode::OK,
         [(header::SET_COOKIE, cookie)],
@@ -246,8 +264,8 @@ pub async fn exchange_bootstrap(
 
 /// `POST /api/bootstrap` — mint a bootstrap code for a browser elsewhere.
 ///
-/// Used by `splitty connect`, which runs this over SSH on the remote host so a
-/// local browser can establish a session through the tunnel.
+/// Used by `splitty issue-bootstrap --addr` for an explicitly selected browser
+/// gateway. SSH connectors never obtain browser credentials from a host.
 ///
 /// Reachable **only** over HTTP with the process token, never over the local
 /// control socket (security review SR-05/SR-24, see docs/security/findings.md):
@@ -260,7 +278,7 @@ pub async fn exchange_bootstrap(
 /// configuration directly. What the separation guarantees is that panes are
 /// never *handed* a credential, so none leaks through `env` output, crash
 /// reports or CI logs.
-pub async fn issue_bootstrap(State(state): State<AppState>) -> Response {
+pub async fn issue_bootstrap(State(state): State<BrowserState>) -> Response {
     Json(json!({ "bootstrap": state.sessions.issue_bootstrap() })).into_response()
 }
 
@@ -269,7 +287,7 @@ pub async fn issue_bootstrap(State(state): State<AppState>) -> Response {
 /// Reachable only through the authenticated, origin-checked middleware stack, so
 /// possession of a valid session and an allowed origin is already proven by the
 /// time this runs.
-pub async fn issue_ws_ticket(State(state): State<AppState>) -> Response {
+pub async fn issue_ws_ticket(State(state): State<BrowserState>) -> Response {
     Json(json!({ "ticket": state.sessions.issue_ticket() })).into_response()
 }
 

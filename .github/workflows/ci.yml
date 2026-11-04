@@ -95,6 +95,39 @@ jobs:
       - name: Test server, core and architecture check
         run: cargo test --locked --workspace --exclude splitty-gui
 
+      # Native policy must actually execute; WSL/container refusal is not proof.
+      - name: Require native forwarding reservation lifecycle
+        env:
+          SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE: '1'
+        run: cargo test --locked -p splitty-remote --test native_exposure -- --exact native_policy_retains_published_worker_after_coordinator_death --nocapture
+
+      # The SSH server is unpacked privately, never installed as a host service.
+      # Only this disposable hosted runner's user-namespace policy is adjusted.
+      - name: Prepare isolated real SSH crash fixture
+        run: |
+          sudo apt-get -o Acquire::Retries=3 update
+          mkdir -p "${RUNNER_TEMP}/splitty-sshd/packages" "${RUNNER_TEMP}/splitty-sshd/root"
+          cd "${RUNNER_TEMP}/splitty-sshd/packages"
+          apt-get download openssh-server libwrap0
+          for package in ./*.deb; do
+            dpkg-deb --extract "$package" "${RUNNER_TEMP}/splitty-sshd/root"
+          done
+          if test -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+          unshare --user --map-current-user --keep-caps --net true
+
+      - name: Require real SSH reconnect, forwarding crash and kept-session migration
+        env:
+          SPLITTY_TEST_SSHD_ROOT: ${{ runner.temp }}/splitty-sshd/root
+          SPLITTY_TEST_REQUIRE_SSH_LAB: '1'
+          SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE: '1'
+        run: |
+          cargo test --locked -p splitty-server --test remote_connect fixture_cleanup_refuses_processes_outside_its_network_namespace -- --exact --nocapture
+          cargo test --locked -p splitty-server --test remote_connect connect_reconnects_and_hands_over_sessions_through_real_ssh -- --exact --nocapture
+          cargo test --locked -p splitty-server --test remote_connect exposure_crash::a_published_reverse_worker_blocks_gateway_reuse_after_its_coordinator_is_killed -- --exact --nocapture
+          cargo test --locked -p splitty-server --test remote_connect the_hub_updates_a_host_daemon_of_another_version -- --exact --nocapture
+
   aarch64:
     name: Static server (aarch64)
     if: github.event_name != 'schedule'
@@ -204,6 +237,12 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend/pnpm-lock.yaml
 
+      # Frontend conformance tests type-check the actual Electron adapters.
+      - name: Install Electron adapter types
+        env:
+          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
+        run: pnpm install --frozen-lockfile --dir frontend-electron
+
       - name: Check, test and build
         working-directory: frontend
         run: pnpm install --frozen-lockfile && pnpm check && pnpm test && pnpm build
@@ -228,7 +267,11 @@ jobs:
           cache: pnpm
           cache-dependency-path: frontend-electron/pnpm-lock.yaml
 
-      - name: Type-check the main process
+      # The Electron build also builds and packages the shared frontend.
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile --dir frontend
+
+      - name: Type-check and package main-process assets
         working-directory: frontend-electron
         run: pnpm install --frozen-lockfile && pnpm build
 
@@ -263,3 +306,114 @@ jobs:
       - name: npm advisories (architecture tooling)
         working-directory: architecture
         run: pnpm audit
+
+  tauri-macos:
+    name: Tauri native runtime (macOS)
+    if: github.event_name != 'schedule'
+    runs-on: macos-14
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          components: clippy
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: tauri-macos
+          # Preserve compiled dependencies while platform checks are diagnosed.
+          cache-on-failure: true
+
+      # A missing alternate user or WindowServer is a failed verification,
+      # never a passing test that silently skipped its OS assertions.
+      - name: Verify native runtime prerequisites
+        run: |
+          /usr/bin/pgrep -x WindowServer
+          /usr/sbin/sysctl -n kern.osrelease
+          /usr/sbin/lsof -v
+          sudo -n -u nobody /usr/bin/python3 -c 'import os, sys; assert os.geteuid() != 0 and os.geteuid() != int(sys.argv[1])' "$(id -u)"
+
+      - name: Build packaged frontend
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      - name: Check portable WKWebView harness preparation
+        run: |
+          python3 scripts/testing/tauri-wkwebview-smoke-test.py
+          python3 scripts/testing/tauri-wkwebview-smoke.py --prepare-only --evidence-dir "${RUNNER_TEMP}/splitty-macos-native-evidence"
+
+      - name: Lint and test native macOS application
+        run: |
+          cargo clippy --locked -p splitty-gui --all-targets -- -D warnings
+          cargo test --locked -p splitty-gui --lib
+
+      # Gather the independent native IPC runtime evidence even when a
+      # core platform test fails. The final gate still fails this job.
+      - name: Test macOS core
+        id: core_tests
+        continue-on-error: true
+        run: cargo test --locked -p splitty-core
+
+      - name: Verify macOS native carrier failure and cancellation cleanup
+        run: cargo test --locked -p splitty-remote --lib bridge::tests -- --nocapture
+
+      - name: Verify native endpoint peer-user boundary
+        run: cargo test --locked -p splitty-server --test native_endpoint -- --nocapture
+
+      - name: Verify native exposure and explicit gateway positive controls
+        env:
+          SPLITTY_TEST_REQUIRE_NATIVE_EXPOSURE: '1'
+        run: |
+          cargo test --locked -p splitty-remote --test native_exposure -- --exact native_policy_retains_published_worker_after_coordinator_death --nocapture
+          cargo test --locked -p splitty-server --test daemon_lifecycle start_status_control_command_stop -- --exact
+          cargo test --locked -p splitty-server --test daemon_lifecycle process_inventory::inventory_observes_owned_ipv4_and_ipv6_listeners -- --exact
+          cargo test --locked -p splitty-server --test daemon_lifecycle owned_native_child_pipes_end_only_their_embedded_sessions -- --exact
+          cargo test --locked -p splitty-server --test daemon_lifecycle remote_bridge_relays_native_bytes_and_detaches_without_ending_host_sessions -- --exact
+          cargo test --locked -p splitty-server --test daemon_lifecycle an_explicit_daemon_browser_gateway_survives_daemon_replacement_and_detaches_cleanly -- --exact
+          cargo build --locked -p splitty-server
+
+      # Real WKWebView/PTY/popout execution; no mock runtime or HTTP UI server.
+      - name: Run packaged WKWebView lifecycle smoke
+        run: >-
+          python3 scripts/testing/tauri-wkwebview-smoke.py
+          --full-ui --coexist-daemon --reloads 36
+          --evidence-dir "${RUNNER_TEMP}/splitty-macos-native-evidence"
+
+      - name: Verify WKWebView remote isolation and slow consumers
+        timeout-minutes: 6
+        run: >-
+          python3 scripts/testing/tauri-wkwebview-smoke.py
+          --isolation-consumer --reloads 1
+          --harness-dir "${RUNNER_TEMP}/splitty-macos-isolation-harness"
+          --evidence-dir "${RUNNER_TEMP}/splitty-macos-native-evidence/isolation-consumer"
+
+      - name: Enforce macOS core test result
+        if: always()
+        env:
+          CORE_TEST_OUTCOME: ${{ steps.core_tests.outcome }}
+        run: |
+          if [ "$CORE_TEST_OUTCOME" != success ]; then
+            echo '::error::The macOS core suite did not pass; later runtime evidence does not waive this gate.'
+            exit 1
+          fi
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: tauri-macos-native-evidence
+          path: ${{ runner.temp }}/splitty-macos-native-evidence
+          retention-days: 7

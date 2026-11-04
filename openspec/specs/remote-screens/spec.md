@@ -6,19 +6,19 @@ Defines remote screens: screens of a remote host shown next to local screens in 
 ## Requirements
 
 ### Requirement: Remote Screen Hub Endpoint
-The server SHALL accept WebSocket upgrades at `/ws/remote` with the query parameters `ticket` and `target`, authenticated like `/ws` (see `access-control`, Remote Screen Hub Access). For each socket it SHALL:
+An explicit browser gateway SHALL accept `/ws/remote` upgrades with `ticket` and `target`, authenticated like `/ws`. An authorized native main client SHALL be able to open the equivalent host stream through its assigned service. For either client stream the hub SHALL:
 1. validate the target as `splitty connect` does;
-2. make sure the host has a server and a running daemon, as `splitty connect` does (see `cli`, Remote Connect Tunnel, and `remote-hosts`), with a port hint that is free on this side;
-3. start `splitty remote-bridge` on the host over SSH, using the installed server's absolute path when it installed one or found one installed;
+2. make sure the host has a server and a running daemon, as `splitty connect` does (see `cli`, Remote Connect Tunnel, and `remote-hosts`), without a TCP port hint and requiring native transport compatibility;
+3. start `splitty remote-bridge --transport native-v1` on the host over SSH, using the installed server's absolute path when it installed one or found one installed;
 4. send `remote.ready`;
-5. relay every WebSocket message between the socket and the host daemon unchanged, text as text and binary as binary, in order.
+5. relay every application message between the client stream and the host daemon unchanged, text as text and binary as binary, in order.
 
-Before the relay the server SHALL send only these text messages:
+Before the relay the hub SHALL send only these application text messages:
 - `{"type": "remote.progress", "step", "message"}`, with `step` one of `install`, `daemon`, `started` and `bridge`;
 - exactly one `{"type": "remote.ready", "target", "daemon": {"version", "protocol", "keepsSessions", "started"}, "screens": [{"id", "name", "panes"}]}`, where `keepsSessions` is the handshake's (see `remote-hosts`, Remote Handshake);
-- or `{"type": "remote.error", "code", "message", "hint"?}`, after which it SHALL close the socket. `code` is one of `invalid_target`, `host_key`, `auth`, `unreachable`, `unsupported_host`, `install`, `daemon`, `incompatible`, `bridge` and `internal`.
+- or `{"type": "remote.error", "code", "message", "hint"?}`, after which it SHALL close the socket. `code` is one of `invalid_target`, `host_key`, `auth`, `unreachable`, `unsupported_host`, `install`, `daemon`, `incompatible`, `migration_unavailable`, `bridge` and `internal`.
 
-After `remote.ready`, the server SHALL send no message of its own. When the connection to the host ends, it SHALL close the socket with code 4001. When the socket closes, it SHALL end its `ssh` process. Each socket SHALL use an SSH connection of its own. Once `remote.ready` is sent, the server SHALL record the target as a recent host (see `remote-hosts`, Known Hosts).
+After `remote.ready`, the hub SHALL send no application message of its own; transport negotiation/liveness is outside this application stream. When the connection to the host ends, it SHALL close the WebSocket with code 4001 or the native stream with the equivalent host-lost reason. When the socket closes, it SHALL end its `ssh` process. Each socket SHALL use an SSH connection of its own. Once `remote.ready` is sent, the server SHALL record the target as a recent host (see `remote-hosts`, Known Hosts).
 
 #### Scenario: Connect a host without Splitty
 - **WHEN** a client opens `/ws/remote?target=vm1` with a valid ticket and `vm1` has no Splitty
@@ -41,7 +41,7 @@ After `remote.ready`, the server SHALL send no message of its own. When the conn
 - **THEN** its `remote.ready` carries `keepsSessions` true in `daemon`
 
 ### Requirement: Remote Screen Protocol Check
-Before it starts the bridge, the server SHALL compare the host daemon's protocol version from the handshake with its own. It SHALL accept the same version and the one before (see `remote-hosts`, Protocol Version). Otherwise it SHALL send `remote.error` with code `incompatible`, the daemon's `version`, `protocol` and `keepsSessions`, and its `screens` as in `remote.ready`, and close the socket. It SHALL NOT stop or replace the host's daemon.
+Before it starts the bridge, the server SHALL require a supported native transport and compare the host daemon's protocol version from the handshake with its own. It SHALL accept the same version and the one before (see `remote-hosts`, Protocol Version). A missing or unsupported native transport SHALL also be incompatible. Otherwise it SHALL send `remote.error` with code `incompatible`, the daemon's `version`, `protocol` and `keepsSessions`, and its `screens` as in `remote.ready`, and close the socket. Ordinary connection SHALL NOT stop or replace the host's daemon. A positively eligible legacy daemon SHALL additionally report a structured migration offer; a blocked legacy daemon SHALL report `migration_unavailable` with its reason.
 
 #### Scenario: Newer host
 - **WHEN** the host daemon's protocol version is higher than the server's
@@ -90,7 +90,7 @@ A client SHALL show local screens and remote screens grouped by their host in th
 - **AND** the order is the same after the client restarts
 
 ### Requirement: Remote Screen Reconnect
-When a host's connection drops after `remote.ready`, the client SHALL mark that host's screens as reconnecting, keep them from taking input, and reconnect with a delay that grows to 10 seconds, with a fresh ticket for every attempt. A failed ticket request for a host SHALL NOT be reported as the local session's authentication error. After a successful reconnect, the client SHALL resync the host's screens and re-attach their sessions. When the connection fails with an error code that retrying cannot fix, the client SHALL stop retrying and show the error with its hint and a retry. When a host cannot be reached again, its screens SHALL be shown as offline with a retry.
+When a host's connection drops after `remote.ready`, the client SHALL mark that host's screens as reconnecting, keep them from taking input, and reconnect with a delay that grows to 10 seconds, with a fresh ticket for every browser attempt or a freshly authorized native stream for a native client. A failed ticket request for a host SHALL NOT be reported as the local session's authentication error. No queued terminal input or mutation from the lost connection SHALL be replayed. After a successful reconnect, the client SHALL resync the host's screens and re-attach their sessions. When the connection fails with an error code that retrying cannot fix, the client SHALL stop retrying and show the error with its hint and a retry. When a host cannot be reached again, its screens SHALL be shown as offline with a retry.
 
 #### Scenario: Network drop
 - **WHEN** the connection to `vm1` drops and the host is reachable again 20 seconds later
@@ -155,23 +155,25 @@ The client SHALL retain host groups for recently connected hosts even when they 
 - **THEN** the client reports the screen as missing and does not recreate it
 
 ### Requirement: Host Update
-`/ws/remote` SHALL accept the query parameter `update=1`. With it, before the bridge starts, the server SHALL stop the host's daemon if that daemon already ran and its version differs from the server's own, which ends its sessions unless the daemon keeps them (`keepsSessions`), report that as `remote.progress` with step `update`, and SHALL then start its own version with the handshake as usual. When the host has no server of the server's own version to start, the server SHALL stop nothing and SHALL send `remote.error` with code `unsupported_host`. The stop is the host server's `daemon stop`, the only command the server sends to a host besides those of the install, the handshake and the bridge (see `access-control`, Remote Screen Hub Access). A client SHALL use `update=1` only after the user confirmed a warning: for a daemon that keeps its sessions, that they keep running while its daemon restarts and the connection drops for a moment; for any other, the number of screens and panes that end on the host. A client SHALL show that an update is available for a compatible host whose daemon runs another version, and SHALL offer that update too; once it is confirmed, the client SHALL end the host's connection and open the next one with `update=1`.
+`/ws/remote` SHALL accept `update=1`; an authorized native main host connection SHALL support the corresponding explicit intent. A client SHALL request it only after the user confirms the versions and keeper-session behavior. An older native daemon may be updated only with verified instance identity, session keepers and the matching installed replacement. An eligible legacy daemon SHALL use Confirmed Legacy Daemon Migration instead. A missing replacement, newer daemon, absent session keepers or blocked legacy migration SHALL stop nothing and return an actionable failure. No update SHALL deliberately end sessions.
 
-#### Scenario: Update an incompatible host
-- **WHEN** `vm1`'s daemon is incompatible and the user confirms "Update now"
-- **THEN** the old daemon on `vm1` stops, a daemon of the local server's version starts, and the screens connect to it
+The intent SHALL apply to one connection attempt and be consumed before a potentially mutating command; reconnect and ambiguous completion SHALL NOT replay it. Successful replacement SHALL report update progress and require a fresh handshake for the intended native daemon. A daemon already running the intended version SHALL remain running. Migration offers SHALL be structured metadata rather than inferred from message text; blocked legacy migration SHALL use `migration_unavailable` and SHALL NOT offer an ordinary update that cannot succeed.
 
-#### Scenario: Update a compatible host of another version
-- **WHEN** the window is connected to `vm1`, whose daemon runs an older compatible version, and the user confirms its update
-- **THEN** the window's connection to `vm1` ends, the next one opens with `update=1`, and `vm1` then runs the local server's version
+#### Scenario: Update a compatible older host
+- **WHEN** a user confirms updating an older native daemon with keepers and a matching replacement
+- **THEN** the instance-bound update preserves keeper sessions and connects to the freshly verified replacement
 
 #### Scenario: Nothing to update
-- **WHEN** a client opens `/ws/remote` for `vm1` with `update=1` and `vm1`'s daemon runs the server's version
-- **THEN** the daemon keeps running with its sessions, and the socket connects to it as without `update=1`
+- **WHEN** a confirmed update finds the host already running the intended version
+- **THEN** it connects without stopping that daemon
 
-#### Scenario: Update a host whose daemon keeps its sessions
-- **WHEN** the window is connected to `vm1`, whose older daemon keeps its sessions and runs a build, and the user confirms its update
-- **THEN** the warning said that the sessions keep running, and after the update `vm1` runs the local server's version with the build still running in its pane
+#### Scenario: Eligible legacy migration
+- **WHEN** a host failure includes a positive migration offer and the user confirms it
+- **THEN** the next connection consumes the migration intent once and preserves keeper-managed sessions through the conditional migration
+
+#### Scenario: Migration unavailable
+- **WHEN** legacy process identity or keeper compatibility cannot be verified
+- **THEN** the UI explains the blocked reason and does not present a working update action or end sessions
 
 ### Requirement: Port Forwards Through The Hub
 The server SHALL offer forwards from a local port to a port of a host:
@@ -439,3 +441,14 @@ The window SHALL offer sharing a local port with a host only as the user's own a
 #### Scenario: Administrative port
 - **WHEN** the user enters local port 2375 to share
 - **THEN** the window shows the stronger warning before the user can share it
+
+### Requirement: Native Host Management Surface
+An authorized native main client SHALL have equivalents of the existing host, preference, order, catalog, remembered-screen and forwarding API operations through its assigned service. Reads and metadata edits SHALL retain their existing absence of connection side effects. Remote-window and restricted-agent connections SHALL not gain local hub or forwarding authority.
+
+#### Scenario: Native host metadata
+- **WHEN** a native main window reads or edits its saved host metadata without requesting a connection
+- **THEN** the same validated metadata is returned or saved and no SSH connection or listener is started
+
+#### Scenario: Native saved forwarding
+- **WHEN** a native main window deliberately connects a host
+- **THEN** only that host's enabled saved forwards/reverse forwards may restore, with the existing Stop, Forget, ordering and endpoint-exclusion rules

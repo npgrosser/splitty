@@ -16,11 +16,11 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-use tokio::process::Child;
+use splitty_transport::{admission::Admission, worker::Worker};
 use tokio::task::JoinHandle;
 
 use super::{wait_for_forward, PortReservation};
-use crate::ssh::{classify, keep_end, kept_end, Ssh, SshError};
+use crate::ssh::{diagnostic_budget, keep_end, kept_end, Diagnostic, Ssh, SshError};
 
 /// A forward as the user asks for it: `PORT`, or `LOCAL:REMOTE`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,10 +226,9 @@ async fn read_ready(stdout: impl tokio::io::AsyncRead + Unpin, marker: &str) -> 
 /// OpenSSH ssh_session2 runs ssh_init_forwarding before LocalCommand, and
 /// ExitOnForwardFailure exits before that command when -L cannot bind. A live
 /// authenticating child plus someone else's TCP listener is not readiness.
-async fn wait_for_ready(child: &mut Child, port: u16, marker: &str) -> io::Result<()> {
+async fn wait_for_ready(child: &mut Worker, port: u16, marker: &str) -> io::Result<()> {
     let stdout = child
-        .stdout
-        .take()
+        .stdout()
         .ok_or_else(|| io::Error::other("missing SSH readiness pipe"))?;
     tokio::time::timeout(SETUP_TIMEOUT, async {
         read_ready(stdout, marker).await?;
@@ -302,8 +301,8 @@ pub enum PortTunnelError {
 /// One port of a host forwarded by an `ssh -N` of its own. The `ssh` is
 /// killed when this is dropped.
 pub struct PortTunnel {
-    child: Child,
-    stderr: Option<JoinHandle<String>>,
+    child: Worker,
+    stderr: Option<JoinHandle<Diagnostic>>,
 }
 
 impl PortTunnel {
@@ -348,15 +347,23 @@ impl PortTunnel {
                 local: port,
                 source,
             })?;
+        let budget = splitty_transport::budget::ConnectionBudget::default();
+        let diagnostic_bytes = diagnostic_budget(&budget)
+            .map_err(|error| PortTunnelError::Ssh(SshError::Spawn(error)))?;
+        // BufReader and bounded readiness-line capacity; held through setup.
+        let _read_storage = budget.reserve(3 * 8192, false).map_err(|error| {
+            PortTunnelError::Ssh(SshError::Spawn(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                error,
+            )))
+        })?;
         // As late as possible (SR-13), see `PortReservation`.
         drop(local);
-        let mut child = command
-            .spawn()
+        let mut child = Worker::spawn(&mut command, &Admission::global())
             .map_err(|error| PortTunnelError::Ssh(SshError::Spawn(error)))?;
         let stderr = child
-            .stderr
-            .take()
-            .map(|stderr| tokio::spawn(keep_end(stderr)));
+            .stderr()
+            .map(|stderr| tokio::spawn(keep_end(stderr, diagnostic_bytes)));
         let mut tunnel = Self { child, stderr };
         let Err(error) = wait_for_ready(&mut tunnel.child, port, READY_MARKER).await else {
             if let Err(source) = check_forward_address(port) {
@@ -381,9 +388,9 @@ impl PortTunnel {
             });
         }
         Err(match exited {
-            Some(status) if !status.success() => {
-                PortTunnelError::Ssh(classify(host, status, &stderr))
-            }
+            Some(status) if !status.success() => PortTunnelError::Ssh(
+                crate::ssh::classify_budgeted(host, status, &stderr, &budget),
+            ),
             _ => PortTunnelError::NotEstablished {
                 host: host.to_owned(),
                 remote,
@@ -410,6 +417,14 @@ impl PortTunnel {
     pub async fn close(&mut self) {
         // Fails only when `ssh` has already been waited for.
         let _ = self.child.kill().await;
+        let _ = kept_end(self.stderr.take()).await;
+    }
+}
+impl Drop for PortTunnel {
+    fn drop(&mut self) {
+        if let Some(stderr) = self.stderr.take() {
+            stderr.abort();
+        }
     }
 }
 
@@ -735,14 +750,14 @@ mod tests {
         use tokio::io::AsyncWriteExt;
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("competing listener");
         let port = listener.local_addr().expect("address").port();
-        let mut child = tokio::process::Command::new("sh")
+        let mut command = tokio::process::Command::new("sh");
+        command
             .args(["-c", "read line; exit 255"])
             .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .expect("delayed SSH fixture");
-        let mut release = child.stdin.take().expect("gate");
+            .stdout(Stdio::piped());
+        let mut child =
+            Worker::spawn(&mut command, &Admission::global()).expect("delayed SSH fixture");
+        let mut release = child.stdin().expect("gate");
         let ready = wait_for_ready(&mut child, port, "not-emitted-before-binding");
         tokio::pin!(ready);
         assert!(

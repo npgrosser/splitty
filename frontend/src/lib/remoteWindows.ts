@@ -5,6 +5,7 @@
 
 import { shellKind, type ShellKind } from "./platform.ts";
 import { parseKnownHosts, type KnownHost } from "./remote/known_hosts.ts";
+import { migrationOffer, type MigrationOffer } from "./remote/update.ts";
 
 export { parseKnownHosts, type KnownHost };
 
@@ -20,6 +21,7 @@ export interface RemoteProgress {
 export interface RemoteOpenError {
   message: string;
   hint?: string;
+  migration?: MigrationOffer;
 }
 
 export interface RemoteWindowsAPI {
@@ -27,7 +29,7 @@ export interface RemoteWindowsAPI {
   readonly available: boolean;
   hosts(): Promise<KnownHost[]>;
   /** Resolves once the remote window shows the host; rejects with a {@link RemoteOpenError}. */
-  open(target: string): Promise<void>;
+  open(target: string, options?: { update?: boolean }): Promise<void>;
   /** The pending open of `target` then rejects with `{ message: "cancelled" }`. */
   cancel(target: string): Promise<void>;
   onProgress(callback: (progress: RemoteProgress) => void): () => void;
@@ -42,9 +44,12 @@ export interface RemoteWindowsAPI {
 export function toOpenError(cause: unknown): RemoteOpenError {
   if (typeof cause === "string" && cause) return { message: cause };
   if (cause && typeof cause === "object") {
-    const { message, hint } = cause as { message?: unknown; hint?: unknown };
+    const { message, hint, migration: offered } = cause as { message?: unknown; hint?: unknown; migration?: unknown };
     if (typeof message === "string" && message) {
-      return typeof hint === "string" && hint ? { message, hint } : { message };
+      const result: RemoteOpenError = typeof hint === "string" && hint ? { message, hint } : { message };
+      const migration = migrationOffer(offered);
+      if (migration) result.migration = migration;
+      return result;
     }
   }
   return { message: "The host could not be opened." };
@@ -61,43 +66,49 @@ function isProgress(value: unknown): value is RemoteProgress {
 
 function tauriBridge(scope: any): RemoteWindowsAPI {
   const invoke = (command: string, args?: Record<string, unknown>): Promise<unknown> =>
-    scope.__TAURI_INTERNALS__.invoke(command, args);
+    scope.__SPLITTY_TAURI__.invoke(command, args);
 
+  const callbacks = new Set<(progress: RemoteProgress) => void>();
+  const pending = new Set<string>();
+  const polling = new Set<string>();
+  const last = new Map<string, string>();
+  let timer: ReturnType<typeof setInterval> | undefined;
+  const poll = () => {
+    for (const target of pending) {
+      if (polling.has(target)) continue;
+      polling.add(target);
+      void invoke("remote_progress", { target }).then(value => {
+        if (!pending.has(target) || !isProgress(value)) return;
+        const key = JSON.stringify(value);
+        if (last.get(target) === key) return;
+        last.set(target, key);
+        for (const callback of callbacks) callback(value);
+      }).catch(() => {}).finally(() => polling.delete(target));
+    }
+  };
   return {
     available: true,
     async hosts() {
       return parseKnownHosts(await invoke("remote_hosts"));
     },
-    async open(target) {
+    async open(target, options) {
+      pending.add(target);
+      if (!timer) timer = setInterval(poll, 150);
       try {
-        await invoke("remote_open", { target });
+        await invoke("remote_open", { target, ...(options?.update === true ? { update: true } : {}) });
       } catch (cause) {
         throw toOpenError(cause);
+      } finally {
+        pending.delete(target); last.delete(target);
+        if (!pending.size) { clearInterval(timer); timer = undefined; }
       }
     },
     async cancel(target) {
       await invoke("remote_cancel", { target }).catch(() => {});
     },
     onProgress(callback) {
-      // `listen` registers asynchronously; an unsubscribe before that finishes
-      // drops the listener as soon as it exists.
-      let unlisten: (() => void) | undefined;
-      let disposed = false;
-      void import("@tauri-apps/api/event")
-        .then(({ listen }) => listen<unknown>("remote-progress", (event) => {
-          if (isProgress(event.payload)) callback(event.payload);
-        }))
-        .then((fn) => {
-          if (disposed) fn();
-          else unlisten = fn;
-        })
-        .catch((error: unknown) => {
-          console.warn("could not follow remote window progress", error);
-        });
-      return () => {
-        disposed = true;
-        unlisten?.();
-      };
+      callbacks.add(callback);
+      return () => { callbacks.delete(callback); };
     },
   };
 }
@@ -118,10 +129,12 @@ function electronBridge(scope: any): RemoteWindowsAPI {
     async hosts() {
       return parseKnownHosts(await electron.invoke("remote:hosts"));
     },
-    async open(target) {
+    async open(target, options) {
       let result: ElectronOpenResult | undefined;
       try {
-        result = await electron.invoke("remote:open", target);
+        result = options?.update === true
+          ? await electron.invoke("remote:open", target, { update: true })
+          : await electron.invoke("remote:open", target);
       } catch (cause) {
         throw toOpenError(cause);
       }

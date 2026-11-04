@@ -1,0 +1,159 @@
+# Spec Delta
+
+## Purpose
+
+Defines how clients reach a Splitty service, exchange requests and terminal streams, and recover from failure without changing backend identity, authority or application semantics.
+
+## ADDED Requirements
+
+### Requirement: Equivalent Client Operations
+Authorized native and browser clients SHALL observe the same results, validation errors and workspace/session effects for equivalent operations. Transport selection SHALL NOT change job ownership, scratchpad access, file/editor admission or session lifetime.
+
+#### Scenario: Shared state across transports
+- **WHEN** a native client changes a screen and an authorized browser client and owner CLI query that service
+- **THEN** all observe the same resulting workspace and session identifiers
+
+#### Scenario: Invalid operation through another transport
+- **WHEN** equivalent invalid requests arrive through native IPC and an authenticated browser connection
+- **THEN** both reject them with equivalent error/status semantics and no effects
+
+### Requirement: Independent Client Lifetimes
+Each application connection through a gateway or an app-owned helper SHALL retain its own service client identity, attachments, resize contributions, subscriptions and file/editor registration. Closing or stalling one client SHALL not close another or transfer its pending responses, registrations or authority. Closing or reloading a document SHALL NOT end the app-owned embedded service. Gateway HTTP operations SHALL retain their existing actor semantics independently of WebSocket attachments.
+
+#### Scenario: Two browser tabs
+- **WHEN** two tabs attach to one service through a gateway and one closes
+- **THEN** only that tab's registrations and subscriptions are removed, the other tab continues and sessions keep running
+
+#### Scenario: Multiple remote browser clients
+- **WHEN** two browser clients use a remote gateway and one stream stalls or fails
+- **THEN** the other retains its own ordered stream, identity and pending responses
+
+#### Scenario: Documents share an app-owned embedded service
+- **WHEN** multiple document connections use the same app-owned helper and one closes or reloads
+- **THEN** only that connection is revoked, the service instance and local sessions remain available to the other and replacement connections
+- **AND** an invalid host-open or saturated data stream cannot terminate the other document connections
+- **AND** closing the app-owned outer pipe ends the embedded service and its local sessions/jobs
+
+### Requirement: Native Transport Negotiation
+A native connection SHALL negotiate transport version 1 independently of mux and verify the service instance/limits before application requests. Each framing/service handshake SHALL fail within 5 seconds if incomplete. A launcher MAY report preparation progress under its existing startup deadlines, but SHALL admit no application input until service negotiation completes. Unsupported versions, invalid framing and mismatched discovery SHALL fail before dispatch without a fallback listener.
+
+#### Scenario: Unsupported endpoint
+- **WHEN** a client reaches an endpoint with an unsupported native transport version
+- **THEN** it reports incompatibility and sends no application operation or TCP fallback request
+
+#### Scenario: Stale discovery
+- **WHEN** the endpoint's service instance differs from the instance in the discovery record
+- **THEN** the client rejects it and refreshes discovery without sending queued input
+
+#### Scenario: Helper still preparing its backend
+- **WHEN** a native helper has negotiated framing but is still starting WSL or preparing SSH
+- **THEN** it can report bounded progress, but no application request is dispatched before the verified service generation is ready
+
+#### Scenario: Owner host-open intent is pinned before preparation
+- **WHEN** an authorized main broker or authenticated local gateway opens a separate host stream through a private owner endpoint
+- **THEN** the endpoint verifies the expected local service instance before preparing SSH and assigns the validated target for the lifetime of that stream
+- **AND** a stale local instance cannot initiate SSH work through a replacement hub
+
+#### Scenario: Remote carriers cannot open a local host stream
+- **WHEN** a peer sends host-open intent on an assigned direct or SSH remote carrier
+- **THEN** it is rejected before transport acceptance and causes no local host preparation
+
+### Requirement: Fixed Backend And Connection Identity
+Each client connection SHALL bind to one backend and one connection generation. Request IDs, subscriptions and replies SHALL be resolved only within that generation. A peer-supplied target, path, handle or session identifier SHALL NOT select another backend or change the caller's authority.
+
+#### Scenario: Reply from a previous connection
+- **WHEN** a response arrives after its connection was replaced and its request ID is reused on a new connection
+- **THEN** it settles no request and delivers no data to the new connection
+
+#### Scenario: Host supplies local identifiers
+- **WHEN** a host sends messages naming local panes or another host's connection handle
+- **THEN** no operation is routed to either other backend
+
+### Requirement: Enumerated Native Requests
+Native requests SHALL name supported operations with validated arguments. Unknown operations and extra authority fields SHALL be rejected before effects. No generic native proxy, local filesystem or OS-execution escape hatch SHALL be exposed. Intended terminal/job/input/file operations on the assigned backend SHALL retain their existing authority and validation; caller-selected URLs, sockets or authentication headers SHALL not redirect them.
+
+#### Scenario: Generic proxy request
+- **WHEN** a renderer requests a generic URL/socket proxy or local OS-exec operation outside the enumerated backend API
+- **THEN** the broker rejects it before connecting, reading a file or starting a process
+
+### Requirement: Bounded Delivery
+Native frames SHALL be at most 16 MiB. API bodies SHALL be at most 1 MiB or their existing smaller endpoint limit. Each connection SHALL admit at most 64 pending API requests and 32 MiB of application-owned queued/in-flight transport data; all connections together SHALL reserve at most 128 MiB of such transport data per process. Application-owned reassembly, IPC queues and retained IPC output, including encoding copies through completion or disposal of platform delivery, SHALL count against these limits. Incomplete negotiation SHALL hold no application state.
+
+These numeric allowances do not bound framework-owned inbound invoke bodies allocated before application validation, generic framework command replies, engine storage outside the accounted transport buffers, or total process/renderer memory. These exclusions SHALL NOT relax application frame/body limits, transport-buffer accounting, request limits, connection/worker admission, or native role checks. A compromised packaged renderer can exhaust unaccounted framework storage; isolation of its authority does not guarantee availability of other windows sharing the process.
+
+#### Scenario: Oversized frame
+- **WHEN** a native transport peer announces a frame longer than the limit or exceeds its allowed reassembly budget
+- **THEN** the connection ends before the application allocates the declared transport payload or partially applies it
+- **AND** this preallocation guarantee does not cover framework ingress allocation that precedes the application handler
+
+#### Scenario: Frozen client
+- **WHEN** a client stops consuming output and reaches the delivery limit
+- **THEN** it is disconnected without silently dropping part of a terminal message, other clients remain usable and the session keeps capturing bounded output
+
+#### Scenario: Request flood
+- **WHEN** a client already has 64 pending API requests
+- **THEN** additional requests are refused with a busy result without starting their operations
+
+### Requirement: Resource Admission
+Admission SHALL precede application-owned per-client state allocation, backend dialing and worker spawn, with no unbounded wait queue. Framework ingress allocation before the application handler is outside this admission guarantee. Initial ceilings SHALL be:
+
+- 256 accepted transport connections per process, including unauthenticated gateway HTTP and handshakes;
+- 128 live application streams/native handles and 16 pending connection establishments per process;
+- 64 live streams per assigned backend;
+- 32 live streams and 4 pending opens per native window/shared trust domain or authenticated browser session;
+- 32 owned SSH/transport-helper workers per process, including setup and deliberate forwarding workers.
+
+Anonymous work SHALL consume process quotas; parent-owned popouts SHALL share their parent's quota. Excess authenticated work SHALL receive a busy/503 result; anonymous excess SHALL close before upstream work. Slots SHALL release exactly once after cleanup; worker slots only after observed exit. Cancellation and liveness of admitted clients SHALL remain usable. Handshakes SHALL time out in 5 seconds, incomplete native frames in 60 seconds, and unauthenticated HTTP header/idle reads in 15 seconds.
+
+#### Scenario: Idle stream flood
+- **WHEN** a client opens many idle streams that remain below the queued-byte budget
+- **THEN** stream/handle/worker counts stay within all applicable quotas, excess work causes no extra dial/spawn, and existing clients retain cancellation and liveness
+
+#### Scenario: Incomplete handshake and frame flood
+- **WHEN** callers hold connections with incomplete handshakes, headers or frames
+- **THEN** process admission remains bounded before authentication and the specified deadlines release those connections without upstream work
+
+#### Scenario: Quota recovery
+- **WHEN** an admitted open is cancelled, times out, fails, or its owned worker exits
+- **THEN** its capacity returns exactly once after cleanup and can serve another caller without leaking or prematurely reusing a worker slot
+
+### Requirement: Ordered Stream And Cancellation
+Each connection SHALL preserve application-message order and existing spawn/replay ordering. Orderly peer closure SHALL deliver already accepted application frames before reporting end of input; explicit revocation and protocol failure SHALL still discard undelivered input immediately. Cancellation and liveness SHALL remain deliverable under saturation. A request cancellation or timeout SHALL release pending waits, but SHALL NOT claim an already admitted mutation was undone or automatically repeat it.
+
+#### Scenario: Cancel while output is saturated
+- **WHEN** an upload or pending request is cancelled while output fills the data allowance
+- **THEN** cancellation is processed or the connection is explicitly closed within its deadline, without an unbounded wait
+
+#### Scenario: Response lost after mutation
+- **WHEN** a mutation may have applied but its response is lost
+- **THEN** the client reports an uncertain outcome and resynchronizes rather than automatically performing it again
+
+### Requirement: Reconnect Does Not Replay Input
+A reconnect SHALL discard unsent terminal input, uploads, editor actions and non-idempotent mutations from the previous connection. After fresh authentication/negotiation it SHALL resynchronize workspace state and reattach existing sessions. Existing explicitly idempotent job requests SHALL retain their established deduplication semantics.
+
+#### Scenario: Typing during a disconnect
+- **WHEN** the connection drops while input is pending and later reconnects
+- **THEN** old input is not sent to the recovered or a replacement session
+
+#### Scenario: Recovered daemon
+- **WHEN** a daemon restarts and adopts kept sessions
+- **THEN** a reconnecting client obtains fresh connection identity and displays those sessions without spawning replacements
+
+### Requirement: Native Document Lifetime
+A native connection handle SHALL be bound to its actual window, top-level document generation, role and backend. Reload, navigation, destruction or backend replacement SHALL revoke the handle, subscriptions and pending requests, including parent-owned popout views. A new document SHALL obtain its own authorized connection. Direct native grants SHALL not be transferable; same-origin Dockview popouts share their parent's script trust domain rather than forming an isolation boundary.
+
+#### Scenario: Handle copied to another window
+- **WHEN** another window or child frame directly invokes the native broker with a copied connection handle
+- **THEN** the broker rejects the call before any backend request
+- **AND** calls executed through a same-origin popout's parent belong to the shared parent trust domain, not a claimed isolated popout principal
+
+#### Scenario: Distribution switch
+- **WHEN** the Windows app replaces its WSL backend
+- **THEN** outstanding handles and replies from the old distribution cannot address the new one
+
+### Requirement: Feature Parity Without Hidden Listeners
+Native clients SHALL support the existing settings, themes, shell profiles, templates, notifications, files, editor confirmations, popouts, zoom and host-management features allowed by their role. Using those features SHALL NOT start a fallback HTTP listener or grant arbitrary native privileges.
+
+#### Scenario: Native desktop workflow
+- **WHEN** a desktop user saves settings, changes a theme, transfers a file, confirms an editor request and moves a terminal into a popout
+- **THEN** the operations retain their existing validation and lifetime behavior without starting a terminal-server TCP listener

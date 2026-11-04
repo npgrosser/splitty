@@ -1,9 +1,9 @@
 /**
  * Files pasted or dropped into a pane (`terminal-sessions`, Image Paste In A
  * Pane and Files Into A Pane): each goes to the pane's own server, which
- * stores it as a file, and the file's path is pasted into the pane. Images go
- * with `save_image`, which older hosts know too; every other file goes in
- * chunks with `upload`. Claude Code and other agents take a pasted path as the
+ * stores it as a file. Clipboard images go with `save_image`, which older
+ * hosts know too; every other pasted file goes in chunks with `upload`.
+ * Drops go to the destination dialog before anything is sent. Claude Code and other agents take a pasted path as the
  * file, also when they run on a host whose clipboard is empty.
  *
  * The files come from the browser's `paste` and `drop` events; the page may
@@ -17,6 +17,11 @@ import { isMac } from "../shortcuts.ts";
 import { toBase64 } from "../protocol/base64.ts";
 
 export { toBase64 };
+
+/** Preserve plain paths; quote shell metacharacters, including spaces and quotes. */
+export function quoteUploadPath(path: string): string {
+  return /^[\p{L}\p{N}_./-]+$/u.test(path) ? path : `'${path.replaceAll("'", `'"'"'`)}'`;
+}
 
 /** Largest image `save_image` takes; a larger one is uploaded as a file. */
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
@@ -38,10 +43,13 @@ export interface TransferData {
 
 /** The pane, or the text field, files go into. */
 export interface ImagePasteTarget {
+  captureConnection?(): () => void;
   /** Store the image (base64) on the pane's server; resolves with its path. */
   saveImage(data: string): Promise<string>;
   /** Store a file on the pane's server in chunks; resolves with its path. */
   uploadFile(file: File, onProgress?: (received: number) => void): Promise<string>;
+  /** Offer dropped files without sending any bytes yet. */
+  dropFiles?(files: File[]): void;
   /** Paste text into the pane as a bracketed paste. */
   paste(text: string): void;
   /** Send Ctrl+V's `^V` to the terminal. */
@@ -88,7 +96,7 @@ function pastesInto(element: Element | null | undefined): boolean {
  * order, separated by spaces. Files over the limit are refused before
  * anything is sent; any failure pastes nothing and says why.
  */
-export async function pasteFiles(files: readonly File[], target: ImagePasteTarget): Promise<void> {
+export async function pasteFiles(files: readonly File[], target: ImagePasteTarget, shellArguments = true): Promise<void> {
   const tooLarge = files.find((file) => file.size > MAX_FILE_BYTES);
   if (tooLarge) {
     target.failed(`${tooLarge.name || "A file"} is larger than 512 MB.`, false);
@@ -98,16 +106,24 @@ export async function pasteFiles(files: readonly File[], target: ImagePasteTarge
   let stored = 0;
   const paths: string[] = [];
   try {
+    const current = target.captureConnection?.() ?? (() => {});
+    current();
     for (const file of files) {
+      current();
       if (isImage(file)) {
-        paths.push(await target.saveImage(toBase64(new Uint8Array(await file.arrayBuffer()))));
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        current();
+        paths.push(await target.saveImage(toBase64(bytes)));
       } else {
         const before = stored;
         paths.push(await target.uploadFile(file, (received) => target.progress?.(before + received, total, false)));
       }
+      current();
       stored += file.size;
       target.progress?.(stored, total, false);
     }
+    current();
+    if (paths.length > 0) target.paste((shellArguments ? paths.map(quoteUploadPath) : paths).join(" "));
   } catch (err) {
     const needsUpdate = typeof err === "object" && err !== null && "needsUpdate" in err && err.needsUpdate === true;
     target.failed(readError(err) ?? (err instanceof Error ? err.message : String(err)), needsUpdate);
@@ -115,7 +131,6 @@ export async function pasteFiles(files: readonly File[], target: ImagePasteTarge
   } finally {
     target.progress?.(stored, total, true);
   }
-  if (paths.length > 0) target.paste(paths.join(" "));
 }
 
 /** What to say when the browser cannot read a dropped file, typically a folder. */
@@ -171,13 +186,16 @@ export function formatBytes(bytes: number): string {
  */
 export function attachImageInsert(
   field: HTMLTextAreaElement,
-  store: Pick<ImagePasteTarget, "saveImage" | "uploadFile">,
+  store: Pick<ImagePasteTarget, "saveImage" | "uploadFile" | "captureConnection">,
   insert: (text: string) => void,
+  dropFiles?: (files: File[]) => void,
 ): () => void {
   const target: ImagePasteTarget = {
+    captureConnection: store.captureConnection,
     saveImage: (data) => store.saveImage(data),
     uploadFile: (file, onProgress) => store.uploadFile(file, onProgress),
     paste: insert,
+    dropFiles,
     sendCtrlV: () => {},
     failed: reportImageFailure,
     progress: progressNotice(),
@@ -187,7 +205,7 @@ export function attachImageInsert(
     const found = pastedFiles(e.clipboardData);
     if (found.length === 0) return;
     e.preventDefault();
-    void pasteFiles(found, target);
+    void pasteFiles(found, target, false);
   };
   const dragover = (e: DragEvent) => {
     if (!hasFiles(e.dataTransfer)) return;
@@ -198,7 +216,7 @@ export function attachImageInsert(
     if (!hasFiles(e.dataTransfer)) return;
     e.preventDefault();
     const found = droppedFiles(e.dataTransfer);
-    if (found.length > 0) void pasteFiles(found, target);
+    if (found.length > 0) target.dropFiles?.(found);
   };
 
   field.addEventListener("paste", paste);
@@ -217,12 +235,14 @@ export function attachImageInsert(
  */
 export function attachImagePaste(container: HTMLElement, target: ImagePasteTarget): () => void {
   let ctrlV: ReturnType<typeof setTimeout> | undefined;
+  let ctrlVCurrent: (() => void) | undefined;
 
-  const settleCtrlV = (): boolean => {
-    if (ctrlV === undefined) return false;
+  const settleCtrlV = (): (() => void) | undefined => {
+    if (ctrlV === undefined) return undefined;
     clearTimeout(ctrlV);
     ctrlV = undefined;
-    return true;
+    const current = ctrlVCurrent; ctrlVCurrent = undefined;
+    return current;
   };
 
   const keydown = (e: KeyboardEvent) => {
@@ -230,14 +250,22 @@ export function attachImagePaste(container: HTMLElement, target: ImagePasteTarge
     // Not to the terminal yet: the browser's paste, which follows, decides.
     e.stopImmediatePropagation();
     settleCtrlV();
+    try { ctrlVCurrent = target.captureConnection?.() ?? (() => {}); }
+    catch (error) { target.failed(String(error), false); return; }
+    const current = ctrlVCurrent;
     ctrlV = setTimeout(() => {
-      ctrlV = undefined;
-      target.sendCtrlV();
+      ctrlV = undefined; ctrlVCurrent = undefined;
+      try { current(); target.sendCtrlV(); }
+      catch (error) { target.failed(String(error), false); }
     }, CTRL_V_FALLBACK_MS);
   };
 
   const paste = (e: ClipboardEvent) => {
     const viaCtrlV = settleCtrlV();
+    if (viaCtrlV) {
+      try { viaCtrlV(); }
+      catch (error) { e.preventDefault(); e.stopImmediatePropagation(); target.failed(String(error), false); return; }
+    }
     const found = pastedFiles(e.clipboardData);
     if (found.length > 0) {
       e.preventDefault();
@@ -262,7 +290,7 @@ export function attachImagePaste(container: HTMLElement, target: ImagePasteTarge
     e.preventDefault();
     e.stopPropagation();
     const found = droppedFiles(e.dataTransfer);
-    if (found.length > 0) void pasteFiles(found, target);
+    if (found.length > 0) target.dropFiles?.(found);
   };
 
   container.addEventListener("keydown", keydown, true);

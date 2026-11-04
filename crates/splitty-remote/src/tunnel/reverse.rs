@@ -19,12 +19,12 @@ use std::io;
 use std::process::Stdio;
 use std::time::Duration;
 
+use splitty_transport::{admission::Admission, worker::Worker};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Child;
 use tokio::task::JoinHandle;
 
 use crate::install::Server;
-use crate::ssh::{classify, keep_end, kept_end, CommandLine, Ssh, SshError};
+use crate::ssh::{diagnostic_budget, keep_end, kept_end, CommandLine, Diagnostic, Ssh, SshError};
 
 /// The line the relay prints once it listens.
 pub const RELAY_READY: &str = "SPLITTY_RELAY_READY_V1";
@@ -68,6 +68,9 @@ pub enum ReverseTunnelError {
         code: String,
         detail: String,
     },
+
+    #[error("local port sharing admission failed: {0}")]
+    Reservation(io::Error),
 
     /// `ssh -G` or the reverse forward's `ssh` failed.
     #[error(transparent)]
@@ -196,9 +199,10 @@ fn relay_command(ssh: &Ssh, socket: &str, local: u16) -> tokio::process::Command
 /// One local port shared with a host by an `ssh -R` of its own and the
 /// host's relay. The `ssh` is killed when this is dropped.
 pub struct ReverseTunnel {
-    child: Child,
-    stderr: Option<JoinHandle<String>>,
+    child: Worker,
+    stderr: Option<JoinHandle<Diagnostic>>,
     tasks: Vec<JoinHandle<()>>,
+    _share: super::exposure::Share,
 }
 
 impl ReverseTunnel {
@@ -216,6 +220,25 @@ impl ReverseTunnel {
         local: u16,
         port: u16,
     ) -> Result<Self, ReverseTunnelError> {
+        let share = super::exposure::Share::reserve(local)
+            .await
+            .map_err(ReverseTunnelError::Reservation)?;
+        Self::open_reserved(ssh, server, dir, name, local, port, share).await
+    }
+
+    pub async fn open_reserved(
+        ssh: &Ssh,
+        server: &Server,
+        dir: &str,
+        name: &str,
+        local: u16,
+        port: u16,
+        share: super::exposure::Share,
+    ) -> Result<Self, ReverseTunnelError> {
+        share
+            .check(local)
+            .await
+            .map_err(ReverseTunnelError::Reservation)?;
         let host = ssh.target().as_str();
         let not_established = |detail: String| ReverseTunnelError::NotEstablished {
             host: host.to_owned(),
@@ -243,22 +266,33 @@ impl ReverseTunnel {
             .value(&port.to_string())
             .word("--socket")
             .value(&socket);
-        let mut child = relay_command(ssh, &socket, local)
-            .arg(host)
-            .arg("--")
-            .arg(relay.as_str())
-            .spawn()
+        let mut command = relay_command(ssh, &socket, local);
+        command.arg(host).arg("--").arg(relay.as_str());
+        let budget = splitty_transport::budget::ConnectionBudget::default();
+        let diagnostic_bytes = diagnostic_budget(&budget)
+            .map_err(|error| ReverseTunnelError::Ssh(SshError::Spawn(error)))?;
+        // Outer/report BufReaders, readiness line and the eventual copy scratch.
+        // The reservation moves into the stdout drain, not the tunnel owner.
+        let read_storage = budget.reserve(5 * 8192, false).map_err(|error| {
+            ReverseTunnelError::Ssh(SshError::Spawn(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                error,
+            )))
+        })?;
+        let mut child = share
+            .spawn(&mut command, &Admission::global())
+            .await
             .map_err(|error| ReverseTunnelError::Ssh(SshError::Spawn(error)))?;
         let stderr = child
-            .stderr
-            .take()
-            .map(|stderr| tokio::spawn(keep_end(stderr)));
-        let stdout = child.stdout.take();
-        let stdin = child.stdin.take();
+            .stderr()
+            .map(|stderr| tokio::spawn(keep_end(stderr, diagnostic_bytes)));
+        let stdout = child.stdout();
+        let stdin = child.stdin();
         let mut tunnel = Self {
             child,
             stderr,
             tasks: Vec::new(),
+            _share: share,
         };
         let Some(stdout) = stdout else {
             tunnel.close().await;
@@ -282,12 +316,15 @@ impl ReverseTunnel {
             }
             other => {
                 let exited = tunnel.child.try_wait().ok().flatten();
+                // Own the guarded drain before close consumes the remaining
+                // resources. Its diagnostics still determine the setup error.
+                let diagnostic = kept_end(tunnel.stderr.take());
                 tunnel.close().await;
-                let stderr = kept_end(tunnel.stderr.take()).await;
+                let stderr = diagnostic.await;
                 return Err(match exited {
-                    Some(status) if !status.success() => {
-                        ReverseTunnelError::Ssh(classify(host, status, &stderr))
-                    }
+                    Some(status) if !status.success() => ReverseTunnelError::Ssh(
+                        crate::ssh::classify_budgeted(host, status, &stderr, &budget),
+                    ),
                     _ => not_established(match other {
                         Err(_) => "the relay did not report in time".into(),
                         Ok(Err(error)) => error.to_string(),
@@ -298,9 +335,7 @@ impl ReverseTunnel {
         }
         // Nothing more is expected on standard output; keep it drained so
         // the pipe never fills.
-        tunnel.tasks.push(tokio::spawn(async move {
-            let _ = tokio::io::copy(&mut reader, &mut tokio::io::sink()).await;
-        }));
+        tunnel.tasks.push(drain_stdout(reader, read_storage));
         if let Some(mut stdin) = stdin {
             tunnel.tasks.push(tokio::spawn(async move {
                 loop {
@@ -335,11 +370,28 @@ impl ReverseTunnel {
         }
         // Fails only when `ssh` has already been waited for.
         let _ = self.child.kill().await;
+        let _ = kept_end(self.stderr.take()).await;
     }
+}
+
+fn drain_stdout<R>(reader: R, storage: splitty_transport::budget::Lease) -> JoinHandle<()>
+where
+    R: tokio::io::AsyncRead + Unpin + Send + 'static,
+{
+    let output = (reader, storage);
+    tokio::spawn(async move {
+        // Capture the whole owner. Tuple field order drops the reader before
+        // its reservation, including cancellation before or during copy.
+        let mut output = output;
+        let _ = tokio::io::copy(&mut output.0, &mut tokio::io::sink()).await;
+    })
 }
 
 impl Drop for ReverseTunnel {
     fn drop(&mut self) {
+        if let Some(stderr) = self.stderr.take() {
+            stderr.abort();
+        }
         for task in &self.tasks {
             task.abort();
         }
@@ -349,6 +401,108 @@ impl Drop for ReverseTunnel {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn cancelling_stdout_drops_the_reader_before_its_reservation() {
+        use splitty_transport::budget::{ConnectionBudget, ProcessBudget};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            Arc,
+        };
+        struct Reader {
+            budget: ConnectionBudget,
+            dropped_with_charge: Arc<AtomicBool>,
+            polled: Option<tokio::sync::oneshot::Sender<()>>,
+        }
+        impl tokio::io::AsyncRead for Reader {
+            fn poll_read(
+                mut self: std::pin::Pin<&mut Self>,
+                _: &mut std::task::Context<'_>,
+                _: &mut tokio::io::ReadBuf<'_>,
+            ) -> std::task::Poll<io::Result<()>> {
+                if let Some(polled) = self.polled.take() {
+                    let _ = polled.send(());
+                }
+                std::task::Poll::Pending
+            }
+        }
+        impl Drop for Reader {
+            fn drop(&mut self) {
+                self.dropped_with_charge
+                    .store(self.budget.used() > 0, Ordering::SeqCst);
+            }
+        }
+        for poll in [false, true] {
+            let process = ProcessBudget::new(5 * 8192, 0);
+            let budget = ConnectionBudget::new(process.clone(), 5 * 8192, 0);
+            let storage = budget.reserve(5 * 8192, false).unwrap();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let (entered, polled) = tokio::sync::oneshot::channel();
+            let task = drain_stdout(
+                Reader {
+                    budget: budget.clone(),
+                    dropped_with_charge: dropped.clone(),
+                    polled: Some(entered),
+                },
+                storage,
+            );
+            if poll {
+                polled.await.unwrap();
+            }
+            task.abort();
+            let _ = task.await;
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "reader storage was released before reader destruction"
+            );
+            assert_eq!(process.used(), 0);
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_setup_preserves_ssh_diagnostics_after_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("ssh");
+        let server = Server::Installed {
+            path: "/unused/splitty".into(),
+            config_dir: None,
+        };
+        for diagnostic in [
+            "Host key verification failed.",
+            "Permission denied (publickey).",
+            "remote port forwarding failed for listen path /relay/test.sock",
+        ] {
+            std::fs::write(&program, format!(
+                "#!/bin/sh\nfor arg do\n [ \"$arg\" != -G ] || exit 0\ndone\nprintf '%s\\n' '{diagnostic}' >&2\nexit 255\n"
+            )).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let ssh = Ssh::relay_only(crate::ssh::SshTarget::parse("vm").unwrap())
+                .with_test_program(program.clone());
+            let (_registry, share) = super::super::exposure::test_share(8080);
+            let error = ReverseTunnel::open_reserved(
+                &ssh,
+                &server,
+                "/relay",
+                "test.sock",
+                8080,
+                8080,
+                share,
+            )
+            .await
+            .err()
+            .expect("failed SSH setup");
+            match error {
+                ReverseTunnelError::Ssh(SshError::Failed { stderr, hint, .. }) => {
+                    assert_eq!(stderr, diagnostic);
+                    assert_eq!(hint.is_some(), diagnostic.contains("Host key"));
+                }
+                other => panic!("lost SSH classification: {other}"),
+            }
+        }
+    }
 
     #[tokio::test]
     async fn the_report_is_the_first_ready_or_failed_line() {

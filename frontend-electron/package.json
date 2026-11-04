@@ -1,15 +1,23 @@
 {
   "name": "splitty-electron",
-  "version": "0.1.30",
+  "version": "0.2.0-dev.3",
   "license": "MIT",
   "private": true,
   "main": "compiled/main.js",
   "scripts": {
-    "build": "tsc",
-    "start": "tsc && electron .",
-    "dev": "tsc && electron .",
-    "pack": "tsc && electron-builder --dir",
-    "dist": "tsc && electron-builder"
+    "build": "pnpm --dir ../frontend build && tsc && node scripts/package-assets.cjs",
+    "start": "pnpm build && electron .",
+    "dev": "pnpm build && electron .",
+    "pack": "pnpm build && electron-builder --dir",
+    "dist": "pnpm build && electron-builder",
+    "smoke:assets": "electron scripts/smoke-assets.cjs",
+    "smoke:pipes": "node scripts/smoke-native-pipe.cjs",
+    "smoke:owner": "node scripts/smoke-native-owner.cjs",
+    "smoke:ipc": "electron scripts/smoke-native-ipc.cjs",
+    "smoke:app": "electron scripts/smoke-native-app.cjs",
+    "smoke:remote-lifecycle": "node scripts/smoke-remote-lifecycle.mjs",
+    "smoke:package": "node scripts/smoke-package.cjs",
+    "smoke:browser-assignment": "electron scripts/smoke-browser-assignment.cjs"
   },
   "devDependencies": {
     "electron": "^44.10.0",

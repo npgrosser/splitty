@@ -22,14 +22,16 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tower::ServiceExt;
 
 use super::{allowed_origins, apply_middleware, routes, session::SessionStore, AppState};
+use crate::client_session::ports::{PortWatch, Scan};
 use crate::hub::testing::{Prepare, ScriptedHost, WELCOME};
 use crate::hub::{Hub, HOST_LOST, VERSION};
-use crate::ws::ports::{PortWatch, Scan};
 
 const WAIT: Duration = Duration::from_secs(10);
 
+mod conformance;
 mod editor;
 mod files;
+mod gateway;
 mod managed_jobs;
 mod move_pane;
 mod mux_tabs;
@@ -38,7 +40,7 @@ mod scratchpad;
 
 /// The state `serve` builds, for a server on `listen_addr` with its files in
 /// `dir`.
-fn state(listen_addr: &str, dir: &Path) -> AppState {
+pub(super) fn state(listen_addr: &str, dir: &Path) -> AppState {
     state_with(listen_addr, dir, None)
 }
 
@@ -52,12 +54,12 @@ fn state_with(listen_addr: &str, dir: &Path, ports: Option<PortWatch>) -> AppSta
     let pty = Arc::new(splitty_core::pty::manager::Manager::with_shell_profiles(
         shell_profiles.clone(),
     ));
-    let dispatcher = Arc::new(splitty_core::protocol::dispatcher::Dispatcher::new(
-        pty.clone(),
-    ));
+    let mut dispatcher = splitty_core::protocol::dispatcher::Dispatcher::new(pty.clone());
+    dispatcher.paste_dir = Some(dir.join("paste"));
+    let dispatcher = Arc::new(dispatcher);
     let mux_store = Arc::new(splitty_core::mux::Store::new());
-    let (notify_tx, _) = tokio::sync::broadcast::channel(16);
-    let mut ws_state = crate::ws::WsState::new(
+    let notify_tx = splitty_core::protocol::notify::NotificationBus::default();
+    let mut client_state = crate::client_session::ClientState::new(
         mux_store.clone(),
         dispatcher,
         shell_profiles.clone(),
@@ -67,33 +69,40 @@ fn state_with(listen_addr: &str, dir: &Path, ports: Option<PortWatch>) -> AppSta
         "embedded".to_owned(),
     );
     if let Some(ports) = ports {
-        ws_state = ws_state.with_ports(ports);
+        client_state = client_state.with_ports(ports);
     }
-    let ws_state = Arc::new(ws_state);
+    let client_state = Arc::new(client_state);
     AppState {
         token: "process-token".to_owned(),
         sessions: Arc::new(SessionStore::new()),
         allowed_origins: Arc::new(allowed_origins(listen_addr)),
-        mux_store,
-        ws_state,
-        config: Arc::new(RwLock::new(splitty_core::config::HomeConfig::default())),
-        shell_profiles,
-        server_config: Arc::new(RwLock::new(splitty_core::config::ServerConfig::default())),
-        template_store: Arc::new(splitty_core::template::FileStore::new(
-            dir.join("templates"),
-        )),
-        themes_dir: dir.join("themes"),
-        version: "test".to_owned(),
-        commit: "test".to_owned(),
-        build_time: "test".to_owned(),
+        service: Arc::new(crate::service::State {
+            instance: crate::service::new_instance(),
+            owner_shutdown: Arc::new(tokio::sync::Notify::new()),
+            hub: Arc::new(crate::hub::Hub::system()),
+            mux_store,
+            client_state,
+            config: Arc::new(RwLock::new(splitty_core::config::HomeConfig::default())),
+            shell_profiles,
+            server_config: Arc::new(RwLock::new(splitty_core::config::ServerConfig::default())),
+            template_store: Arc::new(splitty_core::template::FileStore::new(
+                dir.join("templates"),
+            )),
+            themes_dir: dir.join("themes"),
+            version: "test".to_owned(),
+            commit: "test".to_owned(),
+            build_time: "test".to_owned(),
+            server_mode: "embedded".to_owned(),
+        }),
         listen_addr: listen_addr.to_owned(),
-        server_mode: "embedded".to_owned(),
     }
 }
 
 /// `build_router` with the hub given.
 fn router(state: &AppState, hub: Hub) -> axum::Router {
-    apply_middleware(routes::api_routes_with(Arc::new(hub)), state).with_state(state.clone())
+    let mut state = state.clone();
+    Arc::make_mut(&mut state.service).hub = Arc::new(hub);
+    apply_middleware(routes::api_routes_with(state.service.hub.clone()), &state).with_state(state)
 }
 
 /// A hub with `host`, recording its recent hosts in `dir/config`.
@@ -159,6 +168,8 @@ async fn the_hub_refuses_an_upgrade_before_it_reaches_a_host() {
     let query = format!("?target=vm1&ticket={ticket}");
     for (origin, fetch_site) in [
         (Some("http://127.0.0.1:1"), None),
+        (Some("http://localhost:1420"), None),
+        (Some("http://127.0.0.1:1420"), None),
         (None, None),
         (Some(ORIGIN), Some("same-site")),
         (Some(ORIGIN), Some("none")),
@@ -1002,7 +1013,70 @@ async fn remote_host_metadata_validates_bodies_and_requires_api_auth() {
 
 // ── Over a real socket ──────────────────────────────────────────────────────
 
-type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
+enum Socket {
+    Web(WebSocketStream<MaybeTlsStream<TcpStream>>),
+    Native(crate::client_session::Connection),
+}
+
+impl Socket {
+    async fn send(&mut self, message: Message) -> Result<(), String> {
+        use crate::client_session::Message as Native;
+        match self {
+            Self::Web(socket) => socket
+                .send(message)
+                .await
+                .map_err(|error| error.to_string()),
+            Self::Native(connection) => {
+                let message = match message {
+                    Message::Text(text) => Native::Text(text.to_string()),
+                    Message::Binary(bytes) => Native::Binary(bytes.to_vec()),
+                    Message::Ping(bytes) => Native::Ping(bytes.to_vec()),
+                    Message::Pong(bytes) => Native::Pong(bytes.to_vec()),
+                    Message::Close(_) => Native::Close,
+                    Message::Frame(_) => {
+                        return Err("raw WebSocket frame on native connection".into())
+                    }
+                };
+                connection
+                    .input
+                    .send(message)
+                    .map_err(|error| error.to_string())
+            }
+        }
+    }
+
+    async fn next(&mut self) -> Option<Result<Message, String>> {
+        use crate::client_session::Message as Native;
+        match self {
+            Self::Web(socket) => socket
+                .next()
+                .await
+                .map(|result| result.map_err(|error| error.to_string())),
+            Self::Native(connection) => connection.output.recv().await.map(|message| {
+                Ok(match message.value {
+                    Native::Text(text) => Message::Text(text.into()),
+                    Native::Binary(bytes) => Message::Binary(bytes.into()),
+                    Native::Ping(bytes) => Message::Ping(bytes.into()),
+                    Native::Pong(bytes) => Message::Pong(bytes.into()),
+                    Native::Close => Message::Close(None),
+                })
+            }),
+        }
+    }
+
+    async fn close(
+        &mut self,
+        frame: Option<tokio_tungstenite::tungstenite::protocol::CloseFrame>,
+    ) -> Result<(), String> {
+        match self {
+            Self::Web(socket) => socket.close(frame).await.map_err(|error| error.to_string()),
+            Self::Native(connection) => connection
+                .input
+                .send(crate::client_session::Message::Close)
+                .map_err(|error| error.to_string()),
+        }
+    }
+}
 
 /// The router served on a loopback port of its own.
 struct Served {
@@ -1022,13 +1096,27 @@ impl Served {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
+        Self::start_on(hub, state_of, listener).await
+    }
+
+    async fn start_on(
+        hub: Hub,
+        state_of: impl FnOnce(&str) -> AppState,
+        listener: tokio::net::TcpListener,
+    ) -> Self {
         let addr = listener.local_addr().expect("address");
-        let state = state_of(&addr.to_string());
+        let mut state = state_of(&addr.to_string());
         let hub = Arc::new(hub);
-        let app = apply_middleware(routes::api_routes_with(hub.clone()), &state)
-            .with_state(state.clone());
+        Arc::make_mut(&mut state.service).hub = hub.clone();
+        let mut browser =
+            super::BrowserState::new(addr, state.token.clone()).expect("browser origin");
+        browser.sessions = state.sessions.clone();
+        let app = super::gateway::router(
+            super::gateway::Backend::embedded(state.service.clone()),
+            browser,
+        );
         let task = tokio::spawn(async move {
-            let _ = axum::serve(listener, app).await;
+            let _ = super::server::serve(listener, app, std::future::pending()).await;
         });
         Self {
             hub,
@@ -1055,6 +1143,17 @@ impl Served {
         self.connect("/ws?").await
     }
 
+    async fn open_local_for(&self, native: bool) -> Socket {
+        if native {
+            Socket::Native(
+                crate::client_session::connect(self.state.client_state.clone())
+                    .expect("native admission"),
+            )
+        } else {
+            self.open_local().await
+        }
+    }
+
     /// Open the WebSocket at `path_and_query` as the UI does: a fresh ticket,
     /// its own origin.
     async fn connect(&self, path_and_query: &str) -> Socket {
@@ -1077,7 +1176,7 @@ impl Served {
         let (socket, _) = tokio_tungstenite::connect_async(request)
             .await
             .expect("upgrade");
-        socket
+        Socket::Web(socket)
     }
 }
 
@@ -1189,10 +1288,9 @@ async fn a_host_is_installed_started_and_relayed_both_ways() {
     assert_eq!(next(&mut socket).await, Message::text(WELCOME));
     assert_eq!(next(&mut socket).await, Message::text(early));
 
-    socket
-        .send(Message::binary(vec![0, 1, 2, 255]))
-        .await
-        .expect("send");
+    let input = r#"{"type":"input","sessionId":"p1","data":"bytes"}"#;
+    socket.send(Message::text(input)).await.expect("send");
+    assert_eq!(next(&mut socket).await, Message::text(input));
     assert_eq!(next(&mut socket).await, Message::binary(vec![0, 1, 2, 255]));
     let text = r#"{"type":"mux.op","screenId":"s1","op":{"type":"close_pane"}}"#;
     socket.send(Message::text(text)).await.expect("send");
@@ -1200,11 +1298,7 @@ async fn a_host_is_installed_started_and_relayed_both_ways() {
 
     let asked = host.asked();
     assert_eq!(asked[0], "prepare user@vm1");
-    let hint: u16 = asked[1]
-        .strip_prefix("handshake ")
-        .and_then(|port| port.parse().ok())
-        .expect("a port hint");
-    assert_ne!(hint, 0);
+    assert_eq!(asked[1], "handshake");
     assert_eq!(asked[2..], ["bridge"]);
 
     let recent: serde_json::Value = serde_json::from_slice(
@@ -1336,7 +1430,7 @@ async fn update_replaces_a_daemon_of_another_version() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path())
         .preparing(Prepare::Installed)
-        .with_daemon("0.0.9", PROTOCOL_VERSION + 1);
+        .with_keeping_daemon("0.0.9", PROTOCOL_VERSION + 1);
     let served = Served::start(hub(&host, dir.path()), dir.path()).await;
 
     let mut socket = served.open("vm1").await;
@@ -1345,8 +1439,8 @@ async fn update_replaces_a_daemon_of_another_version() {
     assert_eq!(error["code"], "incompatible", "{error}");
     assert_eq!(error["version"], "0.0.9", "{error}");
     assert_eq!(
-        error["keepsSessions"], false,
-        "an older daemon's sessions end: {error}"
+        error["keepsSessions"], true,
+        "the older daemon keeps its sessions: {error}"
     );
     assert_eq!(calls(&host), ["prepare", "handshake"], "nothing stopped");
 
@@ -1357,7 +1451,10 @@ async fn update_replaces_a_daemon_of_another_version() {
         ["daemon", "update", "started", "bridge"],
         "{progress:?}"
     );
-    assert_eq!(progress[1]["message"], "Stopping Splitty 0.0.9 on vm1...");
+    assert_eq!(
+        progress[1]["message"],
+        "Updating Splitty 0.0.9 on vm1; its sessions keep running..."
+    );
     assert_eq!(ready["type"], "remote.ready", "{ready}");
     assert_eq!(
         ready["daemon"],
@@ -1368,7 +1465,7 @@ async fn update_replaces_a_daemon_of_another_version() {
         calls(&host)[2..],
         ["prepare", "handshake", "stop", "handshake", "bridge"]
     );
-    // The second handshake keeps the port hint the first one was given.
+    // Both handshakes use the same port-free command.
     let asked = host.asked();
     assert_eq!(asked[3], asked[5], "{asked:?}");
 }
@@ -1428,6 +1525,29 @@ async fn update_leaves_a_daemon_of_this_version_running() {
     assert_eq!(calls(&host), ["prepare", "handshake", "bridge"]);
 }
 
+#[tokio::test]
+async fn an_explicit_update_never_ends_unkept_sessions_or_downgrades_a_newer_daemon() {
+    for newer in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let host = ScriptedHost::new(dir.path()).preparing(Prepare::Installed);
+        let host = if newer {
+            host.with_keeping_daemon("99.0.0", PROTOCOL_VERSION)
+        } else {
+            host.with_daemon("0.0.9", PROTOCOL_VERSION)
+        };
+        let served = Served::start(hub(&host, dir.path()), dir.path()).await;
+        let mut socket = served.open_with("vm1", "&update=1").await;
+        let (_, failure) = until_outcome(&mut socket).await;
+        assert_eq!(failure["type"], "remote.error");
+        assert_eq!(failure["code"], "incompatible");
+        assert_eq!(
+            calls(&host),
+            ["prepare", "handshake"],
+            "neither stop nor bridge starts"
+        );
+    }
+}
+
 /// A host whose only server is another version would start that version
 /// again: the update stops nothing and needs the user.
 #[tokio::test]
@@ -1441,9 +1561,11 @@ async fn an_update_without_this_version_on_the_host_stops_nothing() {
     let mut socket = served.open_with("vm1", "&update=1").await;
     let (progress, error) = until_outcome(&mut socket).await;
     assert_eq!(steps(&progress), ["daemon"], "{progress:?}");
-    assert_eq!(error["code"], "unsupported_host", "{error}");
-    let hint = error["hint"].as_str().expect("a hint");
-    assert!(hint.contains("SPLITTY_REMOTE_PAYLOAD"), "{hint}");
+    assert_eq!(error["code"], "incompatible", "{error}");
+    assert!(error["message"]
+        .as_str()
+        .unwrap()
+        .contains("Updating it ends its sessions"));
     assert_eq!(close_code(&mut socket).await, 1000);
     assert_eq!(calls(&host), ["prepare", "handshake"]);
 }
@@ -1455,7 +1577,7 @@ async fn a_daemon_that_does_not_stop_is_reported() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path())
         .preparing(Prepare::Installed)
-        .with_daemon("0.0.9", PROTOCOL_VERSION)
+        .with_keeping_daemon("0.0.9", PROTOCOL_VERSION)
         .not_stopping();
     let served = Served::start(hub(&host, dir.path()), dir.path()).await;
     let mut socket = served.open_with("vm1", "&update=1").await;
@@ -1486,6 +1608,11 @@ async fn next_ports(socket: &mut Socket) -> serde_json::Value {
 /// hold.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn clients_get_the_listening_ports_after_their_welcome_and_on_change() {
+    run_clients_get_the_listening_ports_after_their_welcome_and_on_change(false).await;
+    run_clients_get_the_listening_ports_after_their_welcome_and_on_change(true).await;
+}
+
+async fn run_clients_get_the_listening_ports_after_their_welcome_and_on_change(native: bool) {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let listed: Arc<Mutex<Vec<ListeningPort>>> = Arc::default();
@@ -1498,7 +1625,7 @@ async fn clients_get_the_listening_ports_after_their_welcome_and_on_change() {
     })
     .await;
 
-    let mut first = served.open_local().await;
+    let mut first = served.open_local_for(native).await;
     assert_eq!(json_of(next(&mut first).await)["type"], "mux.welcome");
     let greeting = json_of(next(&mut first).await);
     assert_eq!(greeting["type"], "ports.changed", "{greeting}");
@@ -1554,6 +1681,12 @@ async fn without_a_port_scan_no_ports_are_sent() {
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_listener_started_in_a_session_reaches_the_clients_and_so_does_its_end() {
+    run_a_listener_started_in_a_session_reaches_the_clients_and_so_does_its_end(false).await;
+    run_a_listener_started_in_a_session_reaches_the_clients_and_so_does_its_end(true).await;
+}
+
+#[cfg(target_os = "linux")]
+async fn run_a_listener_started_in_a_session_reaches_the_clients_and_so_does_its_end(native: bool) {
     use splitty_core::pty::CreateSessionOpts;
 
     if std::process::Command::new("python3")
@@ -1567,7 +1700,7 @@ async fn a_listener_started_in_a_session_reaches_the_clients_and_so_does_its_end
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = Served::start(hub(&host, dir.path()), dir.path()).await;
-    let backend = served.state.ws_state.dispatcher.backend().clone();
+    let backend = served.state.client_state.dispatcher.backend().clone();
     let opts = CreateSessionOpts {
         id: "listening".to_owned(),
         shell_profile_id: String::new(),
@@ -1587,7 +1720,7 @@ async fn a_listener_started_in_a_session_reaches_the_clients_and_so_does_its_end
             return;
         }
     };
-    let mut socket = served.open_local().await;
+    let mut socket = served.open_local_for(native).await;
     assert_eq!(json_of(next(&mut socket).await)["type"], "mux.welcome");
     assert_eq!(next_ports(&mut socket).await, json!([]));
 
@@ -1631,9 +1764,28 @@ const FORWARDS: &str = "/api/remote/forwards";
 /// A port nothing listens on here, on `127.0.0.1` or `::1`, which a forward
 /// therefore takes as asked.
 fn free_port() -> u16 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    // Keep fixture ports unique after probe/handoff and outside the kernel's
+    // automatic range, where another parallel fixture could reuse a freed
+    // number before the SSH-bind or final-release assertion observes it.
+    static NEXT: AtomicU32 = AtomicU32::new(20000);
+    #[cfg(target_os = "linux")]
+    let automatic: Vec<u16> = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .unwrap()
+        .split_whitespace()
+        .map(|number| number.parse().unwrap())
+        .collect();
     loop {
-        let listener = std::net::TcpListener::bind(("127.0.0.1", 0)).expect("bind");
-        let port = listener.local_addr().expect("address").port();
+        let number = NEXT.fetch_add(1, Ordering::Relaxed);
+        assert!(number < 25000, "HTTP fixture port pool exhausted");
+        let port = u16::try_from(number).expect("bounded fixture port");
+        #[cfg(target_os = "linux")]
+        if (automatic[0]..=automatic[1]).contains(&port) {
+            continue;
+        }
+        let Ok(_listener) = std::net::TcpListener::bind(("127.0.0.1", port)) else {
+            continue;
+        };
         let ipv6 = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port));
         if !matches!(ipv6, Err(error) if error.kind() == std::io::ErrorKind::AddrInUse) {
             return port;
@@ -2455,12 +2607,12 @@ async fn successful_ready_restores_only_its_enabled_saved_forwards_without_block
         .iter()
         .all(|call| !call.starts_with("forward vm2 ") && !call.starts_with("forward vm1 9000 ")));
     socket
-        .send(Message::Text("still relayed".into()))
+        .send(Message::Text(r#"{"type":"mux.resync"}"#.into()))
         .await
         .expect("send");
     assert_eq!(
         next(&mut socket).await,
-        Message::Text("still relayed".into()),
+        Message::Text(r#"{"type":"mux.resync"}"#.into()),
         "no hub error frame after ready"
     );
     socket.close(None).await.expect("close");
@@ -2752,14 +2904,16 @@ async fn successful_ready_restores_saved_reverse_forwards() {
     hub.stop_reverse("vm1", paused.into()).await.expect("pause");
     assert!(host.asked().is_empty());
 
-    let served = Served::start(hub, dir.path()).await;
-    // Saved before this server knew its own port, as by an older server on
-    // another port.
-    served
-        .hub
-        .save_reverse("vm1", own.into(), Some(served.port.into()))
+    // A remembered destination that will become a gateway port. Reserve the
+    // OS address for the fixture, but do not build/serve the gateway yet.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("save");
+        .expect("listener");
+    let port = listener.local_addr().expect("address").port();
+    hub.save_reverse("vm1", own.into(), Some(port.into()))
+        .await
+        .expect("legacy saved rule");
+    let served = Served::start_on(hub, |addr| state(addr, dir.path()), listener).await;
     let mut socket = served.open("vm1").await;
     assert_eq!(until_outcome(&mut socket).await.1["type"], "remote.ready");
     tokio::time::timeout(WAIT, async {

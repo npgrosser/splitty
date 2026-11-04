@@ -31,7 +31,8 @@ async fn output_until(socket: &mut Socket, session: &str, needle: &str) {
     while !output.contains(needle) {
         match next(socket).await {
             Message::Binary(frame) => {
-                if let Some((id, data)) = crate::ws::codec::decode_binary_frame(&frame) {
+                if let Some((id, data)) = crate::client_session::codec::decode_binary_frame(&frame)
+                {
                     if id == session {
                         output.push_str(&String::from_utf8_lossy(data));
                     }
@@ -52,6 +53,11 @@ fn size_of(event: &serde_json::Value) -> (u64, u64) {
 
 #[tokio::test]
 async fn two_connections_share_the_smaller_active_size() {
+    run_two_connections_share_the_smaller_active_size(false).await;
+    run_two_connections_share_the_smaller_active_size(true).await;
+}
+
+async fn run_two_connections_share_the_smaller_active_size(native: bool) {
     use splitty_core::pty::testing::pty_available;
     if !pty_available() {
         return;
@@ -60,7 +66,7 @@ async fn two_connections_share_the_smaller_active_size() {
     let host = ScriptedHost::new(dir.path());
     let served = Served::start(hub(&host, dir.path()), dir.path()).await;
 
-    let mut a = served.open_local().await;
+    let mut a = served.open_local_for(native).await;
     let welcome = message_type(&mut a, "mux.welcome").await;
     assert!(welcome["capabilities"]
         .as_array()
@@ -103,6 +109,18 @@ async fn two_connections_share_the_smaller_active_size() {
     send(&mut b, json!({"type":"idle"})).await;
     assert_eq!(size_of(&message_type(&mut a, "size").await), (120, 40));
 
+    // Closing B removes only B's contribution and leaves A's session usable.
+    send(&mut b, json!({"type":"activity"})).await;
+    assert_eq!(size_of(&message_type(&mut a, "size").await), (100, 30));
+    b.close(None).await.expect("close second client");
+    assert_eq!(size_of(&message_type(&mut a, "size").await), (120, 40));
+    send(
+        &mut a,
+        json!({"type":"input","id":session,"data":"stty size\n"}),
+    )
+    .await;
+    output_until(&mut a, &session, "40 120").await;
+
     send(&mut a, json!({"type":"close","id":session})).await;
     message_type(&mut a, "closed").await;
 }
@@ -119,7 +137,7 @@ async fn updated_settings_reconfigure_the_size_policy() {
     updated.terminal.size_idle_seconds = 30;
     routes::apply_home_settings(&state, updated);
     assert_eq!(
-        state.ws_state.dispatcher.size_config(),
+        state.client_state.dispatcher.size_config(),
         SizeConfig {
             policy: SizePolicy::Latest,
             idle: Duration::from_secs(30)

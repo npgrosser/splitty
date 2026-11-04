@@ -4,7 +4,7 @@ import { editorMenuItem, sshPathMenuItem } from "./remote_editor.ts";
 import { shortcutKey } from "./shortcuts.ts";
 import { addTerminalPane } from "./panes.ts";
 import { guardedClose, guardedCloseMultiple } from "./close_guard.ts";
-import { bindingForApi, sessionForPane } from "./connection/screen_binding.ts";
+import { bindingForApi, sessionForPane, pasteClipboardToPane } from "./connection/screen_binding.ts";
 import { toggleDrawer, getDrawerState } from "../stores/ui.svelte.ts";
 import { openExternalTarget } from "./window.ts";
 import { getShellProfiles, shellProfileIcon } from "./shell_profiles.ts";
@@ -32,10 +32,7 @@ export function paneMenuItems(
     },
     {
       label: "Paste",
-      action: async () => {
-        const text = await navigator.clipboard.readText();
-        if (text) session?.emulator.paste(text);
-      },
+      action: () => pasteClipboardToPane(api, paneId, session),
     },
     { label: "", action: () => {}, separator: true },
     {

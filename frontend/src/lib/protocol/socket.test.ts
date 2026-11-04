@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { decodeOutputFrame } from "./socket.ts";
+import { belongsToConnection, decodeOutputFrame } from "./socket.ts";
 import { FakeSocket } from "../testing/fake_server.ts";
 import type { OutgoingMessage } from "./types.ts";
 
@@ -91,4 +91,8 @@ describe("decodeOutputFrame", () => {
     expect(decoded?.id).toBe("s1");
     expect(Array.from(decoded?.payload ?? [])).toEqual([0x61, 0x62]);
   });
+});
+
+it("never queues upload cancellation for another connection", () => {
+  expect(belongsToConnection({ type: "upload_cancel", requestId: "u" })).toBe(true);
 });

@@ -140,12 +140,20 @@ pub struct Forwards {
 
 impl Forwards {
     pub fn new(connector: Arc<dyn Connector>, config_dir: PathBuf) -> Self {
+        Self::with_store(connector, Store::new(config_dir))
+    }
+    /// Explicit CLI mappings share supervision/cleanup, while saved desktop
+    /// preferences are neither read nor changed by this command's lifetime.
+    pub fn transient(connector: Arc<dyn Connector>) -> Self {
+        Self::with_store(connector, Store::transient())
+    }
+    fn with_store(connector: Arc<dyn Connector>, preferences: Store) -> Self {
         Self {
             shared: Arc::new(Shared {
                 connector,
                 state: Mutex::new(State {
                     slots: HashMap::new(),
-                    preferences: Store::new(config_dir),
+                    preferences,
                     errors: HashMap::new(),
                     restoring: HashSet::new(),
                 }),
@@ -153,6 +161,27 @@ impl Forwards {
             }),
             operations: Mutex::new(Vec::new()),
         }
+    }
+
+    /// Consume an explicitly owned manager. Cancel and observe pending setup,
+    /// then stop all live supervisors without changing saved preferences.
+    pub async fn close(self) {
+        let tasks = std::mem::take(&mut *lock(&self.operations));
+        for task in &tasks {
+            task.abort();
+        }
+        for task in tasks {
+            let _ = task.await;
+        }
+        let live: Vec<_> = lock(&self.shared.state)
+            .slots
+            .drain()
+            .filter_map(|(_, slot)| match slot {
+                Slot::Open(forward) => Some(forward),
+                Slot::Opening => None,
+            })
+            .collect();
+        futures::future::join_all(live.into_iter().map(Supervised::stop)).await;
     }
 
     pub async fn open(
@@ -782,6 +811,28 @@ mod tests {
         Forwards::new(Arc::new(host.clone()), dir.join("config"))
     }
 
+    #[tokio::test]
+    async fn owned_manager_close_cancels_pending_setup_before_returning() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = ScriptedHost::new(dir.path());
+        let gate = host.pause_forward(5173);
+        let manager = Forwards::transient(Arc::new(host.clone()));
+        let shared = manager.shared.clone();
+        let mut opening = Box::pin(manager.open("vm1", 5173, None, false));
+        assert!(poll!(&mut opening).is_pending());
+        gate.entered().await;
+        assert_eq!(lock(&shared.state).slots.len(), 1);
+        drop(opening);
+        tokio::time::timeout(Duration::from_secs(2), manager.close())
+            .await
+            .unwrap();
+        assert!(
+            lock(&shared.state).slots.is_empty(),
+            "no opening task survives its command owner"
+        );
+        assert!(lock(&shared.state).preferences.list().forwards.is_empty());
+    }
+
     /// A slow reap must not turn the former five-second deadline into a
     /// successful Stop. Virtual time makes cancellation/ordering deterministic.
     #[tokio::test(start_paused = true)]
@@ -1206,18 +1257,28 @@ mod tests {
             gate.release();
             if let Some(cleanup) = cleanup {
                 cleanup.entered().await;
+                assert_eq!(
+                    host.forward_listener_counts(5173),
+                    (2, 1),
+                    "failed setup still owns its listener at the cleanup gate"
+                );
                 assert_eq!(manager.list()[0].state, ForwardState::Down);
                 assert_eq!(manager.list()[0].local, original);
                 cleanup.release();
                 manager.stop("vm1", 5173).await.expect("finish cleanup");
-                assert!(TcpListener::bind(("127.0.0.1", original)).is_ok());
+                assert_eq!(
+                    host.forward_listener_counts(5173),
+                    (2, 0),
+                    "acknowledged Stop waits for listener disposal"
+                );
             } else {
                 assert!(
                     matches!(opening.await, Err(ForwardError::LocalConflict { port, .. }) if port == alternate)
                 );
                 assert!(manager.list().is_empty());
-                assert!(
-                    TcpListener::bind(("127.0.0.1", alternate)).is_ok(),
+                assert_eq!(
+                    host.forward_listener_counts(5173),
+                    (1, 0),
                     "failed tunnel closed before response"
                 );
             }
