@@ -213,8 +213,14 @@
             <p class="note" role="status">{group.state.progress.at(-1)?.message || "Connecting…"}</p>
           {:else if group.state?.error}
             <p class="note error" role="status" title={group.state.error.message}>{describeFailure(group.target, group.state.error).headline}</p>
+            {#if group.state.error.code === "migration_unavailable" || group.state.error.migration}
+              <p class="note">{group.state.error.message}</p>
+            {/if}
             {#if group.state.error.hint}<p class="note">{group.state.error.hint}</p>{/if}
             <button class="button" onclick={() => onConnectHost(group.key)}>Retry</button>
+            {#if group.state.phase === "failed" && group.state.error.code === "incompatible" && group.state.error.migration?.available === true}
+              <button class="button" onclick={() => onUpdateHost(group.key)}>Update server and connect…</button>
+            {/if}
           {/if}
           {#if olderVersion(group)}
             <div class="update">

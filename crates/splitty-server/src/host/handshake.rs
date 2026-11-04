@@ -80,6 +80,10 @@ pub async fn run(ensure_daemon: bool) -> Result<Handshake, Error> {
         Some(_) => Vec::new(),
         None => Vec::new(),
     };
+    let legacy_migration = match &info {
+        Some(info) if info.legacy() => Some(super::migration::probe(info).await),
+        _ => None,
+    };
     Ok(Handshake {
         handshake: FORMAT,
         server: ServerInfo {
@@ -92,6 +96,7 @@ pub async fn run(ensure_daemon: bool) -> Result<Handshake, Error> {
             running: info.is_some(),
             daemon: info.map(|info| RunningDaemon {
                 legacy: info.legacy(),
+                legacy_migration,
                 pid: info.pid,
                 instance: info.instance,
                 transport_version: info.transport_version,

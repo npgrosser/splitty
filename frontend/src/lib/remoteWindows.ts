@@ -5,6 +5,7 @@
 
 import { shellKind, type ShellKind } from "./platform.ts";
 import { parseKnownHosts, type KnownHost } from "./remote/known_hosts.ts";
+import { migrationOffer, type MigrationOffer } from "./remote/update.ts";
 
 export { parseKnownHosts, type KnownHost };
 
@@ -20,6 +21,7 @@ export interface RemoteProgress {
 export interface RemoteOpenError {
   message: string;
   hint?: string;
+  migration?: MigrationOffer;
 }
 
 export interface RemoteWindowsAPI {
@@ -27,7 +29,7 @@ export interface RemoteWindowsAPI {
   readonly available: boolean;
   hosts(): Promise<KnownHost[]>;
   /** Resolves once the remote window shows the host; rejects with a {@link RemoteOpenError}. */
-  open(target: string): Promise<void>;
+  open(target: string, options?: { update?: boolean }): Promise<void>;
   /** The pending open of `target` then rejects with `{ message: "cancelled" }`. */
   cancel(target: string): Promise<void>;
   onProgress(callback: (progress: RemoteProgress) => void): () => void;
@@ -42,9 +44,12 @@ export interface RemoteWindowsAPI {
 export function toOpenError(cause: unknown): RemoteOpenError {
   if (typeof cause === "string" && cause) return { message: cause };
   if (cause && typeof cause === "object") {
-    const { message, hint } = cause as { message?: unknown; hint?: unknown };
+    const { message, hint, migration: offered } = cause as { message?: unknown; hint?: unknown; migration?: unknown };
     if (typeof message === "string" && message) {
-      return typeof hint === "string" && hint ? { message, hint } : { message };
+      const result: RemoteOpenError = typeof hint === "string" && hint ? { message, hint } : { message };
+      const migration = migrationOffer(offered);
+      if (migration) result.migration = migration;
+      return result;
     }
   }
   return { message: "The host could not be opened." };
@@ -86,11 +91,11 @@ function tauriBridge(scope: any): RemoteWindowsAPI {
     async hosts() {
       return parseKnownHosts(await invoke("remote_hosts"));
     },
-    async open(target) {
+    async open(target, options) {
       pending.add(target);
       if (!timer) timer = setInterval(poll, 150);
       try {
-        await invoke("remote_open", { target });
+        await invoke("remote_open", { target, ...(options?.update === true ? { update: true } : {}) });
       } catch (cause) {
         throw toOpenError(cause);
       } finally {
@@ -124,10 +129,12 @@ function electronBridge(scope: any): RemoteWindowsAPI {
     async hosts() {
       return parseKnownHosts(await electron.invoke("remote:hosts"));
     },
-    async open(target) {
+    async open(target, options) {
       let result: ElectronOpenResult | undefined;
       try {
-        result = await electron.invoke("remote:open", target);
+        result = options?.update === true
+          ? await electron.invoke("remote:open", target, { update: true })
+          : await electron.invoke("remote:open", target);
       } catch (cause) {
         throw toOpenError(cause);
       }

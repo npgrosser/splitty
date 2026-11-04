@@ -3,9 +3,8 @@
   import type { UpdateWarning } from "../../lib/remote/update.ts";
   import "./dialog.css";
 
-  // Updating a host's Splitty (`remote-screens`, Host Update) stops its daemon
-  // and ends every session there, so the user confirms a warning that says
-  // what ends (`lib/remote/update.ts`). Enter does not confirm: only the
+  // Updating restarts the host's daemon. The confirmation states whether its
+  // verified keeper-backed sessions survive (`lib/remote/update.ts`). Enter does not confirm: only the
   // button does. Escape cancels.
 
   interface Props {
@@ -49,7 +48,7 @@
       <p class="dialog-text"><strong>{warning.ends}</strong></p>
       <div class="dialog-actions">
         <button class="dialog-btn" onclick={onCancel}>Cancel</button>
-        <button class="dialog-btn-danger" onclick={onConfirm}>Update now</button>
+        <button class="dialog-btn-danger" onclick={onConfirm}>{warning.action ?? "Update now"}</button>
       </div>
     </div>
   </div>

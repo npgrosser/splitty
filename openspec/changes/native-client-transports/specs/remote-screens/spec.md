@@ -13,7 +13,7 @@ An explicit browser gateway SHALL accept `/ws/remote` upgrades with `ticket` and
 Before the relay the hub SHALL send only these application text messages:
 - `{"type": "remote.progress", "step", "message"}`, with `step` one of `install`, `daemon`, `started` and `bridge`;
 - exactly one `{"type": "remote.ready", "target", "daemon": {"version", "protocol", "keepsSessions", "started"}, "screens": [{"id", "name", "panes"}]}`, where `keepsSessions` is the handshake's (see `remote-hosts`, Remote Handshake);
-- or `{"type": "remote.error", "code", "message", "hint"?}`, after which it SHALL close the socket. `code` is one of `invalid_target`, `host_key`, `auth`, `unreachable`, `unsupported_host`, `install`, `daemon`, `incompatible`, `bridge` and `internal`.
+- or `{"type": "remote.error", "code", "message", "hint"?}`, after which it SHALL close the socket. `code` is one of `invalid_target`, `host_key`, `auth`, `unreachable`, `unsupported_host`, `install`, `daemon`, `incompatible`, `migration_unavailable`, `bridge` and `internal`.
 
 After `remote.ready`, the hub SHALL send no application message of its own; transport negotiation/liveness is outside this application stream. When the connection to the host ends, it SHALL close the WebSocket with code 4001 or the native stream with the equivalent host-lost reason. When the socket closes, it SHALL end its `ssh` process. Each socket SHALL use an SSH connection of its own. Once `remote.ready` is sent, the server SHALL record the target as a recent host (see `remote-hosts`, Known Hosts).
 
@@ -38,7 +38,7 @@ After `remote.ready`, the hub SHALL send no application message of its own; tran
 - **THEN** its `remote.ready` carries `keepsSessions` true in `daemon`
 
 ### Requirement: Remote Screen Protocol Check
-Before it starts the bridge, the server SHALL require a supported native transport and compare the host daemon's protocol version from the handshake with its own. It SHALL accept the same version and the one before (see `remote-hosts`, Protocol Version). A missing or unsupported native transport SHALL also be incompatible. Otherwise it SHALL send `remote.error` with code `incompatible`, the daemon's `version`, `protocol` and `keepsSessions`, and its `screens` as in `remote.ready`, and close the socket. It SHALL NOT stop or replace the host's daemon.
+Before it starts the bridge, the server SHALL require a supported native transport and compare the host daemon's protocol version from the handshake with its own. It SHALL accept the same version and the one before (see `remote-hosts`, Protocol Version). A missing or unsupported native transport SHALL also be incompatible. Otherwise it SHALL send `remote.error` with code `incompatible`, the daemon's `version`, `protocol` and `keepsSessions`, and its `screens` as in `remote.ready`, and close the socket. Ordinary connection SHALL NOT stop or replace the host's daemon. A positively eligible legacy daemon SHALL additionally report a structured migration offer; a blocked legacy daemon SHALL report `migration_unavailable` with its reason.
 
 #### Scenario: Newer host
 - **WHEN** the host daemon's protocol version is higher than the server's
@@ -54,6 +54,27 @@ When a host's connection drops after `remote.ready`, the client SHALL mark that 
 #### Scenario: Network drop
 - **WHEN** the connection to `vm1` drops and the host is reachable again 20 seconds later
 - **THEN** `vm1`'s screens show "reconnecting…" and then their content again, with the output written in the meantime
+
+### Requirement: Host Update
+`/ws/remote` SHALL accept `update=1`; an authorized native main host connection SHALL support the corresponding explicit intent. A client SHALL request it only after the user confirms the versions and keeper-session behavior. An older native daemon may be updated only with verified instance identity, session keepers and the matching installed replacement. An eligible legacy daemon SHALL use Confirmed Legacy Daemon Migration instead. A missing replacement, newer daemon, absent session keepers or blocked legacy migration SHALL stop nothing and return an actionable failure. No update SHALL deliberately end sessions.
+
+The intent SHALL apply to one connection attempt and be consumed before a potentially mutating command; reconnect and ambiguous completion SHALL NOT replay it. Successful replacement SHALL report update progress and require a fresh handshake for the intended native daemon. A daemon already running the intended version SHALL remain running. Migration offers SHALL be structured metadata rather than inferred from message text; blocked legacy migration SHALL use `migration_unavailable` and SHALL NOT offer an ordinary update that cannot succeed.
+
+#### Scenario: Update a compatible older host
+- **WHEN** a user confirms updating an older native daemon with keepers and a matching replacement
+- **THEN** the instance-bound update preserves keeper sessions and connects to the freshly verified replacement
+
+#### Scenario: Nothing to update
+- **WHEN** a confirmed update finds the host already running the intended version
+- **THEN** it connects without stopping that daemon
+
+#### Scenario: Eligible legacy migration
+- **WHEN** a host failure includes a positive migration offer and the user confirms it
+- **THEN** the next connection consumes the migration intent once and preserves keeper-managed sessions through the conditional migration
+
+#### Scenario: Migration unavailable
+- **WHEN** legacy process identity or keeper compatibility cannot be verified
+- **THEN** the UI explains the blocked reason and does not present a working update action or end sessions
 
 ## ADDED Requirements
 

@@ -77,6 +77,9 @@ enum Commands {
         /// Record an explicit desktop host-open intent after successful admission
         #[arg(long, requires = "target", conflicts_with = "owner")]
         remember_target: bool,
+        /// One explicit initial SSH update; never retained for reconnection
+        #[arg(long, requires = "target", conflicts_with = "owner")]
+        update: bool,
         /// Keep one embedded service across independent native substreams
         #[arg(long, conflicts_with = "target")]
         owner: bool,
@@ -307,6 +310,13 @@ enum Commands {
 
         #[arg(long)]
         ensure_daemon: bool,
+    },
+
+    /// Explicitly migrate a verified keeper-backed legacy daemon (internal)
+    #[command(name = "remote-migrate", hide = true)]
+    RemoteMigrate {
+        #[arg(long)]
+        expected: String,
     },
 
     /// Relay the private daemon endpoint over native stdin/stdout (internal)
@@ -673,6 +683,7 @@ async fn async_main() {
             | Commands::DesktopBackend { .. }
             | Commands::RemoteBridge { .. }
             | Commands::RemoteHandshake { .. }
+            | Commands::RemoteMigrate { .. }
     ) {
         // The daemon's stdout is its readiness handshake with `daemon start`;
         // its logs go to stderr, which `daemon start` points at daemon.log.
@@ -693,9 +704,10 @@ async fn async_main() {
             target,
             owner,
             remember_target,
+            update,
         } => {
-            let result = match (backend.as_str(), target, owner, remember_target) {
-                ("embedded", None, true, false) => {
+            let result = match (backend.as_str(), target, owner, remember_target, update) {
+                ("embedded", None, true, false, false) => {
                     splitty_server::native::helper::owner::embedded(
                         tokio::io::stdin(),
                         tokio::io::stdout(),
@@ -703,7 +715,7 @@ async fn async_main() {
                     )
                     .await
                 }
-                ("embedded", None, false, false) => {
+                ("embedded", None, false, false, false) => {
                     splitty_server::native::helper::embedded(
                         tokio::io::stdin(),
                         tokio::io::stdout(),
@@ -711,12 +723,13 @@ async fn async_main() {
                     )
                     .await
                 }
-                ("ssh", Some(target), false, remember) => {
+                ("ssh", Some(target), false, remember, update) => {
                     splitty_server::native::helper::ssh(
                         tokio::io::stdin(),
                         tokio::io::stdout(),
                         target,
                         remember,
+                        update,
                         connect_shutdown(),
                     )
                     .await
@@ -1058,6 +1071,20 @@ async fn async_main() {
                     std::process::exit(reason.exit_code());
                 }
             }
+        }
+        Commands::RemoteMigrate { expected } => {
+            if let Err(reason) = splitty_server::host::migration::migrate(&expected).await {
+                eprintln!("{reason}");
+                std::process::exit(reason.exit_code());
+            }
+            // A concurrent start is discovered before binding; native starts
+            // additionally serialize through the existing endpoint lock.
+            handle_daemon(DaemonAction::Start {
+                addr: None,
+                token: None,
+                remote: false,
+            })
+            .await;
         }
         Commands::RemoteBridge { transport: _ } => {
             if let Err(reason) = splitty_server::host::bridge::run().await {
@@ -2511,6 +2538,7 @@ mod editor_cli_tests {
             ],
             vec!["remote-bridge", "--transport", "native-v1"],
             vec!["remote-handshake", "--json"],
+            vec!["remote-migrate", "--expected", "invalid"],
             vec!["session-keeper"],
             vec!["daemon", "start"],
             vec!["attach"],

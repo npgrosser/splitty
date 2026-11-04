@@ -16,6 +16,8 @@
     type HostRow, type PickerEvent, type PickerState,
   } from "../../lib/host_picker.ts";
   import "./dialog.css";
+  import UpdateHostDialog from "./UpdateHostDialog.svelte";
+  import { updateWarning, type UpdateWarning } from "../../lib/remote/update.ts";
 
   interface Props {
     open: boolean;
@@ -47,6 +49,7 @@
   let selected = $state(0);
   let inputEl: HTMLInputElement | undefined = $state();
   let retryEl: HTMLButtonElement | undefined = $state();
+  let migration = $state<{ target: string; warning: UpdateWarning } | null>(null);
 
   const rows = $derived(hostRows(hosts, query));
   const active = $derived(Math.min(selected, rows.length - 1));
@@ -61,6 +64,7 @@
     // The attempt counter survives a reopen, so a late result of an open
     // cancelled by closing the dialog cannot match a new one.
     picker = { ...initialPickerState, attempt: untrack(() => picker.attempt) };
+    migration = null;
     query = "";
     selected = 0;
     hosts = [];
@@ -78,6 +82,7 @@
 
     return () => {
       alive = false;
+      migration = null;
       unsubscribe?.();
       // Closing the dialog ends an open it started.
       if (picker.phase === "opening") void from?.cancel(picker.target);
@@ -94,7 +99,7 @@
     requestAnimationFrame(() => target?.focus());
   });
 
-  async function openTarget(target: string) {
+  async function openTarget(target: string, update = false) {
     if (onPick) {
       onClose();
       onPick(target);
@@ -106,10 +111,24 @@
     // Not started: another open is in flight.
     if (attempt === previous) return;
     try {
-      await opener.open(target);
+      await opener.open(target, update ? { update: true } : undefined);
       if (dispatch({ type: "succeeded", attempt }).phase === "done") onClose();
     } catch (cause) {
       dispatch({ type: "failed", attempt, error: toOpenError(cause) });
+    }
+  }
+
+  function askMigration() {
+    if (picker.phase !== "failed" || !picker.error?.migration) return;
+    migration = { target: picker.target, warning: updateWarning(picker.target,
+      { migration: picker.error.migration }, { known: false, shown: 0 }) };
+  }
+
+  function confirmMigration() {
+    const confirmed = migration;
+    migration = null;
+    if (confirmed && open && picker.phase === "failed" && picker.target === confirmed.target) {
+      void openTarget(confirmed.target, true);
     }
   }
 
@@ -232,9 +251,15 @@
           {:else}
             <button class="dialog-btn" onclick={() => dispatch({ type: "back" })}>Back</button>
             <button bind:this={retryEl} class="dialog-btn-primary" onclick={() => openTarget(picker.target)}>Retry</button>
+            {#if picker.phase === "failed" && picker.error?.migration}
+              <button class="dialog-btn-primary" onclick={askMigration}>Update server and connect…</button>
+            {/if}
           {/if}
         </div>
       {/if}
     </div>
   </div>
 {/if}
+
+<UpdateHostDialog open={migration !== null} warning={migration?.warning ?? null}
+  onConfirm={confirmMigration} onCancel={() => { migration = null; }} />

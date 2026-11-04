@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { updateImpact, updateNote, updateWarning } from "./update.ts";
+import { migrationOffer, updateImpact, updateNote, updateWarning } from "./update.ts";
 
 describe("updateImpact", () => {
   it("counts the host's screens and panes from its last remote.ready and the window's layouts", () => {
@@ -18,6 +18,16 @@ describe("updateImpact", () => {
 });
 
 describe("updateWarning", () => {
+  it("states the verified keeper count and makes migration explicit", () => {
+    const migration = { available: true as const, fromVersion: "0.1.27", toVersion: "0.2.0-dev.2", sessions: 3 };
+    const warning = updateWarning("vm1", { migration }, { known: false, shown: 0 });
+    expect(warning.title).toBe("Update server and connect to vm1?");
+    expect(warning.action).toBe("Update server and connect");
+    expect(warning.versions).toContain("0.1.27");
+    expect(warning.versions).toContain("0.2.0-dev.2");
+    expect(warning.ends).toContain("3 keeper-backed sessions checked on vm1 keep running");
+    expect(warning.ends).toContain("If the server can no longer be verified, the update stops");
+  });
   it("names the versions and what ends on the host", () => {
     const warning = updateWarning("vm1", { hostVersion: "0.3.9", hostProtocol: 1, localVersion: "0.4.2" },
       { known: true, screens: 2, panes: 5 });
@@ -41,6 +51,17 @@ describe("updateWarning", () => {
       + "This window shows 2 of them.",
     );
     expect(updateWarning("vm1", {}, { known: false, shown: 0 }).ends).not.toContain("This window shows");
+  });
+});
+
+describe("migrationOffer", () => {
+  const offer = { available: true, fromVersion: "0.1.27", toVersion: "0.2.0-dev.2", sessions: 0 };
+  it("keeps only bounded descriptive metadata, never migration authority", () => {
+    expect(migrationOffer({ ...offer, token: "secret", pid: 10 })).toEqual(offer);
+    for (const value of [undefined, { ...offer, available: false }, { ...offer, sessions: -1 },
+      { ...offer, sessions: 0.5 }, { ...offer, sessions: 2 ** 32 }, { ...offer, fromVersion: "x".repeat(65) }]) {
+      expect(migrationOffer(value)).toBeUndefined();
+    }
   });
 });
 

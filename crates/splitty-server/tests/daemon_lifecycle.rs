@@ -1409,6 +1409,35 @@ fn native_child_arguments_and_legacy_bootstrap_input_fail_before_backend_creatio
             "native-v1",
             "--backend",
             "embedded",
+            "--update",
+        ],
+        vec![
+            "desktop-backend",
+            "--transport",
+            "native-v1",
+            "--backend",
+            "embedded",
+            "--update",
+            "--target",
+            "vm1",
+        ],
+        vec![
+            "desktop-backend",
+            "--transport",
+            "native-v1",
+            "--backend",
+            "ssh",
+            "--update",
+            "--target",
+            "vm1",
+            "--owner",
+        ],
+        vec![
+            "desktop-backend",
+            "--transport",
+            "native-v1",
+            "--backend",
+            "embedded",
             "--remember-target",
         ],
         vec![
@@ -3842,7 +3871,14 @@ fn a_kept_shell_survives_a_pinned_previous_binary_rollback_and_return() {
         }
     }
     let mut owned = Owned(Vec::new());
-    let run = |binary: &Path, args: &[&str]| {
+    let mut unrelated_command = Command::new("/bin/sh");
+    let mut unrelated = sandbox
+        .isolate(&mut unrelated_command)
+        .args(["-c", "read -r ignored"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let run_result = |binary: &Path, args: &[&str]| {
         eprintln!("ROLLBACK CLI binary={} args={args:?}", binary.display());
         let stdout_path = sandbox.path("rollback-cli.stdout");
         let stderr_path = sandbox.path("rollback-cli.stderr");
@@ -3877,11 +3913,14 @@ fn a_kept_shell_survives_a_pinned_previous_binary_rollback_and_return() {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        let output = Output {
+        Output {
             status,
             stdout: fs::read(stdout_path).unwrap(),
             stderr: fs::read(stderr_path).unwrap(),
-        };
+        }
+    };
+    let run = |binary: &Path, args: &[&str]| {
+        let output = run_result(binary, args);
         assert!(
             output.status.success(),
             "{args:?}: {}",
@@ -4041,14 +4080,188 @@ fn a_kept_shell_survives_a_pinned_previous_binary_rollback_and_return() {
     assert_eq!(adopted[pane]["sessionId"], session);
     assert_eq!(prove(&previous, "rollback-previous", false), shell);
     assert_eq!(sockets(), original_sockets);
-    run(&previous, &["daemon", "stop"]);
-    run(current, &["daemon", "start"]);
+
+    // Also create a terminal while the historical daemon is running, so its
+    // keeper is genuinely the pinned historical executable, not merely a
+    // current keeper that the historical daemon adopted during rollback.
+    run(&previous, &["new-screen"]);
+    let historical_screens: serde_json::Value =
+        serde_json::from_slice(&run(&previous, &["list-screens", "--json"]).stdout).unwrap();
+    let historical_screen = historical_screens
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"].as_str() != Some(screen))
+        .unwrap()["id"]
+        .as_str()
+        .unwrap();
+    let historical_panes: serde_json::Value = serde_json::from_slice(
+        &run(
+            &previous,
+            &["list-panes", "--screen", historical_screen, "--json"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    let (historical_pane, historical_record) =
+        historical_panes.as_object().unwrap().iter().next().unwrap();
+    let historical_session = historical_record["sessionId"].as_str().unwrap();
+    let historical_secret = random();
+    let prove_historical = |binary: &Path, stage: &str, initialize: bool| {
+        let nonce = random();
+        let init = if initialize {
+            format!("SPLITTY_HISTORICAL_PROOF={historical_secret}; ")
+        } else {
+            String::new()
+        };
+        let line = format!(
+            "{init}printf '%s:%s:%s\\n' '{nonce}' \"$$\" \"$SPLITTY_HISTORICAL_PROOF\" > {}\\n",
+            sandbox.path(stage).display()
+        );
+        run(
+            binary,
+            &[
+                "send-keys",
+                "--screen",
+                historical_screen,
+                "--pane",
+                historical_pane,
+                &line,
+            ],
+        );
+        let proof = sandbox.wait_for(stage);
+        let fields: Vec<_> = proof.split(':').collect();
+        assert_eq!(fields.len(), 3, "{stage}: {proof}");
+        assert_eq!(fields[0], nonce);
+        assert_eq!(
+            fields[2], historical_secret,
+            "{stage}: historical shell private state"
+        );
+        fields[1].parse::<u32>().unwrap()
+    };
+    let historical_shell = prove_historical(&previous, "historical-before-migration", true);
+    owned.pin(historical_shell, &sandbox);
+    let historical_stat = fs::read_to_string(format!("/proc/{historical_shell}/stat")).unwrap();
+    let historical_keeper: u32 = historical_stat
+        .rsplit_once(')')
+        .unwrap()
+        .1
+        .split_whitespace()
+        .nth(1)
+        .unwrap()
+        .parse()
+        .unwrap();
+    owned.pin(historical_keeper, &sandbox);
+    assert_eq!(
+        fs::read_link(format!("/proc/{historical_keeper}/exe")).unwrap(),
+        previous,
+        "new historical session is owned by the pinned historical keeper executable"
+    );
+    let original_sockets = sockets();
+    assert_eq!(original_sockets.len(), 2);
+
+    // The new binary's discovery only reads the old daemon's private owner
+    // socket and keeper Hello. No claim, shutdown or TCP fallback occurs.
+    let inspect = || -> serde_json::Value {
+        serde_json::from_slice(&run(current, &["remote-handshake", "--json"]).stdout).unwrap()
+    };
+    let before = fs::read(sandbox.info_path()).unwrap();
+    let offer = inspect();
+    assert_eq!(offer["daemon"]["pid"], info["pid"]);
+    assert_eq!(
+        offer["daemon"]["legacyMigration"]["status"], "ready",
+        "{offer}"
+    );
+    assert_eq!(offer["daemon"]["legacyMigration"]["sessions"], 2);
+    let token = offer["daemon"]["legacyMigration"]["token"]
+        .as_str()
+        .unwrap();
+    assert_eq!(fs::read(sandbox.info_path()).unwrap(), before);
+    assert_eq!(prove(&previous, "migration-probe-read-only", false), shell);
+
+    // A live mux session with undiscoverable keepers cannot be offered for
+    // migration. Temporarily move only fixture socket directory entries; the
+    // old daemon's established keeper connection and the program stay alive.
+    let keeper_paths: Vec<_> = fs::read_dir(sandbox.run_dir().join("keepers"))
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    for path in &keeper_paths {
+        fs::rename(path, path.with_extension("hidden")).unwrap();
+    }
+    let no_keepers = inspect();
+    for path in &keeper_paths {
+        fs::rename(path.with_extension("hidden"), path).unwrap();
+    }
+    assert_eq!(no_keepers["daemon"]["legacyMigration"]["status"], "blocked");
+    assert_eq!(prove(&previous, "migration-missing-keeper", false), shell);
+
+    // A valid-looking record for the wrong process must never authorize a
+    // signal. The namespace supervisor is deliberately *not* the socket peer.
+    let mut wrong_identity = info.clone();
+    wrong_identity["pid"] = serde_json::json!(std::process::id());
+    fs::write(
+        sandbox.info_path(),
+        serde_json::to_vec(&wrong_identity).unwrap(),
+    )
+    .unwrap();
+    let rejected = inspect();
+    assert_eq!(rejected["daemon"]["legacyMigration"]["status"], "blocked");
+    let rejected = run_result(current, &["remote-migrate", "--expected", token]);
+    assert!(!rejected.status.success());
+    fs::write(sandbox.info_path(), &before).unwrap();
+    assert_eq!(prove(&previous, "migration-wrong-identity", false), shell);
+
+    // The token binds the exact metadata, even fields not used for transport.
+    let mut changed = info.clone();
+    changed["startedAt"] = serde_json::json!("changed-record");
+    fs::write(sandbox.info_path(), serde_json::to_vec(&changed).unwrap()).unwrap();
+    let rejected = run_result(current, &["remote-migrate", "--expected", token]);
+    assert_eq!(rejected.status.code(), Some(75));
+    fs::write(sandbox.info_path(), &before).unwrap();
+    assert_eq!(prove(&previous, "migration-changed-record", false), shell);
+
+    // This is the explicit app action: one checked SIGTERM, then normal keeper
+    // adoption by the new binary. A lost successful response must not make
+    // repeating the old intent restart the replacement daemon.
+    run(current, &["remote-migrate", "--expected", token]);
+    let replacement = fs::read(sandbox.info_path()).unwrap();
+    let replay = run_result(current, &["remote-migrate", "--expected", token]);
+    assert!(!replay.status.success());
+    assert_eq!(fs::read(sandbox.info_path()).unwrap(), replacement);
     owned.pin(
         sandbox.read_info().unwrap()["pid"].as_u64().unwrap() as u32,
         &sandbox,
     );
     assert_eq!(prove(current, "rollback-return", false), shell);
+    assert_eq!(
+        prove_historical(current, "historical-after-migration", false),
+        historical_shell
+    );
+    let historical_adopted: serde_json::Value = serde_json::from_slice(
+        &run(
+            current,
+            &["list-panes", "--screen", historical_screen, "--json"],
+        )
+        .stdout,
+    )
+    .unwrap();
+    assert_eq!(
+        historical_adopted[historical_pane]["sessionId"],
+        historical_session
+    );
+    assert_eq!(
+        fs::read_link(format!("/proc/{historical_keeper}/exe")).unwrap(),
+        previous,
+        "migration retained the historical keeper process"
+    );
     assert_eq!(sockets(), original_sockets);
+    assert!(
+        unrelated.try_wait().unwrap().is_none(),
+        "migration and rejected replay leave the unrelated owned child running"
+    );
+    unrelated.kill().unwrap();
+    unrelated.wait().unwrap();
     run(current, &["daemon", "stop", "--end-sessions"]);
     wait_until("all rollback process generations exit", || {
         owned
@@ -4057,5 +4270,5 @@ fn a_kept_shell_survives_a_pinned_previous_binary_rollback_and_return() {
             .all(|file| matches!(Owned::exited(file), Ok(true)))
     });
     assert_eq!(sandbox.keeper_sockets(), 0);
-    eprintln!("PROVED historical rollback current→{expected}→current: original shell PID, private state, session and keeper inode retained; exact processes exited");
+    eprintln!("PROVED historical rollback current→{expected}→current: current and historical keeper executables both retain original shell PID, private state, session and keeper inode; unrelated process survives; exact processes exited");
 }

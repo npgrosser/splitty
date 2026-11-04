@@ -53,7 +53,7 @@ pub use splitty_remote::hosts::{HostOrder, HostPreference, PreferenceError};
 use splitty_remote::install::{Prepared, Server};
 use splitty_remote::ssh::{self, SshError, SshTarget};
 use splitty_remote::tunnel::PortReservation;
-use splitty_remote::tunnel::{update_plan, UpdatePlan, PREPARE_TIMEOUT};
+use splitty_remote::tunnel::{migration_offer, update_plan, UpdatePlan, PREPARE_TIMEOUT};
 use splitty_transport::{
     admission,
     budget::{Charged, ConnectionBudget},
@@ -111,6 +111,16 @@ pub trait Connector: Send + Sync {
 
     /// Stop only an older daemon whose keepers preserve its sessions.
     fn stop_daemon<'a>(
+        &'a self,
+        target: &'a SshTarget,
+        server: &'a Server,
+        daemon: &'a RunningDaemon,
+        context: &'a splitty_transport::queue::Context,
+    ) -> BoxFuture<'a, Result<(), HubError>>;
+
+    /// Apply a positively verified legacy handover after an explicit user action.
+    /// Callers never automatically retry this mutation, including exit 75.
+    fn migrate_legacy<'a>(
         &'a self,
         target: &'a SshTarget,
         server: &'a Server,
@@ -685,6 +695,36 @@ impl Hub {
         let mut metadata = Some(reservation);
         let result = async {
             let mut daemon = running(&host, &handshake)?;
+            if daemon.legacy {
+                let offer = migration_offer(daemon, VERSION, Some(&handshake.server.version));
+                let Some(offer) = offer else {
+                    let message = match &daemon.legacy_migration {
+                        Some(splitty_remote::handshake::LegacyMigration::Blocked { message }) => message.clone(),
+                        _ => format!("The legacy Splitty daemon on {host} cannot be migrated safely by this client. Update or restart it explicitly on the host before connecting."),
+                    };
+                    return Err(HubError::MigrationUnavailable { message });
+                };
+                if !update {
+                    return Err(HubError::MigrationRequired { host, offer });
+                }
+                report(Step::Update, format_args!("Updating legacy Splitty on {host}; its kept sessions continue running..."))?;
+                // This reach owns exactly one explicit intent. Mutation and
+                // post-mutation discovery errors are permanent, never replayed.
+                self.connector.migrate_legacy(&target, &prepared.server, daemon, context)
+                    .await.map_err(|error| HubError::MigrationFailed(Box::new(error)))?;
+                let updated = self.connector.handshake(&target, &prepared, context)
+                    .await.map_err(|error| HubError::MigrationFailed(Box::new(error)))?;
+                let (updated, reservation) = updated.into_parts();
+                handshake = updated;
+                metadata = Some(reservation);
+                daemon = running(&host, &handshake)
+                    .map_err(|error| HubError::MigrationFailed(Box::new(error)))?;
+                if daemon.version != VERSION || !daemon.supports_native() {
+                    return Err(HubError::MigrationFailed(Box::new(HubError::MigrationUnavailable {
+                        message: "the requested native replacement was not confirmed".into(),
+                    })));
+                }
+            }
             // The update needs the running daemon's version, which this handshake
             // tells: it starts no daemon when one runs, so asking first would cost
             // a call. A daemon it started is the answering server's own.

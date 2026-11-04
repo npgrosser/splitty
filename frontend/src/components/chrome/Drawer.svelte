@@ -699,7 +699,7 @@
             {onBrowseHost}
             onNewHostScreen={(target) => { onNewHostScreen(target, true); closePanel(); }}
             onConnectNew={() => { closePanel(); setRemoteScreenPickerOpen(true); }}
-            onUpdateHost={(host) => { closePanel(); onUpdateHost(host); }}
+            {onUpdateHost}
             onOpenWindow={remoteWindows.available ? (target) => { closePanel(); setHostPickerOpen(true, target); } : undefined}
           />
         {/if}

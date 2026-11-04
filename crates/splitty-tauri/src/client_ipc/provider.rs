@@ -10,7 +10,13 @@ use splitty_remote::{
     tunnel,
 };
 use splitty_transport::{admission, budget::Charged, negotiation, queue, wire};
-use std::{io, sync::Arc};
+use std::{
+    io,
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
+};
 
 #[cfg(any(target_os = "windows", test))]
 use splitty_remote::owner;
@@ -33,6 +39,7 @@ enum Source {
     Remote {
         target: SshTarget,
         assignment: admission::Assignment,
+        update: Arc<AtomicBool>,
     },
 }
 fn closed() -> io::Error {
@@ -58,9 +65,15 @@ impl Provider {
         }
     }
     pub(crate) fn remote(target: SshTarget) -> Self {
+        Self::remote_with_update(target, false)
+    }
+    /// This one-shot intent belongs to the authenticated launcher. The remote
+    /// document still has no update capability and reconnects cannot replay it.
+    pub(crate) fn remote_with_update(target: SshTarget, update: bool) -> Self {
         Self {
             source: Source::Remote {
                 target,
+                update: Arc::new(AtomicBool::new(update)),
                 assignment: admission::Assignment::new(
                     admission::Backend::new(),
                     admission::Domain::new(),
@@ -147,19 +160,24 @@ impl Provider {
                 )
                 .await
                 .map(|connection| Backend::Owned(Box::new(connection))),
-            Source::Remote { target, assignment } => {
+            Source::Remote {
+                target,
+                assignment,
+                update,
+            } => {
                 if attempt.plan.target.as_ref() != Some(target) || attempt.plan.update {
                     return Err(io::Error::new(
                         io::ErrorKind::PermissionDenied,
                         "native host assignment mismatch",
                     ));
                 }
-                let result = tunnel::open(
+                let result = tunnel::open_with_update(
                     Ssh::stdio_only(target.clone()).with_context(context.clone()),
                     env!("CARGO_PKG_VERSION"),
                     MUX_PROTOCOL,
                     install::payload_for,
                     assignment.clone(),
+                    update.swap(false, Ordering::AcqRel),
                     |event| {
                         if context.is_closed() {
                             return;

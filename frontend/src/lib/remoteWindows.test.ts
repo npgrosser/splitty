@@ -55,6 +55,18 @@ describe("the Tauri bridge", () => {
     expect(invoke).toHaveBeenCalledWith("remote_cancel", { target: "vm1" });
   });
 
+  it("sends confirmed update intent once and preserves the native offer", async () => {
+    const migration = { available: true, fromVersion: "0.1.27", toVersion: "0.2.0-dev.2", sessions: 2 };
+    invoke.mockRejectedValueOnce({ message: "Update required", migration: { ...migration, token: "not-renderer-authority" } });
+    const api = bridge();
+    await expect(api.open("vm1")).rejects.toEqual({ message: "Update required", migration });
+    await api.open("vm1", { update: true });
+    await api.open("vm1");
+    expect(invoke.mock.calls).toEqual([
+      ["remote_open", { target: "vm1" }], ["remote_open", { target: "vm1", update: true }], ["remote_open", { target: "vm1" }],
+    ]);
+  });
+
   it("rejects an open with the command's error, hint included", async () => {
     invoke.mockRejectedValueOnce({ message: "Host key verification failed.", hint: "Run `ssh vm1` once in a terminal." });
 
@@ -126,6 +138,16 @@ describe("the Electron bridge", () => {
     await bridge().cancel("vm1");
 
     expect(invoke.mock.calls).toEqual([["remote:hosts"], ["remote:open", "vm1"], ["remote:cancel", "vm1"]]);
+  });
+
+  it("passes one explicit confirmation and keeps migration metadata in the result", async () => {
+    const migration = { available: true, fromVersion: "0.1.30", toVersion: "0.2.0-dev.2", sessions: 1 };
+    invoke.mockResolvedValueOnce({ ok: false, error: { message: "Update required", migration } });
+    const api = bridge();
+    await expect(api.open("vm1")).rejects.toEqual({ message: "Update required", migration });
+    await api.open("vm1", { update: true });
+    await api.open("vm1");
+    expect(invoke.mock.calls).toEqual([["remote:open", "vm1"], ["remote:open", "vm1", { update: true }], ["remote:open", "vm1"]]);
   });
 
   /// `ipcRenderer.invoke` rejections lose their fields, so the main process

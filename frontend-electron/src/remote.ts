@@ -7,6 +7,24 @@ export interface KnownHost {
   lastConnected?: number;
 }
 
+export interface MigrationOffer {
+  available: true;
+  fromVersion: string;
+  toVersion: string;
+  sessions: number;
+}
+
+/** Copy only the bounded, descriptive fields supplied by native discovery. */
+export function migrationOffer(value: unknown): MigrationOffer | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const offer = value as Partial<MigrationOffer>;
+  if (offer.available !== true ||
+      typeof offer.fromVersion !== "string" || !offer.fromVersion || offer.fromVersion.length > 64 ||
+      typeof offer.toVersion !== "string" || !offer.toVersion || offer.toVersion.length > 64 ||
+      !Number.isInteger(offer.sessions) || offer.sessions! < 0 || offer.sessions! > 0xffffffff) return undefined;
+  return { available: true, fromVersion: offer.fromVersion, toVersion: offer.toVersion, sessions: offer.sessions! };
+}
+
 /** The native host.list reply body; nothing for anything unexpected. */
 export function parseKnownHosts(output: string): KnownHost[] {
   let value: unknown;

@@ -20,12 +20,12 @@ Desktop apps on supported platforms SHALL open one window per host using package
 ### Requirement: Remote Window Shell API
 The trusted UI of a desktop app (its authorized packaged main window, and on Windows its separately scoped bundled setup page) SHALL be able to:
 - **list the known hosts:** Tauri command `remote_hosts`, Electron channel `remote:hosts`. The result is an array of `{ target, source, lastConnected?, alias? }`, in the order of `remote-hosts`, Known Hosts, with `source` `recent` or `ssh-config`.
-- **open a host:** Tauri command `remote_open` with `{ target }`, Electron channel `remote:open` with the target. It resolves once the remote window shows the host, and rejects with `{ message, hint? }`.
+- **open a host:** Tauri command `remote_open` with `{ target }`, Electron channel `remote:open` with the target. It resolves once the remote window shows the host, and rejects with `{ message, hint?, migration? }`. A positively eligible migration offer SHALL support one separately confirmed update-and-connect launch. Only the authorized main/setup launcher may provide that intent; the remote document remains fixed to its assigned host and gains no launcher, executable or process-selection authority.
 - **cancel an open in flight:** Tauri command `remote_cancel` with `{ target }`, Electron channel `remote:cancel`. The pending open then rejects.
 
 While an open runs, the shell SHALL send progress to the window that called it: Tauri event `remote-progress`, Electron channel `remote:progress`, each `{ target, step, message }` with the steps of `cli`, Remote Connect Machine-Readable Output.
 
-A target that is not valid (see `access-control`, Remote Access Through SSH Tunnel) SHALL be rejected before anything runs. Concurrent opens of the same target SHALL share one connection attempt.
+A target that is not valid (see `access-control`, Remote Access Through SSH Tunnel) SHALL be rejected before anything runs. Concurrent ordinary opens of the same target SHALL share one connection attempt. A confirmed migration SHALL NOT be silently coalesced into an ordinary pending open or a focus operation; its native-owned intent SHALL be consumed once and omitted from reconnect or recreated helpers.
 
 #### Scenario: Progress and failure
 - **WHEN** the UI opens `vm1` and the SSH login fails

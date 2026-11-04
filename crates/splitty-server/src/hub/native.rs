@@ -243,6 +243,118 @@ mod tests {
     use crate::hub::testing::ScriptedHost;
     use serde_json::{json, Value};
 
+    fn legacy_ready() -> splitty_remote::handshake::LegacyMigration {
+        splitty_remote::handshake::LegacyMigration::Ready {
+            token: "a".repeat(64),
+            sessions: 3,
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_connect_only_offers_migration_and_explicit_update_hands_over_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = ScriptedHost::new(dir.path()).with_legacy_daemon(Some(legacy_ready()));
+        let hub = Hub::new(Box::new(host.clone()), dir.path().join("config"), None);
+        let context = splitty_transport::queue::Context::default();
+        let (reports, received) = tokio::sync::mpsc::channel(8);
+        let error = hub
+            .reach(SshTarget::parse("vm").unwrap(), false, reports, &context)
+            .await
+            .err()
+            .unwrap();
+        let failure = error.failure_budgeted("vm", &context.budget).unwrap();
+        drop(error);
+        drop(received);
+        assert!(context.budget.used() > 0, "copied offer remains charged");
+        let frame = failure_frame(failure, &context.budget).unwrap();
+        let closed: wire::Closed = frame.decode().unwrap();
+        assert!(!closed.retryable);
+        let diagnostic: Value = serde_json::from_str(&closed.message).unwrap();
+        assert_eq!(diagnostic["migration"]["available"], true);
+        assert_eq!(diagnostic["migration"]["sessions"], 3);
+        assert_eq!(diagnostic["migration"]["fromVersion"], "0.1.27");
+        assert_eq!(diagnostic["keepsSessions"], true);
+        assert!(!closed.message.contains(&"a".repeat(64)));
+        assert_eq!(host.asked(), ["prepare vm", "handshake"]);
+        drop(frame);
+        assert_eq!(context.budget.used(), 0);
+        let (reports, _received) = tokio::sync::mpsc::channel(8);
+        let reached = hub
+            .reach(SshTarget::parse("vm").unwrap(), true, reports, &context)
+            .await
+            .unwrap();
+        assert!(reached.daemon.supports_native());
+        assert_eq!(reached.daemon.version, VERSION);
+        assert_eq!(
+            host.asked(),
+            [
+                "prepare vm",
+                "handshake",
+                "prepare vm",
+                "handshake",
+                "migrate",
+                "handshake",
+                "bridge"
+            ]
+        );
+        let _ = reached.bridge.finish().await;
+    }
+
+    #[tokio::test]
+    async fn blocked_or_ambiguous_legacy_update_has_no_update_offer_and_no_automatic_retry() {
+        let dir = tempfile::tempdir().unwrap();
+        for (host, mutations) in [
+            (ScriptedHost::new(dir.path()).with_legacy_daemon(None), 0),
+            (
+                ScriptedHost::new(dir.path()).with_legacy_daemon(Some(
+                    splitty_remote::handshake::LegacyMigration::Blocked {
+                        message: "private owner proof unavailable".into(),
+                    },
+                )),
+                0,
+            ),
+            (
+                ScriptedHost::new(dir.path())
+                    .with_legacy_daemon(Some(legacy_ready()))
+                    .with_server_version("0.1.29"),
+                0,
+            ),
+            (
+                ScriptedHost::new(dir.path())
+                    .with_legacy_daemon(Some(legacy_ready()))
+                    .not_stopping(),
+                1,
+            ),
+        ] {
+            let hub = Hub::new(Box::new(host.clone()), dir.path().join("config"), None);
+            let (reports, _received) = tokio::sync::mpsc::channel(8);
+            let error = hub
+                .reach(
+                    SshTarget::parse("vm").unwrap(),
+                    true,
+                    reports,
+                    &Default::default(),
+                )
+                .await
+                .err()
+                .unwrap();
+            let failure = error.failure("vm");
+            assert_eq!(failure.code, Code::MigrationUnavailable);
+            assert!(failure.migration.is_none());
+            let closed: wire::Closed = failure_frame(failure, &Default::default())
+                .unwrap()
+                .decode()
+                .unwrap();
+            assert!(!closed.retryable);
+            let asked = host.asked();
+            assert_eq!(
+                asked.iter().filter(|call| *call == "migrate").count(),
+                mutations
+            );
+            assert!(!asked.iter().any(|call| call == "stop" || call == "bridge"));
+        }
+    }
+
     #[test]
     fn exhausted_control_capacity_keeps_failure_delivery_refused() {
         let budget = splitty_transport::budget::ConnectionBudget::default();
@@ -262,6 +374,7 @@ mod tests {
     #[test]
     fn oversized_native_errors_preserve_types_and_mark_screen_counts_unknown() {
         let failure = Failure {
+            migration: None,
             code: Code::Incompatible,
             message: "\u{0001}🙂".repeat(8192),
             hint: Some("更新🙂".repeat(8192)),

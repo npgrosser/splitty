@@ -1,6 +1,6 @@
 import { expect, it } from "vitest";
 import { setImmediate as nextTurn } from "node:timers/promises";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { NativeProcessBudget } from "../../../../frontend-electron/src/native_budget.ts";
@@ -13,10 +13,29 @@ it("rejects invalid targets and worker floods before process startup", () => {
     expect(() => startNativeHelper("unreachable", {}, events, target, budget)).toThrow("Invalid");
   }
   expect(() => startNativeHelper("unreachable", {}, events, undefined, budget, false, true)).toThrow("requires an SSH helper");
+  expect(() => startNativeHelper("unreachable", {}, events, undefined, budget, false, false, true)).toThrow("requires an SSH helper");
   expect(budget.counts.workers).toBe(0);
   const workers = Array.from({ length: 32 }, () => budget.worker());
   expect(() => startNativeHelper("unreachable", {}, events, undefined, budget)).toThrow("worker");
   workers.forEach(release => release()); expect(budget.counts).toEqual({ data: 0, controls: 0, workers: 0 });
+});
+
+it.runIf(process.platform !== "win32")("passes explicit update intent only to its assigned SSH child", async () => {
+  const fixture = mkdtempSync(join(tmpdir(), "splitty-helper-migration-"));
+  const executable = join(fixture, "helper"), output = join(fixture, "args.json");
+  writeFileSync(executable, `#!${process.execPath}\nrequire('node:fs').writeFileSync(process.env.ARGS_OUTPUT, JSON.stringify(process.argv.slice(2)));\n`, { mode: 0o700 });
+  const budget = new NativeProcessBudget();
+  try {
+    for (const update of [true, false]) {
+      const helper = startNativeHelper(executable, { ARGS_OUTPUT: output }, { closed() {} }, "host.invalid", budget, false, true, update);
+      void helper.pipe.ready.catch(() => {});
+      await helper.exited; await nextTurn();
+      const args = JSON.parse(readFileSync(output, "utf8"));
+      expect(args).toContain("--target"); expect(args).toContain("host.invalid");
+      expect(args.includes("--update")).toBe(update);
+    }
+    expect(budget.counts).toEqual({ data: 0, controls: 0, workers: 0 });
+  } finally { rmSync(fixture, { recursive: true, force: true }); }
 });
 
 it("cleans up a failed OS spawn without claiming there was an exited child", async () => {

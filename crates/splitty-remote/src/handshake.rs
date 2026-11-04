@@ -55,16 +55,37 @@ pub struct RunningDaemon {
     pub transport_version: Option<u32>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub legacy: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_migration: Option<LegacyMigration>,
     pub version: String,
     pub protocol: u32,
     pub started_at: String,
-    /// Whether its sessions outlive it in session keepers, so that a restart
-    /// or an update ends none. False for a host that does not say.
+    /// Whether it is configured to use session keepers. Legacy migration also
+    /// verifies the actual inventory; this flag alone cannot prove that every
+    /// running terminal has a keeper. False for a host that does not say.
     #[serde(default)]
     pub keeps_sessions: bool,
     /// Whether this handshake started it.
     #[serde(default)]
     pub started: bool,
+}
+
+/// Read-only legacy migration eligibility. The process token is consumed only
+/// by the installed host binary, never used as a renderer credential.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "camelCase")]
+pub enum LegacyMigration {
+    Ready { token: String, sessions: u32 },
+    Blocked { message: String },
+}
+
+pub const LEGACY_MIGRATION_MESSAGE_LIMIT: usize = 1024;
+
+pub fn valid_migration_token(token: &str) -> bool {
+    token.len() == 64
+        && token
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -151,8 +172,22 @@ pub fn parse_budgeted(
                         "legacy daemon claims native service identity".into(),
                     ));
                 }
+                if let Some(migration) = &daemon.legacy_migration {
+                    let valid = match migration {
+                        LegacyMigration::Ready { token, .. } => {
+                            daemon.keeps_sessions && valid_migration_token(token)
+                        }
+                        LegacyMigration::Blocked { message } => {
+                            !message.is_empty() && message.len() <= LEGACY_MIGRATION_MESSAGE_LIMIT
+                        }
+                    };
+                    if !valid {
+                        return Err(invalid("invalid legacy migration eligibility".into()));
+                    }
+                }
             } else if !daemon.instance.as_deref().is_some_and(valid_instance)
                 || !daemon.transport_version.is_some_and(|version| version > 0)
+                || daemon.legacy_migration.is_some()
             {
                 return Err(invalid(
                     "native daemon lacks a valid instance or transport version".into(),
@@ -293,6 +328,46 @@ mod tests {
             legacy.supports_mux(1),
             "mux compatibility never authorizes a TCP fallback"
         );
+    }
+
+    #[test]
+    fn migration_offers_are_bounded_and_only_legacy_keepers_can_be_ready() {
+        let mut value: serde_json::Value = serde_json::from_str(EXAMPLE).unwrap();
+        value["daemon"]["legacyMigration"] = serde_json::json!({
+            "status":"ready", "token":"a".repeat(64), "sessions":2
+        });
+        let parse_value =
+            |value: &serde_json::Value| parse("host", &serde_json::to_vec(value).unwrap());
+        assert!(parse_value(&value).is_err(), "native daemons never migrate");
+        value["daemon"]["legacy"] = true.into();
+        value["daemon"].as_object_mut().unwrap().remove("instance");
+        value["daemon"]
+            .as_object_mut()
+            .unwrap()
+            .remove("transportVersion");
+        let ready = parse_value(&value).unwrap();
+        assert!(matches!(
+            ready.daemon.daemon.unwrap().legacy_migration,
+            Some(LegacyMigration::Ready { sessions: 2, .. })
+        ));
+        for token in ["a".repeat(63), "A".repeat(64), "g".repeat(64)] {
+            let mut malformed = value.clone();
+            malformed["daemon"]["legacyMigration"]["token"] = token.into();
+            assert!(parse_value(&malformed).is_err());
+        }
+        value["daemon"]["keepsSessions"] = false.into();
+        assert!(parse_value(&value).is_err());
+        value["daemon"]["legacyMigration"] = serde_json::json!({
+            "status":"blocked", "message":"Restart the daemon explicitly on the host."
+        });
+        assert!(parse_value(&value).is_ok());
+        for message in [
+            String::new(),
+            "x".repeat(LEGACY_MIGRATION_MESSAGE_LIMIT + 1),
+        ] {
+            value["daemon"]["legacyMigration"]["message"] = message.into();
+            assert!(parse_value(&value).is_err());
+        }
     }
 
     #[test]

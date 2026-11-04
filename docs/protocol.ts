@@ -1532,6 +1532,7 @@ type RemoteErrorCode =
   | "daemon" //           the handshake or the daemon start failed (with update=1 also:
   //                      the stop failed, or the old daemon had not ended yet)
   | "incompatible" //     the daemon's protocol is outside the window; it keeps running
+  | "migration_unavailable" // legacy migration cannot be verified; no update is offered
   | "bridge" //           remote-bridge ended before the daemon's first message
   | "forward" //          only from /api/remote/forwards: the forward failed, or the
   //                      host's SSH configuration forwards ports itself
@@ -1550,6 +1551,18 @@ interface RemoteError {
   keepsSessions?: boolean;
   /** For `incompatible`: the daemon's screens, as in `remote.ready`, which an update would end unless it keeps them. */
   screens?: { id: string; name?: string; panes: number }[];
+  /** Positive, native-verified offer; needs a new explicit confirmation.
+   * Conditional host proof tokens never become renderer-selected authority.
+   */
+  migration?: LegacyMigrationOffer;
+}
+
+interface LegacyMigrationOffer {
+  available: true;
+  fromVersion: string;
+  toVersion: string;
+  /** Keeper-backed sessions observed by the host's read-only preflight. */
+  sessions: number;
 }
 
 type RemoteHubMessage = RemoteProgress | RemoteReady | RemoteError;
@@ -2216,11 +2229,22 @@ export interface RemoteHandshakeV2 {
         keepsSessions: boolean;
         started: boolean;
       } & (
-        | { legacy?: false; instance: string; transportVersion: number }
-        | { legacy: true; instance?: never; transportVersion?: never }
+        | { legacy?: false; instance: string; transportVersion: number; legacyMigration?: never }
+        | { legacy: true; instance?: never; transportVersion?: never; legacyMigration?:
+            | { status: "ready"; token: string; sessions: number }
+            | { status: "blocked"; message: string } }
       ));
   screens: { id: string; name?: string; panes: number }[];
 }
+
+/** `remote-migrate --expected <token>` is an internal, explicitly confirmed
+ * host command using the installed replacement binary and its configuration.
+ * The 64-character lowercase hexadecimal token binds the observed legacy
+ * daemon process generation and record; it is not a bearer credential.
+ * The host revalidates identity and keepers before signaling. Exit 75 means
+ * stale proof; any potentially executed migration is never replayed by the
+ * client. A fresh native handshake verifies successful replacement.
+ */
 
 /** Owner Unix socket only, excluded from the browser and native UI catalog.
  * POST /api/daemon/stop compares this immutable instance with the accepting

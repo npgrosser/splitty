@@ -11,7 +11,7 @@ use serde::Serialize;
 use splitty_remote::handshake::{HandshakeError, Screen};
 use splitty_remote::install::InstallError;
 use splitty_remote::ssh::{self, SshError, TargetError};
-use splitty_remote::tunnel::{PortTunnelError, ReverseTunnelError};
+use splitty_remote::tunnel::{MigrationOffer, PortTunnelError, ReverseTunnelError};
 
 /// Why a socket failed before the relay.
 #[derive(Debug, thiserror::Error)]
@@ -56,6 +56,17 @@ pub enum HubError {
         /// The daemon's screens, so the client can say what an update ends.
         screens: Vec<Screen>,
     },
+
+    #[error("{host} runs legacy Splitty {}; update to {} to connect while preserving its {} kept session(s).", offer.from_version, offer.to_version, offer.sessions)]
+    MigrationRequired { host: String, offer: MigrationOffer },
+
+    #[error("{message}")]
+    MigrationUnavailable { message: String },
+
+    // A migration may have reached the host even when its reply was lost.
+    // The client must inspect fresh state before explicitly trying again.
+    #[error("The requested server migration could not be confirmed: {0}. Reconnect to inspect the host before requesting migration again.")]
+    MigrationFailed(Box<HubError>),
 
     /// `update=1`, but the host has no server of this version to start
     /// instead: none is installed, and this client carries none for it.
@@ -142,6 +153,7 @@ pub enum Code {
     Install,
     Daemon,
     Incompatible,
+    MigrationUnavailable,
     Bridge,
     /// Only in the answers of `/api/remote/forwards`: the forward's `ssh`
     /// ran, but the forward failed.
@@ -162,6 +174,7 @@ impl Code {
             Code::Install => "install",
             Code::Daemon => "daemon",
             Code::Incompatible => "incompatible",
+            Code::MigrationUnavailable => "migration_unavailable",
             Code::Bridge => "bridge",
             Code::Forward => "forward",
             Code::Internal => "internal",
@@ -172,6 +185,8 @@ impl Code {
 /// What a `remote.error` carries besides its `type`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Failure {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub migration: Option<MigrationOffer>,
     pub code: Code,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -195,6 +210,7 @@ pub struct Failure {
 impl Failure {
     fn new(code: Code, message: String, hint: Option<String>) -> Self {
         Self {
+            migration: None,
             code,
             message,
             hint,
@@ -449,6 +465,15 @@ impl HubError {
                     screens: Some(screens.clone()),
                     ..Failure::new(Code::Incompatible, self.to_string(), Some(hint))
                 }
+            }
+            HubError::MigrationRequired { offer, .. } => Failure {
+                migration: Some(offer.clone()),
+                version: Some(offer.from_version.clone()),
+                keeps_sessions: Some(true),
+                ..Failure::new(Code::Incompatible, self.to_string(), None)
+            },
+            HubError::MigrationUnavailable { .. } | HubError::MigrationFailed(_) => {
+                Failure::new(Code::MigrationUnavailable, self.to_string(), None)
             }
             HubError::NoUpdate { arch, .. } => Failure::new(
                 Code::UnsupportedHost,
@@ -950,6 +975,7 @@ mod tests {
             Code::Install,
             Code::Daemon,
             Code::Incompatible,
+            Code::MigrationUnavailable,
             Code::Bridge,
             Code::Forward,
             Code::Internal,

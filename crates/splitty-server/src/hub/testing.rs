@@ -45,6 +45,8 @@ struct Daemon {
     version: String,
     protocol: u32,
     keeps_sessions: bool,
+    legacy: bool,
+    legacy_migration: Option<handshake::LegacyMigration>,
 }
 
 /// A host whose answers a test sets. Clones share the host's daemon and what
@@ -182,6 +184,8 @@ impl ScriptedHost {
             version: version.to_owned(),
             protocol,
             keeps_sessions: false,
+            legacy: false,
+            legacy_migration: None,
         });
         self
     }
@@ -193,6 +197,19 @@ impl ScriptedHost {
             version: version.to_owned(),
             protocol,
             keeps_sessions: true,
+            legacy: false,
+            legacy_migration: None,
+        });
+        self
+    }
+
+    pub fn with_legacy_daemon(self, migration: Option<handshake::LegacyMigration>) -> Self {
+        *self.daemon.lock().expect("daemon") = Some(Daemon {
+            version: "0.1.27".into(),
+            protocol: PROTOCOL_VERSION,
+            keeps_sessions: true,
+            legacy: true,
+            legacy_migration: migration,
         });
         self
     }
@@ -365,6 +382,8 @@ impl Connector for ScriptedHost {
                     version: self.server_version.to_owned(),
                     protocol: self.protocol,
                     keeps_sessions: true,
+                    legacy: false,
+                    legacy_migration: None,
                 });
                 (daemon.clone(), started)
             };
@@ -372,7 +391,8 @@ impl Connector for ScriptedHost {
                 "handshake": 2,
                 "server": {"version": self.server_version, "protocol": self.protocol, "path": "/p", "transportVersions":[1]},
                 "daemon": {
-                    "running": true, "pid": 4711, "instance":"0123456789abcdef0123456789abcdef", "transportVersion":1, "version": daemon.version,
+                    "running": true, "pid": 4711, "instance": if daemon.legacy { None } else { Some("0123456789abcdef0123456789abcdef") }, "transportVersion": if daemon.legacy { None } else { Some(1) }, "version": daemon.version,
+                    "legacy": daemon.legacy, "legacyMigration": daemon.legacy_migration,
                     "protocol": daemon.protocol, "startedAt": "1760",
                     "keepsSessions": daemon.keeps_sessions, "started": started,
                 },
@@ -404,6 +424,31 @@ impl Connector for ScriptedHost {
             self.ask("stop".to_owned());
             if self.stops {
                 *self.daemon.lock().expect("daemon") = None;
+            }
+            Ok(())
+        })
+    }
+
+    fn migrate_legacy<'a>(
+        &'a self,
+        _target: &'a SshTarget,
+        _server: &'a Server,
+        _daemon: &'a RunningDaemon,
+        context: &'a splitty_transport::queue::Context,
+    ) -> BoxFuture<'a, Result<(), HubError>> {
+        Box::pin(async move {
+            if context.is_closed() {
+                return Err(HubError::NativeBridge(
+                    std::io::ErrorKind::BrokenPipe.into(),
+                ));
+            }
+            self.ask("migrate".into());
+            if self.stops {
+                *self.daemon.lock().expect("daemon") = None;
+            } else {
+                return Err(HubError::Stop(SshError::Spawn(
+                    std::io::ErrorKind::ConnectionReset.into(),
+                )));
             }
             Ok(())
         })

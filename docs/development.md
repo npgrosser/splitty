@@ -254,8 +254,9 @@ the prerelease number for each subsequent distributed preview; adding build
 metadata alone does not make a daemon eligible for an automatic update.
 Remote updates follow SemVer precedence: `0.2.0-dev.9` precedes
 `0.2.0-dev.10`, and every `0.2.0` prerelease precedes `0.2.0`. The native
-identity and session-keeper requirements still apply; a legacy daemon needs
-the explicit migration described in [CLI documentation](cli.md#splitty-daemon).
+identity and session-keeper requirements still apply. An eligible legacy daemon
+can be migrated through the app's confirmed update action; otherwise use the
+explicit migration described in [CLI documentation](cli.md#splitty-daemon).
 
 After a successful release run, **Cleanup release artifacts** deletes that
 run's Actions artifacts; the files attached to the release remain available.

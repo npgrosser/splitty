@@ -460,6 +460,7 @@
       .map((s) => ({ wireId: s.wireId, panes: views.api(s.id)?.panels.length || undefined }));
     const { error, ready } = socket.state;
     const warning = updateWarning(target, {
+      migration: error?.migration,
       hostVersion: error?.version ?? ready?.daemon.version,
       hostProtocol: error?.protocol ?? ready?.daemon.protocol,
       keepsSessions: error?.keepsSessions ?? ready?.daemon.keepsSessions,

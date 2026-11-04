@@ -29,6 +29,7 @@ pub async fn ssh<R, W>(
     mut write: W,
     target: splitty_remote::ssh::SshTarget,
     remember_target: bool,
+    update: bool,
     shutdown: impl std::future::Future<Output = ()>,
 ) -> io::Result<()>
 where
@@ -51,12 +52,13 @@ where
     let mut prepared = None;
     let prepare = async {
         prepared = Some(
-            tunnel::open(
+            tunnel::open_with_update(
                 Ssh::stdio_only(target.clone()).with_context(context.clone()),
                 env!("CARGO_PKG_VERSION"),
                 splitty_core::protocol::PROTOCOL_VERSION,
                 install::payload_for,
                 assignment,
+                update,
                 |report| {
                     let _ = reports.try_send(report);
                 },
@@ -274,6 +276,7 @@ mod tests {
             .reserve(wire::CONNECTION_CONTROL_BYTES, true)
             .unwrap();
         let failure = splitty_remote::tunnel::Failure {
+            migration: None,
             message: "Host key verification failed".into(),
             hint: Some("Check the fingerprint".into()),
         };
@@ -289,6 +292,35 @@ mod tests {
     }
 
     #[test]
+    fn ssh_failure_preserves_migration_offer_without_exposing_revalidation_token() {
+        let frame = super::failure_frame(
+            splitty_remote::tunnel::Failure {
+                message: "Update the legacy server".into(),
+                hint: None,
+                migration: Some(splitty_remote::tunnel::MigrationOffer {
+                    available: true,
+                    from_version: "0.1.27".into(),
+                    to_version: "0.2.0-dev.2".into(),
+                    sessions: 3,
+                }),
+            },
+            false,
+            &Default::default(),
+        )
+        .unwrap();
+        let closed: splitty_transport::wire::Closed = frame.decode().unwrap();
+        assert!(!closed.retryable);
+        let diagnostic: serde_json::Value = serde_json::from_str(&closed.message).unwrap();
+        assert_eq!(diagnostic["type"], "remote.error");
+        assert_eq!(
+            diagnostic["migration"],
+            serde_json::json!({
+                "available": true, "fromVersion": "0.1.27", "toVersion": "0.2.0-dev.2", "sessions": 3,
+            })
+        );
+    }
+
+    #[test]
     fn ssh_failure_preserves_hint_and_valid_json_under_control_limit() {
         for message in [
             "Host key verification failed".into(),
@@ -296,6 +328,7 @@ mod tests {
         ] {
             let frame = super::failure_frame(
                 splitty_remote::tunnel::Failure {
+                    migration: None,
                     message,
                     hint: Some("Run `ssh vm1` once and check the fingerprint".into()),
                 },

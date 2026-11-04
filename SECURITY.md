@@ -74,6 +74,20 @@ authority exists; explicit browser access and forward-to-local development
 ports remain separate supported surfaces. This registry does not constrain
 other forwarding tools run by the same OS user.
 
+Legacy daemon migration requires an explicit update confirmation. On Linux,
+the installed backend verifies the private owner socket, process generation and
+compatible keeper coverage before offering migration, then repeats those checks
+before signalling a retained pidfd. Daemon-owned PTY masters block migration,
+including terminals absent from the workspace snapshot. It never sends a
+session-ending command or escalates to a forced kill. This is a bounded preflight,
+not a freeze of other clients: the preservation promise covers the checked
+keeper-backed sessions. Unsupported identity checks or platforms refuse the
+operation; an ambiguous SSH result never automatically replays it. The proof
+stays in native code and grants no renderer-selected process or endpoint access.
+Implementation and regressions: `crates/splitty-server/src/host/migration.rs`,
+`crates/splitty-server/tests/daemon_lifecycle.rs` and
+`crates/splitty-remote/src/tunnel/supervisor.rs`.
+
 ## Credentials
 
 These credentials belong to the explicit browser gateway. Packaged desktop

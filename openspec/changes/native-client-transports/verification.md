@@ -1,3 +1,53 @@
+# Confirmed legacy recovery (`0.2.0-dev.2`)
+
+An eligible legacy Linux daemon now offers an explicit update-and-connect action.
+The main launcher, inline remote screen and host directory require confirmation;
+ordinary connect/Retry never migrates a legacy daemon. The native launcher/hub
+consumes intent once before the mutating SSH command. An uncertain result is not
+replayed, and a fresh handshake must identify the intended native replacement.
+
+The installed host binary pins a pidfd, verifies its private owner socket and
+actual process generation, and reads bounded live workspace/keeper inventories.
+Daemon-owned PTY masters block migration, including terminals missing from the
+workspace snapshot. Migration revalidates discovery and process identity before
+SIGTERM and refuses a competing daemon publication observed afterward. It never
+claims keepers during inspection, opens TCP, ends sessions explicitly or escalates
+to a forced kill. Unsupported identity/platform checks, including legacy macOS,
+produce a blocked reason. Existing native updates retain their instance gate.
+
+This is preflight, not a freeze of other legacy clients: preservation covers the
+checked keeper-backed sessions. Legacy clients do not participate in the native
+instance lock, so the check cannot serialize their concurrent startup. The UI
+retains this bounded promise. Renderer-visible offers contain versions/counts,
+never a process selector or conditional migration token.
+
+The strict isolated historical test uses the actual `cc66e97` artifact and SHA256
+recorded below (version `0.1.30`). It exercises current → historical daemon →
+confirmed migration → current. It also starts a second terminal under the old
+daemon and verifies that its keeper executes the historical binary. Both shells
+retain their original PID, unexported variable, session ID and keeper inode after
+migration, including the historical keeper process. An unrelated owned process
+survives.
+Read-only discovery leaves the old daemon unchanged; missing keepers, wrong owner
+identity, changed discovery and replayed proof are refused. A separate test
+rejects an unmapped direct PTY without signalling its owner. This is evidence for
+the pinned historical implementation, not every historical release package.
+No deployed host was migrated or restarted for validation. Independent backend
+and UI reviews found no remaining blocker after descriptor bounds, publication
+checks and host-directory confirmation lifetime corrections.
+
+Local integrated checks pass: 1,070 reported workspace tests, 101 GUI library
+tests, workspace/GUI all-targets clippy with warnings denied, and 22 bootstrap
+JavaScript tests. Optional platform fixtures retain their existing prerequisite
+behavior; the historical migration fixture above runs with strict requirements.
+All 1,518 frontend tests pass; frontend check reports zero errors and eight
+existing warnings. The Electron build packages 58 assets, its remote lifecycle
+smoke passes with owned child cleanup, and all eight architecture files and 15
+main specifications validate. Strict change validation, formatting and version
+consistency pass. Windows packaging is recorded with completed delivery below.
+
+---
+
 # Failed backend diagnostics (`0.2.0-dev.2`)
 
 Failed native preparation closes IO before returning its error. Diagnostic

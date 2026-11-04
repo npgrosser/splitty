@@ -19,10 +19,20 @@ pub(crate) enum Failure {
     Unavailable,
 }
 impl Failure {
-    fn fields(&self) -> (&str, Option<&str>) {
+    fn fields(
+        &self,
+    ) -> (
+        &str,
+        Option<&str>,
+        Option<&splitty_remote::tunnel::MigrationOffer>,
+    ) {
         match self {
-            Self::Shared(value) => (&value.message, value.hint.as_deref()),
-            Self::Unavailable => ("Native diagnostic unavailable", None),
+            Self::Shared(value) => (
+                &value.message,
+                value.hint.as_deref(),
+                value.migration.as_ref(),
+            ),
+            Self::Unavailable => ("Native diagnostic unavailable", None, None),
         }
     }
 }
@@ -39,9 +49,16 @@ impl Serialize for Failure {
             message: &'a str,
             #[serde(skip_serializing_if = "Option::is_none")]
             hint: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            migration: Option<&'a splitty_remote::tunnel::MigrationOffer>,
         }
-        let (message, hint) = self.fields();
-        Borrowed { message, hint }.serialize(serializer)
+        let (message, hint, migration) = self.fields();
+        Borrowed {
+            message,
+            hint,
+            migration,
+        }
+        .serialize(serializer)
     }
 }
 #[cfg(test)]
@@ -127,6 +144,7 @@ struct HostWindow {
 
 struct Attempt {
     id: u64,
+    update: bool,
     outcome: watch::Sender<Option<Outcome>>,
     /// The windows that asked for it, which get its progress.
     callers: Vec<String>,
@@ -143,8 +161,11 @@ struct Host {
 
 /// What `remote_open` does for a target.
 enum Begin {
+    Rejected,
     /// Its window is open and connected: focus it.
-    Focus { label: String },
+    Focus {
+        label: String,
+    },
     /// An open of it runs already: wait for its outcome.
     Wait {
         outcome: watch::Receiver<Option<Outcome>>,
@@ -177,8 +198,14 @@ struct Registry {
 impl Registry {
     /// An open of `target`, asked for by the window `caller`.
     fn begin(&mut self, target: &str, caller: &str) -> Begin {
+        self.begin_with_update(target, caller, false)
+    }
+    fn begin_with_update(&mut self, target: &str, caller: &str, update: bool) -> Begin {
         let host = self.hosts.entry(target.to_owned()).or_default();
         if let Some(attempt) = &mut host.attempt {
+            if attempt.update != update {
+                return Begin::Rejected;
+            }
             if !attempt.callers.iter().any(|known| known == caller) {
                 attempt.callers.push(caller.to_owned());
             }
@@ -187,6 +214,9 @@ impl Registry {
             };
         }
         if let Some(window) = host.window.as_ref().filter(|window| window.connected) {
+            if update {
+                return Begin::Rejected;
+            }
             return Begin::Focus {
                 label: window.label.clone(),
             };
@@ -195,6 +225,7 @@ impl Registry {
         let (sender, outcome) = watch::channel(None);
         host.attempt = Some(Attempt {
             id: self.attempts,
+            update,
             outcome: sender,
             callers: vec![caller.to_owned()],
             committed: false,
@@ -669,6 +700,7 @@ pub async fn remote_open(
     native: tauri::State<'_, Arc<Native>>,
     auth: Auth,
     target: String,
+    update: Option<bool>,
 ) -> Result<(), Failure> {
     native.launcher_action(&webview, &auth).map_err(failure)?;
     let proof = auth.proof();
@@ -681,8 +713,16 @@ pub async fn remote_open(
     let remotes = Arc::clone(remotes.inner());
     let _request = remotes.requester(&native, webview.label(), proof.clone());
     loop {
-        let begin = remotes.lock().begin(target.as_str(), &caller);
+        let update = update.unwrap_or(false);
+        let begin = if update {
+            remotes
+                .lock()
+                .begin_with_update(target.as_str(), &caller, true)
+        } else {
+            remotes.lock().begin(target.as_str(), &caller)
+        };
         match begin {
+            Begin::Rejected => return Err(failure("Another connection is active for this host. Wait for it to finish before updating.")),
             Begin::Focus { label } => {
                 if let Some(window) = app.get_webview_window(&label) {
                     focus(&window);
@@ -712,6 +752,7 @@ pub async fn remote_open(
                     Arc::clone(&remotes),
                     target,
                     attempt,
+                    update,
                     outcome.clone(),
                     opening,
                 ));
@@ -826,6 +867,7 @@ async fn connect(
     remotes: Arc<Remotes>,
     target: SshTarget,
     attempt: u64,
+    update: bool,
     mut outcome: watch::Receiver<Option<Outcome>>,
     opening: splitty_transport::budget::Permit,
 ) {
@@ -836,12 +878,32 @@ async fn connect(
         attempt,
     };
     let native = app.state::<Arc<Native>>().inner().clone();
-    let existing = remotes
+    if outcome.borrow().is_some()
+        || remotes
+            .current_requesters(&native, &host, attempt)
+            .is_empty()
+    {
+        return;
+    }
+    let mut existing = remotes
         .lock()
         .hosts
         .get(&host)
         .and_then(|host| host.window.as_ref())
         .map(|window| (window.label.clone(), window.link.clone()));
+    if update {
+        // A confirmation must not arm a document whose automatic reconnect
+        // could consume it. Retire its fixed attachment before creating a new
+        // provider with a single native-owned update intent.
+        if let Some((label, link)) = existing.take() {
+            native.destroyed(&label);
+            if let Some(window) = app.get_webview_window(&label) {
+                let _ = window.destroy();
+            }
+            native.remove_provider(link.backend);
+            remotes.lock().closed(&label);
+        }
+    }
     let reused = existing.is_some();
     let (backend, label, link, mut events, ready_epoch) = if let Some((label, link)) = existing {
         let backend = link.backend;
@@ -855,7 +917,14 @@ async fn connect(
         (backend, label, link, events, ready_epoch)
     } else {
         let backend = BackendId::new();
-        native.provider(backend, Arc::new(Provider::remote(target.clone())));
+        native.provider(
+            backend,
+            Arc::new(if update {
+                Provider::remote_with_update(target.clone(), true)
+            } else {
+                Provider::remote(target.clone())
+            }),
+        );
         let label = remotes.lock().new_label();
         if native
             .broker
@@ -1118,6 +1187,72 @@ mod tests {
             Begin::Start { attempt, outcome } => (attempt, outcome),
             _ => panic!("expected a new attempt"),
         }
+    }
+
+    #[test]
+    fn update_confirmation_never_coalesces_with_an_ordinary_open() {
+        let mut registry = Registry::default();
+        let (ordinary, _) = start(&mut registry, "host");
+        assert!(matches!(
+            registry.begin_with_update("host", "confirming", true),
+            Begin::Rejected
+        ));
+        assert_eq!(registry.callers("host", ordinary), vec!["main"]);
+        registry.finish("host", ordinary, Err(cancelled()));
+        let Begin::Start { attempt, .. } = registry.begin_with_update("host", "confirming", true)
+        else {
+            panic!("explicit migration did not start");
+        };
+        assert!(matches!(
+            registry.begin("host", "ordinary"),
+            Begin::Rejected
+        ));
+        assert_eq!(registry.callers("host", attempt), vec!["confirming"]);
+        registry.cancel("host");
+        assert!(matches!(
+            registry.begin("host", "ordinary"),
+            Begin::Start { .. }
+        ));
+    }
+
+    #[test]
+    fn update_confirmation_cannot_be_consumed_by_focusing_a_connected_window() {
+        let mut registry = Registry::default();
+        open(&mut registry, "host");
+        assert!(matches!(
+            registry.begin_with_update("host", "main", true),
+            Begin::Rejected
+        ));
+        assert!(matches!(
+            registry.begin("host", "main"),
+            Begin::Focus { .. }
+        ));
+    }
+
+    #[test]
+    fn launcher_serializes_the_native_offer_without_migration_authority() {
+        let budget = splitty_transport::budget::ConnectionBudget::default();
+        let value = budget
+            .display(&"Update required", false)
+            .unwrap()
+            .map(|message| splitty_remote::tunnel::Failure {
+                message,
+                hint: None,
+                migration: Some(splitty_remote::tunnel::MigrationOffer {
+                    available: true,
+                    from_version: "0.1.27".into(),
+                    to_version: "0.2.0-dev.2".into(),
+                    sessions: 3,
+                }),
+            });
+        let json = serde_json::to_value(Failure::Shared(Arc::new(value))).unwrap();
+        assert_eq!(
+            json["migration"],
+            serde_json::json!({
+                "available": true, "fromVersion": "0.1.27", "toVersion": "0.2.0-dev.2", "sessions": 3,
+            })
+        );
+        assert!(json.get("token").is_none());
     }
 
     /// Open `target` in a new window and return its label.
@@ -1540,7 +1675,7 @@ mod tests {
                     outcome
                 }
                 Begin::Wait { outcome } => outcome,
-                Begin::Focus { .. } => panic!("unexpected window"),
+                Begin::Focus { .. } | Begin::Rejected => panic!("unexpected window or update"),
             };
             held.push((admission, request, outcome));
         }

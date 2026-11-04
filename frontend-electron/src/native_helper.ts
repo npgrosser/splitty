@@ -6,12 +6,13 @@ import { isAcceptableTarget } from "./remote";
 /** The main process supplies the executable/environment and fixed target.
  * There is no renderer-controlled command, executable path or stdio endpoint. */
 export function startNativeHelper(binary: string, env: NodeJS.ProcessEnv, events: PipeEvents,
-  target?: string, processBudget: NativeProcessBudget = nativeProcessBudget, owner = false, rememberTarget = false): {
+  target?: string, processBudget: NativeProcessBudget = nativeProcessBudget, owner = false, rememberTarget = false, update = false): {
     pipe: NativePipe; child: ChildProcessWithoutNullStreams; exited: Promise<void>; close(): void;
   } {
   if (target !== undefined && (!isAcceptableTarget(target) || target.length > 4096)) throw Error("Invalid native helper target");
   if (owner && target !== undefined) throw Error("An owner helper must be embedded");
   if (rememberTarget && target === undefined) throw Error("Remembering a host requires an SSH helper");
+  if (update && target === undefined) throw Error("Updating a host requires an SSH helper");
   const releaseWorker = processBudget.worker();
   const budget = processBudget.connection();
   let releaseDiagnostics: () => void;
@@ -19,7 +20,7 @@ export function startNativeHelper(binary: string, env: NodeJS.ProcessEnv, events
   let child: ChildProcessWithoutNullStreams;
   try {
     child = spawn(binary, ["desktop-backend", "--transport", "native-v1", "--backend", target === undefined ? "embedded" : "ssh",
-      ...(target === undefined ? [] : ["--target", target]), ...(owner ? ["--owner"] : []), ...(rememberTarget ? ["--remember-target"] : [])], { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
+      ...(target === undefined ? [] : ["--target", target]), ...(owner ? ["--owner"] : []), ...(rememberTarget ? ["--remember-target"] : []), ...(update ? ["--update"] : [])], { env, stdio: ["pipe", "pipe", "pipe"], windowsHide: true });
   } catch (error) { releaseDiagnostics(); releaseWorker(); throw error; }
   let done = false, tail = Buffer.alloc(0), kill: ReturnType<typeof setTimeout> | undefined;
   let pipe: NativePipe | undefined;

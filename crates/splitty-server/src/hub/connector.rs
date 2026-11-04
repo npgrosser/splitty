@@ -109,6 +109,34 @@ impl Connector for SshConnector {
         })
     }
 
+    fn migrate_legacy<'a>(
+        &'a self,
+        target: &'a SshTarget,
+        server: &'a Server,
+        daemon: &'a RunningDaemon,
+        context: &'a splitty_transport::queue::Context,
+    ) -> BoxFuture<'a, Result<(), HubError>> {
+        Box::pin(async move {
+            let Some(splitty_remote::handshake::LegacyMigration::Ready { token, .. }) =
+                &daemon.legacy_migration
+            else {
+                return Err(HubError::MigrationUnavailable {
+                    message: "Legacy migration is unavailable.".into(),
+                });
+            };
+            let ssh = Ssh::stdio_only(target.clone()).with_context(context.clone());
+            let line = server
+                .command()
+                .word("remote-migrate")
+                .word("--expected")
+                .value(token);
+            run_checked(&ssh, &line, None)
+                .await
+                .map_err(HubError::Stop)?;
+            Ok(())
+        })
+    }
+
     fn bridge<'a>(
         &'a self,
         target: &'a SshTarget,

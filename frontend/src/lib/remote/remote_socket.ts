@@ -27,11 +27,12 @@
 import type { IncomingMessage, OutgoingMessage } from "../protocol/types.ts";
 import { SocketHandlers, type ConnSocket } from "../protocol/socket.ts";
 import { MAX_NAME, MAX_TEXT, MAX_TITLE, plainLines, plainText } from "../protocol/untrusted.ts";
+import { migrationOffer, type MigrationOffer } from "./update.ts";
 
 /** The hub's error codes (`docs/protocol.ts`, RemoteErrorCode). */
 export type RemoteErrorCode =
   | "invalid_target" | "host_key" | "auth" | "unreachable" | "unsupported_host" | "unsupported_environment"
-  | "install" | "daemon" | "incompatible" | "bridge" | "internal";
+  | "install" | "daemon" | "incompatible" | "migration_unavailable" | "bridge" | "internal";
 
 /**
  * Why an attempt failed: the hub's code, or the client's own when the hub
@@ -42,6 +43,7 @@ export type RemoteErrorCode =
 export type RemoteFailureCode = RemoteErrorCode | "ticket" | "closed" | "protocol";
 
 export interface RemoteFailure {
+  migration?: MigrationOffer;
   /** A native protocol/assignment rejection may only tighten retry policy. */
   retryable?: boolean;
   code: RemoteFailureCode;
@@ -136,7 +138,7 @@ const OPEN = 1;
 
 const HUB_CODES: readonly RemoteErrorCode[] = [
   "invalid_target", "host_key", "auth", "unreachable", "unsupported_host", "unsupported_environment",
-  "install", "daemon", "incompatible", "bridge", "internal",
+  "install", "daemon", "incompatible", "migration_unavailable", "bridge", "internal",
 ];
 
 /** Whether another attempt can help: the hub's transient codes and the client's own. */
@@ -472,5 +474,7 @@ function failure(msg: Raw): RemoteFailure {
   if (typeof msg.protocol === "number") result.protocol = msg.protocol;
   if (typeof msg.keepsSessions === "boolean") result.keepsSessions = msg.keepsSessions;
   if (Array.isArray(msg.screens)) result.screens = hostScreens(msg.screens);
+  const migration = migrationOffer(msg.migration);
+  if (migration) result.migration = migration;
   return result;
 }

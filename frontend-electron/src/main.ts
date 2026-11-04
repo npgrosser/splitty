@@ -10,7 +10,7 @@ import { openLocalEditor, openRemoteEditor } from "./editor";
 import { app, BrowserWindow, Menu, shell, ipcMain, protocol, session, webContents, MessageChannelMain, type Session, type WebContents } from "electron";
 import path from "path";
 import {
-  isAcceptableTarget, remoteTitle, type KnownHost, type ConnectionState,
+  isAcceptableTarget, remoteTitle, migrationOffer, type MigrationOffer, type KnownHost, type ConnectionState,
 } from "./remote";
 
 // Secure packaged scheme; privileges never bypass CSP or enable service workers.
@@ -285,17 +285,19 @@ function createWindow(url: string, opts: { nativeTitleBar: boolean }): BrowserWi
 // ---------------------------------------------------------------------------
 
 /** What `remote:open` resolves with; `ipcRenderer.invoke` rejections lose their fields. */
-type RemoteOpenResult = { ok: true } | { ok: false; error: { message: string; hint?: string } };
+type RemoteOpenResult = { ok: true } | { ok: false; error: { message: string; hint?: string; migration?: MigrationOffer } };
 
 function openFailure(message: string, hint?: string): RemoteOpenResult {
+  let migration: MigrationOffer | undefined;
   try {
     const diagnostic = JSON.parse(message);
     if (diagnostic?.type === "remote.error" && typeof diagnostic.message === "string") {
       message = diagnostic.message;
       if (typeof diagnostic.hint === "string") hint = diagnostic.hint;
+      migration = migrationOffer(diagnostic.migration);
     }
   } catch { /* Ordinary native diagnostic. */ }
-  return { ok: false, error: hint ? { message, hint } : { message } };
+  return { ok: false, error: { message, ...(hint ? { hint } : {}), ...(migration ? { migration } : {}) } };
 }
 
 interface RemoteWindow {
@@ -306,6 +308,7 @@ interface RemoteWindow {
   ready(): void; failed(error: Error): void;
 }
 interface PendingOpen {
+  update: boolean;
   promise: Promise<RemoteOpenResult>;
   helper?: ReturnType<typeof startNativeHelper>;
   requesters: Map<WebContents, { document: string; remove(): void }>;
@@ -334,25 +337,36 @@ function reportRemoteProgress(target: string, value: { phase: string; message: s
   }
 }
 
-function remoteHelper(target: string, events: PipeEvents, rememberTarget = false) {
-  const helper = startNativeHelper(findBinary(), cleanEnv(), events, target, undefined, false, rememberTarget);
+function remoteHelper(target: string, events: PipeEvents, rememberTarget = false, update = false) {
+  const helper = startNativeHelper(findBinary(), cleanEnv(), events, target, undefined, false, rememberTarget, update);
   remoteHelpers.add(helper);
   void helper.exited.then(() => remoteHelpers.delete(helper));
   return helper;
 }
 
-function openRemote(target: string, event: Electron.IpcMainInvokeEvent): Promise<RemoteOpenResult> {
+function openRemote(target: string, event: Electron.IpcMainInvokeEvent, update = false): Promise<RemoteOpenResult> {
   const requester = event.sender, document = broker.callerDocument(event);
   if (!document) return Promise.resolve(openFailure("The requesting document is no longer assigned"));
   // An existing but not yet ready window still belongs to its coalesced open.
   const active = pendingOpens.get(target);
-  if (active) { addRequester(active, requester, document); return active.promise; }
+  if (active) {
+    if (active.update !== update) return Promise.resolve(openFailure("Another connection is active for this host. Wait for it to finish before updating."));
+    addRequester(active, requester, document); return active.promise;
+  }
   const existing = remoteWindows.get(target);
   if (existing && !existing.win.isDestroyed()) {
-    if (existing.win.isMinimized()) existing.win.restore();
-    existing.win.focus();
-    if (existing.rendererGone || existing.state !== "connected") return reopenRemote(existing, requester, document);
-    return Promise.resolve({ ok: true });
+    if (update) {
+      if (existing.state !== "disconnected") return Promise.resolve(openFailure("The host is still connected or reconnecting. Wait for it to finish before updating."));
+      // Never arm an existing document: automatic reconnects must not consume
+      // a launcher's confirmation. Retire its attachment and open a fresh one.
+      existing.opensAllowed = false;
+      existing.win.destroy();
+    } else {
+      if (existing.win.isMinimized()) existing.win.restore();
+      existing.win.focus();
+      if (existing.rendererGone || existing.state !== "connected") return reopenRemote(existing, requester, document);
+      return Promise.resolve({ ok: true });
+    }
   }
   if (pendingOpens.size >= 4 || remoteWindows.size + pendingOpens.size >= 32) return Promise.resolve(openFailure("Remote window capacity exhausted"));
   const requesters: PendingOpen["requesters"] = new Map();
@@ -365,7 +379,7 @@ function openRemote(target: string, event: Electron.IpcMainInvokeEvent): Promise
       assignedEvents?.progress?.(value);
       reportRemoteProgress(target, value);
     },
-  }, true);
+  }, true, update);
   const windowHelpers = new Set([helper]);
   void helper.exited.then(() => windowHelpers.delete(helper));
   const promise = helper.pipe.ready.then(async () => {
@@ -439,7 +453,7 @@ function openRemote(target: string, event: Electron.IpcMainInvokeEvent): Promise
       if (!openedWindow || openedWindow.isDestroyed()) await Promise.all([...windowHelpers].map(owned => owned.exited));
       if (pendingOpens.get(target)?.helper === helper) pendingOpens.delete(target);
     });
-  const pending: PendingOpen = { promise, helper, requesters, cancel: contents => {
+  const pending: PendingOpen = { promise, helper, requesters, update, cancel: contents => {
     requesters.get(contents)?.remove(); requesters.delete(contents);
     if (!requesters.size) { cancelled = true; helper.close(); openedWindow?.destroy(); }
   } };
@@ -476,7 +490,7 @@ function reopenRemote(entry: RemoteWindow, requester: WebContents, document: str
       if (!successful) await Promise.all([...entry.helpers].map(helper => helper.exited));
       if (pendingOpens.get(target) === pending) pendingOpens.delete(target);
     });
-  const pending: PendingOpen = { promise, requesters, cancel: contents => {
+  const pending: PendingOpen = { promise, requesters, update: false, cancel: contents => {
     requesters.get(contents)?.remove(); requesters.delete(contents);
     if (!requesters.size) stop("The requesting document is no longer assigned");
   } };
@@ -654,10 +668,13 @@ handleNativeCommand("remote:hosts", (event) => {
   return fromOwnUi(event) ? knownHosts() : [];
 });
 
-handleNativeCommand("remote:open", (event, target: unknown): RemoteOpenResult | Promise<RemoteOpenResult> => {
+handleNativeCommand("remote:open", (event, target: unknown, options?: unknown): RemoteOpenResult | Promise<RemoteOpenResult> => {
   if (!fromOwnUi(event)) return openFailure("Remote windows open only from Splitty's own window.");
   if (!isAcceptableTarget(target)) return openFailure("Not a valid target: use [user@]host[:port].");
-  return openRemote(target, event);
+  if (options !== undefined && (!options || typeof options !== "object" || Array.isArray(options) ||
+      Object.keys(options).some(key => key !== "update") ||
+      ("update" in options && typeof options.update !== "boolean"))) return openFailure("Invalid remote connection options");
+  return openRemote(target, event, (options as { update?: boolean } | undefined)?.update === true);
 });
 
 handleNativeCommand("remote:cancel", (event, target: unknown) => {

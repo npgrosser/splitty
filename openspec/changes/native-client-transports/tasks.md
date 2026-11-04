@@ -195,3 +195,11 @@ The coverage table assigns **every scenario** of each added/modified requirement
 
 - [x] 12.1 Deliver a failed preparation's bounded diagnostic to its original unrevoked document after IO cleanup, and await actual evaluation before completing the invoke. Preserve cancellation/navigation/destruction guards, closed IO and evaluation-owned leases. Extend the carrier regression using real provider failure.
 - [x] 12.2 Add actionable legacy migration guidance without changing update authorization; assign preview version `0.2.0-dev.2`. Verify remote and GUI suites, bootstrap JS, workspace/GUI clippy and version consistency; independently review authority and cleanup behavior.
+
+## 13. Confirmed legacy recovery in the app
+
+- [x] 13.1 Add read-only legacy migration eligibility and a conditional host migration command that verifies the actual process and compatible keepers, refuses unsupported identity/platforms and never opens TCP or ends sessions. Cover refusal and process-generation cases with unit/in-process tests.
+- [x] 13.2 Carry structured migration offers/blocked reasons through shared remote and hub failures. Consume explicit migration intent once before mutation; verify the fresh replacement, preserve native instance-bound updates and never replay ambiguous migration. Extend supervisor/hub regressions.
+- [x] 13.3 Add the confirmed update-and-connect action to inline hosts and desktop remote launchers in Tauri/Electron, retaining fixed-target document authority and meaningful version/session guidance. Test cancellation, concurrent opens, navigation and one-shot helper/provider intent.
+- [x] 13.4 Independently review process identity, authority, budget and cancellation behavior. Run isolated legacy-to-native migration checks preserving session/keeper/shell identity and private shell state while an unrelated process remains alive; never use deployed hosts as mutation fixtures.
+- [ ] 13.5 Reconcile public documentation, protocol/specs and architecture; run appropriate integrated checks, build the final Windows preview and copy its exact installer/checksum to Downloads. Integrate origin/main, update and push the existing PR without merging or creating a release tag.

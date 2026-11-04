@@ -1,6 +1,7 @@
 //! Native SSH preparation and reconnection. No listener, browser credential,
 //! URL or automatic application replay belongs to this layer.
-use super::RemoteError;
+use super::{MigrationOffer, RemoteError};
+use crate::handshake::LegacyMigration;
 use crate::handshake::RunningDaemon;
 use serde::Serialize;
 use splitty_transport::budget::{Charged, ConnectionBudget};
@@ -31,6 +32,20 @@ pub trait Remote: Sync {
         &self,
         daemon: &RunningDaemon,
     ) -> impl Future<Output = Result<(), RemoteError>> + Send;
+    fn take_update_intent(&self) -> bool {
+        false
+    }
+    fn migrate_legacy(
+        &self,
+        _daemon: &RunningDaemon,
+    ) -> impl Future<Output = Result<(), RemoteError>> + Send {
+        async {
+            Err(RemoteError::Spawn(std::io::Error::new(
+                std::io::ErrorKind::Unsupported,
+                "legacy migration is unavailable",
+            )))
+        }
+    }
     fn open_bridge(
         &self,
         daemon: &RunningDaemon,
@@ -117,6 +132,39 @@ pub fn update_plan(
         ));
     }
     UpdatePlan::Update
+}
+
+/// Only a positively verified legacy offer and the exact replacement version
+/// can authorize the explicit action. Callers retain/account the cloned fields.
+pub fn migration_offer(
+    daemon: &RunningDaemon,
+    version: &str,
+    server: Option<&str>,
+) -> Option<MigrationOffer> {
+    let LegacyMigration::Ready { token, sessions } = daemon.legacy_migration.as_ref()? else {
+        return None;
+    };
+    if !daemon.legacy
+        || daemon.started
+        || !daemon.keeps_sessions
+        || daemon.instance.is_some()
+        || daemon.version.len() > 64
+        || version.len() > 64
+        || !older(&daemon.version, version)
+        || server != Some(version)
+        || token.len() != 64
+        || !token
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return None;
+    }
+    Some(MigrationOffer {
+        available: true,
+        from_version: daemon.version.clone(),
+        to_version: version.into(),
+        sessions: *sessions,
+    })
 }
 
 /// Compare SemVer precedence, including prereleases but excluding build
@@ -213,6 +261,80 @@ async fn prepare_connection<R: Remote>(
             Step::Started,
             format_args!("Started a private Splitty daemon on {host}."),
         )?);
+    }
+    if daemon.legacy {
+        let server = remote.server_version();
+        let bytes = host
+            .len()
+            .checked_add(daemon.version.len())
+            .and_then(|bytes| bytes.checked_add(version.len()))
+            .and_then(|bytes| {
+                bytes.checked_add(match &daemon.legacy_migration {
+                    Some(LegacyMigration::Blocked { message }) => message.len(),
+                    _ => 0,
+                })
+            })
+            .and_then(|bytes| bytes.checked_mul(8))
+            .and_then(|bytes| bytes.checked_add(4096))
+            .ok_or_else(|| {
+                RemoteError::Spawn(std::io::Error::other(
+                    "migration diagnostic exceeds capacity",
+                ))
+            })?;
+        let allocation = budget.reserve(bytes, false).map_err(|error| {
+            RemoteError::Spawn(std::io::Error::new(std::io::ErrorKind::WouldBlock, error))
+        })?;
+        let offer = migration_offer(
+            &daemon,
+            version,
+            server.as_deref().map(|version| version.as_str()),
+        );
+        // Consume before calling the remote mutation; even a stale/ambiguous
+        // result cannot reuse consent in the supervisor's discovery retries.
+        let requested = remote.take_update_intent();
+        if let Some(offer) = offer {
+            if !requested {
+                return Err(RemoteError::MigrationRequired {
+                    host: host.into(),
+                    offer,
+                    allocation: Some(Box::new(allocation)),
+                });
+            }
+            on_progress(step(
+                budget,
+                Step::Daemon,
+                format_args!(
+                    "Updating legacy Splitty on {host}; its kept sessions continue running..."
+                ),
+            )?);
+            remote
+                .migrate_legacy(&daemon)
+                .await
+                .map_err(|error| RemoteError::MigrationFailed(Box::new(error)))?;
+            daemon = remote
+                .daemon()
+                .await
+                .map_err(|error| RemoteError::MigrationFailed(Box::new(error)))?;
+            if daemon.version != version || !daemon.supports_native() {
+                return Err(RemoteError::MigrationFailed(Box::new(
+                    RemoteError::InvalidAnswer {
+                        host: host.into(),
+                        detail: "the requested native replacement was not confirmed".into(),
+                        allocation: Some(Box::new(allocation)),
+                    },
+                )));
+            }
+        } else if let Some(LegacyMigration::Blocked { message }) = &daemon.legacy_migration {
+            return Err(RemoteError::InvalidAnswer {
+                host: host.into(),
+                detail: message.clone(),
+                allocation: Some(Box::new(allocation)),
+            });
+        }
+    } else {
+        // A confirmation for a legacy observation cannot outlive a changed
+        // discovery result and later authorize an unrelated legacy daemon.
+        remote.take_update_intent();
     }
     if daemon.version != version {
         let server = remote.server_version();
@@ -401,6 +523,8 @@ mod tests {
         errors: Mutex<VecDeque<RemoteError>>,
         stalled: AtomicBool,
         reject: AtomicBool,
+        update: AtomicBool,
+        migration_error: Mutex<Option<RemoteError>>,
     }
     impl Fake {
         fn new(daemon: RunningDaemon) -> Self {
@@ -415,6 +539,8 @@ mod tests {
                 errors: Mutex::default(),
                 stalled: AtomicBool::new(false),
                 reject: AtomicBool::new(false),
+                update: AtomicBool::new(false),
+                migration_error: Mutex::new(None),
             }
         }
     }
@@ -488,6 +614,16 @@ mod tests {
             self.calls.lock().unwrap().push("stop");
             Ok(())
         }
+        fn take_update_intent(&self) -> bool {
+            self.update.swap(false, Ordering::AcqRel)
+        }
+        async fn migrate_legacy(&self, _: &RunningDaemon) -> Result<(), RemoteError> {
+            self.calls.lock().unwrap().push("migrate");
+            match self.migration_error.lock().unwrap().take() {
+                Some(error) => Err(error),
+                None => Ok(()),
+            }
+        }
         async fn open_bridge(
             &self,
             daemon: &RunningDaemon,
@@ -508,6 +644,155 @@ mod tests {
             instance: Some("0123456789abcdef0123456789abcdef".into()),
             transport_version: Some(1),
             legacy: false,
+            legacy_migration: None,
+        }
+    }
+
+    fn legacy() -> RunningDaemon {
+        RunningDaemon {
+            legacy: true,
+            instance: None,
+            transport_version: None,
+            legacy_migration: Some(LegacyMigration::Ready {
+                token: "a".repeat(64),
+                sessions: 3,
+            }),
+            ..daemon("0.1.27")
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_legacy_connect_offers_migration_without_mutation_and_keeps_metadata_charged()
+    {
+        let remote = Fake::new(legacy());
+        let error = connect(&remote, |_| {}).await.err().unwrap();
+        assert!(matches!(error, RemoteError::MigrationRequired { .. }));
+        assert!(!error.retryable());
+        let source = remote.context.budget.used();
+        assert!(source > 0);
+        let failure = error.failure_budgeted(&remote.context.budget).unwrap();
+        drop(error);
+        assert!(remote.context.budget.used() > 0);
+        assert_eq!(failure.migration.as_ref().unwrap().sessions, 3);
+        let json = serde_json::to_value(&*failure).unwrap();
+        assert_eq!(json["migration"]["available"], true);
+        assert_eq!(json["migration"]["fromVersion"], "0.1.27");
+        assert!(!json.to_string().contains(&"a".repeat(64)));
+        assert_eq!(
+            *remote.calls.lock().unwrap(),
+            ["admit", "prepare", "daemon"]
+        );
+        drop(failure);
+        assert_eq!(remote.context.budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn explicit_legacy_migration_checks_replacement_and_consumes_intent_once() {
+        let remote = Fake::new(legacy());
+        remote.update.store(true, Ordering::Release);
+        remote
+            .daemons
+            .lock()
+            .unwrap()
+            .push_back(daemon(remote.version));
+        let connected = connect(&remote, |_| {}).await.unwrap();
+        assert!(connected.daemon.supports_native());
+        assert_eq!(
+            *remote.calls.lock().unwrap(),
+            ["admit", "prepare", "daemon", "migrate", "daemon", "bridge"]
+        );
+        *remote.daemons.lock().unwrap() = VecDeque::from([legacy()]);
+        let error = connect(&remote, |_| {}).await.err().unwrap();
+        assert!(matches!(error, RemoteError::MigrationRequired { .. }));
+        assert_eq!(
+            remote
+                .calls
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|&&call| call == "migrate")
+                .count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn ambiguous_or_stale_migration_is_never_automatically_retried() {
+        for mutation_error in [
+            RemoteError::DiscoveryChanged,
+            RemoteError::Native(std::io::ErrorKind::ConnectionReset.into()),
+        ] {
+            let remote = Fake::new(legacy());
+            remote.update.store(true, Ordering::Release);
+            *remote.migration_error.lock().unwrap() = Some(mutation_error);
+            let error = connect(&remote, |_| {}).await.err().unwrap();
+            assert!(matches!(error, RemoteError::MigrationFailed(_)));
+            assert!(!error.retryable());
+            assert!(error.failure().migration.is_none());
+            assert_eq!(
+                *remote.calls.lock().unwrap(),
+                ["admit", "prepare", "daemon", "migrate"]
+            );
+            assert!(matches!(
+                connect(&remote, |_| {}).await.err().unwrap(),
+                RemoteError::MigrationRequired { .. }
+            ));
+            assert_eq!(
+                remote
+                    .calls
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|&&call| call == "migrate")
+                    .count(),
+                1
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn migration_requires_fresh_native_replacement_and_positive_eligibility() {
+        let remote = Fake::new(legacy());
+        remote.update.store(true, Ordering::Release);
+        let error = connect(&remote, |_| {}).await.err().unwrap();
+        assert!(matches!(error, RemoteError::MigrationFailed(_)));
+        assert!(!error.retryable());
+        assert!(!remote.calls.lock().unwrap().contains(&"bridge"));
+        for variant in 0..7 {
+            let mut daemon = legacy();
+            match variant {
+                0 => daemon.keeps_sessions = false,
+                1 => daemon.version = "9.0.0".into(),
+                2 => daemon.legacy_migration = None,
+                3 => {
+                    daemon.legacy_migration = Some(LegacyMigration::Blocked {
+                        message: "private ownership cannot be verified".into(),
+                    })
+                }
+                4 => {
+                    daemon.legacy_migration = Some(LegacyMigration::Ready {
+                        token: "bad".into(),
+                        sessions: 1,
+                    })
+                }
+                5 => daemon.started = true,
+                _ => {}
+            }
+            let mut remote = Fake::new(daemon);
+            if variant == 6 {
+                remote.server = "0.1.29";
+            }
+            remote.update.store(true, Ordering::Release);
+            let error = connect(&remote, |_| {}).await.err().unwrap();
+            assert!(error.failure().migration.is_none());
+            let calls = remote.calls.lock().unwrap();
+            assert!(
+                !calls.contains(&"migrate")
+                    && !calls.contains(&"stop")
+                    && !calls.contains(&"bridge"),
+                "{variant}: {calls:?}"
+            );
+            assert!(!remote.update.load(Ordering::Acquire));
         }
     }
 

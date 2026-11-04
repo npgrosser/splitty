@@ -11,6 +11,23 @@
 
 import type { HostScreen } from "./remote_socket.ts";
 
+/** An offer from native discovery, never a process selector or authority token. */
+export interface MigrationOffer {
+  available: true;
+  fromVersion: string;
+  toVersion: string;
+  sessions: number;
+}
+
+export function migrationOffer(value: unknown): MigrationOffer | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const offer = value as Partial<MigrationOffer>;
+  if (offer.available !== true || typeof offer.fromVersion !== "string" || !offer.fromVersion || offer.fromVersion.length > 64
+    || typeof offer.toVersion !== "string" || !offer.toVersion || offer.toVersion.length > 64
+    || !Number.isInteger(offer.sessions) || offer.sessions! < 0 || offer.sessions! > 0xffffffff) return undefined;
+  return { available: true, fromVersion: offer.fromVersion, toVersion: offer.toVersion, sessions: offer.sessions! };
+}
+
 /** What an update ends on the host. */
 export type UpdateImpact =
   | { known: true; screens: number; panes: number }
@@ -48,9 +65,11 @@ export interface UpdateWarning {
   versions: string;
   /** What ends on the host. */
   ends: string;
+  action?: string;
 }
 
 export interface UpdateVersions {
+  migration?: MigrationOffer;
   /** The host daemon's version and protocol, from its `remote.error` or `remote.ready`. */
   hostVersion?: string;
   hostProtocol?: number;
@@ -62,6 +81,15 @@ export interface UpdateVersions {
 
 /** The warning the user confirms before the window opens the host's hub socket with `update=1`. */
 export function updateWarning(target: string, versions: UpdateVersions, impact: UpdateImpact): UpdateWarning {
+  if (versions.migration) {
+    const offer = versions.migration;
+    return {
+      title: `Update server and connect to ${target}?`,
+      versions: `${target} runs Splitty ${offer.fromVersion}. Splitty will verify it again and start ${offer.toVersion}.`,
+      ends: `The ${count(offer.sessions, "keeper-backed session")} checked on ${target} ${offer.sessions === 1 ? "keeps" : "keep"} running. Connections are interrupted briefly. If the server can no longer be verified, the update stops.`,
+      action: "Update server and connect",
+    };
+  }
   const running = versions.hostVersion
     ? `Splitty ${versions.hostVersion}${versions.hostProtocol !== undefined ? ` (protocol ${versions.hostProtocol})` : ""}`
     : "another Splitty";

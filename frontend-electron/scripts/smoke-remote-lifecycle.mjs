@@ -46,7 +46,7 @@ function load(file) {
   if (cache.has(file)) return cache.get(file).exports;
   const module = { exports: {} }; cache.set(file, module);
   let source = fs.readFileSync(file, 'utf8');
-  if (file.endsWith('/main.ts')) source += '\nexport const review = {openRemote, cancelRemote, pendingOpens, remoteWindows, remoteHelpers, broker, policies};';
+  if (file.endsWith('/main.ts')) source += '\nexport const review = {openRemote, openFailure, cancelRemote, pendingOpens, remoteWindows, remoteHelpers, broker, policies};';
   const output = ts.transpileModule(source, { compilerOptions: {
     target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, esModuleInterop: true,
   } }).outputText;
@@ -72,9 +72,9 @@ setInterval(() => {}, 1000);
 `);
 overrides = {
   './asset_protocol': { installAssets() {} },
-  './native_helper': { startNativeHelper(_binary, _env, events, target) {
-    const helper = startNativeHelper(process.execPath, { ...process.env, REVIEW_DELAY: target === 'late' ? '200' : '10000' }, events, target, budget);
-    helpers.push({ helper, events }); return helper;
+  './native_helper': { startNativeHelper(_binary, _env, events, target, _budget, owner, remember, update) {
+    const helper = startNativeHelper(process.execPath, { ...process.env, REVIEW_DELAY: target === 'late' ? '200' : '10000' }, events, target, budget, owner, remember, update);
+    helpers.push({ helper, events, update: update === true }); return helper;
   } },
 };
 const { review } = load(path.join(source, 'main.ts'));
@@ -88,6 +88,12 @@ function caller() {
 const tick = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); };
 process.chdir(fixture);
 try {
+  const offer = {available:true, fromVersion:'0.1.27', toVersion:'0.2.0-dev.2', sessions:2};
+  assert.deepEqual(review.openFailure(JSON.stringify({type:'remote.error', message:'Update required', migration:{...offer,token:'never-ui-authority'}})),
+    {ok:false,error:{message:'Update required',migration:offer}});
+  assert.deepEqual(review.openFailure(JSON.stringify({type:'remote.error', message:'Manual update required', migration:{...offer,available:false}})),
+    {ok:false,error:{message:'Manual update required'}});
+  console.log('PASS native migration offer retains only bounded descriptive fields');
   const a = caller();
   const first = Array.from({ length: 4 }, (_, i) => review.openRemote('vm' + i, event(a)));
   for (let i = 0; i < 4; i++) review.cancelRemote('vm' + i, a);
@@ -101,13 +107,15 @@ try {
   assert.equal(review.pendingOpens.size, 0); assert.equal(budget.counts.workers, 0);
 
   const old = caller(), late = review.openRemote('late', event(old));
-  const before = old.messages.length;
   old.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false, url: 'splitty://app/setup.html' });
   assert.equal(review.pendingOpens.get('late').requesters.size, 1, 'native guard rejects this navigation without cancelling the caller');
   old.emit('did-start-navigation', { isMainFrame: true, isSameDocument: false, url: 'splitty://app/index.html' });
   old.emit('did-navigate');
   const last = helpers.at(-1);
   assert.equal(last.helper.pipe.stage, 'closed');
+  // Committing the new document may publish its bootstrap grant; the stale
+  // progress itself must not add any message after that navigation.
+  const before = old.messages.length;
   last.events.progress?.({ phase: 'bridge', message: 'old document progress' });
   assert.equal(old.messages.length, before);
   assert.equal((await late).ok, false); assert.equal(windows.length, 0);
@@ -115,6 +123,8 @@ try {
 
   const one = caller(), two = caller();
   const shared = review.openRemote('shared', event(one));
+  assert.equal((await review.openRemote('shared', event(two), true)).ok, false);
+  assert.equal(review.pendingOpens.get('shared').requesters.size, 1, 'update cannot coalesce with an ordinary open');
   assert.equal(review.openRemote('shared', event(two)), shared);
   const active = helpers.at(-1).helper;
   review.cancelRemote('shared', one); assert.notEqual(active.pipe.stage, 'closed');
@@ -123,7 +133,8 @@ try {
   console.log('PASS coalesced attempt survives first requester cancellation and ends after last requester');
   {
   const baseHelpers = helpers.length;
-  const a = caller(), opening = review.openRemote('late', event(a));
+  const a = caller(), opening = review.openRemote('late', event(a), true);
+  assert.equal(helpers.at(-1).update, true, 'only the confirmed initial helper receives migration intent');
   const until = async test => { for(let i=0;i<200;i++) { if(test()) return; await new Promise(r=>setTimeout(r,10)); } throw Error('wait timed out'); };
   await until(() => review.remoteWindows.has('late'));
   const entry = review.remoteWindows.get('late'), helper = helpers.at(-1).helper;
@@ -145,7 +156,8 @@ try {
   }
   {
   const baseHelpers = helpers.length;
-  const a = caller(), opening = review.openRemote('late', event(a));
+  const a = caller(), opening = review.openRemote('late', event(a), true);
+  assert.equal(helpers.at(-1).update, true);
   const until = async test => { for(let i=0;i<200;i++) { if(test()) return; await new Promise(r=>setTimeout(r,10)); } throw Error('wait timed out'); };
   await until(() => review.remoteWindows.has('late'));
   const entry = review.remoteWindows.get('late'), helper = helpers.at(-1).helper;
@@ -156,7 +168,9 @@ try {
   review.broker.open(event(entry.win.webContents), { request: 'root-after-startup', document });
   await tick();
   assert.equal(helpers.length - baseHelpers, 2);
-  assert.equal(review.openRemote('late', event(a)), opening);
+  assert.equal(helpers.at(-1).update, false, 'a document reconnect never inherits migration intent');
+  assert.equal((await review.openRemote('late', event(a))).ok, false, 'ordinary open cannot silently consume a confirmation');
+  assert.equal(review.openRemote('late', event(a), true), opening);
   assert.equal(helpers.length - baseHelpers, 2, 'open during startup remains coalesced');
   let settled = false; void opening.then(() => { settled = true; });
   review.cancelRemote('late', a); await tick();

@@ -4,6 +4,7 @@ import { render } from "svelte/server";
 import Drawer from "./Drawer.svelte";
 import HostsPanel from "./HostsPanel.svelte";
 import { portForwarding } from "../../stores/ports.svelte.ts";
+import { getDrawerState, setDrawerState } from "../../stores/ui.svelte.ts";
 import { hostGroups } from "../../lib/remote/on_hosts.ts";
 import type { HostCatalog } from "../../lib/remote/host_directory.ts";
 import type { Screen } from "../../stores/screens.svelte.ts";
@@ -22,13 +23,21 @@ vi.mock("../../stores/screens.svelte.ts", () => ({
   setActiveScreen: vi.fn(), moveScreenInGroup: vi.fn(), subscribe: vi.fn(),
 }));
 vi.mock("../../stores/ui.svelte.ts", () => ({
-  getDrawerState: () => "open", isDrawerPinned: () => true,
+  getDrawerState: vi.fn(() => "open"), isDrawerPinned: () => true,
   setDrawerState: vi.fn(), setDrawerPinned: vi.fn(), setDrawerDragging: vi.fn(),
   setDrawerLiveWidth: vi.fn(), setRemoteScreenPickerOpen: vi.fn(), setHostPickerOpen: vi.fn(), showContextMenu: vi.fn(),
 }));
 vi.mock("../../lib/shortcuts.ts", () => ({ shortcutKey: () => "" }));
 vi.mock("../../lib/remoteWindows.ts", () => ({ remoteWindows: { available: false } }));
 vi.mock("./SettingsPanel.svelte", () => ({ default: () => {} }));
+const renderedPanel = vi.hoisted(() => ({ props: undefined as { onUpdateHost: (host: string) => void } | undefined }));
+vi.mock("./HostsPanel.svelte", async importOriginal => {
+  const actual = await importOriginal<typeof import("./HostsPanel.svelte")>();
+  return { ...actual, default: (...args: any[]) => {
+    renderedPanel.props = args[1];
+    return (actual.default as (...args: any[]) => unknown)(...args);
+  } };
+});
 vi.mock("../../lib/connection/screen_binding.ts", () => ({
   sessionForPane: (_api: unknown, paneId: string) => ({ lastIsBaseShell: paneId.endsWith("idle") }),
 }));
@@ -122,6 +131,43 @@ describe("screen list", () => {
 });
 
 describe("Hosts panel", () => {
+  it("keeps the browsing panel mounted while its update confirmation is open", () => {
+    const callbacks = props();
+    vi.mocked(getDrawerState).mockReturnValue("hosts");
+    vi.mocked(setDrawerState).mockClear();
+    renderedPanel.props = undefined;
+    try {
+      const { body } = render(Drawer, { props: callbacks });
+      expect(body).toContain("Hosts");
+      expect(renderedPanel.props).toBeDefined();
+      renderedPanel.props!.onUpdateHost("host:dev-vm");
+      expect(callbacks.onUpdateHost).toHaveBeenCalledWith("host:dev-vm");
+      // Closing the panel would destroy HostsPanel and release a browse-only
+      // connection before the user can confirm. Cancel also returns here.
+      expect(setDrawerState).not.toHaveBeenCalled();
+      expect(callbacks.onBrowseHost).not.toHaveBeenCalled();
+    } finally { vi.mocked(getDrawerState).mockReturnValue("open"); }
+  });
+
+  it("offers the explicit migration action only with positive native eligibility", () => {
+    const callbacks = panelProps();
+    const migration = { available: true as const, fromVersion: "0.1.27", toVersion: "0.2.0-dev.2", sessions: 2 };
+    callbacks.groups[0].state = { phase: "failed", attempt: 0, progress: [], error: {
+      code: "incompatible", message: "Two kept sessions can be migrated.", migration,
+    } };
+    const { body } = render(HostsPanel, { props: callbacks });
+    expect(body).toMatch(/<button[^>]*>Update server and connect…<\/button>/);
+    expect(body).toMatch(/<p[^>]*>Two kept sessions can be migrated\.<\/p>/);
+    expect(callbacks.onUpdateHost).not.toHaveBeenCalled();
+    callbacks.groups[0].state = { ...callbacks.groups[0].state, error: { code: "migration_unavailable", message: "A running session has no verified keeper." } };
+    const blocked = render(HostsPanel, { props: callbacks }).body;
+    expect(blocked).toMatch(/<p[^>]*>A running session has no verified keeper\.<\/p>/);
+    expect(blocked).not.toContain("Update server and connect…");
+    expect(blocked).not.toContain("Update…");
+    callbacks.groups[0].state = { ...callbacks.groups[0].state, error: { code: "incompatible", message: "No migration offer" } };
+    expect(render(HostsPanel, { props: callbacks }).body).not.toContain("Update server and connect…");
+  });
+
   it("shows a display name with its real SSH address and a menu even on folded hosts", () => {
     const callbacks = panelProps();
     callbacks.groups[1] = { ...callbacks.groups[1], alias: "Home Lab" };

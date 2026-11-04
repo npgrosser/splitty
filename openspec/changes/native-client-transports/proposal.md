@@ -6,6 +6,7 @@ Desktop clients and SSH bridges currently depend on a loopback web server even w
 
 ## What Changes
 
+- Offer a confirmed in-app migration for eligible legacy remote daemons. Verify the actual process and keeper-backed sessions before replacement, preserve ordinary non-mutating retries, and refuse unsupported or ambiguous migration without a TCP fallback.
 - Make the client service independent of HTTP/WebSocket. Preserve one implementation of workspace operations, session handling, settings and host management behind transport adapters.
 - Load packaged UI assets in every desktop window. Use window-bound IPC for Tauri and Electron; connect the Tauri embedded service in-process and child backends through inherited pipes. Use private Unix sockets for independently running daemons.
 - Give local desktop sessions the app's lifetime on every platform. Always start an owned embedded service; never auto-attach a local daemon or revive its keepers. Persistent local work remains an explicit CLI/browser workflow.

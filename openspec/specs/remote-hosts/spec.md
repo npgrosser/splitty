@@ -233,3 +233,28 @@ The client SHALL keep the order in which the user arranged its host groups in `r
 #### Scenario: Heartbeat lost
 - **WHEN** a relay is serving and nothing arrives on its standard input for 45 seconds
 - **THEN** it closes its listeners, removes its socket and exits
+
+### Requirement: Confirmed Legacy Daemon Migration
+Handshake discovery of a legacy daemon SHALL report either a bounded migration offer or a blocked reason, without changing that daemon. An offer SHALL require an older keeper-backed daemon, the matching replacement binary, verified owner/process identity and compatible live keepers. A client SHALL expose migration only as an explicitly confirmed action; ordinary connect, Retry and reconnect SHALL NOT migrate a legacy daemon. The confirmation SHALL identify the versions and explain that keeper-managed sessions continue while clients reconnect.
+
+The host SHALL revalidate the conditional proof immediately before signaling only the verified process generation, then start the replacement with keeper adoption and require a fresh native handshake. Changed discovery, unsupported process identity guarantees, incompatible or missing keepers, a newer daemon or a mismatched replacement SHALL refuse before signaling. No legacy TCP connection, session-ending option or forced termination SHALL be introduced. An ambiguous result, cancellation or reconnect SHALL NOT replay a migration request; another migration needs another explicit confirmation.
+
+#### Scenario: Confirm migration of an eligible legacy host
+- **WHEN** an eligible legacy host reports a migration offer and the user confirms it
+- **THEN** one conditional migration runs, the new native daemon adopts the compatible keeper sessions and the app connects using fresh service identity
+
+#### Scenario: Retry without confirmation
+- **WHEN** an ordinary connection or Retry encounters a legacy daemon
+- **THEN** it reports the offer or blocked reason and leaves the daemon and its sessions unchanged
+
+#### Scenario: Conditional proof is no longer valid
+- **WHEN** the process generation, owner, daemon discovery or keeper eligibility differs at migration time
+- **THEN** migration refuses without signaling any process
+
+#### Scenario: Unsupported migration platform
+- **WHEN** the host cannot provide the process-identity guarantees required for legacy migration
+- **THEN** it reports a blocked reason and manual migration guidance, without a weaker signaling or TCP fallback
+
+#### Scenario: Migration result is lost
+- **WHEN** SSH ends after a confirmed migration might have begun
+- **THEN** migration is not replayed automatically; an ordinary later connection may discover the result without another migration request

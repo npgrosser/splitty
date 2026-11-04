@@ -172,6 +172,8 @@ impl Output {
         struct Diagnostic<'a> {
             message: &'a str,
             hint: &'a Option<String>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            migration: Option<&'a splitty_remote::tunnel::MigrationOffer>,
             code: &'static str,
             retryable: bool,
         }
@@ -181,8 +183,16 @@ impl Output {
             .message
             .len()
             .checked_add(failure.hint.as_ref().map_or(0, String::len))
+            .and_then(|size| {
+                size.checked_add(
+                    failure
+                        .migration
+                        .as_ref()
+                        .map_or(0, |offer| offer.from_version.len() + offer.to_version.len()),
+                )
+            })
             .and_then(|size| size.checked_mul(6))
-            .and_then(|size| size.checked_add(256))
+            .and_then(|size| size.checked_add(512))
             .ok_or("native diagnostic unavailable")?;
         let script_capacity = json_capacity
             .checked_add(self.receiver.len() + 128)
@@ -199,6 +209,7 @@ impl Output {
         let diagnostic = serde_json::to_string(&Diagnostic {
             message: &failure.message,
             hint: &failure.hint,
+            migration: failure.migration.as_ref(),
             code: "backendLost",
             retryable,
         })
@@ -674,6 +685,7 @@ pub(crate) async fn native_open(
                             message.map(|message| splitty_remote::tunnel::Failure {
                                 message,
                                 hint: None,
+                                migration: None,
                             })
                         })
                 });

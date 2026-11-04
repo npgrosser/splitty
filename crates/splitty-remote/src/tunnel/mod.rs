@@ -16,13 +16,16 @@ pub use reverse::{
     MAX_SOCKET_PATH, RELAY_FAILED, RELAY_READY,
 };
 pub use supervisor::{
-    backoff, connect, supervise, update_plan, Connected, Event, Progress, Remote, Step, UpdatePlan,
-    GIVE_UP_AFTER, PREPARE_TIMEOUT,
+    backoff, connect, migration_offer, supervise, update_plan, Connected, Event, Progress, Remote,
+    Step, UpdatePlan, GIVE_UP_AFTER, PREPARE_TIMEOUT,
 };
 
 use std::io;
 use std::net::TcpListener;
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
 use std::time::Duration;
 
 use serde::Serialize;
@@ -90,6 +93,18 @@ pub enum RemoteError {
         allocation: Option<Box<Lease>>,
     },
 
+    #[error("{host} runs legacy Splitty {}; update to {} to connect while preserving its {} kept session(s).", offer.from_version, offer.to_version, offer.sessions)]
+    MigrationRequired {
+        host: String,
+        offer: MigrationOffer,
+        allocation: Option<Box<Lease>>,
+    },
+
+    /// A requested migration is a mutation. An ambiguous result must not be
+    /// replayed by discovery or connection retries.
+    #[error("The requested server migration could not be confirmed: {0}. Reconnect to inspect the host before requesting migration again.")]
+    MigrationFailed(Box<RemoteError>),
+
     #[error("local port {port} is not available ({source})")]
     PortUnavailable { port: u16, source: io::Error },
 
@@ -126,10 +141,23 @@ fn describe(duration: &Duration) -> String {
     }
 }
 
+/// Safe renderer-facing migration offer. The host's revalidation token stays
+/// in native handshake state and is never serialized into a UI diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationOffer {
+    pub available: bool,
+    pub from_version: String,
+    pub to_version: String,
+    pub sessions: u32,
+}
+
 /// What the user reads about a failed connect: what went wrong and, where
 /// there is one, what to do about it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Failure {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub migration: Option<MigrationOffer>,
     pub message: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub hint: Option<String>,
@@ -142,6 +170,7 @@ impl Failure {
     ) -> io::Result<Charged<Self>> {
         budget.display(error, false).map(|message| {
             message.map(|message| Self {
+                migration: None,
                 message,
                 hint: None,
             })
@@ -220,6 +249,10 @@ impl RemoteError {
             _ => format!("Failed to reach the remote daemon: {self}"),
         };
         Failure {
+            migration: match self {
+                Self::MigrationRequired { offer, .. } => Some(offer.clone()),
+                _ => None,
+            },
             message,
             hint: self.hint(),
         }
@@ -395,6 +428,7 @@ pub struct SshRemote {
     answered: Mutex<Option<std::sync::Arc<Charged<String>>>>,
     protocol: u32,
     assignment: admission::Assignment,
+    update: AtomicBool,
 }
 
 impl SshRemote {
@@ -413,7 +447,13 @@ impl SshRemote {
             answered: Mutex::new(None),
             protocol,
             assignment,
+            update: AtomicBool::new(false),
         }
+    }
+
+    pub fn with_update(self, update: bool) -> Self {
+        self.update.store(update, Ordering::Release);
+        self
     }
 
     fn server(&self) -> Server {
@@ -568,6 +608,30 @@ impl Remote for SshRemote {
             .map_err(|error| from_ssh_budgeted(self.host(), error, &self.ssh.context().budget))
     }
 
+    fn take_update_intent(&self) -> bool {
+        self.update.swap(false, Ordering::AcqRel)
+    }
+
+    async fn migrate_legacy(&self, daemon: &RunningDaemon) -> Result<(), RemoteError> {
+        let Some(handshake::LegacyMigration::Ready { token, .. }) = &daemon.legacy_migration else {
+            return Err(RemoteError::InvalidAnswer {
+                allocation: None,
+                host: self.host().into(),
+                detail: "legacy migration is unavailable".into(),
+            });
+        };
+        let command = self
+            .server()
+            .command()
+            .word("remote-migrate")
+            .word("--expected")
+            .value(token);
+        run_checked(&self.ssh, &command, None)
+            .await
+            .map(|_| ())
+            .map_err(|error| from_ssh_budgeted(self.host(), error, &self.ssh.context().budget))
+    }
+
     async fn open_bridge(
         &self,
         daemon: &RunningDaemon,
@@ -642,8 +706,32 @@ pub async fn open(
     assignment: admission::Assignment,
     on_progress: impl FnMut(Charged<Progress>) + Send,
 ) -> Result<(SshRemote, Connected<NativeBridge>), RemoteError> {
+    open_with_update(
+        ssh,
+        version,
+        protocol,
+        payload_for,
+        assignment,
+        false,
+        on_progress,
+    )
+    .await
+}
+
+/// Only a native launcher or an explicitly confirmed host update supplies
+/// `update`. The intent belongs to this preparation, never later reconnects.
+pub async fn open_with_update(
+    ssh: Ssh,
+    version: &'static str,
+    protocol: u32,
+    payload_for: PayloadFor,
+    assignment: admission::Assignment,
+    update: bool,
+    on_progress: impl FnMut(Charged<Progress>) + Send,
+) -> Result<(SshRemote, Connected<NativeBridge>), RemoteError> {
     let owner = ssh.owner_context();
-    let remote = SshRemote::new(ssh, version, protocol, payload_for, assignment);
+    let remote =
+        SshRemote::new(ssh, version, protocol, payload_for, assignment).with_update(update);
     let connected = match owner {
         None => connect(&remote, on_progress).await?,
         Some(owner) => {
@@ -728,7 +816,7 @@ impl From<Forward> for ConnectEvent {
 }
 
 impl From<Failure> for ConnectEvent {
-    fn from(Failure { message, hint }: Failure) -> Self {
+    fn from(Failure { message, hint, .. }: Failure) -> Self {
         ConnectEvent::Failed { message, hint }
     }
 }
