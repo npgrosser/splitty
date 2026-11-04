@@ -190,3 +190,8 @@ The coverage table assigns **every scenario** of each added/modified requirement
 - [x] 11.1 Assign `0.2.0-dev.1` consistently to the Rust workspace, Tauri and Electron packages and lockfile without creating a release tag. Verify version consistency and document incrementing each distributed preview.
 - [x] 11.2 Apply SemVer precedence to remote daemon updates, including numeric prereleases and stable transitions, ignoring build metadata and rejecting invalid versions for replacement. Extend supervisor in-process tests and the existing installation test; preserve keeper, exact payload and native-instance gates.
 - [x] 11.3 Independently review packaging and update-policy changes, run workspace/GUI checks and Electron build, synchronize CLI specs and record verification. Confirm `origin/main` is included and update the existing PR without merging or publishing a release.
+
+## 12. Failed backend diagnostics
+
+- [x] 12.1 Deliver a failed preparation's bounded diagnostic to its original unrevoked document after IO cleanup, and await actual evaluation before completing the invoke. Preserve cancellation/navigation/destruction guards, closed IO and evaluation-owned leases. Extend the carrier regression using real provider failure.
+- [x] 12.2 Add actionable legacy migration guidance without changing update authorization; assign preview version `0.2.0-dev.2`. Verify remote and GUI suites, bootstrap JS, workspace/GUI clippy and version consistency; independently review authority and cleanup behavior.

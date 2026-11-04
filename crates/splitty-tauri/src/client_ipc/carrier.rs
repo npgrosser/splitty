@@ -82,15 +82,21 @@ impl Evaluation {
     }
 }
 
-async fn await_evaluation(
-    context: &splitty_transport::queue::Context,
-    completed: tokio::sync::oneshot::Receiver<bool>,
-) {
-    let mut closing = context.closing();
-    tokio::select! { biased;
-        _ = closing.wait_for(|closed| *closed) => {}
-        _ = tokio::time::sleep(pipe::DELIVERY_TIMEOUT) => {}
-        _ = completed => {}
+async fn await_evaluation(attempt: &Attempt, mut completed: tokio::sync::oneshot::Receiver<bool>) {
+    let mut closing = attempt.context.closing();
+    let timeout = tokio::time::sleep(pipe::DELIVERY_TIMEOUT);
+    tokio::pin!(timeout);
+    loop {
+        if !attempt.can_report_failure() {
+            break;
+        }
+        tokio::select! { biased;
+            // Failed preparation already closed IO. Only a subsequent
+            // document/request revocation ends this diagnostic's wait early.
+            _ = closing.changed() => {}
+            _ = &mut timeout => break,
+            _ = &mut completed => break,
+        }
     }
     // A timeout/revocation ends the command wait, not ownership of its script.
     // The framework callback still owns Evaluation until completion or drop.
@@ -159,6 +165,9 @@ impl Output {
         failure: Arc<splitty_transport::budget::Charged<splitty_remote::tunnel::Failure>>,
         retryable: bool,
     ) -> Result<(String, Evaluation, tokio::sync::oneshot::Receiver<bool>), &'static str> {
+        if !attempt.can_report_failure() {
+            return Err("native diagnostic document closed");
+        }
         #[derive(Serialize)]
         struct Diagnostic<'a> {
             message: &'a str,
@@ -677,13 +686,11 @@ pub(crate) async fn native_open(
             };
             let failure = Arc::new(failure);
             native.event(backend_id, BackendEvent::Failed(failure.clone()));
-            if attempt.current() {
-                if let Ok((script, evaluation, completed)) =
-                    output.failure_script(&attempt, failure, retryable)
-                {
-                    if evaluation.dispatch(&webview, script).is_ok() {
-                        await_evaluation(&attempt.context, completed).await;
-                    }
+            if let Ok((script, evaluation, completed)) =
+                output.failure_script(&attempt, failure, retryable)
+            {
+                if evaluation.dispatch(&webview, script).is_ok() {
+                    await_evaluation(&attempt, completed).await;
                 }
             }
             return Err("SplittyNativeFailureDelivered".into());
@@ -1307,6 +1314,96 @@ mod tests {
     }
 
     #[tokio::test(start_paused = true)]
+    async fn failed_preparation_reports_before_invoke_completion_without_reopening_io() {
+        use splitty_remote::ssh::SshTarget;
+        for outcome in ["complete", "cancel", "navigate", "destroy"] {
+            let native = Native::default();
+            native
+                .broker
+                .register(
+                    "remote",
+                    Policy::Remote {
+                        backend: BackendId::new(),
+                        target: SshTarget::parse("assigned.invalid").unwrap(),
+                    },
+                )
+                .unwrap();
+            let proof = native.broker.committed("remote").unwrap();
+            let attempt = Arc::new(
+                native
+                    .broker
+                    .open("remote", &proof, 1, None, false)
+                    .unwrap(),
+            );
+            // This uses the real preparation failure/cleanup path without
+            // running SSH: an invalid native assignment fails immediately.
+            let provider = Provider::remote(SshTarget::parse("different.invalid").unwrap());
+            let error = match provider.connect(attempt.clone(), |_| {}).await {
+                Ok(_) => panic!("foreign assignment admitted"),
+                Err(error) => error,
+            };
+            assert!(attempt.context.is_closed());
+            assert!(!attempt.current(), "failed IO stays unusable");
+            assert!(attempt.can_report_failure());
+            let budget = attempt.context.budget.clone();
+            let failure = Arc::new(
+                splitty_remote::tunnel::Failure::from_error_budgeted(&error, &budget).unwrap(),
+            );
+            let output = Output {
+                receiver: "private_receiver".into(),
+                document: proof.document,
+                callback: 7,
+            };
+            let (script, evaluation, completed) = output
+                .failure_script(&attempt, failure.clone(), false)
+                .unwrap();
+            assert!(script.contains("native host assignment mismatch"));
+            drop(script);
+            let mut evaluation = Some(evaluation);
+            let waiting_attempt = attempt.clone();
+            let waiting = tokio::spawn(async move {
+                await_evaluation(&waiting_attempt, completed).await;
+            });
+            tokio::task::yield_now().await;
+            assert!(
+                !waiting.is_finished(),
+                "the invoke marker must wait for the diagnostic despite failed IO"
+            );
+            match outcome {
+                "complete" => evaluation.take().unwrap().complete("true"),
+                "cancel" => native
+                    .broker
+                    .cancel("remote", &proof, attempt.handle())
+                    .unwrap(),
+                "navigate" => {
+                    native.broker.navigating("remote");
+                    let next = native.broker.committed("remote").unwrap();
+                    assert_ne!(next.document, proof.document);
+                }
+                "destroy" => native.destroyed("remote"),
+                _ => unreachable!(),
+            }
+            waiting.await.unwrap();
+            assert!(attempt.context.is_closed());
+            if outcome != "complete" {
+                assert!(!attempt.can_report_failure());
+                assert!(output
+                    .failure_script(&attempt, failure.clone(), false)
+                    .is_err());
+            }
+            drop(failure);
+            drop(attempt);
+            if evaluation.is_some() {
+                assert!(budget.used() > 0, "revocation retains evaluation storage");
+                assert_eq!(native.broker.counts(), (1, 1));
+            }
+            drop(evaluation);
+            assert_eq!(native.broker.counts(), (0, 0));
+            assert_eq!(budget.used(), 0);
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
     async fn cancelled_or_timed_out_diagnostic_wait_keeps_actual_evaluation_ownership() {
         for cancel in [true, false] {
             let native = Native::default();
@@ -1333,13 +1430,17 @@ mod tests {
             };
             let (script, evaluation, completion) =
                 output.failure_script(&attempt, failure, true).unwrap();
-            let waiting_context = context.clone();
+            let waiting_attempt = attempt.clone();
             let waiting =
-                tokio::spawn(async move { await_evaluation(&waiting_context, completion).await });
+                tokio::spawn(async move { await_evaluation(&waiting_attempt, completion).await });
             tokio::task::yield_now().await;
             assert!(!waiting.is_finished());
             if cancel {
-                context.close();
+                native
+                    .broker
+                    .cancel("main", &proof, attempt.handle())
+                    .unwrap();
+                assert!(context.is_closed());
             } else {
                 tokio::time::advance(pipe::DELIVERY_TIMEOUT).await;
             }

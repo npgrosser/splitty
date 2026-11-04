@@ -260,7 +260,18 @@ async fn prepare_connection<R: Remote>(
         }
     }
     if !daemon.supports_native() {
-        return Err(RemoteError::InvalidAnswer { allocation: None, host: host.into(), detail: "the running daemon does not support native transport v1; explicit migration is required".into() });
+        let detail = if daemon.legacy && daemon.keeps_sessions {
+            "the running daemon uses legacy transport. On the host, use the newly installed \
+             Splitty binary to run `daemon restart` without `--end-sessions`, then reconnect. \
+             Sessions managed by keepers are preserved."
+        } else {
+            "the running daemon does not support native transport v1; explicit migration is required"
+        };
+        return Err(RemoteError::InvalidAnswer {
+            allocation: None,
+            host: host.into(),
+            detail: detail.into(),
+        });
     }
     if !daemon.supports_mux(remote.protocol()) {
         return Err(RemoteError::InvalidAnswer {
@@ -599,10 +610,17 @@ mod tests {
             let mut remote = Fake::new(old);
             remote.version = "0.2.0-dev.1";
             remote.server = remote.version;
-            assert!(matches!(
-                connect(&remote, |_| {}).await,
-                Err(RemoteError::InvalidAnswer { .. })
-            ));
+            let error = connect(&remote, |_| {})
+                .await
+                .err()
+                .expect("legacy discovery cannot connect");
+            assert!(matches!(error, RemoteError::InvalidAnswer { .. }));
+            assert!(!error.retryable(), "migration requires explicit action");
+            if legacy {
+                let message = error.failure().message;
+                assert!(message.contains("newly installed Splitty binary"));
+                assert!(message.contains("`daemon restart` without `--end-sessions`"));
+            }
             assert_eq!(
                 *remote.calls.lock().unwrap(),
                 ["admit", "prepare", "daemon"]

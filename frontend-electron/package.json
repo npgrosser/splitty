@@ -1,6 +1,6 @@
 {
   "name": "splitty-electron",
-  "version": "0.2.0-dev.1",
+  "version": "0.2.0-dev.2",
   "license": "MIT",
   "private": true,
   "main": "compiled/main.js",

@@ -1,7 +1,29 @@
+# Failed backend diagnostics (`0.2.0-dev.2`)
+
+Failed native preparation closes IO before returning its error. Diagnostic
+delivery now checks the original unrevoked document/attempt independently of
+that IO state and awaits evaluation before completing the invoke. Cancellation,
+navigation, destruction and shutdown still revoke reporting authority; ordinary
+IO remains closed. Evaluation retains its source, encoding and admission
+ownership until actual callback completion/drop, including after timeout.
+
+The regression executes a real provider failure and covers completion,
+cancellation, navigation and destruction. All 157 reported remote tests,
+98 GUI tests and 22 bootstrap JavaScript tests pass; workspace and GUI
+all-targets clippy pass with warnings denied. Independent review found no
+authority, delivery-ordering or accounting blocker. Version files consistently
+identify `0.2.0-dev.2`.
+
+Legacy keeper-backed daemon failures now explain using the newly installed
+binary for an explicit restart without ending sessions. This correction does
+not authorize automatic legacy migration or restart any deployed daemon.
+
+---
+
 # Preview version and daemon upgrade ordering
 
-The native transport preview uses `0.2.0-dev.1` throughout the workspace,
-Tauri/Electron configuration and generated lockfile. Remote installation uses
+The first native transport preview used `0.2.0-dev.1` throughout the workspace,
+Tauri/Electron configuration and generated lockfile. Its remote installation uses
 `remote/0.2.0-dev.1/`; subsequent distributed previews need distinct versions.
 The commit hash and branch name do not select a new installation version.
 

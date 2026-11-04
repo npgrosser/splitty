@@ -185,16 +185,22 @@ impl Registry {
         }
         Ok(window)
     }
-    fn current(&self, handle: Handle) -> bool {
+    fn document_current(&self, handle: Handle) -> bool {
         self.entries.get(&handle).is_some_and(|entry| {
             !entry.revoked
-                && !entry.context.is_closed()
                 && self
                     .windows
                     .get(&entry.window)
                     .and_then(|window| window.proof.as_ref())
                     .is_some_and(|proof| proof.document == entry.document)
         })
+    }
+    fn current(&self, handle: Handle) -> bool {
+        self.document_current(handle)
+            && self
+                .entries
+                .get(&handle)
+                .is_some_and(|entry| !entry.context.is_closed())
     }
     fn revoke(&mut self, label: &str) {
         let Some(window) = self.windows.get_mut(label) else {
@@ -697,6 +703,17 @@ impl Attempt {
                 .lock()
                 .expect("native document registry")
                 .current(self.handle)
+        })
+    }
+    /// A failed backend closes IO before its diagnostic reaches the document.
+    /// Only that failure may outlive IO: cancellation, navigation and window
+    /// destruction still revoke the original attempt's reporting authority.
+    pub(crate) fn can_report_failure(&self) -> bool {
+        self.registry.upgrade().is_some_and(|registry| {
+            registry
+                .lock()
+                .expect("native document registry")
+                .document_current(self.handle)
         })
     }
     pub(crate) fn live(&self) -> bool {
