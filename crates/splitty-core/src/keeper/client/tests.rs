@@ -188,7 +188,17 @@ async fn released_keepers_are_adopted_with_their_output_and_process() {
     first.release_all();
     drop(session);
 
-    let found = find(&keepers);
+    // Release closes the client side synchronously; the keeper processes the
+    // frame/EOF on its controller thread. Discovery can race that detach.
+    let mut found = Vec::new();
+    assert!(
+        wait_until(TIMEOUT, || {
+            found = find(&keepers);
+            found.len() == 1 && !found[0].hello.controlled
+        })
+        .await,
+        "keeper observes the released controller before adoption"
+    );
     assert_eq!(found.len(), 1);
     assert_eq!(found[0].hello.session_id, "kept-adopt");
     assert!(!found[0].hello.controlled, "released");
