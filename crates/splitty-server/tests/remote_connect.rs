@@ -2352,8 +2352,56 @@ async fn the_hub_updates_a_host_daemon_of_another_version() {
     assert_eq!(host_daemon_pid(&lab), daemon);
     fs::write(&info_path, &old_record).unwrap();
 
+    // This fixture simulates an older version by editing diagnostic fields;
+    // the actual daemon still owns its original publication. Restore exactly
+    // that record at the SSH stop boundary, after version-policy selection but
+    // before real shutdown. Production cleanup correctly refuses a changed
+    // publication. This hook never replaces a different record/instance and
+    // records that the expected conditional stop actually crossed SSH.
+    fs::write(
+        lab.dir.path().join("original-publication.json"),
+        &original_record,
+    )
+    .unwrap();
+    fs::write(
+        lab.dir.path().join("simulated-publication.json"),
+        &old_record,
+    )
+    .unwrap();
+    let restore = lab.dir.path().join("restore-publication.py");
+    fs::write(&restore, r#"import json, os, pathlib, shlex
+root = pathlib.Path(__file__).parent
+marker = root / "publication-restored"
+original = (root / "original-publication.json").read_bytes()
+instance = json.loads(original)["instance"]
+command = shlex.split(os.environ.get("SSH_ORIGINAL_COMMAND", ""))
+if not marker.exists() and command[-4:] == ["daemon", "stop", "--if-instance", instance]:
+    target = root / "home/.config/splitty/daemon.json"
+    assert target.read_bytes() == (root / "simulated-publication.json").read_bytes(), "unexpected publication"
+    target.write_bytes(original)
+    marker.write_text(instance)
+"#).unwrap();
+    let force_path = lab.dir.path().join("host-env.sh");
+    let original_force = fs::read_to_string(&force_path).unwrap();
+    let hook = format!(
+        "python3 {} || exit 1\n",
+        splitty_remote::ssh::quote(restore.to_str().unwrap())
+    );
+    let force = original_force.replacen(
+        "if [ -n \"$SSH_ORIGINAL_COMMAND\" ];",
+        &format!("{hook}if [ -n \"$SSH_ORIGINAL_COMMAND\" ];"),
+        1,
+    );
+    assert_ne!(force, original_force);
+    write_executable(&force_path, &force);
+
     let mut socket = hub.open_with(HOST, "&update=1").await;
     let (progress, ready) = socket.progress().await;
+    write_executable(&force_path, &original_force);
+    assert!(
+        lab.dir.path().join("publication-restored").exists(),
+        "conditional stop crossed the fixture boundary"
+    );
     let steps: Vec<&str> = progress
         .iter()
         .map(|message| message["step"].as_str().expect("a step"))

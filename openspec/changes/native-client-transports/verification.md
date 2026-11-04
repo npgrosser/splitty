@@ -739,3 +739,34 @@ files validated. The OS peer-user smoke now runs below a `0775` parent, and the
 macOS CI gate includes the full start/status/stop lifecycle with group-writable
 config/data parents. Windows packaging and native macOS CI results are recorded
 separately when their artifacts finish.
+
+
+### Delivered preview and hosted follow-up
+
+The Windows x64 installer `Splitty_0.2.0-dev.3_x64-setup.exe` was built from
+`1730dd55af15ae3a1b41947517a8ba04980aa441` with all 92 Windows unit tests and fresh
+frontend check/build gates. All four packaged payload checksums, backend version,
+Windows product metadata and artifact timestamps were verified. The installer
+and checksum sidecar were copied to Downloads; no installation or GUI launch was
+performed. Installer SHA256:
+`6d463f96f78ef3b416366f7a27e14cfa985aca05021b7cf4c71a5aeee7dda09a`.
+
+The exact packaged Linux x64 payload (SHA256
+`670a08b0834d91aa88ee059d53aca6c0790ecd908224da3c41b382513a8f2079`)
+was installed using the production installer script in isolated PID/network
+namespaces. Both an empty home and pre-existing `0775` `.local`, `.local/share`
+and `.config` passed install, daemon startup, native handshake and clean exit;
+existing parent modes stayed `0775`. The advertised backend was `0.2.0-dev.3`.
+
+Hosted CI run `41892409194` passed the full macOS runtime job, including the new
+private-directory/native-peer/lifecycle cases and WKWebView smoke, as well as
+frontend, Electron, static aarch64 and dependency checks. The Linux GUI job timed
+out downloading WebKitGTK from its Ubuntu mirror before compilation. The strict
+real-SSH update fixture exposed an interaction with its synthetic version record:
+shutdown now intentionally refuses to delete a changed publication. The fixture
+restores its exact original record only at the matching conditional-stop SSH
+boundary, after version-policy selection, and asserts that this boundary was
+crossed. It never restores over an unexpected record or different instance.
+The strict real-SSH test and its clippy target then passed locally. This follow-up
+changes tests and verification records only; the delivered production binaries
+remain exactly those of `1730dd5`. Hosted CI reruns on that follow-up.
