@@ -12,7 +12,7 @@ model {
 
   remote_host = system 'Remote host' {
     #external
-    description 'A VM or DevPod workspace reached over SSH (system OpenSSH client, the user\'s config and agent). Runs a Splitty daemon of its own, bound to its loopback interface.'
+    description 'A VM or DevPod workspace reached over SSH (system OpenSSH client, the user\'s config and agent). Runs a Splitty daemon of its own, reachable through its private native socket over SSH exec pipes.'
   }
 
   wsl = system 'WSL 2' {
@@ -35,7 +35,7 @@ model {
 
     desktop = container 'Desktop app' {
       technology 'Rust, Tauri 2, crates/splitty-tauri (splitty-gui)'
-      description 'Native window around the web frontend. On macOS and Linux it connects to a running daemon or embeds the server; on Windows it starts the server inside WSL 2 and binds its lifetime through a stdio bridge. Opens hosts in remote windows through an SSH tunnel it holds itself, on Windows also without WSL.'
+      description 'Native window around the web frontend. On macOS and Linux it always owns an embedded server; on Windows it starts the server inside WSL 2 and binds its lifetime through a stdio bridge. Opens hosts in remote windows through owned SSH exec pipes, on Windows also without WSL.'
     }
 
     web = container 'Web frontend' {
@@ -50,7 +50,7 @@ model {
 
     remote = container 'splitty-remote' {
       technology 'Rust library, crates/splitty-remote'
-      description 'Reaching a remote host over SSH, installing the client\'s server there and keeping a tunnel to its daemon; the hosts the user knows. Platform-neutral and free of the server crates: linked into the splitty binary for splitty connect, and into the desktop app for remote windows (remote-window).'
+      description 'Reaching a remote host over SSH, installing the client\'s server there and keeping a native SSH exec stream to its daemon; the hosts the user knows. Platform-neutral and free of the server crates: linked into the splitty binary for splitty connect, and into the desktop app for remote windows (remote-window).'
     }
 
     transport = container 'splitty-transport' {
@@ -71,7 +71,7 @@ model {
 
     daemon_files = store 'Daemon files' {
       technology 'Files, ~/.config/splitty (mode 0700)'
-      description 'daemon.json (discovery: pid, port, control socket), state.json (the persisted workspace), auth-token (owner-only) and daemon.log.'
+      description 'daemon.json (discovery: instance, pid, private client/control sockets), state.json (the persisted workspace), daemon.log and the owner-only auth-token used by explicit browser gateways.'
     }
   }
 
@@ -94,7 +94,7 @@ model {
   splitty.desktop -> wsl 'starts the server in' {
     technology 'wsl.exe, stdio'
   }
-  splitty.remote.tunnel -> remote_host 'asks for the daemon, forwards its port to 127.0.0.1, mints a bootstrap code' {
+  splitty.remote.tunnel -> remote_host 'discovers the daemon and carries native frames through SSH exec to its private socket' {
     technology 'SSH'
   }
   splitty.remote.install -> remote_host 'probes, uploads and installs the server in ~/.local/share/splitty/remote' {

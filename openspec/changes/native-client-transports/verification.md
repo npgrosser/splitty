@@ -1,3 +1,42 @@
+# Post-review correction status
+
+The acceptance runs below establish the pre-review commit `8eda9b8`, not the
+review corrections. Tasks 10.1–10.9 track the new acceptance work.
+The PR must not be considered merge-ready until their final integration gate passes.
+
+Targeted correction results so far:
+- Native transport: 53 unit tests pass, including buffered Reply/Text plus
+  EOF/Closed, hard revocation/malformed discard and matched-pong timing.
+- Owner cleanup: seven tests pass, including finish/drop escalation with retained
+  capacity until cleanup acknowledgement and a healthy owner after normal close.
+- Exposure: 13 targeted tests pass, including crash boundaries and immutable
+  birth replacement versus unknown/UID-only identity changes.
+- All 15 main specifications validate after upload-delta synchronization.
+- Bash/core session regressions: 28 tests pass, including actual first prompts
+  with nounset/POSIX, scalar/array/sparse prompt commands and startup options.
+- Gateway: 21 integration tests pass, including 64 concurrent calls over one
+  native carrier, monotonic IDs, cancellation cleanup and uncertain mutations.
+- Tauri: 96 library tests and 22 capsule JavaScript tests pass, including native
+  challenge identity/idempotence, bootstrap deadline and bounded live progress.
+- Frontend check reports zero errors (eight existing warnings); all 1,510 tests
+  in 82 suites pass. Frontend and Electron builds pass (58 packaged assets).
+- Pure Windows guard checks (23) and WKWebView harness preparation tests (nine)
+  pass; these are not fresh Windows/macOS GUI execution evidence.
+- Independent source review found no blocker in registry birth proof, native
+  orderly close, owner escalation or the revised native challenge. A late
+  preparation/provider-removal race found in review is corrected and tested.
+
+Review dispositions: unsupported Linux registry views remain unsupported for
+browser gateways; network isolation alone does not establish common authority.
+Unknown spawn/publication and cleanup overflow remain fail-closed. The compact
+EOF delivery remains accounted; request IDs consumed on Busy are intentional;
+negotiated frame minima already guard subtraction. No unrelated helper extraction
+or unconditional Electron dependency was introduced. Windows standalone fixture
+safeguards remain enabled; obsolete macOS baseline-comparison diagnostics were
+removed while the mandatory final core-test gate remains.
+
+---
+
 # Native transport verification status
 
 Implementation and all 58 planned tasks are complete. The PR remains subject to

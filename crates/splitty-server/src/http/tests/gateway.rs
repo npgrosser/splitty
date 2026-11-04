@@ -802,6 +802,12 @@ async fn an_embedded_gateway_shares_the_supplied_service_and_releases_clients() 
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(value(response).await["instance"], state.instance);
     }
+    assert_eq!(
+        state.client_state.clients.lock().unwrap().len(),
+        1,
+        "stateless HTTP calls reuse one gateway-owned client"
+    );
+    backend.close();
     tokio::time::timeout(WAIT, async {
         while !state.client_state.clients.lock().unwrap().is_empty() {
             tokio::task::yield_now().await;
@@ -809,7 +815,6 @@ async fn an_embedded_gateway_shares_the_supplied_service_and_releases_clients() 
     })
     .await
     .unwrap();
-    backend.close();
     let response = app.oneshot(request("/api/mux/status")).await.unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(value(response).await["uncertain"], false);
@@ -1223,4 +1228,286 @@ async fn gateway_refuses_wrong_reply_ids_and_reports_mutation_uncertainty_withou
         assert_eq!(error["uncertain"], mutation);
         tokio::time::timeout(WAIT, server).await.unwrap().unwrap();
     }
+}
+
+async fn fake_api_peer(
+    listener: &tokio::net::UnixListener,
+    instance: String,
+) -> splitty_transport::peer::Peer {
+    use splitty_transport::{negotiation, peer::Peer, queue, wire};
+    let (io, _) = listener.accept().await.unwrap();
+    let (mut read, mut write) = io.into_split();
+    let context = queue::Context::default();
+    let ready = wire::Ready {
+        generation: 1,
+        instance,
+        mux_protocol: 1,
+        purpose: wire::Purpose::Direct,
+        limits: wire::Limits::default(),
+    };
+    negotiation::server(&mut read, &mut write, &context.budget)
+        .await
+        .unwrap();
+    negotiation::offer(&mut read, &mut write, &context.budget, &ready)
+        .await
+        .unwrap();
+    Peer::start(read, write, &ready, context)
+}
+fn fake_api_listener(state: &AppState, path: &Path) -> (tokio::net::UnixListener, DaemonInfo) {
+    std::fs::set_permissions(
+        path.parent().unwrap(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    let listener = tokio::net::UnixListener::bind(path).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    (listener, discovery(state, path))
+}
+fn api_reply(sender: &splitty_transport::peer::Sender, id: u32) {
+    use splitty_transport::wire::{self, Kind};
+    sender
+        .json(
+            Kind::Reply,
+            &wire::Reply {
+                id,
+                status: 200,
+                content_type: wire::ContentType::Json,
+                body: format!("{{\"id\":{id}}}"),
+                uncertain: false,
+            },
+        )
+        .unwrap();
+}
+
+#[tokio::test]
+async fn api_calls_share_one_carrier_with_bounded_concurrency_and_monotonic_ids() {
+    use splitty_transport::wire::{self, Kind};
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(ADDR, dir.path());
+    let (listener, info) = fake_api_listener(&state, &dir.path().join("api.sock"));
+    let backend = gateway::Backend::daemon(info);
+    let app = gateway::router(backend.clone(), browser(ADDR));
+    let (full, filled) = tokio::sync::oneshot::channel();
+    let (release, released) = tokio::sync::oneshot::channel();
+    let instance = state.instance.clone();
+    let server = tokio::spawn(async move {
+        let mut peer = fake_api_peer(&listener, instance).await;
+        for id in 1..=64 {
+            let message = peer.recv().await.unwrap();
+            assert_eq!(message.frame.kind, Kind::Request);
+            assert_eq!(message.frame.decode::<wire::Request>().unwrap().id, id);
+        }
+        full.send(()).unwrap();
+        released.await.unwrap();
+        // Replies may arrive out of order; route them to the matching waiter.
+        for id in (1..=64).rev() {
+            api_reply(&peer.sender, id);
+        }
+        for id in 65..=66 {
+            let message = peer.recv().await.unwrap();
+            assert_eq!(message.frame.kind, Kind::Request);
+            assert_eq!(message.frame.decode::<wire::Request>().unwrap().id, id);
+            drop(message);
+            api_reply(&peer.sender, id);
+        }
+        assert!(peer.recv().await.is_none());
+        peer.finish().await.unwrap();
+        use futures::FutureExt;
+        assert!(
+            listener.accept().now_or_never().is_none(),
+            "only one native dial"
+        );
+    });
+    let mut requests = tokio::task::JoinSet::new();
+    for _ in 0..64 {
+        let app = app.clone();
+        requests.spawn(async move { app.oneshot(request("/api/mux/status")).await.unwrap() });
+    }
+    tokio::time::timeout(WAIT, filled).await.unwrap().unwrap();
+    let excess = app
+        .clone()
+        .oneshot(request("/api/mux/status"))
+        .await
+        .unwrap();
+    assert_eq!(excess.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(value(excess).await["uncertain"], false);
+    release.send(()).unwrap();
+    let mut ids = std::collections::BTreeSet::new();
+    while let Some(response) = tokio::time::timeout(WAIT, requests.join_next())
+        .await
+        .unwrap()
+    {
+        let response = response.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(ids.insert(value(response).await["id"].as_u64().unwrap()));
+    }
+    assert_eq!(ids, (1..=64).collect());
+    for id in 65..=66 {
+        let response = app
+            .clone()
+            .oneshot(request("/api/mux/status"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(value(response).await["id"], id);
+    }
+    backend.close();
+    tokio::time::timeout(WAIT, server).await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn cancelling_one_api_wait_keeps_other_requests_and_the_carrier_alive() {
+    use splitty_transport::wire::{self, Kind};
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(ADDR, dir.path());
+    let (listener, info) = fake_api_listener(&state, &dir.path().join("api.sock"));
+    let backend = gateway::Backend::daemon(info);
+    let app = gateway::router(backend.clone(), browser(ADDR));
+    let (entered, admitted) = tokio::sync::oneshot::channel();
+    let (cancelled, cancellation) = tokio::sync::oneshot::channel();
+    let instance = state.instance.clone();
+    let server = tokio::spawn(async move {
+        let mut peer = fake_api_peer(&listener, instance).await;
+        let first = peer.recv().await.unwrap();
+        assert_eq!(first.frame.decode::<wire::Request>().unwrap().id, 1);
+        drop(first);
+        entered.send(()).unwrap();
+        let message = peer.recv().await.unwrap();
+        assert_eq!(message.frame.kind, Kind::Cancel);
+        assert_eq!(message.frame.decode::<wire::Cancel>().unwrap().id, 1);
+        drop(message);
+        api_reply(&peer.sender, 1);
+        cancelled.send(()).unwrap();
+        let second = peer.recv().await.unwrap();
+        assert_eq!(second.frame.kind, Kind::Request);
+        assert_eq!(second.frame.decode::<wire::Request>().unwrap().id, 2);
+        drop(second);
+        api_reply(&peer.sender, 2);
+        assert!(peer.recv().await.is_none());
+        peer.finish().await.unwrap();
+    });
+    let pending = tokio::spawn(app.clone().oneshot(request("/api/mux/status")));
+    tokio::time::timeout(WAIT, admitted).await.unwrap().unwrap();
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(WAIT, cancellation)
+        .await
+        .unwrap()
+        .unwrap();
+    let response = app.oneshot(request("/api/mux/status")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(value(response).await["id"], 2);
+    backend.close();
+    tokio::time::timeout(WAIT, server).await.unwrap().unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn unanswered_api_cancellation_closes_the_carrier_before_capacity_is_reused() {
+    use splitty_transport::wire::{self, Kind};
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(ADDR, dir.path());
+    let (listener, info) = fake_api_listener(&state, &dir.path().join("api.sock"));
+    let backend = gateway::Backend::daemon(info);
+    let app = gateway::router(backend.clone(), browser(ADDR));
+    let (entered, admitted) = tokio::sync::oneshot::channel();
+    let (cancelled, cancellation) = tokio::sync::oneshot::channel();
+    let instance = state.instance.clone();
+    let server = tokio::spawn(async move {
+        let mut peer = fake_api_peer(&listener, instance.clone()).await;
+        let first = peer.recv().await.unwrap();
+        assert_eq!(first.frame.decode::<wire::Request>().unwrap().id, 1);
+        drop(first);
+        entered.send(()).unwrap();
+        let cancel = peer.recv().await.unwrap();
+        assert_eq!(cancel.frame.kind, Kind::Cancel);
+        drop(cancel);
+        cancelled.send(()).unwrap();
+        // The peer remains healthy and answers transport pings, but never
+        // confirms request cancellation. The gateway must close this carrier.
+        assert!(peer.recv().await.is_none());
+        peer.finish().await.unwrap();
+        let mut replacement = fake_api_peer(&listener, instance).await;
+        let next = replacement.recv().await.unwrap();
+        assert_eq!(next.frame.decode::<wire::Request>().unwrap().id, 1);
+        drop(next);
+        api_reply(&replacement.sender, 1);
+        assert!(replacement.recv().await.is_none());
+        replacement.finish().await.unwrap();
+    });
+    let pending = tokio::spawn(app.clone().oneshot(request("/api/mux/status")));
+    admitted.await.unwrap();
+    pending.abort();
+    assert!(pending.await.unwrap_err().is_cancelled());
+    cancellation.await.unwrap();
+    tokio::time::advance(wire::HANDSHAKE_TIMEOUT).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    let response = app.oneshot(request("/api/mux/status")).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(value(response).await["id"], 1);
+    backend.close();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn api_backend_replacement_never_replays_an_admitted_mutation() {
+    use splitty_transport::wire::{self, Kind};
+    let dir = tempfile::tempdir().unwrap();
+    let first = state(ADDR, dir.path());
+    let second = state(ADDR, dir.path());
+    let (listener, info) = fake_api_listener(&first, &dir.path().join("old.sock"));
+    let replacement = Native::start(&second, &dir.path().join("new.sock")).await;
+    let backend = gateway::Backend::daemon(info);
+    let app = gateway::router(backend.clone(), browser(ADDR));
+    let (entered, admitted) = tokio::sync::oneshot::channel();
+    let instance = first.instance.clone();
+    let server = tokio::spawn(async move {
+        let mut peer = fake_api_peer(&listener, instance).await;
+        let request = peer.recv().await.unwrap();
+        assert_eq!(request.frame.kind, Kind::Request);
+        assert_eq!(
+            request.frame.decode::<wire::Request>().unwrap().operation,
+            "home.update"
+        );
+        drop(request);
+        entered.send(()).unwrap();
+        while let Some(message) = peer.recv().await {
+            assert_eq!(message.frame.kind, Kind::Cancel, "no replay on old carrier");
+        }
+        peer.finish().await.unwrap();
+    });
+    let before = serde_json::to_value(&*second.config.read().unwrap()).unwrap();
+    let request = Request::builder()
+        .method("PATCH")
+        .uri("/api/home/settings")
+        .header("host", ADDR)
+        .header("authorization", "Bearer gateway-only-token")
+        .header("content-type", "application/json")
+        .body(Body::from(r#"{"theme":"changed"}"#))
+        .unwrap();
+    let response = tokio::spawn(app.clone().oneshot(request));
+    tokio::time::timeout(WAIT, admitted).await.unwrap().unwrap();
+    backend.set_daemon(Some(replacement.info.clone()));
+    let response = tokio::time::timeout(WAIT, response)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(value(response).await["uncertain"], true);
+    let fresh = app
+        .oneshot(super::gateway::request("/api/mux/status"))
+        .await
+        .unwrap();
+    assert_eq!(fresh.status(), StatusCode::OK);
+    assert_eq!(value(fresh).await["instance"], second.instance);
+    assert_eq!(
+        serde_json::to_value(&*second.config.read().unwrap()).unwrap(),
+        before,
+        "the failed mutation never reached the replacement backend"
+    );
+    backend.close();
+    tokio::time::timeout(WAIT, server).await.unwrap().unwrap();
+    replacement.stop().await;
 }

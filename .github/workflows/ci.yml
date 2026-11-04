@@ -399,27 +399,6 @@ jobs:
           --harness-dir "${RUNNER_TEMP}/splitty-macos-isolation-harness"
           --evidence-dir "${RUNNER_TEMP}/splitty-macos-native-evidence/isolation-consumer"
 
-      # Distinguish transport regressions from existing platform failures.
-      # This diagnostic cannot waive the HEAD suite's mandatory gate below.
-      - name: Compare failing macOS core tests with the merge base
-        if: always() && steps.core_tests.outcome == 'failure'
-        env:
-          BASELINE_REV: ${{ github.event.pull_request.base.sha || 'cc66e97024f1013cc2abad1727ba9378db2200af' }}
-        run: |
-          git fetch --no-tags origin "$BASELINE_REV"
-          baseline_dir="$(mktemp -d "$RUNNER_TEMP/splitty-core-base.XXXXXX")"
-          git archive "$BASELINE_REV" | tar -x -C "$baseline_dir"
-          export CARGO_TARGET_DIR="$RUNNER_TEMP/splitty-core-base-target"
-          evidence_dir="$RUNNER_TEMP/splitty-macos-native-evidence"
-          mkdir -p "$evidence_dir"
-          echo "$BASELINE_REV" > "$evidence_dir/core-baseline-revision.txt"
-          for case in cli_path_survives_bash_and_zsh_startup_without_editing_user_files logs_keep_final_bytes_when_the_process_exits_before_capture_ends managed_input_backpressure_does_not_block_revocation_or_stop; do
-            status=0
-            cargo test --locked --manifest-path "$baseline_dir/Cargo.toml" -p splitty-core --lib "pty::session::tests::$case" -- --exact --nocapture > "$evidence_dir/base-$case.log" 2>&1 || status=$?
-            cat "$evidence_dir/base-$case.log"
-            echo "$case exit=$status" >> "$evidence_dir/core-baseline-results.txt"
-          done
-
       - name: Enforce macOS core test result
         if: always()
         env:

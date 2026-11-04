@@ -1,4 +1,4 @@
-import { NativeConnectionError, type NativeAssignment, type NativeChannel, type NativeDelivery } from "./native_socket.ts";
+import { NativeConnectionError, type NativeAssignment, type NativeChannel, type NativeDelivery, type NativeProgress } from "./native_socket.ts";
 import { encodeNativeFrame, NativeFrameDecoder, NativeKind, type NativeFrame } from "./native_wire.ts";
 
 /** The actual port stays in the isolated preload. This surface only addresses
@@ -6,7 +6,7 @@ import { encodeNativeFrame, NativeFrameDecoder, NativeKind, type NativeFrame } f
 export interface ElectronNativeBridge {
   state(state: "connected" | "reconnecting" | "disconnected"): void;
   onRetry(callback: () => void): () => void;
-  open(options?: { target?: string; update?: boolean }, request?: string): Promise<NativeAssignment>;
+  open(options?: { target?: string; update?: boolean }, request?: string, progress?: (value: NativeProgress) => void): Promise<NativeAssignment>;
   cancelOpen(request: string): void;
   listen(handle: string, incoming: (chunk: Uint8Array) => void, closed: (reason: unknown) => void): () => void;
   start(handle: string): void;
@@ -14,16 +14,17 @@ export interface ElectronNativeBridge {
   close(handle: string): void;
 }
 
-export async function openElectronChannel(bridge: ElectronNativeBridge, options?: { target?: string; update?: boolean }, signal?: AbortSignal): Promise<NativeChannel> {
+export async function openElectronChannel(bridge: ElectronNativeBridge, options?: { target?: string; update?: boolean }, signal?: AbortSignal, progress?: (value: NativeProgress) => void): Promise<NativeChannel> {
   signal?.throwIfAborted();
   const request = crypto.randomUUID();
-  const opening = bridge.open(options, request);
   const cancel = () => bridge.cancelOpen(request);
   signal?.addEventListener("abort", cancel, { once: true });
   if (signal?.aborted) cancel();
+  let preparing = true;
+  const report = (value: NativeProgress) => { if (preparing && !signal?.aborted) progress?.(value); };
   let assignment: Readonly<NativeAssignment>;
   try {
-    assignment = Object.freeze({ ...await opening });
+    assignment = Object.freeze({ ...await bridge.open(options, request, report) });
     if (signal?.aborted) { bridge.close(assignment.handle); signal.throwIfAborted(); }
   } catch (error) {
     if (error instanceof Error && error.message.startsWith("SplittyNativeFailure:")) {
@@ -31,7 +32,7 @@ export async function openElectronChannel(bridge: ElectronNativeBridge, options?
       throw new NativeConnectionError(value.message, value.code, value.retryable === true);
     }
     throw error;
-  } finally { signal?.removeEventListener("abort", cancel); }
+  } finally { preparing = false; signal?.removeEventListener("abort", cancel); }
   // The private preload reserves the announced reassembly bytes before it
   // forwards the first chunk to this document, including concurrent streams.
   const decoder = new NativeFrameDecoder();

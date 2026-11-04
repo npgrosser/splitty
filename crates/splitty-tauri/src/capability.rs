@@ -63,7 +63,7 @@ pub(crate) fn main_window() -> CapabilityBuilder {
                 serde_json::json!({"url":"http://*"}),
                 serde_json::json!({"url":"https://*"}),
             ],
-            Vec::<serde_json::Value>::new(),
+            vec![serde_json::json!({"url":"http://tauri.localhost/*"})],
         )
 }
 pub(crate) fn remote_windows() -> CapabilityBuilder {
@@ -90,6 +90,24 @@ mod tests {
         assert!(!policy.contains("'unsafe-eval'"));
         assert!(!policy.contains("127.0.0.1:*"));
         assert!(policy.contains("frame-src 'none'"));
+    }
+
+    #[test]
+    fn system_opener_explicitly_denies_the_windows_packaged_origin() {
+        let CapabilityFile::Capability(capability) = main_window().build() else {
+            panic!("one capability");
+        };
+        let value = serde_json::to_value(capability).unwrap();
+        let opener = value["permissions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|grant| grant["identifier"] == "opener:allow-open-url")
+            .unwrap();
+        assert_eq!(
+            opener["deny"],
+            serde_json::json!([{"url":"http://tauri.localhost/*"}])
+        );
     }
 
     #[test]

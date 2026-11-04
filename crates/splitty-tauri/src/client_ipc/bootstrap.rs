@@ -12,13 +12,13 @@ pub(crate) fn script(bootstrap: [u8; 32], receiver: &str, entry: &str) -> String
     )
 }
 
-/// Evaluate only after native document commit. A replacement capsule ignores a
-/// late prior-document challenge because its fresh nonce differs.
-pub(crate) fn challenge_script(receiver: &str, nonce: &str, challenge: [u8; 32]) -> String {
+/// Evaluate only after native document commit. Native generation/token checks
+/// reject stale evaluations, and repeated evaluation of one generation is safe.
+pub(crate) fn challenge_script(receiver: &str, generation: u64, challenge: [u8; 32]) -> String {
     format!(
         "window[{}]?.({});",
         json!(receiver),
-        json!({ "nonce": nonce, "challenge": challenge })
+        json!({ "generation": generation, "challenge": challenge })
     )
 }
 
@@ -31,8 +31,8 @@ mod tests {
         let rendered = script([7; 32], "receiver\"\\\n", "tauri://localhost/index.html");
         assert!(!rendered.contains("__SPLITTY_BOOTSTRAP_CONFIG__"));
         assert!(rendered.contains("receiver\\\"\\\\\\n"));
-        let challenge = challenge_script("receiver\"", "nonce\"", [3; 32]);
+        let challenge = challenge_script("receiver\"", 7, [3; 32]);
         assert!(challenge.starts_with("window[\"receiver\\\"\"]?.("));
-        assert!(challenge.contains("\"nonce\":\"nonce\\\"\""));
+        assert!(challenge.contains("\"generation\":7"));
     }
 }

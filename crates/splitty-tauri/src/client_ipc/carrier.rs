@@ -31,6 +31,7 @@ pub(crate) struct Native {
     deliveries: Mutex<HashMap<Handle, Delivery>>,
     events: Mutex<HashMap<BackendId, tokio::sync::watch::Sender<BackendEvent>>>,
     readiness: Mutex<HashMap<BackendId, u64>>,
+    started: Mutex<std::collections::HashSet<BackendId>>,
 }
 #[derive(Clone, Debug)]
 pub(crate) enum BackendEvent {
@@ -53,6 +54,7 @@ struct Evaluation {
     _chunk: Option<pipe::Chunk>,
     input: Option<pipe::Input>,
     _failure: Option<Arc<splitty_transport::budget::Charged<splitty_remote::tunnel::Failure>>>,
+    _progress: Option<Arc<splitty_transport::budget::Charged<splitty_transport::wire::Progress>>>,
     completion: Option<tokio::sync::oneshot::Sender<bool>>,
     _attempt: Arc<Attempt>,
     _storage: splitty_transport::budget::Lease,
@@ -100,6 +102,57 @@ struct Output {
     callback: u32,
 }
 impl Output {
+    fn progress_script(
+        &self,
+        attempt: &Arc<Attempt>,
+        progress: Arc<splitty_transport::budget::Charged<splitty_transport::wire::Progress>>,
+    ) -> Result<(String, Evaluation, tokio::sync::oneshot::Receiver<bool>), &'static str> {
+        // Reserve escaped JSON, script and framework copies before encoding.
+        // The original Progress lease remains in the evaluation through its
+        // actual callback completion, independently of command cancellation.
+        let capacity = progress
+            .phase
+            .len()
+            .checked_add(progress.message.len())
+            .and_then(|size| size.checked_mul(6))
+            .and_then(|size| size.checked_add(self.receiver.len() + 256))
+            .ok_or("native progress too large")?;
+        let storage = attempt
+            .context
+            .budget
+            .reserve(
+                capacity.checked_mul(6).ok_or("native progress too large")?,
+                false,
+            )
+            .map_err(|_| "native progress budget exhausted")?;
+        let payload =
+            serde_json::to_string(&**progress).map_err(|_| "native progress unavailable")?;
+        let mut script = String::with_capacity(capacity);
+        write!(
+            script,
+            "window[{}]?.({},{},{{progress:{payload}}}) === true",
+            serde_json::to_string(&format!("{}_output", self.receiver))
+                .map_err(|_| "native progress unavailable")?,
+            self.document,
+            self.callback,
+        )
+        .map_err(|_| "native progress unavailable")?;
+        debug_assert!(script.len() <= capacity);
+        let (completion, completed) = tokio::sync::oneshot::channel();
+        Ok((
+            script,
+            Evaluation {
+                _chunk: None,
+                input: None,
+                _failure: None,
+                _progress: Some(progress),
+                completion: Some(completion),
+                _attempt: attempt.clone(),
+                _storage: storage,
+            },
+            completed,
+        ))
+    }
     fn failure_script(
         &self,
         attempt: &Arc<Attempt>,
@@ -159,6 +212,7 @@ impl Output {
                 _chunk: None,
                 input: None,
                 _failure: Some(failure),
+                _progress: None,
                 completion: Some(completion),
                 _attempt: attempt.clone(),
                 _storage: storage,
@@ -209,6 +263,7 @@ impl Output {
                 _chunk: chunk,
                 input: Some(input),
                 _failure: None,
+                _progress: None,
                 completion: None,
                 _attempt: attempt.clone(),
                 _storage: storage,
@@ -235,6 +290,10 @@ impl Native {
             .expect("native backend events")
             .remove(&id);
         self.readiness.lock().expect("native readiness").remove(&id);
+        self.started
+            .lock()
+            .expect("native start markers")
+            .remove(&id);
     }
     pub(crate) fn watch_backend(
         &self,
@@ -246,6 +305,23 @@ impl Native {
             .get(&id)
             .map(|event| event.subscribe())
     }
+    pub(crate) fn preparing(&self, id: BackendId) {
+        let events = self.events.lock().expect("native backend events");
+        let Some(event) = events.get(&id) else {
+            return;
+        };
+        self.started
+            .lock()
+            .expect("native start markers")
+            .insert(id);
+        event.send_replace(BackendEvent::Pending);
+    }
+    pub(crate) fn backend_started(&self, id: BackendId) -> bool {
+        self.started
+            .lock()
+            .expect("native start markers")
+            .contains(&id)
+    }
     pub(crate) fn ready_epoch(&self, id: BackendId) -> u64 {
         self.readiness
             .lock()
@@ -255,14 +331,16 @@ impl Native {
             .unwrap_or(0)
     }
     fn event(&self, id: BackendId, value: BackendEvent) {
+        let events = self.events.lock().expect("native backend events");
+        let Some(event) = events.get(&id) else {
+            return;
+        };
         if matches!(value, BackendEvent::Ready) {
             let mut readiness = self.readiness.lock().expect("native readiness");
             let epoch = readiness.entry(id).or_default();
             *epoch = epoch.saturating_add(1);
         }
-        if let Some(event) = self.events.lock().expect("native backend events").get(&id) {
-            event.send_replace(value);
-        }
+        event.send_replace(value);
     }
     pub(crate) fn authenticate(
         &self,
@@ -332,7 +410,18 @@ impl Native {
         // Publication and destruction share this lock. Always take delivery
         // ownership before the broker, matching receipt validation below.
         let mut deliveries = self.deliveries.lock().expect("native delivery ownership");
-        self.broker.destroyed(label);
+        let backend = self
+            .broker
+            .destroyed(label)
+            .and_then(|policy| match policy {
+                super::Policy::Main { backend } | super::Policy::Remote { backend, .. } => {
+                    Some(backend)
+                }
+                super::Policy::Setup => None,
+            });
+        if let Some(backend) = backend {
+            self.remove_provider(backend);
+        }
         deliveries.retain(|_, delivery| delivery.window != label);
     }
     fn publish(
@@ -484,14 +573,55 @@ pub(crate) async fn native_open(
         native: native.clone(),
         key,
     };
-    native.event(attempt.plan.backend, BackendEvent::Pending);
+    native
+        .broker
+        .with_authority(webview.label(), &proof, || {
+            native.preparing(attempt.plan.backend)
+        })
+        .map_err(error)?;
     let progress_native = native.clone();
     let backend_id = attempt.plan.backend;
-    let backend = provider
-        .connect(attempt.clone(), move |progress| {
-            progress_native.event(backend_id, BackendEvent::Progress(Arc::new(progress)));
-        })
-        .await;
+    // Keep only the latest report while one evaluation is pending. A frozen
+    // WebView cannot accumulate progress tasks or framework evaluations.
+    let (reports, mut updates) = tokio::sync::watch::channel(None);
+    let connecting = provider.connect(attempt.clone(), move |progress| {
+        let progress = Arc::new(progress);
+        progress_native.event(backend_id, BackendEvent::Progress(progress.clone()));
+        reports.send_replace(Some(progress));
+    });
+    let reporting = async {
+        loop {
+            if updates.changed().await.is_err() {
+                std::future::pending::<()>().await;
+            }
+            let progress = updates
+                .borrow_and_update()
+                .clone()
+                .expect("published progress");
+            if !attempt.current() {
+                return Err(std::io::Error::other("native document closed"));
+            }
+            let (script, evaluation, completed) = output
+                .progress_script(&attempt, progress)
+                .map_err(std::io::Error::other)?;
+            evaluation
+                .dispatch(&webview, script)
+                .map_err(std::io::Error::other)?;
+            let mut closing = attempt.context.closing();
+            let accepted = tokio::select! { biased;
+                _ = closing.wait_for(|closed| *closed) => false,
+                result = tokio::time::timeout(pipe::DELIVERY_TIMEOUT, completed) => matches!(result, Ok(Ok(true))),
+            };
+            if !accepted {
+                attempt.context.close();
+                return Err(std::io::Error::other("native progress delivery ended"));
+            }
+        }
+    };
+    let backend = tokio::select! { biased;
+        result = connecting => result,
+        result = reporting => result,
+    };
     let backend = match backend {
         Ok(backend) => backend,
         Err(error) => {
@@ -1098,6 +1228,82 @@ mod tests {
         drop(control);
         drop(failure);
         assert_eq!(budget.used(), 0);
+    }
+
+    #[test]
+    fn removed_backend_cannot_resurrect_start_or_ready_markers() {
+        let native = Native::default();
+        let backend = BackendId::new();
+        native.provider(
+            backend,
+            Arc::new(Provider::remote(
+                splitty_remote::ssh::SshTarget::parse("host").unwrap(),
+            )),
+        );
+        native
+            .broker
+            .register(
+                "remote",
+                Policy::Remote {
+                    backend,
+                    target: splitty_remote::ssh::SshTarget::parse("host").unwrap(),
+                },
+            )
+            .unwrap();
+        native.preparing(backend);
+        native.event(backend, BackendEvent::Ready);
+        assert!(native.backend_started(backend));
+        assert_eq!(native.ready_epoch(backend), 1);
+        native.destroyed("remote");
+        native.preparing(backend);
+        native.event(backend, BackendEvent::Ready);
+        assert!(!native.backend_started(backend));
+        assert_eq!(native.ready_epoch(backend), 0);
+        assert!(native.watch_backend(backend).is_none());
+    }
+
+    #[test]
+    fn progress_delivery_keeps_source_and_encoded_budget_after_revocation() {
+        let native = Native::default();
+        native
+            .broker
+            .register(
+                "main",
+                Policy::Main {
+                    backend: BackendId::new(),
+                },
+            )
+            .unwrap();
+        let proof = native.broker.committed("main").unwrap();
+        let attempt = Arc::new(native.broker.open("main", &proof, 1, None, false).unwrap());
+        let budget = attempt.context.budget.clone();
+        let progress = Arc::new(budget.reserve(128, false).unwrap().charge(
+            splitty_transport::wire::Progress {
+                phase: "installing".into(),
+                message: "prepared \"quoted\" payload".into(),
+            },
+        ));
+        let output = Output {
+            receiver: "private_receiver".into(),
+            document: proof.document,
+            callback: 7,
+        };
+        let (script, evaluation, completed) = output.progress_script(&attempt, progress).unwrap();
+        assert!(script.contains("progress:"));
+        let retained = budget.used();
+        assert!(retained > 128);
+        native.destroyed("main");
+        drop(attempt);
+        drop(completed);
+        assert_eq!(
+            budget.used(),
+            retained,
+            "revocation does not release framework-owned evaluation"
+        );
+        drop(script);
+        drop(evaluation);
+        assert_eq!(budget.used(), 0);
+        assert_eq!(native.broker.counts(), (0, 0));
     }
 
     #[tokio::test(start_paused = true)]

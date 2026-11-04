@@ -44,7 +44,7 @@ fn challenge(
     webview
         .eval(client_ipc::bootstrap::challenge_script(
             &receiver,
-            &value.nonce,
+            value.generation,
             value.token,
         ))
         .map_err(|e| e.to_string())
@@ -54,7 +54,6 @@ fn native_bootstrap_begin(
     webview: tauri::Webview,
     native: tauri::State<'_, Arc<Native>>,
     bootstrap: [u8; 32],
-    nonce: String,
 ) -> Result<(), String> {
     let policy = native
         .broker
@@ -65,7 +64,7 @@ fn native_bootstrap_begin(
     }
     if let Some(value) = native
         .broker
-        .bootstrap_begin(webview.label(), &bootstrap, &nonce)
+        .bootstrap_begin(webview.label(), &bootstrap)
         .map_err(|_| "native bootstrap denied")?
     {
         challenge(&webview, &native, value)?;
@@ -77,7 +76,7 @@ fn native_bootstrap_confirm(
     webview: tauri::Webview,
     native: tauri::State<'_, Arc<Native>>,
     bootstrap: [u8; 32],
-    nonce: String,
+    generation: u64,
     challenge: [u8; 32],
 ) -> Result<serde_json::Value, String> {
     let policy = native
@@ -89,7 +88,7 @@ fn native_bootstrap_confirm(
     }
     let (proof, policy) = native
         .broker
-        .bootstrap_confirm(webview.label(), &bootstrap, &nonce, &challenge)
+        .bootstrap_confirm(webview.label(), &bootstrap, generation, &challenge)
         .map_err(|_| "native bootstrap denied")?;
     let (role, target) = match policy {
         Policy::Main { .. } => ("main", None),
@@ -346,23 +345,30 @@ mod windows_commands {
             .broker
             .setup_action(webview.label(), &proof)
             .map_err(|_| "setup document required")?;
-        let owner = state.owner()?;
-        let backend = BackendId::new();
-        native.provider(backend, Arc::new(Provider::owned(owner)));
-        native
-            .broker
-            .replace(webview.label(), Policy::Main { backend })
-            .map_err(|_| "setup document closed")?;
         let window = app
             .get_webview_window(webview.label())
             .ok_or("main window closed")?;
-        window
-            .navigate(
-                "http://tauri.localhost/index.html"
-                    .parse()
-                    .expect("packaged entry"),
-            )
-            .map_err(|e| e.to_string())
+        let owner = state.owner()?;
+        let backend = BackendId::new();
+        native
+            .broker
+            .replace_setup(webview.label(), &proof, backend, || {
+                native.provider(backend, Arc::new(Provider::owned(owner)));
+            })
+            .map_err(|_| "setup document closed")?;
+        // Destruction after the atomic broker/provider commit removes the
+        // provider too. A failed navigation must not leave an unusable grant.
+        if let Err(error) = window.navigate(
+            "http://tauri.localhost/index.html"
+                .parse()
+                .expect("packaged entry"),
+        ) {
+            native.destroyed(webview.label());
+            native.remove_provider(backend);
+            let _ = window.destroy();
+            return Err(error.to_string());
+        }
+        Ok(())
     }
     #[tauri::command]
     pub(crate) async fn wsl_switch_distribution(

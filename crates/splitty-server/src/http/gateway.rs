@@ -27,6 +27,8 @@ use splitty_transport::{
 };
 use std::{collections::HashMap, io, sync::Arc};
 use tokio::sync::watch;
+
+mod api_client;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::{Control, Data, OpCode};
 
 #[derive(Clone)]
@@ -65,6 +67,7 @@ impl AsRef<[u8]> for ResponseBody {
 pub struct Backend {
     source: Source,
     current: watch::Sender<Option<Descriptor>>,
+    api: api_client::Pool,
 }
 impl Backend {
     /// The caller owns the service lifetime. This route never discovers a
@@ -77,6 +80,7 @@ impl Backend {
                 connector: Connector::default(),
             },
             current,
+            api: api_client::Pool::default(),
         })
     }
     pub fn close(&self) {
@@ -87,6 +91,7 @@ impl Backend {
         Arc::new(Self {
             source: Source::Remote(remote),
             current,
+            api: api_client::Pool::default(),
         })
     }
     pub fn set_remote(&self, daemon: Option<RunningDaemon>) {
@@ -99,6 +104,7 @@ impl Backend {
         Arc::new(Self {
             source: Source::Local(Connector::default()),
             current,
+            api: api_client::Pool::default(),
         })
     }
     #[cfg(unix)]
@@ -235,56 +241,6 @@ impl Connection {
                 let _ = client.finish().await;
             }
         }
-    }
-    async fn call(&mut self, request: &catalog::Request) -> io::Result<(wire::Reply, Lease)> {
-        let sender = self.sender();
-        #[derive(serde::Serialize)]
-        struct BorrowedRequest<'a> {
-            id: u32,
-            operation: &'static str,
-            args: &'a serde_json::Map<String, Value>,
-        }
-        sender.json(
-            Kind::Request,
-            &BorrowedRequest {
-                id: 1,
-                operation: request.operation.description().name,
-                args: &request.args,
-            },
-        )?;
-        struct Cancel(Sender);
-        impl Drop for Cancel {
-            fn drop(&mut self) {
-                let _ = self.0.control(
-                    Kind::Cancel,
-                    &wire::Cancel {
-                        generation: self.0.generation(),
-                        id: 1,
-                    },
-                );
-            }
-        }
-        let _cancel = Cancel(sender.clone());
-        while let Some(message) = self.recv().await {
-            if message.frame.kind != Kind::Reply {
-                continue;
-            }
-            let (reply, lease) = message
-                .frame
-                .decode_charged::<wire::Reply>(&sender.context().budget)?
-                .into_parts();
-            if reply.id != 1 {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    "unexpected native API reply",
-                ));
-            }
-            return Ok((reply, lease));
-        }
-        Err(io::Error::new(
-            io::ErrorKind::ConnectionAborted,
-            "backend connection ended",
-        ))
     }
 }
 
@@ -505,6 +461,12 @@ async fn api(state: Gateway, operation: Operation, request: Request) -> Response
         Ok(ticket) => ticket,
         Err(error) => return rejected(StatusCode::SERVICE_UNAVAILABLE, error, false),
     };
+    // This slot bounds body parsers, connection waiters and submitted RPCs.
+    // A cancelled RPC retains it until its reply or carrier cleanup is observed.
+    let capacity = match state.backend.api.admit() {
+        Ok(capacity) => capacity,
+        Err(error) => return rejected(StatusCode::SERVICE_UNAVAILABLE, error, false),
+    };
     let budget = ConnectionBudget::default();
     let (query, _parameter_bytes) = match parse_query(request.uri(), description.arguments, &budget)
     {
@@ -520,18 +482,34 @@ async fn api(state: Gateway, operation: Operation, request: Request) -> Response
             Err(_) => return rejected(StatusCode::BAD_REQUEST, "invalid path arguments", false),
         };
     let request = Request::from_parts(parts, body);
-    let _body = match budget.reserve(2 * description.body_limit, false) {
+    // Bodyless catalog operations need no maximum-sized JSON allocation.
+    let body_limit = if description.arguments.contains(&"body") {
+        description.body_limit
+    } else {
+        0
+    };
+    let _body = match budget.reserve(2 * body_limit, false) {
         Ok(lease) => lease,
         Err(error) => return rejected(StatusCode::SERVICE_UNAVAILABLE, error, false),
     };
     let read = tokio::select! { biased;
         _ = ticket.revision.changed() => return rejected(StatusCode::SERVICE_UNAVAILABLE, "backend changed before request admission", false),
-        result = tokio::time::timeout(wire::FRAME_TIMEOUT, axum::body::to_bytes(request.into_body(), description.body_limit)) => result,
+        result = tokio::time::timeout(wire::FRAME_TIMEOUT, axum::body::to_bytes(request.into_body(), body_limit)) => result,
     };
     let bytes = match read {
         Err(_) => return rejected(StatusCode::REQUEST_TIMEOUT, "request body timed out", false),
         Ok(Ok(bytes)) => bytes,
-        Ok(Err(error)) => return rejected(StatusCode::PAYLOAD_TOO_LARGE, error, false),
+        Ok(Err(error)) => {
+            return rejected(
+                if body_limit == 0 {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::PAYLOAD_TOO_LARGE
+                },
+                error,
+                false,
+            )
+        }
     };
     let _decoded = match splitty_transport::codec::reserve_json(&bytes, &budget, false) {
         Ok(lease) => lease,
@@ -561,8 +539,13 @@ async fn api(state: Gateway, operation: Operation, request: Request) -> Response
         };
         return rejected(status, error, false);
     }
-    let (mut connection, mut revision) = match state.backend.open(ticket).await {
+    let mut revision = ticket.revision.clone();
+    let connection = match state.backend.api.connection(&state.backend, ticket).await {
         Ok(connection) => connection,
+        Err(error) => return rejected(StatusCode::SERVICE_UNAVAILABLE, error, false),
+    };
+    let mut call = match connection.begin(&request, capacity) {
+        Ok(call) => call,
         Err(error) => return rejected(StatusCode::SERVICE_UNAVAILABLE, error, false),
     };
     let deadline = description
@@ -572,9 +555,8 @@ async fn api(state: Gateway, operation: Operation, request: Request) -> Response
     let result = tokio::select! { biased;
         _ = revision.changed() => Err(io::Error::new(io::ErrorKind::ConnectionAborted, "backend changed; the request was not replayed")),
         _ = tokio::time::sleep_until(deadline.unwrap_or_else(tokio::time::Instant::now)), if deadline.is_some() => Err(io::Error::new(io::ErrorKind::TimedOut, "backend request timed out")),
-        reply = connection.call(&request) => reply,
+        reply = call.recv() => reply,
     };
-    connection.finish().await;
     match result {
         Ok((reply, lease)) => native_reply(reply, lease, &budget),
         Err(error) => rejected(

@@ -27,7 +27,7 @@ function capsule({ child = false, href = 'tauri://localhost/index.html', entry =
   vm.runInContext(template.replace('__SPLITTY_BOOTSTRAP_CONFIG__', JSON.stringify({ bootstrap: secret, receiver: 'receive', entry })), scope);
   const begin = calls.find(call => call.command === 'native_bootstrap_begin');
   return { window, calls, callbacks, events, begin, bridge: window.__SPLITTY_TAURI__,
-    authenticate: () => window.receive({ nonce: begin.args.nonce, challenge }) };
+    authenticate: () => window.receive({ generation: 2, challenge }) };
 }
 test('capsule requires assigned packaged document and main frame', () => {
   for (const options of [{ child: true }, { href: 'https://example.com/index.html' }, { href: 'tauri://localhost/popout.html' }]) {
@@ -66,10 +66,10 @@ test('delayed consumption replies bound acknowledgements without disconnecting a
   callback({ index: 20, message: new Uint8Array([0]).buffer });
   assert.equal(c.callbacks.size, 0);
 });
-test('nonce mismatch cannot confirm; proof stays private and caller auth is replaced', async () => {
+test('invalid generation cannot confirm; proof stays private and caller auth is replaced', async () => {
   const c = capsule();
   assert.ok(Object.isFrozen(c.bridge)); assert.ok(Object.isFrozen(c.bridge.native));
-  await c.window.receive({ nonce: 'old-document', challenge });
+  await c.window.receive({ generation: 'old-document', challenge });
   assert.equal(c.calls.length, 1);
   await c.authenticate();
   const metadata = await c.bridge.ready;
@@ -359,4 +359,45 @@ test('pending diagnostic opens retain the existing 32 slots until actual invoke 
   for (const reject of rejected) reject('SplittyNativeFailureDelivered');
   for (const error of await Promise.all(pending)) assert.equal(error, `SplittyNativeFailure:${JSON.stringify(failure)}`);
   assert.equal(c.callbacks.size, 0);
+});
+
+test('duplicate challenge cannot discard a valid pending confirmation', async () => {
+  let resolve;
+  const c = capsule({ confirm: () => new Promise(done => { resolve = done; }) });
+  const first = c.authenticate();
+  await c.authenticate();
+  assert.equal(c.calls.filter(call => call.command === 'native_bootstrap_confirm').length, 1);
+  resolve({ auth: { document: 12, secret: proof }, role: 'main' });
+  await first;
+  assert.equal((await c.bridge.ready).role, 'main');
+});
+test('stale evaluated challenge cannot fail or replace current confirmation', async () => {
+  const c = capsule({ confirm: args => args.generation === 1 ? Promise.reject('Denied') : { auth: { document: 12, secret: proof }, role: 'main' } });
+  await c.window.receive({ generation: 1, challenge });
+  await c.authenticate();
+  await c.window.receive({ generation: 1, challenge });
+  assert.equal((await c.bridge.ready).role, 'main');
+  assert.equal(c.calls.filter(call => call.command === 'native_bootstrap_confirm').length, 2);
+});
+
+test('opening progress is scoped to the document/request and stops on cancel or Ready', async () => {
+  let complete;
+  const c = capsule({ openReport: () => new Promise(resolve => { complete = resolve; }) });
+  await c.authenticate();
+  const reports = [];
+  const opening = c.bridge.native.open({ target: 'host' }, 1, progress => reports.push(progress));
+  await new Promise(resolve => setImmediate(resolve));
+  const callback = c.calls.find(call => call.command === 'native_open').args.output;
+  const packet = { progress: { phase: 'installing', message: 'Preparing' } };
+  assert.equal(c.window.receive_output(11, callback, packet), false);
+  assert.equal(c.window.receive_output(12, callback + 1, packet), false);
+  assert.equal(c.window.receive_output(12, callback, packet), true);
+  assert.equal(reports.length, 1);
+  assert.equal(reports[0].phase, 'installing');
+  c.bridge.native.cancelOpen(1);
+  c.window.receive_output(12, callback, packet);
+  assert.equal(reports.length, 1);
+  complete({ handle: 'a'.repeat(32), document: '12', generation: 1, instance: 'b'.repeat(32), role: 'main' });
+  await opening;
+  assert.equal(c.window.receive_output(12, callback, packet), false);
 });

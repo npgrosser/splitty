@@ -56,3 +56,36 @@ it("aborts an unfinished SSH preparation when its host view closes", async () =>
   });
   socket.close(); expect(signal?.aborted).toBe(true); await tick();
 });
+
+it("shows preparation progress before Ready and suppresses only its matching prelude", async () => {
+  const f = fixture(); let finish!: (channel: NativeChannel) => void;
+  let report!: (value: { phase: string; message: string }) => void;
+  const socket = new NativeHubSocket("vm1", false, "document", (_target, _update, _signal, progress) => {
+    report = progress!; return new Promise(resolve => { finish = resolve; });
+  });
+  const seen = vi.fn(); socket.onmessage = seen;
+  report({ phase: "install", message: "Installing" }); await tick();
+  expect(socket.readyState).toBe(0);
+  expect(seen).toHaveBeenCalledWith({ data: JSON.stringify({ type: "remote.progress", step: "install", message: "Installing" }) });
+  finish(f.channel); await tick();
+  f.json({ type: "remote.progress", step: "install", message: "Installing" });
+  expect(seen).toHaveBeenCalledTimes(1);
+  f.json({ type: "remote.progress", step: "bridge", message: "Ready" });
+  expect(seen).toHaveBeenCalledTimes(2);
+  f.json(ready); expect(seen).toHaveBeenCalledTimes(3);
+  socket.close(); report({ phase: "daemon", message: "Stale" }); await tick();
+  expect(seen).toHaveBeenCalledTimes(3);
+});
+
+it("keeps live progress visible when preparation fails before Ready", async () => {
+  let fail!: (error: Error) => void;
+  const remote = new RemoteSocket("vm1", { openNative: (target, { update }) => new NativeHubSocket(target, update, "document", (_target, _update, _signal, progress) => {
+    progress?.({ phase: "install", message: "Installing" });
+    return new Promise((_resolve, reject) => { fail = reject; });
+  }) });
+  remote.connect(); await tick();
+  expect(remote.state.progress).toEqual([{ step: "install", message: "Installing" }]);
+  fail(Error("SSH failed")); await tick();
+  expect(remote.state).toMatchObject({ phase: "failed", progress: [{ step: "install", message: "Installing" }] });
+  remote.dispose();
+});

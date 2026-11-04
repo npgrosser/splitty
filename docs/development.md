@@ -123,8 +123,9 @@ for the remaining platform cases and the distinction between app exit and reload
 
 The actual macOS WKWebView full-UI run passes 37 document generations, packaged
 assets, popouts, native traffic and coexistence with a separate daemon. macOS
-core failures and the remaining platform matrix are recorded in the verification
-status; passing this runtime smoke does not waive those checks.
+core acceptance also passed at the recorded pre-review revision. Subsequent review
+corrections require fresh targeted checks and CI; the verification status records
+which revisions and platform cases have actually passed.
 
 ## Production builds
 

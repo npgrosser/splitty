@@ -891,9 +891,13 @@ async fn connect(
         (backend, label, link, events, 0)
     };
     let mut check = tokio::time::interval(Duration::from_millis(100));
+    let bootstrap_deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let result = loop {
         tokio::select! { biased;
             _ = settled(&mut outcome) => break Err(cancelled()),
+            _ = bootstrap_timeout(&native, backend, bootstrap_deadline), if !reused => {
+                break Err(failure("Remote window bootstrap timed out."));
+            }
             _ = check.tick() => {
                 if remotes.current_requesters(&native, &host, attempt).is_empty() { break Err(cancelled()); }
                 if *link.closed.borrow() { break Err(cancelled()); }
@@ -920,6 +924,7 @@ async fn connect(
         .remove(&host);
     if let Err(error) = result {
         if !reused {
+            native.destroyed(&label);
             if let Some(window) = app.get_webview_window(&label) {
                 let _ = window.destroy();
             }
@@ -942,6 +947,7 @@ async fn connect(
     });
     if !committed {
         if !reused {
+            native.destroyed(&label);
             if let Some(window) = app.get_webview_window(&label) {
                 let _ = window.destroy();
             }
@@ -967,6 +973,16 @@ async fn connect(
     let mut closed = link.closed.clone();
     let _ = closed.wait_for(|gone| *gone).await;
     native.remove_provider(backend);
+}
+
+/// The deadline only bounds creation of an authenticated native stream, not SSH
+/// installation/preparation after that stream has begun. Initial watch Pending
+/// is not proof that the document ever invoked native_open.
+async fn bootstrap_timeout(native: &Native, backend: BackendId, deadline: tokio::time::Instant) {
+    tokio::time::sleep_until(deadline).await;
+    if native.backend_started(backend) {
+        std::future::pending::<()>().await;
+    }
 }
 
 fn record_recent(app: &AppHandle, target: &SshTarget) {
@@ -1051,6 +1067,38 @@ fn focus(window: &WebviewWindow) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn bootstrap_deadline_ends_missing_ui_but_not_started_ssh_preparation() {
+        let native = Arc::new(Native::default());
+        let missing = BackendId::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let waiting = native.clone();
+        let timeout =
+            tokio::spawn(async move { bootstrap_timeout(&waiting, missing, deadline).await });
+        tokio::time::advance(Duration::from_secs(19)).await;
+        assert!(!timeout.is_finished());
+        tokio::time::advance(Duration::from_secs(1)).await;
+        timeout.await.unwrap();
+        let started = BackendId::new();
+        native.provider(
+            started,
+            Arc::new(Provider::remote(SshTarget::parse("host").unwrap())),
+        );
+        native.preparing(started);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        let waiting = native.clone();
+        let timeout =
+            tokio::spawn(async move { bootstrap_timeout(&waiting, started, deadline).await });
+        tokio::time::advance(Duration::from_secs(600)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !timeout.is_finished(),
+            "SSH preparation has its own timeout"
+        );
+        timeout.abort();
+        assert!(timeout.await.unwrap_err().is_cancelled());
+    }
 
     fn link() -> WindowLink {
         let (_closed, closed) = watch::channel(false);

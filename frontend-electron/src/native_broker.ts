@@ -52,7 +52,7 @@ export class NativeBroker {
       if (this.navigationAllowed && !this.navigationAllowed(contents, details.url)) return;
       if (details.isMainFrame && !details.isSameDocument) { grant.navigating = true; this.revoke(contents); }
     });
-    contents.on("did-navigate", () => { this.revoke(contents); grant.navigating = false; });
+    contents.on("did-navigate", () => { grant.navigating = false; this.revoke(contents); });
     contents.on("did-stop-loading", () => {
       // An admitted navigation can also be aborted before commit. Once the
       // native loader confirms it has stopped on an authorized entry, publish
@@ -161,7 +161,7 @@ export class NativeBroker {
     };
     try {
       const connected = grant.policy.open({
-        progress: progress => { if (current()) this.notify(frame, "native:progress", { request, ...progress }); },
+        progress: progress => { if (current()) this.notify(frame, "native:progress", { request, document: attempt.document, ...progress }); },
         closed: reason => {
           attempt.failure = reason;
           attempt.port?.close(reason);

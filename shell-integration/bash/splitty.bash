@@ -62,7 +62,7 @@ if [[ ${SPLITTY_BASH_INJECT+x} ]]; then
                     break
                 }
             done
-            if [[ -z "$SPLITTY_BASH_RCFILE" ]]; then SPLITTY_BASH_RCFILE="$HOME/.bashrc"; fi
+            if [[ -z "${SPLITTY_BASH_RCFILE-}" ]]; then SPLITTY_BASH_RCFILE="$HOME/.bashrc"; fi
             [ -r "$SPLITTY_BASH_RCFILE" ] && builtin source "$SPLITTY_BASH_RCFILE"
         fi
     fi
@@ -72,7 +72,7 @@ if [[ ${SPLITTY_BASH_INJECT+x} ]]; then
     if [[ $__splitty_bash_flags != *"--splitty-command"* && -z "$(builtin history 1)" ]]; then
         HISTSIZE="${HISTSIZE-500}"
         HISTFILESIZE="${HISTFILESIZE-$HISTSIZE}"
-        if [[ -n "$HISTFILE" && -f "$HISTFILE" && -r "$HISTFILE" ]]; then
+        if [[ -n "${HISTFILE-}" && -f "$HISTFILE" && -r "$HISTFILE" ]]; then
             builtin history -r "$HISTFILE"
         fi
     fi
@@ -83,8 +83,8 @@ if [[ ${SPLITTY_BASH_INJECT+x} ]]; then
 fi
 
 # Guard: only run inside Splitty, prevent double-sourcing
-[[ -z "$SPLITTY_SESSION_ID" ]] && return
-[[ -n "$__splitty_bash_integration" ]] && return
+[[ -z "${SPLITTY_SESSION_ID-}" ]] && return
+[[ -n "${__splitty_bash_integration-}" ]] && return
 __splitty_bash_integration=1
 
 # Login profiles may replace the PATH supplied by the server. Restore only the
@@ -124,7 +124,7 @@ __splitty_ps0() {
 }
 
 # Install hooks
-if [[ ! "$PROMPT_COMMAND" == *"__splitty_precmd"* ]]; then
+if [[ ! "${PROMPT_COMMAND-}" == *"__splitty_precmd"* ]]; then
     PROMPT_COMMAND="__splitty_precmd${PROMPT_COMMAND:+;$PROMPT_COMMAND}"
 fi
 
@@ -132,4 +132,4 @@ fi
 PS0='$(__splitty_ps0)'
 
 # Append 133;B (input start) after the prompt
-PS1="${PS1}\[\e]133;B\a\]"
+PS1="${PS1-}\[\e]133;B\a\]"

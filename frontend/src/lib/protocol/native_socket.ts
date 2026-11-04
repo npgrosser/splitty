@@ -13,6 +13,7 @@ export interface NativeDelivery {
   readonly document: string;
   readonly frame: NativeFrame;
 }
+export interface NativeProgress { phase: string; message: string }
 /** subscribe/start must not lose the initial welcome. The broker retains all
  * output leases until receipt consumption, also across IPC fragmentation. */
 export interface NativeChannel {

@@ -201,6 +201,7 @@ pub struct Peer {
     pub sender: Sender,
     incoming: queue::Receiver<Incoming>,
     cancel: queue::Receiver<Incoming>,
+    cancel_ended: bool,
     tasks: Vec<JoinHandle<io::Result<()>>>,
 }
 impl Peer {
@@ -227,29 +228,50 @@ impl Peer {
         let ledger = Arc::new(Mutex::new(flow::Credits::new(ready.generation)));
         let read_sender = sender.clone();
         let read_ledger = ledger.clone();
+        let (read_ended, mut ended) = tokio::sync::watch::channel(false);
         let read = tokio::spawn(async move {
             let result = read_loop(reader, &read_sender, read_ledger, incoming, cancel).await;
-            read_sender.close();
+            if result.is_err() {
+                read_sender.close();
+            }
+            // EOF closes ingress, not authority: accepted frames still belong
+            // to the consumer. Stop writes without revoking those frames.
+            read_ended.send_replace(true);
             result
         });
         let write_context = context;
         let write = tokio::spawn(async move {
-            let result =
-                write_loop(writer, out_rx, ctl_rx, receipt_rx, ledger, &write_context).await;
-            write_context.close();
+            let result = tokio::select! { biased;
+                _ = ended.wait_for(|done| *done) => Ok(()),
+                result = write_loop(writer, out_rx, ctl_rx, receipt_rx, ledger, &write_context) => result,
+            };
+            if result.is_err() || !*ended.borrow() {
+                write_context.close();
+            }
             result
         });
         Self {
             sender,
             incoming: in_rx,
             cancel: cancel_rx,
+            cancel_ended: false,
             tasks: vec![read, write],
         }
     }
     pub async fn recv(&mut self) -> Option<Charged<Incoming>> {
-        tokio::select! { biased;
-            value = self.cancel.recv() => value,
-            value = self.incoming.recv() => value,
+        loop {
+            tokio::select! { biased;
+                value = self.cancel.recv(), if !self.cancel_ended => match value {
+                    Some(value) => return Some(value),
+                    None => self.cancel_ended = true,
+                },
+                value = self.incoming.recv() => {
+                    if value.is_none() {
+                        self.sender.close();
+                    }
+                    return value;
+                },
+            }
         }
     }
     pub async fn finish(mut self) -> io::Result<()> {
@@ -292,6 +314,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
     let mut ping = time::interval_at(Instant::now() + wire::PING_INTERVAL, wire::PING_INTERVAL);
     ping.set_missed_tick_behavior(time::MissedTickBehavior::Delay);
     let mut outstanding: Option<u32> = None;
+    // Liveness is time since the last matched pong (or connection start),
+    // checked at 15-second ticks, not a fresh 30-second grace for every ping.
     let mut last_pong = Instant::now();
     loop {
         let read = codec::read_limited(
@@ -898,6 +922,127 @@ mod tests {
         drop(current);
         peer.shutdown().await;
         assert_eq!(context.budget.used(), 0);
+    }
+
+    #[tokio::test]
+    async fn orderly_end_drains_accepted_frames_but_revocation_and_bad_frames_discard() {
+        use tokio::io::AsyncWriteExt;
+        for ending in ["eof", "closed", "revoked", "malformed"] {
+            let (server, mut raw) = tokio::io::duplex(4096);
+            let (read, write) = tokio::io::split(server);
+            let context = queue::Context::default();
+            let mut peer = Peer::start(read, write, &ready(), context.clone());
+            for kind in [Kind::Reply, Kind::Text] {
+                codec::write(
+                    &mut raw,
+                    &Frame::data(kind, Delivery::new(3), b"final").unwrap(),
+                )
+                .await
+                .unwrap();
+            }
+            codec::write(
+                &mut raw,
+                &Frame::json(
+                    Kind::Cancel,
+                    &wire::Cancel {
+                        generation: 3,
+                        id: 1,
+                    },
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            if ending == "closed" {
+                codec::write(
+                    &mut raw,
+                    &Frame::json(
+                        Kind::Closed,
+                        &wire::Closed {
+                            code: wire::CloseCode::Closed,
+                            message: "done".into(),
+                            retryable: false,
+                        },
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            } else {
+                if ending == "malformed" {
+                    raw.write_all(&[255]).await.unwrap();
+                }
+                raw.shutdown().await.unwrap();
+            }
+            // Observe actual reader completion before consuming, so this tests
+            // buffered terminal frames rather than racing the consumer against EOF.
+            let result = peer.tasks.remove(0).await.unwrap();
+            assert_eq!(result.is_err(), ending == "malformed");
+            if ending == "revoked" {
+                context.close();
+            }
+            if matches!(ending, "revoked" | "malformed") {
+                assert!(
+                    peer.recv().await.is_none(),
+                    "hard revocation discards queued input"
+                );
+            } else {
+                assert!(!context.is_closed());
+                for expected in [Kind::Cancel, Kind::Reply, Kind::Text] {
+                    let frame = peer.recv().await.expect("accepted final frame");
+                    assert_eq!(frame.frame.kind, expected);
+                }
+                assert!(peer.recv().await.is_none());
+            }
+            peer.shutdown().await;
+            assert_eq!(
+                context.budget.used(),
+                0,
+                "all retained final frames released"
+            );
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn liveness_counts_from_start_and_only_matched_pongs_extend_it() {
+        for matched in [false, true] {
+            let (server, mut raw) = tokio::io::duplex(4096);
+            let (read, write) = tokio::io::split(server);
+            let context = queue::Context::default();
+            let mut peer = Peer::start(read, write, &ready(), context.clone());
+            let budget = ConnectionBudget::default();
+            let frame = codec::read(&mut raw, &budget).await.unwrap().unwrap();
+            let mut ping: wire::Ping = frame.value.decode().unwrap();
+            drop(frame);
+            if !matched {
+                ping.nonce = ping.nonce.wrapping_add(1);
+            }
+            codec::write(&mut raw, &Frame::json(Kind::Pong, &ping).unwrap())
+                .await
+                .unwrap();
+            // A following Ping/Pong exchange is a barrier for parsing the pong.
+            codec::write(
+                &mut raw,
+                &Frame::json(Kind::Ping, &wire::Ping { nonce: 42 }).unwrap(),
+            )
+            .await
+            .unwrap();
+            let pong = codec::read(&mut raw, &budget).await.unwrap().unwrap();
+            assert_eq!(pong.value.kind, Kind::Pong);
+            drop(pong);
+            time::advance(wire::PING_INTERVAL).await;
+            if matched {
+                let next = codec::read(&mut raw, &budget).await.unwrap().unwrap();
+                assert_eq!(next.value.kind, Kind::Ping);
+                drop(next);
+                assert!(!context.is_closed());
+                time::advance(wire::PING_INTERVAL).await;
+            }
+            let error = peer.tasks.remove(0).await.unwrap().unwrap_err();
+            assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+            peer.shutdown().await;
+            assert_eq!(context.budget.used(), 0);
+        }
     }
 
     #[tokio::test]

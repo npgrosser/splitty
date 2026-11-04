@@ -118,11 +118,12 @@ struct Bootstrap {
     secret: [u8; 32],
     committed: bool,
     loaded: bool,
+    generation: u64,
     pending: Option<Challenge>,
 }
 #[derive(Clone)]
 pub(crate) struct Challenge {
-    pub(crate) nonce: String,
+    pub(crate) generation: u64,
     pub(crate) token: [u8; 32],
 }
 impl Bootstrap {
@@ -132,10 +133,17 @@ impl Bootstrap {
             secret: rand::random(),
             committed: false,
             loaded: false,
+            generation: 1,
             pending: None,
         }
     }
     fn revoke(&mut self) {
+        // Exhaustion closes bootstrap admission rather than reusing an epoch.
+        self.generation = (self.generation != 0)
+            .then_some(self.generation)
+            .and_then(|generation| generation.checked_add(1))
+            .filter(|n| *n < (1 << 53))
+            .unwrap_or(0);
         self.committed = false;
         self.loaded = false;
         self.pending = None;
@@ -343,38 +351,38 @@ impl Broker {
             .bootstrap
             .secret)
     }
-    /// The initialization capsule names its random document nonce. The native
-    /// Finished callback and an eval into the current main document must both
-    /// agree before a proof can be issued. At most one pending nonce is kept.
+    /// Begin only requests evaluation in the current document. It never reserves
+    /// a caller-selected nonce: an old queued Begin must not displace a newer
+    /// document. The challenge is native-owned and rotates on navigation.
     pub(crate) fn bootstrap_begin(
         &self,
         label: &str,
         secret: &[u8; 32],
-        nonce: &str,
     ) -> Result<Option<Challenge>, Error> {
-        if nonce.len() != 64 || !nonce.bytes().all(|b| b.is_ascii_hexdigit()) {
-            return Err(Error::Invalid);
-        }
         let mut registry = self.registry.lock().expect("native document registry");
         if registry.closed {
             return Err(Error::Closed);
         }
         let window = registry.windows.get_mut(label).ok_or(Error::Denied)?;
-        if !window.bootstrap.authenticates(secret)
-            || window.proof.is_some()
-            || window.bootstrap.pending.is_some()
-        {
+        if !window.bootstrap.authenticates(secret) || window.bootstrap.generation == 0 {
             return Err(Error::Denied);
         }
-        let challenge = Challenge {
-            nonce: nonce.to_owned(),
-            token: rand::random(),
-        };
-        window.bootstrap.pending = Some(challenge.clone());
+        if window.proof.is_some() {
+            return Ok(None);
+        }
+        let generation = window.bootstrap.generation;
+        let challenge = window
+            .bootstrap
+            .pending
+            .get_or_insert_with(|| Challenge {
+                generation,
+                token: rand::random(),
+            })
+            .clone();
         Ok(window.bootstrap.loaded.then_some(challenge))
     }
-    /// Wry reports Started at native main-document commit. Keep the nonce
-    /// that its document-created script may already have registered.
+    /// Wry reports Started at native main-document commit. Preserve a challenge
+    /// requested by its document-created script before the Finished callback.
     pub(crate) fn bootstrap_committed(&self, label: &str) -> Result<(), Error> {
         let mut registry = self.registry.lock().expect("native document registry");
         if registry.closed {
@@ -400,7 +408,7 @@ impl Broker {
         &self,
         label: &str,
         secret: &[u8; 32],
-        nonce: &str,
+        generation: u64,
         token: &[u8; 32],
     ) -> Result<(Proof, Policy), Error> {
         use subtle::ConstantTimeEq;
@@ -412,7 +420,7 @@ impl Broker {
         let pending = window.bootstrap.pending.as_ref().ok_or(Error::Denied)?;
         if !window.bootstrap.loaded
             || !window.bootstrap.authenticates(secret)
-            || pending.nonce != nonce
+            || pending.generation != generation
             || !bool::from(pending.token.ct_eq(token))
             || window.proof.is_some()
         {
@@ -461,7 +469,7 @@ impl Broker {
             .expect("native document registry")
             .revoke(label);
     }
-    #[cfg(any(target_os = "windows", test))]
+    #[cfg(test)]
     pub(crate) fn replace(&self, label: &str, policy: Policy) -> Result<(), Error> {
         if matches!(&policy, Policy::Remote { target, .. } if target.as_str().len() > 4096) {
             return Err(Error::Invalid);
@@ -481,10 +489,30 @@ impl Broker {
             .policy = policy;
         Ok(())
     }
-    pub(crate) fn destroyed(&self, label: &str) {
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn replace_setup<R>(
+        &self,
+        label: &str,
+        proof: &Proof,
+        backend: BackendId,
+        install: impl FnOnce() -> R,
+    ) -> Result<R, Error> {
+        let mut registry = self.registry.lock().expect("native document registry");
+        if !matches!(registry.window(label, proof)?.policy, Policy::Setup) {
+            return Err(Error::Denied);
+        }
+        registry.revoke(label);
+        registry
+            .windows
+            .get_mut(label)
+            .expect("registered window")
+            .policy = Policy::Main { backend };
+        Ok(install())
+    }
+    pub(crate) fn destroyed(&self, label: &str) -> Option<Policy> {
         let mut registry = self.registry.lock().expect("native document registry");
         registry.revoke(label);
-        registry.windows.remove(label);
+        registry.windows.remove(label).map(|window| window.policy)
     }
     pub(crate) fn shutdown(&self) {
         let mut registry = self.registry.lock().expect("native document registry");
@@ -731,40 +759,39 @@ mod tests {
             )
             .unwrap();
         let key = broker.bootstrap_key("main").unwrap();
-        let nonce = "a".repeat(64);
-        assert!(broker.bootstrap_begin("main", &[0; 32], &nonce).is_err());
-        assert!(broker
-            .bootstrap_begin("main", &key, &nonce)
-            .unwrap()
-            .is_none());
+        assert!(broker.bootstrap_begin("main", &[0; 32]).is_err());
+        assert!(broker.bootstrap_begin("main", &key).unwrap().is_none());
         assert!(broker.bootstrap_loaded("main").unwrap().is_none());
         broker.bootstrap_committed("main").unwrap();
-        let challenge = broker.bootstrap_loaded("main").unwrap().unwrap();
+        let old = broker.bootstrap_loaded("main").unwrap().unwrap();
         assert!(broker
-            .bootstrap_confirm("main", &key, &"b".repeat(64), &challenge.token)
+            .bootstrap_confirm("main", &key, old.generation + 1, &old.token)
             .is_err());
         broker.navigating("main");
         assert!(broker
-            .bootstrap_confirm("main", &key, &nonce, &challenge.token)
+            .bootstrap_confirm("main", &key, old.generation, &old.token)
             .is_err());
-        assert!(broker.bootstrap_loaded("main").unwrap().is_none());
+        // Whether an old queued Begin arrives before or after the new one,
+        // both can only request the same current-document evaluation.
+        assert!(broker.bootstrap_begin("main", &key).unwrap().is_none());
         broker.bootstrap_committed("main").unwrap();
-        broker.bootstrap_loaded("main").unwrap();
-        let next = broker
-            .bootstrap_begin("main", &key, &"b".repeat(64))
-            .unwrap()
-            .unwrap();
+        let current = broker.bootstrap_loaded("main").unwrap().unwrap();
+        let repeated = broker.bootstrap_begin("main", &key).unwrap().unwrap();
+        assert_eq!(current.generation, repeated.generation);
+        assert_eq!(current.token, repeated.token);
+        assert!(current.generation > old.generation);
+        assert_ne!(current.token, old.token);
         assert!(broker
-            .bootstrap_confirm("main", &key, &nonce, &challenge.token)
+            .bootstrap_confirm("main", &key, old.generation, &old.token)
             .is_err());
         let (proof, _) = broker
-            .bootstrap_confirm("main", &key, &next.nonce, &next.token)
+            .bootstrap_confirm("main", &key, current.generation, &current.token)
             .unwrap();
         assert!(broker.authorize("main", &proof).is_ok());
         assert!(broker
-            .bootstrap_confirm("main", &key, &next.nonce, &next.token)
+            .bootstrap_confirm("main", &key, current.generation, &current.token)
             .is_err());
-        assert!(broker.bootstrap_begin("main", &key, &nonce).is_err());
+        assert!(broker.bootstrap_begin("main", &key).unwrap().is_none());
         broker.navigating("main");
         assert!(broker.authorize("main", &proof).is_err());
         assert_eq!(broker.current_document("main"), None);
@@ -773,6 +800,40 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn bootstrap_epoch_exhaustion_does_not_wrap_or_reopen() {
+        let mut bootstrap = Bootstrap::new();
+        bootstrap.generation = (1 << 53) - 1;
+        bootstrap.revoke();
+        assert_eq!(bootstrap.generation, 0);
+        bootstrap.revoke();
+        assert_eq!(bootstrap.generation, 0);
+    }
+
+    #[test]
+    fn setup_replacement_installs_only_under_current_document_authority() {
+        let broker = Broker::default();
+        broker.register("main", Policy::Setup).unwrap();
+        let stale = broker.committed("main").unwrap();
+        broker.navigating("main");
+        assert!(broker
+            .replace_setup("main", &stale, BackendId::new(), || panic!("stale install"))
+            .is_err());
+        let proof = broker.committed("main").unwrap();
+        let backend = BackendId::new();
+        assert_eq!(
+            broker.replace_setup("main", &proof, backend, || 7).unwrap(),
+            7
+        );
+        assert!(broker.authorize("main", &proof).is_err());
+        assert!(
+            matches!(broker.destroyed("main"), Some(Policy::Main { backend: actual }) if actual == backend)
+        );
+        assert!(broker
+            .replace_setup("main", &proof, backend, || panic!("destroyed install"))
+            .is_err());
+    }
 
     fn local() -> Policy {
         Policy::Main {

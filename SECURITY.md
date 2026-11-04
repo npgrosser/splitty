@@ -58,7 +58,17 @@ Splitty does **not** defend against:
 Reverse-share admission and browser binds coordinate through a private
 per-user reservation registry across configuration directories. Ambiguous
 worker identity, corrupt records and unsupported namespace views fail closed.
-Linux requires the initial PID/user namespaces and a matching root mount view.
+Linux requires the initial PID/user namespaces, a matching root mount view and
+verified persistent filesystem semantics for the account-home registry. These
+requirements also apply to `serve`/`connect` browser gateways, even when that
+process never starts a reverse share. Unsupported container/mount/filesystem
+views fail before binding; an isolated network namespace alone does not establish
+shared reservation authority among all processes that can reach its loopback.
+Native desktop and daemon transports do not require a browser gateway.
+A positively different immutable process birth identity in the same verified
+machine/boot/PID view permits release of the old worker generation. UID changes,
+unknown publication state and elapsed time do not. Cleanup bookkeeping exhaustion
+keeps admission closed rather than forgetting unresolved persisted claims.
 Windows and WSL refuse reverse sharing until a shared localhost reservation
 authority exists; explicit browser access and forward-to-local development
 ports remain separate supported surfaces. This registry does not constrain

@@ -133,7 +133,9 @@ it("blocks the old document during navigation and rejects its queued challenge a
   f.broker.open(f.event(main), { request: "during-navigation", document: old });
   f.broker.document(f.event(main));
   expect(f.open).not.toHaveBeenCalled();
+  const pushes = main.mainFrame.send.mock.calls.filter(call => call[0] === "native:document").length;
   main.emit("did-navigate");
+  expect(main.mainFrame.send.mock.calls.filter(call => call[0] === "native:document")).toHaveLength(pushes + 1);
   f.broker.open(f.event(main), { request: "queued-old", document: old });
   expect(f.open).not.toHaveBeenCalled();
   const next = f.authorize(main); expect(next).not.toBe(old);
@@ -277,4 +279,16 @@ it("binds every native shell command to the current main-document challenge", ()
   main.emit("did-navigate");
   expect(f.broker.authorized(f.event(main), document)).toBe(false);
   expect(f.broker.authorized(f.event(main), f.authorize(main))).toBe(true);
+});
+
+it("binds preparation progress to the requesting document and stops it after navigation", () => {
+  const f = broker(), main = new Contents(); f.grant(main);
+  const document = f.authorize(main);
+  f.broker.open(f.event(main), { request: "host-open" });
+  const events = f.open.mock.calls[0]![0];
+  events.progress?.({ phase: "install", message: "Installing" });
+  expect(main.mainFrame.send).toHaveBeenCalledWith("native:progress", { request: "host-open", document, phase: "install", message: "Installing" });
+  main.navigate(); main.mainFrame.send.mockClear();
+  events.progress?.({ phase: "daemon", message: "Late" });
+  expect(main.mainFrame.send.mock.calls.filter(call => call[0] === "native:progress")).toHaveLength(0);
 });

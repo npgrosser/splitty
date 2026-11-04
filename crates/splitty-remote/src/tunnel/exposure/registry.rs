@@ -726,7 +726,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pending_generations_and_reused_pids_never_become_missing_workers() {
+    async fn pending_generations_remain_reserved_but_proven_replacements_can_be_released() {
         for pending in [true, false] {
             let (_dir, registry) = fixture();
             let port = port();
@@ -749,17 +749,25 @@ mod tests {
                 })
                 .unwrap();
             drop(share);
-            assert!(
-                registry.bind(address(port)).is_err(),
-                "unknown generation must survive owner death"
-            );
-            registry
-                .transaction(|records| {
-                    assert_eq!(records.entries.len(), 1);
-                    assert!(!records.entries[0].active);
-                    Ok(())
-                })
-                .unwrap();
+            if pending {
+                assert!(
+                    registry.bind(address(port)).is_err(),
+                    "unknown generation must survive owner death"
+                );
+                registry
+                    .transaction(|records| {
+                        assert_eq!(records.entries.len(), 1);
+                        assert!(!records.entries[0].active);
+                        Ok(())
+                    })
+                    .unwrap();
+            } else {
+                drop(
+                    registry
+                        .bind(address(port))
+                        .expect("different verified process birth proves saved worker ended"),
+                );
+            }
         }
     }
 

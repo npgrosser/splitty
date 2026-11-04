@@ -55,7 +55,7 @@ def host_rootfs(path,base,keys,port):
             data=text.encode();info=tarfile.TarInfo(name);info.size=len(data);info.mode=0o755 if name.startswith('usr/bin/') else 0o600;archive.addfile(info,io.BytesIO(data))
 
 def gui(root,config,names,repo,cache):
-    raise RuntimeError("GUI disabled pending independent STARTUPINFOEX stdio review")
+    raise RuntimeError("Standalone GUI fixture is disabled; use the guarded tauri-windows-wsl-smoke.py entrypoint described in the harness README")
     common.instrument(root)
     crate=root/'crates/splitty-tauri'
     path=crate/'src/lib.rs';source=path.read_text().replace('.window("main").local(true).permission("allow-windows-smoke-report")','.window("*").local(true).permission("allow-windows-smoke-report")')

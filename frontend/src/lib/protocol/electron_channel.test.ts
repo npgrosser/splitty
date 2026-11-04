@@ -48,3 +48,21 @@ it("cancels native preparation immediately when the caller aborts", async () => 
   expect(b.value.cancelOpen).toHaveBeenCalledWith(vi.mocked(b.value.open).mock.calls[0]![1]);
   expect(b.value.start).not.toHaveBeenCalled();
 });
+
+it("delivers progress only during the current native opening", async () => {
+  const b = bridge(), seen = vi.fn(), abort = new AbortController();
+  const assignment = await b.value.open(undefined, "probe");
+  let report!: (value: { phase: string; message: string }) => void;
+  let finish!: (value: typeof assignment) => void;
+  b.value.open = (_options, _request, progress) => { report = progress!; return new Promise(resolve => { finish = resolve; }); };
+  const opening = openElectronChannel(b.value, { target: "vm1" }, abort.signal, seen);
+  report({ phase: "install", message: "Installing" });
+  expect(seen).toHaveBeenCalledOnce();
+  finish(assignment); const channel = await opening;
+  report({ phase: "daemon", message: "Late" }); expect(seen).toHaveBeenCalledOnce();
+  channel.close();
+  const next = openElectronChannel(b.value, { target: "vm1" }, abort.signal, seen);
+  abort.abort(); report({ phase: "bridge", message: "Cancelled" });
+  finish(assignment); await expect(next).rejects.toThrow();
+  expect(seen).toHaveBeenCalledOnce();
+});

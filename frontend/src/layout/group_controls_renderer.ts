@@ -1,6 +1,7 @@
 import type { IHeaderActionsRenderer, IGroupHeaderProps, DockviewApi, DockviewGroupPanel } from "dockview-core";
 import { addTerminalPane } from "../lib/panes.ts";
 import { getSettings, subscribe as subscribeSettings } from "../lib/settings.ts";
+import { isRemoteSession } from "../lib/platform.ts";
 import { shortcutTitle } from "../lib/shortcuts.ts";
 import { bindingForApi } from "../lib/connection/screen_binding.ts";
 import { toggleScratchpad } from "../lib/scratchpad.ts";
@@ -121,7 +122,7 @@ export class GroupControlsRenderer implements IHeaderActionsRenderer {
       splitRightBtn.style.display = s.tabs.showSplit ? "" : "none";
       splitDownBtn.style.display = s.tabs.showSplit ? "" : "none";
       floatBtn.style.display = s.tabs.showFloat && !isPopout ? "" : "none";
-      popoutBtn.style.display = s.tabs.showPopout ? "" : "none";
+      popoutBtn.style.display = s.tabs.showPopout && !isRemoteSession ? "" : "none";
       maxBtn.style.display = s.tabs.showMaximize && !isPopout ? "" : "none";
 
       // Float button state

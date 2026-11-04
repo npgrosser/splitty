@@ -18,6 +18,11 @@ import { toBase64 } from "../protocol/base64.ts";
 
 export { toBase64 };
 
+/** Preserve plain paths; quote shell metacharacters, including spaces and quotes. */
+export function quoteUploadPath(path: string): string {
+  return /^[\p{L}\p{N}_./-]+$/u.test(path) ? path : `'${path.replaceAll("'", `'"'"'`)}'`;
+}
+
 /** Largest image `save_image` takes; a larger one is uploaded as a file. */
 export const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 /** Largest file an upload sends; the server refuses larger ones. */
@@ -91,7 +96,7 @@ function pastesInto(element: Element | null | undefined): boolean {
  * order, separated by spaces. Files over the limit are refused before
  * anything is sent; any failure pastes nothing and says why.
  */
-export async function pasteFiles(files: readonly File[], target: ImagePasteTarget): Promise<void> {
+export async function pasteFiles(files: readonly File[], target: ImagePasteTarget, shellArguments = true): Promise<void> {
   const tooLarge = files.find((file) => file.size > MAX_FILE_BYTES);
   if (tooLarge) {
     target.failed(`${tooLarge.name || "A file"} is larger than 512 MB.`, false);
@@ -118,7 +123,7 @@ export async function pasteFiles(files: readonly File[], target: ImagePasteTarge
       target.progress?.(stored, total, false);
     }
     current();
-    if (paths.length > 0) target.paste(paths.join(" "));
+    if (paths.length > 0) target.paste((shellArguments ? paths.map(quoteUploadPath) : paths).join(" "));
   } catch (err) {
     const needsUpdate = typeof err === "object" && err !== null && "needsUpdate" in err && err.needsUpdate === true;
     target.failed(readError(err) ?? (err instanceof Error ? err.message : String(err)), needsUpdate);
@@ -200,7 +205,7 @@ export function attachImageInsert(
     const found = pastedFiles(e.clipboardData);
     if (found.length === 0) return;
     e.preventDefault();
-    void pasteFiles(found, target);
+    void pasteFiles(found, target, false);
   };
   const dragover = (e: DragEvent) => {
     if (!hasFiles(e.dataTransfer)) return;

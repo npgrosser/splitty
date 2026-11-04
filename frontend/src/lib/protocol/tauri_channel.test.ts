@@ -72,3 +72,21 @@ it("preserves native preparation retry policy without transport fallback", async
   await expect(openTauriChannel(b.value)).rejects.toMatchObject({ code: "backendLost", message: "Host identity changed", retryable: false });
   expect(b.value.start).not.toHaveBeenCalled();
 });
+
+it("delivers progress only during the current native opening", async () => {
+  const b = bridge(), seen = vi.fn(), abort = new AbortController();
+  const assignment = await b.value.open(undefined, 1);
+  let report!: (value: { phase: string; message: string }) => void;
+  let finish!: (value: typeof assignment) => void;
+  b.value.open = (_options, _request, progress) => { report = progress!; return new Promise(resolve => { finish = resolve; }); };
+  const opening = openTauriChannel(b.value, { target: "vm1" }, abort.signal, seen);
+  report({ phase: "install", message: "Installing" });
+  expect(seen).toHaveBeenCalledOnce();
+  finish(assignment); const channel = await opening;
+  report({ phase: "daemon", message: "Late" }); expect(seen).toHaveBeenCalledOnce();
+  channel.close();
+  const next = openTauriChannel(b.value, { target: "vm1" }, abort.signal, seen);
+  abort.abort(); report({ phase: "bridge", message: "Cancelled" });
+  finish(assignment); await expect(next).rejects.toThrow();
+  expect(seen).toHaveBeenCalledOnce();
+});

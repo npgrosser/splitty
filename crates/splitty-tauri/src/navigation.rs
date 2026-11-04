@@ -279,7 +279,10 @@ fn packaged_authority(url: &Url) -> bool {
 }
 
 pub(crate) fn packaged_navigation(url: &Url, role: DocumentRole) -> Decision {
-    if packaged_entry(url, role) {
+    // A fragment is not a new document. Deny its navigation without revoking
+    // the current proof. IPC entry validation deliberately tolerates hashes:
+    // some WebViews update them without calling this navigation callback.
+    if packaged_entry(url, role) && url.fragment().is_none() {
         Decision::Allow
     } else {
         external_or_block(url)
@@ -489,6 +492,27 @@ mod tests {
             &url("blob:http://127.0.0.1:1420/id"),
             DocumentRole::Main
         ));
+    }
+
+    #[test]
+    fn fragment_navigation_never_revokes_a_live_packaged_document() {
+        for role in [
+            DocumentRole::Main,
+            DocumentRole::Remote,
+            DocumentRole::Setup,
+        ] {
+            let entry = if role == DocumentRole::Setup {
+                "/setup.html#part"
+            } else {
+                "/index.html#part"
+            };
+            let target = packaged(entry);
+            assert_eq!(packaged_navigation(&target, role), Decision::Block);
+            assert!(
+                packaged_entry(&target, role),
+                "same-document hash does not remove IPC identity"
+            );
+        }
     }
 
     #[test]

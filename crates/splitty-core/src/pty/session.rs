@@ -449,9 +449,12 @@ fn build_spec(
         if let Some(value) = original {
             cmd.env("SPLITTY_BASH_PROMPT_COMMAND", value);
         }
+        // Execute every populated prompt-command array entry at the initial
+        // prompt, at top level so a user's `declare` keeps its normal scope.
+        // Bash handles subsequent scalar/array prompts itself.
         cmd.env(
             "PROMPT_COMMAND",
-            "builtin source \"$SPLITTY_SHELL_INTEGRATION/bash/splitty.bash\" && builtin eval -- \"$PROMPT_COMMAND\"",
+            "builtin source \"$SPLITTY_SHELL_INTEGRATION/bash/splitty.bash\" && for __splitty_prompt_command in \"${PROMPT_COMMAND[@]-}\"; do builtin eval -- \"$__splitty_prompt_command\"; done; builtin unset __splitty_prompt_command",
         );
     }
 
@@ -768,11 +771,10 @@ fn build_shell_command(
     while index < command_args.len() {
         let arg = &command_args[index];
         match arg.as_str() {
-            "--noprofile" | "--norc" => {
-                flags.push(' ');
-                flags.push_str(arg);
-            }
-            "--rcfile" | "--init-file" => {
+            "--noprofile" | "-noprofile" => flags.push_str(" --noprofile"),
+            "--norc" | "-norc" => flags.push_str(" --norc"),
+            "--login" | "-login" => {}
+            "--rcfile" | "-rcfile" | "--init-file" | "-init-file" => {
                 index += 1;
                 rcfile = command_args.get(index);
             }
@@ -1196,8 +1198,13 @@ mod tests {
         let custom = home.path().join("custom rc").to_string_lossy().into_owned();
         for (args, expected) in [
             (vec!["--noprofile", "-ilc"], None),
+            (vec!["-noprofile", "-ilc"], None),
+            (vec!["-login", "-ic"], Some("PROFILE")),
             (vec!["--norc", "-ic"], None),
+            (vec!["-norc", "-ic"], None),
             (vec!["--rcfile", custom.as_str(), "-ic"], Some("CUSTOM")),
+            (vec!["-rcfile", custom.as_str(), "-ic"], Some("CUSTOM")),
+            (vec!["-init-file", custom.as_str(), "-ic"], Some("CUSTOM")),
             (vec!["-ic"], Some("BASHRC")),
         ] {
             let mut opts = sh_opts("startup-options", "");
@@ -1223,6 +1230,89 @@ mod tests {
                     stdout.lines().filter(|line| *line == marker).count(),
                     usize::from(expected == Some(marker)),
                     "{stdout}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn bash_first_prompt_preserves_nounset_and_prompt_command_entries() {
+        use std::io::Write;
+        for posix in [false, true] {
+            for (commands, expected) in [
+                ("unset PROMPT_COMMAND", vec![]),
+                ("PROMPT_COMMAND=\"printf 'USER_ONE\\n'\"", vec!["USER_ONE"]),
+                (
+                    "PROMPT_COMMAND=(\"declare PROMPT_DEFINED=global; printf 'USER_ONE\\n'\" \"printf 'USER_TWO\\n'\")",
+                    vec!["USER_ONE", "USER_TWO"],
+                ),
+                (
+                    "unset PROMPT_COMMAND; PROMPT_COMMAND[3]=\"printf 'USER_TWO\\n'\"",
+                    vec!["USER_TWO"],
+                ),
+            ] {
+                let home = tempfile::tempdir().expect("home");
+                // Profiles may deliberately unset optional variables. The
+                // integration must install hooks without changing shell modes.
+                let profile = format!(
+                    "{commands}\nunset HISTFILE PS1\nset -u\n{}\n",
+                    if posix { "set -o posix" } else { ":" }
+                );
+                std::fs::write(home.path().join(".bashrc"), &profile).expect("profile");
+                let mut opts = sh_opts("first-prompt", "");
+                opts.shell = "/bin/bash".into();
+                opts.shell_args = vec!["-i".into()];
+                opts.extra_env = vec![
+                    format!("HOME={}", home.path().display()),
+                    "HISTFILE=/dev/null".into(),
+                ];
+                let (mut spec, _) = build_spec(&opts, None, None).expect("spec");
+                spec.env
+                    .retain(|(name, _)| !matches!(name.as_str(), "ENV" | "POSIXLY_CORRECT"));
+                let mut child = std::process::Command::new(&spec.argv[0])
+                    .args(&spec.argv[1..])
+                    .env_clear()
+                    .envs(spec.env)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped())
+                    .spawn()
+                    .expect("bash");
+                child
+                    .stdin
+                    .take()
+                    .expect("stdin")
+                    .write_all(
+                        b"printf 'FIRST_COMMAND:%s\\n' \"$-\"; declare -p PROMPT_COMMAND; printf 'PROMPT_DEFINED:%s\\n' \"${PROMPT_DEFINED-}\"; exit 0\n",
+                    )
+                    .expect("input");
+                let output = child.wait_with_output().expect("output");
+                let stdout = String::from_utf8(output.stdout).expect("stdout");
+                let stderr = String::from_utf8(output.stderr).expect("stderr");
+                assert!(
+                    output.status.success(),
+                    "posix={posix} {commands}: {stdout} {stderr}"
+                );
+                assert!(!stderr.contains("unbound variable"), "{stderr}");
+                let (prompt, command) = stdout.split_once("FIRST_COMMAND:").expect(&stdout);
+                assert!(prompt.contains("\x1b]133;A\x07"), "{stdout}");
+                let mut tail = prompt;
+                for marker in expected {
+                    assert_eq!(prompt.matches(marker).count(), 1, "{stdout}");
+                    tail = tail.split_once(marker).expect(&stdout).1;
+                }
+                assert!(
+                    command.lines().next().expect("flags").contains('u'),
+                    "{stdout}"
+                );
+                assert!(command.contains("__splitty_precmd"), "{stdout}");
+                if commands.contains("PROMPT_DEFINED") {
+                    assert!(command.contains("PROMPT_DEFINED:global"), "{stdout}");
+                }
+                assert_eq!(
+                    std::fs::read_to_string(home.path().join(".bashrc")).expect("profile"),
+                    profile
                 );
             }
         }

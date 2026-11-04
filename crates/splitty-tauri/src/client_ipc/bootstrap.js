@@ -16,8 +16,7 @@
   const rawInvoke = internals.invoke.bind(internals);
   const register = internals.transformCallback.bind(internals);
   const unregister = internals.unregisterCallback.bind(internals);
-  const nonce = Array.from(crypto.getRandomValues(new Uint8Array(32)), byte => byte.toString(16).padStart(2, '0')).join('');
-  let auth, dead = false, confirmation = 0;
+  let auth, dead = false, confirmation = 0, challengeGeneration = 0;
   let resolveAuth, rejectAuth;
   const authenticated = new Promise((resolve, reject) => { resolveAuth = resolve; rejectAuth = reject; });
   // Avoid an unhandled rejection before the packaged entry starts waiting.
@@ -81,7 +80,7 @@
     unregister(record.callback);
     outputs.delete(record.callback);
     const closed = record.closed;
-    record.data = record.closed = undefined;
+    record.data = record.closed = record.progress = undefined;
     if (record.handle) {
       records.delete(record.handle);
       cleanup(record);
@@ -147,6 +146,13 @@
     if (dead || !auth || document !== auth.document) return false;
     const record = outputs.get(callback);
     if (!record || record.ended) return false;
+    if (envelope && 'progress' in envelope) {
+      const progress = envelope.progress;
+      if (!record.opening || !progress || typeof progress.phase !== 'string' || progress.phase.length > 64 ||
+          typeof progress.message !== 'string' || progress.message.length > 4096) return false;
+      try { record.progress?.({ phase: progress.phase, message: progress.message }); } catch { /* UI observers do not own the carrier. */ }
+      return true;
+    }
     if (envelope && 'failure' in envelope) {
       if (!record.opening || record.failure !== undefined) return false;
       const failure = envelope.failure;
@@ -181,10 +187,10 @@
       pendingState = state;
       void reportState();
     },
-    async open(options, request) {
+    async open(options, request, progress) {
       if (!Number.isInteger(request) || request < 1 || request > 0xffffffff) throw Error('Invalid native request');
       if (channels.size >= 32 || dead) throw Error('Native channel capacity exhausted');
-      const record = { next: 0, reorder: new Map(), receipts: new Set(), acknowledging: new Set(), ended: false, opening: true, pendingCalls: 0 };
+      const record = { request, progress: typeof progress === 'function' ? progress : undefined, next: 0, reorder: new Map(), receipts: new Set(), acknowledging: new Set(), ended: false, opening: true, pendingCalls: 0 };
       channels.add(record);
       const output = channel(record);
       try {
@@ -212,10 +218,11 @@
         record.failure = undefined;
         closeRecord(record, error); throw error;
       }
-      finally { record.opening = false; releaseRecord(record); }
+      finally { record.opening = false; record.progress = undefined; releaseRecord(record); }
     },
     cancelOpen(request) {
       if (Number.isInteger(request) && request >= 1 && request <= 0xffffffff) {
+        for (const record of channels) if (record.request === request) record.progress = undefined;
         void authorized('native_cancel_open', { request }).catch(() => {});
       }
     },
@@ -262,16 +269,22 @@
   const invoke = (command, args) => shell.has(command) ? authorized(command, args) : reject('Native shell command denied');
   Object.defineProperty(window, '__SPLITTY_TAURI__', { value: Object.freeze({ native, ready, invoke }) });
   Object.defineProperty(window, config.receiver, { value: async message => {
-    if (dead || bootstrapFailed || auth || !message || message.nonce !== nonce || !secretBytes(message.challenge)) return;
+    if (dead || bootstrapFailed || auth || !message || !Number.isSafeInteger(message.generation) ||
+        message.generation <= challengeGeneration || !secretBytes(message.challenge)) return;
+    challengeGeneration = message.generation;
     const attempt = ++confirmation;
     try {
-      const result = await rawInvoke('native_bootstrap_confirm', { bootstrap: config.bootstrap, nonce, challenge: message.challenge });
+      const result = await rawInvoke('native_bootstrap_confirm', { bootstrap: config.bootstrap, generation: message.generation, challenge: message.challenge });
       if (dead || bootstrapFailed || attempt !== confirmation || auth) return;
       if (!result || !result.auth || !Number.isSafeInteger(result.auth.document) || !secretBytes(result.auth.secret) ||
           !['main', 'remote', 'setup'].includes(result.role) || (result.target != null && typeof result.target !== 'string')) throw Error('Invalid native document assignment');
       auth = Object.freeze({ document: result.auth.document, secret: Object.freeze(result.auth.secret.slice()) });
       resolveAuth({ role: result.role, ...(result.target == null ? {} : { target: result.target }) });
-    } catch (error) { if (!dead && attempt === confirmation) rejectAuth(error); }
+    } catch {
+      // A delayed eval from a previous navigation may run in this document.
+      // Its rejected token cannot fail the newer bootstrap. Only a valid newer
+      // challenge, pagehide, or the bounded bootstrap deadline settles ready.
+    }
   } });
   addEventListener('pagehide', () => {
     dead = true; confirmation++;
@@ -280,5 +293,5 @@
     records.clear(); auth = undefined;
   }, { once: true });
   // Invoke readiness does not wait for the UI module (which itself awaits ready).
-  void rawInvoke('native_bootstrap_begin', { bootstrap: config.bootstrap, nonce }).catch(rejectAuth);
+  void rawInvoke('native_bootstrap_begin', { bootstrap: config.bootstrap }).catch(rejectAuth);
 })();

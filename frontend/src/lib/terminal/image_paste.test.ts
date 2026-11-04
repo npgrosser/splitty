@@ -310,3 +310,13 @@ it("drops a delayed Ctrl+V when its original connection ends", () => {
   expect(destination.sendCtrlV).not.toHaveBeenCalled();
   expect(destination.failed).toHaveBeenCalledOnce(); cleanup(); conn.dispose(); vi.useRealTimers();
 });
+
+it("quotes pasted terminal paths while retaining literal paths for text insertion", async () => {
+  const paths = ["/home/My Files/image.png", "/tmp/it's/$(command).pdf"];
+  const terminal = target(paths);
+  await pasteFiles([png(), pdf()], terminal);
+  expect(terminal.paste).toHaveBeenCalledWith("'/home/My Files/image.png' '/tmp/it'\"'\"'s/$(command).pdf'");
+  const field = target(paths);
+  await pasteFiles([png(), pdf()], field, false);
+  expect(field.paste).toHaveBeenCalledWith(paths.join(" "));
+});

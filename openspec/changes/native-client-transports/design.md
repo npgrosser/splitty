@@ -147,7 +147,7 @@ Do not request OpenSSH stream-local forwarding for terminal traffic: the exec br
 
 Reverse forwards keep the Linux host relay, UID checks, heartbeat cleanup and owner-only remote socket already merged on main. Extend the own-port exclusion into a per-user registry of active Splitty browser listeners and admitted reverse shares, shared across configurations. Acquire a private lock when reserving a gateway listener or admitting a reverse forward so a bind/share race cannot expose a newly started gateway. A gateway cannot take a port already shared by Splitty.
 
-A reverse-share reservation must exist durably **before** any local worker can expose the destination. Record the local worker identity with process generation and network context before allowing forwarding; an incomplete spawn/publication transition is conservatively reserved. Stop and crash recovery release the port only after local forwarding workers are positively known to have terminated. A dead coordinator PID, an expired remote heartbeat, remote EOF or a host's assertion of cleanup is not proof: a hostile host can keep the SSH stream and its direct Unix forward alive. Unknown worker identity, PID reuse or failed cleanup keeps the reservation; an ephemeral gateway chooses another provably unreserved port, while an explicitly requested port fails with a clear reason. An unreadable/corrupt registry fails admission closed rather than being treated as an empty registry. Recovery must never kill an unrelated process based only on a reused PID. No fixed timeout alone clears an ambiguous lease.
+A reverse-share reservation must exist durably **before** any local worker can expose the destination. Record the local worker identity with process generation and network context before allowing forwarding; an incomplete spawn/publication transition is conservatively reserved. Stop and crash recovery release the port only after local forwarding workers are positively known to have terminated. A dead coordinator PID, an expired remote heartbeat, remote EOF or a host's assertion of cleanup is not proof: a hostile host can keep the SSH stream and its direct Unix forward alive. Unknown worker identity or failed cleanup keeps the reservation; a positively different immutable birth identity within the same verified machine/boot/PID view proves the saved generation ended, while UID changes alone do not; an ephemeral gateway chooses another provably unreserved port, while an explicitly requested port fails with a clear reason. An unreadable/corrupt registry fails admission closed rather than being treated as an empty registry. Recovery must never kill an unrelated process based only on a reused PID. No fixed timeout alone clears an ambiguous lease.
 
 Test crashes before spawn, between spawn and worker publication, and after publication, with a hostile peer keeping the forward alive. If a platform cannot atomically publish a complete worker identity before spawn, persist the pending reservation first and retain it through ambiguous recovery. This deliberately favors refusing a port over exposing a gateway; normal Stop awaits local worker termination and releases capacity.
 
@@ -177,7 +177,7 @@ Keep the 5-second framing/service handshake limits. Bound incomplete native fram
 
 Give each connection a single ordered writer. Credits/control responses have bounded reserved capacity so a full data window cannot deadlock cancellation or liveness, without reordering application messages. A stalled or over-budget client is disconnected independently, with a resync/replay outcome; no partial terminal frame is silently dropped. PTY reading and keeper retention continue. Replace the existing unbounded session subscriber/sender path and per-event spawned queueing where necessary; bounding only the final IPC adapter is insufficient.
 
-Native liveness uses connection control ping/pong with the existing 15 s / 30 s policy; pipe EOF/process exit can report failure sooner. API requests have endpoint-appropriate deadlines (including existing long-poll and file-offer waits), request IDs scoped to a connection generation and explicit cancellation. Browser request aborts and native window closure cancel pending waits. A cancellation or lost response after a mutation began does not prove it never happened. Preserve existing job idempotency keys; do not invent automatic retry for terminal input, pane mutations, editor requests or uploads. Reconnect clears unsent input and stale RPCs, renegotiates the endpoint, then resyncs state and reattaches sessions.
+Native liveness uses connection control ping/pong with the existing 15 s / 30 s policy: check elapsed time since the last matched pong (or connection start) at 15-second ticks, rather than granting a fresh 30-second allowance to each ping; pipe EOF/process exit can report failure sooner. API requests have endpoint-appropriate deadlines (including existing long-poll and file-offer waits), request IDs scoped to a connection generation and explicit cancellation. Browser request aborts and native window closure cancel pending waits. A cancellation or lost response after a mutation began does not prove it never happened. Preserve existing job idempotency keys; do not invent automatic retry for terminal input, pane mutations, editor requests or uploads. Reconnect clears unsent input and stale RPCs, renegotiates the endpoint, then resyncs state and reattaches sessions.
 
 Alternative: unlimited queues to hide latency. Rejected because a frozen WebView or disconnected host would exhaust memory. Arbitrary payload dropping is also rejected because it corrupts terminal state.
 
@@ -245,3 +245,29 @@ All dated 2026-11-01 and open to review:
 - **NCT-9** (provisional, tbd): full API/feature parity and one coordinated default cutover; explicit incompatibility instead of TCP fallback.
 
 - **NCT-10** (provisional, tbd): local desktop backends are always app-owned embedded services on all platforms; independent local daemons and keepers are left untouched, with persistent access explicit through CLI/browser.
+
+## Post-review implementation decisions
+
+The accepted corrections retain the original authority and memory boundaries.
+Orderly native EOF/Closed drains accepted frames; revocation/protocol errors still
+abort them immediately. Owner substream cleanup waits five seconds for its
+acknowledgement before closing the physical carrier; the supervisor retains
+capacity until helper exit is observed. Successful cleanup leaves other streams
+and the owned runtime running.
+
+Browser API calls share one bounded revision-bound carrier, with monotonically
+increasing u32 IDs and at most 64 pending operations; mutations are never replayed.
+Tauri bootstrap begin only solicits a current native navigation challenge. Its
+caller-supplied nonce cannot reserve or replace a newer document challenge.
+The token is delivered only by evaluation into the current packaged document,
+never in the begin response. Confirmation must match its loaded native generation
+and token. Navigation invalidates both; duplicate/older evaluated generations
+cannot poison the new bootstrap, which retains its bounded deadline.
+
+Exposure support remains deliberately restricted to verified common registry
+authority. No unsupported-to-unregistered-gateway fallback, namespace shortcut or
+filesystem allowlist expansion is introduced. Ambiguous spawn/publication leases
+remain reserved. Cleanup overflow remains fail-closed rather than dropping claims.
+The optional EOF evaluation remains bounded/accounted; request IDs remain consumed
+on Busy, and negotiated frame minima protect header subtraction. No broad security
+helper deduplication or unconditional Electron build dependency is introduced.

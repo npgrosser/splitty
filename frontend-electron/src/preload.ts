@@ -22,7 +22,8 @@ interface NativePreloadPort {
   scratch(): void;
 }
 const nativePorts = new Map<string, NativePreloadPort>();
-const nativeOpens = new Map<string, { resolve(value: NativeAssignment): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
+type NativeProgress = { phase: string; message: string };
+const nativeOpens = new Map<string, { progress?: (value: NativeProgress) => void; document?: string; resolve(value: NativeAssignment): void; reject(error: Error): void; timer: ReturnType<typeof setTimeout> }>();
 let nativeData = 0, nativeControls = 0;
 const chunkBytes = 64 * 1024;
 let documentChallenge: Promise<string> | undefined;
@@ -133,6 +134,14 @@ ipcRenderer.on("native:assigned", (event: IpcRendererEvent, value: { request: st
     received.start(); pending.resolve(port.assignment);
   } catch (error) { closeNative(port); pending.reject(error instanceof Error ? error : Error(String(error))); }
 });
+ipcRenderer.on("native:progress", (_event: IpcRendererEvent, value: { request?: string; document?: string; phase?: string; message?: string }) => {
+  const pending = typeof value?.request === "string" ? nativeOpens.get(value.request) : undefined;
+  if (!pending || !pending.document || value.document !== pending.document || value.document !== documentToken
+    || typeof value.phase !== "string" || value.phase.length > 64
+    || typeof value.message !== "string" || value.message.length > 4096) return;
+  try { pending.progress?.({ phase: value.phase, message: value.message }); }
+  catch { /* Progress observers cannot change the opening's lifetime. */ }
+});
 ipcRenderer.on("native:failed", (_event: IpcRendererEvent, value: { request?: string; message?: string; code?: string; retryable?: boolean }) => {
   const pending = typeof value?.request === "string" ? nativeOpens.get(value.request) : undefined;
   if (!pending) return;
@@ -157,19 +166,21 @@ const nativeBridge = {
     retryCallback = callback;
     return () => { if (retryCallback === callback) retryCallback = undefined; };
   },
-  open: (options: { target?: string; update?: boolean } = {}, request = crypto.randomUUID()): Promise<NativeAssignment> => {
+  open: (options: { target?: string; update?: boolean } = {}, request = crypto.randomUUID(), progress?: (value: NativeProgress) => void): Promise<NativeAssignment> => {
     if (!options || typeof options !== "object" || Object.keys(options).some(key => !["target", "update"].includes(key))
       || (options.target !== undefined && (typeof options.target !== "string" || options.target.length > 4096))
       || (options.update !== undefined && typeof options.update !== "boolean")) return Promise.reject(Error("Invalid native open intent"));
+    if (progress !== undefined && typeof progress !== "function") return Promise.reject(Error("Invalid native progress listener"));
     if (nativeOpens.size >= 4 || nativePorts.size + nativeOpens.size >= 32) return Promise.reject(Error("Native connection capacity exhausted"));
     if (typeof request !== "string" || !/^[a-zA-Z0-9-]{1,64}$/.test(request) || nativeOpens.has(request)) return Promise.reject(Error("Invalid native open request"));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         nativeOpens.delete(request); ipcRenderer.send("native:cancel-open", { request, document: documentToken }); reject(Error("Native backend preparation timed out"));
       }, 125_000);
-      nativeOpens.set(request, { resolve, reject, timer });
+      nativeOpens.set(request, { resolve, reject, timer, progress });
       void nativeDocument().then(document => {
-        if (nativeOpens.has(request)) ipcRenderer.send("native:open", { request, document, ...options });
+        const pending = nativeOpens.get(request);
+        if (pending) { pending.document = document; ipcRenderer.send("native:open", { request, document, ...options }); }
       }, error => { nativeOpens.delete(request); clearTimeout(timer); reject(error); });
     });
   },

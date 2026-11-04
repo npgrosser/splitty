@@ -58,6 +58,8 @@ impl Requests {
         if id == 0 || id <= self.last_id {
             return Err(Rejection::InvalidId);
         }
+        // An observed ID is consumed even when Busy or cancelled: allowing
+        // reuse would confuse late replies and cancellation tombstones.
         self.last_id = id;
         let cancelled = self.cancelled_ahead.remove(&id);
         self.cancelled_ahead.retain(|waiting| *waiting > id);

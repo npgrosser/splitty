@@ -1,4 +1,4 @@
-import { NativeConnectionError, type NativeAssignment, type NativeChannel, type NativeDelivery } from "./native_socket.ts";
+import { NativeConnectionError, type NativeAssignment, type NativeChannel, type NativeDelivery, type NativeProgress } from "./native_socket.ts";
 import { encodeNativeFrame, NativeFrameDecoder, NativeKind, type NativeFrame } from "./native_wire.ts";
 
 const CHUNK_BYTES = 64 * 1024;
@@ -9,7 +9,7 @@ const QUEUED_FRAMES = 64;
  * proofs nor raw command invocation are exposed through this interface. */
 export interface TauriNativeBridge {
   state(state: "connected" | "reconnecting" | "disconnected"): void;
-  open(options: { target?: string; update?: boolean } | undefined, request: number): Promise<NativeAssignment>;
+  open(options: { target?: string; update?: boolean } | undefined, request: number, progress?: (value: NativeProgress) => void): Promise<NativeAssignment>;
   cancelOpen(request: number): void;
   listen(handle: string, data: (bytes: Uint8Array, token: string) => void, closed: (reason: unknown) => void): () => void;
   start(handle: string): Promise<void>;
@@ -20,15 +20,17 @@ export interface TauriNativeBridge {
 let nextRequest = 0;
 
 export async function openTauriChannel(bridge: TauriNativeBridge,
-  options?: { target?: string; update?: boolean }, signal?: AbortSignal): Promise<NativeChannel> {
+  options?: { target?: string; update?: boolean }, signal?: AbortSignal, progress?: (value: NativeProgress) => void): Promise<NativeChannel> {
   signal?.throwIfAborted();
   if (nextRequest === 0xffffffff) throw Error("Native request IDs exhausted; reload this window");
   const request = ++nextRequest;
   const cancel = () => bridge.cancelOpen(request);
   signal?.addEventListener("abort", cancel, { once: true });
+  let preparing = true;
+  const report = (value: NativeProgress) => { if (preparing && !signal?.aborted) progress?.(value); };
   let assignment: Readonly<NativeAssignment>;
   try {
-    assignment = Object.freeze({ ...await bridge.open(options, request) });
+    assignment = Object.freeze({ ...await bridge.open(options, request, report) });
     if (signal?.aborted) { bridge.close(assignment.handle); signal.throwIfAborted(); }
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
@@ -37,7 +39,7 @@ export async function openTauriChannel(bridge: TauriNativeBridge,
       throw new NativeConnectionError(failure.message, failure.code, failure.retryable === true);
     }
     throw error;
-  } finally { signal?.removeEventListener("abort", cancel); }
+  } finally { preparing = false; signal?.removeEventListener("abort", cancel); }
 
   const decoder = new NativeFrameDecoder();
   let receive: ((delivery: NativeDelivery) => void) | undefined;

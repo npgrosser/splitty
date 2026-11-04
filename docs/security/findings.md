@@ -109,8 +109,9 @@ traffic/switch checks pass. Following a PID-reuse bug in the Windows harness,
 cleanup now uses private kernel Jobs with assignment before process start.
 Fresh setup and remote-only SSH recovery runs pass. A later WSL quoting
 failure prompted exact guest-identity guards. Their isolated runtime preflight
-and guarded WSL switch/restart rerun pass. Prior process-tree cleanup claims remain invalid. The complete platform matrix and framework
-allocation bounds remain open. See the
+and guarded WSL switch/restart rerun pass. Prior process-tree cleanup claims remain invalid. The pre-review platform acceptance matrix passed at its recorded revisions;
+review corrections require their own validation. Whole-framework allocation
+bounds remain outside the application-owned transport contract. See the
 [verification status](../../openspec/changes/native-client-transports/verification.md).
 
 **SR-10.** CI runs `cargo deny check advisories bans sources` and `pnpm audit`

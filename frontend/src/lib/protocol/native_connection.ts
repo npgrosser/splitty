@@ -55,7 +55,15 @@ export class NativeConnection extends NativeSocket {
     if (this.disposed) return;
     // Do not overlap an outstanding open. Its quota remains charged until the
     // shell confirms cleanup, even if the caller no longer wants its result.
-    if (this.opening) return;
+    if (this.opening) {
+      // A deliberate retry renews the recovery window, but keeps the one live
+      // attempt. An already cancelled attempt must first confirm its cleanup.
+      if (!this.preparation?.signal.aborted && this.state === "reconnecting") {
+        this.clearRecovery(); this.lostAt = Date.now();
+        this.deadlineTimer = setTimeout(() => this.expire(), this.recoveryLimit);
+      }
+      return;
+    }
     this.clearRecovery();
     this.epoch++; this.revoke(); void this.connect();
   }

@@ -1,4 +1,4 @@
-throw 'Process fixture execution paused pending independent target-gate review; pure formatter tests only'
+throw 'Standalone console-spawn fixture remains disabled; supported guarded runtime entrypoints are documented in README.md'
 $ErrorActionPreference='Stop'
 $ProgressPreference='SilentlyContinue'
 $root=Join-Path $env:TEMP ('splitty-native-job-console-'+[guid]::NewGuid().ToString('N'))

@@ -141,3 +141,19 @@ it("rejects a result past the deadline even before the overdue timer can run", a
   expect(late.close).toHaveBeenCalledOnce(); expect(late.start).not.toHaveBeenCalled();
   expect(socket.assignment).toBeUndefined(); expect(socket.connectionState).toBe("disconnected"); socket.dispose();
 });
+
+it("renews a deliberate retry deadline without overlapping the pending automatic open", async () => {
+  vi.useFakeTimers();
+  let finish!: (channel: NativeChannel) => void, signal: AbortSignal | undefined;
+  const open = vi.fn().mockRejectedValueOnce(new NativeConnectionError("lost", "backendLost", true))
+    .mockImplementationOnce((value?: AbortSignal) => { signal = value; return new Promise<NativeChannel>(resolve => { finish = resolve; }); });
+  const socket = new NativeConnection(open, assigned);
+  await socket.connect(); await vi.advanceTimersByTimeAsync(590_000);
+  socket.reconnect(); expect(open).toHaveBeenCalledTimes(2);
+  await vi.advanceTimersByTimeAsync(20_000);
+  expect(signal?.aborted).toBe(false); expect(socket.connectionState).toBe("reconnecting");
+  await vi.advanceTimersByTimeAsync(580_000);
+  expect(signal?.aborted).toBe(true); expect(socket.connectionState).toBe("disconnected");
+  const late = channel(); finish(late); await vi.advanceTimersByTimeAsync(0);
+  expect(late.close).toHaveBeenCalledOnce(); expect(open).toHaveBeenCalledTimes(2); socket.dispose();
+});

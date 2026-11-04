@@ -925,9 +925,10 @@ fi
             .map_err(|_| "WSL operation capacity exhausted")?;
         tauri::async_runtime::spawn_blocking(move || {
             let _permit = permit;
-            let distributions = detect_with(&SystemWsl {
+            let executor = SystemWsl {
                 cancellation: Some(state.cancellation.clone()),
-            })?;
+            };
+            let distributions = detect_with(&executor)?;
             let selected = distributions
                 .iter()
                 .find(|candidate| candidate.name == distro)
@@ -938,6 +939,7 @@ fi
                     .clone()
                     .unwrap_or_else(|| "distribution is unsupported".to_string()));
             }
+            ensure_non_root(&executor, &distro)?;
             let mut config = read_config(&app)?;
             config.pending_distro = Some(distro);
             write_config(&app, &config)

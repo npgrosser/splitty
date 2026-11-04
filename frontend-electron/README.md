@@ -126,10 +126,10 @@ held through observed child exit. Only an explicit open passes `--remember-targe
 automatic recovery preserves hidden host metadata. Structured, bounded SSH
 failures retain the host-key verification hint.
 
-The broader migration remains in progress: Tauri/WSL integration, complete
-feature parity, package isolation checks and the final platform audit
-are still tracked in `native-client-transports`. This local smoke is not evidence
-that those remaining scenarios pass.
+The pre-review transport acceptance matrix is recorded in
+`openspec/changes/native-client-transports/verification.md`. Follow-up review
+corrections and their validation are tracked there separately; this local smoke
+does not by itself establish the complete platform matrix.
 
 ## Browser assignment smoke
 

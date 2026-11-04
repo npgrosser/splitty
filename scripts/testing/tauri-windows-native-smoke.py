@@ -128,7 +128,7 @@ void (async () => {
     (root/'runtime-source-hashes.json').write_text(json.dumps(hashes(root), indent=2))
 
 def runtime(root, allow_wsl=False, max_seconds=35):
-    raise RuntimeError("GUI disabled pending independent STARTUPINFOEX stdio review")
+    raise RuntimeError("Standalone GUI fixture is disabled; use the guarded tauri-windows-wsl-smoke.py entrypoint described in the harness README")
     evidence = root/'runtime-evidence'; evidence.mkdir(exist_ok=True)
     for name in ['runtime-result.json', 'processes.json', 'stdout.log', 'stderr.log']: (evidence/name).unlink(missing_ok=True)
     shutil.copyfile(HERE/'tauri-windows-native-smoke/fixture-job.cs',root/'fixture-job.cs')

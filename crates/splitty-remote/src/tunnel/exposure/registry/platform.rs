@@ -296,14 +296,70 @@ pub(super) fn identity(_pid: u32) -> io::Result<Identity> {
 
 pub(super) fn observe(scope: &Scope, expected: &Identity) -> Observed {
     // The registry calls this only after matching its machine, boot and
-    // observer PID namespace. Permission errors and reused PIDs remain unknown.
+    // observer PID namespace. Only an immutable birth-identity change proves
+    // PID reuse; a changed effective UID alone does not prove termination.
     if expected.uid != scope.uid {
         return Observed::Unknown;
     }
-    match identity(expected.pid) {
+    observe_identity(expected, identity(expected.pid))
+}
+
+fn observe_identity(expected: &Identity, current: io::Result<Identity>) -> Observed {
+    match current {
         Ok(current) if &current == expected => Observed::Live,
+        Ok(current)
+            if current.pid == expected.pid
+                && (current.start, current.subsecond) != (expected.start, expected.subsecond) =>
+        {
+            Observed::Terminated
+        }
         Ok(_) => Observed::Unknown,
         Err(error) if error.kind() == io::ErrorKind::NotFound => Observed::Terminated,
         Err(_) => Observed::Unknown,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_an_immutable_birth_change_proves_replacement() {
+        let saved = Identity {
+            pid: 42,
+            start: 100,
+            subsecond: 3,
+            uid: 1000,
+        };
+        assert!(matches!(
+            observe_identity(&saved, Ok(saved.clone())),
+            Observed::Live
+        ));
+        for current in [
+            Identity {
+                start: 101,
+                ..saved.clone()
+            },
+            Identity {
+                subsecond: 4,
+                ..saved.clone()
+            },
+        ] {
+            assert!(matches!(
+                observe_identity(&saved, Ok(current)),
+                Observed::Terminated
+            ));
+        }
+        let changed_user = Identity {
+            uid: 1001,
+            ..saved.clone()
+        };
+        assert!(matches!(
+            observe_identity(&saved, Ok(changed_user)),
+            Observed::Unknown
+        ));
+        assert!(matches!(
+            observe_identity(&saved, Err(io::ErrorKind::PermissionDenied.into())),
+            Observed::Unknown
+        ));
     }
 }

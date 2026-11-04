@@ -1,10 +1,10 @@
 /** Adapt a native host stream to the hub's existing progress/ready/reconnect
  * state machine. The byte stream stays on IPC; no ticket or WebSocket exists. */
-import { NativeSocket, NativeConnectionError, type NativeChannel } from "../protocol/native_socket.ts";
+import { NativeSocket, NativeConnectionError, type NativeChannel, type NativeProgress } from "../protocol/native_socket.ts";
 import type { IncomingMessage } from "../protocol/types.ts";
 import type { HubWebSocket } from "./remote_socket.ts";
 
-export type NativeHostOpener = (target: string, update: boolean, signal?: AbortSignal) => Promise<NativeChannel>;
+export type NativeHostOpener = (target: string, update: boolean, signal?: AbortSignal, progress?: (value: NativeProgress) => void) => Promise<NativeChannel>;
 export class NativeHubSocket implements HubWebSocket {
   binaryType: BinaryType = "arraybuffer";
   readyState = 0;
@@ -17,13 +17,38 @@ export class NativeHubSocket implements HubWebSocket {
   private readonly socket: NativeSocket;
 
   constructor(target: string, update: boolean, document: string, open: NativeHostOpener) {
-    const deliver = (data: unknown) => { if (!this.ended) this.onmessage?.({ data }); };
+    // The bounded native preparation reports are replayed in the service's
+    // prelude. Suppress only matching occurrences already delivered live.
+    const reported: NativeProgress[] = [];
+    let prelude = true;
+    const deliver = (data: unknown) => {
+      if (this.ended) return;
+      if (prelude && typeof data === "string") {
+        try {
+          const message = JSON.parse(data);
+          if (message.type === "remote.ready") { prelude = false; reported.length = 0; }
+          else if (message.type === "remote.progress") {
+            const index = reported.findIndex(value => value.phase === message.step && value.message === message.message);
+            if (index !== -1) { reported.splice(index, 1); return; }
+          }
+        } catch { /* The normal connection parser owns malformed messages. */ }
+      }
+      this.onmessage?.({ data });
+    };
+    const progress = (value: NativeProgress) => {
+      if (this.ended || reported.length >= 8 || typeof value?.phase !== "string" || value.phase.length > 64
+        || typeof value.message !== "string" || value.message.length > 4096) return;
+      const report = { phase: value.phase, message: value.message };
+      reported.push(report);
+      // A synchronous opener may report before the caller installs handlers.
+      queueMicrotask(() => { if (!this.ended) this.onmessage?.({ data: JSON.stringify({ type: "remote.progress", step: report.phase, message: report.message }) }); });
+    };
     // NativeSocket still owns receipts, framing, generations and cancellation.
     // Hub preludes and byte output reach the existing state machine unchanged.
     this.socket = new class extends NativeSocket { override deliver(data: unknown) { deliver(data); } }();
     this.socket.onDisconnected = () => queueMicrotask(() => this.lost());
     this.socket.onError = error => this.failed(error);
-    void open(target, update, this.preparation.signal).then(channel => {
+    void open(target, update, this.preparation.signal, progress).then(channel => {
       if (this.ended) { channel.close(); return; }
       const assigned = channel.assignment;
       if (assigned.role !== "remote" || assigned.target !== target || assigned.document !== document) {

@@ -1,5 +1,5 @@
 /** Batch transfers shared by the pane and scratchpad drop dialog. */
-import { MAX_FILE_BYTES } from "./image_paste.ts";
+import { MAX_FILE_BYTES, quoteUploadPath } from "./image_paste.ts";
 import type { UploadOptions } from "./session_client.ts";
 
 export interface DropUploadTarget {
@@ -15,10 +15,7 @@ export interface DropProgress {
   completed: number;
 }
 
-/** Preserve plain paths; quote shell metacharacters, including spaces and quotes. */
-export function quoteUploadPath(path: string): string {
-  return /^[\p{L}\p{N}_./-]+$/u.test(path) ? path : `'${path.replaceAll("'", `'"'"'`)}'`;
-}
+export { quoteUploadPath };
 
 export function uploadProblem(files: readonly File[]): string | undefined {
   const tooLarge = files.find((file) => file.size > MAX_FILE_BYTES);

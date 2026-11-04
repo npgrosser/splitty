@@ -1,8 +1,9 @@
 # Actual macOS WKWebView smoke
 
-Status: prepared and checked on Linux; **actual macOS build and execution remain
-unverified until the macOS CI job or a Mac run passes**. Source generation and
-observer unit tests are not runtime evidence.
+Actual macOS build and WKWebView execution passed in the recorded pre-review
+acceptance runs. See [verification](../../openspec/changes/native-client-transports/verification.md)
+for exact revisions and follow-up checks. Source generation and observer unit
+tests alone are not runtime evidence for later application changes.
 
 On a dedicated macOS GUI session with Xcode command-line tools, Rust, Node 24,
 pnpm 11 and the repository dependencies:

@@ -42,7 +42,7 @@ export async function bootstrapConnection(): Promise<() => void> {
     }
     assignRootConnection(root, assignment);
     assignPlatform(packagedTauri ? "tauri" : "electron", assignment.role);
-    if (assignment.role === "main") assignNativeHosts((target, update, signal) => packagedTauri ? openTauriChannel(tauri!.native, { target, update }, signal) : openElectronChannel(bridge!, { target, update }, signal));
+    if (assignment.role === "main") assignNativeHosts((target, update, signal, progress) => packagedTauri ? openTauriChannel(tauri!.native, { target, update }, signal, progress) : openElectronChannel(bridge!, { target, update }, signal, progress));
     // Startup reads use a short-lived independent client. The application's
     // client starts only after all welcome/session handlers are installed.
     return () => { assignNativeApi(root); startup.dispose(); };

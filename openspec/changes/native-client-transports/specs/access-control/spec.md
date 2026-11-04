@@ -325,7 +325,7 @@ Splitty SHALL reject reverse forwarding of any of its active browser-gateway por
 - **THEN** gateway reservations protect that destination too, or sharing fails as unsupported before the forward starts
 
 ### Requirement: Forwarding Reservation Lifetime
-A reverse-share reservation SHALL be durable before exposure and cover actual local forwarding workers by process generation/network context. Release SHALL require locally verified termination; coordinator death, remote cleanup/heartbeat and reused PIDs SHALL not suffice. Ambiguous spawn/publication or cleanup SHALL keep the port reserved. Recovery SHALL not kill an unrelated process by PID alone; a conflicting gateway SHALL fail or choose a different ephemeral port.
+A reverse-share reservation SHALL be durable before exposure and cover actual local forwarding workers by process generation/network context. Release SHALL require locally verified termination; coordinator death, remote cleanup/heartbeat and a PID alone SHALL not suffice. A different immutable process birth identity MAY prove termination of the saved generation only within the same verified machine, boot and PID namespace; an effective-UID change alone SHALL NOT suffice. Ambiguous spawn/publication or cleanup SHALL keep the port reserved. Recovery SHALL not kill an unrelated process by PID alone; a conflicting gateway SHALL fail or choose a different ephemeral port.
 
 #### Scenario: Coordinator dies while forwarding lives
 - **WHEN** a coordinator is killed and a hostile SSH peer keeps the local forwarding worker alive
@@ -335,6 +335,11 @@ A reverse-share reservation SHALL be durable before exposure and cover actual lo
 - **WHEN** startup crashes after reserving a port and before a spawned worker's identity is fully recorded
 - **THEN** recovery treats the reservation as uncertain and does not expose a new gateway on that port
 
-#### Scenario: Reused PID or failed cleanup
-- **WHEN** recovery encounters a reused worker PID or cannot verify that cleanup ended forwarding
+#### Scenario: Unverified process identity or failed cleanup
+- **WHEN** recovery cannot verify the saved worker generation or that cleanup ended forwarding
 - **THEN** it neither kills the unrelated process nor releases the reservation based on coordinator death or elapsed time
+
+#### Scenario: Proven process generation replacement
+- **WHEN** the same verified machine, boot and PID namespace reports a different immutable birth identity for the saved worker PID
+- **THEN** recovery may release that worker generation without signaling the replacement process
+- **AND** a changed effective UID without a birth-identity change does not authorize release

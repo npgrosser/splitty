@@ -261,6 +261,8 @@ impl Owner {
             relay: Some(relay),
             released: release,
             capacity: capacity.clone(),
+            owner: self.sender.clone(),
+            cleaning: false,
         };
         let (mut read, mut write) = tokio::io::split(service);
         let purpose = target.map_or(wire::Purpose::Direct, |target| wire::Purpose::Host {
@@ -404,6 +406,8 @@ pub struct Connection {
     relay: Option<JoinHandle<()>>,
     released: watch::Receiver<bool>,
     capacity: Arc<Mutex<Capacity>>,
+    owner: Sender,
+    cleaning: bool,
 }
 impl Connection {
     pub fn ready(&self) -> &wire::Ready {
@@ -419,13 +423,15 @@ impl Connection {
     pub async fn recv(&mut self) -> Option<Charged<Incoming>> {
         self.peer.as_mut()?.recv().await
     }
-    pub async fn finish(mut self) -> io::Result<()> {
+    fn cleanup(&mut self) -> impl std::future::Future<Output = io::Result<()>> + Send + 'static {
+        self.cleaning = true;
         self.context.close();
         let peer = self.peer.take();
         let relay = self.relay.take();
         let mut released = self.released.clone();
         let capacity = self.capacity.clone();
-        tokio::spawn(async move {
+        let owner = self.owner.clone();
+        async move {
             let _capacity = capacity;
             let result = match peer {
                 Some(peer) => peer.finish().await,
@@ -434,33 +440,40 @@ impl Connection {
             if let Some(relay) = relay {
                 let _ = relay.await;
             }
-            let _ = released.wait_for(|done| *done).await;
+            if tokio::time::timeout(wire::HANDSHAKE_TIMEOUT, released.wait_for(|done| *done))
+                .await
+                .is_err()
+            {
+                // Closing a substream alone cannot recover a helper that still
+                // answers carrier pings but never confirms stream cleanup.
+                // The bridge supervisor reaps the helper before releasing routes.
+                owner.close();
+                let _ = released.wait_for(|done| *done).await;
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "embedded stream cleanup timed out; helper stopped",
+                ));
+            }
             result
-        })
-        .await
-        .map_err(io::Error::other)?
+        }
+    }
+    pub async fn finish(mut self) -> io::Result<()> {
+        // Cleanup survives cancellation of the caller's finish future.
+        tokio::spawn(self.cleanup())
+            .await
+            .map_err(io::Error::other)?
     }
 }
 impl Drop for Connection {
     fn drop(&mut self) {
+        if self.cleaning {
+            return;
+        }
         self.context.close();
-        let peer = self.peer.take();
-        let relay = self.relay.take();
-        let mut released = self.released.clone();
-        let capacity = self.capacity.clone();
         let Ok(runtime) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        runtime.spawn(async move {
-            let _capacity = capacity;
-            if let Some(peer) = peer {
-                let _ = peer.finish().await;
-            }
-            if let Some(relay) = relay {
-                let _ = relay.await;
-            }
-            let _ = released.wait_for(|done| *done).await;
-        });
+        runtime.spawn(self.cleanup());
     }
 }
 
@@ -483,6 +496,88 @@ mod tests {
             Peer::start(br, bw, &ready, queue::Context::default()),
         )
     }
+    #[tokio::test(start_paused = true)]
+    async fn missing_stream_cleanup_escalates_but_retains_capacity_until_helper_exit() {
+        for drop_connection in [false, true] {
+            let (physical, helper) = peers();
+            let (release, released) = watch::channel(false);
+            let capacity = Arc::new(Mutex::new(Capacity {
+                opening: None,
+                stream: None,
+            }));
+            let retained = Arc::downgrade(&capacity);
+            let connection = Connection {
+                peer: None,
+                ready: None,
+                context: queue::Context::default(),
+                relay: None,
+                released,
+                capacity,
+                owner: physical.sender.clone(),
+                cleaning: false,
+            };
+            let waiter = tokio::spawn(async move {
+                if drop_connection {
+                    drop(connection);
+                    Ok(())
+                } else {
+                    connection.finish().await
+                }
+            });
+            // No helper acknowledgement; await escalation, using virtual time.
+            let mut closing = physical.sender.context().closing();
+            closing.wait_for(|closed| *closed).await.unwrap();
+            assert!(
+                retained.upgrade().is_some(),
+                "deadline cannot release unconfirmed capacity"
+            );
+            if !drop_connection {
+                assert!(!waiter.is_finished());
+            }
+            // Models the supervisor's notification only after observed helper exit.
+            release.send_replace(true);
+            if !drop_connection {
+                assert_eq!(
+                    waiter.await.unwrap().unwrap_err().kind(),
+                    io::ErrorKind::TimedOut
+                );
+            } else {
+                waiter.await.unwrap().unwrap();
+            }
+            while retained.upgrade().is_some() {
+                tokio::task::yield_now().await;
+            }
+            physical.shutdown().await;
+            helper.shutdown().await;
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn acknowledged_stream_cleanup_keeps_the_owner_usable() {
+        let (physical, mut helper) = peers();
+        let (release, released) = watch::channel(true);
+        let connection = Connection {
+            peer: None,
+            ready: None,
+            context: queue::Context::default(),
+            relay: None,
+            released,
+            capacity: Arc::new(Mutex::new(Capacity {
+                opening: None,
+                stream: None,
+            })),
+            owner: physical.sender.clone(),
+            cleaning: false,
+        };
+        connection.finish().await.unwrap();
+        assert!(!physical.sender.context().is_closed());
+        physical.sender.data(Kind::Text, b"still usable").unwrap();
+        drop(helper.recv().await.unwrap());
+        drop(release);
+        physical.shutdown().await;
+        helper.shutdown().await;
+    }
+
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn preparation_cancellation_returns_after_child_exit() {

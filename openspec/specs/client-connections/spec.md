@@ -118,7 +118,7 @@ Anonymous work SHALL consume process quotas; parent-owned popouts SHALL share th
 - **THEN** its capacity returns exactly once after cleanup and can serve another caller without leaking or prematurely reusing a worker slot
 
 ### Requirement: Ordered Stream And Cancellation
-Each connection SHALL preserve application-message order and existing spawn/replay ordering. Cancellation and liveness SHALL remain deliverable under saturation. A request cancellation or timeout SHALL release pending waits, but SHALL NOT claim an already admitted mutation was undone or automatically repeat it.
+Each connection SHALL preserve application-message order and existing spawn/replay ordering. Orderly peer closure SHALL deliver already accepted application frames before reporting end of input; explicit revocation and protocol failure SHALL still discard undelivered input immediately. Cancellation and liveness SHALL remain deliverable under saturation. A request cancellation or timeout SHALL release pending waits, but SHALL NOT claim an already admitted mutation was undone or automatically repeat it.
 
 #### Scenario: Cancel while output is saturated
 - **WHEN** an upload or pending request is cancelled while output fills the data allowance
