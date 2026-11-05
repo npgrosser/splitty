@@ -52,3 +52,4 @@ Open questions for the design:
 ## Carried-over design notes
 
 - 2026-10-18, `cli-editor-open`: `splitty open [path] [--with vscode|zed]` now provides confirmed external editor handoff; integrated Bash/Zsh also expose `splitty-open`. This viewer change must integrate with that command rather than introduce a conflicting default. An explicit `--in splitty` destination is reserved for the later viewer design, not implemented by the external editor change. The viewer sandbox requirements above remain applicable.
+- 2026-11-04, `review-pane` (draft): a pane for files and diffs with line annotations that are sent to a terminal as text builds on this change's pane kind and renderers and uses the reserved `--in splitty` destination; the two drafts may merge when one of them is next.
