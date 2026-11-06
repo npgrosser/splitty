@@ -103,6 +103,9 @@ describe("screen list", () => {
     expect(body).toMatch(/<button[^>]*aria-current="true"[^>]*>Frontend<\/button>/);
     expect(body).toContain('aria-label="Screens on dev-vm"');
     expect(body).toContain('aria-label="New screen on dev-vm"');
+    expect(body).toContain('aria-label="Close Shell"');
+    expect(body).toContain('aria-label="Detach Frontend: keeps running on the host"');
+    expect(body).toContain('title="Detach screen: keeps running on the host"');
     // A host without open screens, and every port control, stay in the Hosts panel.
     expect(body).not.toContain("saved-vm");
     expect(body).not.toContain("Resume");

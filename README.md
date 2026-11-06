@@ -132,10 +132,12 @@ On macOS and Linux, local terminals need the
 
 ## Getting started
 
-1. Start the app. It opens one screen with one terminal.
+1. Start the app. It opens one screen with one terminal and the drawer pinned
+   beside it. Use the pin button to hide the drawer when not in use; your
+   choice is remembered.
 2. Split with **Cmd/Alt+D** and **Cmd/Alt+Shift+D**, open a tab with
-   **Cmd/Alt+T** and a screen with **Ctrl+Shift+Space**. **Ctrl+B** shows the
-   drawer.
+   **Cmd/Alt+T** and a screen with **Ctrl+Shift+Space**. **Ctrl+B** opens the
+   drawer when it is unpinned.
 3. For a remote screen, click the arrow next to **New screen** in the drawer
    and choose **On a host…**. Connect to a new host once with plain `ssh`
    first to accept its key.

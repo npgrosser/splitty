@@ -280,7 +280,7 @@
   });
 
   // ── End a remote screen ──
-  // × detaches and never asks; the second button ends the screen on its host,
+  // Detach never asks; the separate end button ends the screen on its host,
   // after an inline question in its row the first time.
   let endingId = $state<string | null>(null);
 
@@ -508,11 +508,15 @@
                   {/if}
                   <button
                     class="drawer-icon-btn drawer-screen-close"
-                    title={screen.conn === "local" ? "Close screen" : "Detach: leave the window, keeps running on the host"}
-                    aria-label={`Close ${screen.name}`}
+                    title={screen.conn === "local" ? "Close screen" : "Detach screen: keeps running on the host"}
+                    aria-label={screen.conn === "local" ? `Close ${screen.name}` : `Detach ${screen.name}: keeps running on the host`}
                     onclick={(e) => { e.stopPropagation(); onCloseScreen(screen.id); }}
                   >
-                    <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>
+                    {#if screen.conn === "local"}
+                      <svg width="12" height="12" viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 4.5l7 7M11.5 4.5l-7 7" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" /></svg>
+                    {:else}
+                      <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1.5 8h2M3.5 5h3v6h-3zM6.5 6.5H8M6.5 9.5H8M10 5h2.5v6H10zM12.5 8h2" /></svg>
+                    {/if}
                   </button>
                 </span>
               {/if}

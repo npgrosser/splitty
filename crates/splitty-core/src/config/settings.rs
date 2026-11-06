@@ -232,13 +232,17 @@ pub struct WindowSettings {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DrawerSettings {
-    #[serde(default)]
+    #[serde(default = "default_drawer_pinned")]
     pub pinned: bool,
     pub edge_reveal: bool,
     pub show_tips: bool,
     #[serde(default)]
     pub resizable: bool,
     pub sidebar_width: i32,
+}
+
+fn default_drawer_pinned() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -396,7 +400,7 @@ impl Default for WindowSettings {
 impl Default for DrawerSettings {
     fn default() -> Self {
         Self {
-            pinned: false,
+            pinned: default_drawer_pinned(),
             edge_reveal: true,
             show_tips: true,
             resizable: false,
@@ -948,7 +952,7 @@ mod tests {
         assert!(!cfg.tabs.show_float);
         assert!(!cfg.tabs.show_maximize);
         assert!(!cfg.tabs.show_popout);
-        assert!(!cfg.drawer.pinned);
+        assert!(cfg.drawer.pinned);
         assert!(cfg.drawer.edge_reveal);
         assert!(cfg.drawer.show_tips);
         assert!(!cfg.drawer.resizable);
@@ -1240,13 +1244,24 @@ mod tests {
     fn drawer_pin_and_unpin_survive_reload() {
         let dir = TempDir::new().expect("temporary directory");
         let path = dir.path().join("config.toml");
+        assert!(load_from(&path).drawer.pinned);
         // Existing configurations have no pinned field.
         fs::write(&path, "[drawer]\nsidebar_width = 280\n").expect("old settings");
-        assert!(!load_from(&path).drawer.pinned);
-        for pinned in [true, false] {
+        assert!(load_from(&path).drawer.pinned);
+        let direct: DrawerSettings = serde_json::from_value(serde_json::json!({
+            "edgeReveal": true,
+            "showTips": true,
+            "sidebarWidth": 280
+        }))
+        .expect("drawer without pinned field");
+        assert!(direct.pinned);
+        for pinned in [false, true] {
             let updated = update_at(&path, serde_json::json!({"drawer": {"pinned": pinned}}))
                 .expect("persist pin");
             assert_eq!(updated.drawer.pinned, pinned);
+            let unrelated = update_at(&path, serde_json::json!({"terminal": {"theme": "monokai"}}))
+                .expect("persist unrelated change");
+            assert_eq!(unrelated.drawer.pinned, pinned);
             let reloaded = load_from(&path);
             assert_eq!(reloaded.drawer.pinned, pinned);
             assert_eq!(reloaded.drawer.sidebar_width, 280);
@@ -1410,6 +1425,7 @@ mod tests {
     #[test]
     fn metadata_and_fractional_scroll_are_server_owned() {
         let metadata = settings_metadata();
+        assert_eq!(metadata["defaults"]["drawer"]["pinned"], true);
         assert_eq!(metadata["defaults"]["drawer"]["sidebarWidth"], 200);
         assert_eq!(
             metadata["limits"]["terminal.xterm.scrollSensitivity"]["step"],
