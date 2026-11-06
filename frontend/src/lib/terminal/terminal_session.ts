@@ -75,6 +75,8 @@ export class TerminalSession {
   private readonly isShown: () => boolean;
   private shown = true;
   private paneSize: Grid | null = null;
+  /** The pane size this view last reported; kept across `hide`. */
+  private reported: Grid | null = null;
   private pty: PtySize | null = null;
   /** The next report follows an attach and asks the server for a redraw. */
   private redrawPending = false;
@@ -256,17 +258,16 @@ export class TerminalSession {
     this.apply();
   }
 
-  /** Measure the pane; true when its size changed. */
+  /**
+   * Measure the pane; true when its size changed. Only a report changes the
+   * size the emulator shows: a pane that is not shown (an inactive screen keeps
+   * its layout) keeps the PTY's size, at which the session's processes go on
+   * writing.
+   */
   private measurePane(): boolean {
     const grid = this.emulator.measure();
     if (!grid) return false;
-    const previous = this.paneSize;
-    if (previous && sameGrid(previous, grid)) return false;
-    // While the pane's own size decides the PTY, show the new one right away;
-    // the server's answer to the report corrects it if another client decides.
-    if (this.pty && previous && sameGrid(this.pty, previous)) {
-      this.pty = { ...this.pty, cols: grid.cols, rows: grid.rows };
-    }
+    if (this.paneSize && sameGrid(this.paneSize, grid)) return false;
     this.paneSize = grid;
     return true;
   }
@@ -274,6 +275,12 @@ export class TerminalSession {
   private report(): void {
     if (!this.paneSize) return;
     const { cols, rows } = this.paneSize;
+    // While this view's own size decides the PTY, show the new one right away;
+    // the server's answer to the report corrects it if another client decides.
+    if (this.pty && this.reported && sameGrid(this.pty, this.reported)) {
+      this.pty = { ...this.pty, cols, rows };
+    }
+    this.reported = this.paneSize;
     const redraw = this.redrawPending;
     this.redrawPending = false;
     this.client.socket.send(redraw

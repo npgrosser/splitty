@@ -206,6 +206,36 @@ describe("TerminalSession: a PTY size decided by the server", () => {
     session.detach();
   });
 
+  it("keeps the PTY's size while not shown and reports the pane's when shown again", async () => {
+    const server = sizingServer();
+    let shown = true;
+    const { session, emulator } = await attachedAt(server, { cols: 120, rows: 40 }, { cols: 120, rows: 40 }, () => shown);
+    shown = false;
+    session.setShown(false);
+    const reports = server.socket.sentOfType("resize").length;
+    const resizes: number[][] = [];
+    emulator.onResize((cols, rows) => resizes.push([cols, rows]));
+
+    // The window grows and shrinks back while another screen is shown; the
+    // session's processes go on writing for 120×40 all the while.
+    emulator.pane = { cols: 160, rows: 50 };
+    session.fit();
+    emulator.pane = { cols: 120, rows: 40 };
+    session.fit();
+    expect(resizes).toEqual([]);
+
+    // Grown again and shown: the pane's own size decides, shown right away.
+    emulator.pane = { cols: 160, rows: 50 };
+    session.fit();
+    shown = true;
+    session.setShown(true);
+    expect(server.socket.sentOfType("resize").slice(reports)).toEqual([
+      { type: "resize", id: "sess-1", cols: 160, rows: 50 },
+    ]);
+    expect(resizes).toEqual([[160, 50]]);
+    session.detach();
+  });
+
   it("takes the size over with an activity", async () => {
     const server = sizingServer();
     const { session } = await attachedAt(server, { cols: 120, rows: 40 }, { cols: 100, rows: 30 });
