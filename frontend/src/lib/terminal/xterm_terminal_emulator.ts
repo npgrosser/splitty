@@ -1,5 +1,6 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
+import { UnicodeGraphemesAddon } from "@xterm/addon-unicode-graphemes";
 import type { SearchAddon, ISearchOptions } from "@xterm/addon-search";
 import { cellSize, measure } from "./fit.ts";
 import { OrderedOutput } from "./ordered_output.ts";
@@ -58,13 +59,11 @@ async function loadXtermAddons(
     { SearchAddon },
     { ImageAddon },
     { ClipboardAddon },
-    { UnicodeGraphemesAddon },
   ] = await Promise.all([
     import("@xterm/addon-web-links"),
     import("@xterm/addon-search"),
     import("@xterm/addon-image"),
     import("@xterm/addon-clipboard"),
-    import("@xterm/addon-unicode-graphemes"),
   ]);
 
   // Terminal output is attacker-influenced: any process can print a link, and a
@@ -93,8 +92,6 @@ async function loadXtermAddons(
   const { Base64 } = await import("@xterm/addon-clipboard");
   const { SplittyClipboardProvider } = await import("./clipboard_policy.ts");
   terminal.loadAddon(new ClipboardAddon(new Base64(), new SplittyClipboardProvider()));
-  terminal.loadAddon(new UnicodeGraphemesAddon());
-  terminal.unicode.activeVersion = "15";
 
   if (getSettings().terminal.ligatures) {
     const { LigaturesAddon } = await import("@xterm/addon-ligatures");
@@ -193,6 +190,14 @@ export class XtermTerminalEmulator implements TerminalEmulator {
 
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
+    // Character widths as the programs in the terminal count them (Unicode 15
+    // with grapheme clusters, as string-width and unicode-width do), set
+    // before any output is parsed. The addon's plain "15" gives combining
+    // marks and the emoji variation selector a column of their own: `⚠️` took
+    // three columns where the program wrote two, and the rest of its line
+    // moved.
+    terminal.loadAddon(new UnicodeGraphemesAddon());
+    terminal.unicode.activeVersion = "15-graphemes";
 
     return new XtermTerminalEmulator(terminal, fitAddon, openLink);
   }
@@ -558,7 +563,10 @@ export class XtermTerminalEmulator implements TerminalEmulator {
       // current color, so this is unconditional — it is a no-op when the app
       // never touched it.
       seq += "\x1b]112\x1b\\";
-      this.terminal.write(seq);
+      // Through the output, which puts it between sequences: a write of its
+      // own came after the batch being parsed, inside a sequence the batch
+      // ended in.
+      this.output.insert(new TextEncoder().encode(seq));
     });
     this.cleanups.push(() => disposable.dispose());
   }

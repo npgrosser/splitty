@@ -234,8 +234,7 @@ export class AttachRegistry {
           const output = historical ? replay.push(data) : data;
           if (output.length) sink(output);
         }
-        // An incomplete historical control sequence must not consume live
-        // output or turn its continuation into a fresh terminal query.
+        // A sequence the replay ends in goes on in the live output.
         const tail = replay.finish();
         if (tail.length) sink(tail);
         return this.addView(sessionId, sink);

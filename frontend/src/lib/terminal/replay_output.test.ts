@@ -31,7 +31,27 @@ describe("historical terminal output", () => {
     for (let split = 0; split <= text.length; split++) expect(replay(text, split)).toBe(text);
   });
 
-  it("cancels an unfinished historical escape before live data", () => {
-    expect(replay("prompt\x1b]11;", 8)).toBe("prompt\x1b]11;\x18");
+  it.each([
+    ["an unfinished CSI", "\x1b[38;5"],
+    ["an unfinished OSC", "\x1b]0;tit"],
+    ["an OSC cancelled with CAN", "\x1b]52;c;Y29w\x18"],
+    ["a DCS cancelled with SUB", "\x1bP+q544e\x1a"],
+  ])("judges a query after %s on its own", (_, before) => {
+    for (const query of ["\x1b[c", "\x1b]11;?\x07", "\x1b[6n"]) {
+      const text = `${before}${query}❯ `;
+      for (let split = 0; split <= encoder.encode(text).length; split++) {
+        expect(replay(text, split)).toBe(`${before}❯ `);
+      }
+    }
+  });
+
+  it("keeps the output after a cancelled clipboard write", () => {
+    const text = "\x1b]52;c;Y29w\x18\x1b[1mbold\x1b[0m\x1b]0;title\x1b\\";
+    for (let split = 0; split <= text.length; split++) expect(replay(text, split)).toBe(text);
+  });
+
+  it("hands on a sequence the replay ends in, which live output ends", () => {
+    expect(replay("prompt\x1b[38;2;153", 8)).toBe("prompt\x1b[38;2;153");
+    expect(replay("prompt\x1b]11;", 8)).toBe("prompt\x1b]11;");
   });
 });

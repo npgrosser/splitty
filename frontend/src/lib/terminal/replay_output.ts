@@ -1,39 +1,76 @@
 /** Historical terminal queries must not produce fresh input at a shell prompt.
  * Keep rendering/state sequences, but remove requests for terminal reports.
  * Operates on bytes so UTF-8 and queries split across replay frames survive.
+ * A sequence ends where xterm.js ends it, also at CAN, SUB and an ESC that
+ * does not end a string: one that never ended asks for nothing, and what
+ * follows it is judged on its own.
  */
+const ESC = 0x1b;
+const CAN = 0x18;
+const SUB = 0x1a;
+const STRINGS = [0x5d, 0x50, 0x5f, 0x5e]; // OSC, DCS, APC, PM
+
 export class ReplayOutput {
   private pending: number[] = [];
 
   push(data: Uint8Array): Uint8Array {
     const output: number[] = [];
-    for (const byte of data) {
-      if (!this.pending.length) {
-        if (byte === 0x1b) this.pending.push(byte);
-        else if (byte !== 0x05) output.push(byte); // ENQ
-        continue;
-      }
-      this.pending.push(byte);
-      const kind = this.pending[1];
-      const length = this.pending.length;
-      if (length === 2 && [0x5b, 0x5d, 0x50, 0x5f, 0x5e].includes(kind)) continue;
-      const string = [0x5d, 0x50, 0x5f, 0x5e].includes(kind);
-      const complete = string
-        ? (kind === 0x5d && byte === 7) || (length > 2 && this.pending[length - 2] === 0x1b && byte === 0x5c)
-        : kind === 0x5b ? length > 2 && byte >= 0x40 && byte <= 0x7e : true;
-      if (!complete) continue;
-      if (!this.hasSideEffect()) {
-        for (const value of this.pending) output.push(value);
-      }
-      this.pending = [];
-    }
+    for (const byte of data) this.step(byte, output);
     return Uint8Array.from(output);
   }
 
+  private step(byte: number, output: number[]): void {
+    if (!this.pending.length) {
+      if (byte === ESC) this.pending.push(byte);
+      else if (byte !== 0x05) output.push(byte); // ENQ
+      return;
+    }
+    const string = STRINGS.includes(this.pending[1]);
+    if (byte === CAN || byte === SUB) {
+      this.handOn(output);
+      output.push(byte);
+      return;
+    }
+    if (byte === ESC && !string) {
+      this.handOn(output);
+      this.pending.push(byte);
+      return;
+    }
+    if (string && this.pending.length > 2 && this.pending.at(-1) === ESC && byte !== 0x5c) {
+      // An ESC that is not ST ended the string and starts a sequence of its own.
+      this.pending.pop();
+      this.handOn(output);
+      this.pending.push(ESC);
+      this.step(byte, output);
+      return;
+    }
+    this.pending.push(byte);
+    const kind = this.pending[1];
+    const length = this.pending.length;
+    const inString = STRINGS.includes(kind);
+    if (length === 2 && (kind === 0x5b || inString)) return;
+    const complete = inString
+      ? (kind === 0x5d && byte === 7) || (length > 2 && this.pending[length - 2] === ESC && byte === 0x5c)
+      : kind === 0x5b ? length > 2 && byte >= 0x40 && byte <= 0x7e : true;
+    if (!complete) return;
+    if (!this.hasSideEffect()) this.handOn(output);
+    this.pending = [];
+  }
+
+  /** Hand the pending bytes on unchanged. */
+  private handOn(output: number[]): void {
+    for (const value of this.pending) output.push(value);
+    this.pending = [];
+  }
+
+  /**
+   * The end of the replay: the bytes of a sequence that has not ended yet,
+   * unchanged. Live output follows the replay without a gap and ends that
+   * sequence, so the sequence is live: cancelling it showed the rest of a
+   * colour such as ESC[38;2;153;153;153m as the text `;153;153m`.
+   */
   finish(): Uint8Array {
-    // Preserve a partial state sequence, but cancel it before live output.
-    // Otherwise a trailing ESC/OSC from scrollback could solicit a response.
-    const tail = this.pending.length ? Uint8Array.from([...this.pending, 0x18]) : new Uint8Array();
+    const tail = Uint8Array.from(this.pending);
     this.pending = [];
     return tail;
   }

@@ -116,6 +116,23 @@ describe("AttachRegistry", () => {
     expect(view.chunks.join("")).toBe("oldprompt$ \x1b]11;?\x07\x1b[6n");
   });
 
+  it("lets live output end a sequence the replay ends in", async () => {
+    const terminal = new Terminal({ cols: 80, rows: 5, allowProposedApi: true });
+    try {
+      const pending = registry.attach("s1", 80, 24);
+      socket.frame("s1", "old\r\n\x1b[38;2;153");
+      socket.attached("s1");
+      (await pending).wire((data) => terminal.write(data));
+      socket.frame("s1", ";153;153mgrey\x1b[0m\r\n");
+      await new Promise<void>((done) => terminal.write("", done));
+      const line = terminal.buffer.active.getLine(1);
+      expect(line?.translateToString(true)).toBe("grey");
+      expect(line?.getCell(0)?.getFgColor()).toBe(0x999999);
+    } finally {
+      terminal.dispose();
+    }
+  });
+
   // terminal-sessions, Buffered output shown on attach
   it("shows buffered output that arrives before `attached`, before later output", async () => {
     const pending = registry.attach("s1", 80, 24);

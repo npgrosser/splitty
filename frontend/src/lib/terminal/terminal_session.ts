@@ -75,8 +75,6 @@ export class TerminalSession {
   private readonly isShown: () => boolean;
   private shown = true;
   private paneSize: Grid | null = null;
-  /** The pane size this view last reported; kept across `hide`. */
-  private reported: Grid | null = null;
   private pty: PtySize | null = null;
   /** The next report follows an attach and asks the server for a redraw. */
   private redrawPending = false;
@@ -275,12 +273,10 @@ export class TerminalSession {
   private report(): void {
     if (!this.paneSize) return;
     const { cols, rows } = this.paneSize;
-    // While this view's own size decides the PTY, show the new one right away;
-    // the server's answer to the report corrects it if another client decides.
-    if (this.pty && this.reported && sameGrid(this.pty, this.reported)) {
-      this.pty = { ...this.pty, cols, rows };
-    }
-    this.reported = this.paneSize;
+    // The emulator takes the new size with the server's answer, after the
+    // output written before the PTY took it. Taking it right away parsed that
+    // output at the new size, for as long as the answer took, and showed a
+    // size another client decided only after the answer.
     const redraw = this.redrawPending;
     this.redrawPending = false;
     this.client.socket.send(redraw

@@ -179,14 +179,14 @@ describe("TerminalSession: a PTY size decided by the server", () => {
     session.detach();
   });
 
-  it("resizes right away while its own size decides, and follows the answer", async () => {
+  it("takes a new size with the server's answer, after the output written for the old one", async () => {
     const server = sizingServer();
     const { session, emulator } = await attachedAt(server, { cols: 120, rows: 40 }, { cols: 120, rows: 40 });
 
     emulator.pane = { cols: 140, rows: 50 };
     session.fit();
-    expect([emulator.cols, emulator.rows]).toEqual([140, 50]);
     expect(server.socket.sentOfType("resize").at(-1)).toEqual({ type: "resize", id: "sess-1", cols: 140, rows: 50 });
+    expect([emulator.cols, emulator.rows]).toEqual([120, 40]);
 
     server.socket.message({ type: "size", sessionId: "sess-1", cols: 130, rows: 50, policy: "active" });
     expect([emulator.cols, emulator.rows]).toEqual([130, 50]);
@@ -224,7 +224,7 @@ describe("TerminalSession: a PTY size decided by the server", () => {
     session.fit();
     expect(resizes).toEqual([]);
 
-    // Grown again and shown: the pane's own size decides, shown right away.
+    // Grown again and shown: the pane's size is reported and shown with the answer.
     emulator.pane = { cols: 160, rows: 50 };
     session.fit();
     shown = true;
@@ -232,6 +232,7 @@ describe("TerminalSession: a PTY size decided by the server", () => {
     expect(server.socket.sentOfType("resize").slice(reports)).toEqual([
       { type: "resize", id: "sess-1", cols: 160, rows: 50 },
     ]);
+    server.socket.message({ type: "size", sessionId: "sess-1", cols: 160, rows: 50, policy: "active" });
     expect(resizes).toEqual([[160, 50]]);
     session.detach();
   });
