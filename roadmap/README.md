@@ -65,7 +65,7 @@ Der Nachtrag `remote-forwards-persistence` (manuelle und gespeicherte Dev-Port-W
 
 Aus einem Praxistest auf einem VPS folgten drei Nachträge, alle am 2026-10-14 archiviert: `remote-development-ux` räumt die Bedienung von Hosts und Ports auf; `remote-open-vscode` ergänzt „Open in VS Code“ für den aktuellen Ordner eines Remote-Terminals; `terminal-folder-actions` ergänzt „Copy SSH Path“ und „Open in VS Code“ für lokale Terminals im Browser. Live-Prüfungen auf Windows/macOS und mit installiertem Editor stehen aus.
 
-[Milestone 8](#milestone-8-sessions-unabhängig-vom-server-abgeschlossen) ist abgeschlossen: `terminal-attach`, `session-keepers` und `keeper-host-updates` sind seit 2026-10-28 archiviert, ebenso der Quick Win `session-scratchpad` (108): ein Scratchpad pro Terminal-Session unter dem Pane (`Cmd/Alt+J`), mit der Session gespeichert und für Agents in Panes unsichtbar. Vor neuen Features wird die Architektur geradegezogen: **112**, erst die vier Server-Changes (unabhängig voneinander), dann der Client-Kern. Danach kommt [Milestone 6, Terminal Intelligence](../openspec/changes/terminal-intelligence/proposal.md) in Frage.
+[Milestone 8](#milestone-8-sessions-unabhängig-vom-server-abgeschlossen) ist abgeschlossen: `terminal-attach`, `session-keepers` und `keeper-host-updates` sind seit 2026-10-28 archiviert, ebenso der Quick Win `session-scratchpad` (108): ein Scratchpad pro Terminal-Session unter dem Pane (`Cmd/Alt+J`), mit der Session gespeichert und für Agents in Panes unsichtbar. Vor **112** vorgezogen und seit 2026-11-06 archiviert: **105** (`splitty open` mit Viewer-Panes) und **111** (Annotationen und Review an ein Terminal). Ihre Folge-Drafts sind 115 bis 117. Als Nächstes wird die Architektur geradegezogen: **112**, erst die vier Server-Changes (unabhängig voneinander), dann der Client-Kern, der die Viewer-Teile mit aufnimmt. Danach kommt [Milestone 6, Terminal Intelligence](../openspec/changes/terminal-intelligence/proposal.md) in Frage.
 
 ## Empfohlene Reihenfolge
 
@@ -132,16 +132,19 @@ Ideen und Features, nicht fest eingeplant, aber vorsortiert. Ausgearbeitete Vorh
 | 102 | [Cloud Demo Platform](102-cloud-demo.md) | Idee | Milestone 1 |
 | 103 | [Notes & Tags](../openspec/changes/notes-and-tags/proposal.md) | Draft | Milestone 1 |
 | 104 | [MCP Server](../openspec/changes/mcp-server/proposal.md) | Draft | Fixes für Session-Output (Fundliste) |
-| 105 | [splitty open](../openspec/changes/splitty-open/proposal.md) | Draft | Milestone 1 |
+| 105 | [splitty open](../openspec/specs/viewer-panes/spec.md) | ✅ Done (2026-11-06): Viewer-Panes | Milestone 1 |
 | 106 | [CLI Control](../openspec/specs/managed-jobs/spec.md) | ✅ Done: Managed Jobs, Logs, Agent-Rechte | Milestone 1 + 5 |
 | 107 | Remote Screens | → aufgegangen in Milestone 7 | |
 | 108 | Session-Scratchpad | ✅ Done (2026-10-28) | Milestone 1 + 5 |
 | 109 | [Workspace-Restore](../openspec/changes/workspace-restore/proposal.md) | Draft | Milestone 1 + 5, Session-Status und Pane-cwd im Modell (Fundliste) |
 | 110 | [WSL-Installer teilen](../openspec/changes/wsl-install-shared/proposal.md) | Draft | Windows-Tests (CI oder Windows-Rechner) |
-| 111 | [Review-Pane](../openspec/changes/review-pane/proposal.md) | Draft | Pane-Art ohne Session (105) |
+| 111 | [Review-Pane](../openspec/specs/viewer-annotations/spec.md) | ✅ Done (2026-11-06): Annotationen | 105 |
 | 112 | [Client-Kern und Fachlogik im Server](../openspec/changes/frontend-client-core/proposal.md) | Draft | — |
 | 113 | [Mikrofon für Hosts](../openspec/changes/remote-microphone/proposal.md) | Draft | Milestone 7 + 8 |
 | 114 | [Terminal-Bell](../openspec/changes/terminal-bell/proposal.md) | Draft | — |
+| 115 | [Weitere Renderer](../openspec/changes/viewer-renderers/proposal.md) | Draft | 105 |
+| 116 | [Dateien schnell bearbeiten](../openspec/changes/viewer-quick-edit/proposal.md) | Draft | 105 |
+| 117 | [Diffs reviewen](../openspec/changes/review-diffs/proposal.md) | Draft | 105 + 111 |
 
 **101** macht mehrere gleichzeitige Clients am selben Screen verlässlich. Verbinden können sie sich schon heute (Single-Attach wurde im März 2026 entfernt); es fehlen Layout-Sync für alle Ops, Reihenfolge und Input-Routing. Geteilte Output-Streams (`fix-pty-reader`) und die Resize-Policy (`pty-size-policy`: kleinste Größe der aktiven Clients, sichtbare Markierung, Übernahme) sind erledigt.
 
@@ -151,7 +154,7 @@ Ideen und Features, nicht fest eingeplant, aber vorsortiert. Ausgearbeitete Vorh
 
 **104** MCP Server: Splitty als Tool für AI Agents exponieren. Agents können Terminals lesen, Input senden, Workspaces verwalten.
 
-**105** `splitty open <file>` rendert Dateien direkt in Splitty als Pane oder Overlay.
+**105** `splitty open <file>` zeigt eine Datei in einem Viewer-Pane neben dem Terminal: Markdown und HTML gerendert, ohne Skripte und ohne Frames, Code und Text mit Syntax-Highlighting, Bilder. Gelesen wird über die Verbindung des Fensters, also genauso auf Hosts, und das Pane folgt Änderungen der Datei. Eine Terminal-Auswahl öffnet sich über das Kontextmenü als Text im Viewer. Ordner, `--editor` und `--with` gehen weiter an VS Code oder Zed. Weitere Formate und ein Overlay sind 115.
 
 **106** ergänzt die bestehende CLI um sichtbare Hintergrund-Jobs (`run`, `jobs`, `logs`, `inspect`, `input`, `stop`, `forget`) und begrenzte Agent-Zugänge. Prozesse und Output bleiben beim Splitty-Server, wenn Claude neu startet. MCP kann dieselbe API später nutzen. Weitere CLI-Conveniences (`--command`-Sugar, `-v`, Uptime, Completions) bleiben Folgearbeit. Anleitung: [Managed Jobs](../docs/cli-jobs.md).
 
@@ -163,10 +166,16 @@ Ideen und Features, nicht fest eingeplant, aber vorsortiert. Ausgearbeitete Vorh
 
 **110** installiert das WSL-Backend der Windows-App mit dem Installer aus `splitty-remote` (über `wsl.exe` statt `ssh`), in dieselben Versionsverzeichnisse mit Aufräumen. Zurückgestellt aus `remote-install` (D7), weil es sich hier nur typprüfen, nicht unter Windows testen lässt.
 
-**111** zeigt Dateien und Diffs neben dem Agent-Terminal, mit Annotationen pro Zeile (Kommentar, Frage, Vorschlag, Löschen), die gesammelt als Review-Datei mit eingefügtem Pfad an ein Terminal gehen, wie Drop und Screenshot-Paste; ohne Integration in ein Agent-Werkzeug. Ein Agent öffnet Diffs über dieselbe CLI. Später einfaches Bearbeiten kleiner Dateien, bewusst ohne Language Server und Extensions. VS-Code-Einbettung und Splitty als VS-Code-Extension sind im Design als verworfene Alternativen festgehalten. Vorher eine Weile mit einem vorhandenen Annotations-Werkzeug arbeiten (Plannotator), um zu sehen, was wirklich fehlt.
+**111** Annotationen in Viewer-Panes: Passagen im gerenderten Text oder in der Quelle markieren und kommentieren (Kommentar, Frage, Änderungsvorschlag, Löschen), auch auf Terminal-Auswahlen wie der Antwort eines Agents. Die Annotationen liegen mit dem Pane auf dem Server, überstehen Reload und Daemon-Neustart und werden nach Änderungen der Datei über ihr Zitat wiedergefunden. Gesammelt gehen sie als Markdown-Review an ein Terminal, standardmäßig das, aus dem der Viewer geöffnet wurde: als Paste ohne Enter, als Datei mit eingefügtem Pfad oder ins Scratchpad; Kopieren und Speichern gehen auch. Agents sehen Annotationen erst, wenn der User sie schickt. Ohne Integration in ein Agent-Werkzeug; Diffs sind 117, Bearbeiten ist 116.
 
 **112** trennt das Web-Frontend in einen UI-freien Client-Kern (`frontend/src/core/`, ohne DOM, Svelte, Dockview, Emulator und Shell-API, vom Build erzwungen), Plattform-Ports und Views. Vorher ziehen vier unabhängige Changes Fachlogik aus dem Fenster in den Server: `server-templates` (Templates anwenden und extrahieren), `server-derived-pane-state` (Screen-Namen, Pane-Titel, Busy-Flag, Close-on-Exit, Replay-Filter), `settings-authority` (Defaults, Grenzen, Validierung, Änderungs-Event) und `hub-host-decisions` (Update-Angebot, Retry, Host-Verzeichnis, Katalog, Forward-Feed). Danach kann eine zweite UI (Mobile-Renderer, native Desktop-UI) nur noch Views schreiben. Bestandsaufnahme und Reihenfolge stehen im Design.
 
 **113** macht Spracheingabe wie Claude Codes `/voice` in Panes auf Hosts möglich, ohne PulseAudio, SoX oder eigenes SSH-Forwarding. Pro Host schaltet man das Mikrofon einmal frei. Splitty-Sessions auf dem Host finden dann ein SoX-kompatibles `rec` im `PATH`. Das ist nur ein Link auf das schon installierte Splitty-Binary, installiert wird nichts. Dieses `rec` fordert das Audio über die bestehende Verbindung beim Fenster an. Das Mikrofon öffnet nur für das fokussierte Pane eines fokussierten Fensters und nur, solange aufgenommen wird; das Pane zeigt das an. Ein Wechsel zwischen zwei Agent-Panes braucht keinen Schritt, das neu fokussierte Pane übernimmt das Mikrofon. Lokale Panes nehmen schon heute selbst auf (unter Windows über WSLg).
 
 **114** reagiert auf die Terminal-Bell (BEL), mit der Werkzeuge wie Claude Code „fertig“ oder „wartet“ melden. Der Server erkennt sie schon und schickt `bell` an die Fenster, das Fenster loggt sie bisher nur. Geplant sind eine Markierung am Tab (wie bei ungelesenen Benachrichtigungen) und optional ein Ton oder eine Benachrichtigung. Alles passiert im Fenster selbst, darum funktioniert es für jeden Host ohne Audio über die Verbindung. Ob auch OSC-Benachrichtigungen (9, 99, 777) dazukommen, wird entschieden, wenn der Change dran ist.
+
+**115** weitere Renderer für Viewer-Panes: Mermaid- und Graphviz-Diagramme (als Fence in Markdown und als Datei), PDF über pdf.js, CSV und TSV als Tabelle, `--format` für mehrdeutige Endungen und `splitty open --overlay` als schnelle Vorschau über dem aktuellen Pane. URLs, Web-Apps und Dev-Server bleiben aus Sicherheitsgründen draußen, ebenso Renderer, die den Code eines Dokuments ausführen.
+
+**116** einfaches Bearbeiten kleiner Textdateien im Viewer-Pane (Agent-Anweisungen, Konfiguration, Prompts), gespeichert über die Verbindung des Fensters. Ein Speichern wird abgelehnt, wenn sich die Datei seit dem Laden geändert hat, da der Agent sie gleichzeitig bearbeiten kann. Bewusst ohne Language Server, Extensions und projektweite Suche; dafür bleibt `splitty open --editor`.
+
+**117** Diffs des Repositorys eines Panes im Viewer (Working Tree, Index, gegen einen Commit), mit Annotationen pro Seite und Zeile und demselben Review an ein Terminal wie in 111. Der Server ruft dafür nur lesende `git`-Befehle mit festen Argumenten auf und schaltet Repository-Einstellungen ab, die Befehle ausführen könnten.
