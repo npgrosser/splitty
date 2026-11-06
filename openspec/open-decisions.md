@@ -274,3 +274,6 @@ Each point names what holds now, the alternative, and where it is recorded.
 - **PSD-2** (2026-11-06, provisional, tbd; `server-derived-pane-state`): service-owned metadata polling and a brief final-output drain grace before automatic closure.
 - ST-1 (2026-11-06, `server-templates`, provisional, tbd): template apply is window-session-only; generic mux APIs reject it, preserving the consent boundary.
 - ST-2 (2026-11-06, `server-templates`, provisional, tbd): floating splits and duplicate/unused terminal definitions reject application; empty extraction reports an error.
+- **`settings-authority` D1 metadata endpoint** (2026-11-06, provisional, tbd): separate `GET /api/home/settings/metadata` and native `home.metadata` preserve the older settings body. Alternative: version the existing response.
+- **`settings-authority` D2 fractional sensitivity** (2026-11-06, provisional, tbd): the server persists floating point scroll sensitivities with the controls' fractional steps. Alternative: integer-only controls.
+- **`settings-authority` D3 failed update UX** (2026-11-06, provisional, tbd): restore confirmed settings and show the server error at section level. Alternative: field-level inline markers.

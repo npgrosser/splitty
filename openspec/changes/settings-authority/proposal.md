@@ -1,6 +1,6 @@
 # Proposal
 
-> Draft created on 2026-11-04. Specs, design and tasks are written when this change is next. Part 3 of the sequence in `frontend-client-core` (design, "Sequence"); independent of parts 1, 2 and 4. Related: `pty-size-policy` D8 (the settings window edits only the local server's settings), `display-zoom` (zoom stored per server).
+Part 3 of the sequence in `frontend-client-core` (design, "Sequence"); independent of parts 1, 2 and 4. Related: `pty-size-policy` D8 (the settings window edits only the local server's settings), `display-zoom` (zoom stored per server).
 
 ## Why
 
@@ -23,8 +23,6 @@ Settings live on the server (`config.toml`, `/api/home/settings`), but the windo
 - **Stale fields** leave validation.
 
 ## Capabilities
-
-To be decided when the change is next. Likely candidates:
 
 ### New Capabilities
 
