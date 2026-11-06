@@ -23,7 +23,7 @@ export interface ViewerViewState {
   readonly wrap?: boolean;
   readonly position?: ViewerPosition;
   /**
-   * The annotation list as the user left it (`viewer-annotations`, D7);
+   * The annotation list as the user left it (D7 of review-pane);
    * without a choice it is open while the pane holds annotations.
    */
   readonly annotations?: "open" | "closed";

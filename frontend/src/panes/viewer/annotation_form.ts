@@ -1,5 +1,5 @@
 /**
- * The form in which an annotation is written (`viewer-annotations`, D6): its
+ * The form in which an annotation is written (D6 of review-pane): its
  * kind, the passage exactly as it is stored, the remark and, for a suggested
  * change, the replacement, prefilled with the passage. Ctrl+Enter or
  * Cmd+Enter saves, Escape cancels.

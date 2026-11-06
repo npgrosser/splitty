@@ -1,6 +1,6 @@
 /**
  * Handing a viewer pane's review to a terminal (`viewer-annotations`,
- * Handing A Review To A Terminal; D9).
+ * Handing A Review To A Terminal; D9 of review-pane).
  *
  * The review is pasted as the user's own paste would be, without Enter, and
  * the terminal takes the keyboard. A program that has not enabled bracketed

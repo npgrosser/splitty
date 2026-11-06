@@ -9,7 +9,7 @@
  * Mod+F is the exception and searches the document.
  *
  * Positions are UTF-16 offsets into the text and lines are 1-based, as in
- * `anchoring.ts`. Annotations show as marks (`viewer-annotations`, D5): a
+ * `anchoring.ts`. Annotations show as marks (D5 of review-pane): a
  * decoration over the passage of the source view's own annotations, and a
  * bar in the gutter beside the lines of every annotated passage, those of
  * the rendered view included.

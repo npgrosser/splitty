@@ -1,9 +1,9 @@
 /**
  * The list of a viewer pane's annotations (`viewer-annotations`, Annotations
- * In The Pane; D7): a column on the pane's right. Its header holds the count
- * and the hand-over of the review; each entry shows its kind, where its
- * passage is, the start of its quote and the remark, and offers to edit and
- * delete it. Choosing an entry brings its passage into view.
+ * In The Pane; D7 of review-pane): a column on the pane's right. Its header
+ * holds the count and the hand-over of the review; each entry shows its kind,
+ * where its passage is, the start of its quote and the remark, and offers to
+ * edit and delete it. Choosing an entry brings its passage into view.
  *
  * The entries arrive in the list's order (`review.ts`, `compareListPlaces`);
  * this module only shows them.

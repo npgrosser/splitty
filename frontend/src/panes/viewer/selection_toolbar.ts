@@ -1,8 +1,8 @@
 /**
- * The toolbar beside a selection in a viewer pane (`viewer-annotations`,
- * D6): the four kinds of annotation for the selected passage. A selection
- * too short to be found again, or longer than a quote may be, says so in
- * place of the kinds.
+ * The toolbar beside a selection in a viewer pane (D6 of review-pane): the
+ * four kinds of annotation for the selected passage. A selection too short
+ * to be found again, or longer than a quote may be, says so in place of the
+ * kinds.
  */
 
 import type { AnnotationKind } from "../../lib/protocol/types.ts";
