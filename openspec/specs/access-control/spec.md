@@ -270,7 +270,7 @@ Each server process SHALL offer a local control channel as a Unix socket. A daem
 - **THEN** the new daemon's control socket has the path the shell's `SPLITTY_SOCK` names, and `splitty list-screens` run in that shell reaches the new daemon
 
 ### Requirement: Control Socket Route Set
-The owner control socket SHALL route only these multiplexer endpoints: `GET /api/mux/state`, `GET /api/mux/screens`, `GET /api/mux/screen/{id}`, `POST /api/mux/op`, `GET /api/mux/neighbor`, `GET /api/mux/status` and `POST /api/session/{id}/send`, plus `POST /api/editor/open` for confirmed client editor requests, `POST /api/file/offer` for file offers the user saves in a window, and the job and local agent-administration endpoints specified in `control-api`. Every other path MUST answer 404 there, in particular configuration, shell profiles, themes, templates, stats, and the credential-minting endpoints `/api/session`, `/api/bootstrap` and `/api/ws-ticket`. The separate restricted agent sockets SHALL expose only their fixed subset below. No local socket SHALL mint browser or network credentials.
+The owner control socket SHALL route only these multiplexer endpoints: `GET /api/mux/state`, `GET /api/mux/screens`, `GET /api/mux/screen/{id}`, `POST /api/mux/op`, `GET /api/mux/neighbor`, `GET /api/mux/status` and `POST /api/session/{id}/send`, plus `POST /api/editor/open` for confirmed client editor requests, `POST /api/file/offer` for file offers the user saves in a window, `GET /api/viewer/comments` and `POST /api/viewer/comments/reply` for what the user handed over on viewer panes and agents' replies to it, `POST /api/viewer/review/wait` for waits for the user's review, and the job and local agent-administration endpoints specified in `control-api`. Every other path MUST answer 404 there, in particular configuration, shell profiles, themes, templates, stats, and the credential-minting endpoints `/api/session`, `/api/bootstrap` and `/api/ws-ticket`. The separate restricted agent sockets SHALL expose only their fixed subset below. No local socket SHALL mint browser or network credentials.
 
 #### Scenario: Multiplexer status over the socket
 - **WHEN** a pane process sends `GET /api/mux/status` over the owner control socket without any credential
@@ -293,6 +293,11 @@ The owner control socket SHALL route only these multiplexer endpoints: `GET /api
 - **WHEN** the owner socket receives `POST /api/file/offer`
 - **THEN** it may offer the file to the windows of the session, which save it only on the user's Save
 - **AND** the same route on a restricted grant socket answers 404
+
+#### Scenario: Comments on the owner socket
+- **WHEN** the owner socket receives `GET /api/viewer/comments` or `POST /api/viewer/comments/reply`
+- **THEN** it returns only what the user handed over on the viewer panes of the caller's screen, and adds at most an agent's reply
+- **AND** the same routes and `POST /api/viewer/review/wait` on a restricted grant socket answer 404
 
 ### Requirement: Pane Environment Carries No Credential
 When the server spawns a terminal session, it SHALL pass the owner control socket path as `SPLITTY_SOCK` for ordinary sessions, or the restricted grant socket as `SPLITTY_AGENT_SOCK` for an agent-owned managed job. An agent-owned job MUST NOT receive `SPLITTY_SOCK`, including an inherited value. The server MUST NOT set the process token, a session id used as an authentication credential, a bootstrap code, a ticket or the server's HTTP address in the session's environment (in particular it sets neither `SPLITTY_TOKEN` nor `SPLITTY_SERVER`). Other variables given to sessions are defined in `terminal-sessions`.
@@ -775,7 +780,7 @@ A reverse-share reservation SHALL be durable before exposure and cover actual lo
 - **AND** a changed effective UID without a birth-identity change does not authorize release
 
 ### Requirement: Viewer Documents Stay With Their Connection
-A client SHALL read a viewer pane's document only over the connection whose screen holds the pane, and SHALL show it only in that pane. A server SHALL read for a viewer pane only the file its record names, only to answer `viewer.read` on the connection that sent it, and SHALL never write, create or delete a file for a viewer pane. Every client connection of a server MAY open viewer panes and read their documents, the authority it already has by starting a terminal on that server. The control API, and with it the processes in panes, MAY open viewer panes but SHALL NOT read a document's content or a `text` document's text. A restricted agent grant socket SHALL do neither.
+A client SHALL read a viewer pane's document only over the connection whose screen holds the pane, and SHALL show it only in that pane. A server SHALL read for a viewer pane only the file its record names, only to answer `viewer.read` on the connection that sent it, and SHALL never write, create or delete a file for a viewer pane. Every client connection of a server MAY open viewer panes and read their documents, the authority it already has by starting a terminal on that server. The control API, and with it the processes in panes, MAY open viewer panes but SHALL NOT read a document's content or a `text` document's text, except the passages that annotations the user handed over quote (see `viewer-annotations`, Agents Read And Reply To Handed-Over Threads). A restricted agent grant socket SHALL do neither.
 
 #### Scenario: A host names a local path
 - **WHEN** a host's snapshot holds a viewer pane naming `/home/me/.ssh/id_ed25519` and the window shows that host's screen next to local screens
@@ -784,6 +789,10 @@ A client SHALL read a viewer pane's document only over the connection whose scre
 #### Scenario: A process in a pane reads the workspace
 - **WHEN** a viewer pane shows a terminal selection and a process in a pane sends `GET /api/mux/state` over the owner control socket
 - **THEN** the answer holds the viewer pane without the selected text
+
+#### Scenario: A handed-over quote
+- **WHEN** the user handed over a comment on a passage of a terminal selection shown in a viewer pane, and a process in a pane sends `GET /api/viewer/comments` over the owner control socket
+- **THEN** the answer holds the comment with its quoted passage, and neither the rest of the selected text nor annotations the user has not handed over
 
 #### Scenario: Grant socket
 - **WHEN** an agent grant socket receives `POST /api/mux/op` with `open_viewer`

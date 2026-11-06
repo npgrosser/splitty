@@ -32,7 +32,7 @@ A screen's layout tree SHALL consist of two node kinds: a `slot`, which holds an
 - **THEN** both panes occupy the same area and only one of them is shown at a time
 
 ### Requirement: Layout Operations
-The server SHALL change the workspace only through operations: workspace-level `create_screen`, `close_screen`, `rename_screen`, `set_active_screen`, `reorder_screens`, `move_pane_to_screen`, and screen-level `split_pane`, `new_tab`, `close_pane`, `resize_split`, `move_pane`, `arrange_panes`, `select_tab`, `float_pane`, `dock_pane`, `move_float`, `set_scratchpad`, `open_viewer`, `put_annotations`, `remove_annotations`, plus `create_job`, `stop_job`, `forget_job`, and trusted job lifecycle/ownership operations. An operation SHALL have the same effect on the model whether it arrives over `mux-protocol` or `control-api`, except `set_scratchpad`, `put_annotations` and `remove_annotations`, which only `mux-protocol` accepts (see `session-scratchpad` and `viewer-annotations`). Job operations SHALL preserve the authorization and idempotency rules of `managed-jobs` at every entry point; lifecycle and ownership updates SHALL not be accepted as arbitrary client-authored state.
+The server SHALL change the workspace only through operations: workspace-level `create_screen`, `close_screen`, `rename_screen`, `set_active_screen`, `reorder_screens`, `move_pane_to_screen`, and screen-level `split_pane`, `new_tab`, `close_pane`, `resize_split`, `move_pane`, `arrange_panes`, `select_tab`, `float_pane`, `dock_pane`, `move_float`, `set_scratchpad`, `open_viewer`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies`, `mark_sent`, plus `create_job`, `stop_job`, `forget_job`, trusted job lifecycle/ownership operations, and trusted viewer operations the server derives from control API requests: an agent's reply to an annotation, and the start and end of a wait for a review (see `viewer-annotations`). An operation SHALL have the same effect on the model whether it arrives over `mux-protocol` or `control-api`, except `set_scratchpad`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies` and `mark_sent`, which only `mux-protocol` accepts (see `session-scratchpad` and `viewer-annotations`). Job operations SHALL preserve the authorization and idempotency rules of `managed-jobs` at every entry point; lifecycle and ownership updates SHALL not be accepted as arbitrary client-authored state, and neither SHALL the trusted viewer operations over any transport.
 
 #### Scenario: Same op from two transports
 - **WHEN** an identical `split_pane` op is applied once via a WebSocket client and once via the HTTP control API against identical workspaces
@@ -55,7 +55,11 @@ The server SHALL change the workspace only through operations: workspace-level `
 - **THEN** both resulting workspaces hold the same viewer pane in the same place, and neither spawns a session
 
 #### Scenario: Annotations only through the window
-- **WHEN** a `put_annotations` or `remove_annotations` op arrives over the control API
+- **WHEN** a `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies` or `mark_sent` op arrives over the control API
+- **THEN** the server refuses it, and the workspace stays unchanged
+
+#### Scenario: No client writes an agent's reply
+- **WHEN** a client submits an operation that would add an agent's reply or start a wait for a review, over the WebSocket or the control API
 - **THEN** the server refuses it, and the workspace stays unchanged
 
 ### Requirement: Atomic Rejection

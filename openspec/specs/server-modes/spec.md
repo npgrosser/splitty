@@ -211,7 +211,7 @@ On SIGTERM or SIGINT, the daemon SHALL stop accepting connections, release the k
 - **THEN** the build keeps running after the daemon has exited
 
 ### Requirement: Workspace Persistence In Daemon Mode
-A daemon SHALL persist the workspace to `state.json` in the Splitty configuration directory after every successfully applied workspace change, replacing the file atomically so that a reader never sees a partially written file. A rejected change SHALL NOT trigger a write. A failed write SHALL be logged and SHALL NOT stop the daemon. The persisted workspace SHALL include the screens with their names, order, and active screen, each screen's layout including floating windows, the panes, for each session the record needed to start it again (command, working directory, shell or shell profile, status) and its scratchpad (see `session-scratchpad`), and for each viewer pane its `viewer` record with the text of a `text` document (see `viewer-panes`) and its annotations (see `viewer-annotations`). It SHALL additionally include managed-job identity, launch metadata, owner/creator identifiers, lifecycle and deduplication records, with an explicit never-auto-respawn marker on job sessions. It SHALL NOT include terminal output or scrollback, the content of files that viewer panes show, running process state, client connections, grant socket paths or live grant authority. File permissions are governed by `access-control`.
+A daemon SHALL persist the workspace to `state.json` in the Splitty configuration directory after every successfully applied workspace change, replacing the file atomically so that a reader never sees a partially written file. A rejected change SHALL NOT trigger a write. A failed write SHALL be logged and SHALL NOT stop the daemon. The persisted workspace SHALL include the screens with their names, order, and active screen, each screen's layout including floating windows, the panes, for each session the record needed to start it again (command, working directory, shell or shell profile, status) and its scratchpad (see `session-scratchpad`), and for each viewer pane its `viewer` record with the text of a `text` document (see `viewer-panes`) and its annotations with their numbers, statuses and replies (see `viewer-annotations`). It SHALL additionally include managed-job identity, launch metadata, owner/creator identifiers, lifecycle and deduplication records, with an explicit never-auto-respawn marker on job sessions. It SHALL NOT include terminal output or scrollback, the content of files that viewer panes show, running process state, client connections, waits for a review, grant socket paths or live grant authority. File permissions are governed by `access-control`.
 
 #### Scenario: Layout change persisted
 - **WHEN** a client splits a pane on a daemon
@@ -238,8 +238,12 @@ A daemon SHALL persist the workspace to `state.json` in the Splitty configuratio
 - **THEN** `state.json` holds both panes with their `viewer` records and the selection's text, and none of the file's content
 
 #### Scenario: Annotations persisted
-- **WHEN** a client adds an annotation to a viewer pane on a daemon
-- **THEN** `state.json` holds the annotation in the pane's `viewer` record once the change has been applied
+- **WHEN** a client adds an annotation to a viewer pane on a daemon and an agent replies to it
+- **THEN** `state.json` holds the annotation with its number and the agent's reply in the pane's `viewer` record once the changes have been applied
+
+#### Scenario: A wait is not persisted
+- **WHEN** a daemon restarts while a process waits for a review of a viewer pane
+- **THEN** the viewer pane comes back without the wait, and the waiting command has ended with an error
 
 ### Requirement: Workspace Restore On Daemon Start
 When a daemon starts and a readable `state.json` exists, it SHALL restore that workspace, keeping the screen, pane, and session identifiers. If the file is missing or cannot be parsed, the daemon SHALL start with an empty workspace.
