@@ -1,6 +1,6 @@
 # Proposal
 
-> Draft created on 2026-11-04. Specs, design and tasks are written when this change is next. Part 2 of the sequence in `frontend-client-core` (design, "Sequence"); independent of parts 1, 3 and 4. Related: `terminal-intelligence` (process state and OSC 133 feed the same session metadata), `multi-attach` (several windows on one screen make window-side decisions race).
+> Completed planning on 2026-11-06. Part 2 of the sequence in `frontend-client-core` (design, "Sequence"); independent of parts 1, 3 and 4. Related: `terminal-intelligence` (process state and OSC 133 feed the same session metadata), `multi-attach` (several windows on one screen make window-side decisions race).
 
 ## Why
 
@@ -24,14 +24,14 @@ Several facts about panes and screens are derived in each window, although the s
 
 ## Capabilities
 
-To be decided when the change is next. Likely candidates:
+Existing capabilities changed:
 
 ### Modified Capabilities
 
 - `workspace-model`: default screen names; closing a pane on exit; launch inheritance for new tabs.
 - `terminal-sessions`: display title and busy flag in Session Metadata Updates; Process Exit; replay filtering at the source.
 - `mux-protocol`: the new fields, their capability flags, the pane title for shell panes.
-- `cli`: titles in listings, if the output changes.
+- `cli`: plain-text pane and attach listings consume server titles and safely render controls in metadata.
 
 ## Impact
 
