@@ -6,6 +6,7 @@ pub mod download;
 pub mod editor;
 pub mod jobs;
 pub mod socket;
+pub mod viewer;
 pub use discovery::{discover, ServerInfo, Transport};
 use serde_json::{json, Value};
 

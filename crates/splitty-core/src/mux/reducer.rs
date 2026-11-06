@@ -1,12 +1,13 @@
 //! Pure reducers that transform mux state in response to operations.
 //!
 //! `reduce_workspace` handles workspace-level ops (create/close/rename screen).
-//! `reduce_screen` handles screen-level ops (split, close, resize, move, float, dock).
+//! `reduce_screen` handles screen-level ops (split, close, resize, move, float, dock,
+//! open a viewer).
 //! Both return `(new_state, effects)` without performing any I/O.
 
 use super::effects::Effect;
 use super::job_reducer::{mark_closing_jobs, reduce_create_job, reduce_update_job};
-use super::ops::{Direction, Op, ScreenOp};
+use super::ops::{Direction, Op, ScreenOp, ViewerPlacement};
 use super::state::*;
 use super::validate::{arranged_root, validate_screen_op};
 use super::MuxError;
@@ -26,6 +27,10 @@ pub fn reduce_workspace(
                 ..
             }
             | ScreenOp::NewTab {
+                new_pane_id: Some(ref new_pane_id),
+                ..
+            }
+            | ScreenOp::OpenViewer {
                 new_pane_id: Some(ref new_pane_id),
                 ..
             } = op
@@ -81,6 +86,7 @@ pub fn reduce_workspace(
                     title: None,
                     cwd: None,
                     role: Some(PaneRole::Terminal),
+                    viewer: None,
                 },
             );
             screen.sessions.insert(
@@ -406,6 +412,24 @@ pub fn reduce_screen(
                 .scratchpad = text;
             (state, vec![])
         }
+
+        ScreenOp::OpenViewer {
+            pane_id,
+            placement,
+            new_pane_id,
+            source,
+            cwd,
+        } => (
+            reduce_open_viewer(
+                state,
+                pane_id,
+                placement.unwrap_or_default(),
+                new_pane_id,
+                source,
+                cwd,
+            )?,
+            vec![],
+        ),
     };
 
     new_state.revision += 1;
@@ -453,6 +477,7 @@ fn create_terminal_pane(
             title: None,
             cwd: None,
             role: Some(PaneRole::Terminal),
+            viewer: None,
         },
     );
     state.sessions.insert(
@@ -493,41 +518,47 @@ fn reduce_new_tab(
 ) -> Result<(ScreenState, Vec<Effect>), MuxError> {
     let new_pane_id = new_pane_id.unwrap_or_else(|| PaneId::with_prefix("pane"));
     let effect = create_terminal_pane(&mut state, &pane_id, &new_pane_id, cwd, shell_profile_id);
-    let location = state
-        .find_slot_location(&pane_id)
-        .ok_or_else(|| MuxError::PaneNotInLayout(pane_id.clone()))?;
-    let root = match location {
-        SlotLocation::Root => &mut state.root,
-        SlotLocation::Floating(index) => &mut state.floating[index].root,
-    };
-    let slot_id = root.find_slot(&pane_id).unwrap().id().clone();
-    if let Some(LayoutNode::Slot {
+    push_tab(&mut state, &pane_id, &new_pane_id)?;
+    Ok((state, vec![effect]))
+}
+
+/// Add `new_pane` as the last and active tab of the slot holding `anchor`,
+/// in the root layout or a floating entry.
+fn push_tab(state: &mut ScreenState, anchor: &PaneId, new_pane: &PaneId) -> Result<(), MuxError> {
+    let Some(LayoutNode::Slot {
         pane_ids,
         active_pane_id,
         ..
-    }) = root.find_node_mut(&slot_id)
-    {
-        pane_ids.push(new_pane_id.clone());
-        *active_pane_id = Some(new_pane_id);
-    }
-    Ok((state, vec![effect]))
+    }) = slot_mut(state, anchor)
+    else {
+        return Err(MuxError::PaneNotInLayout(anchor.clone()));
+    };
+    pane_ids.push(new_pane.clone());
+    *active_pane_id = Some(new_pane.clone());
+    Ok(())
+}
+
+/// The slot holding `pane_id`, in the root layout or a floating entry.
+fn slot_mut<'a>(state: &'a mut ScreenState, pane_id: &PaneId) -> Option<&'a mut LayoutNode> {
+    std::iter::once(&mut state.root)
+        .chain(state.floating.iter_mut().map(|entry| &mut entry.root))
+        .find_map(|root| root.find_slot_mut(pane_id))
 }
 
 // ── select_tab ─────────────────────────────────────────────────────────────
 
 fn reduce_select_tab(mut state: ScreenState, pane_id: PaneId) -> Result<ScreenState, MuxError> {
-    let location = state
-        .find_slot_location(&pane_id)
-        .ok_or_else(|| MuxError::PaneNotInLayout(pane_id.clone()))?;
-    let root = match location {
-        SlotLocation::Root => &mut state.root,
-        SlotLocation::Floating(index) => &mut state.floating[index].root,
-    };
-    let slot_id = root.find_slot(&pane_id).unwrap().id().clone();
-    if let Some(LayoutNode::Slot { active_pane_id, .. }) = root.find_node_mut(&slot_id) {
-        *active_pane_id = Some(pane_id);
-    }
+    select_in_slot(&mut state, &pane_id)?;
     Ok(state)
+}
+
+/// Make `pane_id` the active pane of the slot that holds it.
+fn select_in_slot(state: &mut ScreenState, pane_id: &PaneId) -> Result<(), MuxError> {
+    let Some(LayoutNode::Slot { active_pane_id, .. }) = slot_mut(state, pane_id) else {
+        return Err(MuxError::PaneNotInLayout(pane_id.clone()));
+    };
+    *active_pane_id = Some(pane_id.clone());
+    Ok(())
 }
 
 // ── split_pane ─────────────────────────────────────────────────────────────
@@ -548,65 +579,230 @@ fn reduce_split_pane(
 ) -> Result<(ScreenState, Vec<Effect>), MuxError> {
     let new_pane_id = new_pane_id.unwrap_or_else(|| PaneId::with_prefix("pane"));
     let effect = create_terminal_pane(&mut state, &pane_id, &new_pane_id, cwd, shell_profile_id);
-    let new_slot_id = NodeId::with_prefix("slot");
+    insert_beside(
+        &mut state.root,
+        &pane_id,
+        axis,
+        new_pane_index == Some(0),
+        &new_pane_id,
+        resulting_sizes,
+    )?;
+    Ok((state, vec![effect]))
+}
 
-    // Find slot containing the pane
-    let slot_id = state
-        .root
-        .find_slot(&pane_id)
-        .ok_or_else(|| MuxError::PaneNotInLayout(pane_id.clone()))?
+/// Put `new_pane` in a slot of its own beside the slot holding `anchor` in
+/// `root`, before it or after it: a sibling in a parent split of the same
+/// axis, else in a new split that takes the slot's place.
+fn insert_beside(
+    root: &mut LayoutNode,
+    anchor: &PaneId,
+    axis: Axis,
+    before: bool,
+    new_pane: &PaneId,
+    resulting_sizes: Option<Vec<f64>>,
+) -> Result<(), MuxError> {
+    let slot_id = root
+        .find_slot(anchor)
+        .ok_or_else(|| MuxError::PaneNotInLayout(anchor.clone()))?
         .id()
         .clone();
+    let new_slot = LayoutNode::new_slot(NodeId::with_prefix("slot"), vec![new_pane.clone()]);
 
-    let new_slot = LayoutNode::new_slot(new_slot_id, vec![new_pane_id.clone()]);
-    let new_pane_idx = new_pane_index.unwrap_or(1);
-
-    // Check if parent split has the same axis
-    let parent_info = state.root.find_parent_info(&slot_id);
-
-    if let Some(ref info) = parent_info {
-        if info.axis == axis {
-            // Same axis as parent — add as sibling
-            let insert_at = if new_pane_idx == 0 {
-                info.index
-            } else {
-                info.index + 1
-            };
-
-            let parent_id = info.id.clone();
-            if let Some(parent) = state.root.find_node_mut(&parent_id) {
-                if let LayoutNode::Split {
-                    children, sizes, ..
-                } = parent
-                {
-                    children.insert(insert_at, new_slot);
-                    *sizes = resulting_sizes.unwrap_or_else(|| equal_sizes(children.len()));
-                }
-            }
-
-            return Ok((state, vec![effect]));
+    if let Some(info) = root
+        .find_parent_info(&slot_id)
+        .filter(|info| info.axis == axis)
+    {
+        // Same axis as the parent: add as a sibling.
+        let insert_at = if before { info.index } else { info.index + 1 };
+        if let Some(LayoutNode::Split {
+            children, sizes, ..
+        }) = root.find_node_mut(&info.id)
+        {
+            children.insert(insert_at, new_slot);
+            *sizes = resulting_sizes.unwrap_or_else(|| equal_sizes(children.len()));
         }
+        return Ok(());
     }
 
-    // Different axis or root slot — wrap in a new split
-    let split_id = NodeId::with_prefix("split");
-    let old_slot = state
-        .root
+    // Another axis or the root slot: wrap the slot in a new split.
+    let old_slot = root
         .find_node(&slot_id)
         .ok_or_else(|| MuxError::Internal("slot disappeared".to_string()))?
         .clone();
-
-    let children = if new_pane_idx == 0 {
+    let children = if before {
         vec![new_slot, old_slot]
     } else {
         vec![old_slot, new_slot]
     };
-
     let sizes = resulting_sizes.unwrap_or_else(|| vec![0.5, 0.5]);
-    let new_split = LayoutNode::new_split(split_id, axis, children, sizes);
-    replace_node(&mut state.root, &slot_id, new_split);
+    let new_split = LayoutNode::new_split(NodeId::with_prefix("split"), axis, children, sizes);
+    replace_node(root, &slot_id, new_split);
+    Ok(())
+}
 
-    Ok((state, vec![effect]))
+// ── open_viewer ────────────────────────────────────────────────────────────
+
+/// Add a viewer pane, or show a file again in the viewer pane that shows it
+/// (`viewer-panes`, Opening A Viewer and Reopening A File). No session.
+fn reduce_open_viewer(
+    mut state: ScreenState,
+    anchor: Option<PaneId>,
+    placement: ViewerPlacement,
+    new_pane_id: Option<PaneId>,
+    source: ViewerSource,
+    cwd: Option<String>,
+) -> Result<ScreenState, MuxError> {
+    let origin_pane_id = anchor
+        .as_ref()
+        .and_then(|anchor| viewer_origin(&state, anchor));
+    if new_pane_id.is_none() {
+        if let Some(shown) = viewer_showing(&state, &source) {
+            select_in_slot(&mut state, &shown)?;
+            if let Some(viewer) = state
+                .panes
+                .get_mut(&shown)
+                .and_then(|pane| pane.viewer.as_mut())
+            {
+                viewer.revision += 1;
+                // The terminal that asked last; without one the origin stays.
+                if origin_pane_id.is_some() {
+                    viewer.origin_pane_id = origin_pane_id;
+                }
+            }
+            return Ok(state);
+        }
+    }
+
+    let new_pane_id = new_pane_id.unwrap_or_else(|| PaneId::with_prefix("pane"));
+    let (title, cwd) = match &source {
+        ViewerSource::File { path } => (file_name(path).to_string(), Some(parent_dir(path))),
+        ViewerSource::Text { title, .. } => (title.clone(), cwd),
+    };
+    let split = match placement {
+        ViewerPlacement::Right => Some((Axis::Horizontal, false)),
+        ViewerPlacement::Left => Some((Axis::Horizontal, true)),
+        ViewerPlacement::Below => Some((Axis::Vertical, false)),
+        ViewerPlacement::Above => Some((Axis::Vertical, true)),
+        ViewerPlacement::Tab => None,
+    };
+    match anchor {
+        // A split only beside a pane of the root layout: a floating entry
+        // holds no splits, so every placement there is a tab.
+        Some(anchor) => match split {
+            Some((axis, before)) if state.root.find_slot(&anchor).is_some() => {
+                insert_beside(&mut state.root, &anchor, axis, before, &new_pane_id, None)?;
+            }
+            _ => push_tab(&mut state, &anchor, &new_pane_id)?,
+        },
+        None => place_without_anchor(&mut state, &new_pane_id),
+    }
+    state.panes.insert(
+        new_pane_id.clone(),
+        PaneState {
+            id: new_pane_id,
+            job_id: None,
+            session_id: None,
+            title: Some(title),
+            cwd,
+            role: Some(PaneRole::Viewer),
+            viewer: Some(ViewerState {
+                source,
+                origin_pane_id,
+                revision: 1,
+            }),
+        },
+    );
+    Ok(state)
+}
+
+/// The viewer pane of the screen that already shows a `file` source, first
+/// in layout order: the root layout depth first, then the floating entries.
+fn viewer_showing(state: &ScreenState, source: &ViewerSource) -> Option<PaneId> {
+    let ViewerSource::File { .. } = source else {
+        return None;
+    };
+    std::iter::once(&state.root)
+        .chain(state.floating.iter().map(|entry| &entry.root))
+        .flat_map(LayoutNode::collect_pane_ids)
+        .find(|id| {
+            state
+                .panes
+                .get(id)
+                .and_then(|pane| pane.viewer.as_ref())
+                .is_some_and(|viewer| &viewer.source == source)
+        })
+}
+
+/// The origin of a viewer opened next to `anchor`: the anchor when it is a
+/// terminal pane, a viewer anchor's own origin, else none.
+fn viewer_origin(state: &ScreenState, anchor: &PaneId) -> Option<PaneId> {
+    let pane = state.panes.get(anchor)?;
+    match pane.role.clone().unwrap_or_default() {
+        PaneRole::Terminal => Some(anchor.clone()),
+        PaneRole::Viewer => pane.viewer.as_ref()?.origin_pane_id.clone(),
+        PaneRole::Webview => None,
+    }
+}
+
+/// The name of the file an absolute path names; the path itself for `/`.
+fn file_name(path: &str) -> &str {
+    path.rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(path)
+}
+
+/// The directory that holds the file an absolute path names.
+fn parent_dir(path: &str) -> String {
+    match path.trim_end_matches('/').rsplit_once('/') {
+        Some((parent, _)) if !parent.is_empty() => parent.to_string(),
+        _ => "/".to_string(),
+    }
+}
+
+/// A new pane without an anchor: the only pane of a root layout that holds
+/// none, else the right half of a new horizontal split around the root.
+fn place_without_anchor(state: &mut ScreenState, new_pane: &PaneId) {
+    if state.root.count_panes() == 0 {
+        let id = match &state.root {
+            LayoutNode::Slot { id, .. } => id.clone(),
+            LayoutNode::Split { .. } => NodeId::with_prefix("root"),
+        };
+        state.root = LayoutNode::Slot {
+            id,
+            pane_ids: vec![new_pane.clone()],
+            active_pane_id: Some(new_pane.clone()),
+        };
+        return;
+    }
+    let new_slot = LayoutNode::new_slot(NodeId::with_prefix("slot"), vec![new_pane.clone()]);
+    state.root = LayoutNode::new_split(
+        NodeId::with_prefix("split"),
+        Axis::Horizontal,
+        vec![state.root.clone(), new_slot],
+        vec![0.5, 0.5],
+    );
+}
+
+/// The viewer pane an applied `open_viewer` showed its document in, from the
+/// screen before and after it, and whether that pane existed before.
+pub fn shown_viewer(before: &ScreenState, after: &ScreenState) -> Option<(PaneId, bool)> {
+    let viewers = after
+        .panes
+        .values()
+        .filter_map(|pane| Some((pane, pane.viewer.as_ref()?)));
+    let mut reused = None;
+    for (pane, viewer) in viewers {
+        match before
+            .panes
+            .get(&pane.id)
+            .and_then(|pane| pane.viewer.as_ref())
+        {
+            None => return Some((pane.id.clone(), false)),
+            Some(old) if old.revision < viewer.revision => reused = Some((pane.id.clone(), true)),
+            Some(_) => {}
+        }
+    }
+    reused
 }
 
 // ── close_pane ─────────────────────────────────────────────────────────────
@@ -1014,6 +1210,7 @@ mod tests {
                 title: None,
                 cwd: None,
                 role: Some(PaneRole::Terminal),
+                viewer: None,
             },
         );
         let mut sessions = HashMap::new();
@@ -1060,6 +1257,7 @@ mod tests {
                 title: None,
                 cwd: None,
                 role: Some(PaneRole::Terminal),
+                viewer: None,
             },
         );
         panes.insert(
@@ -1071,6 +1269,7 @@ mod tests {
                 title: None,
                 cwd: None,
                 role: Some(PaneRole::Terminal),
+                viewer: None,
             },
         );
 
@@ -2529,5 +2728,928 @@ mod tests {
         }
         let after = serde_json::to_value(store.get_screen(&ScreenId::from("scr"))).unwrap();
         assert_eq!(after, before);
+    }
+
+    // ── open_viewer (viewer-panes) ───
+
+    const PLAN: &str = "/home/me/app/PLAN.md";
+
+    fn open_viewer(fields: serde_json::Value) -> ScreenOp {
+        // Exercise the public wire format as well as the reducer.
+        let mut op = serde_json::json!({"type": "open_viewer"});
+        if let (Some(op), Some(fields)) = (op.as_object_mut(), fields.as_object()) {
+            op.extend(fields.clone());
+        }
+        serde_json::from_value(op).expect("wire op")
+    }
+
+    fn file(path: &str) -> serde_json::Value {
+        serde_json::json!({"kind": "file", "path": path})
+    }
+
+    fn viewer_of(state: &ScreenState, pane: &str) -> ViewerState {
+        state.panes[&PaneId::from(pane)]
+            .viewer
+            .clone()
+            .expect("viewer record")
+    }
+
+    /// A workspace of the one screen, as a store.
+    fn store_with(screen: ScreenState) -> crate::mux::Store {
+        let mut state = WorkspaceState::default();
+        state.screen_order.push(screen.id.clone());
+        state.screens.insert(screen.id.clone(), screen);
+        crate::mux::Store::with_state(state)
+    }
+
+    /// viewer-panes, Viewer Panes (A file document) and Opening A Viewer (To
+    /// the right of a terminal); workspace-model, Workspace Structure (A
+    /// viewer pane next to a terminal).
+    #[test]
+    fn a_file_opens_to_the_right_of_a_terminal_without_a_session() {
+        let state = single_pane_screen();
+        let (next, effects) = reduce_screen(
+            state.clone(),
+            open_viewer(
+                serde_json::json!({"paneId": "p1", "newPaneId": "v1", "source": file(PLAN)}),
+            ),
+        )
+        .expect("opened");
+        assert!(effects.is_empty());
+        assert_eq!(next.revision, state.revision + 1);
+        assert_eq!(
+            shape(&next.root),
+            [
+                "Horizontal [0.5, 0.5]",
+                r#"slot [PaneId("p1")] None"#,
+                r#"slot [PaneId("v1")] None"#,
+            ]
+        );
+        let pane = &next.panes[&PaneId::from("v1")];
+        assert_eq!(pane.role, Some(PaneRole::Viewer));
+        assert_eq!(pane.title.as_deref(), Some("PLAN.md"));
+        assert_eq!(pane.cwd.as_deref(), Some("/home/me/app"));
+        assert_eq!(pane.session_id, None);
+        assert_eq!(
+            pane.viewer,
+            Some(ViewerState {
+                source: ViewerSource::File { path: PLAN.into() },
+                origin_pane_id: Some(PaneId::from("p1")),
+                revision: 1,
+            })
+        );
+        assert_eq!(
+            next.sessions.keys().collect::<Vec<_>>(),
+            [&SessionId::from("s1")],
+            "the terminal's session only"
+        );
+        let wire = serde_json::to_value(pane).expect("pane");
+        assert_eq!(
+            wire["viewer"],
+            serde_json::json!({
+                "source": {"kind": "file", "path": PLAN},
+                "originPaneId": "p1",
+                "revision": 1,
+            })
+        );
+        assert!(wire.get("sessionId").is_none(), "{wire}");
+    }
+
+    /// viewer-panes, Viewer Panes (A text document) and Document Text Outside
+    /// Snapshots: the text stays in the record and leaves the projection.
+    #[test]
+    fn a_text_document_keeps_its_text_out_of_the_projection() {
+        let (next, effects) = reduce_screen(
+            single_pane_screen(),
+            open_viewer(serde_json::json!({
+                "paneId": "p1", "newPaneId": "v1", "cwd": "/home/me/app",
+                "source": {"kind": "text", "title": "Selection from claude", "text": "## Plan\n1. tests"},
+            })),
+        )
+        .expect("opened");
+        assert!(effects.is_empty());
+        let pane = &next.panes[&PaneId::from("v1")];
+        assert_eq!(pane.title.as_deref(), Some("Selection from claude"));
+        assert_eq!(pane.cwd.as_deref(), Some("/home/me/app"));
+        assert_eq!(
+            viewer_of(&next, "v1").source,
+            ViewerSource::Text {
+                title: "Selection from claude".into(),
+                text: "## Plan\n1. tests".into(),
+            }
+        );
+
+        let shown = next.clone().without_viewer_texts();
+        let wire = serde_json::to_value(&shown.panes[&PaneId::from("v1")]).expect("pane");
+        assert_eq!(
+            wire["viewer"],
+            serde_json::json!({
+                "source": {"kind": "text", "title": "Selection from claude"},
+                "originPaneId": "p1",
+                "revision": 1,
+            })
+        );
+        let mut workspace = WorkspaceState::default();
+        workspace.screens.insert(next.id.clone(), next.clone());
+        let wire = serde_json::to_string(&workspace.without_viewer_texts()).expect("workspace");
+        assert!(!wire.contains("1. tests"), "{wire}");
+        assert_eq!(
+            serde_json::to_value(&next.panes[&PaneId::from("v1")]).expect("pane")["viewer"]
+                ["source"]["text"],
+            "## Plan\n1. tests",
+            "the record itself keeps the text"
+        );
+    }
+
+    /// viewer-panes, Opening A Viewer: `left` and `above` before the anchor,
+    /// a sibling in a parent split of the same axis, a new split otherwise.
+    #[test]
+    fn directional_placements_follow_split_pane() {
+        let cases = [
+            (
+                "p2",
+                "left",
+                vec![
+                    "Vertical [0.5, 0.5]",
+                    r#"slot [PaneId("p1")] None"#,
+                    "Horizontal [0.3333333333333333, 0.3333333333333333, 0.3333333333333333]",
+                    r#"slot [PaneId("v1")] None"#,
+                    r#"slot [PaneId("p2")] None"#,
+                    r#"slot [PaneId("p3")] None"#,
+                ],
+            ),
+            (
+                "p1",
+                "above",
+                vec![
+                    "Vertical [0.3333333333333333, 0.3333333333333333, 0.3333333333333333]",
+                    r#"slot [PaneId("v1")] None"#,
+                    r#"slot [PaneId("p1")] None"#,
+                    "Horizontal [0.5, 0.5]",
+                    r#"slot [PaneId("p2")] None"#,
+                    r#"slot [PaneId("p3")] None"#,
+                ],
+            ),
+            (
+                "p3",
+                "below",
+                vec![
+                    "Vertical [0.5, 0.5]",
+                    r#"slot [PaneId("p1")] None"#,
+                    "Horizontal [0.5, 0.5]",
+                    r#"slot [PaneId("p2")] None"#,
+                    "Vertical [0.5, 0.5]",
+                    r#"slot [PaneId("p3")] None"#,
+                    r#"slot [PaneId("v1")] None"#,
+                ],
+            ),
+            (
+                "p1",
+                "right",
+                vec![
+                    "Vertical [0.5, 0.5]",
+                    "Horizontal [0.5, 0.5]",
+                    r#"slot [PaneId("p1")] None"#,
+                    r#"slot [PaneId("v1")] None"#,
+                    "Horizontal [0.5, 0.5]",
+                    r#"slot [PaneId("p2")] None"#,
+                    r#"slot [PaneId("p3")] None"#,
+                ],
+            ),
+        ];
+        for (anchor, placement, expected) in cases {
+            let (next, effects) = reduce_screen(
+                three_pane_screen(),
+                open_viewer(serde_json::json!({
+                    "paneId": anchor, "placement": placement, "newPaneId": "v1", "source": file(PLAN),
+                })),
+            )
+            .expect(placement);
+            assert!(effects.is_empty());
+            assert_eq!(shape(&next.root), expected, "{placement} of {anchor}");
+            assert_eq!(next.floating.len(), 1, "the floating entry stays");
+        }
+    }
+
+    /// viewer-panes, Opening A Viewer (As a tab of a floating group).
+    #[test]
+    fn a_tab_of_a_floating_group_becomes_its_active_pane() {
+        let state = three_pane_screen();
+        let (next, effects) = reduce_screen(
+            state.clone(),
+            open_viewer(serde_json::json!({
+                "paneId": "p4", "placement": "tab", "newPaneId": "v1", "source": file(PLAN),
+            })),
+        )
+        .expect("tab");
+        assert!(effects.is_empty());
+        assert_eq!(
+            shape(&next.floating[0].root),
+            [r#"slot [PaneId("p4"), PaneId("v1")] Some(PaneId("v1"))"#]
+        );
+        assert_eq!(next.floating[0].id, FloatingId::from("float1"));
+        assert_eq!(
+            serde_json::to_value(&next.floating[0].bounds).expect("bounds"),
+            serde_json::to_value(&state.floating[0].bounds).expect("bounds")
+        );
+        assert_eq!(shape(&next.root), shape(&state.root));
+        assert_eq!(
+            viewer_of(&next, "v1").origin_pane_id,
+            Some(PaneId::from("p4"))
+        );
+
+        // A tab of a root slot, after the other tabs.
+        let (next, _) = reduce_screen(
+            tabbed_screen(),
+            open_viewer(serde_json::json!({
+                "paneId": "p1", "placement": "tab", "newPaneId": "v1", "source": file(PLAN),
+            })),
+        )
+        .expect("tab");
+        assert_eq!(
+            shape(&next.root),
+            [r#"slot [PaneId("p1"), PaneId("p2"), PaneId("v1")] Some(PaneId("v1"))"#]
+        );
+    }
+
+    /// viewer-panes, Opening A Viewer (Directional placement in a floating
+    /// group): a floating entry holds no splits, so each placement beside its
+    /// pane adds a tab, also the default `right` that `splitty open` sends.
+    #[test]
+    fn a_directional_placement_in_a_floating_group_becomes_a_tab() {
+        let mut state = three_pane_screen();
+        state.floating[0].bounds = FloatBounds {
+            x: 0.1,
+            y: 0.2,
+            w: 0.3,
+            h: 0.4,
+        };
+        let bounds = serde_json::to_value(&state.floating[0].bounds).expect("bounds");
+        for placement in ["below", "above", "left", "right"] {
+            let (next, effects) = reduce_screen(
+                state.clone(),
+                open_viewer(serde_json::json!({
+                    "paneId": "p4", "placement": placement, "newPaneId": "v1", "source": file(PLAN),
+                })),
+            )
+            .expect(placement);
+            assert!(effects.is_empty());
+            assert_eq!(
+                shape(&next.floating[0].root),
+                [r#"slot [PaneId("p4"), PaneId("v1")] Some(PaneId("v1"))"#],
+                "{placement}"
+            );
+            assert_eq!(next.floating[0].id, FloatingId::from("float1"));
+            assert_eq!(
+                serde_json::to_value(&next.floating[0].bounds).expect("bounds"),
+                bounds
+            );
+            assert_eq!(shape(&next.root), shape(&state.root));
+            assert_eq!(
+                viewer_of(&next, "v1").origin_pane_id,
+                Some(PaneId::from("p4"))
+            );
+        }
+
+        // `splitty open` from the floating pane, twice: one tab, shown again.
+        let store = store_with(state);
+        let screen_id = ScreenId::from("screen1");
+        for _ in 0..2 {
+            store
+                .dispatch_screen(
+                    &screen_id,
+                    open_viewer(serde_json::json!({
+                        "paneId": "p4", "placement": "right", "source": file(PLAN),
+                    })),
+                )
+                .expect("from a floating pane");
+        }
+        let screen = store.get_screen(&screen_id).expect("screen");
+        let LayoutNode::Slot {
+            pane_ids,
+            active_pane_id,
+            ..
+        } = &screen.floating[0].root
+        else {
+            panic!("a floating slot");
+        };
+        assert_eq!(pane_ids.len(), 2);
+        assert_eq!(active_pane_id.as_ref(), pane_ids.last());
+        assert_eq!(viewer_of(&screen, pane_ids[1].as_str()).revision, 2);
+    }
+
+    /// viewer-panes, Opening A Viewer (Without an anchor).
+    #[test]
+    fn without_an_anchor_a_viewer_wraps_the_root_or_fills_an_empty_one() {
+        let (next, effects) = reduce_screen(
+            single_pane_screen(),
+            open_viewer(serde_json::json!({"newPaneId": "v1", "source": file(PLAN)})),
+        )
+        .expect("opened");
+        assert!(effects.is_empty());
+        assert_eq!(
+            shape(&next.root),
+            [
+                "Horizontal [0.5, 0.5]",
+                r#"slot [PaneId("p1")] None"#,
+                r#"slot [PaneId("v1")] None"#,
+            ]
+        );
+        assert_eq!(viewer_of(&next, "v1").origin_pane_id, None);
+
+        let (next, _) = reduce_screen(
+            three_pane_screen(),
+            open_viewer(serde_json::json!({"newPaneId": "v1", "source": file(PLAN)})),
+        )
+        .expect("opened");
+        assert_eq!(
+            shape(&next.root)[..2],
+            ["Horizontal [0.5, 0.5]", "Vertical [0.5, 0.5]"]
+        );
+        assert_eq!(
+            shape(&next.root).last().map(String::as_str),
+            Some(r#"slot [PaneId("v1")] None"#)
+        );
+
+        let mut empty = single_pane_screen();
+        empty.root = LayoutNode::new_slot(NodeId::from("root"), vec![]);
+        empty.panes.clear();
+        empty.sessions.clear();
+        let (next, _) = reduce_screen(
+            empty,
+            open_viewer(
+                serde_json::json!({"placement": "below", "newPaneId": "v1", "source": file(PLAN)}),
+            ),
+        )
+        .expect("opened");
+        assert_eq!(
+            shape(&next.root),
+            [r#"slot [PaneId("v1")] Some(PaneId("v1"))"#]
+        );
+        assert_eq!(next.root.id(), &NodeId::from("root"));
+    }
+
+    /// viewer-panes, Viewer Panes: the origin is a terminal anchor, a viewer
+    /// anchor's own origin, or none.
+    #[test]
+    fn the_origin_is_the_terminal_a_viewer_was_opened_from() {
+        let (state, _) = reduce_screen(
+            single_pane_screen(),
+            open_viewer(
+                serde_json::json!({"paneId": "p1", "newPaneId": "v1", "source": file(PLAN)}),
+            ),
+        )
+        .expect("first");
+        let (state, _) = reduce_screen(
+            state,
+            open_viewer(serde_json::json!({
+                "paneId": "v1", "placement": "tab", "newPaneId": "v2",
+                "source": file("/home/me/app/docs/design.md"),
+            })),
+        )
+        .expect("from the viewer");
+        assert_eq!(
+            viewer_of(&state, "v2").origin_pane_id,
+            Some(PaneId::from("p1"))
+        );
+        let (state, _) = reduce_screen(
+            state,
+            open_viewer(
+                serde_json::json!({"newPaneId": "v3", "source": file("/home/me/notes.txt")}),
+            ),
+        )
+        .expect("without an anchor");
+        let (mut state, _) = reduce_screen(
+            state,
+            open_viewer(serde_json::json!({
+                "paneId": "v3", "newPaneId": "v4", "source": file("/home/me/todo.txt"),
+            })),
+        )
+        .expect("from an unanchored viewer");
+        assert_eq!(viewer_of(&state, "v4").origin_pane_id, None);
+
+        if let Some(pane) = state.panes.get_mut(&PaneId::from("p1")) {
+            pane.role = None;
+        }
+        let (state, _) = reduce_screen(
+            state,
+            open_viewer(serde_json::json!({
+                "paneId": "p1", "newPaneId": "v5", "source": file("/home/me/a.txt"),
+            })),
+        )
+        .expect("from a pane of an older record");
+        assert_eq!(
+            viewer_of(&state, "v5").origin_pane_id,
+            Some(PaneId::from("p1"))
+        );
+    }
+
+    /// viewer-panes, Opening A Viewer (A relative path, A text over the limit,
+    /// A path with a dot segment) and the other limits; workspace-model,
+    /// Identifier Assignment: each rejected atomically.
+    #[test]
+    fn invalid_viewers_are_rejected_and_leave_the_workspace_unchanged() {
+        let long_path = format!("/{}", "a".repeat(crate::mux::VIEWER_PATH_LIMIT));
+        let long_text = "x".repeat(crate::mux::VIEWER_TEXT_LIMIT + 1);
+        let long_title = "t".repeat(crate::mux::VIEWER_TITLE_LIMIT + 1);
+        let text = |title: &str, text: &str| serde_json::json!({"kind": "text", "title": title, "text": text});
+        let cases = [
+            (
+                serde_json::json!({"paneId": "p1", "source": file("docs/plan.md")}),
+                "absolute",
+            ),
+            (
+                serde_json::json!({"paneId": "p1", "source": file("/home/me/a\u{7}b")}),
+                "absolute",
+            ),
+            (
+                serde_json::json!({"paneId": "p1", "source": file(&long_path)}),
+                "absolute",
+            ),
+            (
+                serde_json::json!({"paneId": "p1", "source": file("/home/me/app/../secrets.txt")}),
+                "absolute",
+            ),
+            (
+                serde_json::json!({"paneId": "p1", "source": file("//server/share/PLAN.md")}),
+                "absolute",
+            ),
+            (
+                serde_json::json!({"paneId": "p1", "source": file("/home/me/app/PLAN\u{202e}dm.txt")}),
+                "absolute",
+            ),
+            (
+                serde_json::json!({"paneId": "p1", "source": text("Selection", &long_text)}),
+                "at most 262144 bytes",
+            ),
+            (
+                serde_json::json!({"paneId": "p1", "source": text("", "x")}),
+                "title",
+            ),
+            (
+                serde_json::json!({"paneId": "p1", "source": text(&long_title, "x")}),
+                "title",
+            ),
+            (
+                serde_json::json!({"paneId": "p1", "source": text("a\nb", "x")}),
+                "title",
+            ),
+            (
+                serde_json::json!({"paneId": "p1", "cwd": "app", "source": text("Selection", "x")}),
+                "cwd",
+            ),
+            (
+                serde_json::json!({"paneId": "p9", "source": file(PLAN)}),
+                "pane p9 not found",
+            ),
+            (
+                serde_json::json!({"paneId": "p1", "newPaneId": "p2", "source": file(PLAN)}),
+                "already exists",
+            ),
+        ];
+        let store = store_with(three_pane_screen());
+        let before = serde_json::to_value(store.get_workspace_state()).expect("workspace");
+        for (fields, expected) in cases {
+            let error = store
+                .dispatch_screen(&ScreenId::from("screen1"), open_viewer(fields.clone()))
+                .expect_err(&fields.to_string())
+                .to_string();
+            assert!(error.contains(expected), "{fields}: {error}");
+            assert_eq!(
+                serde_json::to_value(store.get_workspace_state()).expect("workspace"),
+                before
+            );
+        }
+
+        // A pane ID in use on another screen.
+        let store = two_screen_store();
+        let before = store.get_workspace_state();
+        let result = store.dispatch_screen(
+            &ScreenId::from("scr2"),
+            open_viewer(
+                serde_json::json!({"paneId": "p2", "newPaneId": "p1", "source": file(PLAN)}),
+            ),
+        );
+        assert!(matches!(result, Err(MuxError::PaneExists(ref id)) if id == &PaneId::from("p1")));
+        assert_eq!(
+            workspace_summary(&store.get_workspace_state()),
+            workspace_summary(&before)
+        );
+
+        // An unknown kind of document is not an op at all.
+        assert!(serde_json::from_value::<ScreenOp>(serde_json::json!({
+            "type": "open_viewer", "source": {"kind": "url", "url": "https://example.com"},
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn viewer_limits_admit_their_bounds() {
+        let store = store_with(three_pane_screen());
+        let at_limit = format!("/{}", "a".repeat(crate::mux::VIEWER_PATH_LIMIT - 1));
+        let title = "ä".repeat(crate::mux::VIEWER_TITLE_LIMIT);
+        for (id, source) in [
+            ("v1", file(&at_limit)),
+            ("v3", file("/home/me/.config/app/..notes/plan.")),
+            (
+                "v2",
+                serde_json::json!({
+                    "kind": "text", "title": title, "text": "x".repeat(crate::mux::VIEWER_TEXT_LIMIT),
+                }),
+            ),
+        ] {
+            store
+                .dispatch_screen(
+                    &ScreenId::from("screen1"),
+                    open_viewer(
+                        serde_json::json!({"paneId": "p1", "newPaneId": id, "source": source}),
+                    ),
+                )
+                .expect(id);
+        }
+    }
+
+    /// workspace-model, Identifier Assignment (Client-supplied viewer pane ID)
+    /// and Layout Operations (Viewer from both transports): both transports
+    /// hand the same wire op to the store, which places the same pane and
+    /// spawns nothing.
+    #[test]
+    fn the_same_viewer_op_gives_the_same_pane_without_a_session() {
+        let wire = serde_json::json!({
+            "type": "open_viewer", "paneId": "p2", "placement": "below",
+            "newPaneId": "viewer-0123456789abcdef", "source": file(PLAN),
+        });
+        let workspace = two_screen_store().get_workspace_state();
+        let results: Vec<_> = (0..2)
+            .map(|_| {
+                let store = crate::mux::Store::with_state(workspace.clone());
+                let op = serde_json::from_value::<ScreenOp>(wire.clone()).expect("wire op");
+                let effects = store
+                    .dispatch_screen(&ScreenId::from("scr2"), op)
+                    .expect("opened");
+                assert!(effects.is_empty());
+                let screen = store.get_screen(&ScreenId::from("scr2")).expect("screen");
+                assert_eq!(screen.sessions.len(), 1);
+                (
+                    shape(&screen.root),
+                    serde_json::to_value(&screen.panes).expect("panes"),
+                )
+            })
+            .collect();
+        assert_eq!(results[0], results[1]);
+        assert_eq!(
+            results[0].1["viewer-0123456789abcdef"]["role"], "viewer",
+            "{}",
+            results[0].1
+        );
+        let op: ScreenOp = serde_json::from_value(wire.clone()).expect("wire op");
+        assert_eq!(serde_json::to_value(&op).expect("op"), wire);
+    }
+
+    /// viewer-panes, Reopening A File (An agent opens its plan again, Another
+    /// terminal opens the plan).
+    #[test]
+    fn a_file_opened_again_selects_its_viewer_raises_its_revision_and_takes_the_new_origin() {
+        let store = two_screen_store();
+        let scr1 = ScreenId::from("scr1");
+        for op in [
+            open_viewer(
+                serde_json::json!({"paneId": "p1", "placement": "tab", "source": file(PLAN)}),
+            ),
+            open_viewer(
+                serde_json::json!({"paneId": "p1", "placement": "tab", "source": file(PLAN)}),
+            ),
+            new_tab("p1", "p3"),
+        ] {
+            store.dispatch_screen(&scr1, op).expect("applied");
+        }
+        let before = store.get_screen(&scr1).expect("screen");
+        let viewers: Vec<_> = before
+            .panes
+            .values()
+            .filter(|pane| pane.viewer.is_some())
+            .collect();
+        assert_eq!(viewers.len(), 1, "the second open showed the same pane");
+        let v1 = viewers[0].id.clone();
+        assert_eq!(viewer_of(&before, v1.as_str()).revision, 2);
+        assert!(v1.as_str().starts_with("pane-"), "{v1}");
+        assert!(
+            matches!(&before.root, LayoutNode::Slot { active_pane_id, .. }
+            if active_pane_id == &Some(PaneId::from("p3")))
+        );
+
+        let effects = store
+            .dispatch_screen(
+                &scr1,
+                open_viewer(serde_json::json!({"paneId": "p3", "source": file(PLAN)})),
+            )
+            .expect("again");
+        assert!(effects.is_empty());
+        let after = store.get_screen(&scr1).expect("screen");
+        assert_eq!(after.panes.len(), before.panes.len());
+        assert_eq!(viewer_of(&after, v1.as_str()).revision, 3);
+        assert_eq!(after.revision, before.revision + 1);
+        assert!(
+            matches!(&after.root, LayoutNode::Slot { pane_ids, active_pane_id, .. }
+            if active_pane_id.as_ref() == Some(&v1) && pane_ids.len() == 3)
+        );
+        assert_eq!(shown_viewer(&before, &after), Some((v1.clone(), true)));
+
+        // The second terminal asked last: it becomes the origin.
+        assert_eq!(
+            viewer_of(&before, v1.as_str()).origin_pane_id,
+            Some(PaneId::from("p1"))
+        );
+        assert_eq!(
+            viewer_of(&after, v1.as_str()).origin_pane_id,
+            Some(PaneId::from("p3"))
+        );
+
+        // Without an anchor, or beside a pane that yields no origin, the
+        // origin stays.
+        store
+            .dispatch_screen(
+                &scr1,
+                open_viewer(serde_json::json!({
+                    "newPaneId": "t1", "source": {"kind": "text", "title": "Notes", "text": "x"},
+                })),
+            )
+            .expect("a text without an origin");
+        for (fields, case) in [
+            (
+                serde_json::json!({"source": file(PLAN)}),
+                "without an anchor",
+            ),
+            (
+                serde_json::json!({"paneId": "t1", "source": file(PLAN)}),
+                "beside a viewer without an origin",
+            ),
+        ] {
+            store
+                .dispatch_screen(&scr1, open_viewer(fields))
+                .expect(case);
+        }
+        let last = store.get_screen(&scr1).expect("screen");
+        assert_eq!(viewer_of(&last, v1.as_str()).revision, 5);
+        assert_eq!(
+            viewer_of(&last, v1.as_str()).origin_pane_id,
+            Some(PaneId::from("p3"))
+        );
+
+        // Another screen does not share its viewer panes.
+        store
+            .dispatch_screen(
+                &ScreenId::from("scr2"),
+                open_viewer(serde_json::json!({"paneId": "p2", "source": file(PLAN)})),
+            )
+            .expect("other screen");
+        let scr2 = store.get_screen(&ScreenId::from("scr2")).expect("screen");
+        assert_eq!(scr2.panes.len(), 2);
+    }
+
+    /// viewer-panes, Reopening A File (A window opens the same file): with
+    /// `newPaneId` a pane is added in any case; a text is never reused.
+    #[test]
+    fn a_window_opens_the_same_file_in_a_new_pane() {
+        let (state, _) = reduce_screen(
+            single_pane_screen(),
+            open_viewer(
+                serde_json::json!({"paneId": "p1", "newPaneId": "v1", "source": file(PLAN)}),
+            ),
+        )
+        .expect("first");
+        let (next, effects) = reduce_screen(
+            state.clone(),
+            open_viewer(serde_json::json!({
+                "paneId": "p1", "newPaneId": "viewer-0123456789abcdef", "source": file(PLAN),
+            })),
+        )
+        .expect("second");
+        assert!(effects.is_empty());
+        assert_eq!(
+            viewer_of(&next, "viewer-0123456789abcdef").source,
+            ViewerSource::File { path: PLAN.into() }
+        );
+        assert_eq!(viewer_of(&next, "v1").revision, 1);
+        assert_eq!(
+            shown_viewer(&state, &next),
+            Some((PaneId::from("viewer-0123456789abcdef"), false))
+        );
+
+        let text = serde_json::json!({"kind": "text", "title": "Selection", "text": "x"});
+        let (state, _) = reduce_screen(
+            next,
+            open_viewer(serde_json::json!({"paneId": "p1", "source": text})),
+        )
+        .expect("text");
+        let (state, _) = reduce_screen(
+            state,
+            open_viewer(serde_json::json!({"paneId": "p1", "source": text})),
+        )
+        .expect("same text");
+        assert_eq!(
+            state.panes.values().filter(|p| p.viewer.is_some()).count(),
+            4
+        );
+    }
+
+    /// viewer-panes, Viewer Pane Lifetime (Origin closed); workspace-model,
+    /// Closing a Pane (Close a viewer pane).
+    #[test]
+    fn closing_the_origin_keeps_the_viewer_and_closing_the_viewer_ends_nothing() {
+        let store = two_screen_store();
+        let scr1 = ScreenId::from("scr1");
+        store
+            .dispatch_screen(
+                &scr1,
+                open_viewer(
+                    serde_json::json!({"paneId": "p1", "newPaneId": "v1", "source": file(PLAN)}),
+                ),
+            )
+            .expect("opened");
+        let record = viewer_of(&store.get_screen(&scr1).expect("screen"), "v1");
+
+        let effects = store
+            .dispatch_screen(
+                &scr1,
+                ScreenOp::ClosePane {
+                    pane_id: PaneId::from("p1"),
+                    resulting_sizes: None,
+                },
+            )
+            .expect("origin closed");
+        assert!(matches!(effects.as_slice(), [Effect::KillSession { .. }]));
+        let screen = store.get_screen(&scr1).expect("screen");
+        assert_eq!(viewer_of(&screen, "v1"), record);
+        assert_eq!(record.origin_pane_id, Some(PaneId::from("p1")));
+        assert_eq!(shape(&screen.root), [r#"slot [PaneId("v1")] None"#]);
+
+        let effects = store
+            .dispatch_screen(
+                &scr1,
+                ScreenOp::ClosePane {
+                    pane_id: PaneId::from("v1"),
+                    resulting_sizes: None,
+                },
+            )
+            .expect("viewer closed");
+        assert!(effects.is_empty(), "no session to end");
+        let screen = store.get_screen(&scr1).expect("screen");
+        assert!(screen.panes.is_empty());
+        assert_eq!(shape(&screen.root), ["slot [] None"]);
+    }
+
+    /// viewer-panes, Viewer Pane Lifetime (Moved to another screen) and the
+    /// layout ops of every other pane: the record goes along unchanged.
+    #[test]
+    fn a_viewer_keeps_its_record_through_moves_and_layout_ops() {
+        let store = two_screen_store();
+        let scr1 = ScreenId::from("scr1");
+        store
+            .dispatch_screen(
+                &scr1,
+                open_viewer(serde_json::json!({
+                    "paneId": "p1", "newPaneId": "v1", "cwd": "/home/me/app",
+                    "source": {"kind": "text", "title": "Selection from claude", "text": "answer"},
+                })),
+            )
+            .expect("opened");
+        store.dispatch(split_op("scr1", "p1", "p3")).expect("split");
+        let pane = |store: &crate::mux::Store, screen: &str| {
+            serde_json::to_value(
+                &store.get_workspace_state().screens[&ScreenId::from(screen)].panes
+                    [&PaneId::from("v1")],
+            )
+            .expect("pane")
+        };
+        let record = pane(&store, "scr1");
+        let sessions = |store: &crate::mux::Store| {
+            workspace_summary(&store.get_workspace_state())
+                .into_iter()
+                .map(|(_, _, _, sessions)| sessions)
+                .collect::<Vec<_>>()
+        };
+        let before = sessions(&store);
+
+        let floating = || {
+            store
+                .get_screen(&ScreenId::from("scr1"))
+                .expect("screen")
+                .floating[0]
+                .id
+                .clone()
+        };
+        let ops: Vec<Box<dyn Fn() -> ScreenOp>> = vec![
+            Box::new(|| select_tab("v1")),
+            Box::new(|| move_pane("v1", serde_json::json!({"targetSlotId": "slot-missing"}))),
+            Box::new(|| {
+                move_pane(
+                    "v1",
+                    serde_json::json!({"direction": "below", "targetSplitId": "p1"}),
+                )
+            }),
+            Box::new(|| ScreenOp::FloatPane {
+                pane_id: PaneId::from("v1"),
+                bounds: None,
+            }),
+            Box::new(|| ScreenOp::DockPane {
+                floating_id: floating(),
+                pane_id: PaneId::from("p1"),
+            }),
+            Box::new(|| {
+                arrange(serde_json::json!({
+                    "type": "split", "axis": "horizontal", "sizes": [0.5, 0.5], "children": [
+                        {"type": "slot", "paneIds": ["v1", "p1"]},
+                        {"type": "slot", "paneIds": ["p3"]},
+                    ],
+                }))
+            }),
+        ];
+        for op in ops {
+            let op = op();
+            let name = format!("{op:?}");
+            match store.dispatch_screen(&scr1, op) {
+                Ok(effects) => assert!(effects.is_empty(), "{name}"),
+                // The move into a missing slot is the one rejected op.
+                Err(error) => assert!(name.contains("slot-missing"), "{name}: {error}"),
+            }
+            assert_eq!(pane(&store, "scr1"), record, "{name}");
+        }
+
+        let effects = store
+            .dispatch(move_op("scr1", "v1", "scr2", None))
+            .expect("moved");
+        assert!(effects.is_empty());
+        assert_eq!(pane(&store, "scr2"), record);
+        assert_eq!(sessions(&store), before, "no session started or ended");
+        assert!(!store.get_workspace_state().screens[&scr1]
+            .panes
+            .contains_key(&PaneId::from("v1")));
+    }
+
+    /// workspace-model, Split Session Inheritance (Split of a viewer pane): a
+    /// split or a tab of a viewer starts in its directory with the default
+    /// profile, not with the profile of the terminal it came from.
+    #[test]
+    fn a_split_or_tab_of_a_viewer_starts_in_its_directory_with_the_default_profile() {
+        let mut state = single_pane_screen();
+        if let Some(session) = state.sessions.get_mut(&SessionId::from("s1")) {
+            session.shell_profile_id = Some("shell-zsh".into());
+            session.shell = Some("/legacy/zsh".into());
+            session.cwd = Some("/elsewhere".into());
+        }
+        let (state, _) = reduce_screen(
+            state,
+            open_viewer(
+                serde_json::json!({"paneId": "p1", "newPaneId": "v1", "source": file(PLAN)}),
+            ),
+        )
+        .expect("opened");
+        for op in [
+            ScreenOp::SplitPane {
+                pane_id: PaneId::from("v1"),
+                axis: Axis::Vertical,
+                new_pane_index: None,
+                new_pane_id: Some(PaneId::from("p2")),
+                resulting_sizes: None,
+                cwd: None,
+                shell_profile_id: None,
+            },
+            new_tab("v1", "p2"),
+        ] {
+            let (next, effects) = reduce_screen(state.clone(), op).expect("applied");
+            let [Effect::SpawnSession {
+                pane_id,
+                cwd,
+                shell_profile_id,
+                shell,
+                ..
+            }] = effects.as_slice()
+            else {
+                panic!("one spawn: {effects:?}");
+            };
+            assert_eq!(pane_id, &PaneId::from("p2"));
+            assert_eq!(cwd.as_deref(), Some("/home/me/app"));
+            assert_eq!(shell_profile_id, &None, "the default profile");
+            assert_eq!(shell, &None);
+            let pane = &next.panes[&PaneId::from("p2")];
+            assert_eq!(pane.role, Some(PaneRole::Terminal));
+            assert_eq!(pane.viewer, None);
+            let session = &next.sessions[pane.session_id.as_ref().expect("session")];
+            assert_eq!(session.cwd.as_deref(), Some("/home/me/app"));
+        }
+    }
+
+    #[test]
+    fn file_names_and_directories_of_absolute_paths() {
+        for (path, name, dir) in [
+            ("/home/me/app/PLAN.md", "PLAN.md", "/home/me/app"),
+            ("/PLAN.md", "PLAN.md", "/"),
+            ("/home/me/app/", "app", "/home/me"),
+            ("/", "/", "/"),
+        ] {
+            assert_eq!(file_name(path), name, "{path}");
+            assert_eq!(parent_dir(path), dir, "{path}");
+        }
     }
 }

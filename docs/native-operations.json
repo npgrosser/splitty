@@ -627,6 +627,7 @@
     "file.register",
     "file.accept",
     "file.decline",
-    "file.read"
+    "file.read",
+    "viewer.read"
   ]
 }

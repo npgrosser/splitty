@@ -70,19 +70,24 @@ pub struct OfferedFile {
     size: u64,
 }
 
-/// Open the regular file at `path` for an offer, following links, without
-/// blocking on a FIFO. Blocking: call it off the async runtime's workers.
-pub fn open(path: &Path) -> Result<OfferedFile, Failure> {
-    const NOT_A_FILE: Failure = (400, "invalid_path", "Only regular files can be offered");
-    let metadata = std::fs::metadata(path).map_err(|_| {
-        (
-            400,
-            "invalid_path",
-            "The requested path does not exist or is inaccessible",
-        )
-    })?;
-    if !metadata.is_file() {
-        return Err(NOT_A_FILE);
+/// Why [`open_regular`] opened nothing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OpenError {
+    Missing,
+    Unreadable,
+    NotAFile,
+}
+
+/// Open the regular file at `path` for reading, following links, without
+/// blocking on a FIFO or a device; the metadata is the opened file's.
+/// Blocking: call it off the async runtime's workers.
+pub(super) fn open_regular(path: &Path) -> Result<(std::fs::File, std::fs::Metadata), OpenError> {
+    let failed = |error: io::Error| match error.kind() {
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => OpenError::Missing,
+        _ => OpenError::Unreadable,
+    };
+    if !std::fs::metadata(path).map_err(failed)?.is_file() {
+        return Err(OpenError::NotAFile);
     }
     let mut options = std::fs::OpenOptions::new();
     options.read(true);
@@ -92,17 +97,26 @@ pub fn open(path: &Path) -> Result<OfferedFile, Failure> {
         // Swapped for a FIFO since the check above, it must not hang here.
         options.custom_flags(nix::libc::O_NONBLOCK | nix::libc::O_NOCTTY);
     }
-    let file = options.open(path).map_err(|_| {
-        (
+    let file = options.open(path).map_err(failed)?;
+    let metadata = file.metadata().map_err(|_| OpenError::NotAFile)?;
+    if !metadata.is_file() {
+        return Err(OpenError::NotAFile);
+    }
+    Ok((file, metadata))
+}
+
+/// Open the regular file at `path` for an offer, following links, without
+/// blocking on a FIFO. Blocking: call it off the async runtime's workers.
+pub fn open(path: &Path) -> Result<OfferedFile, Failure> {
+    const NOT_A_FILE: Failure = (400, "invalid_path", "Only regular files can be offered");
+    let (file, metadata) = open_regular(path).map_err(|error| match error {
+        OpenError::NotAFile => NOT_A_FILE,
+        OpenError::Missing | OpenError::Unreadable => (
             400,
             "invalid_path",
             "The requested path does not exist or is inaccessible",
-        )
+        ),
     })?;
-    let metadata = file.metadata().map_err(|_| NOT_A_FILE)?;
-    if !metadata.is_file() {
-        return Err(NOT_A_FILE);
-    }
     if metadata.len() > MAX_FILE_BYTES {
         return Err((413, "too_large", "Files over 512 MiB cannot be offered"));
     }
@@ -528,7 +542,7 @@ impl FileOffers {
 }
 
 /// `len` bytes of `file` at `offset`; fewer means the file became shorter.
-fn read_at(file: &std::fs::File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
+pub(super) fn read_at(file: &std::fs::File, offset: u64, len: u64) -> io::Result<Vec<u8>> {
     let mut bytes = vec![0; usize::try_from(len).map_err(io::Error::other)?];
     let mut filled = 0;
     while filled < bytes.len() {

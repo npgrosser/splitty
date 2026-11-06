@@ -5,7 +5,7 @@
 //! Server→client events use `ServerEvent` with serde serialization directly.
 
 // Re-export core protocol types used by other ws modules.
-pub use splitty_core::protocol::{Request, MSG_MUX_OP, MSG_MUX_RESYNC};
+pub use splitty_core::protocol::{Request, MSG_MUX_OP, MSG_MUX_RESYNC, MSG_VIEWER_READ};
 
 /// Encode a binary frame for terminal output.
 ///

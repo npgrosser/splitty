@@ -118,6 +118,7 @@ pub(super) fn reduce_create_job(
                         title: None,
                         cwd: None,
                         role: Some(PaneRole::Terminal),
+                        viewer: None,
                     },
                 );
                 screen.sessions.insert(

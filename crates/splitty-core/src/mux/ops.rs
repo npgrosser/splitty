@@ -6,7 +6,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::state::{Axis, FloatBounds};
+use super::state::{Axis, FloatBounds, ViewerSource};
 use crate::ids::*;
 
 /// Direction for spatial navigation and move operations.
@@ -19,6 +19,19 @@ pub enum Direction {
     Above,
     #[serde(alias = "down")]
     Below,
+}
+
+/// Where `open_viewer` puts a new viewer pane relative to its anchor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerPlacement {
+    #[default]
+    Right,
+    Left,
+    Above,
+    Below,
+    /// The last tab of the anchor's slot, in the root layout or a floating entry.
+    Tab,
 }
 
 /// Top-level operation. Dispatched by the workspace reducer.
@@ -170,6 +183,24 @@ pub enum ScreenOp {
     /// window's mux connection sends it (`session-scratchpad`).
     #[serde(rename_all = "camelCase")]
     SetScratchpad { session_id: SessionId, text: String },
+
+    /// Show a document in a viewer pane next to `pane_id`, or around the root
+    /// layout without it; no session, no effect (`viewer-panes`). Without
+    /// `new_pane_id`, a file a viewer pane of the screen already shows is
+    /// shown again in that pane.
+    #[serde(rename_all = "camelCase")]
+    OpenViewer {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_id: Option<PaneId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placement: Option<ViewerPlacement>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_pane_id: Option<PaneId>,
+        source: ViewerSource,
+        /// The working directory of a `text` document; a file's is its directory.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+    },
 }
 
 /// A layout tree as `arrange_panes` carries it: like the root layout, but

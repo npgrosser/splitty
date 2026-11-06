@@ -47,6 +47,8 @@ mod tests {
             "does NOT replay jobs",
             "old grants/cursors expire",
             "splitty download build/report.pdf",
+            "splitty open PLAN.md",
+            "Opened <path> in pane <id>",
         ] {
             assert!(guide.contains(term), "guide missing {term}");
         }

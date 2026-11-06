@@ -64,6 +64,23 @@ splitty split -H
 This opens a shell to the right; `splitty split` opens one below. A managed program
 is different: its pane runs that program and does not become a shell after exit.
 
+## Show a file to the user
+
+From an ordinary pane (not under `SPLITTY_AGENT_SOCK`), show a plan, a report or any
+other text file of this server in a read-only viewer pane next to your pane:
+
+```sh
+splitty open PLAN.md
+splitty open --tab build/report.html
+```
+
+No confirmation is asked; the command prints `Opened <path> in pane <id>` and exits 0.
+Markdown and HTML are rendered without running scripts. The pane reads the file again
+while it is shown, so rewrite the file to update it; running `splitty open` again for
+the same file brings its pane forward (`Showing <path> in pane <id>`) instead of adding
+one. A regular file of at most 8 MiB; a folder, `--editor` or `--with vscode|zed`
+request the user's editor instead, with a confirmation.
+
 ## Hand a file to the user
 
 From an ordinary pane (not under `SPLITTY_AGENT_SOCK`), offer a file on this server to

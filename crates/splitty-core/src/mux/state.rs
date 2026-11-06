@@ -5,6 +5,7 @@
 //! - `ScreenState` -- a single screen with its layout tree, panes, sessions, and floating windows.
 //! - `LayoutNode` -- recursive tree: `Slot` (leaf with pane stack) or `Split` (branch with axis/sizes).
 //! - `PaneState` / `SessionEntry` -- metadata for panes and PTY sessions.
+//! - `ViewerState` -- the document a viewer pane shows (`viewer-panes`).
 //! - `FloatingEntry` -- a detached overlay window with its own layout and bounds.
 
 use std::collections::HashMap;
@@ -104,7 +105,48 @@ pub struct PaneState {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<PaneRole>,
+    /// The document of a pane of the role `viewer`, which has no session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer: Option<ViewerState>,
 }
+
+/// What a viewer pane shows (`viewer-panes`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerState {
+    pub source: ViewerSource,
+    /// The terminal pane the viewer was opened from, kept when that pane closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_pane_id: Option<PaneId>,
+    /// Starts at 1 and rises when `open_viewer` shows the same file again.
+    pub revision: u64,
+}
+
+/// A viewer pane's document: a file on the server's machine, read when a
+/// window shows it, or a text the server keeps in the pane record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ViewerSource {
+    File {
+        path: String,
+    },
+    Text {
+        title: String,
+        /// Left out of snapshots and control API answers
+        /// (`ScreenState::without_viewer_texts`).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
+    },
+}
+
+/// The longest path of a `file` document, in bytes.
+pub const VIEWER_PATH_LIMIT: usize = 4096;
+
+/// The longest text of a `text` document, in bytes of UTF-8.
+pub const VIEWER_TEXT_LIMIT: usize = 256 * 1024;
+
+/// The longest title of a `text` document, in characters.
+pub const VIEWER_TITLE_LIMIT: usize = 200;
 
 /// A PTY process record in the mux state (not the actual PTY — just the data).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -240,6 +282,19 @@ impl LayoutNode {
                 }
                 None
             }
+        }
+    }
+
+    /// Find the slot that contains the given pane ID, for changing it.
+    pub fn find_slot_mut(&mut self, pane_id: &PaneId) -> Option<&mut Self> {
+        if matches!(self, Self::Slot { pane_ids, .. } if pane_ids.contains(pane_id)) {
+            return Some(self);
+        }
+        match self {
+            Self::Slot { .. } => None,
+            Self::Split { children, .. } => children
+                .iter_mut()
+                .find_map(|child| child.find_slot_mut(pane_id)),
         }
     }
 
@@ -389,6 +444,35 @@ impl ScreenState {
     /// Count total panes in the root layout (not floating).
     pub fn count_root_panes(&self) -> usize {
         self.root.count_panes()
+    }
+
+    /// The screen without the text of its `text` viewer documents, as
+    /// snapshots and the control API show it; windows read the text with
+    /// `viewer.read`.
+    pub fn without_viewer_texts(mut self) -> Self {
+        for pane in self.panes.values_mut() {
+            if let Some(ViewerState {
+                source: ViewerSource::Text { text, .. },
+                ..
+            }) = &mut pane.viewer
+            {
+                *text = String::new();
+            }
+        }
+        self
+    }
+}
+
+impl WorkspaceState {
+    /// The workspace without the text of its `text` viewer documents
+    /// (`ScreenState::without_viewer_texts`).
+    pub fn without_viewer_texts(mut self) -> Self {
+        self.screens = self
+            .screens
+            .into_iter()
+            .map(|(id, screen)| (id, screen.without_viewer_texts()))
+            .collect();
+        self
     }
 }
 

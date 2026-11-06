@@ -26,16 +26,17 @@ mod validate;
 
 pub use effects::Effect;
 pub use grid::{find_neighbor, project_grid, PaneRect};
-pub use ops::{Arrangement, Direction, Op, ScreenOp};
+pub use ops::{Arrangement, Direction, Op, ScreenOp, ViewerPlacement};
 pub use state::{
     equal_sizes, replace_node, Axis, FloatBounds, FloatingEntry, LayoutNode, PaneRole, PaneState,
-    ParentInfo, ScreenInfo, ScreenState, SessionEntry, SessionStatus, SlotLocation, WorkspaceState,
-    SCRATCHPAD_LIMIT,
+    ParentInfo, ScreenInfo, ScreenState, SessionEntry, SessionStatus, SlotLocation, ViewerSource,
+    ViewerState, WorkspaceState, SCRATCHPAD_LIMIT, VIEWER_PATH_LIMIT, VIEWER_TEXT_LIMIT,
+    VIEWER_TITLE_LIMIT,
 };
 pub use store::Store;
 
-pub use reducer::{reduce_screen, reduce_workspace};
-pub use validate::validate_screen_op;
+pub use reducer::{reduce_screen, reduce_workspace, shown_viewer};
+pub use validate::{validate_screen_op, viewer_path_is_valid};
 
 use thiserror::Error;
 
@@ -127,6 +128,24 @@ pub enum MuxError {
 
     #[error("a scratchpad holds at most {limit} bytes, got {got}")]
     ScratchpadTooLong { limit: usize, got: usize },
+
+    #[error(
+        "a viewer's file path must be absolute and at most {} bytes long, and hold no leading //, backslash, . or .. segment, control character or invisible formatting character",
+        state::VIEWER_PATH_LIMIT
+    )]
+    ViewerPathInvalid,
+
+    #[error("a viewer's text holds at most {limit} bytes, got {got}")]
+    ViewerTextTooLong { limit: usize, got: usize },
+
+    #[error(
+        "a viewer's title must have 1 to {} characters and no control characters",
+        state::VIEWER_TITLE_LIMIT
+    )]
+    ViewerTitleInvalid,
+
+    #[error("a viewer's cwd must be an absolute path")]
+    ViewerCwdNotAbsolute,
 
     #[error("{0}")]
     Internal(String),

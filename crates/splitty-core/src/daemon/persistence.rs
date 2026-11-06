@@ -195,4 +195,79 @@ mod tests {
         assert_eq!(sessions[&respawned].scratchpad, "send after the build");
         assert_eq!(sessions[&adopted].scratchpad, "check the diff");
     }
+
+    /// server-modes, Workspace Persistence In Daemon Mode (Viewer panes
+    /// persisted), and viewer-panes, Viewer Pane Lifetime (Daemon restart):
+    /// both viewer records and the selection's text are in `state.json`, the
+    /// file's content is not, and the restore starts only the terminal.
+    #[test]
+    fn viewer_panes_survive_state_json_and_the_restore_without_a_process() {
+        use crate::ids::{PaneId, ScreenId};
+        use crate::mux::{Effect, ScreenOp, ViewerSource};
+
+        let dir = tempfile::tempdir().expect("fixture");
+        let path = dir.path().join("state.json");
+        let shown = dir.path().join("PLAN.md");
+        fs::write(&shown, "the plan's own content").expect("file");
+        let shown = shown.to_str().expect("UTF-8 path").to_owned();
+        let mut store = Store::new();
+        let file = path.clone();
+        store.set_on_change(move |state| save_at(&file, state).expect("persist"));
+        let screen_id = ScreenId::from("s");
+        store
+            .dispatch(Op::CreateScreen {
+                name: None,
+                screen_id: Some(screen_id.clone()),
+                new_pane_id: Some(PaneId::from("p1")),
+                shell_profile_id: None,
+            })
+            .expect("screen");
+        for op in [
+            serde_json::json!({
+                "type": "open_viewer", "paneId": "p1", "newPaneId": "v1",
+                "source": {"kind": "file", "path": shown},
+            }),
+            serde_json::json!({
+                "type": "open_viewer", "paneId": "p1", "newPaneId": "v2", "cwd": "/home/me/app",
+                "source": {"kind": "text", "title": "Selection from claude", "text": "the agent's answer"},
+            }),
+        ] {
+            let op: ScreenOp = serde_json::from_value(op).expect("wire op");
+            assert!(store
+                .dispatch_screen(&screen_id, op)
+                .expect("open")
+                .is_empty());
+        }
+
+        let bytes = fs::read(&path).expect("state.json");
+        let written: serde_json::Value = serde_json::from_slice(&bytes).expect("JSON");
+        let panes = &written["screens"]["s"]["panes"];
+        assert_eq!(panes["v1"]["viewer"]["source"]["path"], shown.as_str());
+        assert_eq!(
+            panes["v2"]["viewer"]["source"]["text"],
+            "the agent's answer"
+        );
+        assert!(!String::from_utf8_lossy(&bytes).contains("the plan's own content"));
+
+        let mut restored: WorkspaceState = serde_json::from_value(written).expect("restore");
+        super::super::restore_jobs(&mut restored, &std::collections::HashSet::new());
+        let effects = super::super::restore_effects(&restored, |_| false);
+        assert!(
+            matches!(effects.as_slice(), [Effect::SpawnSession { pane_id, .. }] if pane_id == &PaneId::from("p1")),
+            "{effects:?}"
+        );
+        assert_eq!(restored.screens[&screen_id].sessions.len(), 1);
+        let restored = Store::with_state(restored);
+        assert_eq!(
+            restored.viewer_source(&PaneId::from("v1")),
+            Some(ViewerSource::File { path: shown })
+        );
+        assert_eq!(
+            restored.viewer_source(&PaneId::from("v2")),
+            Some(ViewerSource::Text {
+                title: "Selection from claude".into(),
+                text: "the agent's answer".into(),
+            })
+        );
+    }
 }

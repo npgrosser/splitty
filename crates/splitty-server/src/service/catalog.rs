@@ -277,6 +277,7 @@ pub const SESSION_OPERATIONS: &[&str] = &[
     "file.accept",
     "file.decline",
     "file.read",
+    "viewer.read",
 ];
 
 /// All session operations act on the assigned backend. Disconnect cancels its

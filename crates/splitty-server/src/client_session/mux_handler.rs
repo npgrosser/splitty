@@ -277,10 +277,13 @@ impl MuxHandler {
                     // Starts and ends no session, yet both screens changed.
                     self.nudge_others(&[&screen_id, &target]);
                 }
-                if op_type == "set_scratchpad" || op_type == "arrange_panes" {
+                let viewer_change =
+                    op_type == "open_viewer" || (op_type == "close_pane" && effects.is_empty());
+                if op_type == "set_scratchpad" || op_type == "arrange_panes" || viewer_change {
                     // Starts and ends no session either, yet the other
-                    // windows show the text (`session-scratchpad`) or the
-                    // arrangement (`arrange-panes`).
+                    // windows show the text (`session-scratchpad`), the
+                    // arrangement (`arrange-panes`) or the viewer pane that
+                    // came or went (`viewer-panes`).
                     self.nudge_others(&[&screen_id]);
                 }
                 self.run_effects(effects, &screen_id, &op_type).await;
@@ -810,5 +813,129 @@ mod tests {
             snapshot["screen"]["sessions"][session.as_str()]["scratchpad"],
             "ask why the test is skipped"
         );
+    }
+
+    /// viewer-panes, Viewer Capability and Document Text Outside Snapshots
+    /// (Snapshot of a screen with a text document), and mux-protocol, Change
+    /// Propagation to Other Clients (Viewer opened and closed by a client):
+    /// the welcome announces viewers, opening and closing one nudges the other
+    /// clients and not the sender, and a resync's snapshot holds the record
+    /// without the text.
+    #[tokio::test]
+    async fn a_viewer_opened_and_closed_nudges_the_others_and_its_text_stays_out_of_snapshots() {
+        let store = Arc::new(Store::new());
+        store
+            .dispatch(Op::CreateScreen {
+                name: None,
+                screen_id: Some(ScreenId::from("screen-1")),
+                new_pane_id: Some(PaneId::from("terminal-1")),
+                shell_profile_id: None,
+            })
+            .unwrap();
+        let (sender, mut sent) = ClientSender::channel();
+        let backend = Arc::new(splitty_core::pty::manager::Manager::new());
+        let runner = Arc::new(EffectRunner::new(backend.clone()));
+        let jobs = crate::jobs::Jobs::new(
+            store.clone(),
+            backend,
+            runner.clone(),
+            EnvContext::default(),
+            Default::default(),
+        );
+        let broadcasts = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let recorded = broadcasts.clone();
+        let shell_profiles = splitty_core::shell_profiles::state_from_settings(&Default::default());
+        let handler = MuxHandler::new(
+            store.clone(),
+            Arc::new(sender),
+            "client".to_string(),
+            "daemon".to_string(),
+            runner,
+            Arc::new(RwLock::new(shell_profiles)),
+            EnvContext::default(),
+            Arc::new(move |texts, _| {
+                recorded.lock().unwrap().extend(
+                    texts
+                        .iter()
+                        .map(|event| serde_json::to_string(event).unwrap()),
+                )
+            }),
+            jobs,
+        );
+        let next = |sent: &mut splitty_transport::queue::Receiver<Message>| match sent
+            .try_recv()
+            .map(|m| m.value)
+        {
+            Ok(Message::Text(text)) => serde_json::from_str::<Value>(text.as_str()).unwrap(),
+            other => panic!("expected a text message, got {other:?}"),
+        };
+        let nudges = || -> Vec<Value> {
+            broadcasts
+                .lock()
+                .unwrap()
+                .iter()
+                .map(|text| serde_json::from_str(text).unwrap())
+                .collect()
+        };
+
+        handler.send_welcome().await;
+        let welcome = next(&mut sent);
+        assert_eq!(welcome["type"], "mux.welcome");
+        assert!(
+            welcome["capabilities"]
+                .as_array()
+                .is_some_and(|all| all.iter().any(|c| c == "viewer-v1")),
+            "{welcome}"
+        );
+
+        let open = r#"{"type":"mux.op","screenId":"screen-1","op":{"type":"open_viewer","paneId":"terminal-1","newPaneId":"viewer-0123456789abcdef","cwd":"/home/me/app","source":{"kind":"text","title":"Selection from claude","text":"the agent's answer"}}}"#;
+        assert!(handler.try_handle(open).await);
+        let nudged = nudges();
+        assert_eq!(nudged.len(), 1, "{nudged:?}");
+        assert_eq!(nudged[0]["type"], "mux.nudge");
+        assert_eq!(nudged[0]["reason"], "mux_op");
+        assert_eq!(nudged[0]["screenId"], "screen-1");
+        assert!(sent.try_recv().is_err(), "the opener gets nothing");
+        assert_eq!(
+            store
+                .get_screen(&ScreenId::from("screen-1"))
+                .unwrap()
+                .sessions
+                .len(),
+            1
+        );
+
+        assert!(
+            handler
+                .try_handle(r#"{"type":"mux.resync","screenId":"screen-1"}"#)
+                .await
+        );
+        let snapshot = next(&mut sent);
+        assert_eq!(snapshot["type"], "mux.screen_snapshot");
+        let pane = &snapshot["screen"]["panes"]["viewer-0123456789abcdef"];
+        assert_eq!(pane["role"], "viewer", "{pane}");
+        assert_eq!(pane["title"], "Selection from claude");
+        assert_eq!(
+            pane["viewer"],
+            serde_json::json!({
+                "source": {"kind": "text", "title": "Selection from claude"},
+                "originPaneId": "terminal-1",
+                "revision": 1,
+            })
+        );
+        assert!(!snapshot.to_string().contains("the agent's answer"));
+
+        let close = r#"{"type":"mux.op","screenId":"screen-1","op":{"type":"close_pane","paneId":"viewer-0123456789abcdef"}}"#;
+        assert!(handler.try_handle(close).await);
+        let nudged = nudges();
+        assert_eq!(nudged.len(), 2, "{nudged:?}");
+        assert_eq!(nudged[1]["type"], "mux.nudge");
+        assert_eq!(nudged[1]["screenId"], "screen-1");
+        assert!(sent.try_recv().is_err(), "the closer gets nothing");
+        let screen = store.get_screen(&ScreenId::from("screen-1")).unwrap();
+        assert!(!screen
+            .panes
+            .contains_key(&PaneId::from("viewer-0123456789abcdef")));
+        assert_eq!(screen.sessions.len(), 1, "no session ended");
     }
 }

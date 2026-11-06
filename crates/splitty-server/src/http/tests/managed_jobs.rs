@@ -331,6 +331,39 @@ async fn managed_grant_socket_is_private_resumable_and_never_promotes_to_owner()
         .0,
         404
     );
+    // access-control, Viewer Documents Stay With Their Connection (Grant
+    // socket): no viewer through a grant, though the pane exists.
+    state
+        .mux_store
+        .dispatch(splitty_core::mux::Op::CreateScreen {
+            name: None,
+            screen_id: Some("s1".into()),
+            new_pane_id: Some("p1".into()),
+            shell_profile_id: None,
+        })
+        .expect("screen");
+    assert_eq!(
+        crate::cli::request(
+            &server,
+            "POST",
+            "/api/mux/op",
+            Some(json!({"screenId":"s1","op":{"type":"open_viewer","paneId":"p1","source":{"kind":"file","path":"/tmp/x"}}}))
+        )
+        .await
+        .expect("mux route denied")
+        .0,
+        404
+    );
+    assert_eq!(
+        state
+            .mux_store
+            .get_screen(&"s1".into())
+            .expect("screen")
+            .panes
+            .len(),
+        1,
+        "no viewer pane"
+    );
     let (status, list) = crate::cli::request(&server, "GET", "/api/jobs", None)
         .await
         .expect("first client");

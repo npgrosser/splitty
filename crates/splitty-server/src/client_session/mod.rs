@@ -12,6 +12,7 @@
 //! - [`mux_handler`] — handles `mux.*` protocol messages (op, resync).
 //! - [`ports`] — `ports.changed`, the ports processes of the sessions listen on.
 //! - [`sender`] — ordered client sender.
+//! - [`viewer`] — `viewer.read`, the documents of viewer panes.
 
 pub mod codec;
 pub mod editor;
@@ -20,6 +21,7 @@ mod handler;
 mod mux_handler;
 pub mod ports;
 pub mod sender;
+pub mod viewer;
 
 pub use connection::{connect, connect_admitted, connect_with, Connection, Input, Message};
 mod connection;

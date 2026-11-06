@@ -5,8 +5,11 @@
 
 use std::collections::HashSet;
 
-use super::ops::{Arrangement, ScreenOp};
-use super::state::{equal_sizes, LayoutNode, ScreenState, SCRATCHPAD_LIMIT};
+use super::ops::{Arrangement, ScreenOp, ViewerPlacement};
+use super::state::{
+    equal_sizes, LayoutNode, ScreenState, SlotLocation, ViewerSource, SCRATCHPAD_LIMIT,
+    VIEWER_PATH_LIMIT, VIEWER_TEXT_LIMIT, VIEWER_TITLE_LIMIT,
+};
 use super::MuxError;
 use crate::ids::*;
 
@@ -42,7 +45,92 @@ pub fn validate_screen_op(state: &ScreenState, op: &ScreenOp) -> Result<(), MuxE
         ScreenOp::SetScratchpad { session_id, text } => {
             validate_set_scratchpad(state, session_id, text)
         }
+        ScreenOp::OpenViewer {
+            pane_id,
+            placement,
+            source,
+            cwd,
+            ..
+        } => validate_open_viewer(
+            state,
+            pane_id.as_ref(),
+            placement.unwrap_or_default(),
+            source,
+            cwd.as_deref(),
+        ),
     }
+}
+
+/// What the reducer can see of a viewer's document; whether a file exists is
+/// decided when it is read.
+fn validate_open_viewer(
+    state: &ScreenState,
+    anchor: Option<&PaneId>,
+    placement: ViewerPlacement,
+    source: &ViewerSource,
+    cwd: Option<&str>,
+) -> Result<(), MuxError> {
+    match source {
+        ViewerSource::File { path } => {
+            if !viewer_path_is_valid(path) {
+                return Err(MuxError::ViewerPathInvalid);
+            }
+        }
+        ViewerSource::Text { title, text } => {
+            if text.len() > VIEWER_TEXT_LIMIT {
+                return Err(MuxError::ViewerTextTooLong {
+                    limit: VIEWER_TEXT_LIMIT,
+                    got: text.len(),
+                });
+            }
+            let chars = title.chars().count();
+            if chars == 0 || chars > VIEWER_TITLE_LIMIT || title.chars().any(char::is_control) {
+                return Err(MuxError::ViewerTitleInvalid);
+            }
+        }
+    }
+    if cwd.is_some_and(|cwd| !cwd.starts_with('/')) {
+        return Err(MuxError::ViewerCwdNotAbsolute);
+    }
+    match (anchor, placement) {
+        (None, _) => Ok(()),
+        (Some(anchor), ViewerPlacement::Tab) => validate_located_pane(state, anchor),
+        // A floating entry holds no splits: a directional placement there is a tab.
+        (Some(anchor), _)
+            if matches!(
+                state.find_slot_location(anchor),
+                Some(SlotLocation::Floating(_))
+            ) =>
+        {
+            validate_located_pane(state, anchor)
+        }
+        (Some(anchor), _) => validate_split_pane(state, anchor, None),
+    }
+}
+
+/// Whether a viewer pane may name the file at `path`: absolute, at most
+/// [`VIEWER_PATH_LIMIT`] bytes long, and without a leading `//`, a backslash,
+/// a `.` or `..` segment, control characters or the invisible formatting
+/// characters U+200B..U+200F, U+202A..U+202E, U+2060..U+206F and U+FEFF.
+/// The paths of editor requests follow the same rules.
+pub fn viewer_path_is_valid(path: &str) -> bool {
+    path.starts_with('/')
+        && !path.starts_with("//")
+        && path.len() <= VIEWER_PATH_LIMIT
+        && !path.contains('\\')
+        && !path.chars().any(|c| {
+            c.is_control()
+                || matches!(
+                    c,
+                    '\u{200b}'..='\u{200f}'
+                        | '\u{202a}'..='\u{202e}'
+                        | '\u{2060}'..='\u{206f}'
+                        | '\u{feff}'
+                )
+        })
+        && !path
+            .split('/')
+            .any(|segment| segment == "." || segment == "..")
 }
 
 fn validate_set_scratchpad(
@@ -308,6 +396,7 @@ mod tests {
                 title: None,
                 cwd: None,
                 role: None,
+                viewer: None,
             },
         );
         let mut sessions = HashMap::new();

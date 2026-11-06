@@ -111,7 +111,35 @@ interface PaneState {
   title?: string;
   cwd?: string;
   role?: "terminal" | "webview" | "viewer";
+  /** Only on a pane of the role "viewer", which has no sessionId. */
+  viewer?: ViewerState;
 }
+
+/**
+ * The document of a viewer pane (servers with "viewer-v1", see `viewer-panes`).
+ * The pane's title is the file's name or the text's title, its cwd the file's
+ * directory or the text's `cwd`. Windows give the viewer panes they create IDs
+ * of the form `viewer-<16 hex>`. The content is read with `viewer.read`.
+ */
+interface ViewerState {
+  source: ViewerSource;
+  /**
+   * The terminal pane it was opened from, or that showed it again last; kept
+   * when that pane closes.
+   */
+  originPaneId?: string;
+  /** Starts at 1; rises when `open_viewer` shows the same file again. */
+  revision: number;
+}
+
+type ViewerSource =
+  /** A file on the server's machine, read when a window shows it. */
+  | { kind: "file"; path: string }
+  /**
+   * A text the server keeps in the pane record (and state.json). Snapshots,
+   * GET /api/mux/state and GET /api/mux/screen/{id} leave `text` out.
+   */
+  | { kind: "text"; title: string; text?: string };
 
 /**
  * A Session is a PTY process managed by the server.
@@ -697,7 +725,7 @@ interface MuxWelcome extends ServerEvent {
   clientId: string;
   screens: ScreenInfo[];
   serverMode?: "embedded" | "daemon";
-  capabilities?: string[]; // includes "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1" and "tab-select-v1"; absent on old servers
+  capabilities?: string[]; // includes "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1" and "viewer-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -1006,6 +1034,39 @@ interface SetScratchpadOp {
   text: string;
 }
 
+/**
+ * Show a document in a new viewer pane, without a session or any effect
+ * (servers with "viewer-v1"). With `paneId`, a directional placement puts it
+ * beside that pane of the root layout as split_pane does (left/above before
+ * it); "tab" appends it to the pane's slot as the active tab. A floating
+ * entry holds no splits, so beside a floating pane every placement is "tab".
+ * Without `paneId`: the only pane of an empty root layout, else the right
+ * half of a new horizontal split around the root layout. Without `newPaneId`,
+ * a file a viewer pane of the screen already shows is not opened again: the
+ * first such pane in layout order becomes its slot's active pane, its
+ * `revision` rises by one, and a `paneId` that yields an origin becomes its
+ * `originPaneId`. Rejected: a file path that is relative, starts with "//",
+ * is over 4096 bytes, or holds a backslash, a "." or ".." segment, control
+ * characters or U+200B..U+200F, U+202A..U+202E, U+2060..U+206F, U+FEFF; a
+ * text over 256 KiB of UTF-8, a title outside 1 to 200 characters or with
+ * control characters, a relative `cwd`, an unknown `paneId`, a `newPaneId` in
+ * use. Other clients get `mux.nudge` for the screen; the sender gets nothing.
+ */
+interface OpenViewerOp {
+  type: "open_viewer";
+  /**
+   * The anchor. A terminal anchor is the origin; a viewer anchor passes on
+   * its own origin.
+   */
+  paneId?: string;
+  /** Default "right". */
+  placement?: "right" | "left" | "above" | "below" | "tab";
+  newPaneId?: string;
+  source: ViewerSource;
+  /** A text's working directory; absolute. */
+  cwd?: string;
+}
+
 interface SetScreenOwnershipOp {
   type: "set_screen_ownership";
   screenId: string;
@@ -1026,6 +1087,7 @@ type Operation =
   | RenameScreenOp
   | MovePaneToScreenOp
   | SetScratchpadOp
+  | OpenViewerOp
   | SetScreenOwnershipOp;
 
 // ============================================================================
@@ -1269,16 +1331,22 @@ type ClientCommand =
  *   { screenId: string, op: Operation }
  *
  * Response:
- *   200 { ok: true, revision: number }
+ *   200 { ok: true, revision: number, screenId: string,
+ *         created: { paneId: string; sessionId: string }[],
+ *         paneId?: string, reused?: boolean }   // paneId, reused: open_viewer only
  *   400 { ok: false, error: string }     // validation error
  *   404 { ok: false, error: string }     // screen/panel not found
+ *
+ * For open_viewer, `paneId` is the viewer pane that shows the document and
+ * `reused` is true when that pane existed before.
  */
 
 /**
  * GET /api/mux/state
  *
  * Returns the full WorkspaceState. Used by `splitty list-panes`,
- * `splitty list-screens`, etc.
+ * `splitty list-screens`, etc. No session carries its scratchpad and no
+ * `text` viewer document its text, here and in GET /api/mux/screen/:id.
  *
  * Response:
  *   200 WorkspaceState
@@ -2110,6 +2178,42 @@ export type FileServerMessage =
 // server has it (untrusted: the window shows it as text and saves the file
 // under a safe name); data is standard base64; expiresAt is UTC Unix
 // milliseconds. Transient, connection-bound, no generic event ID.
+
+// The documents of viewer panes (viewer-v1 in mux.welcome). A window reads
+// one over the connection whose screen holds the pane, never through the
+// control API: offset 0 first, then each next offset with the `version` of
+// the first answer. The server keeps nothing between chunks and runs reads off
+// the connection's message loop, at most 4 per connection (`busy` beyond, and
+// while the connection's output has no room for a chunk). A file is opened anew
+// for every read (links followed, regular files of at most 8 MiB, never
+// waiting on a FIFO); its version is f-<size>-<mtime ns>-<inode> of the opened
+// file, so a file changed between two chunks fails with `changed`. A text
+// document is read from the pane record (at most 256 KiB, version
+// t-<size>-<16 hex of its SHA-256>). Reading changes no state and reaches no
+// other client.
+export type ViewerClientMessage = {
+  type: "viewer.read";
+  /** At most 128 bytes; echoed in the answer. */
+  requestId: string;
+  paneId: string;
+  offset: number;
+  /** Required when offset > 0. */
+  version?: string;
+  /** Offset 0 only: answer viewer.unchanged when the document has it. */
+  ifVersion?: string;
+};
+export type ViewerServerMessage =
+  /** At most 1 MiB of the document as standard base64; size is the document's. */
+  | { type: "viewer.chunk"; requestId: string; offset: number; size: number; version: string; data: string; eof: boolean }
+  | { type: "viewer.unchanged"; requestId: string; version: string }
+  | {
+      type: "viewer.failed";
+      requestId: string;
+      code: "unknown_pane" | "not_found" | "not_a_file" | "too_large" | "unreadable" | "changed" | "busy" | "invalid";
+      error: string;
+    };
+// Transient, connection-bound, no generic event ID. A malformed read is
+// answered `invalid` with its requestId when that is a string that fits, else "".
 
 // Dedicated desktop commands remain open_local_editor / open_remote_editor
 // (Electron editor:open-local / editor:open-remote) with {cwd,editor,target?,

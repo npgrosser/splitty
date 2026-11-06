@@ -62,6 +62,9 @@ pub(super) async fn run(
         client_state.jobs.clone(),
     ));
 
+    // `viewer.read`, answered off this loop (`viewer-panes`).
+    let viewer_reads = super::viewer::Reads::new(client_state.mux_store.clone(), sender.clone());
+
     // Every foreign event uses the pending notification queue, including
     // broadcasts racing registration. Welcome reaches the main output first.
     let (notification_sender, mut notify_rx) = ClientSender::with_context(sender.context());
@@ -142,6 +145,7 @@ pub(super) async fn run(
                                 Some("file.accept") => { offers.accept(&client_id, &value).await; continue; }
                                 Some("file.decline") => { offers.decline(&client_id, &value).await; continue; }
                                 Some("file.read") => { offers.read(&client_id, &value).await; continue; }
+                                Some(codec::MSG_VIEWER_READ) => { viewer_reads.read(&value); continue; }
                                 _ => {}
                             }
                             if value["type"]=="mux.op" {

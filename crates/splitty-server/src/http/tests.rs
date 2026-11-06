@@ -37,6 +37,7 @@ mod move_pane;
 mod mux_tabs;
 mod pty_size;
 mod scratchpad;
+mod viewer;
 
 /// The state `serve` builds, for a server on `listen_addr` with its files in
 /// `dir`.

@@ -152,7 +152,9 @@ enum Commands {
         open: bool,
     },
 
-    /// Request a file or folder in the local client's editor (requires confirmation)
+    /// Show a file in a viewer pane next to this terminal; request a folder,
+    /// or a file with --with or --editor, in the local client's editor
+    /// (requires confirmation)
     Open {
         #[command(flatten)]
         ctl: CtlOpts,
@@ -162,6 +164,18 @@ enum Commands {
         /// Override the client-side editor preference
         #[arg(long = "with", value_parser = ["vscode", "zed"])]
         editor: Option<String>,
+        /// Request the file in the client's preferred editor instead
+        #[arg(long = "editor")]
+        in_editor: bool,
+        /// Show the file as a tab of the pane instead of beside it
+        #[arg(long, conflicts_with_all = ["editor", "in_editor"])]
+        tab: bool,
+        /// Pane to show the file next to (defaults to $SPLITTY_PANE_ID)
+        #[arg(long, conflicts_with_all = ["editor", "in_editor"])]
+        pane: Option<String>,
+        /// Screen of that pane (defaults to $SPLITTY_SCREEN_ID)
+        #[arg(long, conflicts_with_all = ["editor", "in_editor"])]
+        screen: Option<String>,
         /// Originating terminal (normally inherited from Splitty)
         #[arg(long, env = "SPLITTY_SESSION_ID")]
         session: Option<String>,
@@ -829,9 +843,29 @@ async fn async_main() {
             ctl,
             path,
             editor,
+            in_editor,
+            tab,
+            pane,
+            screen,
             session,
         } => {
             handle_ctl(async {
+                if opens_in_viewer(&path, editor.as_deref(), in_editor) {
+                    let request = cli::viewer::prepare(
+                        &path,
+                        &resolve_screen(&screen),
+                        &resolve_pane(&pane),
+                        tab,
+                    )?;
+                    let server = discover_server(&ctl)?;
+                    return cli::viewer::submit(&server, &request).await;
+                }
+                if tab || pane.is_some() || screen.is_some() {
+                    return Err(cli::CliError::Usage(
+                        "--tab, --pane and --screen apply only to a file shown in a viewer pane"
+                            .into(),
+                    ));
+                }
                 let session = session.filter(|s| !s.is_empty()).ok_or_else(|| {
                     cli::CliError::Usage(
                         "Run this command in a Splitty terminal, or supply --session <id>".into(),
@@ -1206,6 +1240,12 @@ async fn async_main() {
 
 fn discover_server(ctl: &CtlOpts) -> Result<cli::ServerInfo, cli::CliError> {
     cli::discover(ctl.addr.as_deref(), ctl.token.as_deref())
+}
+
+/// Whether `splitty open` shows `path` in a viewer pane: a file does, a
+/// folder and a file with `--with` or `--editor` go to the client's editor.
+fn opens_in_viewer(path: &std::path::Path, editor: Option<&str>, in_editor: bool) -> bool {
+    editor.is_none() && !in_editor && !path.is_dir()
 }
 
 fn resolve_screen(flag: &Option<String>) -> String {
@@ -2545,6 +2585,9 @@ mod editor_cli_tests {
             vec!["attach"],
             vec!["serve"],
             vec!["issue-bootstrap"],
+            // cli, Open In A Viewer Pane: still refused under a grant.
+            vec!["open", "PLAN.md"],
+            vec!["open", "--editor", "PLAN.md"],
         ] {
             let parsed = Cli::try_parse_from(std::iter::once("splitty").chain(args)).unwrap();
             assert!(!grant_command_allowed(&parsed.command));
@@ -2586,6 +2629,65 @@ mod editor_cli_tests {
         );
         assert!(Cli::try_parse_from(["splitty", "open", "--with", "sh"]).is_err());
         assert!(Cli::try_parse_from(["splitty", "open", "--in", "splitty"]).is_err());
+    }
+
+    /// cli, Open In A Viewer Pane (As a tab) and Open In Client Editor: the
+    /// viewer's flags, `--editor`, and no viewer flag next to an editor.
+    #[test]
+    fn open_takes_the_viewer_flags_or_the_editor_flags() {
+        let cli = Cli::try_parse_from([
+            "splitty",
+            "open",
+            "--tab",
+            "--pane",
+            "p1",
+            "--screen",
+            "s1",
+            "notes.txt",
+        ])
+        .expect("parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Open { path, tab: true, pane: Some(pane), screen: Some(screen), in_editor: false, editor: None, .. }
+                if path == std::path::Path::new("notes.txt") && pane == "p1" && screen == "s1"
+        ));
+        let cli =
+            Cli::try_parse_from(["splitty", "open", "--editor", "src/main.rs"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Open {
+                in_editor: true,
+                editor: None,
+                tab: false,
+                ..
+            }
+        ));
+        assert!(
+            Cli::try_parse_from(["splitty", "open", "--editor", "--with", "zed", "a.rs"]).is_ok()
+        );
+
+        // cli, Open In A Viewer Pane (A folder still goes to the editor) and
+        // Open In Client Editor (Relative file and default folder).
+        let dir = tempfile::tempdir().expect("fixture");
+        let file = dir.path().join("PLAN.md");
+        std::fs::write(&file, "# Plan").expect("file");
+        assert!(opens_in_viewer(&file, None, false));
+        assert!(!opens_in_viewer(dir.path(), None, false));
+        assert!(!opens_in_viewer(std::path::Path::new("."), None, false));
+        assert!(!opens_in_viewer(&file, None, true));
+        assert!(!opens_in_viewer(&file, Some("zed"), false));
+        for flags in [
+            ["--tab", "--editor"],
+            ["--tab", "--with=zed"],
+            ["--pane=p1", "--editor"],
+            ["--screen=s1", "--with=vscode"],
+        ] {
+            assert!(
+                Cli::try_parse_from(["splitty", "open"].into_iter().chain(flags).chain(["a.rs"]))
+                    .is_err(),
+                "{flags:?}"
+            );
+        }
     }
 
     #[test]

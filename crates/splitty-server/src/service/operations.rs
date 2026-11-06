@@ -570,7 +570,9 @@ pub(crate) fn without_scratchpads(screen: &mut mux::ScreenState) {
 }
 
 pub(crate) async fn get_mux_state(state: &ServiceState) -> Payload<Value> {
-    let mut ws = state.mux_store.get_workspace_state();
+    // Nor the text a viewer pane shows (`viewer-panes`); windows read it with
+    // `viewer.read` over their own connection.
+    let mut ws = state.mux_store.get_workspace_state().without_viewer_texts();
     ws.screens.values_mut().for_each(without_scratchpads);
     Payload(serde_json::to_value(&ws).unwrap_or(json!({})))
 }
@@ -578,7 +580,8 @@ pub(crate) async fn get_mux_state(state: &ServiceState) -> Payload<Value> {
 pub(crate) async fn get_mux_screen(state: &ServiceState, id: String) -> Reply {
     let screen_id = ScreenId::from(id.as_str());
     match state.mux_store.get_screen(&screen_id) {
-        Some(mut screen) => {
+        Some(screen) => {
+            let mut screen = screen.without_viewer_texts();
             without_scratchpads(&mut screen);
             Payload(serde_json::to_value(&screen).unwrap_or(json!({}))).into_reply()
         }
@@ -622,6 +625,8 @@ pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Repl
 
     // The target of a pane moved to another screen, nudged with its source.
     let mut moved_to = None;
+    // The pane an `open_viewer` showed its document in, and whether it existed.
+    let mut viewer = None;
     // Workspace-level ops vs screen-level ops
     let result = match op_type {
         "move_pane_to_screen" => {
@@ -735,7 +740,26 @@ pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Repl
                         .into_reply();
                 }
             };
-            state.mux_store.dispatch_screen(&screen_id, screen_op)
+            if matches!(screen_op, ScreenOp::OpenViewer { .. }) {
+                let id = screen_id.clone();
+                state
+                    .mux_store
+                    .dispatch_inspect(
+                        mux::Op::ModifyScreen {
+                            screen_id: screen_id.clone(),
+                            op: screen_op,
+                        },
+                        |before, after| {
+                            mux::shown_viewer(before.screens.get(&id)?, after.screens.get(&id)?)
+                        },
+                    )
+                    .map(|(effects, shown)| {
+                        viewer = shown;
+                        effects
+                    })
+            } else {
+                state.mux_store.dispatch_screen(&screen_id, screen_op)
+            }
         }
     };
 
@@ -785,13 +809,17 @@ pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Repl
             let screen = state.mux_store.get_screen(&screen_id);
             let revision = screen.map(|s| s.revision).unwrap_or(0);
 
-            Payload(json!({
+            let mut body = json!({
                 "ok": true,
                 "revision": revision,
                 "screenId": screen_id,
                 "created": spawned.iter().map(|(_,pane,session)|json!({"paneId":pane,"sessionId":session})).collect::<Vec<_>>(),
-            }))
-            .into_reply()
+            });
+            if let Some((pane, reused)) = viewer {
+                body["paneId"] = json!(pane);
+                body["reused"] = json!(reused);
+            }
+            Payload(body).into_reply()
         }
         Err(e) => (
             StatusCode::BAD_REQUEST,
