@@ -385,7 +385,7 @@ impl Default for TabSettings {
 impl Default for WindowSettings {
     fn default() -> Self {
         Self {
-            native_title_bar: true,
+            native_title_bar: !cfg!(target_os = "linux"),
             title_bar_color_mode: default_title_bar_color_mode(),
             title_bar_height: 0,
             title_bar_scroll: true,
@@ -952,7 +952,7 @@ mod tests {
         assert!(cfg.drawer.edge_reveal);
         assert!(cfg.drawer.show_tips);
         assert!(!cfg.drawer.resizable);
-        assert!(cfg.window.native_title_bar);
+        assert_eq!(cfg.window.native_title_bar, !cfg!(target_os = "linux"));
         assert_eq!(cfg.window.title_bar_color_mode, "tabBar");
         assert_eq!(cfg.window.title_bar_height, 0);
         assert!(cfg.window.title_bar_scroll);
@@ -1273,6 +1273,27 @@ mod tests {
         assert_eq!(updated.terminal.renderer, "xterm");
         assert_eq!(updated.appearance.theme, "splitty-dark");
         assert_eq!(updated.tabs.min_width, 12);
+    }
+
+    #[test]
+    fn native_title_bar_default_and_saved_preferences() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+
+        // An older partial config takes the current platform default.
+        fs::write(&path, "[window]\ntitle_bar_height = 40\n").unwrap();
+        assert_eq!(
+            load_from(&path).window.native_title_bar,
+            !cfg!(target_os = "linux")
+        );
+
+        for saved in [true, false] {
+            fs::write(&path, format!("[window]\nnative_title_bar = {saved}\n")).unwrap();
+            assert_eq!(load_from(&path).window.native_title_bar, saved);
+            let updated = update_at(&path, serde_json::json!({"tabs": {"minWidth": 18}})).unwrap();
+            assert_eq!(updated.window.native_title_bar, saved);
+            assert_eq!(load_from(&path).window.native_title_bar, saved);
+        }
     }
 
     #[test]

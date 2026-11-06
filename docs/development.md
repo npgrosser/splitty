@@ -13,7 +13,7 @@ listed in [`CLAUDE.md`](../CLAUDE.md#checks).
 | Frontend | Svelte 5, TypeScript, Vite, Tailwind CSS |
 | Terminal | xterm.js with WebGL, ligatures, search, image support; ghostty-web |
 | Layout | dockview-core |
-| Desktop | Tauri v2 (OS WebView); Electron (Linux AppImage) |
+| Desktop | Tauri v2 (macOS and Windows releases; Linux source build); Electron (Linux release AppImage) |
 | Backend | Rust (Tokio, Axum) |
 | PTY | portable-pty |
 | Config | TOML (`~/.config/splitty/config.toml`) |
@@ -66,7 +66,7 @@ resolved inside the owning `ServerConnection`.
 
 - Rust (stable)
 - Node.js 24 and pnpm
-- (Desktop) Tauri v2 prerequisites — see [Tauri docs](https://v2.tauri.app/start/prerequisites/)
+- (Tauri desktop builds) Tauri v2 prerequisites — see [Tauri docs](https://v2.tauri.app/start/prerequisites/)
 
 Frontend conformance tests import the actual Electron adapters. Install both
 `frontend/` and `frontend-electron/` dependencies before running `pnpm check` or
@@ -131,10 +131,10 @@ which revisions and platform cases have actually passed.
 
 ```bash
 make build/splitty        # server and CLI binary (embeds the frontend)
-make build/splitty-gui    # Tauri desktop binary (Linux)
+make electron             # Linux release format: Electron AppImage
+make build/splitty-gui    # Tauri desktop binary (Linux source build)
 make build/Splitty.app    # macOS app bundle
 make dmg                  # macOS disk image
-make electron             # Electron AppImage (Linux)
 ```
 
 ## Local macOS app
@@ -178,13 +178,13 @@ cache behavior, alternative distributions, and fast iteration options.
 ## Installation from source
 
 ```bash
-# Desktop app (Tauri) — includes both GUI and server binary
+# Linux release format: Electron AppImage
+make install-electron     # → ~/.local/bin/Splitty-Electron.AppImage
+
+# Tauri desktop app from source — includes both GUI and server binary
 make install-tauri
 # macOS: → /Applications/Splitty.app
 # Linux: → ~/.local/bin/splitty-gui + splitty + desktop entry
-
-# Electron AppImage (Linux)
-make install-electron     # → ~/.local/bin/Splitty-Electron.AppImage
 
 # Server only (no GUI)
 make install-no-gui       # → ~/.local/bin/splitty
@@ -237,7 +237,7 @@ git push --atomic origin HEAD v0.1.2
 ```
 
 The pushed tag starts the release workflow. It refuses a tag that does not match
-the version files, builds the Windows installer, the Linux packages and the
+the version files, builds the Windows installer, the Linux Electron AppImage and the
 macOS `.dmg`, and publishes the GitHub release with them once all of them have
 built; a tag with a suffix (`v0.2.0-rc.1`) becomes a prerelease. The Windows installer is a per-user setup: run a newer one over an
 installed Splitty to update it, and uninstall it from Windows' installed apps.

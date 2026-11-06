@@ -53,7 +53,7 @@ jobs:
     # Waits for the Windows workflow, whose first job builds the static
     # servers that every desktop app carries for remote hosts.
     needs: windows
-    # The oldest supported runner, so the packages work on older glibc too.
+    # The oldest supported runner, so the AppImage works on older glibc too.
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     env:
@@ -87,13 +87,6 @@ jobs:
           sha256sum -c splitty-wsl-x86_64.tar.gz.sha256 splitty-wsl-aarch64.tar.gz.sha256
           splitty-darwin-aarch64.tar.gz.sha256 splitty-darwin-x86_64.tar.gz.sha256
 
-      - name: Install WebKitGTK and bundling tools
-        timeout-minutes: 10
-        run: >-
-          sudo apt-get -o Acquire::Retries=3 update && sudo apt-get -o Acquire::Retries=3 install --yes
-          libwebkit2gtk-4.1-dev librsvg2-dev libxdo-dev libayatana-appindicator3-dev
-          patchelf file
-
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
           version: 11
@@ -106,20 +99,9 @@ jobs:
             frontend/pnpm-lock.yaml
             frontend-electron/pnpm-lock.yaml
 
-      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
-        with:
-          toolchain: stable
-
       - name: Build frontend
         working-directory: frontend
         run: pnpm install --frozen-lockfile && pnpm build
-
-      - name: Build Tauri packages (deb, AppImage)
-        working-directory: crates/splitty-tauri
-        env:
-          # linuxdeploy's bundled strip cannot handle newer ELF sections.
-          NO_STRIP: "true"
-        run: ../../frontend/node_modules/.bin/tauri build --bundles deb,appimage
 
       # The AppImage runs the static x86_64 server: a fine local backend, and
       # as a client it installs itself on x86_64 hosts and the servers it
@@ -138,8 +120,6 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p out
-          cp target/release/bundle/deb/*.deb out/
-          cp target/release/bundle/appimage/*.AppImage out/
           for image in frontend-electron/dist/*.AppImage; do
             cp "$image" "out/$(basename "$image" .AppImage | sed 's/^Splitty-/Splitty-Electron-/')-x86_64.AppImage"
           done

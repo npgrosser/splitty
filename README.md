@@ -105,7 +105,12 @@ the GitHub CLI, for example
 |---|---|---|
 | Windows 10/11 (x64) | `Splitty_<version>_x64-setup.exe` | Local terminals run in WSL 2 (Ubuntu or Debian); the app's setup page shows how to get it. Without WSL, the app opens remote hosts only. To update, run the newer installer. |
 | macOS (Apple silicon and Intel) | `Splitty_<version>_universal.dmg` | Clear the quarantine flag after installing (below). |
-| Linux (x86_64) | `Splitty_<version>_amd64.deb` or `Splitty_<version>_amd64.AppImage` | If WebKitGTK gives you trouble: `Splitty-Electron-<version>-x86_64.AppImage`. |
+| Linux (x86_64) | `Splitty-Electron-<version>-x86_64.AppImage` | Run the AppImage directly. |
+
+The Linux release uses Electron's bundled Chromium for a consistent runtime
+across distributions and to avoid WebKitGTK compatibility and rendering trouble.
+Splitty uses its own title bar by default on Linux. You can enable the native
+title bar in Settings and restart the app; an existing saved choice is preserved.
 
 The binaries are not code-signed, so Windows SmartScreen and macOS Gatekeeper
 warn about them, and Smart App Control, where it is on, blocks them. Check the
@@ -192,9 +197,9 @@ browser downloaded the archive, run
   Splitty on the host and relays it over SSH.
 - The server is Rust (Tokio, Axum, portable-pty); the UI is Svelte 5 with
   [dockview](https://github.com/mathuo/dockview) and xterm.js (ghostty-web as
-  an option). The desktop app uses [Tauri v2](https://v2.tauri.app), with an
-  Electron build for Linux; on Windows the server runs in WSL 2 behind a native
-  WebView2 window.
+  an option). Released desktop apps use [Tauri v2](https://v2.tauri.app) on
+  macOS and Windows, and Electron on Linux. On Windows the server runs in WSL 2
+  behind a native WebView2 window.
 
 More in [`docs/architecture.md`](docs/architecture.md).
 
@@ -266,17 +271,21 @@ vulnerabilities privately through
 
 ## Building from source
 
-You need Rust (stable), Node.js 24 with pnpm, and for the desktop app the
+You need Rust (stable) and Node.js 24 with pnpm. Tauri builds on macOS and
+Windows, or an optional Linux Tauri build, also need the
 [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```bash
 make dev                  # server with the embedded UI on 127.0.0.1:9800, rebuilt on changes
-make dev-tauri            # packaged desktop UI with rebuilds, native IPC
-make install-tauri        # desktop app; on Linux also splitty in ~/.local/bin
+make install-electron     # Linux desktop app → ~/.local/bin/Splitty-Electron.AppImage
+~/.local/bin/Splitty-Electron.AppImage
 make install-no-gui       # only splitty, to ~/.local/bin
+
+make dev-tauri            # Tauri desktop UI with rebuilds, native IPC
+make install-tauri        # Tauri app; on Linux also splitty in ~/.local/bin
 ```
 
-The macOS app, the Windows installer, the Electron AppImage and releases are
+The macOS app, the Windows installer, the Linux Electron AppImage and releases are
 described in [Development](docs/development.md). A build of your own installs
 itself on remote hosts only with a payload: set `SPLITTY_REMOTE_PAYLOAD` as
 [Remote development](docs/remote.md#installing-splitty-on-hosts) explains, or
