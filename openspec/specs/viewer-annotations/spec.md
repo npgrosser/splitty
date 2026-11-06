@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Annotations are a review of a document in a viewer pane: comments, questions, and suggested changes or deletions, each on a quoted passage or on the document as a whole. They are kept with the pane and find their passage again by its text when the file changes. The window turns them into a review in Markdown and hands it to the terminal the document was opened from, usually an agent's, or to another terminal, the scratchpad, the clipboard or a file. Annotations are made and read only through the window: processes in panes cannot read or change them and see a review only when the user sends it.
+Annotations are a review of a document in a viewer pane: comments and suggested changes, a deletion being a change with an empty replacement, each on a quoted passage or on the document as a whole. Each one opens a numbered thread of replies by the user and by agents. They are kept with the pane and find their passage again by its text when the file changes, or a similar passage nearby, marked as changed. The window turns them into a review in Markdown and hands it to the terminal the document was opened from, usually an agent's, or to another terminal, the scratchpad, the clipboard or a file, or answers a process that waits for the review; sending marks what the review held as handed over and keeps it. Annotations are made, changed and resolved only through the window. Processes in panes read only the threads the user handed over on their own screen, and can only add replies to them.
 
 ## Requirements
 
