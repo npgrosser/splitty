@@ -57,12 +57,18 @@ pub struct TitleInfo {
 impl TitleInfo {
     /// Shared display policy for snapshots, listings and attached clients.
     pub fn display_title(&self, osc_title: &str, home: &str) -> String {
+        let mut utf16_units = 0;
         self.raw_display_title(osc_title, home)
             .chars()
             .filter(|c| {
                 !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
             })
-            .take(500)
+            // The web client's existing bound is in UTF-16 code units. Keeping
+            // whole characters within that bound gives every client the same text.
+            .take_while(|c| {
+                utf16_units += c.len_utf16();
+                utf16_units <= 500
+            })
             .collect()
     }
 
@@ -416,6 +422,12 @@ mod display_tests {
             "notes31m"
         );
         assert_eq!(info.display_title(&"x".repeat(600), "/home/me").len(), 500);
+        assert_eq!(
+            info.display_title(&"🙂".repeat(300), "/home/me")
+                .encode_utf16()
+                .count(),
+            500
+        );
         info.proc.clear();
         assert!(!info.busy());
         assert_eq!(info.display_title("", "/home/me"), "Terminal");
