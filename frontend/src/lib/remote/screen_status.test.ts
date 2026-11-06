@@ -47,10 +47,11 @@ describe("remoteScreenStatus", () => {
       .toEqual({ kind: "reconnecting", target: "vm1", attempt: 3, progress: [], error: { code: "unreachable", message: "x" } });
   });
 
-  it("offers an update only for an incompatible host", () => {
-    const incompatible = host("failed", { error: { code: "incompatible", message: "", version: "0.3.9", protocol: 1 } });
+  it("offers an update only with positive hub metadata", () => {
+    const incompatible = host("failed", { error: { code: "incompatible", message: "", version: "0.3.9", protocol: 1, update: { available: true, keepsSessions: true } } });
     expect(offersUpdate(remoteScreenStatus("vm1", incompatible, plain, []))).toBe(true);
     for (const state of [
+      host("failed", { error: { code: "incompatible", message: "", update: {available:false, keepsSessions:true} } }),
       host("failed", { error: { code: "unsupported_host", message: "" } }),
       host("failed", { error: { code: "migration_unavailable", message: "A keeper cannot be verified" } }),
       host("offline", { error: { code: "incompatible", message: "" } }),
@@ -123,10 +124,11 @@ describe("the screen list's host state", () => {
     expect(hostTooltip("vm1", undefined)).toBe("vm1 · not connected");
   });
 
-  it("says that an update is available when the host runs another version than the local server", () => {
-    const ready = host("ready", { ready: { target: "vm1", daemon: { version: "0.4.1", protocol: 1, keepsSessions: false, started: false }, screens: [] } });
+  it("shows the hub update decision", () => {
+    const ready = host("ready", { ready: { target: "vm1", daemon: { version: "0.4.1", protocol: 1, keepsSessions: false, started: false }, update: {available: true, keepsSessions: false}, screens: [] } });
     expect(hostTooltip("vm1", ready, "0.4.2")).toBe("vm1 · Splitty 0.4.1 · update to 0.4.2 available · connected");
-    expect(hostTooltip("vm1", ready, "0.4.1")).toBe("vm1 · Splitty 0.4.1 · connected");
+    ready.ready!.update = {available:false, keepsSessions:true};
+    expect(hostTooltip("vm1", ready, "0.4.2")).toBe("vm1 · Splitty 0.4.1 · connected");
     // The local version is not known yet: nothing to compare.
     expect(hostTooltip("vm1", ready)).toBe("vm1 · Splitty 0.4.1 · connected");
   });

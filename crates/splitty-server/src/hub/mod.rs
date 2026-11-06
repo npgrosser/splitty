@@ -27,6 +27,7 @@
 
 mod catalog;
 mod connector;
+mod directory;
 mod failure;
 mod forwards;
 mod native;
@@ -211,6 +212,7 @@ enum HubMessage<'a> {
     Ready {
         target: &'a str,
         daemon: ReadyDaemon<'a>,
+        update: failure::UpdateAvailability,
         screens: &'a [Screen],
     },
     #[serde(rename = "remote.error")]
@@ -235,6 +237,7 @@ struct Reached {
     bridge: NativeBridge,
     first: Charged<Incoming>,
     daemon: RunningDaemon,
+    update: failure::UpdateAvailability,
     screens: Vec<Screen>,
     _metadata: splitty_transport::budget::Lease,
 }
@@ -258,8 +261,23 @@ enum End {
 type Sink = SplitSink<WebSocket, Message>;
 type Stream = SplitStream<WebSocket>;
 
+/// Coalesced passive invalidation. Receivers read current state after a signal.
+#[derive(Clone)]
+pub(super) struct Changes(tokio::sync::watch::Sender<()>);
+impl Default for Changes {
+    fn default() -> Self {
+        Self(tokio::sync::watch::channel(()).0)
+    }
+}
+impl Changes {
+    fn send(&self) {
+        self.0.send_replace(());
+    }
+}
+
 /// The hub of one server.
 pub struct Hub {
+    changes: Changes,
     connector: Arc<dyn Connector>,
     /// The configuration directory, where the recent hosts and the
     /// remembered screens and host directories are kept.
@@ -282,9 +300,19 @@ impl Hub {
         ssh_dir: Option<PathBuf>,
     ) -> Self {
         let connector: Arc<dyn Connector> = Arc::from(connector);
+        let changes = Changes::default();
         Self {
-            forwards: forwards::Forwards::new(connector.clone(), config_dir.clone()),
-            reverses: reverse::Reverses::new(connector.clone(), config_dir.clone()),
+            forwards: forwards::Forwards::with_changes(
+                connector.clone(),
+                config_dir.clone(),
+                changes.clone(),
+            ),
+            reverses: reverse::Reverses::with_changes(
+                connector.clone(),
+                config_dir.clone(),
+                changes.clone(),
+            ),
+            changes,
             connector,
             config_dir,
             ssh_dir,
@@ -304,6 +332,10 @@ impl Hub {
         )
     }
 
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<()> {
+        self.changes.0.subscribe()
+    }
+
     /// The known hosts, for `GET /api/remote/hosts`.
     pub fn known_hosts(&self) -> Vec<KnownHost> {
         hosts::known(&self.config_dir, self.ssh_dir.as_deref())
@@ -317,7 +349,7 @@ impl Hub {
         &self,
         document: serde_json::Value,
     ) -> Result<HostPreference, PreferenceError> {
-        hosts::update_preference(&self.config_dir, document)
+        hosts::update_preference(&self.config_dir, document).inspect(|_| self.changes.send())
     }
 
     /// The order of the client's host groups, for `GET /api/remote/host-order`.
@@ -330,7 +362,7 @@ impl Hub {
         &self,
         document: serde_json::Value,
     ) -> Result<HostOrder, PreferenceError> {
-        hosts::set_host_order(&self.config_dir, document)
+        hosts::set_host_order(&self.config_dir, document).inspect(|_| self.changes.send())
     }
 
     /// Forget metadata only: running connections, screens and forwards remain.
@@ -346,6 +378,7 @@ impl Hub {
         // Tombstone first: a partial failure cannot resurrect the host through
         // a cached directory or the user's unchanged SSH configuration.
         hosts::forget_locked(&self.config_dir, &target)?;
+        self.changes.send();
         catalog::forget(&self.config_dir, &target)?;
         Ok(())
     }
@@ -382,7 +415,28 @@ impl Hub {
     pub fn update_catalog(&self, document: serde_json::Value) -> Result<HostCatalog, CatalogError> {
         let update = catalog::check(document)?;
         let _writing = hosts::lock(&self.config_dir)?;
-        catalog::update(&self.config_dir, update)
+        catalog::update(&self.config_dir, update).inspect(|_| self.changes.send())
+    }
+
+    fn observe_handshake(&self, target: &str, screens: &[Screen]) {
+        if screens.len() > 200
+            || screens.iter().any(|screen| {
+                screen.id.chars().count() > 256
+                    || screen
+                        .name
+                        .as_ref()
+                        .is_some_and(|name| name.chars().count() > 200)
+            })
+        {
+            tracing::warn!("host directory exceeds cache limits");
+            self.changes.send();
+            return;
+        }
+        let observation = serde_json::json!({"target": target, "screens": screens});
+        if let Err(error) = self.update_catalog(observation) {
+            tracing::warn!(%error, "could not cache the host screen directory");
+        }
+        self.changes.send();
     }
 
     /// Open a forward of `port` on `target`, for `POST /api/remote/forwards`,
@@ -509,6 +563,7 @@ impl Hub {
                     bridge,
                     first,
                     daemon,
+                    update,
                     screens,
                     _metadata,
                 } = *reached;
@@ -520,6 +575,7 @@ impl Hub {
                         keeps_sessions: daemon.keeps_sessions,
                         started: daemon.started,
                     },
+                    update,
                     screens: &screens,
                 };
                 // Keep the attachment's cleanup inside this client lifetime.
@@ -539,6 +595,7 @@ impl Hub {
                         target.as_str()
                     );
                 }
+                self.observe_handshake(target.as_str(), &screens);
                 self.forwards.restore(target.as_str());
                 self.reverses.restore(target.as_str());
                 relay(target.as_str(), sink, stream, bridge, first, early).await;
@@ -766,6 +823,7 @@ impl Hub {
                     format_args!("Started a private Splitty daemon on {host}."),
                 )?;
             }
+            let update_availability = failure::UpdateAvailability::new(daemon, &handshake.server.version);
             // The window's protocol is this server's: the UI comes from it. A
             // daemon outside the window keeps running untouched.
             if !compatible(daemon.protocol, PROTOCOL_VERSION) {
@@ -774,6 +832,7 @@ impl Hub {
                     version: daemon.version.clone(),
                     protocol: daemon.protocol,
                     keeps_sessions: daemon.keeps_sessions,
+                    update_available: update_availability.available,
                     ours: PROTOCOL_VERSION,
                     screens: handshake.screens,
                 });
@@ -852,6 +911,7 @@ impl Hub {
                 bridge,
                 first,
                 daemon: handshake.daemon.daemon.expect("validated running daemon"),
+                update: update_availability,
                 screens: handshake.screens,
                 _metadata: metadata.take().expect("metadata reservation"),
             })
@@ -1094,6 +1154,43 @@ mod tests {
         serde_json::to_value(message).expect("serialize")
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn incompatible_update_offer_requires_the_discovered_matching_replacement() {
+        for replacement in [VERSION, "0.0.0"] {
+            let dir = tempfile::tempdir().expect("temporary directory");
+            let host = testing::ScriptedHost::new(dir.path())
+                .with_keeping_daemon("0.0.0", PROTOCOL_VERSION + 2)
+                .with_server_version(replacement);
+            let hub = Hub::new(Box::new(host.clone()), dir.path().join("config"), None);
+            let context = splitty_transport::queue::Context::default();
+            let (progress, _reports) = mpsc::channel(8);
+            let outcome = hub
+                .reach(
+                    SshTarget::parse("vm1").expect("target"),
+                    false,
+                    progress,
+                    &context,
+                )
+                .await;
+            let error = match outcome {
+                Err(error) => error,
+                Ok(_) => panic!("incompatible daemon must not connect"),
+            };
+            let failure = error.failure("vm1");
+            assert_eq!(failure.code, Code::Incompatible);
+            assert_eq!(
+                failure.update.expect("eligibility").available,
+                replacement == VERSION
+            );
+            assert_eq!(
+                host.asked(),
+                ["prepare vm1", "handshake"],
+                "eligibility checks never stop a daemon"
+            );
+        }
+    }
+
     /// The shapes `docs/protocol.ts` names.
     #[test]
     fn the_hubs_messages_encode_as_the_protocol_names_them() {
@@ -1138,10 +1235,15 @@ mod tests {
                     keeps_sessions: true,
                     started: true
                 },
+                update: failure::UpdateAvailability {
+                    available: splitty_remote::tunnel::older("0.1.0", VERSION),
+                    keeps_sessions: true
+                },
                 screens: &screens,
             }),
             serde_json::json!({
                 "type": "remote.ready",
+                "update": {"available": splitty_remote::tunnel::older("0.1.0", VERSION), "keepsSessions": true},
                 "target": "user@vm1",
                 "daemon": {"version": "0.1.0", "protocol": 1, "keepsSessions": true, "started": true},
                 "screens": [{"id": "s1", "name": "api", "panes": 3}, {"id": "s2", "panes": 1}],
@@ -1153,6 +1255,7 @@ mod tests {
             version: "0.9.0".into(),
             protocol: 3,
             keeps_sessions: true,
+            update_available: false,
             ours: 1,
             screens: vec![Screen {
                 id: "s1".into(),
@@ -1166,6 +1269,8 @@ mod tests {
             serde_json::json!({
                 "type": "remote.error",
                 "code": "incompatible",
+                "retryable": false,
+                "update": {"available": splitty_remote::tunnel::older("0.9.0", VERSION), "keepsSessions": true},
                 "message": "vm1 runs Splitty 0.9.0 (protocol 3); this Splitty needs protocol 1.",
                 "hint": "Update this Splitty to use vm1. Its daemon keeps running.",
                 "version": "0.9.0",

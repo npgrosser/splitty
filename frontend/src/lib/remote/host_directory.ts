@@ -20,7 +20,14 @@ export interface HostCatalog {
   screens: HostScreen[];
 }
 
+export interface DirectoryHost {
+  target: string; alias?: string; source?: "recent" | "ssh-config";
+  lastConnected?: number; lastSeen?: number; screens: HostScreen[];
+}
+
 interface Effects {
+  observe?(target: string, screens: readonly HostScreen[]): void;
+  order?(targets: string[]): void;
   fetch(path: string, init?: RequestInit): Promise<Response>;
   changed(): void;
 }
@@ -39,6 +46,10 @@ interface WriteState {
 }
 
 export class HostDirectory {
+  private serverOwned = false;
+  private merged: DirectoryHost[] = [];
+  private revision = 0;
+  private readonly reported = new Map<string, string>();
   private readonly catalog = new Map<string, HostCatalog>();
   private readonly writes = new Map<string, WriteState>();
   private hosts: KnownHost[] = [];
@@ -50,6 +61,50 @@ export class HostDirectory {
   private disposed = false;
 
   constructor(private readonly fx: Effects) {}
+
+  /** A supporting hub owns the merge and all persistence. */
+  useServerDirectory(enabled: boolean): void {
+    this.serverOwned = enabled;
+    this.revision++;
+    this.reported.clear();
+    this.loading = undefined;
+    if (enabled) {
+      for (const state of this.writes.values()) clearTimeout(state.timer);
+      this.writes.clear();
+    }
+    this.fx.changed();
+  }
+
+  mergedHosts(): readonly DirectoryHost[] | undefined { return this.serverOwned ? this.merged : undefined; }
+
+  async refresh(): Promise<void> {
+    if (!this.serverOwned) { this.loading = undefined; await this.load(); return; }
+    const revision = ++this.revision;
+    try {
+      const response = await this.fx.fetch("/api/remote/directory");
+      if (!response.ok) return;
+      const value: unknown = await response.json();
+      if (this.disposed || revision !== this.revision || !record(value) || value.version !== 1 || !Array.isArray(value.hosts)) return;
+      const hosts: DirectoryHost[] = [];
+      const seen = new Set<string>();
+      for (const entry of value.hosts) {
+        if (!record(entry) || typeof entry.target !== "string" || !validTarget(entry.target) || seen.has(entry.target) || this.hidden.has(entry.target)) continue;
+        seen.add(entry.target);
+        hosts.push({ target: entry.target, screens: parseScreens(Array.isArray(entry.screens) ? entry.screens : []),
+          ...(typeof entry.alias === "string" ? {alias: plainText(entry.alias, MAX_NAME)} : {}),
+          ...(entry.source === "recent" || entry.source === "ssh-config" ? {source: entry.source} : {}),
+          ...(nonnegativeInteger(entry.lastConnected) ? {lastConnected: entry.lastConnected} : {}),
+          ...(nonnegativeInteger(entry.lastSeen) ? {lastSeen: entry.lastSeen} : {}),
+        });
+      }
+      this.merged = hosts;
+      this.hosts = hosts.map((host) => ({target: host.target, source: host.source ?? "recent", alias: host.alias, lastConnected: host.lastConnected}));
+      this.catalog.clear();
+      for (const host of hosts) if (host.lastSeen !== undefined) this.catalog.set(host.target, {target:host.target, lastSeen:host.lastSeen, screens:host.screens});
+      if (Array.isArray(value.order)) this.fx.order?.(value.order.filter((target): target is string => typeof target === "string" && validTarget(target)));
+      this.fx.changed();
+    } catch { /* Keep the last successful passive read. */ }
+  }
 
   /** Newest first, detached from the controller's internal state. */
   entries(): HostCatalog[] {
@@ -64,6 +119,8 @@ export class HostDirectory {
   setHidden(target: string, hidden: boolean): void {
     if (!hidden) { this.hidden.delete(target); return; }
     this.hidden.add(target);
+    this.revision++;
+    this.merged = this.merged.filter((host) => host.target !== target);
     this.catalog.delete(target);
     this.hosts = this.hosts.filter((host) => host.target !== target);
     const state = this.writes.get(target);
@@ -74,6 +131,7 @@ export class HostDirectory {
 
   load(): Promise<void> {
     if (this.disposed) return Promise.resolve();
+    if (this.serverOwned) return this.refresh();
     // Independent reads: a failed catalog must not hide the recent hosts.
     return this.loading ??= Promise.all([this.readCatalog(), this.readHosts()]).then(() => {});
   }
@@ -83,6 +141,14 @@ export class HostDirectory {
     if (this.disposed || this.hidden.has(target) || !validTarget(target) || !Array.isArray(screens)) return;
     const clean = parseScreens(screens);
     const body = JSON.stringify({ target, screens: clean });
+    if (this.serverOwned) {
+      if (this.reported.get(target) !== body) {
+        this.reported.set(target, body);
+        this.revision++;
+        this.fx.observe?.(target, clean);
+      }
+      return;
+    }
     const now = Math.floor(Date.now() / 1000);
     if (!this.readDone) this.observed.add(target);
     let state = this.writes.get(target);
@@ -160,7 +226,7 @@ export class HostDirectory {
       const res = await this.fx.fetch(PATH);
       if (!res.ok) return;
       const value: unknown = await res.json();
-      if (this.disposed || !record(value) || value.version !== 1 || !Array.isArray(value.hosts)) return;
+      if (this.disposed || this.serverOwned || !record(value) || value.version !== 1 || !Array.isArray(value.hosts)) return;
       // The hub returns newest first, including writes within the same second.
       // Insert oldest first so ties retain that order in ordered() and trim().
       for (const item of [...value.hosts].reverse()) {
@@ -187,7 +253,7 @@ export class HostDirectory {
       const res = await this.fx.fetch("/api/remote/hosts");
       if (!res.ok) return;
       const value: unknown = await res.json();
-      if (this.disposed || !Array.isArray(value)) return;
+      if (this.disposed || this.serverOwned || !Array.isArray(value)) return;
       const hosts = new Map<string, KnownHost>();
       for (const host of parseKnownHosts(value)) {
         if (this.hidden.has(host.target) || !validTarget(host.target)) continue;

@@ -66,6 +66,7 @@ export interface EditorRequest {
   expiresAt: number;
 }
 export type IncomingMessage =
+  | { type: "hub.catalog.observe"; target: string; screens: readonly {id: string; name?: string; panes: number}[] }
   | { type: "editor.register" }
   | { type: "editor.result"; requestId: string; outcome: EditorOutcome }
   | { type: "create"; shell?: string; shellProfileId?: string; cols?: number; rows?: number; command?: string; dir?: string; root?: string; restoreMode?: RestoreMode; paneId?: string; screenId?: string }
@@ -219,6 +220,7 @@ export interface ServerCommand extends ServerEvent { type: "command"; command: C
 // --- Server -> Client: Union ---
 
 export type OutgoingMessage =
+  | { type: "hub.changed" }
   | EditorRequest
   | { type: "editor.cancelled"; requestId: string }
   // Session lifecycle

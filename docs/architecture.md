@@ -507,3 +507,19 @@ OSC 52 clipboard writes in the xterm renderer use `clipboard_policy.ts`: enabled
 The explicit gateway upgrades a host WebSocket before the bounded SSH preparation finishes. It reserves opening capacity before starting that work. Preparation input is counted against the connection/process byte budgets and capped at 64 messages; it transfers once to the verified native generation, or is discarded on cancellation/failure. Native preparation pulses map to the existing ordered browser progress steps without replaying their later snapshot. The ping timer, last acknowledged heartbeat and pending nonce survive the transition to the admitted session. A slow browser cannot extend a partial frame, blocked write or original liveness deadline.
 
 Plain `serve` composes this gateway with an owned embedded service; `serve --daemon` composes it with the verified private owner endpoint. API calls use the fixed operation catalog and a bounded gateway-owned native API carrier per backend revision, with increasing request IDs and at most 64 pending calls. Reply IDs must match; a lost/mismatched reply to an admitted mutation reports uncertainty and is never replayed. Typed setup errors pass through as bounded bytes without allocating an arbitrary JSON value tree.
+
+### Hub-owned host metadata and passive updates
+
+The hub builds `/api/remote/directory` from known hosts, display preferences,
+saved host order, cached screens and active/saved forwards in both directions.
+It stores the handshake's screen list after readiness. Windows report later
+screen observations over their ordered local connection; validation and cache
+writes stay in the hub. The host relay remains opaque. Legacy catalog PUTs
+remain available for older clients.
+
+Forward supervisors and metadata mutations invalidate a coalescing local watch.
+The common connection loop subscribes before welcome and sends `hub.changed`;
+a window supporting `hub-host-decisions-v1` refreshes passive reads on this
+message and reconnect, while older hubs retain polling. Refreshes never restore
+or create forwards. Host update and retry decisions arrive with hub setup
+metadata, using the remote supervisor's shared version comparison.

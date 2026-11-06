@@ -105,6 +105,23 @@ afterEach(() => {
 });
 
 describe("RemoteSocket before remote.ready", () => {
+  it("uses explicit hub retry classification and validates update metadata", async () => {
+    const r = rig(); r.socket.connect(); await settle();
+    r.hub.ready(); r.hub.end(1006);
+    await vi.advanceTimersByTimeAsync(MAX_RECONNECT_DELAY);
+    expect(r.hubs).toHaveLength(2);
+    r.hub.json({ type: "remote.error", code: "internal", message: "Permanent", retryable: false,
+      update: { available: true, keepsSessions: true } });
+    r.hub.end(1000);
+    await vi.advanceTimersByTimeAsync(MAX_RECONNECT_DELAY * 2);
+    expect(r.hubs).toHaveLength(2);
+    expect(r.socket.state.error?.update).toEqual({ available: true, keepsSessions: true });
+    r.socket.retry(); await settle();
+    r.hub.json({ type: "remote.ready", daemon: { version: "0.1.0", protocol: 1, started: false }, screens: [],
+      update: { available: "yes", keepsSessions: true } });
+    expect(r.socket.state.ready?.update).toBeUndefined();
+    r.socket.close();
+  });
   it("collects the hub's progress and opens the hub with a fresh ticket", async () => {
     const r = rig();
     r.socket.connect();

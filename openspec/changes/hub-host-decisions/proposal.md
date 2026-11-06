@@ -1,6 +1,6 @@
 # Proposal
 
-> Draft created on 2026-11-04. Specs, design and tasks are written when this change is next. Part 4 of the sequence in `frontend-client-core` (design, "Sequence"); independent of parts 1 to 3. Related: `native-client-transports` (the hub's frames and endpoints keep their meaning over native transports), `mobile-ssh-client` (a phone has no local hub and needs the same answers from its own bridge).
+> Planned on 2026-11-06. Part 4 of the sequence in `frontend-client-core`, independent of parts 1 to 3. Related: `native-client-transports`; roadmap 112 in `roadmap/README.md`.
 
 ## Why
 
@@ -17,7 +17,7 @@ The local server is the hub for remote hosts, but several decisions about hosts 
 - **Update availability from the hub.** `remote.ready` (and `incompatible`) carries `update: {available, keepsSessions}`, where available means the host's daemon is older. The hub refuses to downgrade a newer daemon. The window shows what the hub says.
 - **Retry classification from the hub.** `remote.error` carries `retryable`.
 - **Host directory read.** A local endpoint returns the merged host directory: recent, configured and alias hosts with hidden ones filtered out, catalog `lastSeen` and screens, the hosts of saved and active forwards, ordered by the host order. The window adds only open screens, live connection state and first-appearance order.
-- **Catalog written by the hub.** The hub writes the catalog at `remote.ready` from the handshake. What the window still reports afterwards (renames, pane counts it observes), and whether that keeps "the hub relays host frames without reading them", is decided when this change is next.
+- **Catalog written by the hub.** The hub persists the handshake directory at readiness. Later window observations use an ordered message on the local connection; the window has no persistence queue, keepalive writer or revision reconciliation. The hub continues relaying host frames without interpreting them. Existing catalog HTTP writes remain for older clients.
 - **Forwards change feed.** Changes to forwards are pushed on the local connection, which replaces the window's polling.
 
 ## Capabilities
@@ -27,8 +27,7 @@ To be decided when the change is next. Likely candidates:
 ### Modified Capabilities
 
 - `remote-screens`: Host Update (offer only for an older daemon, no downgrade); Host Screen Directory Cache (the hub writes it); Detected Ports In The Window (change feed instead of polling).
-- `remote-hosts`: Known Hosts and Host Group Order through the directory read.
-- `desktop-remote`: where a remote window gets update availability without a local hub (the shell's tunnel already uses `update_plan`).
+- Existing `remote-hosts` known-host and order rules are reused by the merged read. Separate desktop windows keep the supervisor's existing update policy; no new authority or desktop-shell interface is needed.
 
 ## Impact
 

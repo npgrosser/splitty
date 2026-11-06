@@ -35,6 +35,7 @@ use crate::ws;
 pub(crate) fn api_routes_with(hub: Arc<Hub>) -> Router<AppState> {
     let upgrade_hub = hub.clone();
     let hosts_hub = hub.clone();
+    let directory_hub = hub.clone();
     let forgetting_host_hub = hub.clone();
     let host_preferences_hub = hub.clone();
     let updating_host_preferences_hub = hub.clone();
@@ -77,6 +78,10 @@ pub(crate) fn api_routes_with(hub: Arc<Hub>) -> Router<AppState> {
                     remote_upgrade(upgrade_hub, state, params, request)
                 },
             ),
+        )
+        .route(
+            "/api/remote/directory",
+            get(move || async move { Json(directory_hub.directory()) }),
         )
         .route(
             "/api/remote/hosts",

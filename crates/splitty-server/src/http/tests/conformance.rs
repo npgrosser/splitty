@@ -125,6 +125,100 @@ async fn framed_reply(peer: &mut splitty_transport::peer::Peer) -> splitty_trans
 }
 
 #[tokio::test]
+async fn hub_observations_notify_other_local_clients_and_respect_assigned_authority() {
+    use splitty_transport::wire::Kind;
+    let dir = tempfile::tempdir().unwrap();
+    let host = ScriptedHost::new(dir.path());
+    let mut state = state(ADDR, dir.path());
+    let service = Arc::get_mut(&mut state.service).unwrap();
+    service.hub = Arc::new(hub(&host, dir.path()));
+    Arc::get_mut(&mut service.client_state).unwrap().hub = Some(service.hub.clone());
+    let (observer, observer_task) = framed(&state, Role::Main).await;
+    let (mut viewer, viewer_task) = framed(&state, Role::Main).await;
+    let welcome = viewer
+        .recv()
+        .await
+        .unwrap()
+        .frame
+        .decode::<Value>()
+        .unwrap();
+    assert_eq!(welcome["type"], "mux.welcome");
+    assert!(welcome["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("hub-host-decisions-v1")));
+    for (index, screens) in [json!([{"id":"s1","name":"Renamed","panes":2}]), json!([])]
+        .into_iter()
+        .enumerate()
+    {
+        observer
+            .sender
+            .json(
+                Kind::Text,
+                &json!({"type":"hub.catalog.observe","target":"vm1","screens":screens}),
+            )
+            .unwrap();
+        tokio::time::timeout(WAIT, async {
+            loop {
+                let frame = viewer.recv().await.unwrap();
+                if frame.frame.kind == Kind::Text
+                    && frame.frame.decode::<Value>().unwrap()["type"] == "hub.changed"
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        framed_call(&viewer, index as u32 + 1, "remote.directory.get", json!({}));
+        let reply = framed_reply(&mut viewer).await;
+        assert_eq!(reply.status, 200);
+        let directory: Value = serde_json::from_str(&reply.body).unwrap();
+        assert_eq!(directory["hosts"][0]["screens"], screens);
+    }
+    let (mut remote, remote_task) = framed(&state, Role::Remote).await;
+    let remote_welcome = remote
+        .recv()
+        .await
+        .unwrap()
+        .frame
+        .decode::<Value>()
+        .unwrap();
+    assert!(!remote_welcome["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("hub-host-decisions-v1")));
+    state.hub.set_host_order(json!({"order":["vm1"]})).unwrap();
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), async {
+            loop {
+                let frame = remote.recv().await.unwrap();
+                if frame.frame.kind == Kind::Text
+                    && frame.frame.decode::<Value>().unwrap()["type"] == "hub.changed"
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .is_err(),
+        "remote-only connections must not learn local hub activity"
+    );
+    remote.sender.json(Kind::Text, &json!({"type":"hub.catalog.observe","target":"vm1","screens":[{"id":"forbidden","panes":1}]})).unwrap();
+    tokio::time::timeout(WAIT, async { while remote.recv().await.is_some() {} })
+        .await
+        .unwrap();
+    assert!(remote_task.await.unwrap().is_err());
+    assert!(state.hub.directory().hosts[0].screens.is_empty());
+    assert!(host.asked().is_empty());
+    remote.shutdown().await;
+    observer.shutdown().await;
+    viewer.shutdown().await;
+    observer_task.await.unwrap().unwrap();
+    viewer_task.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn framed_json_amplification_disconnects_only_its_client() {
     use splitty_transport::wire::Kind;
     let dir = tempfile::tempdir().unwrap();

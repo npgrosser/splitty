@@ -147,7 +147,7 @@
   /** The version a connected host runs when it is not this app's; then it can be updated. */
   function olderVersion(group: HostGroup<Screen>): string | undefined {
     const version = group.state?.phase === "ready" ? group.state.ready?.daemon.version : undefined;
-    return updateNote(version, getLocalVersion()) ? version : undefined;
+    return updateNote(version, getLocalVersion(), group.state?.ready?.update) ? version : undefined;
   }
 
   function lastSeen(group: HostGroup<Screen>): string | undefined {
@@ -218,13 +218,13 @@
             {/if}
             {#if group.state.error.hint}<p class="note">{group.state.error.hint}</p>{/if}
             <button class="button" onclick={() => onConnectHost(group.key)}>Retry</button>
-            {#if group.state.phase === "failed" && group.state.error.code === "incompatible" && group.state.error.migration?.available === true}
+            {#if group.state.phase === "failed" && group.state.error.code === "incompatible" && (group.state.error.migration?.available === true || group.state.error.update?.available === true)}
               <button class="button" onclick={() => onUpdateHost(group.key)}>Update server and connect…</button>
             {/if}
           {/if}
           {#if olderVersion(group)}
             <div class="update">
-              <p class="note">Runs Splitty {olderVersion(group)}; this app is {getLocalVersion()}. Updating ends its screens there.</p>
+              <p class="note">Runs Splitty {olderVersion(group)}; this app is {getLocalVersion()}. {group.state?.ready?.update?.keepsSessions ? "Updating preserves its sessions." : "Updating requires restarting the server on the host."}</p>
               <button class="button" onclick={() => onUpdateHost(group.key)}>Update…</button>
             </div>
           {/if}

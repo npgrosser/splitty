@@ -400,6 +400,16 @@
       "deadlineMs": 30000
     },
     {
+      "operation": "remote.directory.get",
+      "method": "GET",
+      "path": "/api/remote/directory",
+      "scope": "localHub",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
       "operation": "host.list",
       "method": "GET",
       "path": "/api/remote/hosts",
@@ -668,6 +678,7 @@
     "file.decline",
     "file.read",
     "viewer.read",
-    "viewer.review_answer"
+    "viewer.review_answer",
+    "hub.catalog.observe"
   ]
 }

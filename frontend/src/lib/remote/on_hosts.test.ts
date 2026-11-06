@@ -11,6 +11,15 @@ const cache: HostCatalog = { target: "vm1", lastSeen: 100, screens: [infra] };
 const ready: HostConnectionView = { key: "host:vm1", state: state("ready"), available: [infra] };
 
 describe("persistent host groups", () => {
+  it("uses only the hub directory for saved hosts and overlays live screens", () => {
+    const groups = hostGroups([screen("opened", "host:vm1", "s2")], [ready],
+      [{ target: "stale-host", source: "recent" }], [cache], [{ target: "old-port" }], [], [],
+      [{ target: "vm1", alias: "Work", lastSeen: 101, screens: [infra] },
+        { target: "saved-port", screens: [] }]);
+    expect(groups.map(g => g.target)).toEqual(["vm1", "saved-port"]);
+    expect(groups[0]).toMatchObject({ alias: "Work", stale: false, screens: [], lastSeen: 101 });
+    expect(groups[0].open).toHaveLength(1);
+  });
   it("keeps a recent host and its last seen screens after the last detach", () => {
     const [group] = hostGroups([screen("L", "local")], [], [{ target: "vm1", source: "recent" }], [cache]);
     expect(group).toMatchObject({ key: "host:vm1", open: [], screens: [infra], stale: true, lastSeen: 100 });

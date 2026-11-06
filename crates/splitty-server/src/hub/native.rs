@@ -111,6 +111,7 @@ impl Hub {
             mut bridge,
             first,
             daemon,
+            update,
             screens,
             target,
             _metadata,
@@ -147,6 +148,7 @@ impl Hub {
                     keeps_sessions: daemon.keeps_sessions,
                     started: daemon.started,
                 },
+                update,
                 screens: &screens,
             },
         )?;
@@ -155,6 +157,7 @@ impl Hub {
         if let Err(error) = hosts::record_recent_if_visible(&self.config_dir, &target) {
             tracing::warn!(%error, "could not remember the connected host");
         }
+        self.observe_handshake(target.as_str(), &screens);
         self.forwards.restore(target.as_str());
         self.reverses.restore(target.as_str());
         loop {
@@ -197,10 +200,7 @@ fn failure_frame(
     budget: &splitty_transport::budget::ConnectionBudget,
 ) -> io::Result<splitty_transport::budget::Charged<splitty_transport::codec::Frame>> {
     let failure = failure.borrow_mut();
-    let retryable = matches!(
-        failure.code,
-        Code::Unreachable | Code::Daemon | Code::Bridge | Code::Internal
-    );
+    let retryable = failure.retryable;
     loop {
         let message = HubMessage::Error(failure);
         match splitty_transport::codec::closed_diagnostic(&message, retryable, budget) {
@@ -374,6 +374,8 @@ mod tests {
     #[test]
     fn oversized_native_errors_preserve_types_and_mark_screen_counts_unknown() {
         let failure = Failure {
+            retryable: false,
+            update: None,
             migration: None,
             code: Code::Incompatible,
             message: "\u{0001}🙂".repeat(8192),

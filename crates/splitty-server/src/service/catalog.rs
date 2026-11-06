@@ -139,6 +139,7 @@ operations! {
     JobInput, "job.input", "POST", "/api/jobs/{id}/input", Backend, ["id", "body"], MAX_JOB_BODY, Mutation, Ordinary;
     JobStop, "job.stop", "POST", "/api/jobs/{id}/stop", Backend, ["id"], MAX_JOB_BODY, Mutation, Ordinary;
     JobForget, "job.forget", "POST", "/api/jobs/{id}/forget", Backend, ["id"], MAX_JOB_BODY, Mutation, Ordinary;
+    HostDirectory, "remote.directory.get", "GET", "/api/remote/directory", LocalHub, [], MAX_API_BODY, Read, Ordinary;
     HostList, "host.list", "GET", "/api/remote/hosts", LocalHub, [], MAX_API_BODY, Read, Ordinary;
     HostForget, "host.forget", "DELETE", "/api/remote/hosts", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary;
     HostPreferencesGet, "hostPreferences.get", "GET", "/api/remote/host-preferences", LocalHub, [], MAX_API_BODY, Read, Ordinary;
@@ -285,6 +286,7 @@ pub const SESSION_OPERATIONS: &[&str] = &[
     "file.read",
     "viewer.read",
     "viewer.review_answer",
+    "hub.catalog.observe",
 ];
 
 /// All session operations act on the assigned backend. Disconnect cancels its
@@ -321,6 +323,11 @@ pub fn validate_session(
         "token",
         "origin",
     ] {
+        // This one local-hub message names cached metadata, never a backend
+        // assignment. The carrier separately requires the fixed Main role.
+        if field == "target" && value["type"] == "hub.catalog.observe" {
+            continue;
+        }
         if value.get(field).is_some() {
             return Err(Rejection::Invalid(format!(
                 "unexpected authority field: {field}"

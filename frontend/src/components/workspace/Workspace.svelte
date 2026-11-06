@@ -127,7 +127,11 @@
   const remoteSyncs = new Map<ConnKey, RemoteScreenSync>();
   const browsingHosts = new Set<ConnKey>();
   let directoryVersion = $state(0);
-  const directory = new HostDirectory({ fetch: apiFetch, changed: () => { directoryVersion++; } });
+  const directory = new HostDirectory({ fetch: apiFetch, changed: () => { directoryVersion++; },
+    observe: (target, screens) => connectionFor("local")?.socket.send({ type: "hub.catalog.observe", target, screens }),
+    order: setHostOrder,
+  });
+  const mergedHosts = $derived.by(() => { void directoryVersion; return directory.mergedHosts(); });
   const hostCatalog = $derived.by(() => { void directoryVersion; return directory.entries(); });
   const recentHosts = $derived.by(() => { void directoryVersion; return directory.known(); });
   const hostPreferences = new HostPreferences({
@@ -459,6 +463,7 @@
       .filter((s) => s.conn === conn)
       .map((s) => ({ wireId: s.wireId, panes: views.api(s.id)?.panels.length || undefined }));
     const { error, ready } = socket.state;
+    if (error?.migration?.available !== true && (error?.update ?? ready?.update)?.available !== true) return;
     const warning = updateWarning(target, {
       migration: error?.migration,
       hostVersion: error?.version ?? ready?.daemon.version,
@@ -776,6 +781,22 @@
       let policy: ScreenSyncPolicy;
       const cleanups: (() => void)[] = [];
       if (conn.kind === "local") {
+        directory.useServerDirectory(conn.mux.hubHostDecisions);
+        ports.useChangeFeed(conn.mux.hubHostDecisions);
+        reverseForwarding()?.useChangeFeed(conn.mux.hubHostDecisions);
+        cleanups.push(conn.socket.onMessage((message) => {
+          if (message.type === "mux.welcome") {
+            const enabled = message.capabilities?.includes("hub-host-decisions-v1") === true;
+            directory.useServerDirectory(enabled);
+            ports.useChangeFeed(enabled);
+            reverseForwarding()?.useChangeFeed(enabled);
+            void directory.refresh();
+            refreshPorts();
+          } else if (message.type === "hub.changed") {
+            void directory.refresh();
+            refreshPorts();
+          }
+        }));
         // The remembered remote screens go back once the local ones are settled.
         policy = new LocalScreenSync(conn, startup, views, () => remembered.localScreensReady());
       } else {
@@ -945,6 +966,7 @@
     onNewHostScreen={(target, direct) => newRemoteScreen(target, direct)}
     onUpdateHost={askUpdate}
     catalog={hostCatalog}
+    {mergedHosts}
     {recentHosts}
     preferences={hostMetadata}
     onSetHostAlias={(target, alias) => hostPreferences.setAlias(target, alias)}

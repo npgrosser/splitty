@@ -28,6 +28,15 @@ export function migrationOffer(value: unknown): MigrationOffer | undefined {
   return { available: true, fromVersion: offer.fromVersion, toVersion: offer.toVersion, sessions: offer.sessions! };
 }
 
+/** A decision from the local hub; version strings in the window carry no authority. */
+export interface UpdateAvailability { available: boolean; keepsSessions: boolean }
+export function updateAvailability(value: unknown): UpdateAvailability | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const item = value as Record<string, unknown>;
+  return typeof item.available === "boolean" && typeof item.keepsSessions === "boolean"
+    ? { available: item.available, keepsSessions: item.keepsSessions } : undefined;
+}
+
 /** What an update ends on the host. */
 export type UpdateImpact =
   | { known: true; screens: number; panes: number }
@@ -118,8 +127,8 @@ export function updateWarning(target: string, versions: UpdateVersions, impact: 
  * The tooltip's note for a host whose daemon runs another version than the
  * local server: an update to the local version is available.
  */
-export function updateNote(hostVersion: string | undefined, localVersion: string | undefined): string | undefined {
-  if (!hostVersion || !localVersion || hostVersion === localVersion) return undefined;
+export function updateNote(hostVersion: string | undefined, localVersion: string | undefined, update?: UpdateAvailability): string | undefined {
+  if (!hostVersion || !localVersion || update?.available !== true) return undefined;
   return `update to ${localVersion} available`;
 }
 

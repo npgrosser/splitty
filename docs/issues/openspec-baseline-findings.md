@@ -319,9 +319,9 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
   server's screen ends up empty, so other windows, the CLI and a reload do not see the template's panes. "Apply in
   new screen" also assumes the new view mounts within one animation frame (`Workspace.svelte`), and applies
   nothing when it does not.
-- **A host running a newer version is offered an update** (`hub-host-decisions`). `updateNote` in
-  `remote/update.ts` compares versions with `!==`, while the remote installer never replaces a newer daemon. The
-  Hosts panel always says an update ends the host's screens, even for a daemon that keeps its sessions.
+- **Fixed by `hub-host-decisions` (2026-11-06): newer-host update offers and keeper wording.**
+  Windows consume explicit hub SemVer/update metadata. Unknown, equal and newer versions and hosts without
+  session preservation receive no ordinary update offer; keeper-aware messages describe preservation.
 - **Fractional scroll sensitivities** (`settings-authority`). The xterm settings send steps of 0.1 and 0.5 into
   integer fields (`terminal.xterm.scrollSensitivity`, `fastScrollSensitivity`), so the update cannot be parsed.
   This follows from the types and was not reproduced. The window keeps its optimistic value until a reload. Window

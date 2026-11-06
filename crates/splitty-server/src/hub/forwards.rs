@@ -125,7 +125,15 @@ struct State {
     restoring: HashSet<Key>,
 }
 
+struct ChangedOnDrop(super::Changes);
+impl Drop for ChangedOnDrop {
+    fn drop(&mut self) {
+        self.0.send();
+    }
+}
+
 struct Shared {
+    changes: super::Changes,
     connector: Arc<dyn Connector>,
     state: Mutex<State>,
     lanes: Mutex<HashMap<Key, Weak<AsyncMutex<()>>>>,
@@ -140,16 +148,32 @@ pub struct Forwards {
 
 impl Forwards {
     pub fn new(connector: Arc<dyn Connector>, config_dir: PathBuf) -> Self {
-        Self::with_store(connector, Store::new(config_dir))
+        Self::with_changes(connector, config_dir, super::Changes::default())
     }
+    pub(super) fn with_changes(
+        connector: Arc<dyn Connector>,
+        config_dir: PathBuf,
+        changes: super::Changes,
+    ) -> Self {
+        Self::with_store_and_changes(connector, Store::new(config_dir), changes)
+    }
+
     /// Explicit CLI mappings share supervision/cleanup, while saved desktop
     /// preferences are neither read nor changed by this command's lifetime.
     pub fn transient(connector: Arc<dyn Connector>) -> Self {
         Self::with_store(connector, Store::transient())
     }
     fn with_store(connector: Arc<dyn Connector>, preferences: Store) -> Self {
+        Self::with_store_and_changes(connector, preferences, super::Changes::default())
+    }
+    fn with_store_and_changes(
+        connector: Arc<dyn Connector>,
+        preferences: Store,
+        changes: super::Changes,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
+                changes,
                 connector,
                 state: Mutex::new(State {
                     slots: HashMap::new(),
@@ -277,6 +301,7 @@ impl Forwards {
             state.errors.remove(&key);
         }
         row.last_error = state.errors.get(&key).cloned();
+        self.shared.changes.send();
         Ok(row)
     }
 
@@ -287,6 +312,7 @@ impl Forwards {
         let mut state = lock(&self.shared.state);
         state.preferences.remove(&key)?;
         state.errors.remove(&key);
+        self.shared.changes.send();
         Ok(())
     }
 
@@ -312,7 +338,9 @@ impl Forwards {
         let (answer, response) = oneshot::channel();
         let task = tokio::spawn(async move {
             let _ordered = ordered;
+            let changes = shared.changes.clone();
             let result = action(shared, key).await;
+            changes.send();
             let _ = answer.send(result);
         });
         {
@@ -402,6 +430,7 @@ impl Shared {
             state.errors.remove(key);
             state.slots.remove(key)
         };
+        self.changes.send();
         if let Some(Slot::Open(forward)) = slot {
             forward.stop().await;
         }
@@ -426,6 +455,7 @@ impl Shared {
         local: Option<u16>,
         explicit: bool,
     ) -> Result<ForwardInfo, ForwardError> {
+        let _changed = ChangedOnDrop(self.changes.clone());
         let result = self.open_inner(target, key, local, explicit).await;
         let mut state = lock(&self.state);
         match &result {
@@ -565,7 +595,7 @@ impl Shared {
             remote,
             local,
             forwarding,
-            up.clone(),
+            (up.clone(), self.changes.clone()),
             stopped,
         ));
         Ok(Supervised {
@@ -681,7 +711,7 @@ async fn supervise(
     remote: u16,
     local: u16,
     mut forwarding: Box<dyn Forwarding>,
-    up: Arc<AtomicBool>,
+    (up, changes): (Arc<AtomicBool>, super::Changes),
     mut stop: oneshot::Receiver<()>,
 ) {
     let host = target.as_str();
@@ -696,6 +726,7 @@ async fn supervise(
         // Take the port back before another process can (SR-13).
         let mut held = PortReservation::acquire_port(local).ok();
         up.store(false, Ordering::SeqCst);
+        changes.send();
         tracing::info!(
             "remote screen hub: the forward of port {remote} of {host} at local port {local} \
              ended ({reason}); rebuilding it"
@@ -755,6 +786,7 @@ async fn supervise(
             }
         };
         up.store(true, Ordering::SeqCst);
+        changes.send();
         tracing::info!(
             "remote screen hub: the forward of port {remote} of {host} is back at local port \
              {local}"

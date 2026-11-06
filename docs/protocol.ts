@@ -1886,6 +1886,8 @@ interface RemoteProgress {
 /** Sent once, right before the host daemon's first message. */
 interface RemoteReady {
   type: "remote.ready";
+  /** Hub comparison; absent only on older hubs. */
+  update?: { available: boolean; keepsSessions: boolean };
   /** The target as the hub validated it. */
   target: string;
   daemon: {
@@ -1926,6 +1928,8 @@ type RemoteErrorCode =
 
 interface RemoteError {
   type: "remote.error";
+  retryable: boolean;
+  update?: { available: boolean; keepsSessions: boolean };
   code: RemoteErrorCode;
   message: string;
   /** What the user can do, where there is something. */
@@ -2811,4 +2815,27 @@ export interface ServiceStatus {
   listenAddr: null;
   instance: string;
   transportVersion: 1;
+}
+
+/** hub-host-decisions-v1: passive local reads and coalesced invalidation.
+ * GET /api/remote/directory (native remote.directory.get, localHub only).
+ * Reading never connects a host. Hidden hosts are excluded. Ordered entries
+ * combine known hosts, cached screens and active/saved forward/reverse hosts.
+ */
+interface HubDirectory {
+  version: 1;
+  order: string[];
+  hosts: { target: string; alias?: string; source?: "recent" | "ssh-config";
+    lastConnected?: number; lastSeen?: number;
+    screens: { id: string; name?: string; panes: number }[] }[];
+}
+/** Sent only on the local service connection; no application frames are
+ * injected into a host relay after remote.ready. Refresh passive reads. */
+interface HubChanged { type: "hub.changed" }
+/** Ordered follow-up observations; the hub owns validation and persistence.
+ * Native remote-window roles and restricted sockets cannot submit this. */
+interface HubCatalogObservation {
+  type: "hub.catalog.observe";
+  target: string;
+  screens: { id: string; name?: string; panes: number }[];
 }

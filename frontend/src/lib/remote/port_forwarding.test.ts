@@ -124,6 +124,21 @@ afterEach(() => {
 });
 
 describe("PortForwarding: the hosts' lists", () => {
+  it("replaces polling with hub invalidations and resumes polling for an older hub", async () => {
+    vi.useFakeTimers();
+    const { ports, hub } = setup();
+    ports.useChangeFeed(true); ports.setViewOpen(true);
+    await vi.advanceTimersByTimeAsync(0);
+    hub.requests = [];
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 3);
+    expect(hub.requests).toEqual([]);
+    hub.forwards = [{ target: "vm1", remote: 3000, local: 3000, url: "http://localhost:3000", state: "down" }];
+    await ports.refresh();
+    expect(ports.forwardOf("vm1", 3000)?.state).toBe("down");
+    hub.requests = []; ports.useChangeFeed(false);
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL);
+    expect(hub.requests).toHaveLength(2);
+  });
   it("takes a host's list only from that host's connection", () => {
     const { ports } = setup();
     const vm1 = host("vm1");

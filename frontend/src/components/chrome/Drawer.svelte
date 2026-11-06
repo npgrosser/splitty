@@ -25,7 +25,7 @@
   import { hostIndicator, hostTooltip, type HostIndicator } from "../../lib/remote/screen_status.ts";
   import { terminateConfirmedBefore } from "../../lib/remote/close_screen.ts";
   import { hostGroups, type HostGroup } from "../../lib/remote/on_hosts.ts";
-  import type { HostCatalog } from "../../lib/remote/host_directory.ts";
+  import type { DirectoryHost, HostCatalog } from "../../lib/remote/host_directory.ts";
   import type { HostPreference } from "../../lib/remote/host_preferences.ts";
   import type { KnownHost } from "../../lib/remote/known_hosts.ts";
   import { orderedScreens } from "../../lib/remote/screen_groups.ts";
@@ -58,6 +58,7 @@
     /** Update a host's Splitty to this app's version, after the user confirmed what ends. */
     onUpdateHost: (host: ConnKey) => void;
     catalog: readonly HostCatalog[];
+    mergedHosts?: readonly DirectoryHost[];
     recentHosts: readonly KnownHost[];
     preferences?: readonly HostPreference[];
     onSetHostAlias?: (target: string, alias: string) => Promise<void>;
@@ -67,7 +68,7 @@
     onMoveHostGroup?: (shown: string[], from: number, to: number) => void;
   }
 
-  let { screenApis, paneVersion, onCloseScreen, onTerminateScreen, onActivatePane, onOpenHostScreen, onConnectHost, onBrowseHost, onNewHostScreen, onUpdateHost, catalog, recentHosts, preferences = [], onSetHostAlias, onForgetHost, onRevealHost, onMoveHostGroup }: Props = $props();
+  let { screenApis, paneVersion, onCloseScreen, onTerminateScreen, onActivatePane, onOpenHostScreen, onConnectHost, onBrowseHost, onNewHostScreen, onUpdateHost, catalog, recentHosts, mergedHosts, preferences = [], onSetHostAlias, onForgetHost, onRevealHost, onMoveHostGroup }: Props = $props();
 
   // ── State ──
   let screens = $state(orderedScreens(getScreens(), getHostOrder()));
@@ -89,7 +90,7 @@
   // Host groups outlive their connections and include last-seen directories.
   // The screen list shows a host only while the window shows its screens;
   // every host is in the Hosts panel.
-  const groups = $derived(hostGroups(screens, hostViews(), recentHosts, catalog, [...portLists, ...shareLists], preferences, getHostOrder()));
+  const groups = $derived(hostGroups(screens, hostViews(), recentHosts, catalog, [...portLists, ...shareLists], preferences, getHostOrder(), mergedHosts));
   const openGroups = $derived(groups.filter((group) => group.open.length > 0));
   const localScreens = $derived(screens.filter((s) => s.conn === "local"));
   // "Ports": per host its listed ports and the local server's forwards

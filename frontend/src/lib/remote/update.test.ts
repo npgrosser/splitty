@@ -83,8 +83,10 @@ describe("updateWarning for a daemon that keeps its sessions", () => {
 });
 
 describe("updateNote", () => {
-  it("is there only when both versions are known and differ", () => {
-    expect(updateNote("0.4.1", "0.4.2")).toBe("update to 0.4.2 available");
+  it("requires a positive hub decision, never just differing versions", () => {
+    expect(updateNote("0.4.1", "0.4.2", {available: true, keepsSessions: true})).toBe("update to 0.4.2 available");
+    expect(updateNote("0.5.0", "0.4.2", {available: false, keepsSessions: true})).toBeUndefined();
+    expect(updateNote("0.4.1", "0.4.2")).toBeUndefined();
     expect(updateNote("0.4.2", "0.4.2")).toBeUndefined();
     expect(updateNote(undefined, "0.4.2")).toBeUndefined();
     expect(updateNote("0.4.1", undefined)).toBeUndefined();

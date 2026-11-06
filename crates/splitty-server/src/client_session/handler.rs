@@ -30,7 +30,9 @@ pub(super) async fn run(
     mut read: queue::Receiver<Message>,
     sender: Arc<ClientSender>,
     client_state: Arc<ClientState>,
+    local_hub: bool,
 ) {
+    let hub = client_state.hub.as_ref().filter(|_| local_hub);
     let mut closing = sender.closing();
     if *closing.borrow() {
         return;
@@ -50,18 +52,21 @@ pub(super) async fn run(
     let broadcast_fn: mux_handler::BroadcastFn = Arc::new(move |events, origin| {
         broadcast_client_state.broadcast_events(events, Some(&origin));
     });
-    let mux_handler = Arc::new(MuxHandler::new(
-        client_state.mux_store.clone(),
-        sender.clone(),
-        client_id.clone(),
-        client_state.server_mode.clone(),
-        client_state.effect_runner.clone(),
-        client_state.shell_profiles.clone(),
-        client_state.env.clone(),
-        broadcast_fn,
-        client_state.jobs.clone(),
-        client_state.reviews.clone(),
-    ));
+    let mux_handler = Arc::new(
+        MuxHandler::new(
+            client_state.mux_store.clone(),
+            sender.clone(),
+            client_id.clone(),
+            client_state.server_mode.clone(),
+            client_state.effect_runner.clone(),
+            client_state.shell_profiles.clone(),
+            client_state.env.clone(),
+            broadcast_fn,
+            client_state.jobs.clone(),
+            client_state.reviews.clone(),
+        )
+        .with_hub_decisions(hub.is_some()),
+    );
 
     // `viewer.read`, answered off this loop (`viewer-panes`).
     let viewer_reads = super::viewer::Reads::new(client_state.mux_store.clone(), sender.clone());
@@ -87,6 +92,8 @@ pub(super) async fn run(
         );
     }
 
+    let mut hub_changes = hub.map(|hub| hub.changes());
+
     // Send welcome (replaces hello + mux.connect), then the listening ports
     // Subscribe before the first snapshot of the catalog: a concurrent launch
     // must not fall into a gap between welcome and event subscription.
@@ -102,6 +109,15 @@ pub(super) async fn run(
     loop {
         tokio::select! {
             _ = closing.changed() => break,
+            changed = async {
+                match hub_changes.as_mut() {
+                    Some(changes) => changes.changed().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                if changed.is_err() { hub_changes = None; }
+                else if sender.try_send_json(&serde_json::json!({"type":"hub.changed"})).is_err() { break; }
+            },
             msg = read.recv() => {
                 let (msg, _incoming_bytes) = match msg {
                     Some(m) => m.into_parts(),
@@ -129,6 +145,15 @@ pub(super) async fn run(
                             }
                         } else { None };
                         {
+                            if value["type"] == "hub.catalog.observe" {
+                                if let Some(hub) = hub {
+                                    value.as_object_mut().expect("typed observation object").remove("type");
+                                    if let Err(error) = hub.update_catalog(value) {
+                                        tracing::warn!(%error, "host catalog observation refused");
+                                    }
+                                }
+                                continue;
+                            }
                             if value["type"] == "editor.register" {
                                 client_state.editor_requests.register(&client_id, sender.clone(), connection.attached_sessions()).await;
                                 continue;

@@ -46,6 +46,7 @@ use sender::ClientSender;
 
 /// Shared session state, used by service operations and every client adapter.
 pub struct ClientState {
+    pub hub: Option<Arc<crate::hub::Hub>>,
     pub admission: Arc<splitty_transport::admission::Backend>,
     pub editor_requests: Arc<editor::EditorRequests>,
     pub file_offers: Arc<files::FileOffers>,
@@ -100,6 +101,7 @@ impl ClientState {
             notify_tx.clone(),
         );
         Self {
+            hub: None,
             admission: splitty_transport::admission::Backend::new(),
             editor_requests: Arc::new(editor::EditorRequests::default()),
             file_offers: Arc::new(files::FileOffers::default()),
@@ -114,6 +116,13 @@ impl ClientState {
             notify_tx,
             server_mode,
             ports,
+        }
+    }
+
+    pub fn with_hub(self, hub: Arc<crate::hub::Hub>) -> Self {
+        Self {
+            hub: Some(hub),
+            ..self
         }
     }
 

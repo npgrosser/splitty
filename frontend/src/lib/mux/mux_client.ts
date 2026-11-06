@@ -64,6 +64,7 @@ export class MuxClient {
   screens: ScreenInfo[] = [];
   serverMode: "embedded" | "daemon" = "embedded";
   /** Whether the server keeps scratchpads (`session-scratchpad`, Scratchpad Capability). */
+  hubHostDecisions = false;
   scratchpads = false;
   /** Whether the server takes a window's grid as `arrange_panes` (mux-protocol, Window Layout Changes Reach the Server). */
   arrangements = false;
@@ -170,6 +171,7 @@ export class MuxClient {
         this.clientId = typeof msg.clientId === "string" ? msg.clientId : undefined;
         this.screens = screens;
         this.serverMode = msg.serverMode === "daemon" ? "daemon" : "embedded";
+        this.hubHostDecisions = Array.isArray(msg.capabilities) && msg.capabilities.includes("hub-host-decisions-v1");
         this.scratchpads = Array.isArray(msg.capabilities) && msg.capabilities.includes("scratchpad-v1");
         this.arrangements = Array.isArray(msg.capabilities) && msg.capabilities.includes("layout-arrange-v1");
         this.tabSelections = Array.isArray(msg.capabilities) && msg.capabilities.includes("tab-select-v1");

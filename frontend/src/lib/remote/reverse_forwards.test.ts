@@ -93,6 +93,21 @@ const rule = (remote: number, local = remote, enabled = true, target = "vm1"): S
 const active = (remote: number, local = remote, state: "up" | "down" = "up", target = "vm1"): ReverseForward => ({ target, remote, local, state });
 
 describe("shared ports: reads", () => {
+  it("replaces polling with hub invalidations and resumes polling for an older hub", async () => {
+    vi.useFakeTimers();
+    const { sharing, hub } = setup();
+    sharing.useChangeFeed(true); sharing.setViewOpen(true);
+    await vi.advanceTimersByTimeAsync(0);
+    hub.requests = [];
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL * 3);
+    expect(hub.requests).toEqual([]);
+    hub.forwards = [active(3000, 3000, "down")];
+    await sharing.refresh();
+    expect(sharing.forwardOf("vm1", 3000)?.state).toBe("down");
+    hub.requests = []; sharing.useChangeFeed(false);
+    await vi.advanceTimersByTimeAsync(REFRESH_INTERVAL);
+    expect(hub.requests).toHaveLength(2);
+  });
   it("parses active shares in order and refuses a list with an invalid entry", () => {
     expect(parseReverseForwards([active(9000, 9000, "down", "vm2"), active(8080), { ...active(3000), state: "weird" }]))
       .toEqual([active(3000), active(8080), active(9000, 9000, "down", "vm2")]);

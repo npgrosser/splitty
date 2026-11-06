@@ -32,13 +32,14 @@ pub fn connect_with(
         .begin(assignment)
         .and_then(|pending| pending.admit())
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::WouldBlock, e))?;
-    Ok(connect_admitted(state, context, stream))
+    Ok(connect_admitted(state, context, stream, true))
 }
 
 pub fn connect_admitted(
     state: Arc<ClientState>,
     context: queue::Context,
     stream: admission::Stream,
+    local_hub: bool,
 ) -> Connection {
     let (input, incoming) = context.channel(queue::QUEUE_ITEMS);
     let (sender, output) = ClientSender::with_context(context.clone());
@@ -46,7 +47,7 @@ pub fn connect_admitted(
     let task_sender = sender.clone();
     let worker = tokio::spawn(async move {
         let _stream = stream;
-        handler::run(incoming, task_sender, state).await;
+        handler::run(incoming, task_sender, state, local_hub).await;
     });
     Connection {
         input: Input { tx: input, context },

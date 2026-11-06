@@ -52,6 +52,8 @@ pub enum HubError {
         protocol: u32,
         /// Whether its sessions outlive it, so an update ends none.
         keeps_sessions: bool,
+        /// Eligibility from the exact discovered daemon and replacement binary.
+        update_available: bool,
         ours: u32,
         /// The daemon's screens, so the client can say what an update ends.
         screens: Vec<Screen>,
@@ -182,9 +184,40 @@ impl Code {
     }
 }
 
+/// Hub-owned comparison; metadata never grants permission to replace a daemon.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAvailability {
+    pub available: bool,
+    pub keeps_sessions: bool,
+}
+
+impl UpdateAvailability {
+    pub(super) fn new(
+        daemon: &splitty_remote::handshake::RunningDaemon,
+        replacement_version: &str,
+    ) -> Self {
+        Self {
+            available: matches!(
+                splitty_remote::tunnel::update_plan(
+                    daemon,
+                    "",
+                    super::VERSION,
+                    Some(replacement_version)
+                ),
+                splitty_remote::tunnel::UpdatePlan::Update
+            ),
+            keeps_sessions: daemon.keeps_sessions,
+        }
+    }
+}
+
 /// What a `remote.error` carries besides its `type`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Failure {
+    pub retryable: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update: Option<UpdateAvailability>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub migration: Option<MigrationOffer>,
     pub code: Code,
@@ -211,6 +244,11 @@ impl Failure {
     fn new(code: Code, message: String, hint: Option<String>) -> Self {
         Self {
             migration: None,
+            retryable: matches!(
+                code,
+                Code::Unreachable | Code::Daemon | Code::Bridge | Code::Internal
+            ),
+            update: None,
             code,
             message,
             hint,
@@ -446,6 +484,7 @@ impl HubError {
                 version,
                 protocol,
                 keeps_sessions,
+                update_available,
                 ours,
                 screens,
                 ..
@@ -460,6 +499,10 @@ impl HubError {
                 };
                 Failure {
                     version: Some(version.clone()),
+                    update: Some(UpdateAvailability {
+                        available: *update_available,
+                        keeps_sessions: *keeps_sessions,
+                    }),
                     protocol: Some(*protocol),
                     keeps_sessions: Some(*keeps_sessions),
                     screens: Some(screens.clone()),
@@ -617,6 +660,7 @@ mod tests {
                 version: metadata.daemon.daemon.unwrap().version,
                 protocol: 3,
                 keeps_sessions: false,
+                update_available: false,
                 ours: 1,
                 screens: metadata.screens,
             }),
@@ -804,6 +848,7 @@ mod tests {
             version: "0.3.9".into(),
             protocol: 1,
             keeps_sessions: false,
+            update_available: false,
             ours: 3,
             screens: vec![Screen {
                 id: "s1".into(),
@@ -837,6 +882,7 @@ mod tests {
             version: "9.0.0".into(),
             protocol: 2,
             keeps_sessions: true,
+            update_available: false,
             ours: 1,
             screens: Vec::new(),
         }
@@ -964,7 +1010,7 @@ mod tests {
         let failure = Failure::new(Code::Unreachable, "gone".into(), None);
         assert_eq!(
             serde_json::to_value(&failure).expect("json"),
-            serde_json::json!({"code": "unreachable", "message": "gone"})
+            serde_json::json!({"code": "unreachable", "message": "gone", "retryable": true})
         );
         for code in [
             Code::InvalidTarget,
@@ -984,6 +1030,50 @@ mod tests {
                 serde_json::to_value(code).expect("json"),
                 serde_json::json!(code.as_str())
             );
+        }
+    }
+
+    #[test]
+    fn update_and_retry_decisions_are_positive_server_metadata() {
+        let mut daemon: splitty_remote::handshake::RunningDaemon =
+            serde_json::from_value(serde_json::json!({
+                "pid": 1, "instance": "0123456789abcdef0123456789abcdef", "transportVersion": 1,
+                "version": "0.0.0", "protocol": 1, "startedAt": "now", "keepsSessions": true
+            }))
+            .expect("daemon");
+        assert!(UpdateAvailability::new(&daemon, super::super::VERSION).available);
+        assert!(
+            !UpdateAvailability::new(&daemon, "0.0.0").available,
+            "no matching replacement"
+        );
+        daemon.instance = None;
+        assert!(
+            !UpdateAvailability::new(&daemon, super::super::VERSION).available,
+            "no pinned instance"
+        );
+        daemon.instance = Some("0123456789abcdef0123456789abcdef".into());
+        daemon.keeps_sessions = false;
+        assert!(!UpdateAvailability::new(&daemon, super::super::VERSION).available);
+        daemon.keeps_sessions = true;
+        for version in [super::super::VERSION, "999.0.0", "development", ""] {
+            daemon.version = version.into();
+            assert!(!UpdateAvailability::new(&daemon, super::super::VERSION).available);
+        }
+        for code in [
+            Code::Auth,
+            Code::HostKey,
+            Code::Incompatible,
+            Code::MigrationUnavailable,
+        ] {
+            assert!(!Failure::new(code, String::new(), None).retryable);
+        }
+        for code in [
+            Code::Unreachable,
+            Code::Daemon,
+            Code::Bridge,
+            Code::Internal,
+        ] {
+            assert!(Failure::new(code, String::new(), None).retryable);
         }
     }
 }

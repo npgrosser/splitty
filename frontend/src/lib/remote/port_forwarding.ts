@@ -99,6 +99,7 @@ export class PortForwarding {
   private viewOpen = false;
   private timer: ReturnType<typeof setInterval> | undefined;
   private disposed = false;
+  private eventDriven = false;
 
   constructor(private readonly deps: PortForwardingDeps) {}
 
@@ -157,6 +158,12 @@ export class PortForwarding {
         const error = this.errorOf(host.target, row.port);
         return error ? { ...row, error } : row;
       }) }));
+  }
+
+  /** A local change feed replaces polling; mutations still reconcile their own result. */
+  useChangeFeed(enabled: boolean): void {
+    this.eventDriven = enabled;
+    this.schedule();
   }
 
   /** Opening the drawer must discover changes even when this window was empty. */
@@ -520,7 +527,7 @@ export class PortForwarding {
   /** Poll passive snapshots; failures here never authorize another opening. */
   private schedule(): void {
     if (this.disposed) return;
-    const active = this.viewOpen || this.hosts.size > 0 || this.forwardList.length > 0 || this.savedList.length > 0;
+    const active = !this.eventDriven && (this.viewOpen || this.hosts.size > 0 || this.forwardList.length > 0 || this.savedList.length > 0);
     if (active && this.timer === undefined) {
       this.timer = setInterval(() => void this.refresh(), REFRESH_INTERVAL);
     } else if (!active && this.timer !== undefined) {

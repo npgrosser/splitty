@@ -52,6 +52,45 @@ function setup() {
 const settle = () => vi.advanceTimersByTimeAsync(0);
 const elapsed = () => vi.advanceTimersByTimeAsync(DELAY);
 
+describe("hub-owned directory", () => {
+  it("reads the merged directory and sends ordered observations without persistence requests", async () => {
+    const observe = vi.fn(); const order = vi.fn();
+    const fetch = vi.fn(async () => json({ version: 1, order: ["vm1"], hosts: [{ ...entry(), alias: "Work" }] }));
+    const directory = new HostDirectory({ fetch, observe, order, changed: vi.fn() });
+    instances.push(directory);
+    directory.useServerDirectory(true);
+    await directory.load();
+    expect(directory.mergedHosts()).toEqual([{ ...entry(), alias: "Work" }]);
+    expect(order).toHaveBeenCalledWith(["vm1"]);
+    directory.observe("vm1", [screen()]);
+    directory.observe("vm1", [screen()]);
+    directory.observe("vm1", [screen("renamed")]);
+    directory.observe("vm1", []);
+    directory.flush(true);
+    await elapsed();
+    expect(observe.mock.calls).toEqual([["vm1", [screen()]], ["vm1", [screen("renamed")]], ["vm1", []]]);
+    expect(fetch.mock.calls).toEqual([["/api/remote/directory"]]);
+    directory.useServerDirectory(true); // reconnect resends the current observation
+    directory.observe("vm1", []);
+    expect(observe).toHaveBeenCalledTimes(4);
+  });
+
+  it("discards reads overtaken by an invalidation or forgetting a host", async () => {
+    const first = deferred<Response>(); const second = deferred<Response>();
+    const fetch = vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise);
+    const directory = new HostDirectory({ fetch, changed: vi.fn() });
+    instances.push(directory); directory.useServerDirectory(true);
+    const old = directory.refresh(); const fresh = directory.refresh();
+    second.resolve(json({ version: 1, hosts: [entry("fresh")] })); await fresh;
+    first.resolve(json({ version: 1, hosts: [entry("old")] })); await old;
+    expect(directory.mergedHosts()?.map(h => h.target)).toEqual(["fresh"]);
+    const pending = deferred<Response>(); fetch.mockReturnValueOnce(pending.promise);
+    const refresh = directory.refresh(); directory.setHidden("fresh", true);
+    pending.resolve(json({ version: 1, hosts: [entry("fresh")] })); await refresh;
+    expect(directory.mergedHosts()).toEqual([]);
+  });
+});
+
 beforeEach(() => {
   vi.useFakeTimers();
   vi.setSystemTime(NOW * 1000);

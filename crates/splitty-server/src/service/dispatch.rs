@@ -149,6 +149,7 @@ impl State {
             },
             Operation::RemoteScreensGet => Payload(hub.remembered_screens()).into_reply(),
             Operation::RemoteScreensUpdate => op::remember_screens(hub, body),
+            Operation::HostDirectory => Payload(hub.directory()).into_reply(),
             Operation::CatalogGet => Payload(hub.catalog()).into_reply(),
             Operation::CatalogUpdate => op::update_catalog(hub, body),
             Operation::ForwardList => Payload(hub.forwards()).into_reply(),

@@ -184,6 +184,7 @@ where
         state.client_state.clone(),
         context.clone(),
         stream.clone(),
+        assignment.role == Role::Main,
     );
     let mut peer = peer::Peer::start(read, write, &ready, context.clone());
     let result = run(&state, assignment.role, &mut peer, &mut session).await;
@@ -302,7 +303,11 @@ async fn run(
                     match message.frame.kind {
                         Kind::Text => {
                             let bytes = message.frame.application()?.1;
-                            catalog::validate_session(bytes, &sender.context().budget).map_err(invalid)?;
+                            let validated = catalog::validate_session(bytes, &sender.context().budget).map_err(invalid)?;
+                            if role != Role::Main && validated["type"] == "hub.catalog.observe" {
+                                return Err(invalid("host observations require local hub authority"));
+                            }
+                            drop(validated);
                             std::str::from_utf8(bytes).map_err(invalid)?;
                             // Transfer the carrier allocation and its lease. A
                             // full-size image must not coexist with another

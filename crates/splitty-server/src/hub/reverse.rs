@@ -94,7 +94,15 @@ struct State {
     restoring: HashSet<Key>,
 }
 
+struct ChangedOnDrop(super::Changes);
+impl Drop for ChangedOnDrop {
+    fn drop(&mut self) {
+        self.0.send();
+    }
+}
+
 struct Shared {
+    changes: super::Changes,
     connector: Arc<dyn Connector>,
     state: Mutex<State>,
     lanes: Mutex<HashMap<Key, Weak<AsyncMutex<()>>>>,
@@ -110,9 +118,19 @@ pub struct Reverses {
 }
 
 impl Reverses {
+    #[cfg(test)]
     pub fn new(connector: Arc<dyn Connector>, config_dir: PathBuf) -> Self {
+        Self::with_changes(connector, config_dir, super::Changes::default())
+    }
+
+    pub(super) fn with_changes(
+        connector: Arc<dyn Connector>,
+        config_dir: PathBuf,
+        changes: super::Changes,
+    ) -> Self {
         Self {
             shared: Arc::new(Shared {
+                changes,
                 connector,
                 state: Mutex::new(State {
                     slots: HashMap::new(),
@@ -217,6 +235,7 @@ impl Reverses {
             state.errors.remove(&key);
         }
         row.last_error = state.errors.get(&key).cloned();
+        self.shared.changes.send();
         Ok(row)
     }
 
@@ -228,6 +247,7 @@ impl Reverses {
         let mut state = lock(&self.shared.state);
         state.store.remove(&key)?;
         state.errors.remove(&key);
+        self.shared.changes.send();
         Ok(())
     }
 
@@ -351,6 +371,7 @@ impl Shared {
             state.errors.remove(key);
             state.slots.remove(key)
         };
+        self.changes.send();
         if let Some(Slot::Open(forward)) = slot {
             forward.stop().await;
         }
@@ -376,6 +397,7 @@ impl Shared {
         local: Option<u16>,
         explicit: bool,
     ) -> Result<ReverseInfo, ForwardError> {
+        let _changed = ChangedOnDrop(self.changes.clone());
         let result = self.open_inner(target, key, local, explicit).await;
         let mut state = lock(&self.state);
         match &result {
@@ -487,7 +509,7 @@ impl Shared {
             remote,
             local,
             (forwarding, share),
-            up.clone(),
+            (up.clone(), self.changes.clone()),
             stopped,
         ));
         Ok(Supervised {
@@ -626,7 +648,7 @@ async fn supervise(
         Box<dyn Forwarding>,
         Option<splitty_remote::tunnel::exposure::Share>,
     ),
-    up: Arc<AtomicBool>,
+    (up, changes): (Arc<AtomicBool>, super::Changes),
     mut stop: oneshot::Receiver<()>,
 ) {
     let host = target.as_str();
@@ -639,6 +661,7 @@ async fn supervise(
             reason = forwarding.ended() => reason,
         };
         up.store(false, Ordering::SeqCst);
+        changes.send();
         tracing::info!(
             "remote screen hub: local port {local}, shared as port {remote} of {host}, ended \
              ({reason}); rebuilding it"
@@ -677,6 +700,7 @@ async fn supervise(
             }
         };
         up.store(true, Ordering::SeqCst);
+        changes.send();
         tracing::info!(
             "remote screen hub: local port {local} is shared as port {remote} of {host} again"
         );

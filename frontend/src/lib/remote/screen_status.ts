@@ -78,7 +78,8 @@ export function blocksInput(status: RemoteScreenStatus): boolean {
  * and only an update (which ends its sessions) lets the window use it.
  */
 export function offersUpdate(status: RemoteScreenStatus): boolean {
-  return status.kind === "failed" && status.error.code === "incompatible";
+  return status.kind === "failed" && status.error.code === "incompatible"
+    && (status.error.migration?.available === true || status.error.update?.available === true);
 }
 
 // ── Errors ──
@@ -168,7 +169,7 @@ export function hostTooltip(target: string, host: RemoteState | undefined, local
   const parts = [target];
   if (host?.ready) {
     parts.push(`Splitty ${host.ready.daemon.version}`);
-    const note = updateNote(host.ready.daemon.version, localVersion);
+    const note = updateNote(host.ready.daemon.version, localVersion, host.ready.update);
     if (note) parts.push(note);
   }
   const indicator = hostIndicator(host);

@@ -27,7 +27,7 @@
 import type { IncomingMessage, OutgoingMessage } from "../protocol/types.ts";
 import { SocketHandlers, type ConnSocket } from "../protocol/socket.ts";
 import { MAX_NAME, MAX_TEXT, MAX_TITLE, plainLines, plainText } from "../protocol/untrusted.ts";
-import { migrationOffer, type MigrationOffer } from "./update.ts";
+import { migrationOffer, updateAvailability, type UpdateAvailability, type MigrationOffer } from "./update.ts";
 
 /** The hub's error codes (`docs/protocol.ts`, RemoteErrorCode). */
 export type RemoteErrorCode =
@@ -43,6 +43,7 @@ export type RemoteErrorCode =
 export type RemoteFailureCode = RemoteErrorCode | "ticket" | "closed" | "protocol";
 
 export interface RemoteFailure {
+  update?: UpdateAvailability;
   migration?: MigrationOffer;
   /** A native protocol/assignment rejection may only tighten retry policy. */
   retryable?: boolean;
@@ -74,6 +75,7 @@ export interface HostScreen {
 }
 
 export interface RemoteReadyInfo {
+  update?: UpdateAvailability;
   /** The target as the hub validated it. */
   target: string;
   /** `keepsSessions`: its sessions outlive it, so an update ends none (false when the hub does not say). */
@@ -381,7 +383,7 @@ export class RemoteSocket extends SocketHandlers implements ConnSocket {
       // The first connect: the user decides. The progress shows how far it got.
       this.queue = [];
       this.update({ phase: "failed", error });
-    } else if (error.retryable === false || !retryable(error.code)) {
+    } else if (!(error.retryable ?? retryable(error.code))) {
       this.update({ phase: "failed", progress: [], error });
     } else if (this.now() - this.droppedAt >= GIVE_UP_AFTER) {
       this.update({ phase: "offline", progress: [], error });
@@ -449,6 +451,7 @@ function readyInfo(msg: Raw): RemoteReadyInfo | null {
       started: daemon.started === true,
     },
     screens: hostScreens(msg.screens),
+    ...(updateAvailability(msg.update) ? { update: updateAvailability(msg.update) } : {}),
   };
 }
 
@@ -468,6 +471,8 @@ function failure(msg: Raw): RemoteFailure {
   const code = HUB_CODES.find((c) => c === msg.code) ?? "internal";
   const result: RemoteFailure = { code, message: plainLines(msg.message, MAX_TEXT) };
   if (typeof msg.retryable === "boolean") result.retryable = msg.retryable;
+  const update = updateAvailability(msg.update);
+  if (update) result.update = update;
   const hint = plainText(msg.hint, MAX_TEXT);
   if (hint) result.hint = hint;
   if (typeof msg.version === "string") result.version = plainText(msg.version, MAX_TITLE);

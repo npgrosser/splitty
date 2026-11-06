@@ -170,7 +170,7 @@ pub fn migration_offer(
 /// Compare SemVer precedence, including prereleases but excluding build
 /// metadata. One optional `v` prefix is accepted; invalid versions never
 /// authorize replacing a daemon.
-fn older(a: &str, b: &str) -> bool {
+pub fn older(a: &str, b: &str) -> bool {
     fn parse(version: &str) -> Result<semver::Version, semver::Error> {
         semver::Version::parse(version.strip_prefix('v').unwrap_or(version))
     }

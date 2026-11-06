@@ -16,8 +16,8 @@ pub use reverse::{
     MAX_SOCKET_PATH, RELAY_FAILED, RELAY_READY,
 };
 pub use supervisor::{
-    backoff, connect, migration_offer, supervise, update_plan, Connected, Event, Progress, Remote,
-    Step, UpdatePlan, GIVE_UP_AFTER, PREPARE_TIMEOUT,
+    backoff, connect, migration_offer, older, supervise, update_plan, Connected, Event, Progress,
+    Remote, Step, UpdatePlan, GIVE_UP_AFTER, PREPARE_TIMEOUT,
 };
 
 use std::io;

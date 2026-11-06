@@ -103,20 +103,24 @@ pub fn build(
     ));
     let env = dispatcher.env.clone();
 
-    let client_state = Arc::new(client_session::ClientState::new(
-        mux_store.clone(),
-        dispatcher,
-        shell_profiles.clone(),
-        effect_runner,
-        env,
-        notify_tx,
-        server_mode.to_string(),
-    ));
+    let hub = Arc::new(crate::hub::Hub::system());
+    let client_state = Arc::new(
+        client_session::ClientState::new(
+            mux_store.clone(),
+            dispatcher,
+            shell_profiles.clone(),
+            effect_runner,
+            env,
+            notify_tx,
+            server_mode.to_string(),
+        )
+        .with_hub(hub.clone()),
+    );
 
     let state = Arc::new(super::State {
         instance: super::new_instance(),
         owner_shutdown: Arc::new(tokio::sync::Notify::new()),
-        hub: Arc::new(crate::hub::Hub::system()),
+        hub,
         mux_store,
         client_state,
         config: Arc::new(RwLock::new(config)),

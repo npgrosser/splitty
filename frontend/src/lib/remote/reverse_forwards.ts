@@ -217,6 +217,7 @@ export class ReverseForwarding {
   private viewOpen = false;
   private timer: ReturnType<typeof setInterval> | undefined;
   private disposed = false;
+  private eventDriven = false;
 
   constructor(private readonly deps: ReverseForwardingDeps) {}
 
@@ -241,6 +242,12 @@ export class ReverseForwarding {
   lists(): HostShares[] {
     return shareLists(this.forwardList, this.savedList,
       (target, port) => this.pending.get(portKey(target, port)), (target, port) => this.errorOf(target, port));
+  }
+
+  /** A local change feed replaces polling; mutations still reconcile their own result. */
+  useChangeFeed(enabled: boolean): void {
+    this.eventDriven = enabled;
+    this.schedule();
   }
 
   /** Opening the drawer reads at once and keeps reading while it is open. */
@@ -437,7 +444,7 @@ export class ReverseForwarding {
   /** Poll passive snapshots; a read never starts a share. */
   private schedule(): void {
     if (this.disposed) return;
-    const active = this.viewOpen || this.forwardList.length > 0 || this.savedList.length > 0;
+    const active = !this.eventDriven && (this.viewOpen || this.forwardList.length > 0 || this.savedList.length > 0);
     if (active && this.timer === undefined) {
       this.timer = setInterval(() => void this.refresh(), REFRESH_INTERVAL);
     } else if (!active && this.timer !== undefined) {

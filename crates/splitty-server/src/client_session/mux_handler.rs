@@ -26,6 +26,7 @@ pub type BroadcastFn = Arc<dyn Fn(&[ServerEvent], Arc<ClientSender>) + Send + Sy
 
 /// Handles the mux.* protocol for a single WebSocket connection.
 pub struct MuxHandler {
+    hub_decisions: bool,
     store: Arc<Store>,
     sender: Arc<ClientSender>,
     client_id: String,
@@ -71,6 +72,7 @@ impl MuxHandler {
         reviews: Arc<super::reviews::Reviews>,
     ) -> Self {
         Self {
+            hub_decisions: false,
             store,
             sender,
             client_id,
@@ -84,6 +86,11 @@ impl MuxHandler {
         }
     }
 
+    pub(super) fn with_hub_decisions(mut self, enabled: bool) -> Self {
+        self.hub_decisions = enabled;
+        self
+    }
+
     /// Send the welcome message with screen list on connect.
     pub async fn send_welcome(&self) {
         let screens = self.store.list_screen_infos();
@@ -95,6 +102,9 @@ impl MuxHandler {
         );
 
         if let ServerEvent::MuxWelcome { capabilities, .. } = &mut event {
+            if self.hub_decisions {
+                capabilities.push("hub-host-decisions-v1".into());
+            }
             capabilities.push(super::editor::CAPABILITY.into());
             capabilities.push(super::files::CAPABILITY.into());
             capabilities.push(splitty_core::protocol::sizing::CAPABILITY.into());
