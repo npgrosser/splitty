@@ -7,8 +7,8 @@ use std::collections::HashSet;
 
 use super::ops::{Arrangement, ScreenOp, ViewerPlacement};
 use super::state::{
-    equal_sizes, AnnotationKind, AnnotationReply, LayoutNode, PaneRole, ReplyAuthor, ReviewWait,
-    ScreenState, SentEntry, SlotLocation, ViewerAnnotation, ViewerSource, ViewerState,
+    equal_sizes, AnnotationKind, AnnotationReply, Axis, LayoutNode, PaneRole, ReplyAuthor,
+    ReviewWait, ScreenState, SentEntry, SlotLocation, ViewerAnnotation, ViewerSource, ViewerState,
     ANNOTATION_CONTEXT_LIMIT, ANNOTATION_COUNT_LIMIT, ANNOTATION_LINE_LIMIT,
     ANNOTATION_PANE_TEXT_LIMIT, ANNOTATION_TEXT_LIMIT, MARK_SENT_LIMIT, REPLY_COUNT_LIMIT,
     REPLY_TITLE_LIMIT, SCRATCHPAD_LIMIT, VIEWER_PATH_LIMIT, VIEWER_TEXT_LIMIT, VIEWER_TITLE_LIMIT,
@@ -21,9 +21,10 @@ pub fn validate_screen_op(state: &ScreenState, op: &ScreenOp) -> Result<(), MuxE
     match op {
         ScreenOp::SplitPane {
             pane_id,
+            axis,
             resulting_sizes,
             ..
-        } => validate_split_pane(state, pane_id, resulting_sizes.as_deref()),
+        } => validate_split_pane(state, pane_id, axis, resulting_sizes.as_deref()),
         ScreenOp::NewTab { pane_id, .. }
         | ScreenOp::ClosePane { pane_id, .. }
         | ScreenOp::SelectTab { pane_id } => validate_located_pane(state, pane_id),
@@ -131,7 +132,7 @@ fn validate_open_viewer(
         {
             validate_located_pane(state, anchor)
         }
-        (Some(anchor), _) => validate_split_pane(state, anchor, None),
+        (Some(anchor), _) => validate_split_anchor(state, anchor).map(|_| ()),
     }
 }
 
@@ -644,18 +645,32 @@ fn validate_set_scratchpad(
 fn validate_split_pane(
     state: &ScreenState,
     pane_id: &PaneId,
+    axis: &Axis,
     resulting_sizes: Option<&[f64]>,
 ) -> Result<(), MuxError> {
+    let slot = validate_split_anchor(state, pane_id)?;
+    if let Some(sizes) = resulting_sizes {
+        let expected_len = state
+            .root
+            .find_parent_info(slot.id())
+            .filter(|parent| &parent.axis == axis)
+            .map_or(2, |parent| parent.num_children + 1);
+        validate_sizes(sizes, expected_len)?;
+    }
+    Ok(())
+}
+
+fn validate_split_anchor<'a>(
+    state: &'a ScreenState,
+    pane_id: &PaneId,
+) -> Result<&'a LayoutNode, MuxError> {
     if !state.panes.contains_key(pane_id) {
         return Err(MuxError::PaneNotFound(pane_id.clone()));
     }
-    if state.root.find_slot(pane_id).is_none() {
-        return Err(MuxError::PaneNotInLayout(pane_id.clone()));
-    }
-    if let Some(sizes) = resulting_sizes {
-        validate_sizes(sizes, 2)?;
-    }
-    Ok(())
+    state
+        .root
+        .find_slot(pane_id)
+        .ok_or_else(|| MuxError::PaneNotInLayout(pane_id.clone()))
 }
 
 fn validate_located_pane(state: &ScreenState, pane_id: &PaneId) -> Result<(), MuxError> {
@@ -862,7 +877,7 @@ pub fn validate_sizes(sizes: &[f64], expected_len: usize) -> Result<(), MuxError
             return Err(MuxError::NegativeSize(s));
         }
     }
-    if (sum - 1.0).abs() > 0.01 {
+    if !sum.is_finite() || (sum - 1.0).abs() > 0.01 {
         return Err(MuxError::SizesSumInvalid(sum));
     }
     Ok(())
@@ -970,6 +985,59 @@ mod tests {
     #[test]
     fn validate_sizes_negative() {
         assert!(validate_sizes(&[-0.5, 1.5], 2).is_err());
+    }
+
+    #[test]
+    fn validate_sizes_nonfinite() {
+        for sizes in [
+            [f64::NAN, 0.5],
+            [f64::INFINITY, 0.5],
+            [f64::NEG_INFINITY, 0.5],
+        ] {
+            assert!(validate_sizes(&sizes, 2).is_err());
+        }
+    }
+
+    #[test]
+    fn validate_split_pane_wrapper_requires_two_sizes() {
+        let state = test_screen();
+        let mut op = ScreenOp::SplitPane {
+            pane_id: PaneId::from("p1"),
+            axis: Axis::Horizontal,
+            new_pane_index: None,
+            new_pane_id: None,
+            resulting_sizes: Some(vec![0.2, 0.3, 0.5]),
+            cwd: None,
+            shell_profile_id: None,
+        };
+        assert!(matches!(
+            validate_screen_op(&state, &op),
+            Err(MuxError::InvalidSizesLength {
+                expected: 2,
+                got: 3
+            })
+        ));
+
+        let mut nested_state = state;
+        nested_state.root = LayoutNode::new_split(
+            NodeId::from("split1"),
+            Axis::Horizontal,
+            vec![
+                nested_state.root.clone(),
+                LayoutNode::new_slot(NodeId::from("slot2"), vec![]),
+            ],
+            vec![0.5, 0.5],
+        );
+        if let ScreenOp::SplitPane { axis, .. } = &mut op {
+            *axis = Axis::Vertical;
+        }
+        assert!(matches!(
+            validate_screen_op(&nested_state, &op),
+            Err(MuxError::InvalidSizesLength {
+                expected: 2,
+                got: 3
+            })
+        ));
     }
 
     #[test]

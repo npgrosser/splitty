@@ -2087,6 +2087,125 @@ mod tests {
 
     // ── split_pane tests ───
 
+    fn sized_split(
+        pane: &str,
+        axis: Axis,
+        before: bool,
+        new_pane: &str,
+        sizes: Vec<f64>,
+    ) -> ScreenOp {
+        ScreenOp::SplitPane {
+            pane_id: PaneId::from(pane),
+            axis,
+            new_pane_index: Some(if before { 0 } else { 1 }),
+            new_pane_id: Some(PaneId::from(new_pane)),
+            resulting_sizes: Some(sizes),
+            cwd: None,
+            shell_profile_id: None,
+        }
+    }
+
+    #[test]
+    fn split_pane_explicit_sizes_for_root_and_different_axis() {
+        let (root, effects) = reduce_screen(
+            single_pane_screen(),
+            sized_split("p1", Axis::Horizontal, false, "p2", vec![0.2, 0.8]),
+        )
+        .unwrap();
+        assert!(matches!(effects.as_slice(), [Effect::SpawnSession { .. }]));
+        assert!(
+            matches!(&root.root, LayoutNode::Split { children, sizes, .. }
+            if children.len() == 2 && sizes == &[0.2, 0.8])
+        );
+
+        let (nested, effects) = reduce_screen(
+            two_pane_screen(),
+            sized_split("p2", Axis::Vertical, true, "p3", vec![0.6, 0.4]),
+        )
+        .unwrap();
+        assert!(matches!(effects.as_slice(), [Effect::SpawnSession { .. }]));
+        let LayoutNode::Split {
+            children, sizes, ..
+        } = &nested.root
+        else {
+            panic!("expected outer split");
+        };
+        assert_eq!(sizes, &[0.5, 0.5]);
+        assert!(
+            matches!(&children[1], LayoutNode::Split { axis: Axis::Vertical, children, sizes, .. }
+            if children.len() == 2
+                && children[0].find_slot(&PaneId::from("p3")).is_some()
+                && children[1].find_slot(&PaneId::from("p2")).is_some()
+                && sizes == &[0.6, 0.4])
+        );
+    }
+
+    #[test]
+    fn split_pane_explicit_sizes_for_same_axis_before_and_after() {
+        let (state, effects) = reduce_screen(
+            two_pane_screen(),
+            sized_split("p2", Axis::Horizontal, true, "p3", vec![0.2, 0.3, 0.5]),
+        )
+        .unwrap();
+        assert!(matches!(effects.as_slice(), [Effect::SpawnSession { .. }]));
+        let (state, effects) = reduce_screen(
+            state,
+            sized_split(
+                "p3",
+                Axis::Horizontal,
+                false,
+                "p4",
+                vec![0.1, 0.2, 0.3, 0.4],
+            ),
+        )
+        .unwrap();
+        assert!(matches!(effects.as_slice(), [Effect::SpawnSession { .. }]));
+        assert_eq!(state.revision, 2);
+        assert!(
+            matches!(&state.root, LayoutNode::Split { children, sizes, .. }
+            if sizes == &[0.1, 0.2, 0.3, 0.4]
+                && children.iter().map(|child| child.collect_pane_ids())
+                    .collect::<Vec<_>>() == vec![
+                        vec![PaneId::from("p1")],
+                        vec![PaneId::from("p3")],
+                        vec![PaneId::from("p4")],
+                        vec![PaneId::from("p2")],
+                    ])
+        );
+    }
+
+    #[test]
+    fn split_pane_explicit_sizes_use_immediate_nested_parent() {
+        let (state, _) = reduce_screen(
+            two_pane_screen(),
+            sized_split("p2", Axis::Vertical, false, "p3", vec![0.7, 0.3]),
+        )
+        .unwrap();
+        let (state, effects) = reduce_screen(
+            state,
+            sized_split("p2", Axis::Vertical, true, "p4", vec![0.2, 0.5, 0.3]),
+        )
+        .unwrap();
+        assert!(matches!(effects.as_slice(), [Effect::SpawnSession { .. }]));
+        let LayoutNode::Split {
+            children, sizes, ..
+        } = &state.root
+        else {
+            panic!("expected outer split");
+        };
+        assert_eq!(sizes, &[0.5, 0.5]);
+        assert!(
+            matches!(&children[1], LayoutNode::Split { axis: Axis::Vertical, children, sizes, .. }
+            if sizes == &[0.2, 0.5, 0.3]
+                && children.iter().map(|child| child.collect_pane_ids())
+                    .collect::<Vec<_>>() == vec![
+                        vec![PaneId::from("p4")],
+                        vec![PaneId::from("p2")],
+                        vec![PaneId::from("p3")],
+                    ])
+        );
+    }
+
     #[test]
     fn split_pane_creates_new_pane_and_session() {
         let state = single_pane_screen();

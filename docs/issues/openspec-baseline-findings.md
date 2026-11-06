@@ -21,10 +21,10 @@ Line numbers refer to the tree at commit `b495e1c`.
 
 ### workspace-model
 
-- **Split sizes are validated against the wrong count.** `split_pane` always expects exactly 2 `resultingSizes`
-  (`mux/validate.rs:47`), but when the new slot joins a parent split of the same axis the parent ends up with
-  N+1 children (`mux/reducer.rs:296-305`). A correct N+1 array is rejected; a 2-entry array is accepted and leaves
-  sizes and children mismatched, which the grid projection silently papers over with equal sizes (`mux/grid.rs:49-53`).
+- **Fixed in `mux-layout-consistency` (2026-11-07): split sizes used the wrong child count.**
+  Explicit sizes now match the same-axis parent's resulting child count, or the two-child wrapper
+  for a different axis/root slot. Invalid counts and non-finite sizes reject without mutating state
+  or producing session effects.
 - **Fixed: `move_pane` lost panes.** With `direction` but no `targetSplitId`, an unknown or non-slot `targetSlotId`,
   or a target the move itself removed, the pane dropped out of the layout while the op reported success; moving the
   only pane of a parentless root slot duplicated it. Since `arrange-panes` (2026-10-30) all of these are rejected
@@ -46,15 +46,21 @@ Line numbers refer to the tree at commit `b495e1c`.
 
 ### mux-protocol
 
-- **Layout-only ops never reach other clients.** A WebSocket op that spawns or ends no session sends no nudge
-  (`ws/mux_handler.rs:245`), so rename, `resize_split`, `move_pane`, float and `set_active_screen` drift silently
-  between clients. Matters as soon as two clients are open (roadmap 101). Exceptions: `move_pane_to_screen`,
-  `set_scratchpad` and, since `arrange-panes`, `arrange_panes`, which carries a window's drags and divider moves;
-  since `splitty-open` also `open_viewer` and a `close_pane` that ends no session.
-- **Rejected ops are only reported when they carry `newPaneId`** (or are `arrange_panes`, since `arrange-panes`), and an op that fails to parse is dropped before
-  `mux.op_failed` even then (`ws/mux_handler.rs:194`); the client waits for its own timeout.
-- **`mux.pane_spawned` is sent even when the spawn failed**; effect errors are only logged
-  (`ws/mux_handler.rs:250-272`). The client is handed a session ID that does not exist.
+- **Fixed in `mux-layout-consistency` (2026-11-07): layout-only mutations were not consistently announced.**
+  Notifications now follow the changed screen IDs rather than process effects or an operation allowlist,
+  with actual added/removed IDs and successful spawn events before one nudge per affected screen.
+  The documented window-local `select_tab` exception remains silent.
+- **Fixed in `mux-layout-consistency` (2026-11-07): parsed rejected ops were reported selectively.**
+  Every parsed dispatch rejection except `select_tab` now reaches its originating client, whose
+  frontend resyncs the named screen. Existing malformed/unknown-message policy remains unchanged.
+- **Workspace directory reconciliation is still incomplete between open windows.** Screenless nudges
+  now announce order/activation changes, but the web client ignores them. A nudge naming a removed
+  screen requests a snapshot that the server intentionally does not send. A directory snapshot/event
+  and connection-local reconciliation are separate follow-up work; notification delivery alone does
+  not make screen order/removal converge across windows.
+- **Resolved: failed spawns no longer announce a nonexistent session.** Only successful
+  spawns produce `mux.pane_spawned`; a failed spawn reports `mux.op_failed` to its origin.
+  Accepted model changes still notify peers, including when their process effects fail.
 - **No backpressure**: each client's outgoing queue is unbounded (`ws/sender.rs:27`).
 - **Connect race**: a client joins the broadcast list (`ws/handler.rs:63`) before `mux.welcome` is sent (`:73`).
 - Ordering only holds within one op: broadcasts spawn one task per client per batch (`ws/mod.rs`).

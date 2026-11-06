@@ -254,7 +254,7 @@ export class MuxClient {
 
       case "mux.op_failed": {
         const op = typeof msg.op === "string" ? msg.op : "";
-        const screenId = typeof msg.screenId === "string" ? msg.screenId : undefined;
+        const screenId = typeof msg.screenId === "string" && msg.screenId.length > 0 ? msg.screenId : undefined;
         const paneId = typeof msg.paneId === "string" ? msg.paneId : undefined;
         // An annotation op names the viewer pane it was for, which nothing waits for.
         if (paneId !== undefined && !ANNOTATION_OPS.has(op)) {
@@ -278,10 +278,9 @@ export class MuxClient {
           error: plainText(msg.error, MAX_TEXT),
         };
         for (const listener of [...this.failureListeners]) listener(failure);
-        // The server kept its own layout or annotations: the screen shows them
-        // again. A refused viewer pane spawns nothing to wait for, so its panel
-        // goes the same way.
-        if ((op === "apply_template" || op === "arrange_panes" || op === "open_viewer" || ANNOTATION_OPS.has(op)) && screenId !== undefined) this.resync(screenId);
+        // Any rejected optimistic edit can have left the local screen stale,
+        // including operations that create no pane and have no spawn waiter.
+        if (screenId !== undefined) this.resync(screenId);
         break;
       }
     }

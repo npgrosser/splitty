@@ -347,9 +347,10 @@ pub enum ServerEvent {
         shell_profile_fallback_reason: Option<String>,
     },
 
-    /// Sent to the originating client when a mux op was rejected. Carries the
-    /// pane the op would have created so a client waiting for `mux.pane_spawned`
-    /// can stop waiting and spawn the session itself instead of hanging.
+    /// Sent only to the originating client for a parsed mux op rejection,
+    /// except the silent `select_tab` case. The client resyncs the named screen.
+    /// An optional pane ID cancels its pending spawn or identifies an annotation
+    /// target; rejected operations never ask the client to spawn a session.
     #[serde(rename = "mux.op_failed", rename_all = "camelCase")]
     MuxOpFailed {
         id: String,

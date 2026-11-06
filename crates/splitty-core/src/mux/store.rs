@@ -328,6 +328,58 @@ mod tests {
     }
 
     #[test]
+    fn invalid_split_sizes_leave_workspace_revision_and_notifications_untouched() {
+        let store = Store::new();
+        let screen_id = ScreenId::from("scr1");
+        store
+            .dispatch(Op::CreateScreen {
+                name: None,
+                screen_id: Some(screen_id.clone()),
+                new_pane_id: Some(PaneId::from("p1")),
+                shell_profile_id: None,
+            })
+            .unwrap();
+        let split = |pane: &str, new_pane: &str, sizes: Vec<f64>| ScreenOp::SplitPane {
+            pane_id: PaneId::from(pane),
+            axis: Axis::Horizontal,
+            new_pane_index: None,
+            new_pane_id: Some(PaneId::from(new_pane)),
+            resulting_sizes: Some(sizes),
+            cwd: None,
+            shell_profile_id: None,
+        };
+        let effects = store
+            .dispatch_screen(&screen_id, split("p1", "p2", vec![0.4, 0.6]))
+            .unwrap();
+        assert!(matches!(effects.as_slice(), [Effect::SpawnSession { .. }]));
+
+        let before = serde_json::to_value(store.get_workspace_state()).unwrap();
+        let changes = store.changes();
+        for (sizes, expected_error) in [
+            (vec![0.5, 0.5], "invalid sizes: expected 3 got 2"),
+            (vec![0.2, 0.2, 0.2], "sizes must sum to ~1.0"),
+            (vec![-0.2, 0.7, 0.5], "sizes must be non-negative"),
+            (vec![f64::NAN, 0.5, 0.5], "sizes must sum to ~1.0"),
+        ] {
+            let error = store
+                .dispatch_screen(&screen_id, split("p2", "p3", sizes))
+                .unwrap_err();
+            assert!(error.to_string().starts_with(expected_error));
+            assert_eq!(
+                serde_json::to_value(store.get_workspace_state()).unwrap(),
+                before
+            );
+            assert!(!changes.has_changed().unwrap());
+        }
+
+        let effects = store
+            .dispatch_screen(&screen_id, split("p2", "p3", vec![0.2, 0.3, 0.5]))
+            .unwrap();
+        assert!(matches!(effects.as_slice(), [Effect::SpawnSession { .. }]));
+        assert_eq!(store.get_screen(&screen_id).unwrap().revision, 3);
+    }
+
+    #[test]
     fn failed_dispatch_leaves_state_untouched() {
         let store = Store::new();
         store

@@ -229,12 +229,33 @@ impl MuxHandler {
             .filter(|_| annotation_op)
             .map(String::from);
 
-        // The target of a pane moved to another screen, nudged with its source.
-        let mut moved_to = None;
+        // Inspect under the store lock: these targets belong to this op alone,
+        // including changes without lifecycle effects and removed screens.
+        let dispatch = |op| {
+            self.store.dispatch_inspect(op, |before, after| {
+                let mut screens: Vec<_> = before
+                    .screens
+                    .keys()
+                    .chain(after.screens.keys())
+                    .filter(|id| {
+                        before.screens.get(*id).map(|screen| screen.revision)
+                            != after.screens.get(*id).map(|screen| screen.revision)
+                    })
+                    .cloned()
+                    .collect();
+                screens.sort_unstable_by(|left, right| {
+                    (left != &screen_id, left.as_str()).cmp(&(right != &screen_id, right.as_str()))
+                });
+                screens.dedup();
+                let workspace_changed = before.screen_order != after.screen_order
+                    || before.active_screen_id != after.active_screen_id;
+                (screens, workspace_changed)
+            })
+        };
         let result = match op_type.as_str() {
             "apply_template" => {
                 match serde_json::from_value::<splitty_core::mux::ApplyTemplate>(msg.op) {
-                    Ok(request) => self.store.dispatch(Op::ApplyTemplate {
+                    Ok(request) => dispatch(Op::ApplyTemplate {
                         screen_id: screen_id.clone(),
                         request: Box::new(request),
                     }),
@@ -251,8 +272,7 @@ impl MuxHandler {
                     return;
                 };
                 let target = ScreenId::from(target);
-                moved_to = Some(target.clone());
-                self.store.dispatch(Op::MovePaneToScreen {
+                dispatch(Op::MovePaneToScreen {
                     screen_id: screen_id.clone(),
                     pane_id: PaneId::from(pane_id),
                     target_screen_id: target,
@@ -290,14 +310,14 @@ impl MuxHandler {
                             .map(|p| p.id.clone())
                     });
 
-                self.store.dispatch(Op::CreateScreen {
+                dispatch(Op::CreateScreen {
                     name,
                     screen_id: sid,
                     new_pane_id: pid,
                     shell_profile_id,
                 })
             }
-            "close_screen" => self.store.dispatch(Op::CloseScreen {
+            "close_screen" => dispatch(Op::CloseScreen {
                 screen_id: screen_id.clone(),
             }),
             "rename_screen" => {
@@ -307,12 +327,12 @@ impl MuxHandler {
                     .and_then(|v| v.as_str())
                     .unwrap_or("")
                     .to_string();
-                self.store.dispatch(Op::RenameScreen {
+                dispatch(Op::RenameScreen {
                     screen_id: screen_id.clone(),
                     name,
                 })
             }
-            "set_active_screen" => self.store.dispatch(Op::SetActiveScreen {
+            "set_active_screen" => dispatch(Op::SetActiveScreen {
                 screen_id: screen_id.clone(),
             }),
             "reorder_screens" => {
@@ -326,7 +346,7 @@ impl MuxHandler {
                             .collect()
                     })
                     .unwrap_or_default();
-                self.store.dispatch(Op::ReorderScreens {
+                dispatch(Op::ReorderScreens {
                     screen_order: order,
                 })
             }
@@ -357,41 +377,53 @@ impl MuxHandler {
                     }
                 };
 
-                self.store.dispatch_screen(&screen_id, screen_op)
+                dispatch(Op::ModifyScreen {
+                    screen_id: screen_id.clone(),
+                    op: screen_op,
+                })
             }
         };
 
         match result {
-            Ok(effects) => {
-                if let Some(target) = moved_to {
-                    // Starts and ends no session, yet both screens changed.
-                    self.nudge_others(&[&screen_id, &target]);
+            Ok((effects, (mut screens, workspace_changed))) => {
+                // Recreating an empty screen may reset its revision to the same
+                // value. The effect still identifies its actual (possibly
+                // generated) screen, never the request's placeholder ID.
+                for effect in &effects {
+                    let spawned_screen = match effect {
+                        Effect::SpawnSession { screen_id, .. } => Some(screen_id),
+                        Effect::SpawnJob { job } => Some(&job.screen_id),
+                        Effect::KillSession { .. } => None,
+                    };
+                    if let Some(screen) = spawned_screen {
+                        if !screens.contains(screen) {
+                            screens.push(screen.clone());
+                        }
+                    }
                 }
-                let viewer_change = matches!(
-                    op_type.as_str(),
-                    "open_viewer"
-                        | "put_annotations"
-                        | "remove_annotations"
-                        | "put_replies"
-                        | "remove_replies"
-                        | "mark_sent"
-                ) || (op_type == "close_pane" && effects.is_empty());
-                if op_type == "set_scratchpad" || op_type == "arrange_panes" || viewer_change {
-                    // Starts and ends no session either, yet the other
-                    // windows show the text (`session-scratchpad`), the
-                    // arrangement (`arrange-panes`), the viewer pane that
-                    // came or went (`viewer-panes`) or its annotations
-                    // (`viewer-annotations`).
-                    self.nudge_others(&[&screen_id]);
+                let mut batch = self.run_effects(effects, &screen_id, &op_type).await;
+                // Tab choices persist window-local focus and intentionally do
+                // not invalidate another window's layout (mux-protocol).
+                if op_type != "select_tab" {
+                    if screens.is_empty() && workspace_changed {
+                        batch.push(ServerEvent::mux_nudge("mux_op".into(), None));
+                    }
+                    batch.extend(screens.into_iter().map(|screen| {
+                        ServerEvent::mux_nudge("mux_op".into(), Some(screen.to_string()))
+                    }));
                 }
-                self.run_effects(effects, &screen_id, &op_type).await;
+                // Spawn metadata is now committed. One ordered publication
+                // keeps every spawn before every nudge, excluding the sender.
+                if !batch.is_empty() {
+                    (self.broadcast)(&batch, self.sender.clone());
+                }
             }
             Err(e) => {
                 // Windows before `layout-arrange-v1` send `move_pane` without a
                 // target for every drag; it was always rejected, and harmless.
                 if op_type == "move_pane" {
                     tracing::debug!(
-                        "mux.op {} ignored: screen={}, err={}",
+                        "mux.op {} rejected: screen={}, err={}",
                         op_type,
                         msg.screen_id,
                         e
@@ -418,14 +450,9 @@ impl MuxHandler {
                     );
                 }
 
-                // A rejected arrangement or annotation op makes the window
-                // show the server's state again (mux-protocol, Rejected Op
-                // Reporting).
-                if new_pane_id.is_some()
-                    || op_type == "arrange_panes"
-                    || op_type == "apply_template"
-                    || annotation_op
-                {
+                // Parsed shared-layout rejections always undo optimistic
+                // state through a failure; tab selections remain silent.
+                if op_type != "select_tab" {
                     self.send_event(&ServerEvent::mux_op_failed(
                         op_type,
                         Some(msg.screen_id.clone()),
@@ -438,10 +465,16 @@ impl MuxHandler {
         }
     }
 
-    /// Execute effects produced by the reducer and nudge clients if any were run.
-    async fn run_effects(&self, effects: Vec<Effect>, screen_id: &ScreenId, op_type: &str) {
+    /// Execute effects and enqueue the sender's results. Return successful
+    /// spawn announcements for the final publication with mutation nudges.
+    async fn run_effects(
+        &self,
+        effects: Vec<Effect>,
+        screen_id: &ScreenId,
+        op_type: &str,
+    ) -> Vec<ServerEvent> {
         if effects.is_empty() {
-            return;
+            return vec![];
         }
 
         if let Err(error) = self.jobs.stop_effects(&effects).await {
@@ -452,18 +485,10 @@ impl MuxHandler {
                 error.error,
             ))
             .await;
-            return;
+            return vec![];
         }
 
         let errors = self.effect_runner.execute(effects, &self.env).await;
-        let actual_screen = errors
-            .iter()
-            .find_map(|outcome| match &outcome.effect {
-                Effect::SpawnSession { screen_id, .. } => Some(screen_id.clone()),
-                Effect::SpawnJob { job } => Some(job.screen_id.clone()),
-                _ => None,
-            })
-            .unwrap_or_else(|| screen_id.clone());
         let spawn_info: Vec<_> = errors
             .iter()
             .filter_map(|o| o.spawned())
@@ -526,27 +551,7 @@ impl MuxHandler {
             self.send_event(event).await;
         }
 
-        // Everyone else gets pane_spawned first, then the nudge that makes them
-        // resync. A client that sees the nudge first rebuilds from the snapshot
-        // and tears down the pane still waiting to learn its session id, so this
-        // order is load-bearing on every delivery path.
-        let mut batch = Vec::with_capacity(spawn_info.len() + 1);
-        batch.extend(spawn_events);
-        batch.push(ServerEvent::mux_nudge(
-            "mux_op".to_string(),
-            Some(actual_screen.to_string()),
-        ));
-
-        (self.broadcast)(&batch, self.sender.clone());
-    }
-
-    /// Send every other client a `mux_op` nudge for each of `screens`.
-    fn nudge_others(&self, screens: &[&ScreenId]) {
-        let events: Vec<_> = screens
-            .iter()
-            .map(|screen| ServerEvent::mux_nudge("mux_op".to_string(), Some(screen.to_string())))
-            .collect();
-        (self.broadcast)(&events, self.sender.clone());
+        spawn_events
     }
 
     async fn handle_resync(&self, msg: MuxResyncMsg) {
@@ -593,7 +598,14 @@ mod tests {
         if !splitty_core::pty::testing::pty_available() {
             return;
         }
-        let store = Arc::new(Store::new());
+        let empty_id = ScreenId::from("empty");
+        let mut empty = splitty_core::mux::ScreenState::new(empty_id.clone(), None);
+        empty.revision = 1;
+        let mut state = splitty_core::mux::WorkspaceState::default();
+        state.screens.insert(empty_id.clone(), empty);
+        state.screen_order.push(empty_id.clone());
+        state.active_screen_id = Some(empty_id);
+        let store = Arc::new(Store::with_state(state));
         let (sender, mut sent) = ClientSender::channel();
         let backend = Arc::new(splitty_core::pty::manager::Manager::new());
         let runner = Arc::new(EffectRunner::new(backend.clone()));
@@ -606,6 +618,7 @@ mod tests {
         );
         let broadcasts = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
         let recorded = broadcasts.clone();
+        let published_store = store.clone();
         let handler = MuxHandler::new(
             store.clone(),
             Arc::new(sender),
@@ -615,6 +628,27 @@ mod tests {
             Arc::new(RwLock::new(Default::default())),
             EnvContext::default(),
             Arc::new(move |events, _| {
+                let state = published_store.get_workspace_state();
+                for event in events {
+                    if let ServerEvent::MuxPaneSpawned {
+                        session_id,
+                        shell_profile_id,
+                        ..
+                    } = event
+                    {
+                        let session = state
+                            .screens
+                            .values()
+                            .find_map(|screen| {
+                                screen.sessions.get(&SessionId::from(session_id.as_str()))
+                            })
+                            .expect("published session");
+                        assert_eq!(
+                            &session.shell_profile_id, shell_profile_id,
+                            "resolved metadata precedes publication"
+                        );
+                    }
+                }
                 recorded.lock().unwrap().extend(
                     events
                         .iter()
@@ -704,6 +738,45 @@ mod tests {
         let replaced = store.get_screen(&ScreenId::from("screen")).unwrap();
         assert_eq!(replaced.panes.len(), 1);
         assert_eq!(replaced.name.as_deref(), Some("T"));
+
+        // Even failed effects follow the accepted model change. With an empty
+        // request envelope, both failure and nudge name the generated screen.
+        broadcasts.lock().expect("recorder").clear();
+        handler.handle_value(serde_json::json!({"type":"mux.op", "screenId":"", "op":{"type":"create_screen", "newPaneId":"generated-pane"}})).await;
+        let failure = next_text(&mut sent);
+        assert_eq!(failure["type"], "mux.op_failed");
+        let generated = failure["screenId"].as_str().expect("actual screen ID");
+        assert!(!generated.is_empty());
+        assert!(store
+            .get_screen(&ScreenId::from(generated))
+            .expect("generated screen")
+            .panes
+            .contains_key(&PaneId::from("generated-pane")));
+        {
+            let events = broadcasts.lock().expect("recorder");
+            assert_eq!(events.len(), 1, "one nudge, no phantom spawn: {events:?}");
+            assert_eq!(events[0]["type"], "mux.nudge");
+            assert_eq!(events[0]["screenId"], generated);
+            assert!(sent.try_recv().is_err(), "no sender nudge");
+        }
+
+        // Recreating this empty screen resets revision 1 to revision 1, so
+        // the effect target must still invalidate exactly this screen.
+        broadcasts.lock().expect("recorder").clear();
+        handler.handle_value(serde_json::json!({"type":"mux.op", "screenId":"unrelated", "op":{"type":"create_screen", "screenId":"empty", "newPaneId":"recreated-pane"}})).await;
+        assert_eq!(next_text(&mut sent)["screenId"], "empty");
+        assert_eq!(
+            store
+                .get_screen(&ScreenId::from("empty"))
+                .expect("recreated screen")
+                .revision,
+            1
+        );
+        let events = broadcasts.lock().expect("recorder");
+        assert_eq!(events.len(), 1, "{events:?}");
+        assert_eq!(events[0]["type"], "mux.nudge");
+        assert_eq!(events[0]["screenId"], "empty");
+        assert!(sent.try_recv().is_err(), "no sender nudge");
     }
 
     /// A reloading client's `create_screen` for a screen the server already
@@ -765,12 +838,224 @@ mod tests {
         assert_eq!(screen.panes.len(), 1);
     }
 
+    /// Layout-only edits have no process effects, but each accepted revision
+    /// must reach other clients exactly once (mux-protocol).
+    #[tokio::test]
+    async fn layout_mutations_without_effects_nudge_the_others_once() {
+        let store = layout_store();
+        let others = Default::default();
+        let (handler, mut sent) = window(&store, "sender", &others);
+        let screen_id = ScreenId::from("screen-1");
+        for kind in [
+            "resize_split",
+            "move_pane",
+            "float_pane",
+            "move_float",
+            "dock_pane",
+            "rename_screen",
+            "close_pane",
+        ] {
+            let before = store.get_screen(&screen_id).expect("screen");
+            let op = match kind {
+                "resize_split" => {
+                    serde_json::json!({"type":kind, "nodeId":before.root.id(), "sizes":[0.2,0.3,0.5]})
+                }
+                "move_pane" => {
+                    serde_json::json!({"type":kind, "paneId":"p2", "targetSlotId":before.root.find_slot(&PaneId::from("p1")).expect("slot").id()})
+                }
+                "float_pane" => serde_json::json!({"type":kind, "paneId":"p2"}),
+                "move_float" => {
+                    serde_json::json!({"type":kind, "floatingId":before.floating[0].id, "bounds":{"x":0.1,"y":0.2,"w":0.3,"h":0.4}})
+                }
+                "dock_pane" => {
+                    serde_json::json!({"type":kind, "floatingId":before.floating[0].id, "paneId":"p1"})
+                }
+                "rename_screen" => serde_json::json!({"type":kind, "name":"Renamed"}),
+                "close_pane" => serde_json::json!({"type":kind, "paneId":"p2"}),
+                _ => unreachable!("listed operation"),
+            };
+            handler
+                .handle_value(serde_json::json!({"type":"mux.op", "screenId":"screen-1", "op":op}))
+                .await;
+            let events = std::mem::take(&mut *others.lock().expect("recorder"));
+            assert_eq!(events.len(), 1, "{kind}: {events:?}");
+            assert_eq!(events[0]["type"], "mux.nudge", "{kind}");
+            assert_eq!(events[0]["reason"], "mux_op", "{kind}");
+            assert_eq!(events[0]["screenId"], "screen-1", "{kind}");
+            assert!(sent.try_recv().is_err(), "{kind}: sender stays optimistic");
+            assert_eq!(
+                store.get_screen(&screen_id).expect("screen").revision,
+                before.revision + 1
+            );
+        }
+        assert_eq!(
+            store
+                .get_screen(&screen_id)
+                .expect("screen")
+                .name
+                .as_deref(),
+            Some("Renamed")
+        );
+    }
+
+    #[tokio::test]
+    async fn workspace_only_changes_and_sessionless_removal_are_published() {
+        let store = layout_store();
+        let others = Default::default();
+        let (handler, mut sent) = window(&store, "sender", &others);
+        for (screen, op, nudge_screen) in [
+            (
+                "_",
+                serde_json::json!({"type":"reorder_screens", "screenOrder":["screen-2","screen-1"]}),
+                None,
+            ),
+            (
+                "screen-2",
+                serde_json::json!({"type":"set_active_screen"}),
+                None,
+            ),
+            (
+                "screen-2",
+                serde_json::json!({"type":"close_screen"}),
+                Some("screen-2"),
+            ),
+        ] {
+            handler
+                .handle_value(serde_json::json!({"type":"mux.op", "screenId":screen, "op":op}))
+                .await;
+            let events = std::mem::take(&mut *others.lock().expect("recorder"));
+            assert_eq!(events.len(), 1, "{events:?}");
+            assert_eq!(events[0]["type"], "mux.nudge");
+            assert_eq!(events[0]["screenId"].as_str(), nudge_screen);
+            assert!(sent.try_recv().is_err(), "no sender notification");
+        }
+        assert!(store.get_screen(&ScreenId::from("screen-2")).is_none());
+        // Setting the already-active screen changes neither a revision nor
+        // the workspace fields, so there is nothing to invalidate.
+        handler.handle_value(serde_json::json!({"type":"mux.op", "screenId":"screen-1", "op":{"type":"set_active_screen"}})).await;
+        assert!(others.lock().expect("recorder").is_empty());
+        assert!(sent.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn parsed_layout_rejections_answer_only_the_sender_without_a_spawn_id() {
+        let store = layout_store();
+        let others = Default::default();
+        let (handler, mut sent) = window(&store, "sender", &others);
+        let before = serde_json::to_value(store.get_workspace_state()).expect("state");
+        for (screen, op) in [
+            (
+                "screen-1",
+                serde_json::json!({"type":"resize_split", "nodeId":"absent", "sizes":[0.5,0.5]}),
+            ),
+            (
+                "screen-1",
+                serde_json::json!({"type":"move_pane", "paneId":"p1"}),
+            ),
+            (
+                "screen-1",
+                serde_json::json!({"type":"float_pane", "paneId":"absent"}),
+            ),
+            (
+                "screen-1",
+                serde_json::json!({"type":"move_float", "floatingId":"absent", "bounds":{"x":0.1,"y":0.2,"w":0.3,"h":0.4}}),
+            ),
+            (
+                "screen-1",
+                serde_json::json!({"type":"dock_pane", "floatingId":"absent", "paneId":"p1"}),
+            ),
+            (
+                "screen-1",
+                serde_json::json!({"type":"close_pane", "paneId":"absent"}),
+            ),
+            (
+                "screen-1",
+                serde_json::json!({"type":"move_pane_to_screen", "paneId":"p1", "targetScreenId":"absent"}),
+            ),
+            (
+                "absent",
+                serde_json::json!({"type":"rename_screen", "name":"Renamed"}),
+            ),
+            ("absent", serde_json::json!({"type":"close_screen"})),
+            ("absent", serde_json::json!({"type":"set_active_screen"})),
+        ] {
+            handler
+                .handle_value(serde_json::json!({"type":"mux.op", "screenId":screen, "op":op}))
+                .await;
+            let failure = next_text(&mut sent);
+            assert_eq!(failure["type"], "mux.op_failed", "{op}");
+            assert_eq!(failure["op"], op["type"]);
+            assert_eq!(failure["screenId"], screen);
+            assert!(
+                failure.get("paneId").is_none(),
+                "existing panes are not spawn correlations"
+            );
+            assert!(!failure["error"].as_str().expect("error").is_empty());
+            assert!(sent.try_recv().is_err());
+            assert!(others.lock().expect("recorder").is_empty());
+            assert_eq!(
+                serde_json::to_value(store.get_workspace_state()).expect("state"),
+                before
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_and_malformed_ops_keep_their_silent_compatibility() {
+        let store = layout_store();
+        let others = Default::default();
+        let (handler, mut sent) = window(&store, "sender", &others);
+        let before = serde_json::to_value(store.get_workspace_state()).expect("state");
+        for message in [
+            serde_json::json!({"type":"mux.unknown"}),
+            serde_json::json!({"type":"mux.op", "op":{"type":"close_screen"}}),
+            serde_json::json!({"type":"mux.op", "screenId":"screen-1"}),
+            serde_json::json!({"type":"mux.op", "screenId":"screen-1", "op":{"type":"unknown"}}),
+            serde_json::json!({"type":"mux.op", "screenId":"screen-1", "op":{"type":"split_pane", "paneId":"p1", "newPaneId":"p4"}}),
+            serde_json::json!({"type":"mux.op", "screenId":"screen-1", "op":{"type":"move_pane_to_screen", "paneId":"p1"}}),
+        ] {
+            handler.handle_value(message).await;
+            assert!(sent.try_recv().is_err());
+            assert!(others.lock().expect("recorder").is_empty());
+            assert_eq!(
+                serde_json::to_value(store.get_workspace_state()).expect("state"),
+                before
+            );
+        }
+    }
+
+    /// Reducer-created layout with no running processes, for layout-only
+    /// session handler tests. Panes without sessions close without effects.
+    fn layout_store() -> Arc<Store> {
+        let seed = Store::new();
+        for (screen, pane) in [("screen-1", "p1"), ("screen-2", "p4")] {
+            seed.dispatch(Op::CreateScreen {
+                name: None,
+                screen_id: Some(ScreenId::from(screen)),
+                new_pane_id: Some(PaneId::from(pane)),
+                shell_profile_id: None,
+            })
+            .expect("screen");
+        }
+        for pane in ["p2", "p3"] {
+            seed.dispatch_screen(&ScreenId::from("screen-1"), serde_json::from_value(serde_json::json!({"type":"split_pane", "paneId":"p1", "axis":"horizontal", "newPaneId":pane})).expect("split")).expect("split applied");
+        }
+        let mut state = seed.get_workspace_state();
+        for screen in state.screens.values_mut() {
+            screen.sessions.clear();
+            for pane in screen.panes.values_mut() {
+                pane.session_id = None;
+            }
+        }
+        Arc::new(Store::with_state(state))
+    }
+
     /// mux-protocol, Change Propagation to Other Clients (Pane moved by a
     /// client): the others are nudged for both screens, the mover is not.
     #[tokio::test]
     async fn a_moved_pane_nudges_the_other_clients_for_both_screens() {
         let store = Arc::new(Store::new());
-        for (screen, pane) in [("screen-1", "terminal-1"), ("screen-2", "terminal-2")] {
+        for (screen, pane) in [("screen-z", "terminal-1"), ("screen-a", "terminal-2")] {
             store
                 .dispatch(Op::CreateScreen {
                     name: None,
@@ -812,7 +1097,7 @@ mod tests {
             Default::default(),
         );
 
-        let op = r#"{"type":"mux.op","screenId":"screen-1","op":{"type":"move_pane_to_screen","paneId":"terminal-1","targetScreenId":"screen-2"}}"#;
+        let op = r#"{"type":"mux.op","screenId":"screen-z","op":{"type":"move_pane_to_screen","paneId":"terminal-1","targetScreenId":"screen-a"}}"#;
         assert!(handler.try_handle(op).await);
 
         let nudged: Vec<Value> = broadcasts
@@ -822,7 +1107,7 @@ mod tests {
             .map(|text| serde_json::from_str(text).unwrap())
             .collect();
         assert_eq!(nudged.len(), 2, "{nudged:?}");
-        for (event, screen) in nudged.iter().zip(["screen-1", "screen-2"]) {
+        for (event, screen) in nudged.iter().zip(["screen-z", "screen-a"]) {
             assert_eq!(event["type"], "mux.nudge");
             assert_eq!(event["reason"], "mux_op");
             assert_eq!(event["screenId"], screen);
@@ -830,9 +1115,9 @@ mod tests {
         assert!(sent.try_recv().is_err(), "the mover gets no nudge");
         assert_eq!(
             store.screen_of_movable_pane(&PaneId::from("terminal-1")),
-            Some(ScreenId::from("screen-2"))
+            Some(ScreenId::from("screen-a"))
         );
-        assert!(store.get_screen(&ScreenId::from("screen-1")).is_none());
+        assert!(store.get_screen(&ScreenId::from("screen-z")).is_none());
     }
 
     /// mux-protocol, Change Propagation to Other Clients (Panes arranged by a

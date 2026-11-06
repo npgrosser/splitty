@@ -899,8 +899,13 @@ interface MuxScreenSnapshot extends ServerEvent {
  * (e.g. a CLI command modified the layout). Client should request
  * a resync (mux.resync) to get the updated state.
  *
- * This is intentionally NOT a full state push — keeps the protocol
- * simple. Client decides when to resync.
+ * Accepted shared-layout ops notify other clients even without process effects.
+ * Successful pane-spawn events precede at most one nudge per affected screen.
+ * IDs name the actual changed, added or removed screens. The originating client
+ * receives no success nudge; select_tab retains its window-local exception.
+ * A workspace-only order/activation change uses a nudge without screenId.
+ * This is an invalidation, not a workspace-directory snapshot; current web
+ * clients only resync nudges that identify a screen.
  */
 interface MuxNudge extends ServerEvent {
   type: "mux.nudge";
@@ -918,14 +923,15 @@ interface MuxPaneSpawned extends ServerEvent {
 }
 
 /**
- * A WebSocket op was rejected, sent to its client only: for an op that names a
- * pane to create (`paneId`, so the client stops waiting for mux.pane_spawned),
- * for `arrange_panes` (no `paneId`; the window resyncs `screenId`), and for
- * `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies`
- * and `mark_sent`, also when the op does not parse (`paneId` is the viewer
- * pane; the window shows the server's annotations again). Never a nudge to
- * others. apply_template always reports rejection with screenId, and names
- * paneId for an individual spawn failure; the window resyncs without spawning.
+ * A parsed native/browser layout op was rejected, sent to its client only.
+ * The window resyncs screenId for every reported operation, including resize,
+ * move, float and workspace operations without a new pane. No failure nudge
+ * is sent to others. select_tab retains its documented silent exception.
+ * paneId correlates newPaneId with a pending spawn, or identifies the viewer
+ * for annotation operations; an ordinary existing-pane target is not a spawn
+ * waiter. apply_template also names paneId for an individual spawn failure.
+ * Malformed/unknown input remains ignored except for the existing template and
+ * annotation parse failures, which already report through this event.
  */
 interface MuxOpFailed extends ServerEvent {
   type: "mux.op_failed";
@@ -1039,23 +1045,26 @@ type ServerMessage =
 // applies its own default policy.
 // ============================================================================
 
-interface SplitPanelOp {
-  type: "split_panel";
-  panelId: string;
+interface SplitPaneOp {
+  type: "split_pane";
+  paneId: string;
   axis: "horizontal" | "vertical";
-  /** Client-set ID for the new panel. Server generates one if omitted (e.g. CLI-initiated). */
-  newPanelId?: string;
-  /** Client provides the resulting sizes after split. Server uses default (equal) if omitted. */
+  /** Client-set ID for the new pane. Server generates one if omitted (e.g. CLI-initiated). */
+  newPaneId?: string;
+  /** One finite nonnegative value per resulting child, sum 1 within 0.01.
+   * Same-axis parent: existing child count + 1; a new wrapper: 2.
+   * Invalid arrays reject without changing state or spawning; omission uses equal sizes. */
   resultingSizes?: number[];
-  /** Position of the new panel in the children array. */
-  newPanelIndex?: number;
+  /** 0 inserts before the source slot; other values or omission insert after. */
+  newPaneIndex?: number;
+  cwd?: string;
   /** Explicit profile, otherwise inherit the source pane's profile. */
   shellProfileId?: string;
 }
 
-interface ClosePanelOp {
-  type: "close_panel";
-  panelId: string;
+interface ClosePaneOp {
+  type: "close_pane";
+  paneId: string;
   /** How siblings redistribute space. Server uses default (equal) if omitted. */
   resultingSizes?: number[];
 }
@@ -1362,9 +1371,9 @@ interface SetScreenOwnershipOp {
 
 type Operation =
   | ApplyTemplateOp
-  | SplitPanelOp
+  | SplitPaneOp
   | NewTabOp
-  | ClosePanelOp
+  | ClosePaneOp
   | ResizeSplitOp
   | SelectTabOp
   | MovePaneOp
@@ -1436,7 +1445,7 @@ type ClientCommand =
  *     │──── mux.op { create_screen }  │
  *     │──── create { ... }            │  (PTY session)
  *     │<─── created { id }            │
- *     │──── mux.op { split_panel }    │  (fire-and-forget)
+ *     │──── mux.op { split_pane }     │  (fire-and-forget)
  *     │     ...                       │
  */
 
@@ -1520,13 +1529,13 @@ type ClientCommand =
  *     │    }               │                   │
  *     │                    │                   │
  *     │  Client executes split in dockview.
- *     │  Client generates new panel ID ("terminal-5").
+ *     │  Client generates new pane ID ("terminal-5").
  *     │  Client mirrors result to server:
  *     │                    │                   │
  *     │── mux.op {         │                   │
- *     │     split_panel,   │                   │
- *     │     panelId: "terminal-3",             │
- *     │     newPanelId: "terminal-5",          │
+ *     │     split_pane,    │                   │
+ *     │     paneId: "terminal-3",              │
+ *     │     newPaneId: "terminal-5",           │
  *     │     axis: "horizontal"                 │
  *     │   }                │                   │
  */

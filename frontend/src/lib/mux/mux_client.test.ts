@@ -117,11 +117,32 @@ describe("MuxClient", () => {
     socket.message({ type: "mux.welcome", clientId: "c1", screens: [], capabilities: ["scratchpad-v1", "layout-arrange-v1"] });
     expect(mux.arrangements).toBe(true);
 
-    socket.message({ type: "mux.op_failed", op: "split_pane", screenId: "screen-1", error: "pane not found" });
     socket.message({ type: "mux.op_failed", op: "arrange_panes", error: "no screen" });
     expect(socket.sentOfType("mux.resync")).toEqual([]);
     socket.message({ type: "mux.op_failed", op: "arrange_panes", screenId: "screen-1", error: "the arrangement misses pane p3" });
     expect(socket.sentOfType("mux.resync")).toEqual([{ type: "mux.resync", screenId: "screen-1" }]);
+  });
+
+  // mux-protocol, Rejected Op Reporting: recovery does not depend on a new
+  // pane or an operation allowlist, and stays on the connection that failed.
+  it.each(["split_pane", "resize_split", "move_pane", "float_pane", "move_float", "dock_pane", "close_pane", "rename_screen", "close_screen", "move_pane_to_screen"])("resyncs a rejected %s without a pane identifier", (op) => {
+    const otherSocket = new FakeSocket();
+    const other = new MuxClient(otherSocket);
+    const failures: unknown[] = [];
+    mux.onOpFailed((failure) => failures.push(failure));
+    socket.message({ type: "mux.op_failed", op, screenId: "screen-1", error: "rejected" });
+    socket.message({ type: "mux.op_failed", op, error: "no screen" });
+    socket.message({ type: "mux.op_failed", op, screenId: 7, error: "invalid screen" });
+    socket.message({ type: "mux.op_failed", op, screenId: "", error: "empty screen" });
+    expect(socket.sentOfType("mux.resync")).toEqual([{ type: "mux.resync", screenId: "screen-1" }]);
+    expect(otherSocket.sentOfType("mux.resync")).toEqual([]);
+    expect(failures).toEqual([
+      { op, screenId: "screen-1", error: "rejected" },
+      { op, error: "no screen" },
+      { op, error: "invalid screen" },
+      { op, error: "empty screen" },
+    ]);
+    other.dispose();
   });
 
   // mux-protocol, Selected Tabs Reach the Server (Host without the capability).
