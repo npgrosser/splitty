@@ -1,7 +1,9 @@
 /**
  * How a viewer pane's view was left: its mode, its wrap choice, where
- * reading stood (`viewer-panes`, Keeping A Shown Document Current) and
- * whether its annotation list was open (`viewer-annotations`). A view
+ * reading stood (`viewer-panes`, Keeping A Shown Document Current), whether
+ * its annotation list was open, and whether the user hid its marks or showed
+ * those of resolved annotations (`viewer-annotations`, Annotations In The
+ * Pane). These choices are the window's own, per pane, while it runs. A view
  * built again for the same pane starts from it: after a snapshot rebuilt the
  * pane's screen (`layout/screen_snapshot.ts`), after a move to or from a
  * popout window, and on the screen a pane was moved to.
@@ -27,6 +29,10 @@ export interface ViewerViewState {
    * without a choice it is open while the pane holds annotations.
    */
   readonly annotations?: "open" | "closed";
+  /** The document shows no marks of annotations. */
+  readonly hideMarks?: boolean;
+  /** The passages of resolved annotations are marked as well. */
+  readonly showResolved?: boolean;
 }
 
 /** More than the panes of a screen rebuilt at once; the oldest goes first. */

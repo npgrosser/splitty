@@ -68,7 +68,7 @@
       {/if}
       {#if annotations > 0}
         <p class="dialog-text">
-          {annotations === 1 ? "An annotation was not sent yet; closing deletes it." : `${annotations} annotations were not sent yet; closing deletes them.`}
+          {annotations === 1 ? "Closing deletes an annotation and its replies." : `Closing deletes ${annotations} annotations and their replies.`}
         </p>
       {/if}
 

@@ -9,7 +9,8 @@
  * - Anything else without a NUL byte in its first 8 KiB: source, highlighted
  *   by the file's name and decoded as UTF-8 with replacement characters.
  * - Anything else: its size, none of its bytes.
- * - A `text` document: plain text.
+ * - A `text` document: rendered as Markdown with its `format` `markdown`,
+ *   plain text otherwise.
  */
 
 import type { ViewerSource } from "../protocol/types.ts";
@@ -58,7 +59,9 @@ function extensionOf(name: string): string {
 }
 
 export function presentationOf(source: ViewerSource, bytes: Uint8Array): Presentation {
-  if (source.kind === "text") return { kind: "source" };
+  if (source.kind === "text") {
+    return source.format === "markdown" && bytes.length <= RENDER_LIMIT_BYTES ? { kind: "rendered", format: "markdown" } : { kind: "source" };
+  }
   const name = fileName(source.path);
   const extension = extensionOf(name);
   const fits = bytes.length <= RENDER_LIMIT_BYTES;

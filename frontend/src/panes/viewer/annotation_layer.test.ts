@@ -1,14 +1,15 @@
 // @vitest-environment jsdom
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { MuxOperation, ScreenState, ViewerAnnotation, ViewerRecord } from "../../lib/protocol/types.ts";
+import type { AnnotationReply, MuxOperation, ReviewWait, ScreenState, ViewerAnnotation, ViewerRecord } from "../../lib/protocol/types.ts";
 import { CONTEXT_CHARS } from "../../lib/viewer/anchoring.ts";
 import { ViewerAnnotations } from "../../lib/viewer/annotations.ts";
-import type { ReviewTarget } from "../../lib/viewer/handover.ts";
+import type { ReviewAnswerRequest, ReviewTarget } from "../../lib/viewer/handover.ts";
 import type { BoundaryRange } from "../../lib/viewer/render.ts";
 import type { ContextMenuItem } from "../../stores/ui.svelte.ts";
 import { ViewerView } from "../viewer_view.ts";
 import type { ViewerViewState } from "../viewer_view_state.ts";
+import { DELETION_NOTE } from "./annotation_form.ts";
 import type { AnnotationLayerOptions } from "./annotation_layer.ts";
 import { LONG_SELECTION, SHORT_SELECTION } from "./selection_toolbar.ts";
 
@@ -33,12 +34,151 @@ const filler = (from: number, to: number) => Array.from({ length: to - from + 1 
 /** A plan with `retry three times` on line 30. */
 const PLAN = `${filler(1, 29)}\n2. On failure, retry three times before giving up.\n${filler(31, 40)}\n`;
 const RENDERED_PLAN = "# Plan\n\nThe first step.\n\n- retry three times\n- ship it\n";
+/** The passage on line 30, as a window annotated it. */
+const RETRY = { view: "source" as const, quote: "retry three times", prefix: "2. On failure, ", suffix: " before giving up.", startLine: 30, endLine: 30 };
+const WAIT: ReviewWait = { id: "wait-0123456789abcdef", paneId: "t1", title: "claude" };
+const WAITING: ViewerRecord = { ...PLAN_RECORD, reviewWait: WAIT };
+
+function screenWith(annotations: ViewerAnnotation[]): ScreenState {
+  return {
+    id: "screen-1",
+    root: { type: "slot", id: "s1", paneIds: ["v1"] },
+    panes: { v1: { id: "v1", role: "viewer", viewer: { ...PLAN_RECORD, ...(annotations.length > 0 ? { annotations } : {}) } } },
+    sessions: {},
+  } as unknown as ScreenState;
+}
+
+/**
+ * The pane's server as far as annotations go: it applies the operations of
+ * its windows by its rules, numbering each new annotation, and answers a
+ * window's resync with a snapshot made after the window's operations. It
+ * tells a window nothing of the window's own operations; `broadcast` is the
+ * resync of every window after a change of another client.
+ */
+class PaneServer {
+  readonly ops: MuxOperation[] = [];
+  annotations: ViewerAnnotation[] = [];
+  /** The server rejects every operation: it keeps the workspace as it is. */
+  refusing = false;
+  private last = 0;
+  private replyCount = 0xa000;
+  private readonly windows: ViewerAnnotations[] = [];
+
+  /** The annotation store of one more window. */
+  window(): ViewerAnnotations {
+    const store = new ViewerAnnotations({
+      send: (_screenId, op) => {
+        this.ops.push(op);
+        if (!this.refusing) this.apply(op);
+      },
+      resync: () => queueMicrotask(() => this.snapshotTo(store)),
+    });
+    this.windows.push(store);
+    return store;
+  }
+
+  broadcast(): void {
+    for (const store of this.windows) this.snapshotTo(store);
+  }
+
+  /** The server holds `annotations` now, as after other clients' changes, and every window resyncs. */
+  serve(annotations: ViewerAnnotation[]): void {
+    this.annotations = annotations;
+    this.last = Math.max(this.last, ...annotations.map((annotation) => annotation.number ?? 0));
+    this.broadcast();
+  }
+
+  sent<T extends MuxOperation["type"]>(type: T): Extract<MuxOperation, { type: T }>[] {
+    return this.ops.filter((op): op is Extract<MuxOperation, { type: T }> => op.type === type);
+  }
+
+  get(number: number): ViewerAnnotation {
+    return this.annotations.find((annotation) => annotation.number === number)!;
+  }
+
+  /** An agent in pane `t1` replies in the thread of annotation `number`. */
+  agentReplies(number: number, body: string, title = "claude"): AnnotationReply {
+    const reply: AnnotationReply = { id: `rep-${(++this.replyCount).toString(16).padStart(16, "0")}`, author: "agent", body, from: { paneId: "t1", title } };
+    this.annotations = this.annotations.map((annotation) => (
+      annotation.number === number ? { ...annotation, replies: [...(annotation.replies ?? []), reply] } : annotation));
+    this.broadcast();
+    return reply;
+  }
+
+  dispose(): void {
+    for (const store of this.windows) store.dispose();
+  }
+
+  private snapshotTo(store: ViewerAnnotations): void {
+    store.snapshot(screenWith(JSON.parse(JSON.stringify(this.annotations)) as ViewerAnnotation[]));
+  }
+
+  private apply(op: MuxOperation): void {
+    const edit = (id: string, change: (annotation: ViewerAnnotation) => ViewerAnnotation) => {
+      this.annotations = this.annotations.map((annotation) => (annotation.id === id ? change(annotation) : annotation));
+    };
+    switch (op.type) {
+      case "put_annotations":
+        for (const put of op.annotations) {
+          const held = this.annotations.find((annotation) => annotation.id === put.id);
+          if (held) edit(put.id, () => ({ ...put, number: held.number, ...(held.replies ? { replies: held.replies } : {}) }));
+          else this.annotations.push({ ...put, number: ++this.last });
+        }
+        break;
+      case "remove_annotations":
+        this.annotations = this.annotations.filter((annotation) => !op.ids.includes(annotation.id));
+        break;
+      case "put_replies":
+        edit(op.annotationId, (annotation) => {
+          const replies = [...(annotation.replies ?? [])];
+          for (const reply of op.replies) {
+            const at = replies.findIndex((each) => each.id === reply.id);
+            if (at >= 0) replies[at] = reply;
+            else replies.push(reply);
+          }
+          return { ...annotation, replies };
+        });
+        break;
+      case "remove_replies":
+        edit(op.annotationId, (annotation) => {
+          const replies = (annotation.replies ?? []).filter((reply) => !op.ids.includes(reply.id));
+          const { replies: _replies, ...rest } = annotation;
+          return replies.length > 0 ? { ...rest, replies } : rest;
+        });
+        break;
+      case "mark_sent": {
+        // As the server: only an entry that reads as the review held it.
+        const held = new Map(op.entries.map((entry) => [entry.id, entry]));
+        const same = (a: unknown, b: unknown) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+        const reads = (annotation: ViewerAnnotation) => {
+          const entry = held.get(annotation.id);
+          return entry !== undefined && entry.kind === annotation.kind && entry.body === annotation.body
+            && entry.replacement === annotation.replacement && same(entry.target, annotation.target);
+        };
+        this.annotations = this.annotations.map((annotation) => ({
+          ...annotation,
+          ...(reads(annotation) ? { sent: true as const } : {}),
+          ...(annotation.replies ? {
+            replies: annotation.replies.map((reply) => (
+              reply.author === "user" && held.get(reply.id)?.body === reply.body ? { ...reply, sent: true as const } : reply)),
+          } : {}),
+        }));
+        break;
+      }
+      default:
+        break;
+    }
+  }
+}
 
 let views: ViewerView[] = [];
+let servers: PaneServer[] = [];
 
 afterEach(() => {
   for (const view of views) view.destroy();
+  for (const server of servers) server.dispose();
   views = [];
+  servers = [];
   vi.restoreAllMocks();
   document.body.replaceChildren();
 });
@@ -46,12 +186,19 @@ afterEach(() => {
 interface Terminal {
   readonly target: ReviewTarget;
   readonly pasted: string[];
+  scratchpad(): string;
 }
 
-function terminal(paneId: string, title: string, options: { bracketedPaste?: boolean; upload?: () => Promise<string> } = {}): Terminal {
+function terminal(
+  paneId: string,
+  title: string,
+  options: { bracketedPaste?: boolean; upload?: () => Promise<string>; scratchpad?: boolean } = {},
+): Terminal {
   const pasted: string[] = [];
+  let pad = "";
   return {
     pasted,
+    scratchpad: () => pad,
     target: {
       paneId,
       title,
@@ -59,6 +206,7 @@ function terminal(paneId: string, title: string, options: { bracketedPaste?: boo
       paste: (text) => pasted.push(text),
       reveal: vi.fn(),
       upload: options.upload ?? (async () => "/home/me/.cache/splitty/uploads/review-PLAN.md"),
+      ...(options.scratchpad ? { scratchpad: { text: () => pad, set: (text: string) => { pad = text; }, open: vi.fn() } } : {}),
     },
   };
 }
@@ -71,12 +219,17 @@ interface Setup {
   origin?: ReviewTarget;
   terminals?: ReviewTarget[];
   state?: ViewerViewState;
+  /** The pane's server, shared by the windows of a test. */
+  server?: PaneServer;
+  /** The window's store, shared by its views. */
   store?: ViewerAnnotations;
+  answer?: (request: ReviewAnswerRequest) => Promise<boolean>;
 }
 
 function setup(params: Setup = {}) {
-  const sent: MuxOperation[] = [];
-  const store = params.store ?? new ViewerAnnotations({ send: (_screenId, op) => sent.push(op), resync: () => {} });
+  const server = params.server ?? new PaneServer();
+  if (!servers.includes(server)) servers.push(server);
+  const store = params.store ?? server.window();
   const notices = { sent: vi.fn(), undoable: vi.fn(), info: vi.fn(), error: vi.fn() };
   const showMenu = vi.fn<(items: ContextMenuItem[], x: number, y: number) => void>();
   const writeClipboard = vi.fn(async (_text: string) => {});
@@ -94,6 +247,7 @@ function setup(params: Setup = {}) {
     showMenu,
     writeClipboard,
     download,
+    ...(params.answer ? { answer: params.answer } : {}),
   };
   const shown = new ViewerView(document, {
     record,
@@ -108,7 +262,7 @@ function setup(params: Setup = {}) {
   document.body.append(shown.element);
   views.push(shown);
   if (params.text !== undefined) shown.update(read(params.text));
-  return { shown, store, sent, notices, showMenu, writeClipboard, download, setOrigin: (target: ReviewTarget | undefined) => { origin = target; } };
+  return { shown, store, server, notices, showMenu, writeClipboard, download, setOrigin: (target: ReviewTarget | undefined) => { origin = target; } };
 }
 
 function read(text: string, version = "v1") {
@@ -121,7 +275,7 @@ function editor(view: ViewerView): EditorView {
   return EditorView.findFromDOM(query(view, ".cm-editor")!)!;
 }
 
-/** Select the `occurrence`-th `quote` in the source view. */
+/** Select `quote` in the source view. */
 function selectSource(view: ViewerView, quote: string): void {
   const text = editor(view).state.doc.toString();
   const start = text.indexOf(quote);
@@ -147,6 +301,10 @@ function form(view: ViewerView): HTMLElement | null {
   return query(view, ".viewer-annotation-form");
 }
 
+function formTitle(view: ViewerView): string {
+  return form(view)!.querySelector(".viewer-form-title")!.textContent!;
+}
+
 function write(view: ViewerView, label: string, text: string): void {
   const field = form(view)!.querySelector<HTMLTextAreaElement>(`textarea[aria-label="${label}"]`)!;
   field.value = text;
@@ -159,11 +317,20 @@ function pressKey(view: ViewerView, init: KeyboardEventInit): void {
 }
 
 function entries(view: ViewerView): HTMLElement[] {
-  return [...view.element.querySelectorAll<HTMLElement>(".viewer-annotation")];
+  return [...view.element.querySelectorAll<HTMLElement>("li.viewer-annotation")];
+}
+
+/** The entry of annotation `number`. */
+function entry(view: ViewerView, number: number): HTMLElement {
+  return view.element.querySelector<HTMLElement>(`li.viewer-annotation[data-number="${number}"]`)!;
 }
 
 function whereOf(view: ViewerView): string[] {
-  return entries(view).map((entry) => entry.querySelector(".viewer-annotation-where")!.textContent!);
+  return entries(view).map((each) => each.querySelector(".viewer-annotation-where")!.textContent!);
+}
+
+function click(element: Element | null, selector: string): void {
+  element!.querySelector<HTMLButtonElement>(selector)!.click();
 }
 
 /** The menu the list's ▾ button shows. */
@@ -172,79 +339,98 @@ function handoverMenu(view: ViewerView, showMenu: ReturnType<typeof setup>["show
   return showMenu.mock.calls.at(-1)![0];
 }
 
-function screenWith(annotations: ViewerAnnotation[]): ScreenState {
-  return {
-    id: "screen-1",
-    root: { type: "slot", id: "s1", paneIds: ["v1"] },
-    panes: { v1: { id: "v1", role: "viewer", viewer: { ...PLAN_RECORD, annotations } } },
-    sessions: {},
-  } as unknown as ScreenState;
+/** Comment on `quote` of the source view through the context menu. */
+function comment(view: ViewerView, quote: string, remark: string): void {
+  selectSource(view, quote);
+  view.annotationMenu()!.annotate("comment");
+  write(view, "Comment", remark);
+  pressKey(view, { key: "Enter", ctrlKey: true });
 }
 
-/** Ask a question on `quote` of the source view through the context menu. */
-function ask(view: ViewerView, quote: string, remark: string): void {
-  selectSource(view, quote);
-  view.annotationMenu()!.annotate("question");
-  write(view, "Question", remark);
-  pressKey(view, { key: "Enter", ctrlKey: true });
+/** Wait until the server has numbered every annotation the window shows. */
+async function numbered(store: ViewerAnnotations): Promise<void> {
+  await vi.waitFor(() => expect(store.list("v1").every((annotation) => annotation.number !== undefined)).toBe(true));
+}
+
+/** Reply in the thread of `item` through its reply box. */
+function reply(item: HTMLElement, text: string, init: KeyboardEventInit = { key: "Enter", ctrlKey: true }): void {
+  click(item, ".viewer-annotation-reply");
+  const field = item.querySelector<HTMLTextAreaElement>(".viewer-reply-text")!;
+  field.value = text;
+  field.dispatchEvent(new Event("input", { bubbles: true }));
+  field.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init }));
+}
+
+/** The source view's marked passages. */
+function marked(view: ViewerView, selector = ".cm-viewer-marked"): string[] {
+  return [...view.element.querySelectorAll(selector)].map((element) => element.textContent!);
+}
+
+function bars(view: ViewerView): Element[] {
+  return [...view.element.querySelectorAll(".cm-viewer-marks .cm-gutterElement")].filter((element) => element.querySelector(".cm-viewer-mark"));
 }
 
 describe("making annotations", () => {
   // viewer-annotations, Annotations On A Viewer Pane: A question on a passage.
-  it("asks a question on a passage of the source from the selection's toolbar", async () => {
-    const { shown, store, sent } = setup({ text: PLAN });
+  it("comments on a passage of the source from the selection's toolbar, and shows the server's number", async () => {
+    const { shown, store, server } = setup({ text: PLAN });
     selectSource(shown, "retry three times");
     query(shown, ".viewer-document")!.dispatchEvent(new Event("pointerup", { bubbles: true }));
     const toolbar = query(shown, ".viewer-selection-toolbar")!;
     await vi.waitFor(() => expect(toolbar.hidden).toBe(false));
-    toolbar.querySelector<HTMLButtonElement>('[data-kind="question"]')!.click();
+    // Two kinds: a comment, which also asks, and a suggested change.
+    expect([...toolbar.querySelectorAll(".viewer-selection-kind")].map((kind) => kind.textContent)).toEqual(["Comment", "Suggest Change"]);
+    toolbar.querySelector<HTMLButtonElement>('[data-kind="comment"]')!.click();
     expect(toolbar.hidden).toBe(true);
 
-    expect(form(shown)!.querySelector(".viewer-form-title")!.textContent).toBe("New Question");
+    expect(formTitle(shown)).toBe("New Comment");
     expect(form(shown)!.querySelector(".viewer-form-quote")!.textContent).toBe("retry three times");
     expect(form(shown)!.querySelector(".viewer-form-label")!.textContent).toBe("Passage, Line 30");
-    write(shown, "Question", "Why three?");
+    write(shown, "Comment", "Why three?");
     pressKey(shown, { key: "Enter", ctrlKey: true });
 
     expect(form(shown)).toBeNull();
     const [annotation] = store.list("v1");
     const at = PLAN.indexOf("retry three times");
-    expect(annotation).toMatchObject({
-      kind: "question",
-      body: "Why three?",
-      target: {
-        view: "source",
-        quote: "retry three times",
-        prefix: PLAN.slice(at - CONTEXT_CHARS, at),
-        suffix: PLAN.slice(at + 17, at + 17 + CONTEXT_CHARS),
-        startLine: 30,
-        endLine: 30,
-      },
-    });
+    const target = {
+      view: "source",
+      quote: "retry three times",
+      prefix: PLAN.slice(at - CONTEXT_CHARS, at),
+      suffix: PLAN.slice(at + 17, at + 17 + CONTEXT_CHARS),
+      startLine: 30,
+      endLine: 30,
+    };
+    expect(annotation).toMatchObject({ kind: "comment", body: "Why three?", target });
     expect(annotation.id).toMatch(/^ann-[0-9a-f]{16}$/);
-    expect(sent).toEqual([{ type: "put_annotations", paneId: "v1", annotations: [annotation] }]);
+    // Without a number: the server gives it.
+    expect(server.ops).toEqual([{ type: "put_annotations", paneId: "v1", annotations: [{ id: annotation.id, kind: "comment", body: "Why three?", target }] }]);
+    await numbered(store);
+    expect(store.list("v1")[0].number).toBe(1);
+    expect(entries(shown)[0].dataset.number).toBe("1");
+    expect(entries(shown)[0].querySelector(".viewer-annotation-number")!.textContent).toBe("#1");
     // Listed, and marked in the source.
     expect(whereOf(shown)).toEqual(["Line 30"]);
-    expect(query(shown, ".cm-viewer-marked")!.textContent).toBe("retry three times");
+    expect(marked(shown)).toEqual(["retry three times"]);
   });
 
   // viewer-annotations, Annotations On A Viewer Pane: A general comment.
-  it("adds a general comment without a selection", () => {
+  it("adds a general comment without a selection, which is a comment", async () => {
     const { shown, store } = setup({ text: PLAN });
     const menu = shown.annotationMenu()!;
     expect(menu.selection).toBe("none");
     menu.addComment();
-    const kinds = [...form(shown)!.querySelectorAll(".viewer-form-kind")].map((kind) => kind.textContent);
-    expect(kinds).toEqual(["Comment", "Question"]);
+    expect(form(shown)!.querySelectorAll(".viewer-form-kind")).toHaveLength(0);
     expect(form(shown)!.querySelector(".viewer-form-quote")).toBeNull();
     write(shown, "Comment", "Split the plan into two.");
     form(shown)!.querySelector<HTMLButtonElement>(".viewer-form-save")!.click();
-    expect(store.list("v1")).toEqual([{ id: expect.stringMatching(/^ann-/), kind: "comment", body: "Split the plan into two." }]);
+    await numbered(store);
+    expect(store.list("v1")).toEqual([{ id: expect.stringMatching(/^ann-/), number: 1, kind: "comment", body: "Split the plan into two." }]);
     expect(whereOf(shown)).toEqual(["General"]);
+    expect(entries(shown)[0].dataset.state).toBe("general");
   });
 
   it("keeps the form open with the reason when a remark is missing, and cancels with Escape", () => {
-    const { shown, store, sent } = setup({ text: PLAN });
+    const { shown, store, server } = setup({ text: PLAN });
     selectSource(shown, "retry three times");
     shown.annotationMenu()!.annotate("comment");
     write(shown, "Comment", "  \n ");
@@ -255,20 +441,44 @@ describe("making annotations", () => {
     pressKey(shown, { key: "Escape" });
     expect(form(shown)).toBeNull();
     expect(store.count("v1")).toBe(0);
-    expect(sent).toEqual([]);
+    expect(server.ops).toEqual([]);
   });
 
-  it("prefills a suggested change with the passage and saves its replacement", () => {
+  it("starts a suggested change with the passage and saves its replacement", () => {
     const { shown, store } = setup({ text: PLAN });
     selectSource(shown, "retry three times");
     shown.annotationMenu()!.annotate("change");
+    expect(formTitle(shown)).toBe("New Suggested Change");
     const replacement = form(shown)!.querySelector<HTMLTextAreaElement>('textarea[aria-label="Replacement"]')!;
     expect(replacement.value).toBe("retry three times");
     expect(document.activeElement).toBe(replacement);
+    // Its remark is a reason, and optional.
+    expect(form(shown)!.querySelector('textarea[aria-label="Reason (optional)"]')).not.toBeNull();
     write(shown, "Replacement", "retry twice");
     pressKey(shown, { key: "Enter", ctrlKey: true });
     expect(store.list("v1")[0]).toMatchObject({ kind: "change", replacement: "retry twice" });
     expect(store.list("v1")[0]).not.toHaveProperty("body");
+    expect(entries(shown)[0].querySelector(".viewer-annotation-kind")!.textContent).toBe("Change");
+    expect(entries(shown)[0].querySelector(".viewer-annotation-replacement")!.textContent).toBe("retry twice");
+  });
+
+  // viewer-annotations, Annotations On A Viewer Pane: A suggested deletion.
+  it("reads an empty replacement as a suggested deletion", () => {
+    const { shown, store } = setup({ text: PLAN });
+    selectSource(shown, "retry three times");
+    shown.annotationMenu()!.annotate("change");
+    const note = form(shown)!.querySelector<HTMLElement>(".viewer-form-deletion")!;
+    expect(note.hidden).toBe(true);
+    write(shown, "Replacement", "");
+    expect(formTitle(shown)).toBe("New Suggested Deletion");
+    expect(note.hidden).toBe(false);
+    expect(note.textContent).toBe(DELETION_NOTE);
+    pressKey(shown, { key: "Enter", ctrlKey: true });
+    expect(store.list("v1")[0]).toMatchObject({ kind: "change", replacement: "" });
+    const [item] = entries(shown);
+    expect(item.dataset.deletion).toBe("");
+    expect(item.querySelector(".viewer-annotation-kind")!.textContent).toBe("Deletion");
+    expect(item.querySelector(".viewer-annotation-deletion")!.textContent).toBe("Delete this passage");
   });
 
   it("asks for a longer selection, and says when one is too long", async () => {
@@ -292,43 +502,90 @@ describe("making annotations", () => {
     await vi.waitFor(() => expect(note.textContent).toBe(LONG_SELECTION));
   });
 
-  it("edits an annotation from the list and deletes one with an undo", () => {
+  it("edits an annotation from the list, and puts a deleted one back under a new number", async () => {
     const { shown, store, notices } = setup({ text: PLAN });
-    ask(shown, "retry three times", "Why three?");
+    comment(shown, "retry three times", "Why three?");
+    await numbered(store);
     const [first] = store.list("v1");
 
-    entries(shown)[0].querySelector<HTMLButtonElement>('[title="Edit this annotation"]')!.click();
-    expect(form(shown)!.querySelector(".viewer-form-title")!.textContent).toBe("Edit Question");
-    const remark = form(shown)!.querySelector<HTMLTextAreaElement>('textarea[aria-label="Question"]')!;
+    click(entries(shown)[0], '[title="Edit this annotation"]');
+    expect(formTitle(shown)).toBe("Edit Comment");
+    const remark = form(shown)!.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]')!;
     expect(remark.value).toBe("Why three?");
-    write(shown, "Question", "Why not twice?");
-    pressKey(shown, { key: "Enter", metaKey: false, ctrlKey: true });
+    write(shown, "Comment", "Why not twice?");
+    pressKey(shown, { key: "Enter", ctrlKey: true });
     expect(store.list("v1")).toEqual([{ ...first, body: "Why not twice?" }]);
     expect(entries(shown)[0].querySelector(".viewer-annotation-body")!.textContent).toBe("Why not twice?");
 
-    entries(shown)[0].querySelector<HTMLButtonElement>('[title="Delete this annotation"]')!.click();
+    click(entries(shown)[0], '[title="Delete this annotation"]');
     expect(store.count("v1")).toBe(0);
     expect(notices.undoable).toHaveBeenCalledWith("Annotation deleted", expect.any(Function));
     notices.undoable.mock.calls[0][1]();
-    expect(store.list("v1")).toEqual([{ ...first, body: "Why not twice?" }]);
+    expect(store.list("v1")).toEqual([{ ...first, number: undefined, body: "Why not twice?" }]);
+    // The server numbers it anew: a number is never given twice in a pane.
+    await vi.waitFor(() => expect(store.list("v1")[0].number).toBe(2));
+  });
+
+  // viewer-annotations, Saving Annotations Through The Window: An edit after sending.
+  it("puts an edited annotation that was handed over as pending, and one saved unchanged as it was", () => {
+    const { shown, store, server } = setup({ text: PLAN });
+    server.serve([{ id: "ann-0000000000000001", number: 1, kind: "comment", body: "Why three?", target: RETRY, sent: true }]);
+    expect(entries(shown)[0].dataset.sent).toBe("");
+
+    click(entries(shown)[0], '[title="Edit this annotation"]');
+    pressKey(shown, { key: "Enter", ctrlKey: true });
+    expect(server.sent("put_annotations").at(-1)!.annotations[0]).toMatchObject({ body: "Why three?", sent: true });
+
+    click(entries(shown)[0], '[title="Edit this annotation"]');
+    write(shown, "Comment", "Why not twice?");
+    pressKey(shown, { key: "Enter", ctrlKey: true });
+    expect(server.sent("put_annotations").at(-1)!.annotations[0]).not.toHaveProperty("sent");
+    expect(store.list("v1")[0]).not.toHaveProperty("sent");
+    expect(entries(shown)[0].dataset.sent).toBeUndefined();
+    expect(entries(shown)[0].querySelector(".viewer-annotation-sent")).toBeNull();
   });
 
   // viewer-annotations, Concurrent Annotation Edits: the form keeps what the user writes.
-  it("keeps the form's text while another window changes the same annotation, and saving replaces that change", () => {
-    const { shown, store } = setup({ text: PLAN });
-    ask(shown, "retry three times", "Why three?");
+  it("keeps the form's text while another window changes the same annotation, and saving replaces that change", async () => {
+    const { shown, store, server } = setup({ text: PLAN });
+    comment(shown, "retry three times", "Why three?");
+    await numbered(store);
     const [own] = store.list("v1");
-    entries(shown)[0].querySelector<HTMLButtonElement>('[title="Edit this annotation"]')!.click();
-    write(shown, "Question", "Why not twice?");
+    click(entries(shown)[0], '[title="Edit this annotation"]');
+    write(shown, "Comment", "Why not twice?");
 
-    vi.useFakeTimers({ toFake: ["Date"] });
-    vi.setSystemTime(Date.now() + 5_000);
-    store.snapshot(screenWith([{ ...own, body: "Changed elsewhere." }]));
-    vi.useRealTimers();
+    server.serve([{ ...server.get(1), body: "Changed elsewhere." }]);
     expect(entries(shown)[0].querySelector(".viewer-annotation-body")!.textContent).toBe("Changed elsewhere.");
-    expect(form(shown)!.querySelector<HTMLTextAreaElement>('textarea[aria-label="Question"]')!.value).toBe("Why not twice?");
+    expect(form(shown)!.querySelector<HTMLTextAreaElement>('textarea[aria-label="Comment"]')!.value).toBe("Why not twice?");
     pressKey(shown, { key: "Enter", ctrlKey: true });
     expect(store.list("v1")).toEqual([{ ...own, body: "Why not twice?" }]);
+  });
+
+  // viewer-annotations, Anchoring By Quote: Moved to another passage.
+  it("Moved to another passage: gives an annotation not found the selected passage", () => {
+    const { shown, store, server } = setup({ text: PLAN });
+    server.serve([{
+      id: "ann-0000000000000001", number: 1, kind: "comment", body: "Gone?", sent: true,
+      target: { view: "source", quote: "no such passage", prefix: "", suffix: "", startLine: 2, endLine: 2 },
+    }]);
+    const item = entry(shown, 1);
+    expect(item.dataset.state).toBe("stale");
+    expect(item.querySelector(".viewer-annotation-not-found")!.textContent).toBe("not found");
+    const move = item.querySelector<HTMLButtonElement>(".viewer-annotation-move")!;
+    expect(move.disabled).toBe(true);
+
+    selectSource(shown, "Step 12 of the plan.");
+    expect(move.disabled).toBe(false);
+    move.click();
+    const [moved] = server.sent("put_annotations");
+    expect(moved.annotations[0]).toMatchObject({ id: "ann-0000000000000001", target: { quote: "Step 12 of the plan.", startLine: 12, endLine: 12 } });
+    // Its passage changed: it is pending again.
+    expect(moved.annotations[0]).not.toHaveProperty("sent");
+    expect(store.list("v1")[0].number).toBe(1);
+    expect(entry(shown, 1).dataset.state).toBe("anchored");
+    expect(entry(shown, 1).querySelector(".viewer-annotation-not-found")).toBeNull();
+    expect(whereOf(shown)).toEqual(["Line 12"]);
+    expect(marked(shown)).toEqual(["Step 12 of the plan."]);
   });
 
   // viewer-annotations, Annotations Capability: Host without annotations.
@@ -350,8 +607,9 @@ describe("making annotations", () => {
   });
 
   it("says when the server rejected the window's annotations", () => {
-    const { shown, store, notices } = setup({ text: PLAN });
-    ask(shown, "retry three times", "Why three?");
+    const { shown, store, server, notices } = setup({ text: PLAN });
+    server.refusing = true;
+    comment(shown, "retry three times", "Why three?");
     store.failed({ op: "put_annotations", screenId: "screen-1", paneId: "v1", error: "pane v1 is no viewer pane" });
     expect(store.count("v1")).toBe(0);
     expect(notices.error).toHaveBeenCalledWith("The annotations could not be saved", "pane v1 is no viewer pane");
@@ -360,56 +618,225 @@ describe("making annotations", () => {
   });
 });
 
-describe("annotations in the pane", () => {
-  it("lists anchored passages in document order, then those not found, then general comments", () => {
-    const { shown, store } = setup({ text: PLAN });
-    shown.annotationMenu()!.addComment();
-    write(shown, "Comment", "General remark.");
-    pressKey(shown, { key: "Enter", ctrlKey: true });
-    ask(shown, "Step 35 of the plan.", "Later step.");
-    ask(shown, "Step 3 of the plan.", "Early step.");
-    store.put("screen-1", "v1", [{ id: "ann-00000000000000ff", kind: "comment", body: "Gone.", target: { view: "source", quote: "no such passage", prefix: "", suffix: "", startLine: 2, endLine: 2 } }]);
-    expect(whereOf(shown)).toEqual(["Line 3", "Line 35", "Line 2, not found", "General"]);
-    expect(entries(shown)[2].classList.contains("stale")).toBe(true);
-    expect(query(shown, ".viewer-annotations-count")!.textContent).toBe("4 annotations");
-    expect(query(shown, ".viewer-bar-annotations")!.textContent).toBe("4 Annotations");
+describe("threads", () => {
+  /** #1 on line 30, handed over, with an agent's answer; #2 on line 3. */
+  function answered(params: Setup = {}) {
+    const setUp = setup({ text: PLAN, ...params });
+    setUp.server.serve([
+      {
+        id: "ann-0000000000000001", number: 1, kind: "comment", body: "Why three?", target: RETRY, sent: true,
+        replies: [{ id: "rep-0000000000000001", author: "agent", body: "Use <b>on-demand</b> **retries**.\u001b[2J", from: { paneId: "t1", title: "claude" } }],
+      },
+      {
+        id: "ann-0000000000000002", number: 2, kind: "comment", body: "Early step.",
+        target: { view: "source", quote: "Step 3 of the plan.", prefix: "", suffix: "", startLine: 3, endLine: 3 },
+      },
+    ]);
+    return setUp;
+  }
+
+  // viewer-annotations, Annotations In The Pane: an agent's reply as plain text with the title of its pane.
+  it("shows an agent's reply as text, with the title of the pane it came from and its controls replaced", () => {
+    const { shown } = answered();
+    const item = entry(shown, 1);
+    expect(item.dataset.sent).toBe("");
+    expect(item.querySelector(".viewer-annotation-sent")!.textContent).toBe("sent");
+    const replies = [...item.querySelectorAll<HTMLElement>("li.viewer-reply")];
+    expect(replies.map((each) => each.dataset.author)).toEqual(["agent"]);
+    expect(replies[0].querySelector(".viewer-reply-author")!.textContent).toBe("Agent (claude)");
+    const body = replies[0].querySelector(".viewer-reply-body")!;
+    // Text, never markup, with what a terminal acts on or what hides text replaced.
+    expect(body.textContent).toBe("Use <b>on-demand</b> **retries**.\ufffd[2J");
+    expect(body.querySelector("b")).toBeNull();
+    expect(body.children).toHaveLength(0);
   });
 
-  // viewer-annotations, Anchoring By Quote: Lines inserted above the passage, The passage removed.
-  it("follows the passage through new versions and keeps one that is gone", () => {
-    const { shown, showMenu } = setup({ text: PLAN, origin: terminal("t1", "claude").target });
-    ask(shown, "retry three times", "Why three?");
-
-    shown.update(read(`${filler(101, 110)}\n${PLAN}`, "v2"));
-    expect(whereOf(shown)).toEqual(["Line 40"]);
-    expect(query(shown, ".cm-viewer-marked")!.textContent).toBe("retry three times");
-    handoverMenu(shown, showMenu).find((item) => item.label === "Copy as Markdown")!.action();
-
-    shown.update(read(PLAN.replace("retry three times", "give up"), "v3"));
-    expect(whereOf(shown)).toEqual(["Line 30, not found"]);
-    expect(entries(shown)[0].querySelector(".viewer-annotation-quote")!.textContent).toBe("retry three times");
-    expect(query(shown, ".cm-viewer-marked")).toBeNull();
-
-    shown.update(read(PLAN, "v4"));
-    expect(whereOf(shown)).toEqual(["Line 30"]);
+  // viewer-annotations, Threads: The user answers an agent.
+  it("The user answers an agent: the reply follows the agent's, as the user's", () => {
+    const { shown, store, server } = answered();
+    reply(entry(shown, 1), "Then retry five times.");
+    const [put] = server.sent("put_replies");
+    expect(put).toEqual({
+      type: "put_replies", paneId: "v1", annotationId: "ann-0000000000000001",
+      replies: [{ id: expect.stringMatching(/^rep-[0-9a-f]{16}$/), author: "user", body: "Then retry five times." }],
+    });
+    expect(store.get("v1", "ann-0000000000000001")!.replies!.map((each) => each.author)).toEqual(["agent", "user"]);
+    const replies = [...entry(shown, 1).querySelectorAll<HTMLElement>("li.viewer-reply")];
+    expect(replies.map((each) => each.querySelector(".viewer-reply-author")!.textContent)).toEqual(["Agent (claude)", "You"]);
+    expect(entry(shown, 1).querySelector<HTMLElement>(".viewer-reply-box")!.hidden).toBe(true);
   });
 
-  it("names the passage's current lines in the review, and a passage not found as such", async () => {
-    const { shown, showMenu, writeClipboard } = setup({ text: PLAN });
-    ask(shown, "retry three times", "Why three?");
-    shown.update(read(`${filler(101, 110)}\n${PLAN}`, "v2"));
-    handoverMenu(shown, showMenu).find((item) => item.label === "Copy as Markdown")!.action();
+  it("names the thread in its reply box, refuses an empty reply and cancels with Escape", () => {
+    const { shown, server } = answered();
+    const item = entry(shown, 1);
+    reply(item, "  ");
+    const box = item.querySelector<HTMLElement>(".viewer-reply-box")!;
+    expect(box.hidden).toBe(false);
+    expect(item.querySelector(".viewer-reply-text")!.getAttribute("aria-label")).toBe("Reply to #1");
+    expect(item.querySelector<HTMLElement>(".viewer-reply-problem")!.textContent).toBe("A reply needs a text.");
+    item.querySelector(".viewer-reply-text")!.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Escape" }));
+    expect(box.hidden).toBe(true);
+    expect(server.sent("put_replies")).toEqual([]);
+  });
+
+  it("keeps a reply being written while an agent answers in the same thread", () => {
+    const { shown, server } = answered();
+    const item = entry(shown, 1);
+    click(item, ".viewer-annotation-reply");
+    const field = item.querySelector<HTMLTextAreaElement>(".viewer-reply-text")!;
+    field.value = "Half a thought";
+    server.agentReplies(1, "One more thing.");
+    expect(entry(shown, 1)).toBe(item);
+    expect(item.querySelectorAll("li.viewer-reply")).toHaveLength(2);
+    expect(item.querySelector<HTMLTextAreaElement>(".viewer-reply-text")!.value).toBe("Half a thought");
+    expect(item.querySelector<HTMLElement>(".viewer-reply-box")!.hidden).toBe(false);
+  });
+
+  it("edits the user's reply, and removes an agent's without an undo and the user's with one", () => {
+    const { shown, store, server, notices } = answered();
+    reply(entry(shown, 1), "Then retry five times.");
+    const own = store.get("v1", "ann-0000000000000001")!.replies![1];
+    const [agent, mine] = [...entry(shown, 1).querySelectorAll<HTMLElement>("li.viewer-reply")];
+    // An agent's reply cannot be edited.
+    expect(agent.querySelector('[title="Edit this reply"]')).toBeNull();
+
+    click(mine, '[title="Edit this reply"]');
+    const field = entry(shown, 1).querySelector<HTMLTextAreaElement>(".viewer-reply-text")!;
+    expect(field.value).toBe("Then retry five times.");
+    expect(entry(shown, 1).querySelector(".viewer-reply-submit")!.textContent).toBe("Save");
+    field.value = "Then retry four times.";
+    field.dispatchEvent(new KeyboardEvent("keydown", { bubbles: true, cancelable: true, key: "Enter", ctrlKey: true }));
+    expect(server.sent("put_replies").at(-1)!.replies).toEqual([{ id: own.id, author: "user", body: "Then retry four times." }]);
+
+    click(entry(shown, 1).querySelector("li.viewer-reply")!, '[title="Remove this reply"]');
+    expect(server.sent("remove_replies")).toEqual([{ type: "remove_replies", paneId: "v1", annotationId: "ann-0000000000000001", ids: ["rep-0000000000000001"] }]);
+    expect(notices.undoable).not.toHaveBeenCalled();
+
+    click(entry(shown, 1).querySelector("li.viewer-reply")!, '[title="Remove this reply"]');
+    expect(store.get("v1", "ann-0000000000000001")).not.toHaveProperty("replies");
+    expect(notices.undoable).toHaveBeenCalledWith("Reply removed", expect.any(Function));
+    notices.undoable.mock.calls[0][1]();
+    expect(store.get("v1", "ann-0000000000000001")!.replies).toEqual([{ id: own.id, author: "user", body: "Then retry four times." }]);
+  });
+
+  // viewer-annotations, Resolving A Thread: Resolved after the agent's answer.
+  it("Resolved after the agent's answer: folds it among the resolved ones with its replies, and marks it no longer", () => {
+    const { shown, store, server } = answered();
+    expect(marked(shown)).toEqual(["Step 3 of the plan.", "retry three times"]);
+    const resolve = entry(shown, 1).querySelector<HTMLButtonElement>(".viewer-annotation-resolve")!;
+    expect(resolve.textContent).toBe("Resolve");
+    resolve.click();
+
+    // The status goes with the annotation; its number, thread and hand-over stay.
+    expect(server.sent("put_annotations")).toEqual([{
+      type: "put_annotations", paneId: "v1",
+      annotations: [{ id: "ann-0000000000000001", kind: "comment", body: "Why three?", target: RETRY, status: "resolved", sent: true }],
+    }]);
+    expect(store.get("v1", "ann-0000000000000001")).toMatchObject({ number: 1, status: "resolved", replies: [expect.objectContaining({ author: "agent" })] });
+    const group = query<HTMLDetailsElement>(shown, "details.viewer-annotations-resolved")!;
+    expect(group.hidden).toBe(false);
+    expect(group.open).toBe(false);
+    expect(group.querySelector(".viewer-annotations-resolved-summary")!.textContent).toBe("Resolved (1)");
+    const item = group.querySelector<HTMLElement>("li.viewer-annotation")!;
+    expect(item.dataset.number).toBe("1");
+    expect(item.dataset.status).toBe("resolved");
+    expect(item.querySelectorAll("li.viewer-reply")).toHaveLength(1);
+    expect([...query(shown, ".viewer-annotations-list:not(.viewer-annotations-resolved-list)")!.children].map((each) => (each as HTMLElement).dataset.number)).toEqual(["2"]);
+    expect(marked(shown)).toEqual(["Step 3 of the plan."]);
+    expect(query(shown, ".viewer-annotations-count")!.textContent).toBe("1 open, 1 resolved");
+    expect(query(shown, ".viewer-bar-annotations")!.textContent).toBe("1 Annotation");
+    // A resolved thread is reopened before it goes on.
+    expect(item.querySelector<HTMLElement>(".viewer-annotation-actions")!.hidden).toBe(true);
+    // The group stays folded; the keyboard goes to it.
+    expect(document.activeElement).toBe(group.querySelector("summary"));
+  });
+
+  // viewer-annotations, Resolving A Thread: Reopened.
+  it("Reopened: open again with its number and replies, and marked again", () => {
+    const { shown, store, server } = answered();
+    click(entry(shown, 1), ".viewer-annotation-resolve");
+    const reopen = entry(shown, 1).querySelector<HTMLButtonElement>(".viewer-annotation-resolve")!;
+    expect(reopen.textContent).toBe("Reopen");
+    expect(reopen.title).toBe("Reopen this annotation");
+    reopen.click();
+    expect(server.sent("put_annotations").at(-1)!.annotations[0]).not.toHaveProperty("status");
+    expect(store.get("v1", "ann-0000000000000001")).toMatchObject({ number: 1, sent: true, replies: [expect.objectContaining({ author: "agent" })] });
+    expect(store.get("v1", "ann-0000000000000001")).not.toHaveProperty("status");
+    expect(entries(shown).map((each) => each.dataset.number)).toEqual(["2", "1"]);
+    expect(query(shown, "details.viewer-annotations-resolved")!.hidden).toBe(true);
+    expect(marked(shown)).toEqual(["Step 3 of the plan.", "retry three times"]);
+    expect(document.activeElement).toBe(entry(shown, 1));
+  });
+});
+
+describe("marks", () => {
+  // viewer-annotations, Annotations In The Pane: Marks hidden.
+  it("Marks hidden: no marks in the document, the list keeps the annotations, and other windows keep their marks", async () => {
+    const server = new PaneServer();
+    const first = setup({ text: PLAN, server });
+    const second = setup({ text: PLAN, server });
+    comment(first.shown, "retry three times", "Why three?");
+    await numbered(first.store);
+    server.broadcast();
+    expect(marked(second.shown)).toEqual(["retry three times"]);
+
+    const hide = query<HTMLButtonElement>(first.shown, ".viewer-annotations-hide-marks")!;
+    expect(hide.getAttribute("aria-pressed")).toBe("false");
+    hide.click();
+    expect(hide.getAttribute("aria-pressed")).toBe("true");
+    expect(marked(first.shown)).toEqual([]);
+    expect(bars(first.shown)).toHaveLength(0);
+    expect(entries(first.shown)).toHaveLength(1);
+    expect(marked(second.shown)).toEqual(["retry three times"]);
+    expect(bars(second.shown)).toHaveLength(1);
+    expect(first.shown.annotationMenu()!.marksHidden).toBe(true);
+
+    // The choice stays with the pane's next view in this window.
+    const state = first.shown.viewState();
+    expect(state).toMatchObject({ hideMarks: true });
+    const next = setup({ text: PLAN, server, store: first.store, state }).shown;
+    expect(marked(next)).toEqual([]);
+    next.annotationMenu()!.toggleMarks();
+    expect(marked(next)).toEqual(["retry three times"]);
+    expect(next.viewState()).not.toHaveProperty("hideMarks");
+  });
+
+  it("marks the passages of resolved annotations only while the user shows them", () => {
+    const { shown, server } = setup({ text: PLAN });
+    server.serve([{ id: "ann-0000000000000001", number: 1, kind: "comment", body: "Why three?", target: RETRY, status: "resolved" }]);
+    expect(marked(shown)).toEqual([]);
+    const show = query<HTMLButtonElement>(shown, ".viewer-annotations-show-resolved")!;
+    expect(show.disabled).toBe(false);
+    show.click();
+    expect(show.getAttribute("aria-pressed")).toBe("true");
+    expect(marked(shown, ".cm-viewer-marked-resolved")).toEqual(["retry three times"]);
+    expect(shown.viewState()).toMatchObject({ showResolved: true });
+    shown.annotationMenu()!.toggleResolved();
+    expect(marked(shown)).toEqual([]);
+  });
+
+  // viewer-annotations, Anchoring By Quote: The passage reworded.
+  it("The passage reworded: marks it as changed and names its recorded lines in the review", async () => {
+    const { shown, store, showMenu, writeClipboard } = setup({ text: PLAN });
+    comment(shown, "retry three times", "Why three?");
+    await numbered(store);
+    shown.update(read(`Step 0 of the plan.\n${PLAN.replace("retry three times", "retry it three times")}`, "v2"));
+    const [item] = entries(shown);
+    expect(item.dataset.state).toBe("changed");
+    expect(item.classList.contains("changed")).toBe(true);
+    expect(item.querySelector(".viewer-annotation-changed")!.textContent).toBe("changed");
+    expect(item.querySelector(".viewer-annotation-quote")!.textContent).toBe("retry three times");
+    expect(whereOf(shown)).toEqual(["Line 31"]);
+    expect(marked(shown, ".cm-viewer-marked-changed").join("")).toContain("three times");
+    expect(query(shown, ".cm-viewer-mark-changed")).not.toBeNull();
+
+    handoverMenu(shown, showMenu).find((each) => each.label === "Copy as Markdown")!.action();
     await vi.waitFor(() => expect(writeClipboard).toHaveBeenCalledTimes(1));
-    expect(writeClipboard.mock.calls[0][0]).toContain("## 1. Line 40, question\n> retry three times\n\nWhy three?");
-
-    shown.update(read(PLAN.replace("retry three times", "give up"), "v3"));
-    handoverMenu(shown, showMenu).find((item) => item.label === "Copy as Markdown")!.action();
-    await vi.waitFor(() => expect(writeClipboard).toHaveBeenCalledTimes(2));
-    expect(writeClipboard.mock.calls[1][0]).toContain("## 1. Line 30, question (passage not found in the current version)");
+    expect(writeClipboard.mock.calls[0][0]).toContain("## #1 Line 30, comment (passage changed since)\n> retry three times\n\nWhy three?");
   });
 
   // viewer-annotations, Annotations In The Pane: From the rendered view to the source.
-  it("marks the lines of a rendered passage in the source", () => {
+  it("From the rendered view to the source: marks the lines of a rendered passage in the source", () => {
     const { shown, store } = setup({ text: RENDERED_PLAN, mode: "rendered" });
     selectRendered(shown, "retry three times");
     shown.annotationMenu()!.annotate("comment");
@@ -421,8 +848,7 @@ describe("annotations in the pane", () => {
     expect(root.querySelector("[data-splitty-mark]")!.textContent).toBe("retry three times");
 
     shown.toggleMode();
-    const bars = [...shown.element.querySelectorAll(".cm-viewer-marks .cm-gutterElement")].filter((element) => element.querySelector(".cm-viewer-mark"));
-    expect(bars).toHaveLength(1);
+    expect(bars(shown)).toHaveLength(1);
     expect(query(shown, ".cm-viewer-marked")).toBeNull();
     expect(whereOf(shown)).toEqual(["Line 5"]);
   });
@@ -437,6 +863,70 @@ describe("annotations in the pane", () => {
     const root = query(shown, ".viewer-rendered")!.shadowRoot!;
     expect([...root.querySelectorAll("[data-splitty-mark]")].map((block) => block.textContent)).toEqual(["The first step."]);
   });
+});
+
+describe("annotations in the pane", () => {
+  it("lists the open ones, anchored in document order, then those not found, then general comments, and the resolved ones folded after them", async () => {
+    const { shown, store } = setup({ text: PLAN });
+    shown.annotationMenu()!.addComment();
+    write(shown, "Comment", "General remark.");
+    pressKey(shown, { key: "Enter", ctrlKey: true });
+    comment(shown, "Step 35 of the plan.", "Later step.");
+    comment(shown, "Step 3 of the plan.", "Early step.");
+    store.put("screen-1", "v1", [{
+      id: "ann-00000000000000ff", kind: "comment", body: "Gone.",
+      target: { view: "source", quote: "no such passage", prefix: "", suffix: "", startLine: 2, endLine: 2 },
+    }]);
+    store.put("screen-1", "v1", [{
+      id: "ann-00000000000000fe", kind: "comment", body: "Done.", status: "resolved",
+      target: { view: "source", quote: "Step 20 of the plan.", prefix: "", suffix: "", startLine: 20, endLine: 20 },
+    }]);
+    await numbered(store);
+    expect(whereOf(shown)).toEqual(["Line 3", "Line 35", "Line 2", "General", "Line 20"]);
+    expect(entries(shown).map((each) => each.dataset.number)).toEqual(["3", "2", "4", "1", "5"]);
+    expect(entries(shown).map((each) => each.dataset.state)).toEqual(["anchored", "anchored", "stale", "general", "anchored"]);
+    expect(entries(shown)[2].classList.contains("stale")).toBe(true);
+    expect(entries(shown)[2].querySelector(".viewer-annotation-not-found")).not.toBeNull();
+    expect(query(shown, ".viewer-annotations-resolved-list")!.contains(entries(shown)[4])).toBe(true);
+    expect(query<HTMLDetailsElement>(shown, "details.viewer-annotations-resolved")!.open).toBe(false);
+    expect(query(shown, ".viewer-annotations-count")!.textContent).toBe("4 open, 1 resolved");
+    expect(query(shown, ".viewer-bar-annotations")!.textContent).toBe("4 Annotations");
+  });
+
+  // viewer-annotations, Anchoring By Quote: Lines inserted above the passage, The passage removed.
+  it("follows the passage through new versions and keeps one that is gone", () => {
+    const { shown } = setup({ text: PLAN });
+    comment(shown, "retry three times", "Why three?");
+
+    shown.update(read(`${filler(101, 110)}\n${PLAN}`, "v2"));
+    expect(whereOf(shown)).toEqual(["Line 40"]);
+    expect(marked(shown)).toEqual(["retry three times"]);
+
+    shown.update(read(PLAN.replace("retry three times", "give up"), "v3"));
+    expect(whereOf(shown)).toEqual(["Line 30"]);
+    expect(entries(shown)[0].dataset.state).toBe("stale");
+    expect(entries(shown)[0].querySelector(".viewer-annotation-not-found")!.textContent).toBe("not found");
+    expect(entries(shown)[0].querySelector(".viewer-annotation-quote")!.textContent).toBe("retry three times");
+    expect(query(shown, ".cm-viewer-marked")).toBeNull();
+
+    shown.update(read(PLAN, "v4"));
+    expect(whereOf(shown)).toEqual(["Line 30"]);
+    expect(entries(shown)[0].dataset.state).toBe("anchored");
+  });
+
+  it("names the passage's current lines in the review, and a passage not found as such", async () => {
+    const { shown, showMenu, writeClipboard } = setup({ text: PLAN });
+    comment(shown, "retry three times", "Why three?");
+    shown.update(read(`${filler(101, 110)}\n${PLAN}`, "v2"));
+    handoverMenu(shown, showMenu).find((item) => item.label === "Copy as Markdown")!.action();
+    await vi.waitFor(() => expect(writeClipboard).toHaveBeenCalledTimes(1));
+    expect(writeClipboard.mock.calls[0][0]).toContain("## #1 Line 40, comment\n> retry three times\n\nWhy three?");
+
+    shown.update(read(PLAN.replace("retry three times", "give up"), "v3"));
+    handoverMenu(shown, showMenu).find((item) => item.label === "Copy as Markdown")!.action();
+    await vi.waitFor(() => expect(writeClipboard).toHaveBeenCalledTimes(2));
+    expect(writeClipboard.mock.calls[1][0]).toContain("## #1 Line 30, comment (passage not found in the current version)");
+  });
 
   it("names no lines for a passage of a rendered HTML page", async () => {
     const { shown, showMenu, writeClipboard } = setup({
@@ -445,25 +935,25 @@ describe("annotations in the pane", () => {
       mode: "rendered",
     });
     selectRendered(shown, "All checks passed");
-    shown.annotationMenu()!.annotate("question");
-    write(shown, "Question", "Which checks?");
+    shown.annotationMenu()!.annotate("comment");
+    write(shown, "Comment", "Which checks?");
     pressKey(shown, { key: "Enter", ctrlKey: true });
     expect(whereOf(shown)).toEqual(["Passage"]);
     handoverMenu(shown, showMenu).find((item) => item.label === "Copy as Markdown")!.action();
     await vi.waitFor(() => expect(writeClipboard).toHaveBeenCalledTimes(1));
-    expect(writeClipboard.mock.calls[0][0]).toContain("## 1. Passage, question\n> All checks passed");
+    expect(writeClipboard.mock.calls[0][0]).toContain("## #1 Passage, comment\n> All checks passed");
   });
 
   it("keeps the list closed as the user left it for the pane's next view", () => {
-    const { shown, store } = setup({ text: PLAN });
-    ask(shown, "retry three times", "Why three?");
+    const { shown, store, server } = setup({ text: PLAN });
+    comment(shown, "retry three times", "Why three?");
     expect(query(shown, ".viewer-annotations")!.hidden).toBe(false);
     query<HTMLButtonElement>(shown, ".viewer-annotations-icon")!.click();
     expect(query(shown, ".viewer-annotations")!.hidden).toBe(true);
     const state = shown.viewState();
     expect(state.annotations).toBe("closed");
 
-    const next = setup({ text: PLAN, store, state }).shown;
+    const next = setup({ text: PLAN, server, store, state }).shown;
     expect(query(next, ".viewer-annotations")!.hidden).toBe(true);
     expect(next.annotationMenu()!.listShown).toBe(false);
     query<HTMLButtonElement>(next, ".viewer-bar-annotations")!.click();
@@ -472,48 +962,142 @@ describe("annotations in the pane", () => {
 });
 
 describe("handing the review over", () => {
-  // viewer-annotations, Handing A Review To A Terminal: Send to the agent.
-  it("sends the review to the viewer's origin and ends the round", async () => {
+  // viewer-annotations, Handing A Review To A Terminal: Send to the agent, Undo after sending.
+  it("Send to the agent: pastes the review, keeps the annotations marked as handed over, and offers no undo", async () => {
     const agent = terminal("t1", "claude");
-    const { shown, store, notices } = setup({ text: PLAN, origin: agent.target });
-    ask(shown, "retry three times", "Why three?");
+    const { shown, store, server, notices } = setup({ text: PLAN, origin: agent.target });
+    comment(shown, "retry three times", "Why three?");
     const send = query<HTMLButtonElement>(shown, ".viewer-annotations-primary")!;
     expect(send.textContent).toBe("Send to claude");
     send.click();
-    await vi.waitFor(() => expect(store.count("v1")).toBe(0));
+    await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(1));
     expect(agent.pasted).toHaveLength(1);
-    expect(agent.pasted[0]).toMatch(/^# Review of PLAN\.md\n\nDocument: \/home\/me\/app\/PLAN\.md\n\n## 1\. Line 30, question/);
+    expect(agent.pasted[0]).toMatch(/^# Review of PLAN\.md\n\nDocument: \/home\/me\/app\/PLAN\.md\n\n## #1 Line 30, comment\n> retry three times\n\nWhy three\?\n\n/);
+    expect(agent.pasted[0].endsWith("Reply in a thread: splitty comments reply v1 <number> '<text>'")).toBe(true);
     expect(agent.target.reveal).toHaveBeenCalledTimes(1);
 
-    // viewer-annotations, Handing A Review To A Terminal: Undo after sending.
-    const undo = notices.sent.mock.calls[0][1] as () => void;
-    undo();
+    const [annotation] = store.list("v1");
+    expect(server.sent("mark_sent")).toEqual([{ type: "mark_sent", paneId: "v1", entries: [
+      { id: annotation.id, kind: "comment", body: "Why three?", target: annotation.target },
+    ] }]);
     expect(store.count("v1")).toBe(1);
-    expect(agent.pasted).toHaveLength(1);
+    expect(annotation.sent).toBe(true);
+    expect(entries(shown)[0].dataset.sent).toBe("");
+    expect(entries(shown)[0].querySelector(".viewer-annotation-sent")).not.toBeNull();
+    expect(notices.sent).toHaveBeenCalledWith("The review is at the prompt of claude");
+    expect(notices.sent.mock.calls[0]).toHaveLength(1);
+    expect(notices.undoable).not.toHaveBeenCalled();
+    expect(send.textContent).toBe("Send Again to claude");
+  });
+
+  // viewer-annotations, The Review: A thread with an answer; Handing A Review To A Terminal: Sent again.
+  it("sends what is new in a thread after an agent's answer, and everything open again when nothing is", async () => {
+    const agent = terminal("t1", "claude");
+    const { shown, store, server } = setup({ text: PLAN, origin: agent.target });
+    comment(shown, "retry three times", "Why three?");
+    comment(shown, "Step 3 of the plan.", "Early step.");
+    const send = query<HTMLButtonElement>(shown, ".viewer-annotations-primary")!;
+    send.click();
+    await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(1));
+    expect(agent.pasted[0]).toContain("## #2 Line 3, comment");
+    expect(agent.pasted[0]).toContain("## #1 Line 30, comment");
+
+    server.agentReplies(1, "Three covers a short outage.");
+    // An agent's reply is nothing the user sends.
+    expect(send.textContent).toBe("Send Again to claude");
+    reply(entry(shown, 1), "Then make it five.");
+    expect(send.textContent).toBe("Send to claude");
+    const own = store.get("v1", server.get(1).id)!.replies!.find((each) => each.author === "user")!;
+    send.click();
+    await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(2));
+    expect(agent.pasted[1]).toContain(
+      "## #1 Line 30, comment\n> retry three times\n\nWhy three?\n\nAgent (claude): Three covers a short outage.\n\nUser: Then make it five.",
+    );
+    expect(agent.pasted[1]).not.toContain("## #2");
+    expect(server.sent("mark_sent")[1].entries).toEqual([{ id: own.id, body: "Then make it five." }]);
+    expect(entry(shown, 1).querySelector("li.viewer-reply[data-author='user']")!.querySelector(".viewer-reply-sent")).not.toBeNull();
+
+    // Sent again: every open annotation, and nothing more to mark.
+    expect(send.textContent).toBe("Send Again to claude");
+    expect(send.title).toContain("all open annotations");
+    send.click();
+    await vi.waitFor(() => expect(agent.pasted).toHaveLength(3));
+    expect(agent.pasted[2]).toContain("## #2 Line 3, comment");
+    expect(agent.pasted[2]).toContain("## #1 Line 30, comment");
+    expect(server.sent("mark_sent")).toHaveLength(2);
+  });
+
+  it("holds no resolved annotation in a review", async () => {
+    const agent = terminal("t1", "claude");
+    const { shown, server } = setup({ text: PLAN, origin: agent.target });
+    server.serve([
+      { id: "ann-0000000000000001", number: 1, kind: "comment", body: "Why three?", target: RETRY, status: "resolved" },
+      { id: "ann-0000000000000002", number: 2, kind: "comment", body: "Split the plan." },
+    ]);
+    query<HTMLButtonElement>(shown, ".viewer-annotations-primary")!.click();
+    await vi.waitFor(() => expect(agent.pasted).toHaveLength(1));
+    expect(agent.pasted[0]).toContain("## General comments\n\n- #2 Split the plan.");
+    expect(agent.pasted[0]).not.toContain("#1");
   });
 
   // viewer-annotations, Handing A Review To A Terminal: The origin is gone.
-  it("asks for a terminal of the screen when the origin is gone, and sends nothing before", async () => {
+  it("The origin is gone: asks for a terminal of the screen, and sends nothing before", async () => {
     const shell = terminal("t2", "bash");
-    const { shown, store, showMenu } = setup({ text: PLAN, terminals: [shell.target] });
-    ask(shown, "retry three times", "Why three?");
+    const { shown, store, server, showMenu } = setup({ text: PLAN, terminals: [shell.target] });
+    comment(shown, "retry three times", "Why three?");
     const send = query<HTMLButtonElement>(shown, ".viewer-annotations-primary")!;
     expect(send.textContent).toBe("Send to Terminal…");
     send.click();
     const items = showMenu.mock.calls.at(-1)![0];
     expect(items.map((item) => item.label)).toEqual(["bash"]);
     expect(shell.pasted).toEqual([]);
-    expect(store.count("v1")).toBe(1);
     items[0].action();
-    await vi.waitFor(() => expect(store.count("v1")).toBe(0));
-    expect(shell.pasted).toHaveLength(1);
+    await vi.waitFor(() => expect(shell.pasted).toHaveLength(1));
+    await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(1));
+    expect(store.count("v1")).toBe(1);
+    expect(send.textContent).toBe("Send Again to Terminal…");
+  });
+
+  // viewer-annotations, Handing A Review To A Terminal: A program without bracketed paste.
+  it("A program without bracketed paste: stores the review as a file, inserts its path and marks what it held", async () => {
+    const agent = terminal("t1", "claude", { bracketedPaste: false });
+    const { shown, server, notices } = setup({ text: PLAN, origin: agent.target });
+    comment(shown, "retry three times", "Why three?");
+    query<HTMLButtonElement>(shown, ".viewer-annotations-primary")!.click();
+    await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(1));
+    expect(agent.pasted).toEqual(["/home/me/.cache/splitty/uploads/review-PLAN.md"]);
+    expect(notices.sent.mock.calls[0][0]).toContain("takes no bracketed paste");
+  });
+
+  // viewer-annotations, Handing A Review To A Terminal: Into the scratchpad.
+  it("Into the scratchpad: appends the review, sends the terminal nothing and marks what it held", async () => {
+    const agent = terminal("t1", "claude", { scratchpad: true });
+    const { shown, server, showMenu } = setup({ text: PLAN, origin: agent.target });
+    comment(shown, "retry three times", "Why three?");
+    const into = handoverMenu(shown, showMenu).find((item) => item.label === "Append to Scratchpad Of")!;
+    expect(into.children!.map((item) => [item.label, !!item.disabled])).toEqual([["claude", false]]);
+    into.children![0].action();
+    await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(1));
+    expect(agent.scratchpad()).toMatch(/^# Review of PLAN\.md\n/);
+    expect(agent.scratchpad()).toContain("## #1 Line 30, comment");
+    expect(agent.pasted).toEqual([]);
+    expect(agent.target.scratchpad!.open).toHaveBeenCalledTimes(1);
+  });
+
+  it("marks nothing when the review did not go out", async () => {
+    const agent = terminal("t1", "claude", { upload: async () => { throw new Error("The connection changed during the upload."); } });
+    const { shown, server, showMenu, notices } = setup({ text: PLAN, origin: agent.target });
+    comment(shown, "retry three times", "Why three?");
+    handoverMenu(shown, showMenu).find((item) => item.label === "Send as File To")!.children![0].action();
+    await vi.waitFor(() => expect(notices.error).toHaveBeenCalledWith("The review was not sent", "The connection changed during the upload."));
+    expect(server.sent("mark_sent")).toEqual([]);
   });
 
   it("offers every form of hand-over, the origin first", () => {
     const agent = terminal("t1", "claude");
     const shell = terminal("t2", "bash");
     const { shown, showMenu } = setup({ text: PLAN, origin: agent.target, terminals: [shell.target, agent.target] });
-    ask(shown, "retry three times", "Why three?");
+    comment(shown, "retry three times", "Why three?");
     const items = handoverMenu(shown, showMenu);
     expect(items.filter((item) => !item.separator).map((item) => item.label)).toEqual([
       "Send To", "Send as File To", "Append to Scratchpad Of", "Copy as Markdown", "Save as File", "Clear Annotations",
@@ -525,49 +1109,181 @@ describe("handing the review over", () => {
 
   it("names no terminal where the screen has none", () => {
     const { shown, showMenu } = setup({ text: PLAN });
-    ask(shown, "retry three times", "Why three?");
+    comment(shown, "retry three times", "Why three?");
     const items = handoverMenu(shown, showMenu);
     expect(items[0].children).toEqual([expect.objectContaining({ label: "No terminal pane on this screen", disabled: true })]);
   });
 
   // viewer-annotations, Handing A Review To A Terminal: Copied.
-  it("copies and saves the review and keeps the annotations", async () => {
-    const { shown, store, showMenu, writeClipboard, download, notices } = setup({ text: PLAN });
-    ask(shown, "retry three times", "Why three?");
+  it("Copied: copies and saves the review, and marks nothing", async () => {
+    const { shown, store, server, showMenu, writeClipboard, download, notices } = setup({ text: PLAN });
+    comment(shown, "retry three times", "Why three?");
     handoverMenu(shown, showMenu).find((item) => item.label === "Copy as Markdown")!.action();
     await vi.waitFor(() => expect(notices.info).toHaveBeenCalledWith("The review is in the clipboard"));
     expect(writeClipboard.mock.calls[0][0]).toMatch(/^# Review of PLAN\.md/);
     handoverMenu(shown, showMenu).find((item) => item.label === "Save as File")!.action();
+    await vi.waitFor(() => expect(download).toHaveBeenCalledTimes(1));
     expect(download.mock.calls[0][0]).toBe("review-PLAN.md");
     expect(await download.mock.calls[0][1].text()).toBe(writeClipboard.mock.calls[0][0]);
-    expect(store.count("v1")).toBe(1);
+    expect(server.sent("mark_sent")).toEqual([]);
+    expect(store.list("v1")[0]).not.toHaveProperty("sent");
   });
 
-  it("clears the annotations with an undo", () => {
+  it("clears the annotations with an undo", async () => {
     const { shown, store, showMenu, notices } = setup({ text: PLAN });
-    ask(shown, "retry three times", "Why three?");
-    ask(shown, "Step 3 of the plan.", "Early step.");
+    comment(shown, "retry three times", "Why three?");
+    comment(shown, "Step 3 of the plan.", "Early step.");
+    await numbered(store);
     handoverMenu(shown, showMenu).find((item) => item.label === "Clear Annotations")!.action();
     expect(store.count("v1")).toBe(0);
     expect(notices.undoable).toHaveBeenCalledWith("2 annotations cleared", expect.any(Function));
     notices.undoable.mock.calls[0][1]();
     expect(store.count("v1")).toBe(2);
+    await vi.waitFor(() => expect(store.list("v1").map((annotation) => annotation.number)).toEqual([3, 4]));
   });
 
   // viewer-annotations, Handing A Review To A Terminal: Added while sending.
-  it("keeps an annotation another window added while the review was on its way", async () => {
-    let stored: (path: string) => void = () => {};
+  it("Added while sending: an annotation another window added stays pending, as does one changed meanwhile", async () => {
+    let stored: ((path: string) => void) | undefined;
     const agent = terminal("t1", "claude", { upload: () => new Promise<string>((resolve) => { stored = resolve; }) });
-    const { shown, store, showMenu } = setup({ text: PLAN, origin: agent.target });
-    ask(shown, "retry three times", "Why three?");
-    const [own] = store.list("v1");
-    handoverMenu(shown, showMenu).find((item) => item.label === "Send as File To")!.children![0].action();
+    const server = new PaneServer();
+    const first = setup({ text: PLAN, server, origin: agent.target });
+    const second = setup({ text: PLAN, server });
+    comment(first.shown, "retry three times", "Why three?");
+    comment(first.shown, "Step 3 of the plan.", "Early step.");
+    await numbered(first.store);
+    handoverMenu(first.shown, first.showMenu).find((item) => item.label === "Send as File To")!.children![0].action();
+    await vi.waitFor(() => expect(stored).toBeDefined());
 
-    const theirs: ViewerAnnotation = { id: "ann-00000000000000bb", kind: "comment", body: "From the other window." };
-    store.snapshot(screenWith([own, theirs]));
+    // While the review is on its way, the other window adds one, and this window edits #2.
+    server.broadcast();
+    comment(second.shown, "Step 12 of the plan.", "From the other window.");
+    await numbered(second.store);
+    server.broadcast();
+    click(entry(first.shown, 2), '[title="Edit this annotation"]');
+    write(first.shown, "Comment", "Earlier step.");
+    pressKey(first.shown, { key: "Enter", ctrlKey: true });
+
+    stored!("/home/me/.cache/splitty/uploads/review-PLAN.md");
+    await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(1));
+    expect(server.sent("mark_sent")[0].entries.map((entry) => entry.id)).toEqual([server.get(1).id]);
+    expect(server.get(1).sent).toBe(true);
+    expect(server.get(2)).not.toHaveProperty("sent");
+    expect(server.get(3)).not.toHaveProperty("sent");
+    expect(query(first.shown, ".viewer-annotations-primary")!.textContent).toBe("Send to claude");
+  });
+});
+
+describe("waiting for a review", () => {
+  function banner(view: ViewerView): HTMLElement {
+    return query(view, ".viewer-review-wait")!;
+  }
+
+  // viewer-annotations, Waiting For A Review: Feedback on a plan.
+  it("Feedback on a plan: sends the review to the waiting command, and marks it once the server took it", async () => {
+    let take: ((accepted: boolean) => void) | undefined;
+    const answer = vi.fn((_request: ReviewAnswerRequest) => new Promise<boolean>((resolve) => { take = resolve; }));
+    const { shown, store, server, notices } = setup({ text: PLAN, record: WAITING, answer });
+    const shownBanner = banner(shown);
+    expect(shown.element.firstElementChild).toBe(shownBanner);
+    expect(shownBanner.hidden).toBe(false);
+    expect(shownBanner.dataset.waitId).toBe(WAIT.id);
+    expect(shownBanner.querySelector(".viewer-review-wait-text")!.textContent).toBe("claude waits for a review");
+    const sendReview = shownBanner.querySelector<HTMLButtonElement>(".viewer-review-wait-send")!;
+    const approve = shownBanner.querySelector<HTMLButtonElement>(".viewer-review-wait-approve")!;
+    expect(sendReview.textContent).toBe("Send Review");
+    expect(sendReview.disabled).toBe(true);
+
+    comment(shown, "retry three times", "Why three?");
+    comment(shown, "Step 3 of the plan.", "Early step.");
+    expect(sendReview.disabled).toBe(false);
+    sendReview.click();
+    await vi.waitFor(() => expect(answer).toHaveBeenCalledTimes(1));
+    const [request] = answer.mock.calls[0];
+    expect(request).toMatchObject({ screenId: "screen-1", paneId: "v1", waitId: WAIT.id, outcome: "feedback" });
+    expect(request.review).toMatch(/^# Review of PLAN\.md\n/);
+    expect(request.review).toContain("## #2 Line 3, comment");
+    expect(request.review).toContain("## #1 Line 30, comment");
+    // Nothing is marked before the server took the answer; meanwhile the banner waits.
+    expect(server.sent("mark_sent")).toEqual([]);
+    expect(sendReview.disabled).toBe(true);
+    expect(approve.disabled).toBe(true);
+    expect(shownBanner.getAttribute("aria-busy")).toBe("true");
+
+    take!(true);
+    await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(1));
+    expect(server.sent("mark_sent")[0].entries.map((entry) => entry.id).sort()).toEqual(store.list("v1").map((annotation) => annotation.id).sort());
     expect(store.count("v1")).toBe(2);
-    stored("/home/me/.cache/splitty/uploads/review-PLAN.md");
-    await vi.waitFor(() => expect(agent.pasted).toEqual(["/home/me/.cache/splitty/uploads/review-PLAN.md"]));
-    expect(store.list("v1")).toEqual([theirs]);
+    expect(shownBanner.hidden).toBe(true);
+    expect(notices.sent).toHaveBeenCalledWith("The review went to claude");
+  });
+
+  // viewer-annotations, Waiting For A Review: Approved.
+  it("Approved: answers without a review and marks nothing", async () => {
+    const answer = vi.fn(async (_request: ReviewAnswerRequest) => true);
+    const { shown, server, notices } = setup({ text: PLAN, record: WAITING, answer });
+    comment(shown, "retry three times", "Why three?");
+    banner(shown).querySelector<HTMLButtonElement>(".viewer-review-wait-approve")!.click();
+    await vi.waitFor(() => expect(banner(shown).hidden).toBe(true));
+    expect(answer.mock.calls[0][0]).toEqual({ screenId: "screen-1", paneId: "v1", waitId: WAIT.id, outcome: "approved" });
+    expect(server.sent("mark_sent")).toEqual([]);
+    expect(notices.info).toHaveBeenCalledWith("Approved for claude");
+  });
+
+  // viewer-annotations, Waiting For A Review: Two windows answer.
+  it("Two windows answer: the window whose answer came second marks nothing", async () => {
+    const server = new PaneServer();
+    let settled = false;
+    const answer = vi.fn(async (_request: ReviewAnswerRequest) => {
+      const first = !settled;
+      settled = true;
+      return first;
+    });
+    const first = setup({ text: PLAN, server, record: WAITING, answer });
+    const second = setup({ text: PLAN, server, record: WAITING, answer });
+    comment(first.shown, "retry three times", "Why three?");
+    await numbered(first.store);
+    server.broadcast();
+
+    banner(second.shown).querySelector<HTMLButtonElement>(".viewer-review-wait-approve")!.click();
+    await vi.waitFor(() => expect(answer).toHaveBeenCalledTimes(1));
+    banner(first.shown).querySelector<HTMLButtonElement>(".viewer-review-wait-send")!.click();
+    await vi.waitFor(() => expect(first.notices.info).toHaveBeenCalledWith("The review was not taken: the command no longer waits for it"));
+    expect(answer).toHaveBeenCalledTimes(2);
+    expect(server.sent("mark_sent")).toEqual([]);
+    expect(banner(first.shown).hidden).toBe(true);
+  });
+
+  // viewer-annotations, Waiting For A Review: The agent stops waiting.
+  it("The agent stops waiting: offers no answer any more, and the annotations stay", () => {
+    const { shown, store } = setup({ text: PLAN, record: WAITING, answer: async () => true });
+    comment(shown, "retry three times", "Why three?");
+    shown.setRecord(PLAN_RECORD);
+    expect(banner(shown).hidden).toBe(true);
+    expect(store.count("v1")).toBe(1);
+    // A new wait is offered again.
+    shown.setRecord({ ...PLAN_RECORD, reviewWait: { ...WAIT, id: "wait-00000000000000ff", title: "" } });
+    expect(banner(shown).hidden).toBe(false);
+    expect(banner(shown).querySelector(".viewer-review-wait-text")!.textContent).toBe("A command waits for a review");
+  });
+
+  it("says when the answer did not arrive, and offers it again", async () => {
+    const answer = vi.fn(async (_request: ReviewAnswerRequest): Promise<boolean> => {
+      throw new Error("The connection to the server ended before it took the answer.");
+    });
+    const { shown, server, notices } = setup({ text: PLAN, record: WAITING, answer });
+    comment(shown, "retry three times", "Why three?");
+    banner(shown).querySelector<HTMLButtonElement>(".viewer-review-wait-send")!.click();
+    await vi.waitFor(() => expect(notices.error).toHaveBeenCalledWith(
+      "The answer did not reach claude", "The connection to the server ended before it took the answer.",
+    ));
+    expect(server.sent("mark_sent")).toEqual([]);
+    expect(banner(shown).hidden).toBe(false);
+    expect(banner(shown).querySelector<HTMLButtonElement>(".viewer-review-wait-send")!.disabled).toBe(false);
+  });
+
+  it("shows no banner where the server keeps no annotations", () => {
+    const { shown } = setup({ text: PLAN, record: WAITING, answer: async () => true, available: false });
+    expect(banner(shown).hidden).toBe(true);
   });
 });

@@ -1,8 +1,10 @@
 /**
- * The form in which an annotation is written (D6 of review-pane): its
- * kind, the passage exactly as it is stored, the remark and, for a suggested
- * change, the replacement, prefilled with the passage. Ctrl+Enter or
- * Cmd+Enter saves, Escape cancels.
+ * The form in which an annotation is written (D6 of review-pane, D1 of
+ * review-threads): its kind, a comment or a suggested change, the passage
+ * exactly as it is stored, the remark and, for a suggested change, the
+ * replacement, which starts as the passage. An empty replacement suggests
+ * deleting the passage, and the form says so. A general comment is a
+ * comment. Ctrl+Enter or Cmd+Enter saves, Escape cancels.
  *
  * The passage is shown read-only and scrolls when it is long: in the rendered
  * view a selection also takes text the document hides with CSS, and the form
@@ -23,11 +25,12 @@ export interface FormDraft {
 export interface AnnotationFormOptions {
   /** The kind the form starts with. */
   readonly kind: AnnotationKind;
-  /** The passage as it is stored; absent for a general comment, which is a comment or a question. */
+  /** The passage as it is stored; absent for a general comment, which is a comment. */
   readonly quote?: string;
   /** Where the passage is, as the list names it. */
   readonly where?: string;
   readonly body?: string;
+  /** The replacement of a change being edited; a new change starts with the passage. */
   readonly replacement?: string;
   /** The annotation exists already. */
   readonly editing: boolean;
@@ -38,17 +41,15 @@ export interface AnnotationFormOptions {
 
 const KIND_LABELS: Record<AnnotationKind, string> = {
   comment: "Comment",
-  question: "Question",
   change: "Change",
-  delete: "Deletion",
 };
 
 const REMARK_LABELS: Record<AnnotationKind, string> = {
   comment: "Comment",
-  question: "Question",
   change: "Reason (optional)",
-  delete: "Reason (optional)",
 };
+
+export const DELETION_NOTE = "An empty replacement suggests deleting the passage.";
 
 function element<K extends keyof HTMLElementTagNameMap>(doc: Document, tag: K, className: string, text?: string): HTMLElementTagNameMap[K] {
   const node = doc.createElement(tag);
@@ -66,28 +67,35 @@ export class AnnotationForm {
   private readonly remarkLabel: HTMLElement;
   private readonly replacement: HTMLTextAreaElement;
   private readonly replacementBox: HTMLElement;
+  private readonly deletionNote: HTMLElement;
   private readonly problem: HTMLElement;
+  /** The replacement holds what the user or the annotation gave it, so switching kinds leaves it as it is. */
+  private replacementGiven: boolean;
 
   constructor(doc: Document, private readonly options: AnnotationFormOptions) {
-    this.kind = options.kind;
+    this.kind = options.quote === undefined ? "comment" : options.kind;
     this.element = element(doc, "div", "viewer-annotation-form");
     this.element.setAttribute("role", "dialog");
 
     const header = element(doc, "div", "viewer-form-header");
     this.title = element(doc, "span", "viewer-form-title");
-    const kinds = element(doc, "div", "viewer-form-kinds");
-    kinds.setAttribute("role", "radiogroup");
-    kinds.setAttribute("aria-label", "Kind");
-    const offered: AnnotationKind[] = options.quote === undefined ? ["comment", "question"] : ["comment", "question", "change", "delete"];
-    for (const kind of offered) {
-      const button = element(doc, "button", "viewer-form-kind", KIND_LABELS[kind]);
-      button.type = "button";
-      button.setAttribute("role", "radio");
-      button.addEventListener("click", () => this.setKind(kind));
-      this.kindButtons.set(kind, button);
-      kinds.append(button);
+    header.append(this.title);
+    // A general comment has one kind.
+    if (options.quote !== undefined) {
+      const kinds = element(doc, "div", "viewer-form-kinds");
+      kinds.setAttribute("role", "radiogroup");
+      kinds.setAttribute("aria-label", "Kind");
+      for (const kind of ["comment", "change"] as const) {
+        const button = element(doc, "button", "viewer-form-kind", KIND_LABELS[kind]);
+        button.type = "button";
+        button.dataset.kind = kind;
+        button.setAttribute("role", "radio");
+        button.addEventListener("click", () => this.setKind(kind));
+        this.kindButtons.set(kind, button);
+        kinds.append(button);
+      }
+      header.append(kinds);
     }
-    header.append(this.title, kinds);
     this.element.append(header);
 
     if (options.quote !== undefined) {
@@ -99,14 +107,21 @@ export class AnnotationForm {
       this.element.append(label, quote);
     }
 
-    this.replacementBox = element(doc, "div", "viewer-form-field");
+    this.replacementBox = element(doc, "div", "viewer-form-field viewer-form-replacement");
     this.replacementBox.append(element(doc, "div", "viewer-form-label", "Replace with"));
     this.replacement = element(doc, "textarea", "viewer-form-text");
     this.replacement.rows = 3;
     this.replacement.spellcheck = false;
     this.replacement.setAttribute("aria-label", "Replacement");
-    this.replacement.value = options.replacement ?? (options.kind === "change" ? options.quote ?? "" : "");
-    this.replacementBox.append(this.replacement);
+    this.replacementGiven = options.replacement !== undefined;
+    this.replacement.value = options.replacement ?? (this.kind === "change" ? options.quote ?? "" : "");
+    if (this.kind === "change") this.replacementGiven = true;
+    this.deletionNote = element(doc, "p", "viewer-form-deletion", DELETION_NOTE);
+    this.replacementBox.append(this.replacement, this.deletionNote);
+    this.replacement.addEventListener("input", () => {
+      this.replacementGiven = true;
+      this.showTitle();
+    });
 
     const remarkBox = element(doc, "div", "viewer-form-field");
     this.remarkLabel = element(doc, "div", "viewer-form-label");
@@ -166,13 +181,26 @@ export class AnnotationForm {
       button.setAttribute("aria-checked", String(each === kind));
       button.classList.toggle("selected", each === kind);
     }
-    const verb = this.options.editing ? "Edit" : "New";
-    this.title.textContent = `${verb} ${KIND_LABELS[kind]}`;
+    // A change starts with the passage the first time it is chosen.
+    if (kind === "change" && !this.replacementGiven) {
+      this.replacement.value = this.options.quote ?? "";
+      this.replacementGiven = true;
+    }
     this.remarkLabel.textContent = REMARK_LABELS[kind];
     this.remark.setAttribute("aria-label", REMARK_LABELS[kind]);
     this.replacementBox.hidden = kind !== "change";
-    if (kind === "change" && !this.replacement.value) this.replacement.value = this.options.quote ?? "";
     this.problem.hidden = true;
+    this.showTitle();
+  }
+
+  /** The title names what the form makes: a comment, a suggested change, or a suggested deletion. */
+  private showTitle(): void {
+    const verb = this.options.editing ? "Edit" : "New";
+    const deletion = this.kind === "change" && this.replacement.value === "";
+    const what = this.kind === "comment" ? "Comment" : deletion ? "Suggested Deletion" : "Suggested Change";
+    this.title.textContent = `${verb} ${what}`;
+    this.deletionNote.hidden = !deletion;
+    this.element.setAttribute("aria-label", this.title.textContent);
   }
 
   private save(): void {

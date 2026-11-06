@@ -9,11 +9,11 @@
  */
 
 import type {
-  FloatingEntry, LayoutNode, PaneState, ScreenInfo, ScreenState, SessionState, ViewerRecord, ViewerSource,
+  FloatingEntry, LayoutNode, PaneState, ReviewWait, ScreenInfo, ScreenState, SessionState, ViewerRecord, ViewerSource,
 } from "../protocol/types.ts";
-import { MAX_NAME, MAX_TITLE, MAX_VALUE, optionalBounded, optionalText } from "../protocol/untrusted.ts";
+import { MAX_NAME, MAX_TITLE, MAX_VALUE, optionalBounded, optionalText, plainText } from "../protocol/untrusted.ts";
 import { SCRATCHPAD_LIMIT } from "../scratchpad.ts";
-import { receivedAnnotations } from "../viewer/annotations.ts";
+import { REPLY_TITLE_LIMIT, isWaitId, receivedAnnotations } from "../viewer/annotations.ts";
 import { isViewerPath, isViewerTitle } from "../viewer/limits.ts";
 
 /** Deeper layout trees are cut off; no real layout comes close. */
@@ -132,6 +132,7 @@ function paneState(id: string, raw: Raw): PaneState {
  * listed fields is kept, so a text a server put into a snapshot goes no further.
  * Its annotations are checked by the server's rules (`viewer-annotations`);
  * malformed ones are dropped and the list is bounded by the pane's limits.
+ * A malformed counter of numbers or wait is left out.
  */
 function viewerRecord(value: unknown): ViewerRecord | undefined {
   if (!isRecord(value) || !isRecord(value.source)) return undefined;
@@ -140,12 +141,29 @@ function viewerRecord(value: unknown): ViewerRecord | undefined {
   if (!source || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) return undefined;
   const origin = value.originPaneId;
   const annotations = receivedAnnotations(value.annotations);
+  const last = value.lastAnnotationNumber;
+  const wait = reviewWait(value.reviewWait);
   return {
     source,
     revision,
     ...(typeof origin === "string" && origin.length > 0 && origin.length <= 256 ? { originPaneId: origin } : {}),
     ...(annotations.length > 0 ? { annotations } : {}),
+    ...(typeof last === "number" && Number.isSafeInteger(last) && last > 0 ? { lastAnnotationNumber: last } : {}),
+    ...(wait ? { reviewWait: wait } : {}),
   };
+}
+
+/**
+ * The wait of a process for a review of the pane (`viewer-annotations`,
+ * Waiting For A Review). The waiting pane's title is untrusted text, shown
+ * in the pane: controls and bidirectional formatting characters go.
+ */
+function reviewWait(value: unknown): ReviewWait | undefined {
+  if (!isRecord(value) || !isWaitId(value.id)) return undefined;
+  const { paneId } = value;
+  if (typeof paneId !== "string" || paneId.length === 0 || paneId.length > 256) return undefined;
+  const title = plainText(value.title, REPLY_TITLE_LIMIT).trim();
+  return { id: value.id, paneId, title };
 }
 
 function viewerSource(raw: Raw): ViewerSource | undefined {
@@ -153,7 +171,9 @@ function viewerSource(raw: Raw): ViewerSource | undefined {
     return typeof raw.path === "string" && isViewerPath(raw.path) ? { kind: "file", path: raw.path } : undefined;
   }
   if (raw.kind === "text") {
-    return typeof raw.title === "string" && isViewerTitle(raw.title) ? { kind: "text", title: raw.title } : undefined;
+    if (typeof raw.title !== "string" || !isViewerTitle(raw.title)) return undefined;
+    // Any other format shows as plain text.
+    return raw.format === "markdown" ? { kind: "text", title: raw.title, format: "markdown" } : { kind: "text", title: raw.title };
   }
   return undefined;
 }

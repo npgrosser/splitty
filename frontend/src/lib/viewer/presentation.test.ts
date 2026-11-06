@@ -76,6 +76,11 @@ describe("presentationOf", () => {
     expect(presentationOf({ kind: "text", title: "Selection from claude" }, text("# Not rendered\n"))).toEqual({ kind: "source" });
     expect(presentationOf({ kind: "text", title: "PLAN.md" }, text("# Not rendered\n"))).toEqual({ kind: "source" });
   });
+
+  // viewer-panes, Showing A Document (A plan in Markdown).
+  it("renders a text document whose format is Markdown", () => {
+    expect(presentationOf({ kind: "text", title: "Plan", format: "markdown" }, text("# Plan\n"))).toEqual({ kind: "rendered", format: "markdown" });
+  });
 });
 
 describe("helpers", () => {

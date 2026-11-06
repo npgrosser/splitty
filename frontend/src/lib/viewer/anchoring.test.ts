@@ -3,6 +3,9 @@ import {
   anchor,
   anchorer,
   CONTEXT_CHARS,
+  SIMILAR_LINES,
+  SIMILAR_MAX_QUOTE,
+  SIMILAR_SCORE,
   lastLine,
   lineAt,
   lineStarts,
@@ -95,7 +98,7 @@ describe("targetAt", () => {
 });
 
 describe("anchor", () => {
-  it("finds the passage again after lines were inserted above it", () => {
+  it("Lines inserted above the passage: finds the passage again at its new lines", () => {
     const before = `${numberedLines(4)}\nThe cache is rebuilt on every change.\n${numberedLines(3, 6)}`;
     const target = selectionTarget(before, "rebuilt on every change");
     expect(target.startLine).toBe(5);
@@ -119,7 +122,7 @@ describe("anchor", () => {
     if (again.state === "anchored") expect(again.anchor.startLine).toBe(3);
   });
 
-  it("picks the occurrence with the recorded context over a nearer one", () => {
+  it("The same words twice: picks the occurrence with the recorded context over a nearer one", () => {
     const original = "intro\nThen deploy, run the tests again.\n";
     const target = selectionTarget(original, "the tests");
     expect(target.startLine).toBe(2);
@@ -174,6 +177,128 @@ describe("anchor", () => {
       anchorAll({ quote, prefix: "", suffix: "", startLine: 1, endLine: 1 }).state,
     );
     expect(states).toEqual(["anchored", "anchored", "stale"]);
+  });
+});
+
+describe("a changed passage", () => {
+  const plan = [
+    "# Plan",
+    "",
+    "1. Read the configuration from the file.",
+    "2. Cache the session list and invalidate it on every change.",
+    "3. Retry three times before giving up.",
+    "4. Write the result to the log.",
+    "",
+  ].join("\n");
+  const quote = "Cache the session list and invalidate it on every change.";
+
+  it("The passage reworded: anchors at the passage the quote became, as changed", () => {
+    const target = selectionTarget(plan, quote);
+    const reworded = plan
+      .replace("# Plan\n", "# Plan\n\nA short introduction.\n")
+      .replace(quote, "Cache the list of sessions and invalidate it on each change.");
+    const result = anchor(reworded, target);
+    expect(result.state).toBe("changed");
+    if (result.state !== "changed") return;
+    expect(reworded.slice(result.anchor.start, result.anchor.end)).toBe("Cache the list of sessions and invalidate it on each change.");
+    expect(result.anchor.startLine).toBe(6);
+    expect(result.anchor.endLine).toBe(6);
+    expect(result.score).toBeGreaterThanOrEqual(SIMILAR_SCORE);
+    expect(result.score).toBeLessThan(1);
+    // The target keeps its recorded quote and lines.
+    expect(target.quote).toBe(quote);
+    expect(target.startLine).toBe(4);
+  });
+
+  it("folds case and collapses whitespace before comparing", () => {
+    const target = selectionTarget(plan, quote);
+    const shouted = plan.replace(quote, "CACHE the session  list and\ninvalidate it on any change.");
+    const result = anchor(shouted, target);
+    expect(result.state).toBe("changed");
+    if (result.state !== "changed") return;
+    expect(shouted.slice(result.anchor.start, result.anchor.end)).toBe("CACHE the session  list and\ninvalidate it on any change.");
+    expect(result.anchor).toMatchObject({ startLine: 4, endLine: 5 });
+  });
+
+  it("The passage removed: stays not found when nothing similar is near", () => {
+    const target = selectionTarget(plan, quote);
+    const rewritten = plan.replace(`2. ${quote}\n`, "2. Compute the list on demand.\n");
+    expect(anchor(rewritten, target)).toEqual({ state: "stale" });
+  });
+
+  it("anchors without a change again once a later version holds the quote", () => {
+    const target = selectionTarget(plan, quote);
+    const reworded = plan.replace(quote, "Cache the list of sessions and invalidate it on each change.");
+    expect(anchor(reworded, target).state).toBe("changed");
+    expect(anchor(plan, target).state).toBe("anchored");
+  });
+
+  it("looks only near the recorded lines", () => {
+    const target = selectionTarget(plan, quote);
+    const reworded = "Cache the list of sessions and invalidate it on each change.";
+    const far = `${numberedLines(SIMILAR_LINES + 10)}\n${reworded}\n`;
+    expect(anchor(far, target)).toEqual({ state: "stale" });
+    const near = `${numberedLines(SIMILAR_LINES - 10)}\n${reworded}\n`;
+    expect(anchor(near, target).state).toBe("changed");
+  });
+
+  it("prefers the similar passage nearest the recorded lines among equal ones", () => {
+    const target: QuoteTarget = { quote: "retry three times before giving up", prefix: "", suffix: "", startLine: 20, endLine: 20 };
+    const lines = numberedLines(30).split("\n");
+    lines[4] = "Retry four times before giving up";
+    lines[22] = "Retry four times before giving up";
+    const text = lines.join("\n");
+    const result = anchor(text, target);
+    expect(result.state).toBe("changed");
+    if (result.state === "changed") expect(result.anchor.startLine).toBe(23);
+  });
+
+  it("skips the search for a quote of more than 4,000 characters", () => {
+    const long = "word ".repeat(SIMILAR_MAX_QUOTE / 5 + 1).trim();
+    const target: QuoteTarget = { quote: long, prefix: "", suffix: "", startLine: 1, endLine: 1 };
+    expect(anchor(`${long.slice(0, -10)} other`, target)).toEqual({ state: "stale" });
+    const fits = long.slice(0, 3_000);
+    expect(anchor(`${fits.slice(0, -10)} other`, { ...target, quote: fits }).state).toBe("changed");
+  });
+
+  it("starts and ends a passage at any character of a script without spaces", () => {
+    const target: QuoteTarget = { quote: "設定ファイルを読み込んでから接続する", prefix: "", suffix: "", startLine: 1, endLine: 1 };
+    const text = "最初に設定ファイルを読み込んで接続する。次に進む。";
+    const result = anchor(text, target);
+    expect(result.state).toBe("changed");
+    if (result.state === "changed") expect(text.slice(result.anchor.start, result.anchor.end)).toBe("設定ファイルを読み込んで接続する");
+  });
+
+  it("does not stall on a large document or a long line", () => {
+    const words = ["cache", "session", "list", "retry", "change", "window", "server", "review", "thread", "passage"];
+    let seed = 7;
+    const next = () => {
+      seed = (Math.imul(seed, 1103515245) + 12345) | 0;
+      return (seed >>> 8) & 0xffff;
+    };
+    const prose = (chars: number, width: number) => {
+      const out: string[] = [];
+      let length = 0;
+      let column = 0;
+      while (length < chars) {
+        const word = `${words[next() % words.length]}${next() % 100}`;
+        const gap = column + word.length > width ? "\n" : " ";
+        column = gap === "\n" ? 0 : column + word.length + 1;
+        out.push(word, gap);
+        length += word.length + 1;
+      }
+      return out.join("");
+    };
+    const large = prose(8 * 1024 * 1024, 80);
+    const line = prose(2 * 1024 * 1024, Number.MAX_SAFE_INTEGER);
+    for (const text of [large, line]) {
+      const anchorAll = anchorer(text);
+      const started = performance.now();
+      for (let i = 0; i < 20; i++) {
+        anchorAll({ quote: prose(SIMILAR_MAX_QUOTE - 100 - i, Number.MAX_SAFE_INTEGER).trim(), prefix: "", suffix: "", startLine: 1 + i * 500, endLine: 1 + i * 500 });
+      }
+      expect(performance.now() - started).toBeLessThan(5_000);
+    }
   });
 });
 

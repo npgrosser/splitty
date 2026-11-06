@@ -13,24 +13,38 @@
  * document. A rendered HTML page names no lines, so its passages show only
  * in its rendered view.
  *
+ * A passage that changed is anchored where it most likely is now and marked
+ * in its own style; resolved annotations are marked only while the user
+ * shows them, and the user can hide every mark of the pane. Both choices are
+ * the window's own and stay with the pane's views (`viewer_view_state.ts`).
+ *
+ * Sending the review marks what it held as handed over and keeps it (D4 of
+ * review-threads); a process waiting for the review is answered from the
+ * pane's banner (`review_banner.ts`).
+ *
  * Annotations are offered while the pane's server keeps them and the
  * document is text; an image or a binary file shows the list only while it
  * holds annotations.
  */
 
 import type { ContextMenuItem } from "../../stores/ui.svelte.ts";
-import type { AnnotationKind, AnnotationTarget, ViewerAnnotation } from "../../lib/protocol/types.ts";
+import type { AnnotationKind, AnnotationTarget, ReviewOutcome, ReviewWait, SentEntry, ViewerAnnotation } from "../../lib/protocol/types.ts";
 import { anchorer, sourceLines, targetAt, type Anchor, type Anchoring, type LineRange, type QuoteTarget } from "../../lib/viewer/anchoring.ts";
 import {
-  ANNOTATION_LINE_LIMIT, ANNOTATION_TEXT_LIMIT, MIN_QUOTE_CHARS, newAnnotationId, registerAnnotationList, type ViewerAnnotations,
+  ANNOTATION_LINE_LIMIT, ANNOTATION_TEXT_LIMIT, MIN_QUOTE_CHARS, isBlank, isDeletion, isOpen, newAnnotationId, newReplyId, ownOf,
+  pendingEntries, registerAnnotationList, reviewSelection, sameContent, type ViewerAnnotations,
 } from "../../lib/viewer/annotations.ts";
 import { utf8Length } from "../../lib/viewer/limits.ts";
-import { scratchpadProblem, sendReview, type HandoverNotices, type Review, type ReviewTarget, type SendForm } from "../../lib/viewer/handover.ts";
+import {
+  REVIEW_ANSWER_LIMIT, scratchpadProblem, sendReview, type HandoverNotices, type Review, type ReviewAnswerRequest, type ReviewTarget,
+  type SendForm,
+} from "../../lib/viewer/handover.ts";
 import type { BlockMark, BoundaryRange, RenderedDocument, RenderedMark, RenderedText } from "../../lib/viewer/render.ts";
 import { compareListPlaces, reviewFileName, reviewMarkdown, type ListPlace, type ReviewDocument, type ReviewEntry } from "../../lib/viewer/review.ts";
 import type { SourceMark, SourceView } from "../../lib/viewer/source_view.ts";
 import { AnnotationForm, type FormDraft } from "./annotation_form.ts";
-import { AnnotationList, type ListEntry } from "./annotation_list.ts";
+import { AnnotationList, type ListEntry, type ListHeader } from "./annotation_list.ts";
+import { ReviewBanner } from "./review_banner.ts";
 import { SelectionToolbar, type SelectionState } from "./selection_toolbar.ts";
 
 /** What a viewer pane shows, as annotations need it. */
@@ -76,10 +90,17 @@ export interface AnnotationLayerOptions {
   showMenu(items: ContextMenuItem[], x: number, y: number): void;
   writeClipboard(text: string): Promise<void>;
   download(name: string, blob: Blob): void;
+  /**
+   * Answer a process that waits for a review of the pane; resolves with
+   * whether the server took the answer (`handover.ts`, `ReviewAnswers`).
+   */
+  answer?(request: ReviewAnswerRequest): Promise<boolean>;
 }
 
 /** The parts of the pane the layer places its own in. */
 export interface LayerHost {
+  /** The pane, whose banner goes above its body. */
+  readonly pane: HTMLElement;
   /** The pane's body, which the list column joins on the right. */
   readonly body: HTMLElement;
   /** The document's area, positioned: the toolbar and the form float in it. */
@@ -98,10 +119,23 @@ export interface AnnotationMenu {
   addComment(): void;
   readonly listShown: boolean;
   toggleList(): void;
+  readonly marksHidden: boolean;
+  toggleMarks(): void;
+  readonly resolvedShown: boolean;
+  toggleResolved(): void;
 }
 
 /** Where the list column stands by the user's choice; without one it is open while the pane holds annotations. */
 export type ListChoice = "open" | "closed";
+
+/** The user's choices of a pane's annotations that its next view starts from. */
+export interface LayerState {
+  readonly list?: ListChoice;
+  /** No marks in the document. */
+  readonly hideMarks?: boolean;
+  /** The passages of resolved annotations are marked as well. */
+  readonly showResolved?: boolean;
+}
 
 interface Placed {
   readonly annotation: ViewerAnnotation;
@@ -109,6 +143,19 @@ interface Placed {
   /** The text the passage was found in. */
   readonly view?: "source" | "rendered";
   readonly anchor?: Anchor;
+  /** Anchored at the passage its quote most likely became. */
+  readonly changed?: boolean;
+}
+
+/** A review ready to go, and what it held of each of the user's pending entries. */
+interface Prepared {
+  readonly review: Review;
+  /** The annotations it holds. */
+  readonly count: number;
+  /** No annotation was pending: it holds every open one again. */
+  readonly again: boolean;
+  /** Per pending entry of the user it holds, the entry as it read then; an entry changed since stays pending. */
+  readonly entries: ReadonlyMap<string, SentEntry>;
 }
 
 interface Anchorers {
@@ -131,6 +178,35 @@ const STALE: Anchoring = { state: "stale" };
 
 function linesLabel(start: number, end: number): string {
   return start === end ? `Line ${start}` : `Lines ${start}-${end}`;
+}
+
+/**
+ * One entry of the user as it reads now, as `mark_sent` names it: the
+ * annotation `id` itself with its kind, remark, replacement and passage, or a
+ * reply of the user in its thread with its text.
+ */
+function entryOf(annotation: ViewerAnnotation, id: string): SentEntry | undefined {
+  if (id === annotation.id) {
+    const { kind, body, replacement, target } = annotation;
+    return {
+      id,
+      kind,
+      ...(body === undefined ? {} : { body }),
+      ...(replacement === undefined ? {} : { replacement }),
+      ...(target ? { target: { view: target.view, quote: target.quote, prefix: target.prefix, suffix: target.suffix, startLine: target.startLine, endLine: target.endLine } } : {}),
+    };
+  }
+  const reply = annotation.replies?.find((each) => each.id === id && each.author === "user");
+  return reply ? { id, body: reply.body } : undefined;
+}
+
+/** Whether `entry` reads as `held`, the way the server compares them for `mark_sent`. */
+function readsAs(entry: SentEntry | undefined, held: SentEntry): boolean {
+  if (!entry || entry.id !== held.id || entry.kind !== held.kind || entry.body !== held.body || entry.replacement !== held.replacement) return false;
+  const [a, b] = [entry.target, held.target];
+  if (!a || !b) return a === b;
+  return a.view === b.view && a.quote === b.quote && a.prefix === b.prefix && a.suffix === b.suffix
+    && a.startLine === b.startLine && a.endLine === b.endLine;
 }
 
 /** Whether `text` holds at least `count` characters, counted as code points. */
@@ -165,14 +241,21 @@ export class AnnotationLayer {
   private readonly toolbar: SelectionToolbar;
   private readonly list: AnnotationList;
   private readonly listButton: HTMLButtonElement;
+  private readonly banner: ReviewBanner;
   private placed: Placed[] = [];
   /** The store's list the annotations were placed from; the same array while it is unchanged. */
   private listed: readonly ViewerAnnotation[] | undefined;
   private anchorers: Anchorers | undefined;
   private active: string | undefined;
   private choice: ListChoice | undefined;
+  private marksHidden: boolean;
+  private resolvedShown: boolean;
   private form: { readonly form: AnnotationForm; readonly id?: string } | null = null;
   private selected: Selected | undefined;
+  /** The wait for a review the pane's record names, and the one this window answered. */
+  private wait: ReviewWait | undefined;
+  private answered: string | undefined;
+  private answering = false;
   private readonly cleanups: (() => void)[] = [];
   private toolbarTimer: ReturnType<typeof setTimeout> | undefined;
   private destroyed = false;
@@ -182,20 +265,28 @@ export class AnnotationLayer {
     private readonly host: LayerHost,
     private readonly content: () => AnnotatedContent,
     private readonly options: AnnotationLayerOptions,
-    choice: ListChoice | undefined,
+    state: LayerState | undefined,
     private readonly focusDocument: () => void,
   ) {
-    this.choice = choice;
+    this.choice = state?.list;
+    this.marksHidden = !!state?.hideMarks;
+    this.resolvedShown = !!state?.showResolved;
     this.toolbar = new SelectionToolbar(doc, (kind) => this.annotateSelection(kind));
     host.main.append(this.toolbar.element);
     this.list = new AnnotationList(doc, {
       select: (id) => this.select(id),
       edit: (id) => this.edit(id),
       remove: (id) => this.remove(id),
+      setResolved: (id, resolved) => this.setResolved(id, resolved),
+      move: (id) => this.move(id),
+      reply: (id, body, replyId) => this.reply(id, body, replyId),
+      removeReply: (id, replyId) => this.removeReply(id, replyId),
       addComment: () => this.openForm({ kind: "comment" }),
       send: (anchor) => this.sendToDefault(anchor),
       more: (anchor) => this.showMenuAt(anchor, this.handoverItems()),
       close: () => this.setChoice("closed"),
+      toggleMarks: () => this.toggleMarks(),
+      toggleResolved: () => this.toggleResolved(),
     });
     host.body.append(this.list.element);
     this.list.element.addEventListener("pointerenter", () => this.renderList());
@@ -206,6 +297,12 @@ export class AnnotationLayer {
     this.listButton.addEventListener("click", () => this.toggleList());
     host.bar.append(this.listButton);
 
+    this.banner = new ReviewBanner(doc, {
+      approve: () => void this.answerWait("approved"),
+      send: () => void this.answerWait("feedback"),
+    });
+    host.pane.insertBefore(this.banner.element, host.body);
+
     const box = host.documentBox;
     const later = () => this.scheduleToolbar();
     const hide = (event: Event) => {
@@ -215,9 +312,7 @@ export class AnnotationLayer {
     this.listen(box, "keyup", later);
     this.listen(box, "pointerdown", hide);
     this.listen(box, "scroll", () => this.hideToolbar(), { capture: true, passive: true });
-    this.listen(doc, "selectionchange", () => {
-      if (this.toolbar.shown && !this.readSelection()) this.hideToolbar();
-    });
+    this.listen(doc, "selectionchange", () => this.selectionChanged());
 
     const { store, paneId } = options;
     this.cleanups.push(
@@ -233,9 +328,13 @@ export class AnnotationLayer {
     this.refresh();
   }
 
-  /** The list column's state as the user chose it, for the pane's next view. */
-  get listChoice(): ListChoice | undefined {
-    return this.choice;
+  /** The user's choices for the pane's next view: the list column, the marks, the resolved ones. */
+  viewState(): LayerState {
+    return {
+      ...(this.choice ? { list: this.choice } : {}),
+      ...(this.marksHidden ? { hideMarks: true } : {}),
+      ...(this.resolvedShown ? { showResolved: true } : {}),
+    };
   }
 
   /** The document, its version or its view changed: anchor and mark again. */
@@ -246,7 +345,17 @@ export class AnnotationLayer {
 
   /** The selection changed; a toolbar shown for an earlier one goes once it is empty. */
   selectionChanged(): void {
-    if (this.toolbar.shown && !this.readSelection()) this.hideToolbar();
+    if (this.destroyed) return;
+    const selected = this.toolbar.shown || this.list.shown ? this.readSelection() : undefined;
+    if (this.toolbar.shown && !selected) this.hideToolbar();
+    if (this.list.shown) this.list.setMovable(selected?.state === "passage");
+  }
+
+  /** The pane's record names a wait for a review, or none. */
+  setWait(wait: ReviewWait | undefined): void {
+    if (this.wait?.id !== wait?.id) this.answered = undefined;
+    this.wait = wait;
+    this.renderBanner();
   }
 
   /** What the context menu offers, for the selection as it is now. */
@@ -261,25 +370,40 @@ export class AnnotationLayer {
       addComment: () => this.openForm({ kind: "comment" }),
       listShown: this.listShown(),
       toggleList: () => this.toggleList(),
+      marksHidden: this.marksHidden,
+      toggleMarks: () => this.toggleMarks(),
+      resolvedShown: this.resolvedShown,
+      toggleResolved: () => this.toggleResolved(),
     };
   }
 
-  /** The review of the pane's annotations as they are anchored now, and the annotations it holds. */
-  review(): { review: Review; sent: ViewerAnnotation[] } {
+  /**
+   * The review of the pane's annotations as they are anchored now (D4 of
+   * review-threads): the open ones with an entry of the user not handed
+   * over, or every open one when none is.
+   */
+  private review(): Prepared {
     this.anchorAll();
     const content = this.content();
-    const entries: ReviewEntry[] = this.placed.map(({ annotation, view, anchor }) => {
-      const { kind, body, replacement, target } = annotation;
-      if (!target) return { kind, body };
-      const page = (view ?? target.view) === "rendered" && content.format === "html";
-      const lines = page ? null
-        : anchor ? { start: anchor.startLine, end: anchor.endLine }
-        : { start: target.startLine, end: target.endLine };
-      return { kind, body, replacement, passage: { quote: target.quote, lines, stale: !anchor } };
-    });
+    const open = this.placed.filter((placed) => isOpen(placed.annotation));
+    const selection = reviewSelection(open.map((placed) => placed.annotation));
+    const chosen = new Set(selection.annotations.map((annotation) => annotation.id));
+    const entries: ReviewEntry[] = [];
+    const pending = new Map<string, SentEntry>();
+    for (const placed of open) {
+      if (!chosen.has(placed.annotation.id)) continue;
+      entries.push(this.reviewEntry(placed, content));
+      for (const id of pendingEntries(placed.annotation)) {
+        const entry = entryOf(placed.annotation, id);
+        if (entry) pending.set(id, entry);
+      }
+    }
+    const { document, paneId } = this.options;
     return {
-      review: { text: reviewMarkdown(this.options.document, entries), fileName: reviewFileName(this.options.document) },
-      sent: this.placed.map((placed) => placed.annotation),
+      review: { text: reviewMarkdown(document, entries, { paneId }), fileName: reviewFileName(document) },
+      count: entries.length,
+      again: selection.again,
+      entries: pending,
     };
   }
 
@@ -292,6 +416,7 @@ export class AnnotationLayer {
     this.toolbar.element.remove();
     this.list.element.remove();
     this.listButton.remove();
+    this.banner.element.remove();
   }
 
   // ── Anchoring and Marks ──
@@ -301,6 +426,7 @@ export class AnnotationLayer {
     this.anchorAll();
     this.applyMarks();
     this.renderList();
+    this.renderBanner();
   }
 
   private anchorersFor(content: AnnotatedContent): Anchorers {
@@ -343,10 +469,10 @@ export class AnnotationLayer {
         view = "source";
         anchoring = anchorers.source(target);
       }
-      if (anchoring.state === "anchored") {
+      if (anchoring.state !== "stale") {
         const anchor = anchoring.anchor;
         return {
-          annotation, view, anchor,
+          annotation, view, anchor, changed: anchoring.state === "changed",
           place: { state: "anchored", view, offset: anchor.start, startLine: anchor.startLine, endLine: anchor.endLine, index },
         };
       }
@@ -356,32 +482,62 @@ export class AnnotationLayer {
     this.placed = placed;
   }
 
+  /** The passages to mark: none while the marks are hidden, a resolved one only while resolved ones are shown. */
+  private marked(): Placed[] {
+    if (this.marksHidden) return [];
+    return this.placed.filter((placed) => placed.anchor && (this.resolvedShown || isOpen(placed.annotation)));
+  }
+
   private applyMarks(): void {
     const content = this.content();
     const lineMarks = content.format === "markdown";
+    const style = (placed: Placed) => (!isOpen(placed.annotation) ? "resolved" as const : placed.changed ? "changed" as const : undefined);
     if (content.shown === "source" && content.source) {
       const marks: SourceMark[] = [];
-      for (const { annotation, view, anchor } of this.placed) {
-        if (!anchor) continue;
+      for (const placed of this.marked()) {
+        const { annotation, view, anchor } = placed;
         const active = annotation.id === this.active;
-        if (view === "source") marks.push({ from: anchor.start, to: anchor.end, startLine: anchor.startLine, endLine: anchor.endLine, active });
-        else if (lineMarks) marks.push({ startLine: anchor.startLine, endLine: anchor.endLine, active });
+        const kind = style(placed);
+        const extra = { active, ...(kind ? { style: kind } : {}) };
+        if (view === "source") marks.push({ from: anchor!.start, to: anchor!.end, startLine: anchor!.startLine, endLine: anchor!.endLine, ...extra });
+        else if (lineMarks) marks.push({ startLine: anchor!.startLine, endLine: anchor!.endLine, ...extra });
       }
       content.source.setMarks(marks);
     } else if (content.shown === "rendered" && content.rendered) {
       const marks: RenderedMark[] = [];
       const blocks: BlockMark[] = [];
-      for (const { annotation, view, anchor } of this.placed) {
-        if (!anchor) continue;
+      for (const placed of this.marked()) {
+        const { annotation, view, anchor } = placed;
         const active = annotation.id === this.active;
-        if (view === "rendered") marks.push({ start: anchor.start, end: anchor.end, active });
-        else if (lineMarks) blocks.push({ startLine: anchor.startLine, endLine: anchor.endLine, active });
+        const kind = style(placed);
+        const extra = { active, ...(kind ? { style: kind } : {}) };
+        if (view === "rendered") marks.push({ start: anchor!.start, end: anchor!.end, ...extra });
+        else if (lineMarks) blocks.push({ startLine: anchor!.startLine, endLine: anchor!.endLine, ...extra });
       }
       content.rendered.setMarks(marks, blocks);
     }
   }
 
+  private toggleMarks(): void {
+    this.marksHidden = !this.marksHidden;
+    this.applyMarks();
+    this.renderList();
+  }
+
+  private toggleResolved(): void {
+    this.resolvedShown = !this.resolvedShown;
+    this.applyMarks();
+    this.renderList();
+  }
+
   // ── The List ──
+
+  /** The open annotations as they were placed last. */
+  private openCount(): number {
+    let open = 0;
+    for (const placed of this.placed) if (isOpen(placed.annotation)) open++;
+    return open;
+  }
 
   private listShown(): boolean {
     const count = this.options.store.count(this.options.paneId);
@@ -407,32 +563,67 @@ export class AnnotationLayer {
     return anchor ? linesLabel(anchor.startLine, anchor.endLine) : linesLabel(target.startLine, target.endLine);
   }
 
+  private entryOf(placed: Placed): ListEntry {
+    const { annotation, anchor, changed } = placed;
+    return {
+      id: annotation.id,
+      ...(annotation.number !== undefined ? { number: annotation.number } : {}),
+      kind: annotation.kind,
+      deletion: isDeletion(annotation),
+      where: this.where(placed),
+      state: !annotation.target ? "general" : !anchor ? "stale" : changed ? "changed" : "anchored",
+      resolved: !isOpen(annotation),
+      sent: !!annotation.sent,
+      quote: annotation.target?.quote,
+      body: annotation.body,
+      replacement: annotation.replacement,
+      replies: (annotation.replies ?? []).map((reply) => ({
+        id: reply.id,
+        author: reply.author,
+        ...(reply.from?.title ? { title: reply.from.title } : {}),
+        body: reply.body,
+        sent: !!reply.sent,
+      })),
+    };
+  }
+
+  /** The main hand-over action: to the origin, or to a terminal the user chooses; again when nothing is pending. */
+  private sendLabel(again: boolean): { send: string; sendTitle: string } {
+    const origin = this.options.handover.origin();
+    const verb = again ? "Send Again" : "Send";
+    return {
+      send: `${verb} to ${origin ? origin.title : "Terminal…"}`,
+      sendTitle: again
+        ? "Paste the review of all open annotations into the terminal again, without submitting it"
+        : "Paste the review of the annotations not sent yet into the terminal, without submitting it",
+    };
+  }
+
   private renderList(): void {
     if (this.destroyed) return;
-    const count = this.placed.length;
+    const total = this.placed.length;
+    const open = this.openCount();
     const available = this.options.available();
     const shown = this.listShown();
     this.list.setShown(shown);
-    this.listButton.hidden = !available && count === 0;
-    this.listButton.textContent = count === 0 ? "Annotations" : count === 1 ? "1 Annotation" : `${count} Annotations`;
+    this.listButton.hidden = !available && total === 0;
+    this.listButton.textContent = open === 0 ? "Annotations" : open === 1 ? "1 Annotation" : `${open} Annotations`;
     this.listButton.title = shown ? "Hide the annotations" : "Show the annotations";
     this.listButton.setAttribute("aria-pressed", String(shown));
     if (!shown) return;
-    const origin = this.options.handover.origin();
-    const entries: ListEntry[] = this.placed.map((placed) => ({
-      id: placed.annotation.id,
-      kind: placed.annotation.kind,
-      where: this.where(placed),
-      stale: placed.place.state === "stale",
-      quote: placed.annotation.target?.quote,
-      body: placed.annotation.body,
-      replacement: placed.annotation.replacement,
-    }));
-    this.list.render({
-      count,
-      send: origin ? `Send to ${origin.title}` : "Send to Terminal…",
-      writable: this.writable(),
-    }, entries, this.active);
+    const { again } = reviewSelection(this.placed.filter((placed) => isOpen(placed.annotation)).map((placed) => placed.annotation));
+    const writable = this.writable();
+    const header: ListHeader = {
+      open,
+      resolved: total - open,
+      ...this.sendLabel(again && open > 0),
+      sendable: open > 0,
+      writable,
+      movable: writable && this.readSelection()?.state === "passage",
+      marksHidden: this.marksHidden,
+      resolvedShown: this.resolvedShown,
+    };
+    this.list.render(header, this.placed.map((placed) => this.entryOf(placed)), this.active);
   }
 
   private select(id: string): void {
@@ -454,14 +645,14 @@ export class AnnotationLayer {
   }
 
   private edit(id: string): void {
-    const annotation = this.options.store.list(this.options.paneId).find((each) => each.id === id);
+    const annotation = this.options.store.get(this.options.paneId, id);
     if (!annotation) return;
     const placed = this.placed.find((each) => each.annotation.id === id);
     this.openForm({ kind: annotation.kind, target: annotation.target, existing: annotation, where: placed ? this.where(placed) : undefined });
   }
 
   private remove(id: string): void {
-    const annotation = this.options.store.list(this.options.paneId).find((each) => each.id === id);
+    const annotation = this.options.store.get(this.options.paneId, id);
     if (!annotation) return;
     if (this.active === id) this.active = undefined;
     this.options.store.remove(this.options.screenId(), this.options.paneId, [id]);
@@ -476,13 +667,136 @@ export class AnnotationLayer {
     this.options.notices.undoable(all.length === 1 ? "Annotation cleared" : `${all.length} annotations cleared`, () => this.putBack(all));
   }
 
-  /** Put annotations back as they were, by the server's rules: they were kept before. */
+  /**
+   * Put annotations back as they were, by the server's rules: they were kept
+   * before. The server numbers them anew; the user's replies come back with
+   * them, an agent's cannot.
+   */
   private putBack(annotations: readonly ViewerAnnotation[]): void {
-    const problem = this.options.store.put(this.options.screenId(), this.options.paneId, annotations, { restore: true });
-    if (problem) this.options.notices.error("The annotations could not be put back", problem);
+    const { store, paneId } = this.options;
+    const screenId = this.options.screenId();
+    const problem = store.put(screenId, paneId, annotations, { restore: true });
+    if (problem) {
+      this.options.notices.error("The annotations could not be put back", problem);
+      return;
+    }
+    for (const annotation of annotations) {
+      const replies = (annotation.replies ?? []).filter((reply) => reply.author === "user");
+      const failed = replies.length > 0 ? store.putReplies(screenId, paneId, annotation.id, replies, { restore: true }) : undefined;
+      if (failed) this.options.notices.error("The replies could not be put back", failed);
+    }
+  }
+
+  /** Resolve an open annotation or reopen a resolved one; its number, thread and hand-over mark stay. */
+  private setResolved(id: string, resolved: boolean): void {
+    const { store, paneId } = this.options;
+    const annotation = store.get(paneId, id);
+    if (!annotation) return;
+    const { status: _status, ...rest } = annotation;
+    const problem = store.put(this.options.screenId(), paneId, [resolved ? { ...rest, status: "resolved" } : rest]);
+    if (problem) {
+      this.options.notices.error(resolved ? "The annotation could not be resolved" : "The annotation could not be reopened", problem);
+      return;
+    }
+    this.refresh();
+    this.list.focusEntry(id);
+  }
+
+  /**
+   * Give an annotation the passage selected in the pane as its target (D7 of
+   * review-threads). Its passage changed, so it is pending again.
+   */
+  private move(id: string): void {
+    const { store, paneId } = this.options;
+    const annotation = store.get(paneId, id);
+    if (!annotation) return;
+    const selected = this.readSelection();
+    if (!selected || selected.state !== "passage") {
+      this.options.notices.info("Select a passage in the document to move the annotation to it");
+      return;
+    }
+    const { sent: _sent, ...rest } = annotation;
+    const problem = store.put(this.options.screenId(), paneId, [{ ...rest, target: selected.target }]);
+    if (problem) {
+      this.options.notices.error("The annotation could not be moved", problem);
+      return;
+    }
+    this.active = id;
+    this.refresh();
+    this.select(id);
+  }
+
+  /** Save a reply of the user; an edit that changes its text is pending again. */
+  private reply(id: string, body: string, replyId?: string): string | undefined {
+    const { store, paneId } = this.options;
+    const annotation = store.get(paneId, id);
+    if (!annotation) return "The annotation is no longer there.";
+    const existing = replyId ? annotation.replies?.find((reply) => reply.id === replyId && reply.author === "user") : undefined;
+    const sent = existing?.sent && existing.body === body;
+    return store.putReplies(this.options.screenId(), paneId, id, [{ id: existing?.id ?? newReplyId(), body, ...(sent ? { sent: true } : {}) }]);
+  }
+
+  /** Remove a reply; the user's own can be put back for a while, an agent's cannot. */
+  private removeReply(id: string, replyId: string): void {
+    const { store, paneId } = this.options;
+    const reply = store.get(paneId, id)?.replies?.find((each) => each.id === replyId);
+    if (!reply) return;
+    const screenId = this.options.screenId();
+    store.removeReplies(screenId, paneId, id, [replyId]);
+    if (reply.author !== "user") {
+      this.options.notices.info("The agent's reply was removed");
+      return;
+    }
+    this.options.notices.undoable("Reply removed", () => {
+      const problem = store.putReplies(this.options.screenId(), paneId, id, [reply], { restore: true });
+      if (problem) this.options.notices.error("The reply could not be put back", problem);
+    });
   }
 
   // ── The Review ──
+
+  private reviewEntry(placed: Placed, content: AnnotatedContent): ReviewEntry {
+    const { annotation, view, anchor, changed } = placed;
+    const { number, kind, body, replacement, target } = annotation;
+    const replies = (annotation.replies ?? []).map((reply) => ({
+      author: reply.author,
+      ...(reply.from?.title ? { title: reply.from.title } : {}),
+      body: reply.body,
+    }));
+    const own = { ...(number !== undefined ? { number } : {}), kind, body, replies };
+    if (!target) return own;
+    const page = (view ?? target.view) === "rendered" && content.format === "html";
+    const state = !anchor ? "stale" as const : changed ? "changed" as const : "anchored" as const;
+    // A changed passage, and one not found, are named by the lines they were annotated on.
+    const lines = page ? null
+      : state === "anchored" ? { start: anchor!.startLine, end: anchor!.endLine }
+      : { start: target.startLine, end: target.endLine };
+    return { ...own, replacement, passage: { quote: target.quote, lines, state } };
+  }
+
+  /** The review, once the annotations it holds have the numbers the server gives them. */
+  private async prepareReview(): Promise<Prepared> {
+    const { store, paneId } = this.options;
+    const open = this.placed.filter((placed) => isOpen(placed.annotation)).map((placed) => placed.annotation);
+    await store.whenNumbered(paneId, reviewSelection(open).annotations.map((annotation) => annotation.id));
+    return this.review();
+  }
+
+  /**
+   * Mark what the review held as handed over: the entries of the user that
+   * read as they did when it was made, each named with that content, so that
+   * the server, too, leaves an entry another window changed meanwhile pending.
+   */
+  private markHandedOver(prepared: Prepared): void {
+    const { store, paneId } = this.options;
+    const list = store.list(paneId);
+    const held: SentEntry[] = [];
+    for (const [id, entry] of prepared.entries) {
+      const owner = list.find((annotation) => annotation.id === id || annotation.replies?.some((reply) => reply.id === id));
+      if (owner && readsAs(entryOf(owner, id), entry)) held.push(entry);
+    }
+    store.markSent(this.options.screenId(), paneId, held);
+  }
 
   private targets(): ReviewTarget[] {
     const origin = this.options.handover.origin();
@@ -516,7 +830,7 @@ export class AnnotationLayer {
       { label: "Append to Scratchpad Of", action: () => {}, children: this.targetItems("scratchpad", review) },
       { label: "", action: () => {}, separator: true },
       { label: "Copy as Markdown", action: () => void this.copy() },
-      { label: "Save as File", action: () => this.download() },
+      { label: "Save as File", action: () => void this.download() },
       { label: "", action: () => {}, separator: true },
       { label: "Clear Annotations", action: () => this.clear(), danger: true },
     ];
@@ -530,22 +844,13 @@ export class AnnotationLayer {
   }
 
   private async send(target: ReviewTarget, form: SendForm): Promise<void> {
-    const { review, sent } = this.review();
-    if (sent.length === 0) return;
-    const { store, paneId } = this.options;
-    const screenId = this.options.screenId();
-    const ids = sent.map((annotation) => annotation.id);
-    await sendReview(review, target, form, {
-      end: () => {
-        if (this.active && ids.includes(this.active)) this.active = undefined;
-        store.remove(screenId, paneId, ids);
-      },
-      restore: () => this.putBack(sent),
-    }, this.options.notices);
+    const prepared = await this.prepareReview();
+    if (prepared.count === 0 || this.destroyed) return;
+    if (await sendReview(prepared.review, target, form, this.options.notices)) this.markHandedOver(prepared);
   }
 
   private async copy(): Promise<void> {
-    const { review } = this.review();
+    const { review } = await this.prepareReview();
     try {
       await this.options.writeClipboard(review.text);
       this.options.notices.info("The review is in the clipboard");
@@ -554,9 +859,72 @@ export class AnnotationLayer {
     }
   }
 
-  private download(): void {
-    const { review } = this.review();
+  private async download(): Promise<void> {
+    const { review } = await this.prepareReview();
     this.options.download(review.fileName, new Blob([review.text], { type: "text/markdown" }));
+  }
+
+  // ── Waiting For A Review ──
+
+  /** The wait the banner offers to answer: while the server keeps annotations, and until this window answered it. */
+  private openWait(): ReviewWait | undefined {
+    const wait = this.wait;
+    if (!wait || !this.options.answer || !this.options.available() || wait.id === this.answered) return undefined;
+    return wait;
+  }
+
+  private renderBanner(): void {
+    if (this.destroyed) return;
+    this.banner.show({ wait: this.openWait(), answering: this.answering, sendable: this.openCount() > 0 });
+  }
+
+  /**
+   * Answer the waiting process: approve the document, which marks nothing,
+   * or send it the review, whose entries are marked once the server took the
+   * answer. Only the first answer to a wait counts; once the server
+   * acknowledged one from this window, taken or not, the banner goes.
+   */
+  private async answerWait(outcome: ReviewOutcome): Promise<void> {
+    const wait = this.openWait();
+    const answer = this.options.answer;
+    if (!wait || !answer || this.answering) return;
+    const { notices, paneId } = this.options;
+    this.answering = true;
+    this.renderBanner();
+    try {
+      const prepared = outcome === "feedback" ? await this.prepareReview() : undefined;
+      if (prepared && prepared.count === 0) {
+        notices.info("Annotate the document first, or approve it");
+        return;
+      }
+      if (prepared && utf8Length(prepared.review.text) > REVIEW_ANSWER_LIMIT) {
+        notices.error("The review was not sent", "It is longer than the 1 MiB a waiting command takes.");
+        return;
+      }
+      const accepted = await answer({
+        screenId: this.options.screenId(),
+        paneId,
+        waitId: wait.id,
+        outcome,
+        ...(prepared ? { review: prepared.review.text } : {}),
+      });
+      this.answered = wait.id;
+      if (!accepted) {
+        notices.info(`${outcome === "approved" ? "The approval" : "The review"} was not taken: the command no longer waits for it`);
+        return;
+      }
+      if (prepared) {
+        this.markHandedOver(prepared);
+        notices.sent(`The review went to ${wait.title || "the waiting command"}`);
+      } else {
+        notices.info(`Approved for ${wait.title || "the waiting command"}`);
+      }
+    } catch (error) {
+      notices.error(`The answer did not reach ${wait.title || "the waiting command"}`, error instanceof Error ? error.message : undefined);
+    } finally {
+      this.answering = false;
+      this.renderBanner();
+    }
   }
 
   // ── Making Annotations ──
@@ -610,6 +978,7 @@ export class AnnotationLayer {
     if (this.destroyed || this.form) return;
     const selected = this.readSelection();
     this.selected = selected;
+    if (this.list.shown) this.list.setMovable(selected?.state === "passage");
     if (!selected) {
       this.hideToolbar();
       return;
@@ -649,7 +1018,7 @@ export class AnnotationLayer {
       kind,
       ...(target ? { quote: target.quote, where } : {}),
       body: existing?.body,
-      replacement: existing?.replacement,
+      ...(existing?.kind === "change" ? { replacement: existing.replacement ?? "" } : {}),
       editing: !!existing,
       save: (draft) => this.save(draft, target, existing),
       cancel: () => {
@@ -679,16 +1048,24 @@ export class AnnotationLayer {
     element.style.top = `${Math.round(Math.max(margin, Math.min(top, box.height - height - margin)))}px`;
   }
 
+  /**
+   * Save the form: a new annotation, or the annotation edited, which keeps
+   * its status; an edit that changes it is pending again, one that changes
+   * nothing keeps its hand-over mark.
+   */
   private save(draft: FormDraft, target: AnnotationTarget | undefined, existing: ViewerAnnotation | undefined): string | undefined {
-    const general = !target;
-    const kind = general && draft.kind !== "comment" && draft.kind !== "question" ? "comment" : draft.kind;
-    const annotation: ViewerAnnotation = {
+    // A general comment is a comment.
+    const kind = target ? draft.kind : "comment";
+    const edited: ViewerAnnotation = {
       id: existing?.id ?? newAnnotationId(),
       kind,
-      ...(draft.body ? { body: draft.body } : {}),
+      ...(isBlank(draft.body) ? {} : { body: draft.body }),
       ...(kind === "change" ? { replacement: draft.replacement } : {}),
       ...(target ? { target } : {}),
+      ...(existing && !isOpen(existing) ? { status: "resolved" as const } : {}),
     };
+    const unchanged = !!existing?.sent && sameContent(ownOf(existing), edited);
+    const annotation: ViewerAnnotation = unchanged ? { ...edited, sent: true } : edited;
     const problem = this.options.store.put(this.options.screenId(), this.options.paneId, [annotation]);
     if (problem) return problem;
     this.active = annotation.id;
@@ -709,4 +1086,3 @@ export class AnnotationLayer {
     this.cleanups.push(() => target.removeEventListener(type, handler, options));
   }
 }
-

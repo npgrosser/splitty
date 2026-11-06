@@ -177,9 +177,20 @@ describe("MuxClient", () => {
     await Promise.resolve();
     expect(settled).toBe(false);
 
+    // The operations on threads go the same way.
+    for (const op of ["put_replies", "remove_replies", "mark_sent"]) {
+      socket.message({ type: "mux.op_failed", op, screenId: "screen-2", paneId: "viewer-0123456789abcdef", error: `${op} refused` });
+    }
+    expect(failures.slice(2)).toEqual(["put_replies", "remove_replies", "mark_sent"].map((op) => (
+      { op, screenId: "screen-2", paneId: "viewer-0123456789abcdef", error: `${op} refused` }
+    )));
+    expect(socket.sentOfType("mux.resync").map((message) => message.screenId)).toEqual(["screen-1", "screen-2", "screen-2", "screen-2"]);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
     stop();
     socket.message({ type: "mux.op_failed", op: "put_annotations", screenId: "screen-1", paneId: "v1", error: "again" });
-    expect(failures).toHaveLength(2);
+    expect(failures).toHaveLength(5);
     socket.message({ type: "mux.pane_spawned", paneId: "viewer-0123456789abcdef", sessionId: "" });
   });
 
@@ -202,6 +213,52 @@ describe("MuxClient", () => {
     expect(got.v3.viewer).not.toHaveProperty("annotations");
   });
 
+  // viewer-annotations, Threads and Waiting For A Review: numbers, statuses,
+  // hand-over marks, replies, the counter and the wait arrive checked;
+  // malformed entries are dropped and the kinds of earlier builds are read.
+  it("keeps the threads, the counter and the wait of a viewer record by the server's rules", () => {
+    const seen: ScreenState[] = [];
+    mux.setHandlers({ onSnapshot: (screen) => seen.push(screen) });
+    const target = { view: "source", quote: "retry three times", prefix: "", suffix: "", startLine: 30, endLine: 30 };
+    const agent = { id: "rep-00000000000000a1", author: "agent", body: "Done.", from: { paneId: "p1", title: "claude\u001b[2J" } };
+    const user = { id: "rep-00000000000000a2", author: "user", body: "Thanks.", sent: true };
+    const threads = [
+      { id: "ann-0000000000000001", number: 1, kind: "comment", body: "Why?", target, status: "resolved", sent: true, replies: [agent, user] },
+      { id: "ann-0000000000000002", number: 2, kind: "question", body: "Asked before threads.", target },
+      { id: "ann-0000000000000003", number: 3, kind: "delete", target },
+      { id: "ann-0000000000000004", number: -1, kind: "comment", body: "Bad number." },
+      { id: "ann-0000000000000005", kind: "comment", body: "Bad status.", status: "done" },
+    ];
+    const record = (extra: Record<string, unknown>) => ({
+      role: "viewer",
+      viewer: { source: { kind: "text", title: "Plan" }, revision: 1, ...extra },
+    });
+    const wait = { id: "wait-0123456789abcdef", paneId: "p1", title: " claude\u0007 " };
+    const panes: Record<string, unknown> = {
+      v1: record({ annotations: threads, lastAnnotationNumber: 5, reviewWait: wait }),
+      v2: record({ lastAnnotationNumber: 0, reviewWait: { ...wait, id: "wait-1" } }),
+      v3: record({ lastAnnotationNumber: 1.5, reviewWait: { ...wait, paneId: "" } }),
+      v4: record({ lastAnnotationNumber: "3", reviewWait: { ...wait, paneId: "p".repeat(257) } }),
+      v5: record({ reviewWait: { id: wait.id, title: "claude" } }),
+    };
+    socket.message({ type: "mux.screen_snapshot", screen: { id: "screen-1", root: { type: "slot", id: "s1", paneIds: Object.keys(panes) }, panes } });
+    const got = seen[0].panes;
+    expect(got.v1.viewer).toEqual({
+      source: { kind: "text", title: "Plan" },
+      revision: 1,
+      annotations: [
+        { ...threads[0], replies: [{ ...agent, from: { paneId: "p1", title: "claude[2J" } }, user] },
+        { id: "ann-0000000000000002", number: 2, kind: "comment", body: "Asked before threads.", target },
+        { id: "ann-0000000000000003", number: 3, kind: "change", replacement: "", target },
+      ],
+      lastAnnotationNumber: 5,
+      reviewWait: { id: wait.id, paneId: "p1", title: "claude" },
+    });
+    for (const paneId of ["v2", "v3", "v4", "v5"]) {
+      expect(got[paneId].viewer, paneId).toEqual({ source: { kind: "text", title: "Plan" }, revision: 1 });
+    }
+  });
+
   // viewer-panes, Viewer Panes and Viewer Capability: a malformed record
   // leaves a viewer pane that says it cannot be shown; Document Text Outside
   // Snapshots: a text a snapshot carries anyway goes no further.
@@ -212,6 +269,8 @@ describe("MuxClient", () => {
     const panes: Record<string, unknown> = {
       v1: { role: "viewer", title: "PLAN.md", cwd: "/home/me/app", viewer: { source: { kind: "file", path: "/home/me/app/PLAN.md" }, originPaneId: "p1", revision: 2, extra: 1 } },
       v2: { role: "viewer", viewer: { source: { kind: "text", title: "Selection from claude", text: "the selected text" }, revision: 1 } },
+      plan: { role: "viewer", viewer: { source: { kind: "text", title: "Plan", format: "markdown" }, revision: 1 } },
+      odd: { role: "viewer", viewer: { source: { kind: "text", title: "Notes", format: "html" }, revision: 1 } },
       relative: { role: "viewer", viewer: file("docs/plan.md") },
       dotted: { role: "viewer", viewer: file("/home/me/app/../secrets.txt") },
       control: { role: "viewer", viewer: file("/home/me/a\nb") },
@@ -232,6 +291,9 @@ describe("MuxClient", () => {
       viewer: { source: { kind: "file", path: "/home/me/app/PLAN.md" }, originPaneId: "p1", revision: 2 },
     });
     expect(got.v2.viewer).toEqual({ source: { kind: "text", title: "Selection from claude" }, revision: 1 });
+    expect(got.plan.viewer).toEqual({ source: { kind: "text", title: "Plan", format: "markdown" }, revision: 1 });
+    // Another format shows the text as plain text.
+    expect(got.odd.viewer).toEqual({ source: { kind: "text", title: "Notes" }, revision: 1 });
     for (const id of ["relative", "dotted", "control", "long", "url", "revision", "fraction", "untitled", "titled", "missing"]) {
       expect(got[id].role, id).toBe("viewer");
       expect(got[id], id).not.toHaveProperty("viewer");

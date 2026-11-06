@@ -508,29 +508,36 @@ describe("viewer pane menu", () => {
     expect(writeText.mock.calls).toEqual([["chosen"], ["/home/me/app/PLAN.md"]]);
   });
 
-  // viewer-annotations: the kinds for a selected passage, a general comment and the list.
+  // viewer-annotations: the two kinds for a selected passage, a general comment, the list and the marks.
   it("annotates the selection, adds a general comment and shows the list", () => {
     const { api } = screen("local");
     const annotations = {
       selection: "passage" as const, annotate: vi.fn(), addComment: vi.fn(), listShown: false, toggleList: vi.fn(),
+      marksHidden: false, toggleMarks: vi.fn(), resolvedShown: false, toggleResolved: vi.fn(),
     };
     const items = viewerMenuItems(paneId, api, controls({ selection: () => "retry three times", annotations }));
-    expect(labels(items).slice(0, 7)).toEqual([
-      "Copy", "Comment on Selection", "Ask About Selection", "Suggest Change", "Suggest Deletion", "Add Comment", "Show Annotations",
+    expect(labels(items).slice(0, 8)).toEqual([
+      "Copy", "Comment on Selection", "Suggest Change", "Add Comment", "Show Annotations", "Hide Marks", "Show Resolved", "Reload",
     ]);
-    items.find((entry) => entry.label === "Ask About Selection")!.action();
-    expect(annotations.annotate).toHaveBeenCalledWith("question");
-    items.find((entry) => entry.label === "Suggest Deletion")!.action();
-    expect(annotations.annotate).toHaveBeenLastCalledWith("delete");
+    items.find((entry) => entry.label === "Comment on Selection")!.action();
+    expect(annotations.annotate).toHaveBeenCalledWith("comment");
+    items.find((entry) => entry.label === "Suggest Change")!.action();
+    expect(annotations.annotate).toHaveBeenLastCalledWith("change");
     items.find((entry) => entry.label === "Add Comment")!.action();
     expect(annotations.addComment).toHaveBeenCalled();
     items.find((entry) => entry.label === "Show Annotations")!.action();
     expect(annotations.toggleList).toHaveBeenCalled();
+    items.find((entry) => entry.label === "Hide Marks")!.action();
+    expect(annotations.toggleMarks).toHaveBeenCalled();
+    items.find((entry) => entry.label === "Show Resolved")!.action();
+    expect(annotations.toggleResolved).toHaveBeenCalled();
 
-    const short = viewerMenuItems(paneId, api, controls({ annotations: { ...annotations, selection: "short", listShown: true } }));
+    const short = viewerMenuItems(paneId, api, controls({
+      annotations: { ...annotations, selection: "short", listShown: true, marksHidden: true, resolvedShown: true },
+    }));
     const comment = short.find((entry) => entry.label === "Comment on Selection")!;
     expect(comment).toMatchObject({ disabled: true, detail: "Select a longer passage" });
-    expect(labels(short)).toContain("Hide Annotations");
+    expect(labels(short)).toEqual(expect.arrayContaining(["Hide Annotations", "Show Marks", "Hide Resolved"]));
     const long = viewerMenuItems(paneId, api, controls({ annotations: { ...annotations, selection: "long" } }));
     expect(long.find((entry) => entry.label === "Suggest Change")).toMatchObject({ disabled: true, detail: "Over 16 KB" });
     const none = viewerMenuItems(paneId, api, controls({ annotations: { ...annotations, selection: "none" } }));

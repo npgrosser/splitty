@@ -18,7 +18,8 @@
  *
  * Annotations (`viewer-annotations`) are the layer's (`viewer/annotation_layer.ts`):
  * it gets the document's texts from here and is told whenever the document,
- * its version or its view changes.
+ * its version or its view changes, and of the wait for a review that the
+ * pane's record names. Its banner goes above the pane's body.
  */
 
 import type { ViewerRecord } from "../lib/protocol/types.ts";
@@ -29,7 +30,9 @@ import { decodeText, fileName, imageDataUrl, presentationOf, type Presentation }
 import { RenderedDocument, renderedText, type RenderedText } from "../lib/viewer/render.ts";
 import { SourceView } from "../lib/viewer/source_view.ts";
 import { formatBytes } from "../lib/terminal/image_paste.ts";
-import { AnnotationLayer, type AnnotatedContent, type AnnotationLayerOptions, type AnnotationMenu } from "./viewer/annotation_layer.ts";
+import {
+  AnnotationLayer, type AnnotatedContent, type AnnotationLayerOptions, type AnnotationMenu, type LayerState,
+} from "./viewer/annotation_layer.ts";
 import type { ViewerMode, ViewerPosition, ViewerViewState } from "./viewer_view_state.ts";
 
 export type { ViewerMode } from "./viewer_view_state.ts";
@@ -95,6 +98,16 @@ function element<K extends keyof HTMLElementTagNameMap>(doc: Document, tag: K, c
   return node;
 }
 
+/** The annotation choices a view's state holds. */
+function layerState(state: ViewerViewState | undefined): LayerState | undefined {
+  if (!state) return undefined;
+  return {
+    ...(state.annotations ? { list: state.annotations } : {}),
+    ...(state.hideMarks ? { hideMarks: true } : {}),
+    ...(state.showResolved ? { showResolved: true } : {}),
+  };
+}
+
 export class ViewerView {
   readonly element: HTMLElement;
   private readonly doc: Document;
@@ -154,12 +167,13 @@ export class ViewerView {
     if (options.annotations && this.record && options.supported) {
       this.layer = new AnnotationLayer(
         doc,
-        { body, main, documentBox: this.documentBox, bar },
+        { pane: this.element, body, main, documentBox: this.documentBox, bar },
         () => this.annotatedContent(),
         options.annotations,
-        options.state?.annotations,
+        layerState(options.state),
         () => this.focus(),
       );
+      this.layer.setWait(this.record.reviewWait);
     }
 
     if (!this.record || !options.supported) {
@@ -185,6 +199,7 @@ export class ViewerView {
   setRecord(record: ViewerRecord): void {
     this.record = record;
     this.showLabel();
+    this.layer?.setWait(record.reviewWait);
     // Another origin is another terminal to send the review to.
     this.layer?.contentChanged();
   }
@@ -215,12 +230,14 @@ export class ViewerView {
   /** How the view is left, for the pane's next view. */
   viewState(): ViewerViewState {
     const position = this.pending ?? this.position;
-    const annotations = this.layer ? this.layer.listChoice : this.options.state?.annotations;
+    const layer = this.layer ? this.layer.viewState() : layerState(this.options.state);
     return {
       mode: this.mode,
       ...(this.wrapChoice !== undefined ? { wrap: this.wrapChoice } : {}),
       ...(position ? { position } : {}),
-      ...(annotations ? { annotations } : {}),
+      ...(layer?.list ? { annotations: layer.list } : {}),
+      ...(layer?.hideMarks ? { hideMarks: true } : {}),
+      ...(layer?.showResolved ? { showResolved: true } : {}),
     };
   }
 

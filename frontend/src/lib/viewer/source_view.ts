@@ -12,7 +12,10 @@
  * `anchoring.ts`. Annotations show as marks (D5 of review-pane): a
  * decoration over the passage of the source view's own annotations, and a
  * bar in the gutter beside the lines of every annotated passage, those of
- * the rendered view included.
+ * the rendered view included. A passage that changed since it was annotated,
+ * and one of a resolved annotation, has a style of its own (D7 of
+ * review-threads); where marks share a line, its bar shows an open passage
+ * before a changed one, and that before a resolved one.
  */
 
 import {
@@ -49,7 +52,14 @@ export interface SourceMark {
   readonly endLine: number;
   /** The passage the user chose. */
   readonly active?: boolean;
+  /** A passage found as what its quote most likely became, or one of a resolved annotation. */
+  readonly style?: "changed" | "resolved";
 }
+
+type MarkStyle = "open" | "changed" | "resolved";
+
+/** Which style a line's bar shows when marks share it: the lowest. */
+const STYLE_RANK: Record<MarkStyle, number> = { open: 0, changed: 1, resolved: 2 };
 
 /** The most lines one mark puts a bar beside. */
 const MAX_MARKED_LINES = 10_000;
@@ -120,7 +130,14 @@ const theme = EditorView.theme({
   ".cm-panel.cm-search [name=close]": { color: "var(--splitty-text-secondary)", backgroundColor: "transparent", border: "none" },
   ".cm-viewer-marks .cm-gutterElement": { padding: "0 2px" },
   ".cm-viewer-mark": { width: "3px", height: "100%", borderRadius: "1px", backgroundColor: "var(--splitty-accent)" },
+  ".cm-viewer-mark-changed": { backgroundColor: "var(--splitty-warning)" },
+  ".cm-viewer-mark-resolved": { backgroundColor: "var(--splitty-text-muted)" },
   ".cm-viewer-marked": { backgroundColor: "var(--splitty-annotation-bg, var(--splitty-accent-muted))" },
+  ".cm-viewer-marked-changed": {
+    backgroundColor: "var(--splitty-annotation-changed-bg, var(--splitty-accent-muted))",
+    textDecoration: "underline dotted var(--splitty-warning)",
+  },
+  ".cm-viewer-marked-resolved": { backgroundColor: "var(--splitty-annotation-resolved-bg, var(--splitty-hover-bg))" },
   ".cm-viewer-marked-active": { backgroundColor: "var(--splitty-annotation-active-bg, var(--splitty-accent-muted))" },
   ".sv-keyword": { color: "var(--sv-keyword)" },
   ".sv-string": { color: "var(--sv-string)" },
@@ -141,14 +158,26 @@ const theme = EditorView.theme({
 });
 
 class MarkMarker extends GutterMarker {
+  constructor(private readonly style: MarkStyle) {
+    super();
+  }
+
+  override eq(other: GutterMarker): boolean {
+    return other instanceof MarkMarker && other.style === this.style;
+  }
+
   override toDOM(view: EditorView): Node {
     const dot = view.dom.ownerDocument.createElement("div");
-    dot.className = "cm-viewer-mark";
+    dot.className = this.style === "open" ? "cm-viewer-mark" : `cm-viewer-mark cm-viewer-mark-${this.style}`;
     return dot;
   }
 }
 
-const markMarker = new MarkMarker();
+const MARKERS: Record<MarkStyle, MarkMarker> = {
+  open: new MarkMarker("open"),
+  changed: new MarkMarker("changed"),
+  resolved: new MarkMarker("resolved"),
+};
 
 interface Marks {
   readonly decorations: DecorationSet;
@@ -157,24 +186,41 @@ interface Marks {
 
 const setMarks = StateEffect.define<readonly SourceMark[]>();
 
-const markedPassage = Decoration.mark({ class: "cm-viewer-marked" });
-const activePassage = Decoration.mark({ class: "cm-viewer-marked cm-viewer-marked-active" });
+const passageMarks = new Map<string, Decoration>();
+
+/** The decoration of a passage in `style`, the chosen one's as well. */
+function passageMark(style: MarkStyle, active: boolean): Decoration {
+  const key = `${style}:${active}`;
+  let mark = passageMarks.get(key);
+  if (!mark) {
+    const classes = ["cm-viewer-marked"];
+    if (style !== "open") classes.push(`cm-viewer-marked-${style}`);
+    if (active) classes.push("cm-viewer-marked-active");
+    mark = Decoration.mark({ class: classes.join(" ") });
+    passageMarks.set(key, mark);
+  }
+  return mark;
+}
 
 function buildMarks(marks: readonly SourceMark[], state: EditorState): Marks {
   const doc = state.doc;
   const decorations = [];
-  const lines = new Set<number>();
+  const lines = new Map<number, MarkStyle>();
   for (const mark of marks) {
+    const style: MarkStyle = mark.style ?? "open";
     if (mark.from !== undefined && mark.to !== undefined) {
       const from = Math.max(0, Math.min(doc.length, mark.from));
       const to = Math.max(from, Math.min(doc.length, mark.to));
-      if (to > from) decorations.push((mark.active ? activePassage : markedPassage).range(from, to));
+      if (to > from) decorations.push(passageMark(style, !!mark.active).range(from, to));
     }
     const first = Math.max(1, Math.min(doc.lines, mark.startLine));
     const last = Math.min(doc.lines, Math.max(first, mark.endLine), first + MAX_MARKED_LINES - 1);
-    for (let line = first; line <= last; line++) lines.add(line);
+    for (let line = first; line <= last; line++) {
+      const known = lines.get(line);
+      if (known === undefined || STYLE_RANK[style] < STYLE_RANK[known]) lines.set(line, style);
+    }
   }
-  const markers = [...lines].sort((a, b) => a - b).map((line) => markMarker.range(doc.line(line).from));
+  const markers = [...lines].sort(([a], [b]) => a - b).map(([line, style]) => MARKERS[style].range(doc.line(line).from));
   return { decorations: Decoration.set(decorations, true), markers: RangeSet.of(markers, true) };
 }
 

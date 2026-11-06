@@ -73,19 +73,20 @@ export function viewerPaneTitle(record: ViewerRecord | undefined): string {
 }
 
 /**
- * The params of a snapshot's viewer pane. Its annotations stay with the
- * connection's store (`annotations.ts`): a change of them alone leaves the
- * params as they are, so it never touches the layout.
+ * The params of a snapshot's viewer pane. Its annotations and their counter
+ * stay with the connection's store (`annotations.ts`): a change of them alone
+ * leaves the params as they are, so it never touches the layout. A wait for a
+ * review stays in the record, whose banner the pane shows.
  */
 export function viewerPanelParams(pane: PaneState, supported: boolean): ViewerPanelParams {
   const record = pane.viewer ? panelRecord(pane.viewer) : undefined;
   return { viewer: { ...(record ? { record } : {}), supported, ...(pane.cwd ? { cwd: pane.cwd } : {}) } };
 }
 
-/** A viewer record without its annotations. */
+/** A viewer record without its annotations and their counter. */
 function panelRecord(record: ViewerRecord): ViewerRecord {
-  if (!record.annotations) return record;
-  const { annotations: _annotations, ...rest } = record;
+  if (!record.annotations && record.lastAnnotationNumber === undefined) return record;
+  const { annotations: _annotations, lastAnnotationNumber: _last, ...rest } = record;
   return rest;
 }
 

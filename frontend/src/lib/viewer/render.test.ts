@@ -1,7 +1,10 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { lastLine } from "./anchoring.ts";
-import { ACTIVE_HIGHLIGHT, HIGHLIGHT, HOST_STYLE, RenderedDocument, renderedText, shadowSelection, type BoundaryRange } from "./render.ts";
+import {
+  ACTIVE_HIGHLIGHT, CHANGED_HIGHLIGHT, HIGHLIGHT, HOST_STYLE, RESOLVED_HIGHLIGHT, RenderedDocument, renderedText, shadowSelection,
+  type BoundaryRange,
+} from "./render.ts";
 import { cssValueAllowed, documentSelector, sanitizeHtml } from "./sanitize.ts";
 
 /** A script that marks the document when it runs, `data-ran-<name>` on its root element. */
@@ -395,6 +398,16 @@ describe("annotations in a rendered document", () => {
     expect([...items].map((item) => item.getAttribute("data-splitty-mark"))).toEqual(["active", "active"]);
     expect(root.querySelector("ul")!.hasAttribute("data-splitty-mark")).toBe(false);
 
+    // A changed passage and a resolved one in their own styles; where they share a block, the open one shows.
+    rendered.setMarks([], [
+      { startLine: 3, endLine: 3, style: "changed" },
+      { startLine: 5, endLine: 5, style: "resolved" },
+      { startLine: 6, endLine: 6, style: "resolved" },
+      { startLine: 6, endLine: 6 },
+    ]);
+    expect(root.querySelector("p")!.getAttribute("data-splitty-mark")).toBe("changed");
+    expect([...items].map((item) => item.getAttribute("data-splitty-mark"))).toEqual(["resolved", ""]);
+
     rendered.render("markdown", PLAN, lastLine(PLAN));
     expect(root.querySelectorAll("[data-splitty-mark]")).toHaveLength(0);
   });
@@ -410,6 +423,16 @@ describe("annotations in a rendered document", () => {
       rendered.setMarks([{ start, end: start + 17 }, { start: first, end: first + 5, active: true }]);
       expect([...highlights.get(HIGHLIGHT)!].map(String)).toEqual(["retry three times"]);
       expect([...highlights.get(ACTIVE_HIGHLIGHT)!].map(String)).toEqual(["first"]);
+
+      // A changed passage and a resolved one in highlights of their own, below the chosen one.
+      rendered.setMarks([{ start, end: start + 5, style: "changed" }, { start: first, end: first + 5, style: "resolved" }]);
+      expect([...highlights.get(CHANGED_HIGHLIGHT)!].map(String)).toEqual(["retry"]);
+      expect([...highlights.get(RESOLVED_HIGHLIGHT)!].map(String)).toEqual(["first"]);
+      expect(highlights.get(HIGHLIGHT)!.size).toBe(0);
+      const priority = (name: string) => (highlights.get(name) as { priority?: number }).priority!;
+      expect(priority(RESOLVED_HIGHLIGHT)).toBeLessThan(priority(CHANGED_HIGHLIGHT));
+      expect(priority(CHANGED_HIGHLIGHT)).toBeLessThan(priority(HIGHLIGHT));
+      expect(priority(HIGHLIGHT)).toBeLessThan(priority(ACTIVE_HIGHLIGHT));
 
       rendered.setMarks([]);
       expect(highlights.get(HIGHLIGHT)!.size).toBe(0);

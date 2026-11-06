@@ -609,10 +609,16 @@ body,
 /* ── Viewer Panes ── */
 
 .viewer-pane {
-  /* Annotated passages (viewer-annotations): the source view, the rendered document and its blocks. */
+  /*
+   * Annotated passages (viewer-annotations): the source view, the rendered
+   * document and its blocks; a passage that changed since it was annotated,
+   * and one of a resolved annotation, in their own colors.
+   */
   --splitty-annotation-bg: color-mix(in srgb, var(--splitty-accent) 24%, transparent);
   --splitty-annotation-active-bg: color-mix(in srgb, var(--splitty-accent) 46%, transparent);
   --splitty-annotation-block-bg: color-mix(in srgb, var(--splitty-accent) 10%, transparent);
+  --splitty-annotation-changed-bg: color-mix(in srgb, var(--splitty-warning) 20%, transparent);
+  --splitty-annotation-resolved-bg: color-mix(in srgb, var(--splitty-text-muted) 16%, transparent);
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -763,11 +769,18 @@ body,
 .viewer-annotations[hidden],
 .viewer-annotations-empty[hidden],
 .viewer-annotations-add[hidden],
+.viewer-annotations-list[hidden],
+.viewer-annotations-resolved[hidden],
+.viewer-annotation-actions[hidden],
+.viewer-replies[hidden],
+.viewer-reply-box[hidden],
+.viewer-review-wait[hidden],
 .viewer-selection-toolbar[hidden],
 .viewer-selection-kinds[hidden],
 .viewer-selection-note[hidden],
 .viewer-form-field[hidden],
 .viewer-form-problem[hidden],
+.viewer-form-deletion[hidden],
 .splitty-tab-annotations[hidden] {
   display: none;
 }
@@ -780,6 +793,13 @@ body,
   padding: 5px 6px 5px 10px;
   color: var(--splitty-text-secondary);
   font-size: 11px;
+}
+
+.viewer-annotations-count {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .viewer-annotations-icon {
@@ -845,13 +865,78 @@ body,
   cursor: default;
 }
 
-.viewer-annotations-list {
+/* The marks' choices of this window: hide them all, or mark the resolved ones as well. */
+.viewer-annotations-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 8px 6px;
+}
+
+.viewer-annotations-toggle {
+  margin: 0;
+  padding: 1px 7px;
+  border: 1px solid var(--splitty-border-default);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--splitty-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.viewer-annotations-toggle:hover:not(:disabled) {
+  border-color: var(--splitty-accent);
+  color: var(--splitty-text-primary);
+}
+
+.viewer-annotations-toggle[aria-pressed="true"] {
+  border-color: var(--splitty-accent-muted);
+  background: var(--splitty-active-bg);
+  color: var(--splitty-text-primary);
+}
+
+.viewer-annotations-toggle:disabled {
+  color: var(--splitty-text-muted);
+  opacity: 0.6;
+  cursor: default;
+}
+
+.viewer-annotations-scroll {
   flex: 1 1 auto;
   min-height: 0;
-  margin: 0;
-  padding: 0 0 4px;
+  padding-bottom: 4px;
   overflow-y: auto;
+}
+
+.viewer-annotations-list {
+  margin: 0;
+  padding: 0;
   list-style: none;
+}
+
+/* The resolved threads, folded after the open ones. */
+.viewer-annotations-resolved {
+  margin-top: 4px;
+}
+
+.viewer-annotations-resolved-summary {
+  margin: 0 6px 4px;
+  padding: 3px 4px;
+  border-radius: 3px;
+  color: var(--splitty-text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  outline: none;
+}
+
+.viewer-annotations-resolved-summary:hover {
+  background: var(--splitty-hover-bg);
+  color: var(--splitty-text-primary);
+}
+
+.viewer-annotations-resolved-summary:focus-visible {
+  box-shadow: inset 0 0 0 1px var(--splitty-accent-muted);
 }
 
 .viewer-annotation {
@@ -882,6 +967,16 @@ body,
   border-left-color: var(--splitty-warning);
 }
 
+.viewer-annotation.changed {
+  border-left-style: dashed;
+  border-left-color: var(--splitty-warning);
+}
+
+.viewer-annotation.resolved {
+  border-left-color: var(--splitty-border-default);
+  color: var(--splitty-text-secondary);
+}
+
 .viewer-annotation-head {
   display: flex;
   align-items: baseline;
@@ -889,21 +984,53 @@ body,
   font-size: 11px;
 }
 
-.viewer-annotation-kind {
-  color: var(--splitty-accent);
+.viewer-annotation-number {
+  flex: 0 0 auto;
+  color: var(--splitty-text-secondary);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-variant-numeric: tabular-nums;
   font-weight: 600;
 }
 
-.viewer-annotation[data-kind="question"] .viewer-annotation-kind {
-  color: var(--splitty-warning);
+.viewer-annotation-kind {
+  flex: 0 0 auto;
+  color: var(--splitty-accent);
+  font-weight: 600;
 }
 
 .viewer-annotation[data-kind="change"] .viewer-annotation-kind {
   color: var(--splitty-success);
 }
 
-.viewer-annotation[data-kind="delete"] .viewer-annotation-kind {
+.viewer-annotation[data-deletion] .viewer-annotation-kind {
   color: var(--splitty-danger);
+}
+
+.viewer-annotation.resolved .viewer-annotation-kind {
+  color: var(--splitty-text-secondary);
+}
+
+/* Changed, not found, sent: short states beside an entry's place. */
+.viewer-annotation-badge {
+  flex: 0 0 auto;
+  padding: 0 5px;
+  border-radius: 7px;
+  background: var(--splitty-hover-bg);
+  color: var(--splitty-text-muted);
+  font-size: 10px;
+  line-height: 15px;
+}
+
+.viewer-annotation-changed,
+.viewer-annotation-not-found {
+  background: color-mix(in srgb, var(--splitty-warning) 16%, transparent);
+  color: var(--splitty-warning);
+}
+
+.viewer-annotation-sent,
+.viewer-reply-sent {
+  background: color-mix(in srgb, var(--splitty-success) 14%, transparent);
+  color: var(--splitty-success);
 }
 
 .viewer-annotation-where {
@@ -967,11 +1094,170 @@ body,
   border-left-color: var(--splitty-success);
 }
 
+.viewer-annotation-deletion {
+  margin-top: 4px;
+  padding-left: 6px;
+  border-left: 2px solid var(--splitty-danger);
+  color: var(--splitty-text-secondary);
+  font-size: 11px;
+  font-style: italic;
+}
+
 .viewer-annotation-body {
   margin-top: 4px;
   line-height: 1.45;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* A thread's replies: each with its author, an agent's with the title of its pane. */
+.viewer-replies {
+  margin: 6px 0 0;
+  padding: 0 0 0 8px;
+  border-left: 2px solid var(--splitty-border-subtle);
+  list-style: none;
+}
+
+.viewer-reply + .viewer-reply {
+  margin-top: 6px;
+}
+
+.viewer-reply-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.viewer-reply-author {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--splitty-text-secondary);
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-reply[data-author="agent"] .viewer-reply-author {
+  color: var(--splitty-accent);
+}
+
+.viewer-reply-tools {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  margin-left: auto;
+  opacity: 0;
+}
+
+.viewer-reply:hover .viewer-reply-tools,
+.viewer-reply:focus-within .viewer-reply-tools {
+  opacity: 1;
+}
+
+.viewer-reply-body {
+  margin-top: 2px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.viewer-annotation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+  margin: 4px 0 0 -4px;
+}
+
+.viewer-annotation-action {
+  margin: 0;
+  padding: 1px 4px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--splitty-text-muted);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.viewer-annotation-action:hover:not(:disabled) {
+  background: var(--splitty-hover-bg);
+  color: var(--splitty-text-primary);
+}
+
+.viewer-annotation-action:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.viewer-reply-box {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 6px;
+  cursor: auto;
+}
+
+.viewer-reply-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.viewer-reply-actions .viewer-form-button {
+  padding: 2px 8px;
+  font-size: 11px;
+}
+
+/* A process waits for the review of the pane's document: approve it, or send it the review. */
+.viewer-review-wait {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 4px 10px;
+  border-bottom: 1px solid var(--splitty-border-subtle);
+  background: color-mix(in srgb, var(--splitty-accent) 14%, var(--splitty-surface-raised));
+  color: var(--splitty-text-primary);
+  font-size: 12px;
+}
+
+.viewer-review-wait-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-review-wait-button {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 2px 9px;
+  border: 1px solid var(--splitty-border-default);
+  border-radius: 4px;
+  background: var(--splitty-surface-raised);
+  color: var(--splitty-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.viewer-review-wait-send {
+  border-color: var(--splitty-accent);
+  background: var(--splitty-accent-muted);
+  color: var(--splitty-text-primary);
+}
+
+.viewer-review-wait-button:hover:not(:disabled) {
+  border-color: var(--splitty-accent);
+  color: var(--splitty-text-primary);
+}
+
+.viewer-review-wait-button:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .viewer-annotations-empty {
@@ -1158,6 +1444,13 @@ body,
   line-height: 1.45;
 }
 
+.viewer-form-deletion {
+  margin: 0;
+  color: var(--splitty-text-secondary);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
 .viewer-form-actions {
   display: flex;
   align-items: center;
@@ -1192,7 +1485,7 @@ body,
   color: var(--splitty-text-primary);
 }
 
-/* A viewer tab's count of annotations; a click opens the pane's list. */
+/* A viewer tab's count of open annotations; a click opens the pane's list. */
 .splitty-tab-annotations {
   display: inline-flex;
   align-items: center;

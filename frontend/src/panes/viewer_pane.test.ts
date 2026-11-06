@@ -86,7 +86,7 @@ describe("ViewerPaneRenderer", { timeout: 30_000 }, () => {
   // viewer-annotations, Handing A Review To A Terminal: Send to the agent.
   it("sends a pane's review to its origin terminal and gives that terminal the keyboard", async () => {
     const annotation = {
-      id: "ann-0123456789abcdef", kind: "question" as const, body: "Why three?",
+      id: "ann-0123456789abcdef", number: 1, kind: "comment" as const, body: "Why three?",
       target: { view: "source" as const, quote: "retry three times", prefix: "", suffix: "", startLine: 1, endLine: 1 },
     };
     const plan = viewer("v1", "/home/me/app/PLAN.md");
@@ -112,10 +112,13 @@ describe("ViewerPaneRenderer", { timeout: 30_000 }, () => {
 
     await vi.waitFor(() => expect(screen.socket.sentOfType("input")).toHaveLength(1));
     expect(screen.socket.sentOfType("input")[0]).toMatchObject({ id: "sess-1", data: expect.stringMatching(/^# Review of PLAN\.md\n/) });
+    expect(screen.socket.sentOfType("input")[0].data).toContain("## #1 Line 1, comment");
+    // The pane keeps the annotation, marked as handed over.
     expect(screen.socket.sentOfType("mux.op").map((message) => message.op)).toEqual([
-      { type: "remove_annotations", paneId: "v1", ids: [annotation.id] },
+      { type: "mark_sent", paneId: "v1", entries: [expect.objectContaining({ id: annotation.id, kind: "comment" })] },
     ]);
-    expect(screen.binding.conn.annotations.count("v1")).toBe(0);
+    expect(screen.binding.conn.annotations.count("v1")).toBe(1);
+    expect(screen.binding.conn.annotations.get("v1", annotation.id)?.sent).toBe(true);
     await vi.waitFor(() => expect((emulator as unknown as { focusCount: number }).focusCount).toBe(1));
     session.dispose();
   });

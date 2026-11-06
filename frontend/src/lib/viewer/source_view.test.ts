@@ -111,6 +111,32 @@ describe("SourceView", () => {
     expect(view.dom.querySelectorAll(".cm-viewer-marked")).toHaveLength(0);
   });
 
+  // viewer-annotations (D7 of review-threads): a changed passage and a resolved
+  // one in their own style; a shared line's bar shows the open one first.
+  it("marks a changed passage and a resolved one in their own styles", () => {
+    const view = mount("one\ntwo\nthree\nfour\n");
+    view.setMarks([
+      { from: 0, to: 3, startLine: 1, endLine: 1, style: "changed" },
+      { from: 4, to: 7, startLine: 2, endLine: 2, style: "resolved" },
+      { from: 8, to: 13, startLine: 3, endLine: 3, style: "resolved" },
+      { startLine: 3, endLine: 3, style: "changed" },
+      { startLine: 4, endLine: 4, style: "resolved" },
+      { startLine: 4, endLine: 4 },
+    ]);
+    expect(view.dom.querySelector(".cm-viewer-marked-changed")!.textContent).toBe("one");
+    expect([...view.dom.querySelectorAll(".cm-viewer-marked-resolved")].map((element) => element.textContent)).toEqual(["two", "three"]);
+    const bars = [...view.dom.querySelectorAll(".cm-viewer-marks .cm-gutterElement")]
+      .map((element) => element.querySelector(".cm-viewer-mark"))
+      .filter((bar): bar is Element => bar !== null)
+      .map((bar) => bar.className);
+    expect(bars).toEqual([
+      "cm-viewer-mark cm-viewer-mark-changed",
+      "cm-viewer-mark cm-viewer-mark-resolved",
+      "cm-viewer-mark cm-viewer-mark-changed",
+      "cm-viewer-mark",
+    ]);
+  });
+
   it("tells when the selection changes", () => {
     const parent = document.createElement("div");
     document.body.append(parent);

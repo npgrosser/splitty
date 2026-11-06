@@ -81,8 +81,9 @@ More in [Files and editors](docs/files-and-editors.md).
 - **Viewer panes.** `splitty open PLAN.md` shows a file next to the terminal,
   Markdown and HTML rendered, and follows its changes, so an agent can show
   you its plan or report. A terminal selection opens the same way from the
-  context menu. Annotate passages with comments, questions and suggested
-  changes, then paste the review into the agent's terminal as Markdown.
+  context menu. Comment on passages or suggest changes, send the review to
+  the agent's terminal as Markdown, and follow the agent's replies in each
+  thread; `splitty review` lets an agent wait for your verdict.
 
 To get started, add this to your `CLAUDE.md` or `AGENTS.md`:
 

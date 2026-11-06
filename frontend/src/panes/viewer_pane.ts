@@ -23,9 +23,10 @@
  * from the state the last one left (`viewer_view_state.ts`).
  *
  * Where the server keeps annotations (`viewer-annotations`), the view gets
- * the connection's store and the terminals a review can go to: the viewer's
+ * the connection's store, the terminals a review can go to: the viewer's
  * origin while it exists as a terminal pane, on any screen, and the terminal
- * panes of the viewer's screen.
+ * panes of the viewer's screen; and the connection's answers to a process
+ * that waits for the pane's review.
  */
 
 import type { GroupPanelPartInitParameters, IContentRenderer, PanelUpdateEvent } from "dockview-core";
@@ -40,7 +41,7 @@ import { MAX_TITLE, plainText } from "../lib/protocol/untrusted.ts";
 import { scratchpadOf, toggleScratchpad } from "../lib/scratchpad.ts";
 import { getTheme, subscribeTheme } from "../lib/theme.ts";
 import type { DocumentWatch } from "../lib/viewer/documents.ts";
-import { UNDO_MS, type ReviewTarget } from "../lib/viewer/handover.ts";
+import { UNDO_MS, type ReviewAnswerRequest, type ReviewTarget } from "../lib/viewer/handover.ts";
 import { MAX_FILE_BYTES, MAX_TEXT_BYTES } from "../lib/viewer/limits.ts";
 import { isViewerPanel, sameViewerSource, viewerParams } from "../lib/viewer/panel.ts";
 import { syntaxColors } from "../lib/viewer/syntax_colors.ts";
@@ -85,7 +86,7 @@ function applyTheme(element: HTMLElement): void {
 
 /** The notices of annotations and hand-overs, as the window's toasts. */
 const notices: LayerNotices = {
-  sent: (message, undo) => toast.success(message, { duration: UNDO_MS, action: { label: "Undo", onClick: undo } }),
+  sent: (message) => toast.success(message),
   undoable: (message, undo) => toast(message, { duration: UNDO_MS, action: { label: "Undo", onClick: undo } }),
   info: (message) => toast(message),
   error: (message, detail) => toast.error(message, detail ? { description: plainText(detail, 500) } : undefined),
@@ -208,6 +209,7 @@ export class ViewerPaneRenderer implements IContentRenderer {
       showMenu: showContextMenu,
       writeClipboard: (text: string) => navigator.clipboard.writeText(text),
       download: (name: string, blob: Blob) => void saveAsDownload(name, blob),
+      answer: (request: ReviewAnswerRequest) => conn.reviews.answer(request),
     } : undefined;
     // Its annotations end with an embedded server while it is shown (`close_guard.ts`).
     if (source && supported) this.cleanups.push(conn.annotations.mount(api.id));

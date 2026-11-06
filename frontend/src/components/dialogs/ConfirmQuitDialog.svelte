@@ -69,7 +69,7 @@
       {/if}
       {#if annotations > 0}
         <p class="dialog-text">
-          {annotations === 1 ? "An annotation that was not sent ends" : `${annotations} annotations that were not sent end`} with Splitty.
+          {annotations === 1 ? "An annotation and its replies end" : `${annotations} annotations and their replies end`} with Splitty.
         </p>
       {/if}
       {#if hostScreens}

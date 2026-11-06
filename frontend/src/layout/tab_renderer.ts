@@ -61,7 +61,7 @@ export class SplittyTabRenderer implements ITabRenderer {
       this.cleanups.push(scratchpads.subscribe(update));
     }
 
-    // A viewer pane's annotations (viewer-annotations): their count; a click opens the pane's list.
+    // A viewer pane's open annotations (viewer-annotations): their count; a click opens the pane's list.
     const annotations = viewerParams(params.params) ? bindingForApi(params.containerApi)?.conn.annotations : undefined;
     if (annotations) {
       const count = document.createElement("span");
@@ -73,11 +73,11 @@ export class SplittyTabRenderer implements ITabRenderer {
       });
       this.element.appendChild(count);
       const update = () => {
-        const n = annotations.count(api.id);
+        const n = annotations.openCount(api.id);
         count.hidden = n === 0;
         count.textContent = n > 0 ? String(n) : "";
-        const label = n === 1 ? "1 annotation" : `${n} annotations`;
-        count.title = `${label}, not sent yet`;
+        const label = n === 1 ? "1 open annotation" : `${n} open annotations`;
+        count.title = `${label}; show the list`;
         count.setAttribute("aria-label", label);
       };
       update();

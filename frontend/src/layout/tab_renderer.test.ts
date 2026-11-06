@@ -53,23 +53,30 @@ function screen(annotations: ViewerAnnotation[]): ScreenState {
 
 const comment = (n: number): ViewerAnnotation => ({ id: `ann-${n.toString(16).padStart(16, "0")}`, kind: "comment", body: `Remark ${n}.` });
 
-// viewer-annotations, Annotations In The Pane: a tab's marker with the number of the pane's annotations.
+// viewer-annotations, Annotations In The Pane: a tab's marker with the number of the pane's open annotations.
 describe("the tab of a viewer pane", () => {
-  it("shows how many annotations the pane holds, and opens its list on a click", () => {
+  it("shows how many open annotations the pane holds, and opens its list on a click", () => {
     const { renderer, conn, api } = tab("v1", { viewer: { record: PLAN, supported: true } });
     const marker = renderer.element.querySelector<HTMLElement>(".splitty-tab-annotations")!;
     expect(marker.hidden).toBe(true);
 
-    conn.annotations.snapshot(screen([comment(1), comment(2), comment(3)]));
+    conn.annotations.snapshot(screen([comment(1), comment(2), comment(3), { ...comment(4), status: "resolved" }]));
     expect(marker.hidden).toBe(false);
     expect(marker.textContent).toBe("3");
-    expect(marker.getAttribute("aria-label")).toBe("3 annotations");
+    expect(marker.getAttribute("aria-label")).toBe("3 open annotations");
 
     const show = vi.fn();
     cleanups.push(registerAnnotationList("v1", show));
     marker.click();
     expect(api.setActive).toHaveBeenCalled();
     expect(show).toHaveBeenCalledTimes(1);
+
+    // Resolved ones are not counted.
+    conn.annotations.snapshot(screen([{ ...comment(4), status: "resolved" }]));
+    expect(marker.hidden).toBe(true);
+
+    conn.annotations.snapshot(screen([comment(1)]));
+    expect(marker.getAttribute("aria-label")).toBe("1 open annotation");
 
     conn.annotations.snapshot(screen([]));
     expect(marker.hidden).toBe(true);

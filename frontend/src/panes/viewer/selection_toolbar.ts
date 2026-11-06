@@ -1,8 +1,8 @@
 /**
- * The toolbar beside a selection in a viewer pane (D6 of review-pane): the
- * four kinds of annotation for the selected passage. A selection too short
- * to be found again, or longer than a quote may be, says so in place of the
- * kinds.
+ * The toolbar beside a selection in a viewer pane (D6 of review-pane, D1 of
+ * review-threads): the two kinds of annotation for the selected passage, a
+ * comment and a suggested change. A selection too short to be found again,
+ * or longer than a quote may be, says so in place of the kinds.
  */
 
 import type { AnnotationKind } from "../../lib/protocol/types.ts";
@@ -12,10 +12,8 @@ export type SelectionState = "passage" | "short" | "long";
 
 /** The kinds as the toolbar offers them. */
 export const KIND_ACTIONS: readonly { readonly kind: AnnotationKind; readonly label: string; readonly title: string }[] = [
-  { kind: "comment", label: "Comment", title: "Comment on the selection" },
-  { kind: "question", label: "Ask", title: "Ask about the selection" },
-  { kind: "change", label: "Suggest Change", title: "Suggest a replacement for the selection" },
-  { kind: "delete", label: "Suggest Deletion", title: "Suggest deleting the selection" },
+  { kind: "comment", label: "Comment", title: "Comment on the selection, or ask about it" },
+  { kind: "change", label: "Suggest Change", title: "Suggest a replacement for the selection, or its deletion" },
 ];
 
 export const SHORT_SELECTION = "Select a longer passage to annotate it.";

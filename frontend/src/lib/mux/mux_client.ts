@@ -18,7 +18,7 @@
 import type { ConnSocket } from "../protocol/socket.ts";
 import type { MuxOperation, OpenViewerOp, ScreenInfo, ScreenState, OutgoingMessage, ViewerPlacement } from "../protocol/types.ts";
 import { plainText, MAX_TEXT } from "../protocol/untrusted.ts";
-import { ANNOTATIONS_CAPABILITY } from "../viewer/annotations.ts";
+import { ANNOTATIONS_CAPABILITY, ANNOTATION_OPS } from "../viewer/annotations.ts";
 import { VIEWER_CAPABILITY } from "../viewer/limits.ts";
 import { screenList, screenState } from "./incoming.ts";
 
@@ -36,9 +36,6 @@ export interface OpFailure {
   /** The server's reason, as plain text. */
   readonly error: string;
 }
-
-/** Ops whose rejection names the viewer pane they were for, not a pane to create. */
-const ANNOTATION_OPS: ReadonlySet<string> = new Set(["put_annotations", "remove_annotations"]);
 
 interface PaneSpawnedWaiter {
   resolve: (sessionId: string) => void;

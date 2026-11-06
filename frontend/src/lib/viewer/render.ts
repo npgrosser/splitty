@@ -62,11 +62,15 @@ export interface RenderedSelection {
   readonly endLine?: number;
 }
 
+/** How a passage is marked: open, found as what its quote most likely became, or of a resolved annotation. */
+export type MarkStyle = "changed" | "resolved";
+
 /** A passage to mark in a rendered document's text; `active` is the one the user chose. */
 export interface RenderedMark {
   readonly start: number;
   readonly end: number;
   readonly active?: boolean;
+  readonly style?: MarkStyle;
 }
 
 /** Source lines whose blocks to mark: the passages of the other view. */
@@ -74,13 +78,29 @@ export interface BlockMark {
   readonly startLine: number;
   readonly endLine: number;
   readonly active?: boolean;
+  readonly style?: MarkStyle;
 }
 
 /** The names of the highlights in the CSS Custom Highlight API registry, shared by the panes of a window. */
 export const HIGHLIGHT = "splitty-annotation";
 export const ACTIVE_HIGHLIGHT = "splitty-annotation-active";
-/** The attribute that marks a block; a document cannot set `data-splitty-*` (`sanitize.ts`). */
+export const CHANGED_HIGHLIGHT = "splitty-annotation-changed";
+export const RESOLVED_HIGHLIGHT = "splitty-annotation-resolved";
+/**
+ * The attribute that marks a block, with the mark's style: empty, `active`,
+ * `changed` or `resolved`; a document cannot set `data-splitty-*` (`sanitize.ts`).
+ */
 const BLOCK_MARK = "data-splitty-mark";
+
+/** Where marks overlap, the higher one shows: the chosen passage over an open one, over a changed one, over a resolved one. */
+type MarkRank = 0 | 1 | 2 | 3;
+const RANK_VALUES = ["resolved", "changed", "", "active"] as const;
+const RANK_HIGHLIGHTS = [RESOLVED_HIGHLIGHT, CHANGED_HIGHLIGHT, HIGHLIGHT, ACTIVE_HIGHLIGHT] as const;
+
+function rankOf(mark: { readonly active?: boolean; readonly style?: MarkStyle }): MarkRank {
+  if (mark.active) return 3;
+  return mark.style === "resolved" ? 0 : mark.style === "changed" ? 1 : 2;
+}
 
 const MONO = `"SplittyMono", "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace`;
 
@@ -118,8 +138,12 @@ const BASE_CSS = `
 [data-splitty-html] [data-splitty-href]{color:#0645ad;text-decoration:underline;cursor:pointer}
 [data-splitty-href]:focus-visible{outline:2px solid var(--splitty-accent,#63a0ff);outline-offset:2px}
 ::highlight(${HIGHLIGHT}){background-color:var(--splitty-annotation-bg,rgba(99,160,255,.24))}
+::highlight(${CHANGED_HIGHLIGHT}){background-color:var(--splitty-annotation-changed-bg,rgba(229,192,123,.24));text-decoration:underline dotted var(--splitty-warning,#e5c07b)}
+::highlight(${RESOLVED_HIGHLIGHT}){background-color:var(--splitty-annotation-resolved-bg,rgba(138,138,138,.18))}
 ::highlight(${ACTIVE_HIGHLIGHT}){background-color:var(--splitty-annotation-active-bg,rgba(99,160,255,.5))}
 [${BLOCK_MARK}]{background-color:var(--splitty-annotation-block-bg,rgba(99,160,255,.12));box-shadow:-6px 0 0 -3px var(--splitty-accent,#63a0ff);border-radius:2px}
+[${BLOCK_MARK}="changed"]{background-color:var(--splitty-annotation-changed-bg,rgba(229,192,123,.16));box-shadow:-6px 0 0 -3px var(--splitty-warning,#e5c07b)}
+[${BLOCK_MARK}="resolved"]{background-color:var(--splitty-annotation-resolved-bg,rgba(138,138,138,.12));box-shadow:-6px 0 0 -3px var(--splitty-text-muted,#6a6a6a)}
 [${BLOCK_MARK}="active"]{background-color:var(--splitty-annotation-active-bg,rgba(99,160,255,.3))}
 ${SYNTAX_CSS}
 `;
@@ -337,10 +361,13 @@ function highlightApi(doc: Document): HighlightApi | undefined {
 }
 
 /** The window's shared highlight `name`, created on first use. */
-function sharedHighlight(api: HighlightApi, name: string): Set<AbstractRange> {
+function sharedHighlight(api: HighlightApi, rank: MarkRank): Set<AbstractRange> {
+  const name = RANK_HIGHLIGHTS[rank];
   let highlight = api.registry.get(name);
   if (!highlight) {
     highlight = api.create();
+    // Overlapping highlights paint by priority, not by the order they were registered in.
+    (highlight as { priority?: number }).priority = rank;
     api.registry.set(name, highlight);
   }
   return highlight;
@@ -658,24 +685,24 @@ export class RenderedDocument {
     const model = this.textModel();
     if (!model) return;
     const api = highlightApi(this.host.ownerDocument);
-    const blocks = new Map<Element, boolean>();
-    const markBlock = (block: Element, active: boolean) => blocks.set(block, (blocks.get(block) ?? false) || active);
+    const blocks = new Map<Element, MarkRank>();
+    const markBlock = (block: Element, rank: MarkRank) => blocks.set(block, Math.max(blocks.get(block) ?? 0, rank) as MarkRank);
     for (const mark of this.marks) {
       if (!api) {
-        for (const block of model.blocksOf(mark.start, mark.end)) markBlock(block, !!mark.active);
+        for (const block of model.blocksOf(mark.start, mark.end)) markBlock(block, rankOf(mark));
         continue;
       }
       const range = model.range(mark.start, mark.end);
       if (!range) continue;
-      const highlight = sharedHighlight(api, mark.active ? ACTIVE_HIGHLIGHT : HIGHLIGHT);
+      const highlight = sharedHighlight(api, rankOf(mark));
       highlight.add(range);
       this.highlighted.push({ highlight, range });
     }
     for (const mark of this.blockMarks) {
-      for (const block of this.blocksFor(mark.startLine, mark.endLine)) markBlock(block, !!mark.active);
+      for (const block of this.blocksFor(mark.startLine, mark.endLine)) markBlock(block, rankOf(mark));
     }
-    for (const [block, active] of blocks) {
-      block.setAttribute(BLOCK_MARK, active ? "active" : "");
+    for (const [block, rank] of blocks) {
+      block.setAttribute(BLOCK_MARK, RANK_VALUES[rank]);
       this.markedBlocks.push(block);
     }
   }

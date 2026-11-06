@@ -157,13 +157,18 @@ export interface AnnotationMenuControls {
   addComment(): void;
   readonly listShown: boolean;
   toggleList(): void;
+  /** The document shows no marks of annotations, by the user's choice in this window. */
+  readonly marksHidden: boolean;
+  toggleMarks(): void;
+  /** The passages of resolved annotations are marked as well. */
+  readonly resolvedShown: boolean;
+  toggleResolved(): void;
 }
 
+/** The two kinds (D1 of review-threads): a comment, which also asks, and a suggested change, which also deletes. */
 const ANNOTATE_ITEMS: readonly { kind: AnnotationKind; label: string }[] = [
   { kind: "comment", label: "Comment on Selection" },
-  { kind: "question", label: "Ask About Selection" },
   { kind: "change", label: "Suggest Change" },
-  { kind: "delete", label: "Suggest Deletion" },
 ];
 
 /** The annotation entries of a viewer pane's menu. */
@@ -184,6 +189,8 @@ function annotationItems(controls: AnnotationMenuControls): ContextMenuItem[] {
   items.push(
     { label: "Add Comment", action: () => controls.addComment() },
     { label: controls.listShown ? "Hide Annotations" : "Show Annotations", action: () => controls.toggleList() },
+    { label: controls.marksHidden ? "Show Marks" : "Hide Marks", action: () => controls.toggleMarks() },
+    { label: controls.resolvedShown ? "Hide Resolved" : "Show Resolved", action: () => controls.toggleResolved() },
   );
   return items;
 }

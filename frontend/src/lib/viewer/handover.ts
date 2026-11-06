@@ -1,6 +1,7 @@
 /**
- * Handing a viewer pane's review to a terminal (`viewer-annotations`,
- * Handing A Review To A Terminal; D9 of review-pane).
+ * Handing a viewer pane's review to a terminal or to a process that waits
+ * for it (`viewer-annotations`, Handing A Review To A Terminal and Waiting
+ * For A Review; D4 and D9 of review-threads).
  *
  * The review is pasted as the user's own paste would be, without Enter, and
  * the terminal takes the keyboard. A program that has not enabled bracketed
@@ -11,20 +12,30 @@
  * terminal's scratchpad, separated by a blank line, while it stays within
  * the scratchpad's limit.
  *
- * Sending ends the round: the annotations that went out are removed, and for
- * ten seconds a notice offers to put them back. An annotation added in the
- * meantime is not part of the round and stays. Copying and saving the review
- * keep the annotations, since nothing reaches the agent.
+ * Sending keeps the annotations: the caller marks the entries the review
+ * held as handed over once it went out (`mark_sent`), and nothing is taken
+ * back, so there is no undo. Copying and saving the review mark nothing,
+ * since nothing reaches an agent.
+ *
+ * A process that waits for a review is answered with `viewer.review_answer`
+ * over the pane's connection (`ReviewAnswers`); the server acknowledges every
+ * answer with `viewer.review_answered`, and only an accepted one counts.
  *
  * Everything that touches a terminal comes in as a `ReviewTarget`, so that
  * this module knows no panes, sessions or emulators.
  */
 
+import type { ConnSocket } from "../protocol/socket.ts";
+import type { ReviewOutcome } from "../protocol/types.ts";
 import { SCRATCHPAD_LIMIT, byteLength } from "../scratchpad.ts";
 import { quoteUploadPath } from "../terminal/image_paste.ts";
 
-/** How long the notice after a send offers to put the annotations back. */
+/** How long the notice of a change the user can take back offers its undo. */
 export const UNDO_MS = 10_000;
+/** The longest review that answers a waiting process, in bytes of UTF-8. */
+export const REVIEW_ANSWER_LIMIT = 1024 * 1024;
+/** How long an answer waits for the server's acknowledgement. */
+export const ANSWER_TIMEOUT_MS = 15_000;
 
 /** A terminal pane a review can go to. */
 export interface ReviewTarget {
@@ -56,17 +67,10 @@ export interface Review {
   readonly fileName: string;
 }
 
-/** The round a send ends: the annotations the review holds. */
-export interface Round {
-  /** Remove the annotations that were sent. */
-  end(): void;
-  /** Put them back. */
-  restore(): void;
-}
-
-/** What the user is told; `sent` offers the undo for `UNDO_MS`. */
+/** What the user is told. */
 export interface HandoverNotices {
-  sent(message: string, undo: () => void): void;
+  /** The review went out. */
+  sent(message: string): void;
   info(message: string): void;
   error(message: string, detail?: string): void;
 }
@@ -99,16 +103,11 @@ export function scratchpadProblem(review: Review, target: ReviewTarget): string 
 }
 
 /**
- * Send `review` to `target` in `form`. Resolves with whether it was sent, and
- * so the round ended. A paste that a program without bracketed paste would
- * run line by line goes as a file, and the notice says so.
+ * Send `review` to `target` in `form`. Resolves with whether it went out, so
+ * that the caller marks what it held. A paste that a program without
+ * bracketed paste would run line by line goes as a file, and the notice says so.
  */
-export async function sendReview(review: Review, target: ReviewTarget, form: SendForm, round: Round, notices: HandoverNotices): Promise<boolean> {
-  const finish = (message: string) => {
-    round.end();
-    notices.sent(message, () => round.restore());
-  };
-
+export async function sendReview(review: Review, target: ReviewTarget, form: SendForm, notices: HandoverNotices): Promise<boolean> {
   if (form === "scratchpad") {
     const problem = scratchpadProblem(review, target);
     if (problem || !target.scratchpad) {
@@ -117,7 +116,7 @@ export async function sendReview(review: Review, target: ReviewTarget, form: Sen
     }
     target.scratchpad.set(appendedScratchpad(target.scratchpad.text(), review));
     target.scratchpad.open();
-    finish(`The review is in the scratchpad of ${target.title}`);
+    notices.sent(`The review is in the scratchpad of ${target.title}`);
     return true;
   }
 
@@ -125,7 +124,7 @@ export async function sendReview(review: Review, target: ReviewTarget, form: Sen
   if (!asFile) {
     target.paste(pastedText(review));
     target.reveal();
-    finish(`The review is at the prompt of ${target.title}`);
+    notices.sent(`The review is at the prompt of ${target.title}`);
     return true;
   }
 
@@ -138,8 +137,96 @@ export async function sendReview(review: Review, target: ReviewTarget, form: Sen
   }
   target.paste(quoteUploadPath(path));
   target.reveal();
-  finish(form === "file"
+  notices.sent(form === "file"
     ? `The review is stored as a file, its path is at the prompt of ${target.title}`
     : `The review went as a file: the program in ${target.title} takes no bracketed paste, so its path is at the prompt`);
   return true;
+}
+
+/** An answer to a process that waits for a review of a viewer pane. */
+export interface ReviewAnswerRequest {
+  /** The pane's screen, by its id on the server. */
+  readonly screenId: string;
+  readonly paneId: string;
+  readonly waitId: string;
+  readonly outcome: ReviewOutcome;
+  /** The review, for `feedback`. */
+  readonly review?: string;
+}
+
+/** The server did not acknowledge an answer: the connection ended, or no acknowledgement came in time. */
+export class ReviewAnswerError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ReviewAnswerError";
+  }
+}
+
+interface PendingAnswer {
+  readonly promise: Promise<boolean>;
+  settle(accepted: boolean | Error): void;
+}
+
+/**
+ * The answers of one connection to processes waiting for reviews. An answer
+ * resolves with whether the server accepted it, which only the first answer
+ * to a wait is; it fails when the connection ends or no acknowledgement
+ * comes within `ANSWER_TIMEOUT_MS`. A second answer to the same wait while
+ * the first is on its way is the first.
+ */
+export class ReviewAnswers {
+  private readonly pending = new Map<string, PendingAnswer>();
+  private readonly unsubscribes: (() => void)[];
+
+  constructor(private readonly socket: ConnSocket, private readonly timeoutMs = ANSWER_TIMEOUT_MS) {
+    this.unsubscribes = [
+      socket.onMessage((msg) => {
+        if (msg.type !== "viewer.review_answered") return;
+        const { paneId, waitId } = msg as { paneId?: unknown; waitId?: unknown };
+        if (typeof paneId !== "string" || typeof waitId !== "string") return;
+        this.pending.get(key(paneId, waitId))?.settle((msg as { accepted?: unknown }).accepted === true);
+      }),
+      socket.onDisconnect(() => {
+        for (const answer of [...this.pending.values()]) {
+          answer.settle(new ReviewAnswerError("The connection to the server ended before it took the answer."));
+        }
+      }),
+    ];
+  }
+
+  answer(request: ReviewAnswerRequest): Promise<boolean> {
+    const id = key(request.paneId, request.waitId);
+    const known = this.pending.get(id);
+    if (known) return known.promise;
+    let settle!: (accepted: boolean | Error) => void;
+    const promise = new Promise<boolean>((resolve, reject) => {
+      const timer = setTimeout(() => settle(new ReviewAnswerError("The server did not take the answer in time.")), this.timeoutMs);
+      settle = (accepted) => {
+        clearTimeout(timer);
+        if (this.pending.get(id)?.promise === promise) this.pending.delete(id);
+        if (accepted instanceof Error) reject(accepted);
+        else resolve(accepted);
+      };
+    });
+    this.pending.set(id, { promise, settle });
+    this.socket.send({
+      type: "viewer.review_answer",
+      screenId: request.screenId,
+      paneId: request.paneId,
+      waitId: request.waitId,
+      outcome: request.outcome,
+      ...(request.outcome === "feedback" && request.review !== undefined ? { review: request.review } : {}),
+    });
+    return promise;
+  }
+
+  dispose(): void {
+    for (const unsubscribe of this.unsubscribes) unsubscribe();
+    this.unsubscribes.length = 0;
+    for (const answer of [...this.pending.values()]) answer.settle(new ReviewAnswerError("The connection was closed."));
+  }
+}
+
+function key(paneId: string, waitId: string): string {
+  return `${paneId}\u0000${waitId}`;
 }
