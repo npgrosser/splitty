@@ -784,11 +784,11 @@ A folder's archive SHALL hold one top-level folder of the folder's name with eve
 - **THEN** the command is refused
 
 ### Requirement: Review Command
-`splitty review <path>` SHALL show a file as `splitty open <path>` does (see Open In A Viewer Pane), and `splitty review --text [--title <title>] [--format markdown|text]` SHALL show the text read from standard input, at most 256 KiB, as a text document titled `<title>`, `Review` by default, with `replace` set (see `viewer-panes`, Reopening A File), and with the `format` `markdown` unless `--format text` asks for plain text. The command SHALL then wait until the user answers in a window (see `viewer-annotations`, Waiting For A Review), and print to standard error which viewer pane it waits for. When the user sends a review, the command SHALL print the review to standard output and exit with status 0; when the user approves, it SHALL print nothing to standard output and exit with status 0. With `--json` it SHALL print `{"outcome":"feedback","review":<review>}` or `{"outcome":"approved"}` instead. The wait SHALL be for the revision of the document the command showed. When the viewer pane closes before an answer, when a process already waits for that pane, which leaves the pane's document as it was, when another command's document took the pane before the wait began, or when the connection to the server ends, the command SHALL say so and exit with status 1. Interrupting the command SHALL end its wait. The caller's pane and screen SHALL come from `--pane` and `--screen`, else from `SPLITTY_PANE_ID` and `SPLITTY_SCREEN_ID`. Under `SPLITTY_AGENT_SOCK` the command SHALL be refused.
+`splitty review <path>` SHALL show a file as `splitty open <path>` does (see Open In A Viewer Pane), and `splitty review --text [--title <title>] [--format markdown|text]` SHALL show the text read from standard input, at most 256 KiB, as a text document titled `<title>`, `Review` by default, with `replace` set (see `viewer-panes`, Reopening A File), and with the `format` `markdown` unless `--format text` asks for plain text. The command SHALL then wait until the user answers in a window (see `viewer-annotations`, Waiting For A Review), and print to standard error which viewer pane it waits for. When the user approves, the command SHALL print the review to standard output when the approval carries one, nothing otherwise, and exit with status 0. When the user requests changes, it SHALL print the review to standard output and exit with status 3. With `--json` it SHALL print `{"outcome":"approved"}`, `{"outcome":"approved","review":<review>}` or `{"outcome":"changes_requested","review":<review>}` instead, with the same exit status. The wait SHALL be for the revision of the document the command showed. When the viewer pane closes before an answer, when a process already waits for that pane, which leaves the pane's document as it was, when another command's document took the pane before the wait began, or when the connection to the server ends, the command SHALL say so and exit with status 1. Interrupting the command SHALL end its wait. The caller's pane and screen SHALL come from `--pane` and `--screen`, else from `SPLITTY_PANE_ID` and `SPLITTY_SCREEN_ID`. Under `SPLITTY_AGENT_SOCK` the command SHALL be refused.
 
 #### Scenario: A plan reviewed
-- **WHEN** an agent pipes its plan into `splitty review --text --title Plan` and the user comments on two passages and sends the review
-- **THEN** the command prints the review with both comments and exits 0
+- **WHEN** an agent pipes its plan into `splitty review --text --title Plan` and the user comments on two passages and requests changes
+- **THEN** the command prints the review with its verdict and both comments and exits 3
 
 #### Scenario: A plan rendered
 - **WHEN** an agent pipes a Markdown plan into `splitty review --text --title Plan`
@@ -799,12 +799,16 @@ A folder's archive SHALL hold one top-level folder of the folder's name with eve
 - **THEN** the viewer pane of the first plan shows the revised text with its annotations, and the command waits again
 
 #### Scenario: Approved
-- **WHEN** the user approves the document
+- **WHEN** the user approves the document without notes
 - **THEN** the command prints nothing to standard output and exits 0
 
+#### Scenario: Approved with notes
+- **WHEN** the user approves the document with a new comment
+- **THEN** the command prints the review with the comment and exits 0
+
 #### Scenario: Outcome as JSON
-- **WHEN** the command runs with `--json` and the user approves
-- **THEN** it prints `{"outcome":"approved"}` and exits 0
+- **WHEN** the command runs with `--json` and the user approves without notes, or requests changes
+- **THEN** it prints `{"outcome":"approved"}` and exits 0, or prints `{"outcome":"changes_requested","review":…}` and exits 3
 
 #### Scenario: Two reviews at once
 - **WHEN** two `splitty review --text --title Plan` commands run at once in one pane, and the second's text replaces the first's before the first command waits
