@@ -268,16 +268,28 @@ impl SizeArbiter {
             .entry(session.to_string())
             .or_insert_with(Session::new);
         entry.reports.insert(client, size);
+        // A session this arbiter forgot or never sized: setting its PTY to the
+        // size it already has changes nothing and makes nobody redraw.
+        let unknown = entry.applied.is_none();
         let outcome = settle(entry, session, &state.clients, config, now, &self.resize);
         let current = SizeState {
             size: entry.applied.unwrap_or(size),
             policy: config.policy,
         };
         match outcome {
-            Some(result) => Reported {
+            Some(Ok(())) => Reported {
                 state: current,
                 changed: true,
-                result,
+                result: if redraw && unknown {
+                    nudge(&self.resize, session, current.size)
+                } else {
+                    Ok(())
+                },
+            },
+            Some(Err(error)) => Reported {
+                state: current,
+                changed: false,
+                result: Err(error),
             },
             None => Reported {
                 state: current,
@@ -363,7 +375,9 @@ fn prune(state: &mut State) {
 }
 
 /// Set the session's PTY to the size the policy derives, if that changed it.
-/// Returns the outcome of the resize then, `None` when nothing changed.
+/// Returns the outcome of the resize then, `None` when nothing changed. A
+/// resize that failed changes nothing: the PTY keeps its size, and the next
+/// settle tries again.
 fn settle(
     session: &mut Session,
     id: &str,
@@ -382,11 +396,13 @@ fn settle(
         return None;
     }
     let result = resize(id, size);
-    session.applied = Some(size);
-    session.published.send_replace(Some(SizeState {
-        size,
-        policy: config.policy,
-    }));
+    if result.is_ok() {
+        session.applied = Some(size);
+        session.published.send_replace(Some(SizeState {
+            size,
+            policy: config.policy,
+        }));
+    }
     Some(result)
 }
 
@@ -670,6 +686,79 @@ mod tests {
             ]
         );
         assert!(!sizes.has_changed().unwrap(), "nothing published");
+    }
+
+    #[test]
+    fn redraw_once_the_size_was_forgotten() {
+        let (arbiter, resizes) = arbiter(SizePolicy::Active);
+        let now = Instant::now();
+        arbiter.activity(A, false, now);
+        arbiter.report(SID, A, WIDE, false, now);
+        arbiter.disconnect(A, now);
+        assert!(arbiter.lock().sessions.is_empty(), "forgotten");
+        resizes.lock().unwrap().clear();
+
+        // The PTY is still WIDE; only a nudge makes its processes redraw.
+        arbiter.activity(B, false, now);
+        let reported = arbiter.report(SID, B, WIDE, true, now);
+        assert!(reported.result.is_ok());
+        assert_eq!(
+            resizes.lock().unwrap().as_slice(),
+            [
+                (SID.to_string(), WIDE),
+                (
+                    SID.to_string(),
+                    PtySize {
+                        cols: 120,
+                        rows: 41
+                    }
+                ),
+                (SID.to_string(), WIDE)
+            ]
+        );
+    }
+
+    #[test]
+    fn a_failed_resize_keeps_the_size_and_is_tried_again() {
+        let failing = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let resizes: Resizes = Arc::new(Mutex::new(Vec::new()));
+        let arbiter = {
+            let failing = Arc::clone(&failing);
+            let resizes = Arc::clone(&resizes);
+            SizeArbiter::new(
+                SizeConfig {
+                    policy: SizePolicy::Active,
+                    idle: Duration::from_secs(120),
+                },
+                Box::new(move |id, size| {
+                    if failing.load(std::sync::atomic::Ordering::SeqCst) {
+                        return Err(io::Error::new(io::ErrorKind::BrokenPipe, "keeper gone"));
+                    }
+                    resizes.lock().unwrap().push((id.to_string(), size));
+                    Ok(())
+                }),
+            )
+        };
+        let now = Instant::now();
+        let mut sizes = arbiter.subscribe(SID);
+        arbiter.activity(A, false, now);
+        arbiter.report(SID, A, WIDE, false, now);
+        sizes.borrow_and_update();
+
+        failing.store(true, std::sync::atomic::Ordering::SeqCst);
+        let reported = arbiter.report(SID, A, NARROW, false, now);
+        assert!(reported.result.is_err());
+        assert!(!reported.changed, "answered with the size the PTY kept");
+        assert_eq!(reported.state.size, WIDE);
+        assert!(!sizes.has_changed().unwrap(), "nothing published");
+
+        failing.store(false, std::sync::atomic::Ordering::SeqCst);
+        arbiter.tick(now);
+        assert_eq!(last_resize(&resizes), Some(NARROW));
+        assert_eq!(
+            sizes.borrow_and_update().map(|state| state.size),
+            Some(NARROW)
+        );
     }
 
     #[test]
