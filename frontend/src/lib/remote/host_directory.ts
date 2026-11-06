@@ -64,6 +64,16 @@ export class HostDirectory {
 
   /** A supporting hub owns the merge and all persistence. */
   useServerDirectory(enabled: boolean): void {
+    if (this.serverOwned !== enabled) {
+      // Cached entries belong to the previous authority. An older hub's
+      // separate reads only merge catalog entries, so retaining them here
+      // would show screens the newly connected hub never returned.
+      this.merged = [];
+      this.catalog.clear();
+      this.hosts = [];
+      this.observed.clear();
+      this.readDone = false;
+    }
     this.serverOwned = enabled;
     this.revision++;
     this.reported.clear();
@@ -222,11 +232,12 @@ export class HostDirectory {
   }
 
   private async readCatalog(): Promise<void> {
+    const revision = this.revision;
     try {
       const res = await this.fx.fetch(PATH);
       if (!res.ok) return;
       const value: unknown = await res.json();
-      if (this.disposed || this.serverOwned || !record(value) || value.version !== 1 || !Array.isArray(value.hosts)) return;
+      if (this.disposed || this.serverOwned || revision !== this.revision || !record(value) || value.version !== 1 || !Array.isArray(value.hosts)) return;
       // The hub returns newest first, including writes within the same second.
       // Insert oldest first so ties retain that order in ordered() and trim().
       for (const item of [...value.hosts].reverse()) {
@@ -243,17 +254,20 @@ export class HostDirectory {
     } catch {
       // A failed read is not an empty observation and never writes or deletes.
     } finally {
-      this.readDone = true;
-      this.observed.clear();
+      if (revision === this.revision) {
+        this.readDone = true;
+        this.observed.clear();
+      }
     }
   }
 
   private async readHosts(): Promise<void> {
+    const revision = this.revision;
     try {
       const res = await this.fx.fetch("/api/remote/hosts");
       if (!res.ok) return;
       const value: unknown = await res.json();
-      if (this.disposed || this.serverOwned || !Array.isArray(value)) return;
+      if (this.disposed || this.serverOwned || revision !== this.revision || !Array.isArray(value)) return;
       const hosts = new Map<string, KnownHost>();
       for (const host of parseKnownHosts(value)) {
         if (this.hidden.has(host.target) || !validTarget(host.target)) continue;

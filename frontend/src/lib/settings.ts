@@ -169,8 +169,8 @@ export function isAllowed(path: string, value: string | number): boolean {
 
 // --- Module State ---
 
-let current = {} as SplittySettings;
-let confirmed = current;
+let current: SplittySettings | undefined;
+let confirmed: SplittySettings | undefined;
 let changeRevision = 0;
 let lastError: { field?: string; error: string } | null = null;
 const listeners = new Set<() => void>();
@@ -186,8 +186,8 @@ function merge(base: unknown, patch: unknown): unknown {
   return patch ?? base;
 }
 
-function syncTheme(previous: SplittySettings, next: SplittySettings): void {
-  const before = previous.appearance;
+function syncTheme(previous: SplittySettings | undefined, next: SplittySettings): void {
+  const before = previous?.appearance;
   const after = next.appearance;
   if (!before || !after) return;
   if (before.theme !== after.theme || before.themeMode !== after.themeMode ||
@@ -198,6 +198,9 @@ function syncTheme(previous: SplittySettings, next: SplittySettings): void {
 
 export function applyServerSettings(data: SplittySettings): void {
   const previous = current;
+  // A settings.changed event can be the first authoritative payload. Older
+  // hosts also have no metadata endpoint, so their values are the reset base.
+  if (!Object.keys(defaults).length) defaults = structuredClone(data);
   confirmed = merge(defaults, data) as SplittySettings;
   current = confirmed;
   changeRevision++;
@@ -222,10 +225,13 @@ export async function loadSettings(): Promise<SplittySettings> {
     } else defaults = structuredClone(data);
   } catch { defaults = structuredClone(data); }
   applyServerSettings(data);
-  return current;
+  return getSettings();
 }
 
-export function getSettings(): SplittySettings { return current; }
+export function getSettings(): SplittySettings {
+  if (!current) throw new Error("Settings have not loaded");
+  return current;
+}
 export function subscribe(cb: () => void): () => void {
   listeners.add(cb);
   return () => listeners.delete(cb);
@@ -248,8 +254,8 @@ async function savePatch(patch: object): Promise<void> {
     if (changeRevision !== startRevision) await loadSettings();
     else applyServerSettings(saved);
   } catch (error) {
-    const previous = current;
-    current = confirmed;
+    const previous = getSettings();
+    current = confirmed ?? previous;
     lastError = { field: error instanceof Error && "field" in error ? String(error.field) : undefined,
       error: error instanceof Error ? error.message : String(error) };
     notify();
@@ -261,14 +267,16 @@ export async function updateSetting<
   S extends keyof SplittySettings,
   K extends keyof SplittySettings[S],
 >(section: S, key: K, value: SplittySettings[S][K]): Promise<void> {
-  current = { ...current, [section]: { ...current[section], [key]: value } };
+  const previous = getSettings();
+  current = { ...previous, [section]: { ...previous[section], [key]: value } };
   lastError = null;
   notify();
   await savePatch({ [section]: { [key]: value } });
 }
 
 export async function updateXtermSetting<K extends keyof XtermSettings>(key: K, value: XtermSettings[K]): Promise<void> {
-  current = { ...current, terminal: { ...current.terminal, xterm: { ...current.terminal.xterm, [key]: value } } };
+  const previous = getSettings();
+  current = { ...previous, terminal: { ...previous.terminal, xterm: { ...previous.terminal.xterm, [key]: value } } };
   lastError = null;
   notify();
   await savePatch({ terminal: { xterm: { [key]: value } } });

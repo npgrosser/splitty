@@ -460,7 +460,10 @@
       .filter((s) => s.conn === conn)
       .map((s) => ({ wireId: s.wireId, panes: views.api(s.id)?.panels.length || undefined }));
     const { error, ready } = socket.state;
-    if (error?.migration?.available !== true && (error?.update ?? ready?.update)?.available !== true) return;
+    if (error?.migration?.available !== true && (error?.update ?? ready?.update)?.available !== true) {
+      toast.info("This host cannot be updated automatically. Update Splitty on the host and reconnect.");
+      return;
+    }
     const warning = updateWarning(target, {
       migration: error?.migration,
       hostVersion: error?.version ?? ready?.daemon.version,

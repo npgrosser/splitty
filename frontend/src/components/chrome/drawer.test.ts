@@ -1,5 +1,5 @@
 /// <reference types="node" />
-import { afterAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { render } from "svelte/server";
 import Drawer from "./Drawer.svelte";
 import HostsPanel from "./HostsPanel.svelte";
@@ -8,6 +8,11 @@ import { getDrawerState, setDrawerState } from "../../stores/ui.svelte.ts";
 import { hostGroups } from "../../lib/remote/on_hosts.ts";
 import type { HostCatalog } from "../../lib/remote/host_directory.ts";
 import type { Screen } from "../../stores/screens.svelte.ts";
+import { seedSettingsForTest } from "../../lib/testing/settings.ts";
+
+beforeEach(() => {
+  seedSettingsForTest();
+});
 
 const SCREENS: Screen[] = [
   { id: "local", name: "Shell", conn: "local", wireId: "local" },
@@ -195,17 +200,17 @@ describe("Hosts panel", () => {
     expect(callbacks.onConnectHost).not.toHaveBeenCalled();
   });
 
-  it("offers an update for a connected host of another version, and only then", () => {
+  it("offers an update only when the hub reports an eligible replacement", () => {
     const daemon = { version: "0.1.1", protocol: 1 };
-    const withVersion = () => {
+    const withVersion = (available = true) => {
       const p = panelProps();
-      p.groups[0] = { ...p.groups[0], state: { phase: "ready", progress: [], attempt: 0, ready: { daemon } } as never };
+      p.groups[0] = { ...p.groups[0], state: { phase: "ready", progress: [], attempt: 0, ready: { daemon, update: { available, keepsSessions: true } } } as never };
       return p;
     };
     localVersion = "0.1.3";
     expect(render(HostsPanel, { props: withVersion() }).body).toContain("Runs Splitty 0.1.1; this app is 0.1.3.");
     localVersion = "0.1.1";
-    expect(render(HostsPanel, { props: withVersion() }).body).not.toContain("Update…");
+    expect(render(HostsPanel, { props: withVersion(false) }).body).not.toContain("Update…");
     localVersion = undefined;
     expect(render(HostsPanel, { props: panelProps() }).body).not.toContain("Update…");
   });

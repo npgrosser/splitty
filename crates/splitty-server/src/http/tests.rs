@@ -1285,6 +1285,7 @@ async fn a_host_is_installed_started_and_relayed_both_ways() {
         json!({
             "type": "remote.ready",
             "target": "user@vm1",
+            "update": {"available": false, "keepsSessions": true},
             "daemon": {"version": VERSION, "protocol": PROTOCOL_VERSION, "keepsSessions": true, "started": true},
             "screens": [{"id": "s1", "name": "api", "panes": 3}],
         })
@@ -1304,6 +1305,13 @@ async fn a_host_is_installed_started_and_relayed_both_ways() {
     assert_eq!(asked[0], "prepare user@vm1");
     assert_eq!(asked[1], "handshake");
     assert_eq!(asked[2..], ["bridge"]);
+
+    let catalog: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(dir.path().join("config/remote-catalog.json")).expect("handshake catalog"),
+    )
+    .unwrap();
+    assert_eq!(catalog["hosts"][0]["target"], "user@vm1");
+    assert_eq!(catalog["hosts"][0]["screens"], ready["screens"]);
 
     let recent: serde_json::Value = serde_json::from_slice(
         &std::fs::read(dir.path().join("config/recent-hosts.json")).expect("recent hosts"),

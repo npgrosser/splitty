@@ -6,6 +6,16 @@ const initial = { terminal: { xterm: { scrollSensitivity: 1 } }, drawer: { sideb
 const metadata = { defaults: initial, limits: { "terminal.xterm.scrollSensitivity": { min: 0.1, max: 10, step: 0.1 } } };
 const json = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
 describe("server-owned settings", () => {
+  it("does not expose a partial settings object when loading fails, then accepts a retry", async () => {
+    apiFetch.mockResolvedValueOnce(json({ error: "unavailable" }, 503));
+    const settings = await import("./settings.ts");
+    expect(() => settings.getSettings()).toThrow("Settings have not loaded");
+    await expect(settings.loadSettings()).rejects.toThrow("Failed to load settings (503)");
+    expect(() => settings.getSettings()).toThrow("Settings have not loaded");
+    apiFetch.mockImplementation(async (path: string) => path.endsWith("metadata") ? json(metadata) : json(initial));
+    await settings.loadSettings();
+    expect(settings.getSettings().drawer.sidebarWidth).toBe(200);
+  });
   it("omits a profile from a new screen request when none was selected", async () => {
     const { createScreenOp } = await import("./mux/mux_client.ts");
     expect(createScreenOp("screen", undefined, "pane")).toEqual({

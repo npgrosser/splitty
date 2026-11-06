@@ -320,14 +320,12 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
 - **Fixed by `hub-host-decisions` (2026-11-06): newer-host update offers and keeper wording.**
   Windows consume explicit hub update eligibility. Unknown, equal and newer versions, unverified instances
   and hosts without session preservation or a matching replacement receive no ordinary update offer.
-- **Fractional scroll sensitivities** (`settings-authority`). The xterm settings send steps of 0.1 and 0.5 into
-  integer fields (`terminal.xterm.scrollSensitivity`, `fastScrollSensitivity`), so the update cannot be parsed.
-  This follows from the types and was not reproduced. The window keeps its optimistic value until a reload. Window
-  defaults and slider ranges also differ from the server's (`drawer.sidebarWidth` 240 vs 200; font size, title bar
-  height, scrollbar width).
-- **Settings changes reach no other window** (`settings-authority`). Settings load once at startup.
-- **Each window closes a pane on exit** (`server-derived-pane-state`). `panes/terminal_pane.ts` closes the pane in
-  every window showing it, and in none when no window is open.
+- **Fixed by `settings-authority` (2026-11-06): fractional scroll values and settings drift.**
+  The server validates numeric and editor fields atomically, publishes defaults and limits, and broadcasts
+  complete settings to connected windows. Failed optimistic updates restore confirmed values.
+- **Fixed by `server-derived-pane-state` (2026-11-06): client-owned exit closure.**
+  The server applies its close-on-exit policy after the final-output drain grace, including unattended panes;
+  managed jobs retain their outcome. Supporting windows no longer race to close the same pane.
 - **Keyboard resizes are not reported.** Ctrl+Shift+Arrow resizes through dockview's `setSize`
   (`lib/workspace/keyboard_shortcuts.ts`), but the bridge reports only panel moves and divider drags
   (`lib/connection/screen_binding.ts`), so the server keeps the old sizes.

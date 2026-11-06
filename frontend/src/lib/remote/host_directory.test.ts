@@ -53,6 +53,55 @@ const settle = () => vi.advanceTimersByTimeAsync(0);
 const elapsed = () => vi.advanceTimersByTimeAsync(DELAY);
 
 describe("hub-owned directory", () => {
+  it("drops prior-mode snapshots but retains the last good snapshot on same-mode reconnect", async () => {
+    let legacy = entry("legacy");
+    let merged = entry("merged");
+    const fetch = vi.fn(async (path: string) => {
+      if (path === "/api/remote/directory") return json({ version: 1, hosts: [merged] });
+      if (path === PATH) return json({ version: 1, hosts: [legacy] });
+      return json([]);
+    });
+    const directory = new HostDirectory({ fetch, changed: vi.fn() });
+    instances.push(directory);
+    await directory.load();
+    expect(directory.entries().map((host) => host.target)).toEqual(["legacy"]);
+
+    directory.useServerDirectory(true);
+    expect(directory.mergedHosts()).toEqual([]);
+    expect(directory.entries()).toEqual([]);
+    await directory.refresh();
+    expect(directory.mergedHosts()?.map((host) => host.target)).toEqual(["merged"]);
+    directory.useServerDirectory(true);
+    expect(directory.mergedHosts()?.map((host) => host.target)).toEqual(["merged"]);
+
+    legacy = entry("new-legacy");
+    merged = entry("old-merged");
+    directory.useServerDirectory(false);
+    expect(directory.entries()).toEqual([]);
+    expect(directory.known()).toEqual([]);
+    await directory.refresh();
+    expect(directory.entries().map((host) => host.target)).toEqual(["new-legacy"]);
+  });
+
+  it("ignores a legacy read that finishes after switching modes twice", async () => {
+    const old = deferred<Response>();
+    let catalogReads = 0;
+    const fetch = vi.fn(async (path: string) => {
+      if (path === PATH) return ++catalogReads === 1 ? old.promise : json({ version: 1, hosts: [entry("current")] });
+      if (path === HOSTS) return json([]);
+      return json({ version: 1, hosts: [] });
+    });
+    const directory = new HostDirectory({ fetch, changed: vi.fn() });
+    instances.push(directory);
+    const pending = directory.load();
+    directory.useServerDirectory(true);
+    directory.useServerDirectory(false);
+    await directory.refresh();
+    old.resolve(json({ version: 1, hosts: [entry("stale")] }));
+    await pending;
+    expect(directory.entries().map((host) => host.target)).toEqual(["current"]);
+  });
+
   it("reads the merged directory and sends ordered observations without persistence requests", async () => {
     const observe = vi.fn(); const order = vi.fn();
     const fetch = vi.fn(async () => json({ version: 1, order: ["vm1"], hosts: [{ ...entry(), alias: "Work" }] }));

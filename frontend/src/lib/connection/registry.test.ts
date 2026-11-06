@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { beforeEach, describe, expect, it } from "vitest";
 import {
   addConnection, connectionFor, connections, ensureRemote, forEachConnection, localConnection, remoteSocketFor,
   removeConnection,
@@ -6,6 +6,9 @@ import {
 import { fakeServer } from "../testing/fake_server.ts";
 import { RemoteSocket, type HubWebSocket } from "../remote/remote_socket.ts";
 import { attachNotifications, getNotifications } from "../notifications.ts";
+import { seedSettingsForTest } from "../testing/settings.ts";
+
+beforeEach(seedSettingsForTest);
 
 /** A hub socket that answers with `remote.ready` at once. */
 function readyHub(target: string): HubWebSocket {

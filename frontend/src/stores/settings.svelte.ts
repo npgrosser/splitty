@@ -7,7 +7,9 @@ import {
   type XtermSettings,
 } from "../lib/settings.ts";
 
-let current = $state<SplittySettings>(getSettings());
+// The store may be imported before startup has fetched settings. The app only
+// reads it after loadSettings succeeds; direct component tests can seed it.
+let current = $state<SplittySettings | undefined>();
 
 subscribe(() => {
   current = getSettings();
@@ -15,7 +17,7 @@ subscribe(() => {
 
 /** Reactive settings — automatically updates when settings change. */
 export function settings(): SplittySettings {
-  return current;
+  return current ?? getSettings();
 }
 
 /** Update a setting within a section. Optimistic + persisted to backend. */

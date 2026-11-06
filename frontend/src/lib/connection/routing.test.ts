@@ -12,6 +12,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DockviewApi } from "dockview-core";
 import { fakeEmulator, fakeServer, type FakeEmulator, type FakeSocket } from "../testing/fake_server.ts";
+import { seedSettingsForTest } from "../testing/settings.ts";
 import { TerminalSession } from "../terminal/terminal_session.ts";
 import { ScreenStartup } from "../mux/screen_startup.ts";
 import { attachNotifications, getNotifications, getUnreadCountForScreen, getUnreadForPane, markPaneRead } from "../notifications.ts";
@@ -198,6 +199,7 @@ const hostileMessages: [string, (s: FakeSocket) => void][] = [
 let w: World;
 
 beforeEach(async () => {
+  seedSettingsForTest();
   w = await world();
   vi.spyOn(console, "warn").mockImplementation(() => {});
   vi.spyOn(console, "error").mockImplementation(() => {});

@@ -1,5 +1,6 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { fakeServer } from "./testing/fake_server.ts";
+import { seedSettingsForTest } from "./testing/settings.ts";
 import {
   attachNotifications, getUnreadCountForScreen, getUnreadTitlesForScreen, markPaneRead, setWatchedPane,
 } from "./notifications.ts";
@@ -15,6 +16,7 @@ let counter = 0;
 const idle = (socket: ReturnType<typeof host>["socket"]) =>
   socket.message({ type: "process.idle", id: `idle-${++counter}`, sessionId: "sess-1", process: "claude" });
 
+beforeEach(seedSettingsForTest);
 afterEach(() => setWatchedPane(null));
 
 describe("unread notifications", () => {
