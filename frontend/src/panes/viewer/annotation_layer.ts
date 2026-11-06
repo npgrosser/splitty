@@ -270,6 +270,13 @@ function selectionRect(doc: Document, range: BoundaryRange): Selected["rect"] {
   return { left: last.right, bottom: last.bottom, top: rects[0].top };
 }
 
+/**
+ * Per viewer pane, the text of an overall comment that no answer took yet
+ * (D3 of review-verdict), kept for the window's lifetime so that a rebuilt
+ * pane and the next wait offer it again.
+ */
+const overallDrafts = new Map<string, string>();
+
 export class AnnotationLayer {
   private readonly toolbar: SelectionToolbar;
   private readonly list: AnnotationList;
@@ -300,6 +307,14 @@ export class AnnotationLayer {
   private wait: ReviewWait | undefined;
   private answered: string | undefined;
   private answering = false;
+  /**
+   * The version of a file under a wait (D6 of review-verdict): taken from the
+   * first read that starts and settles after the wait appeared, so that a
+   * read of an older revision does not count as a change.
+   */
+  private waitVersion: { phase: "start" | "end" | "set"; version?: string } | undefined;
+  /** The window saw the file change while the process waits. */
+  private waitChanged = false;
   private readonly cleanups: (() => void)[] = [];
   private toolbarTimer: ReturnType<typeof setTimeout> | undefined;
   private destroyed = false;
@@ -347,8 +362,12 @@ export class AnnotationLayer {
 
     this.banner = new ReviewBanner(doc, {
       approve: () => void this.answerWait("approved"),
-      send: () => void this.answerWait("feedback"),
-    });
+      requestChanges: () => void this.answerWait("changes_requested"),
+      overallChanged: (text) => {
+        if (text.trim()) overallDrafts.set(options.paneId, text);
+        else overallDrafts.delete(options.paneId);
+      },
+    }, overallDrafts.get(options.paneId));
     host.pane.insertBefore(this.banner.element, host.body);
 
     const box = host.documentBox;
@@ -412,9 +431,35 @@ export class AnnotationLayer {
 
   /** The pane's record names a wait for a review, or none. */
   setWait(wait: ReviewWait | undefined): void {
-    if (this.wait?.id !== wait?.id) this.answered = undefined;
+    if (this.wait?.id !== wait?.id) {
+      this.answered = undefined;
+      this.waitVersion = wait && this.options.document.kind === "file" ? { phase: "start" } : undefined;
+      this.waitChanged = false;
+    }
     this.wait = wait;
     this.renderBanner();
+  }
+
+  /**
+   * A read of the document started, or settled with `version`: under a wait,
+   * the first read after the wait gives the version the review is about,
+   * and a later one with another version is a change (D6 of review-verdict).
+   */
+  documentRead(reading: boolean, version: string | undefined): void {
+    const watched = this.waitVersion;
+    if (!watched) return;
+    if (reading) {
+      if (watched.phase === "start") watched.phase = "end";
+      return;
+    }
+    if (version === undefined) return;
+    if (watched.phase === "end") {
+      watched.phase = "set";
+      watched.version = version;
+    } else if (watched.phase === "set" && version !== watched.version && !this.waitChanged) {
+      this.waitChanged = true;
+      this.renderBanner();
+    }
   }
 
   /** What the context menu offers, for the selection as it is now. */
@@ -439,13 +484,15 @@ export class AnnotationLayer {
   /**
    * The review of the pane's annotations as they are anchored now (D4 of
    * review-threads): the open ones with an entry of the user not handed
-   * over, or every open one when none is.
+   * over, or every open one when none is. An answer to a waiting process
+   * states its verdict, and an approval holds only the pending ones (D1 and
+   * D4 of review-verdict).
    */
-  private review(): Prepared {
+  private review(verdict?: ReviewOutcome): Prepared {
     this.anchorAll();
     const content = this.content();
     const open = this.placed.filter((placed) => isOpen(placed.annotation));
-    const selection = reviewSelection(open.map((placed) => placed.annotation));
+    const selection = this.selection(open.map((placed) => placed.annotation), verdict);
     const chosen = new Set(selection.annotations.map((annotation) => annotation.id));
     const entries: ReviewEntry[] = [];
     const pending = new Map<string, SentEntry>();
@@ -458,8 +505,9 @@ export class AnnotationLayer {
       }
     }
     const { document, paneId } = this.options;
+    const answer = verdict ? { verdict, ...(this.waitChanged ? { changedDuringWait: true } : {}) } : {};
     return {
-      review: { text: reviewMarkdown(document, entries, { paneId }), fileName: reviewFileName(document) },
+      review: { text: reviewMarkdown(document, entries, { paneId, ...answer }), fileName: reviewFileName(document) },
       count: entries.length,
       again: selection.again,
       entries: pending,
@@ -960,12 +1008,19 @@ export class AnnotationLayer {
     return { ...own, replacement, passage: { quote: target.quote, lines, state } };
   }
 
+  /** The annotations a review holds: for an approval only the pending ones, else the review's selection. */
+  private selection(open: readonly ViewerAnnotation[], verdict?: ReviewOutcome): { readonly annotations: readonly ViewerAnnotation[]; readonly again: boolean } {
+    const selection = reviewSelection(open);
+    return verdict === "approved" && selection.again ? { annotations: [], again: false } : selection;
+  }
+
   /** The review, once the annotations it holds have the numbers the server gives them. */
-  private async prepareReview(): Promise<Prepared> {
+  private async prepareReview(verdict?: ReviewOutcome): Promise<Prepared> {
     const { store, paneId } = this.options;
+    this.refresh();
     const open = this.placed.filter((placed) => isOpen(placed.annotation)).map((placed) => placed.annotation);
-    await store.whenNumbered(paneId, reviewSelection(open).annotations.map((annotation) => annotation.id));
-    return this.review();
+    await store.whenNumbered(paneId, this.selection(open, verdict).annotations.map((annotation) => annotation.id));
+    return this.review(verdict);
   }
 
   /**
@@ -1061,29 +1116,40 @@ export class AnnotationLayer {
 
   private renderBanner(): void {
     if (this.destroyed) return;
-    this.banner.show({ wait: this.openWait(), answering: this.answering, sendable: this.openCount() > 0 });
+    this.banner.show({ wait: this.openWait(), answering: this.answering, changed: this.waitChanged });
   }
 
   /**
-   * Answer the waiting process: approve the document, which marks nothing,
-   * or send it the review, whose entries are marked once the server took the
-   * answer. Only the first answer to a wait counts; once the server
-   * acknowledged one from this window, taken or not, the banner goes.
+   * Answer the waiting process with a verdict (D1 and D3 of review-verdict):
+   * the overall comment first becomes a general comment; an approval carries
+   * the pending annotations as notes, or no review without any; a request for
+   * changes carries the review, which may hold no annotation. The entries of
+   * a review are marked once the server took the answer. Only the first
+   * answer to a wait counts; once the server acknowledged one from this
+   * window, taken or not, the banner goes.
    */
   private async answerWait(outcome: ReviewOutcome): Promise<void> {
     const wait = this.openWait();
     const answer = this.options.answer;
     if (!wait || !answer || this.answering) return;
-    const { notices, paneId } = this.options;
+    const { notices, paneId, store } = this.options;
+    const waiting = wait.title || "the waiting command";
     this.answering = true;
     this.renderBanner();
     try {
-      const prepared = outcome === "feedback" ? await this.prepareReview() : undefined;
-      if (prepared && prepared.count === 0) {
-        notices.info("Annotate the document first, or approve it");
-        return;
+      const overall = this.banner.overall;
+      if (!isBlank(overall)) {
+        const problem = store.put(this.options.screenId(), paneId, [{ id: newAnnotationId(), kind: "comment", body: overall }]);
+        if (problem) {
+          notices.error("The overall comment was not saved", problem);
+          return;
+        }
+        this.banner.clearOverall();
+        overallDrafts.delete(paneId);
       }
-      if (prepared && utf8Length(prepared.review.text) > REVIEW_ANSWER_LIMIT) {
+      const prepared = await this.prepareReview(outcome);
+      const review = outcome === "changes_requested" || prepared.count > 0 ? prepared.review.text : undefined;
+      if (review !== undefined && utf8Length(review) > REVIEW_ANSWER_LIMIT) {
         notices.error("The review was not sent", "It is longer than the 1 MiB a waiting command takes.");
         return;
       }
@@ -1092,21 +1158,19 @@ export class AnnotationLayer {
         paneId,
         waitId: wait.id,
         outcome,
-        ...(prepared ? { review: prepared.review.text } : {}),
+        ...(review !== undefined ? { review } : {}),
       });
       this.answered = wait.id;
       if (!accepted) {
-        notices.info(`${outcome === "approved" ? "The approval" : "The review"} was not taken: the command no longer waits for it`);
+        notices.info(`${outcome === "approved" ? "The approval" : "The request for changes"} was not taken: the command no longer waits for it`);
         return;
       }
-      if (prepared) {
-        this.markHandedOver(prepared);
-        notices.sent(`The review went to ${wait.title || "the waiting command"}`);
-      } else {
-        notices.info(`Approved for ${wait.title || "the waiting command"}`);
-      }
+      if (review !== undefined && prepared.entries.size > 0) this.markHandedOver(prepared);
+      if (outcome === "changes_requested") notices.sent(`Changes requested from ${waiting}`);
+      else if (review !== undefined) notices.sent(`Approved for ${waiting}, with the new comments as notes`);
+      else notices.info(`Approved for ${waiting}`);
     } catch (error) {
-      notices.error(`The answer did not reach ${wait.title || "the waiting command"}`, error instanceof Error ? error.message : undefined);
+      notices.error(`The answer did not reach ${waiting}`, error instanceof Error ? error.message : undefined);
     } finally {
       this.answering = false;
       this.renderBanner();

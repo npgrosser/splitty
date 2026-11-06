@@ -1681,7 +1681,9 @@ type ClientCommand =
  *     viewerRevision?: number }   // the open_viewer answer's, when the caller showed the document
  *
  * Response:
- *   200 { outcome: "approved" } | { outcome: "feedback", review: string }
+ *   200 { outcome: "approved" }                       // approved without notes
+ *     | { outcome: "approved", review: string }        // approved, the review as notes
+ *     | { outcome: "changes_requested", review: string } // the user requests changes
  *   400 invalid     // an empty screenId or paneId, a malformed body
  *   404 not_found   // the caller's pane on no screen, no viewer pane `viewerPaneId` on it
  *   409 busy        // another process waits for that pane
@@ -2536,8 +2538,9 @@ export type ViewerServerMessage =
 // server answers each one to its sender only with viewer.review_answered.
 // The first answer that names the wait and its pane settles it (`accepted`
 // true); an answer to a wait that has ended or of another pane, or one that
-// breaks these rules (an approval with a review, a feedback without one or
-// over 1 MiB, a field of the wrong type) settles nothing. The acknowledgement
+// breaks these rules (a request for changes without a review, a review that
+// is empty or over 1 MiB, an unknown outcome, a field of the wrong type)
+// settles nothing. The acknowledgement
 // echoes `paneId` and `waitId` when they are strings of at most 128 bytes,
 // else "". A window marks the review's entries (mark_sent) only after
 // `accepted` true. Transient, connection-bound, no generic event ID.
@@ -2547,8 +2550,12 @@ export type ReviewClientMessage = {
   /** The viewer pane. */
   paneId: string;
   waitId: string;
-  outcome: "approved" | "feedback";
-  /** Feedback only: the review, 1 byte to 1 MiB of UTF-8. */
+  /** The user's verdict. */
+  outcome: "approved" | "changes_requested";
+  /**
+   * The review, 1 byte to 1 MiB of UTF-8: optional with `approved` (the
+   * pending annotations as notes), required with `changes_requested`.
+   */
   review?: string;
 };
 export type ReviewServerMessage = {

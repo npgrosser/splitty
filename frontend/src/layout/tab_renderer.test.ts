@@ -82,8 +82,28 @@ describe("the tab of a viewer pane", () => {
     expect(marker.hidden).toBe(true);
   });
 
+  // viewer-annotations, Annotations In The Pane: A waiting review in a background tab.
+  it("shows that a process waits for the pane's review, and shows the pane on a click", () => {
+    const { renderer, conn, api } = tab("v1", { viewer: { record: PLAN, supported: true } });
+    const marker = renderer.element.querySelector<HTMLElement>(".splitty-tab-review-wait")!;
+    expect(marker.hidden).toBe(true);
+
+    const waiting = screen([]);
+    waiting.panes.v1!.viewer = { ...waiting.panes.v1!.viewer!, reviewWait: { id: "wait-0123456789abcdef", paneId: "t1", title: "claude" } };
+    conn.annotations.snapshot(waiting);
+    expect(marker.hidden).toBe(false);
+    expect(marker.title).toBe("claude waits for your review");
+    expect(marker.getAttribute("aria-label")).toBe("claude waits for your review");
+    marker.click();
+    expect(api.setActive).toHaveBeenCalledTimes(1);
+
+    conn.annotations.snapshot(screen([]));
+    expect(marker.hidden).toBe(true);
+  });
+
   it("is not on a terminal pane's tab", () => {
     const { renderer } = tab("t1", {});
     expect(renderer.element.querySelector(".splitty-tab-annotations")).toBeNull();
+    expect(renderer.element.querySelector(".splitty-tab-review-wait")).toBeNull();
   });
 });

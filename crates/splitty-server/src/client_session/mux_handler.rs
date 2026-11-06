@@ -1404,7 +1404,7 @@ mod tests {
         assert!(
             a.try_handle(&answer(
                 "v1",
-                serde_json::json!({"outcome": "feedback", "review": "# Review of PLAN.md"})
+                serde_json::json!({"outcome": "changes_requested", "review": "# Review of PLAN.md"})
             ))
             .await
         );
@@ -1423,7 +1423,7 @@ mod tests {
         assert!(sent_a.try_recv().is_err() && sent_b.try_recv().is_err());
         assert_eq!(
             waiting.answer().await,
-            Some(Outcome::Feedback("# Review of PLAN.md".into())),
+            Some(Outcome::ChangesRequested("# Review of PLAN.md".into())),
             "the waiting process receives A's review"
         );
         drop(waiting);

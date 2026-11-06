@@ -4,20 +4,23 @@
  * without explanation.
  *
  * A heading names the document, a file also by its absolute path. The
- * annotations on passages follow in the order of the pane's list, each under
- * its number: its lines, its kind, its passage as a block quote, the remark,
- * for a suggested change the replacement in a fence the replacement cannot
- * close, and its replies with their authors. A change with an empty
- * replacement is a suggested deletion. General comments come after them, and
- * a last line names the command with which an agent replies in a thread: the
- * file's path, or the viewer pane's ID for a text. Nothing else is added.
+ * answer to a waiting process states its verdict under it, and notes a
+ * document that changed while the process waited (D4 of review-verdict).
+ * The general comments come first, then the annotations on passages in the
+ * order of the pane's list, each under its number: its lines, its kind, its
+ * passage as a block quote, the remark, for a suggested change the
+ * replacement in a fence the replacement cannot close, and its replies with
+ * their authors. A change with an empty replacement is a suggested deletion.
+ * A last line names the command with which an agent replies in a thread, by
+ * the viewer pane's ID; a review without annotations, which only a plain
+ * rejection is, has no thread and leaves it out. Nothing else is added.
  *
  * The review goes into a terminal as a paste. Control characters of a quote,
  * remark or reply, which could end a bracketed paste early or reorder what the
  * terminal shows, become U+FFFD; tabs and line breaks stay.
  */
 
-import type { AnnotationKind } from "../protocol/types.ts";
+import type { AnnotationKind, ReviewOutcome } from "../protocol/types.ts";
 import { quoteUploadPath } from "../terminal/image_paste.ts";
 
 export type { AnnotationKind } from "../protocol/types.ts";
@@ -157,7 +160,21 @@ function generalItem(entry: ReviewEntry): string {
 export interface ReviewOptions {
   /** The viewer pane, which names the document for `splitty comments`. */
   readonly paneId: string;
+  /** The verdict of an answer to a waiting process; a review handed to a terminal has none. */
+  readonly verdict?: ReviewOutcome;
+  /** The window saw the document change while the process waited (D6 of review-verdict). */
+  readonly changedDuringWait?: boolean;
 }
+
+/** The line that states an answer's verdict. */
+export const VERDICT_LINES: Readonly<Record<ReviewOutcome, string>> = {
+  approved: "Verdict: approved",
+  changes_requested: "Verdict: changes requested",
+};
+
+/** The line of an answer whose document changed while the process waited. */
+export const CHANGED_DURING_WAIT_NOTE =
+  "Note: the document changed during the review; lines and quotes refer to the version shown when the review was answered.";
 
 /**
  * The last line: the command with which an agent replies in a thread of the
@@ -180,15 +197,19 @@ export function reviewMarkdown(document: ReviewDocument, entries: readonly Revie
     sections.push(`# Review of ${safeText(document.title)}`);
   }
 
-  for (const entry of entries) {
-    if (entry.passage) sections.push(passageSection(entry));
+  if (options.verdict) {
+    sections.push(VERDICT_LINES[options.verdict]);
+    if (options.changedDuringWait) sections.push(CHANGED_DURING_WAIT_NOTE);
   }
 
   const general = entries.filter((entry) => !entry.passage && remark(entry.body));
   if (general.length > 0) {
     sections.push("## General comments", general.map(generalItem).join("\n"));
   }
-  sections.push(replyLine(document, options.paneId));
+  for (const entry of entries) {
+    if (entry.passage) sections.push(passageSection(entry));
+  }
+  if (entries.length > 0) sections.push(replyLine(document, options.paneId));
   return `${sections.join("\n\n")}\n`;
 }
 
@@ -220,15 +241,15 @@ export interface ListPlace {
   readonly index: number;
 }
 
-const STATE_RANK = { anchored: 0, stale: 1, general: 2 } as const;
+const STATE_RANK = { general: 0, anchored: 1, stale: 2 } as const;
 const VIEW_RANK = { source: 0, rendered: 1 } as const;
 
 /**
- * The order of the pane's list and its review: the anchored annotations in
- * document order (by line, and within one view by position; on one line the
- * source view's first), then those not found by their recorded lines, then
- * the general comments, each group in creation order where nothing else
- * decides.
+ * The order of the pane's list and its review: the general comments first
+ * (D5 of review-verdict), then the anchored annotations in document order (by
+ * line, and within one view by position; on one line the source view's
+ * first), then those not found by their recorded lines, each group in
+ * creation order where nothing else decides.
  */
 export function compareListPlaces(a: ListPlace, b: ListPlace): number {
   const rank = STATE_RANK[a.state] - STATE_RANK[b.state];

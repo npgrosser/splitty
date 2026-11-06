@@ -8,6 +8,9 @@ import { scratchpadIcon } from "../panes/scratchpad_area.ts";
 import { viewerParams } from "../lib/viewer/panel.ts";
 import { showAnnotationList } from "../lib/viewer/annotations.ts";
 
+/** An hourglass: a process waits for the review of the pane. */
+const REVIEW_WAIT_ICON = `<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 1.5h8M4 14.5h8M5 1.5v2.5c0 1.6 3 2.6 3 4s-3 2.4-3 4v2.5M11 1.5v2.5c0 1.6-3 2.6-3 4s3 2.4 3 4v2.5"/></svg>`;
+
 /**
  * Custom tab renderer with close guard, context menu, and wheel navigation.
  */
@@ -82,6 +85,26 @@ export class SplittyTabRenderer implements ITabRenderer {
       };
       update();
       this.cleanups.push(annotations.subscribe(update));
+
+      // A process waits for the pane's review (review-verdict, D7): a marker
+      // that names the waiting pane and makes the viewer pane active.
+      const waiting = document.createElement("span");
+      waiting.className = "splitty-tab-review-wait";
+      waiting.innerHTML = REVIEW_WAIT_ICON;
+      waiting.addEventListener("click", (e) => {
+        e.stopPropagation();
+        api.setActive();
+      });
+      this.element.insertBefore(waiting, count);
+      const updateWait = () => {
+        const wait = annotations.waitOf(api.id);
+        waiting.hidden = !wait;
+        const label = wait ? `${wait.title || "A command"} waits for your review` : "";
+        waiting.title = label;
+        waiting.setAttribute("aria-label", label);
+      };
+      updateWait();
+      this.cleanups.push(annotations.subscribe(updateWait));
     }
 
     // Close button

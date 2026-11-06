@@ -150,7 +150,7 @@ export interface ReviewAnswerRequest {
   readonly paneId: string;
   readonly waitId: string;
   readonly outcome: ReviewOutcome;
-  /** The review, for `feedback`. */
+  /** The review: an approval's notes, or what a request for changes asks for. */
   readonly review?: string;
 }
 
@@ -215,7 +215,7 @@ export class ReviewAnswers {
       paneId: request.paneId,
       waitId: request.waitId,
       outcome: request.outcome,
-      ...(request.outcome === "feedback" && request.review !== undefined ? { review: request.review } : {}),
+      ...(request.review !== undefined ? { review: request.review } : {}),
     });
     return promise;
   }

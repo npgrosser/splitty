@@ -529,8 +529,9 @@ async fn wait(state: &State, request: WaitRequest) -> Result<Value, Failure> {
     loop {
         tokio::select! {
             outcome = &mut answered => return match outcome {
-                Some(Outcome::Approved) => Ok(json!({"outcome": "approved"})),
-                Some(Outcome::Feedback(review)) => Ok(json!({"outcome": "feedback", "review": review})),
+                Some(Outcome::Approved(None)) => Ok(json!({"outcome": "approved"})),
+                Some(Outcome::Approved(Some(review))) => Ok(json!({"outcome": "approved", "review": review})),
+                Some(Outcome::ChangesRequested(review)) => Ok(json!({"outcome": "changes_requested", "review": review})),
                 None => Err(closed()),
             },
             changed = changes.changed() => {

@@ -97,7 +97,7 @@ describe("reviewMarkdown", () => {
   });
 
   it("names a file's viewer pane in the last line, not its path, and leaves the text in single quotes", () => {
-    const review = reviewMarkdown({ kind: "file", path: "/home/me/my notes/it's.md" }, [], OPTIONS);
+    const review = reviewMarkdown({ kind: "file", path: "/home/me/my notes/it's.md" }, [{ number: 1, kind: "comment", body: "Fine." }], OPTIONS);
     expect(review).toContain("Document: /home/me/my notes/it's.md");
     expect(review.endsWith("Reply in a thread: splitty comments reply viewer-0123456789abcdef <number> '<text>'\n")).toBe(true);
   });
@@ -132,14 +132,48 @@ describe("reviewMarkdown", () => {
     expect(review).toContain("## #5 Passage, suggested deletion\n> Obsolete table\n");
   });
 
-  it("puts general comments last in their order, with their replies", () => {
+  // viewer-annotations, The Review: General comments lead.
+  it("puts general comments first in their order, with their replies", () => {
     const review = reviewMarkdown(PLAN, [
       { number: 7, kind: "comment", body: "Split step 4 into two steps." },
       { number: 1, kind: "comment", body: "Fine.", passage: { quote: "Step 1", lines: { start: 1, end: 1 }, state: "anchored" } },
       { number: 8, kind: "comment", body: "Is there a migration?\nIf so, where?", replies: [{ author: "agent", title: "claude", body: "None.\nNothing to migrate." }] },
     ], OPTIONS);
     expect(review).toContain(
-      "## #1 Line 1, comment\n> Step 1\n\nFine.\n\n## General comments\n\n- #7 Split step 4 into two steps.\n- #8 Is there a migration?\n  If so, where?\n\n  Agent (claude): None.\n    Nothing to migrate.\n\nReply in a thread:",
+      "## General comments\n\n- #7 Split step 4 into two steps.\n- #8 Is there a migration?\n  If so, where?\n\n  Agent (claude): None.\n    Nothing to migrate.\n\n## #1 Line 1, comment\n> Step 1\n\nFine.\n\nReply in a thread:",
+    );
+  });
+
+  // viewer-annotations, Waiting For A Review: Feedback on a plan, Approved with notes, The file changed during the review.
+  it("states the verdict of an answer under the heading, with the note on a changed document", () => {
+    const entries: ReviewEntry[] = [
+      { number: 4, kind: "comment", body: "Split the migration into its own step." },
+      { number: 1, kind: "comment", body: "Make the TTL configurable.", passage: { quote: "with a TTL of a minute", lines: { start: 3, end: 3 }, state: "anchored" } },
+    ];
+    expect(reviewMarkdown({ kind: "text", title: "Plan" }, entries, { ...OPTIONS, verdict: "changes_requested", changedDuringWait: true })).toBe(
+      [
+        "# Review of Plan",
+        "Verdict: changes requested",
+        "Note: the document changed during the review; lines and quotes refer to the version shown when the review was answered.",
+        "## General comments",
+        "- #4 Split the migration into its own step.",
+        "## #1 Line 3, comment\n> with a TTL of a minute",
+        "Make the TTL configurable.",
+        "Reply in a thread: splitty comments reply viewer-0123456789abcdef <number> '<text>'",
+      ].join("\n\n") + "\n",
+    );
+    const approved = reviewMarkdown(PLAN, entries.slice(1), { ...OPTIONS, verdict: "approved" });
+    expect(approved.startsWith("# Review of PLAN.md\n\nDocument: /home/me/app/PLAN.md\n\nVerdict: approved\n\n## #1 Line 3")).toBe(true);
+    // A review handed to a terminal has no verdict, and the note goes only with one.
+    const handed = reviewMarkdown(PLAN, entries, { ...OPTIONS, changedDuringWait: true });
+    expect(handed).not.toContain("Verdict:");
+    expect(handed).not.toContain("Note:");
+  });
+
+  // viewer-annotations, Waiting For A Review: A plain rejection.
+  it("leaves the reply line out of a review without annotations", () => {
+    expect(reviewMarkdown({ kind: "text", title: "Plan" }, [], { ...OPTIONS, verdict: "changes_requested" })).toBe(
+      "# Review of Plan\n\nVerdict: changes requested\n",
     );
   });
 
@@ -238,7 +272,8 @@ describe("compareListPlaces", () => {
   const anchored = (index: number, startLine: number, offset: number, view: "source" | "rendered" = "source", endLine = startLine): ListPlace =>
     ({ state: "anchored", view, offset, startLine, endLine, index });
 
-  it("lists anchored passages in document order, then those not found, then general comments", () => {
+  // viewer-annotations, Annotations In The Pane: General comments first.
+  it("lists general comments first, then anchored passages in document order, then those not found", () => {
     const places: ListPlace[] = [
       { state: "general", index: 0 },
       { state: "stale", startLine: 2, endLine: 2, index: 1 },
@@ -248,7 +283,7 @@ describe("compareListPlaces", () => {
       anchored(5, 12, 250),
       { state: "stale", startLine: 1, endLine: 1, index: 6 },
     ];
-    expect([...places].sort(compareListPlaces).map((place) => place.index)).toEqual([5, 3, 2, 6, 1, 0, 4]);
+    expect([...places].sort(compareListPlaces).map((place) => place.index)).toEqual([0, 4, 5, 3, 2, 6, 1]);
   });
 
   it("orders passages of both views on one line consistently", () => {

@@ -95,7 +95,8 @@ export type IncomingMessage =
   // `viewer.unchanged` when the document still has that version.
   | { type: "viewer.read"; requestId: string; paneId: string; offset: number; version?: string; ifVersion?: string }
   // The window's answer to a process that waits for a review of a viewer pane
-  // (`viewer-annotations-v1`); `review` with `feedback` only, at most 1 MiB.
+  // (`viewer-annotations-v1`): a verdict, with a review of at most 1 MiB that an
+  // approval may and a request for changes must carry.
   // Answered by `viewer.review_answered` to this connection only.
   | ViewerReviewAnswer
   // Mux messages
@@ -154,7 +155,8 @@ export interface ViewerFailed extends ServerEvent { type: "viewer.failed"; reque
 
 // --- Viewer Reviews (`viewer-annotations-v1`) ---
 
-export type ReviewOutcome = "approved" | "feedback";
+/** The user's verdict on a document a process waits for. */
+export type ReviewOutcome = "approved" | "changes_requested";
 /** A window's answer to the wait `waitId` on viewer pane `paneId`. */
 export interface ViewerReviewAnswer {
   type: "viewer.review_answer";
@@ -162,7 +164,7 @@ export interface ViewerReviewAnswer {
   paneId: string;
   waitId: string;
   outcome: ReviewOutcome;
-  /** The review, with `feedback` only. */
+  /** The review: optional with `approved` (its notes), required with `changes_requested`. */
   review?: string;
 }
 /** The server's acknowledgement of one `viewer.review_answer`; `accepted` only for the answer that settled the wait. */

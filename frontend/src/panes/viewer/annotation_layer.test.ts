@@ -1044,7 +1044,8 @@ describe("from a mark to its thread", () => {
 });
 
 describe("annotations in the pane", () => {
-  it("lists the open ones, anchored in document order, then those not found, then general comments, and the resolved ones folded after them", async () => {
+  // viewer-annotations, Annotations In The Pane: General comments first.
+  it("lists the open ones, general comments first, then anchored in document order, then those not found, and the resolved ones folded after them", async () => {
     const { shown, store } = setup({ text: PLAN });
     shown.annotationMenu()!.addComment();
     write(shown, "Comment", "General remark.");
@@ -1060,11 +1061,11 @@ describe("annotations in the pane", () => {
       target: { view: "source", quote: "Step 20 of the plan.", prefix: "", suffix: "", startLine: 20, endLine: 20 },
     }]);
     await numbered(store);
-    expect(whereOf(shown)).toEqual(["Line 3", "Line 35", "Line 2", "General", "Line 20"]);
-    expect(entries(shown).map((each) => each.dataset.number)).toEqual(["3", "2", "4", "1", "5"]);
-    expect(entries(shown).map((each) => each.dataset.state)).toEqual(["anchored", "anchored", "stale", "general", "anchored"]);
-    expect(entries(shown)[2].classList.contains("stale")).toBe(true);
-    expect(entries(shown)[2].querySelector(".viewer-annotation-not-found")).not.toBeNull();
+    expect(whereOf(shown)).toEqual(["General", "Line 3", "Line 35", "Line 2", "Line 20"]);
+    expect(entries(shown).map((each) => each.dataset.number)).toEqual(["1", "3", "2", "4", "5"]);
+    expect(entries(shown).map((each) => each.dataset.state)).toEqual(["general", "anchored", "anchored", "stale", "anchored"]);
+    expect(entries(shown)[3].classList.contains("stale")).toBe(true);
+    expect(entries(shown)[3].querySelector(".viewer-annotation-not-found")).not.toBeNull();
     expect(query(shown, ".viewer-annotations-resolved-list")!.contains(entries(shown)[4])).toBe(true);
     expect(query<HTMLDetailsElement>(shown, "details.viewer-annotations-resolved")!.open).toBe(false);
     expect(query(shown, ".viewer-annotations-count")!.textContent).toBe("4 open, 1 resolved");
@@ -1356,9 +1357,17 @@ describe("waiting for a review", () => {
   function banner(view: ViewerView): HTMLElement {
     return query(view, ".viewer-review-wait")!;
   }
+  const approveButton = (view: ViewerView) => banner(view).querySelector<HTMLButtonElement>(".viewer-review-wait-approve")!;
+  const changesButton = (view: ViewerView) => banner(view).querySelector<HTMLButtonElement>(".viewer-review-wait-changes")!;
+  const overallField = (view: ViewerView) => banner(view).querySelector<HTMLTextAreaElement>(".viewer-review-wait-comment")!;
+  function writeOverall(view: ViewerView, text: string): void {
+    const field = overallField(view);
+    field.value = text;
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  }
 
   // viewer-annotations, Waiting For A Review: Feedback on a plan.
-  it("Feedback on a plan: sends the review to the waiting command, and marks it once the server took it", async () => {
+  it("Feedback on a plan: requests changes with the review, and marks it once the server took it", async () => {
     let take: ((accepted: boolean) => void) | undefined;
     const answer = vi.fn((_request: ReviewAnswerRequest) => new Promise<boolean>((resolve) => { take = resolve; }));
     const { shown, store, server, notices } = setup({ text: PLAN, record: WAITING, answer });
@@ -1367,25 +1376,25 @@ describe("waiting for a review", () => {
     expect(shownBanner.hidden).toBe(false);
     expect(shownBanner.dataset.waitId).toBe(WAIT.id);
     expect(shownBanner.querySelector(".viewer-review-wait-text")!.textContent).toBe("claude waits for a review");
-    const sendReview = shownBanner.querySelector<HTMLButtonElement>(".viewer-review-wait-send")!;
-    const approve = shownBanner.querySelector<HTMLButtonElement>(".viewer-review-wait-approve")!;
-    expect(sendReview.textContent).toBe("Send Review");
-    expect(sendReview.disabled).toBe(true);
+    expect(changesButton(shown).textContent).toBe("Request Changes");
+    expect(approveButton(shown).textContent).toBe("Approve");
+    expect(changesButton(shown).disabled).toBe(false);
+    expect(shownBanner.querySelector<HTMLElement>(".viewer-review-wait-note")!.hidden).toBe(true);
 
     comment(shown, "retry three times", "Why three?");
     comment(shown, "Step 3 of the plan.", "Early step.");
-    expect(sendReview.disabled).toBe(false);
-    sendReview.click();
+    changesButton(shown).click();
     await vi.waitFor(() => expect(answer).toHaveBeenCalledTimes(1));
     const [request] = answer.mock.calls[0];
-    expect(request).toMatchObject({ screenId: "screen-1", paneId: "v1", waitId: WAIT.id, outcome: "feedback" });
-    expect(request.review).toMatch(/^# Review of PLAN\.md\n/);
+    expect(request).toMatchObject({ screenId: "screen-1", paneId: "v1", waitId: WAIT.id, outcome: "changes_requested" });
+    expect(request.review).toMatch(/^# Review of PLAN\.md\n\nDocument: \/home\/me\/app\/PLAN\.md\n\nVerdict: changes requested\n\n/);
     expect(request.review).toContain("## #2 Line 3, comment");
     expect(request.review).toContain("## #1 Line 30, comment");
     // Nothing is marked before the server took the answer; meanwhile the banner waits.
     expect(server.sent("mark_sent")).toEqual([]);
-    expect(sendReview.disabled).toBe(true);
-    expect(approve.disabled).toBe(true);
+    expect(changesButton(shown).disabled).toBe(true);
+    expect(approveButton(shown).disabled).toBe(true);
+    expect(overallField(shown).disabled).toBe(true);
     expect(shownBanner.getAttribute("aria-busy")).toBe("true");
 
     take!(true);
@@ -1393,19 +1402,133 @@ describe("waiting for a review", () => {
     expect(server.sent("mark_sent")[0].entries.map((entry) => entry.id).sort()).toEqual(store.list("v1").map((annotation) => annotation.id).sort());
     expect(store.count("v1")).toBe(2);
     expect(shownBanner.hidden).toBe(true);
-    expect(notices.sent).toHaveBeenCalledWith("The review went to claude");
+    expect(notices.sent).toHaveBeenCalledWith("Changes requested from claude");
+  });
+
+  // viewer-annotations, Waiting For A Review: A plain rejection.
+  it("A plain rejection: requests changes with a review that holds no annotation", async () => {
+    const answer = vi.fn(async (_request: ReviewAnswerRequest) => true);
+    const { shown, server } = setup({ text: PLAN, record: WAITING, answer });
+    changesButton(shown).click();
+    await vi.waitFor(() => expect(banner(shown).hidden).toBe(true));
+    expect(answer.mock.calls[0][0]).toEqual({
+      screenId: "screen-1", paneId: "v1", waitId: WAIT.id, outcome: "changes_requested",
+      review: "# Review of PLAN.md\n\nDocument: /home/me/app/PLAN.md\n\nVerdict: changes requested\n",
+    });
+    expect(server.sent("mark_sent")).toEqual([]);
+  });
+
+  // viewer-annotations, Waiting For A Review: An overall comment.
+  it("An overall comment: becomes a numbered general comment before the answer, and is handed over with it", async () => {
+    const answer = vi.fn(async (_request: ReviewAnswerRequest) => true);
+    const { shown, store, server } = setup({ text: PLAN, record: WAITING, answer });
+    comment(shown, "retry three times", "Why three?");
+    writeOverall(shown, "Split the migration into its own step.");
+    changesButton(shown).click();
+    await vi.waitFor(() => expect(answer).toHaveBeenCalledTimes(1));
+    const general = store.list("v1").find((annotation) => !annotation.target)!;
+    expect(general).toMatchObject({ kind: "comment", body: "Split the migration into its own step.", number: 2 });
+    const review = answer.mock.calls[0][0].review!;
+    expect(review).toContain("Verdict: changes requested\n\n## General comments\n\n- #2 Split the migration into its own step.\n\n## #1 Line 30, comment");
+    await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(1));
+    expect(server.sent("mark_sent")[0].entries.map((entry) => entry.id)).toContain(general.id);
+    expect(overallField(shown).value).toBe("");
+  });
+
+  it("keeps an overall comment that no answer took, for the next wait and a rebuilt pane", () => {
+    const store = setup({ text: PLAN, record: WAITING, answer: async () => true });
+    writeOverall(store.shown, "Not yet.");
+    store.shown.setRecord(PLAN_RECORD);
+    expect(banner(store.shown).hidden).toBe(true);
+    store.shown.setRecord({ ...PLAN_RECORD, reviewWait: { ...WAIT, id: "wait-00000000000000ee" } });
+    expect(overallField(store.shown).value).toBe("Not yet.");
+    const rebuilt = setup({ text: PLAN, record: WAITING, answer: async () => true, server: store.server, store: store.store });
+    expect(overallField(rebuilt.shown).value).toBe("Not yet.");
+    expect(store.store.count("v1")).toBe(0);
+    // An emptied field is forgotten.
+    writeOverall(rebuilt.shown, "  ");
+    const later = setup({ text: PLAN, record: WAITING, answer: async () => true, server: store.server, store: store.store });
+    expect(overallField(later.shown).value).toBe("");
   });
 
   // viewer-annotations, Waiting For A Review: Approved.
-  it("Approved: answers without a review and marks nothing", async () => {
+  it("Approved: answers without a review and marks nothing while nothing is pending", async () => {
     const answer = vi.fn(async (_request: ReviewAnswerRequest) => true);
     const { shown, server, notices } = setup({ text: PLAN, record: WAITING, answer });
-    comment(shown, "retry three times", "Why three?");
-    banner(shown).querySelector<HTMLButtonElement>(".viewer-review-wait-approve")!.click();
+    approveButton(shown).click();
     await vi.waitFor(() => expect(banner(shown).hidden).toBe(true));
     expect(answer.mock.calls[0][0]).toEqual({ screenId: "screen-1", paneId: "v1", waitId: WAIT.id, outcome: "approved" });
     expect(server.sent("mark_sent")).toEqual([]);
     expect(notices.info).toHaveBeenCalledWith("Approved for claude");
+  });
+
+  // viewer-annotations, Waiting For A Review: Approved with notes.
+  it("Approved with notes: carries the pending comments, and marks them once the server took the answer", async () => {
+    const answer = vi.fn(async (_request: ReviewAnswerRequest) => true);
+    const { shown, store, server, notices } = setup({ text: PLAN, record: WAITING, answer });
+    comment(shown, "retry three times", "Why three?");
+    approveButton(shown).click();
+    await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(1));
+    const [request] = answer.mock.calls[0];
+    expect(request.outcome).toBe("approved");
+    expect(request.review).toMatch(/\n\nVerdict: approved\n\n## #1 Line 30, comment\n/);
+    expect(server.sent("mark_sent")[0].entries.map((entry) => entry.id)).toEqual([store.list("v1")[0].id]);
+    expect(notices.sent).toHaveBeenCalledWith("Approved for claude, with the new comments as notes");
+  });
+
+  it("repeats no handed-over annotation in an approval", async () => {
+    const answer = vi.fn(async (_request: ReviewAnswerRequest) => true);
+    const { shown, store, server } = setup({ text: PLAN, record: WAITING, answer });
+    comment(shown, "retry three times", "Why three?");
+    await numbered(store);
+    store.markSent("screen-1", "v1", [{ id: store.list("v1")[0].id, kind: "comment", body: "Why three?", target: store.list("v1")[0].target }]);
+    await vi.waitFor(() => expect(store.list("v1")[0].sent).toBe(true));
+    approveButton(shown).click();
+    await vi.waitFor(() => expect(answer).toHaveBeenCalledTimes(1));
+    expect(answer.mock.calls[0][0]).not.toHaveProperty("review");
+    expect(server.sent("mark_sent")).toHaveLength(1);
+  });
+
+  // viewer-annotations, Waiting For A Review: The file changed during the review.
+  it("The file changed during the review: says so, and notes it in the review", async () => {
+    const answer = vi.fn(async (_request: ReviewAnswerRequest) => true);
+    const { shown } = setup({ text: PLAN, record: WAITING, answer });
+    const note = () => banner(shown).querySelector<HTMLElement>(".viewer-review-wait-note")!;
+    // The read that was on its way when the wait appeared, and the first one after it, change nothing.
+    shown.update(read(`${PLAN}Step 41 of the plan.\n`, "v2"));
+    shown.update({ ...read(PLAN, "v2"), reading: true });
+    shown.update(read(`${PLAN}Step 41 of the plan.\n`, "v2"));
+    expect(note().hidden).toBe(true);
+    // A later read with another version is a change.
+    shown.update({ ...read(PLAN, "v2"), reading: true });
+    shown.update(read(`${PLAN}Step 42 of the plan.\n`, "v3"));
+    expect(note().hidden).toBe(false);
+    expect(note().textContent).toBe("The document changed since the review began");
+    comment(shown, "retry three times", "Why three?");
+    changesButton(shown).click();
+    await vi.waitFor(() => expect(answer).toHaveBeenCalledTimes(1));
+    expect(answer.mock.calls[0][0].review).toContain(
+      "Verdict: changes requested\n\nNote: the document changed during the review; lines and quotes refer to the version shown when the review was answered.\n\n## #1",
+    );
+  });
+
+  it("notes no change for a text document, nor for a new wait", () => {
+    const text: ViewerRecord = { source: { kind: "text", title: "Plan" }, revision: 1, originPaneId: "t1", reviewWait: WAIT };
+    const { shown } = setup({ text: PLAN, record: text, answer: async () => true });
+    shown.update({ ...read(PLAN), reading: true });
+    shown.update(read(PLAN, "v1"));
+    shown.update({ ...read(PLAN), reading: true });
+    shown.update(read(`${PLAN}More.\n`, "v2"));
+    expect(banner(shown).querySelector<HTMLElement>(".viewer-review-wait-note")!.hidden).toBe(true);
+
+    const file = setup({ text: PLAN, record: WAITING, answer: async () => true });
+    file.shown.update({ ...read(PLAN), reading: true });
+    file.shown.update(read(PLAN, "v1"));
+    file.shown.update({ ...read(PLAN), reading: true });
+    file.shown.update(read(`${PLAN}More.\n`, "v2"));
+    expect(banner(file.shown).querySelector<HTMLElement>(".viewer-review-wait-note")!.hidden).toBe(false);
+    file.shown.setRecord({ ...PLAN_RECORD, reviewWait: { ...WAIT, id: "wait-00000000000000dd" } });
+    expect(banner(file.shown).querySelector<HTMLElement>(".viewer-review-wait-note")!.hidden).toBe(true);
   });
 
   // viewer-annotations, Waiting For A Review: Two windows answer.
@@ -1423,12 +1546,15 @@ describe("waiting for a review", () => {
     await numbered(first.store);
     server.broadcast();
 
-    banner(second.shown).querySelector<HTMLButtonElement>(".viewer-review-wait-approve")!.click();
+    approveButton(second.shown).click();
     await vi.waitFor(() => expect(answer).toHaveBeenCalledTimes(1));
-    banner(first.shown).querySelector<HTMLButtonElement>(".viewer-review-wait-send")!.click();
-    await vi.waitFor(() => expect(first.notices.info).toHaveBeenCalledWith("The review was not taken: the command no longer waits for it"));
+    changesButton(first.shown).click();
+    await vi.waitFor(() => expect(first.notices.info).toHaveBeenCalledWith("The request for changes was not taken: the command no longer waits for it"));
     expect(answer).toHaveBeenCalledTimes(2);
-    expect(server.sent("mark_sent")).toEqual([]);
+    // Only the approval that settled the wait, with the comment as its note, marks it.
+    expect(answer.mock.calls[0][0]).toMatchObject({ outcome: "approved" });
+    expect(answer.mock.calls[0][0].review).toContain("## #1 Line 30, comment");
+    expect(server.sent("mark_sent")).toHaveLength(1);
     expect(banner(first.shown).hidden).toBe(true);
   });
 
@@ -1451,13 +1577,13 @@ describe("waiting for a review", () => {
     });
     const { shown, server, notices } = setup({ text: PLAN, record: WAITING, answer });
     comment(shown, "retry three times", "Why three?");
-    banner(shown).querySelector<HTMLButtonElement>(".viewer-review-wait-send")!.click();
+    changesButton(shown).click();
     await vi.waitFor(() => expect(notices.error).toHaveBeenCalledWith(
       "The answer did not reach claude", "The connection to the server ended before it took the answer.",
     ));
     expect(server.sent("mark_sent")).toEqual([]);
     expect(banner(shown).hidden).toBe(false);
-    expect(banner(shown).querySelector<HTMLButtonElement>(".viewer-review-wait-send")!.disabled).toBe(false);
+    expect(changesButton(shown).disabled).toBe(false);
   });
 
   it("shows no banner where the server keeps no annotations", () => {

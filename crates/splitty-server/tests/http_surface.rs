@@ -1790,8 +1790,7 @@ async fn an_agent_reads_and_answers_a_review_through_the_cli() {
     );
 
     let first = "1. Retry three times.\n2. Cache the list.\n";
-    let feedback =
-        "# Review of Plan\n\n## #1 Line 1, comment\n> Retry three times.\n\nWhy not five times?\n";
+    let changes = "# Review of Plan\n\nVerdict: changes requested\n\n## #1 Line 1, comment\n> Retry three times.\n\nWhy not five times?\n";
     let child = review(&server, &dir, &["--text", "--title", "Plan"], first);
     let (plan_pane, wait, record) = waiting_review(&mut window).await;
     assert_eq!(record["source"]["kind"], "text", "{record}");
@@ -1799,7 +1798,7 @@ async fn an_agent_reads_and_answers_a_review_through_the_cli() {
     send(
         &mut window,
         json!({"type": "viewer.review_answer", "screenId": "s-cli", "paneId": plan_pane,
-               "waitId": wait, "outcome": "feedback", "review": feedback}),
+               "waitId": wait, "outcome": "changes_requested", "review": changes}),
     )
     .await;
     assert_eq!(
@@ -1807,8 +1806,9 @@ async fn an_agent_reads_and_answers_a_review_through_the_cli() {
         true
     );
     let output = finished(child).await;
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), feedback);
+    // Only the binary's exit path shows the status of a request for changes.
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), changes);
     assert!(
         String::from_utf8_lossy(&output.stderr).contains(&plan_pane),
         "{output:?}"

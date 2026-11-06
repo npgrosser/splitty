@@ -22,12 +22,13 @@ pub const MAX_REVIEW_BYTES: usize = 1024 * 1024;
 /// The longest pane or wait ID an acknowledgement echoes.
 const MAX_ECHOED_ID: usize = 128;
 
-/// What the user answered.
+/// The user's verdict, with the review as the window built it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    Approved,
-    /// The review, as the window built it.
-    Feedback(String),
+    /// Approved; with notes when the window sent a review along.
+    Approved(Option<String>),
+    /// Changes requested; the review may hold no annotation.
+    ChangesRequested(String),
 }
 
 /// Why a wait was not registered.
@@ -164,14 +165,16 @@ fn parse(value: &Value) -> Option<(&str, &str, Outcome)> {
     value["screenId"].as_str()?;
     let pane_id = value["paneId"].as_str()?;
     let wait_id = value["waitId"].as_str()?;
-    let review = value.get("review");
-    let outcome = match (value["outcome"].as_str()?, review) {
-        ("approved", None) => Outcome::Approved,
-        ("feedback", Some(Value::String(review)))
-            if !review.is_empty() && review.len() <= MAX_REVIEW_BYTES =>
-        {
-            Outcome::Feedback(review.clone())
+    let review = match value.get("review") {
+        None => None,
+        Some(Value::String(review)) if !review.is_empty() && review.len() <= MAX_REVIEW_BYTES => {
+            Some(review.clone())
         }
+        Some(_) => return None,
+    };
+    let outcome = match (value["outcome"].as_str()?, review) {
+        ("approved", review) => Outcome::Approved(review),
+        ("changes_requested", Some(review)) => Outcome::ChangesRequested(review),
         _ => return None,
     };
     Some((pane_id, wait_id, outcome))
@@ -218,10 +221,10 @@ mod tests {
             Err(Refusal::PaneBusy)
         ));
 
-        let feedback = json!({"outcome": "feedback", "review": "# Review of PLAN.md"});
-        let answered = reviews.answer(&answer("v2", &id, feedback.clone()));
+        let changes = json!({"outcome": "changes_requested", "review": "# Review of PLAN.md"});
+        let answered = reviews.answer(&answer("v2", &id, changes.clone()));
         assert!(!answered.accepted, "another pane");
-        let answered = reviews.answer(&answer("v1", &id, feedback.clone()));
+        let answered = reviews.answer(&answer("v1", &id, changes.clone()));
         assert!(answered.accepted);
         assert_eq!(
             serde_json::to_value(&answered).expect("wire"),
@@ -231,10 +234,25 @@ mod tests {
         assert!(!late.accepted, "settled once");
         assert_eq!(
             first.answer().await,
-            Some(Outcome::Feedback("# Review of PLAN.md".into()))
+            Some(Outcome::ChangesRequested("# Review of PLAN.md".into()))
         );
         assert_eq!(reviews.held(), 0);
         drop(first);
+
+        // mux-protocol, Review Answers (An approval with notes): an approval
+        // settles with and without a review.
+        for (outcome, expected) in [
+            (json!({"outcome": "approved"}), Outcome::Approved(None)),
+            (
+                json!({"outcome": "approved", "review": "# Review of Plan"}),
+                Outcome::Approved(Some("# Review of Plan".into())),
+            ),
+        ] {
+            let mut wait = reviews.register(PaneId::from("v1")).expect("wait");
+            let id = wait.wait_id().to_owned();
+            assert!(reviews.answer(&answer("v1", &id, outcome)).accepted);
+            assert_eq!(wait.answer().await, Some(expected));
+        }
 
         let held: Vec<_> = (0..MAX_WAITS)
             .map(|n| {
@@ -252,10 +270,11 @@ mod tests {
         assert!(reviews.register(PaneId::from("v99")).is_ok());
     }
 
-    /// mux-protocol, Review Answers (A stale answer) and the rules of an
-    /// answer: an ended wait, a malformed answer, a review with an approval,
-    /// a feedback without one or over 1 MiB settle nothing, and the
-    /// acknowledgement echoes what it can.
+    /// mux-protocol, Review Answers (A stale answer, A request for changes
+    /// without a review) and the rules of an answer: an ended wait, a
+    /// malformed answer, a request for changes without a review, a review
+    /// that is empty, over 1 MiB or no text, and the unreleased outcome
+    /// `feedback` settle nothing, and the acknowledgement echoes what it can.
     #[tokio::test]
     async fn stale_and_malformed_answers_settle_nothing() {
         let reviews = Arc::new(Reviews::default());
@@ -263,24 +282,28 @@ mod tests {
         let id = registration.wait_id().to_owned();
         for (outcome, case) in [
             (
-                json!({"outcome": "approved", "review": "x"}),
-                "a review with an approval",
+                json!({"outcome": "changes_requested"}),
+                "a request for changes without a review",
             ),
             (
-                json!({"outcome": "feedback"}),
-                "a feedback without a review",
-            ),
-            (
-                json!({"outcome": "feedback", "review": ""}),
+                json!({"outcome": "changes_requested", "review": ""}),
                 "an empty review",
             ),
             (
-                json!({"outcome": "feedback", "review": "x".repeat(MAX_REVIEW_BYTES + 1)}),
+                json!({"outcome": "approved", "review": ""}),
+                "an empty review with an approval",
+            ),
+            (
+                json!({"outcome": "changes_requested", "review": "x".repeat(MAX_REVIEW_BYTES + 1)}),
                 "a review over 1 MiB",
             ),
             (
-                json!({"outcome": "feedback", "review": 7}),
+                json!({"outcome": "approved", "review": 7}),
                 "a review that is no text",
+            ),
+            (
+                json!({"outcome": "feedback", "review": "x"}),
+                "the unreleased outcome feedback",
             ),
             (json!({"outcome": "later"}), "an unknown outcome"),
             (json!({}), "no outcome"),
@@ -302,7 +325,8 @@ mod tests {
         );
         assert_eq!(reviews.held(), 1, "the wait still waits");
 
-        let at_limit = json!({"outcome": "feedback", "review": "x".repeat(MAX_REVIEW_BYTES)});
+        let at_limit =
+            json!({"outcome": "changes_requested", "review": "x".repeat(MAX_REVIEW_BYTES)});
         assert!(reviews.answer(&answer("v1", &id, at_limit)).accepted);
 
         // The waiting request is gone: its wait has ended.

@@ -36,7 +36,7 @@
  */
 
 import type {
-  AnnotationKind, AnnotationReply, AnnotationTarget, MuxOperation, ScreenState, SentEntry, UserReply, ViewerAnnotation,
+  AnnotationKind, AnnotationReply, AnnotationTarget, MuxOperation, ReviewWait, ScreenState, SentEntry, UserReply, ViewerAnnotation,
 } from "../protocol/types.ts";
 import { plainText } from "../protocol/untrusted.ts";
 import { SETTLE_MS } from "../scratchpad.ts";
@@ -479,6 +479,8 @@ export class ViewerAnnotations {
   private readonly shown = new Map<string, readonly ViewerAnnotation[]>();
   /** Per screen, the viewer panes its last snapshot listed. */
   private readonly screens = new Map<string, Set<string>>();
+  /** Per pane, the wait for its review that its last snapshot named. */
+  private readonly waits = new Map<string, ReviewWait>();
   /** Viewer panes the window shows, and how many views of each. */
   private readonly mounted = new Map<string, number>();
   /** Per screen, the resync after holds that a snapshot contradicted. */
@@ -499,6 +501,7 @@ export class ViewerAnnotations {
       if (pane.role !== "viewer") continue;
       listed.add(paneId);
       changed = this.adopt(screen.id, paneId, pane.viewer?.annotations ?? EMPTY) || changed;
+      changed = this.adoptWait(paneId, pane.viewer?.reviewWait) || changed;
     }
     // A pane gone from its screen is closed, or listed by another screen's snapshot.
     for (const paneId of this.screens.get(screen.id) ?? []) {
@@ -522,6 +525,11 @@ export class ViewerAnnotations {
   /** All annotations of a pane, open and resolved: what closing the pane ends. */
   count(paneId: string): number {
     return this.list(paneId).length;
+  }
+
+  /** The wait for the review of a pane, which its tab's marker shows (review-verdict, D7). */
+  waitOf(paneId: string): ReviewWait | undefined {
+    return this.waits.get(paneId);
   }
 
   /** The open annotations of a pane, which its tab's marker counts. */
@@ -903,7 +911,16 @@ export class ViewerAnnotations {
   private forget(paneId: string): boolean {
     this.server.delete(paneId);
     this.holds.delete(paneId);
-    return this.shown.delete(paneId);
+    const waited = this.waits.delete(paneId);
+    return this.shown.delete(paneId) || waited;
+  }
+
+  /** Take the wait a snapshot names for a pane; true when it differs from the one before. */
+  private adoptWait(paneId: string, wait: ReviewWait | undefined): boolean {
+    const before = this.waits.get(paneId);
+    if (!wait) return this.waits.delete(paneId);
+    this.waits.set(paneId, wait);
+    return before?.id !== wait.id || before.paneId !== wait.paneId || before.title !== wait.title;
   }
 
   private listedElsewhere(screenId: string, paneId: string): boolean {

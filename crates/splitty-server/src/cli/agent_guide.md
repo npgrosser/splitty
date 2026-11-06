@@ -83,10 +83,10 @@ request the user's editor instead, with a confirmation.
 
 The user may annotate the document in that pane and send you the review. It reaches
 you as text pasted at your prompt or as an inserted file path. The review is Markdown:
-the document's name and path, then numbered sections with the lines, the kind
-(comment, suggested change or suggested deletion), the passage as a block quote, the
-remark, a fenced replacement and the replies of the thread, then general comments,
-and a last line with the command that replies in a thread.
+the document's name and path, the general comments, then numbered sections with the
+lines, the kind (comment, suggested change or suggested deletion), the passage as a
+block quote, the remark, a fenced replacement and the replies of the thread, and a last
+line with the command that replies in a thread.
 
 ## Read and answer comments
 
@@ -114,7 +114,7 @@ at most 16 KiB, shown in the thread with your pane's title; the command prints
 
 ## Wait for the user's review
 
-Show a document and wait until the user approves it or sends a review:
+Show a document and wait for the user's verdict, an approval or a request for changes:
 
 ```sh
 splitty review PLAN.md
@@ -122,9 +122,16 @@ splitty review --text --title Plan < plan.md
 ```
 
 The command names the viewer pane on standard error and waits as long as the user
-takes. With a review it prints the review and exits 0; on approval it prints nothing
-and exits 0. With `--json` it prints `{"outcome":"feedback","review":"..."}` or
-`{"outcome":"approved"}`. It exits 1 when the pane closes, when another process already
+takes. On approval it exits 0 and prints nothing, or the review when the user added
+notes: go ahead and take the notes into account. When the user requests changes it
+prints the review and exits 3: revise the document as the review asks and review it
+again; a review without comments is a plain rejection, so ask what to do instead. Under
+its heading, a review that answers you carries `Verdict: approved` or
+`Verdict: changes requested`, and a `Note:` line when the file changed during the review.
+With `--json` it prints
+`{"outcome":"approved"}`, `{"outcome":"approved","review":"..."}` or
+`{"outcome":"changes_requested","review":"..."}`, with the same exit status.
+It exits 1 when the pane closes, when another process already
 waits for that pane, when another command's text took the pane before this one waited
 (run one review at a time per title), or when the connection ends; interrupt it to stop
 waiting. A text,

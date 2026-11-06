@@ -1234,13 +1234,58 @@ body,
 .viewer-review-wait {
   display: flex;
   flex: 0 0 auto;
-  align-items: center;
-  gap: 6px;
-  padding: 4px 8px 4px 10px;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 8px 6px 10px;
   border-bottom: 1px solid var(--splitty-border-subtle);
   background: color-mix(in srgb, var(--splitty-accent) 14%, var(--splitty-surface-raised));
   color: var(--splitty-text-primary);
   font-size: 12px;
+}
+
+.viewer-review-wait-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.viewer-review-wait-note {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--splitty-warning);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-review-wait-note[hidden] {
+  display: none;
+}
+
+/* The overall comment: one line until it holds more, at most a few. */
+.viewer-review-wait-comment {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 24px;
+  max-height: 8.5em;
+  margin: 0;
+  padding: 3px 6px;
+  border: 1px solid var(--splitty-border-default);
+  border-radius: 4px;
+  background: var(--splitty-surface-base);
+  color: var(--splitty-text-primary);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.4;
+  resize: vertical;
+  field-sizing: content;
+}
+
+.viewer-review-wait-comment:focus {
+  border-color: var(--splitty-accent);
+  outline: none;
 }
 
 .viewer-review-wait-text {
@@ -1264,7 +1309,7 @@ body,
   cursor: pointer;
 }
 
-.viewer-review-wait-send {
+.viewer-review-wait-changes {
   border-color: var(--splitty-accent);
   background: var(--splitty-accent-muted);
   color: var(--splitty-text-primary);
@@ -1521,6 +1566,19 @@ body,
   font-variant-numeric: tabular-nums;
   line-height: 1;
   cursor: pointer;
+}
+
+/* A viewer tab's marker while a process waits for the pane's review; a click shows the pane. */
+.splitty-tab-review-wait {
+  display: inline-flex;
+  align-items: center;
+  line-height: 0;
+  color: var(--splitty-accent);
+  cursor: pointer;
+}
+
+.splitty-tab-review-wait[hidden] {
+  display: none;
 }
 
 /* ── Terminal Search ── */

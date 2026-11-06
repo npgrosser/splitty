@@ -206,6 +206,8 @@ export class ViewerView {
 
   update(state: DocumentState): void {
     if (!this.record || !this.options.supported) return;
+    // Under a wait for a review, the layer notes a file that changed meanwhile.
+    this.layer?.documentRead(state.reading, state.failure ? undefined : state.document?.version);
     if (state.failure) {
       this.showFailure(state.failure);
       return;

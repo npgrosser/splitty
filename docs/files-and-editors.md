@@ -69,7 +69,12 @@ splitty review PLAN.md
 splitty review --text --title Plan < plan.md
 ```
 
-The pane then shows a banner, `<title> waits for a review`, with **Approve** and **Send Review**. Send Review answers the command with the review, which it prints to standard output, and marks the annotations as sent; Approve prints nothing. Both end the command with status 0, and `--json` prints the outcome as JSON. Closing the pane first ends it with status 1. A text piped in is rendered as Markdown, or shown as plain text with `--format text`. Piped in again from the same pane with the same title, it replaces the text of its viewer pane, which keeps its annotations; while a command still waits for that pane, a second one fails and changes nothing. Two commands started at once cannot take each other's answer: the one whose text the other replaced before it waited fails.
+The pane then shows a banner, `<title> waits for a review`, with a field for an overall comment and two verdicts:
+
+- **Approve** lets the command go on with status 0. Comments not yet sent go along as notes, and the command prints them as a review; with none it prints nothing.
+- **Request Changes** answers with the review, which the command prints, and ends it with status 3. It also works without any comment, as a plain rejection.
+
+Text in the overall comment field becomes a general comment, with its own number and thread, before the answer goes out. The review starts with its verdict (`Verdict: approved` or `Verdict: changes requested`) and lists the general comments before the comments on passages; it notes when the file changed while the command waited. The answered annotations are marked as sent. `--json` prints the outcome as JSON with the same status. Closing the pane first ends the command with status 1. While a command waits, the pane's tab shows an hourglass, so a waiting review in a background tab is not missed. A text piped in is rendered as Markdown, or shown as plain text with `--format text`. Piped in again from the same pane with the same title, it replaces the text of its viewer pane, which keeps its annotations; while a command still waits for that pane, a second one fails and changes nothing. Two commands started at once cannot take each other's answer: the one whose text the other replaced before it waited fails.
 
 Terminal selections opened in a viewer can be annotated the same way, for example to answer a long reply of an agent point by point.
 

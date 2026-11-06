@@ -6,7 +6,7 @@ use super::comments::{json_text, safe_text};
 use super::{request_within, send_mux_op, CliError, ServerInfo};
 use crate::client_session::viewer::{MAX_TEXT_BYTES, MAX_TITLE_CHARS};
 use serde_json::{json, Value};
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::Path;
 
 const UPDATE: &str = "This Splitty server cannot wait for reviews yet. Update it (for a host: Update… in the Hosts panel) and reopen its terminal.";
@@ -99,8 +99,28 @@ pub fn read_text(input: impl Read) -> Result<String, CliError> {
     String::from_utf8(bytes).map_err(|_| CliError::Usage("The text must be valid UTF-8".into()))
 }
 
-/// Show the document, wait for the user's answer and print it.
-pub async fn run(server: &ServerInfo, review: &Review, json: bool) -> Result<(), CliError> {
+/// The exit status of `splitty review` when the user requests changes
+/// (`cli`, Review Command): 1 and 2 stay failures and usage errors.
+pub const CHANGES_REQUESTED_STATUS: i32 = 3;
+
+/// The user's verdict on the document.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Verdict {
+    Approved,
+    ChangesRequested,
+}
+
+/// What the command prints for an answer, and the verdict it exits with.
+#[derive(Debug, PartialEq, Eq)]
+struct Answer {
+    verdict: Verdict,
+    /// For standard output: the review, or the outcome as JSON.
+    output: Option<String>,
+}
+
+/// Show the document, wait for the user's answer, print it and return the
+/// verdict, with which the caller exits.
+pub async fn run(server: &ServerInfo, review: &Review, json: bool) -> Result<Verdict, CliError> {
     let shown = send_mux_op(server, &review.screen, review.op.clone())
         .await
         .map_err(|error| match error {
@@ -132,94 +152,139 @@ pub async fn run(server: &ServerInfo, review: &Review, json: bool) -> Result<(),
         wait["viewerRevision"] = json!(revision);
     }
     let answer = request_within(server, "POST", "/api/viewer/review/wait", Some(wait), None).await;
-    if let Some(output) = outcome(answer, json)? {
-        print!("{output}");
+    let answer = outcome(answer, json)?;
+    if let Some(output) = &answer.output {
+        // Written and flushed here: the caller may exit right after.
+        let mut stdout = std::io::stdout().lock();
+        stdout
+            .write_all(output.as_bytes())
+            .and_then(|()| stdout.flush())
+            .map_err(|e| CliError::Failed(format!("Cannot print the review: {e}")))?;
     }
-    Ok(())
+    Ok(answer.verdict)
 }
 
 /// What the command prints for the answer to its wait, or why it fails: the
-/// review, nothing for an approval, or either outcome as JSON.
-fn outcome(answer: Result<(u16, Value), CliError>, json: bool) -> Result<Option<String>, CliError> {
+/// review of either verdict, nothing for an approval without one, or the
+/// outcome as JSON.
+fn outcome(answer: Result<(u16, Value), CliError>, json: bool) -> Result<Answer, CliError> {
     let (status, body) = answer.map_err(|error| match error {
         CliError::Request(cause) => CliError::Failed(format!(
             "The connection to the Splitty server ended before an answer: {cause}"
         )),
         other => other,
     })?;
-    match (status, body["outcome"].as_str(), body["code"].as_str()) {
-        (200, Some("approved"), _) => {
-            Ok(json.then(|| format!("{}\n", json!({"outcome": "approved"}))))
+    let (verdict, name) = match (status, body["outcome"].as_str(), body["code"].as_str()) {
+        (200, Some("approved"), _) => (Verdict::Approved, "approved"),
+        (200, Some("changes_requested"), _) => (Verdict::ChangesRequested, "changes_requested"),
+        (410, _, Some("closed")) => {
+            return Err(CliError::Failed(
+                "The review was closed without an answer.".into(),
+            ))
         }
-        (200, Some("feedback"), _) => {
-            let review = body["review"]
-                .as_str()
-                .ok_or_else(|| CliError::Failed("The answer holds no review".into()))?;
-            if json {
-                return Ok(Some(format!(
-                    "{}\n",
-                    json_text(&json!({"outcome": "feedback", "review": review}))
-                )));
-            }
+        (409, _, Some("changed")) => return Err(CliError::Failed(
+            "Another document took the viewer pane before the review began; nothing was reviewed."
+                .into(),
+        )),
+        (404 | 405, _, None) => return Err(CliError::Failed(UPDATE.into())),
+        _ => {
+            return Err(CliError::Failed(
+                body["error"].as_str().unwrap_or("unknown error").into(),
+            ))
+        }
+    };
+    let review = match body.get("review") {
+        None => None,
+        Some(Value::String(review)) => Some(review.as_str()),
+        Some(_) => return Err(CliError::Failed("The answer holds no review".into())),
+    };
+    if verdict == Verdict::ChangesRequested && review.is_none() {
+        return Err(CliError::Failed("The answer holds no review".into()));
+    }
+    let output = if json {
+        let mut printed = json!({"outcome": name});
+        if let Some(review) = review {
+            printed["review"] = json!(review);
+        }
+        Some(format!("{}\n", json_text(&printed)))
+    } else {
+        review.map(|review| {
             let mut review = safe_text(review);
             if !review.ends_with('\n') {
                 review.push('\n');
             }
-            Ok(Some(review))
-        }
-        (410, _, Some("closed")) => Err(CliError::Failed(
-            "The review was closed without an answer.".into(),
-        )),
-        (409, _, Some("changed")) => Err(CliError::Failed(
-            "Another document took the viewer pane before the review began; nothing was reviewed."
-                .into(),
-        )),
-        (404 | 405, _, None) => Err(CliError::Failed(UPDATE.into())),
-        _ => Err(CliError::Failed(
-            body["error"].as_str().unwrap_or("unknown error").into(),
-        )),
-    }
+            review
+        })
+    };
+    Ok(Answer { verdict, output })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// cli, Review Command (A plan reviewed, Approved, Outcome as JSON, The
-    /// pane closed): the review on standard output, nothing for an approval,
-    /// either outcome as JSON, and a failure with its reason for a closed
-    /// pane, a second wait, a document replaced before the wait, a lost
-    /// connection and an old server.
+    /// cli, Review Command (A plan reviewed, Approved, Approved with notes,
+    /// Outcome as JSON, The pane closed): the review of either verdict on
+    /// standard output, nothing for an approval without one, the outcome as
+    /// JSON, the verdict for the exit status, and a failure with its reason
+    /// for a closed pane, a second wait, a document replaced before the wait,
+    /// a lost connection, an answer without its review and an old server.
     #[test]
     fn each_outcome_prints_its_answer_or_fails_with_its_reason() {
-        let review = "# Review of Plan\n\n## #1 Line 3, comment\n> step 4\n\nSplit it.\n";
-        let feedback = || Ok((200, json!({"outcome": "feedback", "review": review})));
+        let review = "# Review of Plan\n\nVerdict: changes requested\n\n## #1 Line 3, comment\n> step 4\n\nSplit it.\n";
+        let changes = || {
+            Ok((
+                200,
+                json!({"outcome": "changes_requested", "review": review}),
+            ))
+        };
         let approved = || Ok((200, json!({"outcome": "approved"})));
+        let notes = || Ok((200, json!({"outcome": "approved", "review": review})));
+        let answer = |verdict, output: Option<&str>| Answer {
+            verdict,
+            output: output.map(str::to_owned),
+        };
         assert_eq!(
-            outcome(feedback(), false).expect("feedback"),
-            Some(review.to_owned())
+            outcome(changes(), false).expect("changes"),
+            answer(Verdict::ChangesRequested, Some(review))
         );
-        assert_eq!(outcome(approved(), false).expect("approved"), None);
+        assert_eq!(
+            outcome(approved(), false).expect("approved"),
+            answer(Verdict::Approved, None)
+        );
+        assert_eq!(
+            outcome(notes(), false).expect("notes"),
+            answer(Verdict::Approved, Some(review))
+        );
         assert_eq!(
             outcome(approved(), true).expect("JSON"),
-            Some("{\"outcome\":\"approved\"}\n".to_owned())
+            answer(Verdict::Approved, Some("{\"outcome\":\"approved\"}\n"))
         );
-        let printed = outcome(feedback(), true).expect("JSON").expect("output");
-        assert_eq!(
-            serde_json::from_str::<Value>(&printed).expect("JSON"),
-            json!({"outcome": "feedback", "review": review})
-        );
-        assert!(printed.starts_with("{\"outcome\":\"feedback\""));
+        for (answered, name, verdict) in [
+            (changes(), "changes_requested", Verdict::ChangesRequested),
+            (notes(), "approved", Verdict::Approved),
+        ] {
+            let printed = outcome(answered, true).expect("JSON");
+            assert_eq!(printed.verdict, verdict);
+            let printed = printed.output.expect("output");
+            assert_eq!(
+                serde_json::from_str::<Value>(&printed).expect("JSON"),
+                json!({"outcome": name, "review": review})
+            );
+            assert!(printed.starts_with(&format!("{{\"outcome\":\"{name}\"")));
+        }
         assert_eq!(
             outcome(
                 Ok((
                     200,
-                    json!({"outcome": "feedback", "review": "No line break\u{1b}[2J"})
+                    json!({"outcome": "changes_requested", "review": "No line break\u{1b}[2J"})
                 )),
                 false
             )
-            .expect("feedback"),
-            Some("No line break\u{fffd}[2J\n".to_owned()),
+            .expect("changes")
+            .output
+            .as_deref(),
+            Some("No line break\u{fffd}[2J\n"),
             "a terminal acts on no character of the review"
         );
 
@@ -259,7 +324,18 @@ mod tests {
                 )),
                 "connection to the Splitty server ended",
             ),
-            (Ok((200, json!({"outcome": "feedback"}))), "no review"),
+            (
+                Ok((200, json!({"outcome": "changes_requested"}))),
+                "no review",
+            ),
+            (
+                Ok((200, json!({"outcome": "approved", "review": 7}))),
+                "no review",
+            ),
+            (
+                Ok((200, json!({"outcome": "feedback", "review": "x"}))),
+                "unknown error",
+            ),
         ] {
             match outcome(answer, false) {
                 Err(CliError::Failed(message)) => assert!(message.contains(reason), "{message}"),

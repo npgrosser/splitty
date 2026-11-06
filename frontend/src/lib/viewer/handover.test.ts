@@ -140,7 +140,7 @@ describe("helpers", () => {
   });
 });
 
-// viewer-annotations, Waiting For A Review (D9 of review-threads): the window's answer and the server's acknowledgement.
+// viewer-annotations, Waiting For A Review (D9 of review-threads, D1 of review-verdict): the window's answer and the server's acknowledgement.
 describe("ReviewAnswers", () => {
   afterEach(() => {
     vi.useRealTimers();
@@ -148,12 +148,12 @@ describe("ReviewAnswers", () => {
 
   const request = { screenId: "screen-1", paneId: "v1", waitId: "wait-0123456789abcdef" } as const;
 
-  it("sends feedback with the review and resolves with whether the server took it", async () => {
+  it("sends a request for changes with the review and resolves with whether the server took it", async () => {
     const socket = new FakeSocket();
     const answers = new ReviewAnswers(socket);
-    const answered = answers.answer({ ...request, outcome: "feedback", review: REVIEW.text });
+    const answered = answers.answer({ ...request, outcome: "changes_requested", review: REVIEW.text });
     expect(socket.sentOfType("viewer.review_answer")).toEqual([
-      { type: "viewer.review_answer", screenId: "screen-1", paneId: "v1", waitId: request.waitId, outcome: "feedback", review: REVIEW.text },
+      { type: "viewer.review_answer", screenId: "screen-1", paneId: "v1", waitId: request.waitId, outcome: "changes_requested", review: REVIEW.text },
     ]);
     // Another wait's acknowledgement, and a malformed one, settle nothing.
     socket.message({ type: "viewer.review_answered", paneId: "v1", waitId: "wait-ffffffffffffffff", accepted: false });
@@ -163,13 +163,17 @@ describe("ReviewAnswers", () => {
     answers.dispose();
   });
 
-  it("sends an approval without a review", async () => {
+  it("sends an approval without a review, or with its notes", async () => {
     const socket = new FakeSocket();
     const answers = new ReviewAnswers(socket);
-    const answered = answers.answer({ ...request, outcome: "approved", review: "ignored" });
+    const answered = answers.answer({ ...request, outcome: "approved" });
     expect(socket.sentOfType("viewer.review_answer")[0]).not.toHaveProperty("review");
     socket.message({ type: "viewer.review_answered", paneId: "v1", waitId: request.waitId, accepted: "yes" });
     await expect(answered).resolves.toBe(false);
+    const notes = answers.answer({ ...request, outcome: "approved", review: REVIEW.text });
+    expect(socket.sentOfType("viewer.review_answer")[1]).toMatchObject({ outcome: "approved", review: REVIEW.text });
+    socket.message({ type: "viewer.review_answered", paneId: "v1", waitId: request.waitId, accepted: true });
+    await expect(notes).resolves.toBe(true);
     answers.dispose();
   });
 
@@ -177,7 +181,7 @@ describe("ReviewAnswers", () => {
   it("resolves with false for an answer that came second", async () => {
     const socket = new FakeSocket();
     const answers = new ReviewAnswers(socket);
-    const answered = answers.answer({ ...request, outcome: "feedback", review: REVIEW.text });
+    const answered = answers.answer({ ...request, outcome: "changes_requested", review: REVIEW.text });
     socket.message({ type: "viewer.review_answered", paneId: "v1", waitId: request.waitId, accepted: false });
     await expect(answered).resolves.toBe(false);
     answers.dispose();
@@ -187,7 +191,7 @@ describe("ReviewAnswers", () => {
     const socket = new FakeSocket();
     const answers = new ReviewAnswers(socket);
     const first = answers.answer({ ...request, outcome: "approved" });
-    const second = answers.answer({ ...request, outcome: "feedback", review: REVIEW.text });
+    const second = answers.answer({ ...request, outcome: "changes_requested", review: REVIEW.text });
     expect(second).toBe(first);
     expect(socket.sentOfType("viewer.review_answer")).toHaveLength(1);
     socket.message({ type: "viewer.review_answered", paneId: "v1", waitId: request.waitId, accepted: true });

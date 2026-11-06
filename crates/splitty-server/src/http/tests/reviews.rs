@@ -169,14 +169,16 @@ fn raw_wait(host: &str) -> Vec<u8> {
     .into_bytes()
 }
 
-/// control-api, Review Requests (Approved, Second wait); viewer-annotations,
-/// Waiting For A Review (Approved, Two windows answer); mux-protocol, Review
-/// Answers (The first answer, A stale answer) and Change Propagation to Other
-/// Clients: a wait held on the HTTP listener names itself, the waiting pane
-/// and its title in the record and nudges every window; a second wait for
-/// the pane is refused while the first keeps waiting; the first answer ends
-/// the wait with its outcome and nudges the windows again; a later answer is
-/// not accepted. The same with a review, held on the owner control socket.
+/// control-api, Review Requests (Approved, Changes requested, Second wait);
+/// viewer-annotations, Waiting For A Review (Approved, Two windows answer);
+/// mux-protocol, Review Answers (The first answer, An approval with notes, A
+/// stale answer) and Change Propagation to Other Clients: a wait held on the
+/// HTTP listener names itself, the waiting pane and its title in the record
+/// and nudges every window; a second wait for the pane is refused while the
+/// first keeps waiting; the first answer ends the wait with its outcome and
+/// nudges the windows again; a later answer is not accepted. The same with a
+/// request for changes, held on the owner control socket, and with an
+/// approval that carries notes.
 #[tokio::test]
 async fn a_wait_ends_with_the_first_answer() {
     let dir = tempfile::tempdir().expect("dir");
@@ -224,7 +226,10 @@ async fn a_wait_ends_with_the_first_answer() {
     nudged(&mut a).await;
     send(
         &mut a,
-        answer(&wait, json!({"outcome": "feedback", "review": "Too late."})),
+        answer(
+            &wait,
+            json!({"outcome": "changes_requested", "review": "Too late."}),
+        ),
     )
     .await;
     let late = message_type(&mut a, "viewer.review_answered").await;
@@ -241,7 +246,10 @@ async fn a_wait_ends_with_the_first_answer() {
     let review = "# Review of PLAN.md\n\n1. Line 30: Why not five times?\n";
     send(
         &mut a,
-        answer(&next_wait, json!({"outcome": "feedback", "review": review})),
+        answer(
+            &next_wait,
+            json!({"outcome": "changes_requested", "review": review}),
+        ),
     )
     .await;
     let got = messages(&mut a, &["viewer.review_answered", "mux.nudge"]).await;
@@ -252,11 +260,32 @@ async fn a_wait_ends_with_the_first_answer() {
         .expect("an answer in time")
         .expect("request");
     assert_eq!(code, StatusCode::OK);
-    assert_eq!(outcome, json!({"outcome": "feedback", "review": review}));
+    assert_eq!(
+        outcome,
+        json!({"outcome": "changes_requested", "review": review})
+    );
     nudged(&mut b).await;
     send(&mut b, answer(&next_wait, json!({"outcome": "approved"}))).await;
     let late = message_type(&mut b, "viewer.review_answered").await;
     assert_eq!(late["accepted"], false, "{late}");
+
+    let waiting = wait_over_control(&control);
+    nudged(&mut a).await;
+    let notes_wait = record(&mut a).await["reviewWait"]["id"].clone();
+    let notes = "# Review of PLAN.md\n\nVerdict: approved\n";
+    send(
+        &mut a,
+        answer(&notes_wait, json!({"outcome": "approved", "review": notes})),
+    )
+    .await;
+    let got = message_type(&mut a, "viewer.review_answered").await;
+    assert_eq!(got["accepted"], true, "{got}");
+    let (code, outcome) = tokio::time::timeout(WAIT, waiting)
+        .await
+        .expect("an answer in time")
+        .expect("request");
+    assert_eq!(code, StatusCode::OK);
+    assert_eq!(outcome, json!({"outcome": "approved", "review": notes}));
 }
 
 /// control-api, Review Requests (Caller gone) and viewer-annotations, Waiting

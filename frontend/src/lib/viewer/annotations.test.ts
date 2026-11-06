@@ -319,6 +319,29 @@ describe("ViewerAnnotations", () => {
     expect(store.openCount("v1")).toBe(2);
   });
 
+  // viewer-annotations, Annotations In The Pane: A waiting review in a background tab (D7 of review-verdict).
+  it("knows the wait each snapshot names for a pane, for the tab's marker", () => {
+    const changes = vi.fn();
+    store.subscribe(changes);
+    const wait = { id: "wait-0123456789abcdef", paneId: "t1", title: "claude" };
+    const waiting = screen({ v1: [] });
+    waiting.panes.v1!.viewer = { ...waiting.panes.v1!.viewer!, reviewWait: wait };
+    store.snapshot(waiting);
+    expect(store.waitOf("v1")).toEqual(wait);
+    expect(changes).toHaveBeenCalledTimes(1);
+    // The same wait again changes nothing.
+    store.snapshot(waiting);
+    expect(changes).toHaveBeenCalledTimes(1);
+    // The wait ended.
+    store.snapshot(screen({ v1: [] }));
+    expect(store.waitOf("v1")).toBeUndefined();
+    expect(changes).toHaveBeenCalledTimes(2);
+    // A pane gone from its screen takes its wait along.
+    store.snapshot(waiting);
+    store.snapshot(screen({}));
+    expect(store.waitOf("v1")).toBeUndefined();
+  });
+
   // viewer-annotations, Saving Annotations Through The Window: shown at once, sent without waiting.
   it("shows the window's own annotation at once, sends it, and asks for its number", () => {
     store.snapshot(screen({ v1: [] }));

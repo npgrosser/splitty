@@ -57,6 +57,9 @@ mod tests {
             "splitty review PLAN.md",
             "splitty review --text --title Plan",
             "{\"outcome\":\"approved\"}",
+            "{\"outcome\":\"changes_requested\",\"review\":\"...\"}",
+            "prints the review and exits 3",
+            "Verdict: changes requested",
             "exits 1 when the pane closes",
         ] {
             assert!(guide.contains(term), "guide missing {term}");

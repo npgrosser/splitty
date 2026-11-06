@@ -221,7 +221,8 @@ enum Commands {
     },
 
     /// Show a file, or a text from standard input, in a viewer pane and wait
-    /// until the user approves it or sends a review, which is printed
+    /// for the user's verdict: exit 0 on approval, 3 when the user requests
+    /// changes; the review, if any, is printed
     Review {
         #[command(flatten)]
         ctl: CtlOpts,
@@ -1025,7 +1026,13 @@ async fn async_main() {
                     }
                 };
                 let server = discover_server(&ctl)?;
-                cli::review::run(&server, &review, json).await
+                // The review is printed and flushed; a request for changes has its own status.
+                if cli::review::run(&server, &review, json).await?
+                    == cli::review::Verdict::ChangesRequested
+                {
+                    std::process::exit(cli::review::CHANGES_REQUESTED_STATUS);
+                }
+                Ok(())
             })
             .await;
         }
