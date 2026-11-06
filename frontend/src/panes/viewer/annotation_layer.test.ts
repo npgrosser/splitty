@@ -1148,8 +1148,10 @@ describe("handing the review over", () => {
     const agent = terminal("t1", "claude");
     const { shown, store, server, notices } = setup({ text: PLAN, origin: agent.target });
     comment(shown, "retry three times", "Why three?");
-    const send = query<HTMLButtonElement>(shown, ".viewer-annotations-primary")!;
-    expect(send.textContent).toBe("Send to claude");
+    const send = query<HTMLButtonElement>(shown, ".viewer-annotations-send-main")!;
+    expect(send.textContent).toBe("Send");
+    // The terminal it goes to is named in the button's title, not its label.
+    expect(send.title).toBe("Paste the review of the annotations not sent yet into claude, without submitting it");
     send.click();
     await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(1));
     expect(agent.pasted).toHaveLength(1);
@@ -1168,7 +1170,21 @@ describe("handing the review over", () => {
     expect(notices.sent).toHaveBeenCalledWith("The review is at the prompt of claude");
     expect(notices.sent.mock.calls[0]).toHaveLength(1);
     expect(notices.undoable).not.toHaveBeenCalled();
-    expect(send.textContent).toBe("Send Again to claude");
+    expect(send.textContent).toBe("Send Again");
+  });
+
+  it("copies the review with the list's Copy, which marks nothing as handed over", async () => {
+    const agent = terminal("t1", "claude");
+    const { shown, store, server, writeClipboard } = setup({ text: PLAN, origin: agent.target });
+    comment(shown, "retry three times", "Why three?");
+    const copy = query<HTMLButtonElement>(shown, ".viewer-annotations-copy")!;
+    expect(copy.disabled).toBe(false);
+    copy.click();
+    await vi.waitFor(() => expect(writeClipboard).toHaveBeenCalledTimes(1));
+    expect(writeClipboard.mock.calls[0][0]).toContain("## #1 Line 30, comment\n> retry three times\n\nWhy three?");
+    expect(agent.pasted).toHaveLength(0);
+    expect(server.sent("mark_sent")).toHaveLength(0);
+    expect(store.list("v1")[0].sent).toBeFalsy();
   });
 
   // viewer-annotations, The Review: A thread with an answer; Handing A Review To A Terminal: Sent again.
@@ -1177,7 +1193,7 @@ describe("handing the review over", () => {
     const { shown, store, server } = setup({ text: PLAN, origin: agent.target });
     comment(shown, "retry three times", "Why three?");
     comment(shown, "Step 3 of the plan.", "Early step.");
-    const send = query<HTMLButtonElement>(shown, ".viewer-annotations-primary")!;
+    const send = query<HTMLButtonElement>(shown, ".viewer-annotations-send-main")!;
     send.click();
     await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(1));
     expect(agent.pasted[0]).toContain("## #2 Line 3, comment");
@@ -1185,9 +1201,9 @@ describe("handing the review over", () => {
 
     server.agentReplies(1, "Three covers a short outage.");
     // An agent's reply is nothing the user sends.
-    expect(send.textContent).toBe("Send Again to claude");
+    expect(send.textContent).toBe("Send Again");
     reply(entry(shown, 1), "Then make it five.");
-    expect(send.textContent).toBe("Send to claude");
+    expect(send.textContent).toBe("Send");
     const own = store.get("v1", server.get(1).id)!.replies!.find((each) => each.author === "user")!;
     send.click();
     await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(2));
@@ -1199,7 +1215,7 @@ describe("handing the review over", () => {
     expect(entry(shown, 1).querySelector("li.viewer-reply[data-author='user']")!.querySelector(".viewer-reply-sent")).not.toBeNull();
 
     // Sent again: every open annotation, and nothing more to mark.
-    expect(send.textContent).toBe("Send Again to claude");
+    expect(send.textContent).toBe("Send Again");
     expect(send.title).toContain("all open annotations");
     send.click();
     await vi.waitFor(() => expect(agent.pasted).toHaveLength(3));
@@ -1215,7 +1231,7 @@ describe("handing the review over", () => {
       { id: "ann-0000000000000001", number: 1, kind: "comment", body: "Why three?", target: RETRY, status: "resolved" },
       { id: "ann-0000000000000002", number: 2, kind: "comment", body: "Split the plan." },
     ]);
-    query<HTMLButtonElement>(shown, ".viewer-annotations-primary")!.click();
+    query<HTMLButtonElement>(shown, ".viewer-annotations-send-main")!.click();
     await vi.waitFor(() => expect(agent.pasted).toHaveLength(1));
     expect(agent.pasted[0]).toContain("## General comments\n\n- #2 Split the plan.");
     expect(agent.pasted[0]).not.toContain("#1");
@@ -1226,8 +1242,8 @@ describe("handing the review over", () => {
     const shell = terminal("t2", "bash");
     const { shown, store, server, showMenu } = setup({ text: PLAN, terminals: [shell.target] });
     comment(shown, "retry three times", "Why three?");
-    const send = query<HTMLButtonElement>(shown, ".viewer-annotations-primary")!;
-    expect(send.textContent).toBe("Send to Terminal…");
+    const send = query<HTMLButtonElement>(shown, ".viewer-annotations-send-main")!;
+    expect(send.textContent).toBe("Send…");
     send.click();
     const items = showMenu.mock.calls.at(-1)![0];
     expect(items.map((item) => item.label)).toEqual(["bash"]);
@@ -1236,7 +1252,7 @@ describe("handing the review over", () => {
     await vi.waitFor(() => expect(shell.pasted).toHaveLength(1));
     await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(1));
     expect(store.count("v1")).toBe(1);
-    expect(send.textContent).toBe("Send Again to Terminal…");
+    expect(send.textContent).toBe("Send Again…");
   });
 
   // viewer-annotations, Handing A Review To A Terminal: A program without bracketed paste.
@@ -1244,7 +1260,7 @@ describe("handing the review over", () => {
     const agent = terminal("t1", "claude", { bracketedPaste: false });
     const { shown, server, notices } = setup({ text: PLAN, origin: agent.target });
     comment(shown, "retry three times", "Why three?");
-    query<HTMLButtonElement>(shown, ".viewer-annotations-primary")!.click();
+    query<HTMLButtonElement>(shown, ".viewer-annotations-send-main")!.click();
     await vi.waitFor(() => expect(server.sent("mark_sent")).toHaveLength(1));
     expect(agent.pasted).toEqual(["/home/me/.cache/splitty/uploads/review-PLAN.md"]);
     expect(notices.sent.mock.calls[0][0]).toContain("takes no bracketed paste");
@@ -1351,7 +1367,7 @@ describe("handing the review over", () => {
     expect(server.get(1).sent).toBe(true);
     expect(server.get(2)).not.toHaveProperty("sent");
     expect(server.get(3)).not.toHaveProperty("sent");
-    expect(query(first.shown, ".viewer-annotations-primary")!.textContent).toBe("Send to claude");
+    expect(query(first.shown, ".viewer-annotations-send-main")!.textContent).toBe("Send");
   });
 });
 

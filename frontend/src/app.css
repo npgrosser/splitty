@@ -841,57 +841,35 @@ body,
   color: var(--splitty-text-primary);
 }
 
-.viewer-annotations-send {
-  display: flex;
-  padding: 0 8px 8px;
-}
-
-.viewer-annotations-primary,
-.viewer-annotations-more {
-  margin: 0;
-  padding: 4px 8px;
-  border: 1px solid var(--splitty-accent);
-  background: var(--splitty-accent-muted);
-  color: var(--splitty-text-primary);
-  font: inherit;
-  cursor: pointer;
-}
-
-.viewer-annotations-primary {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  border-radius: 4px 0 0 4px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.viewer-annotations-more {
-  flex: 0 0 auto;
-  padding: 4px 7px;
-  border-left-color: color-mix(in srgb, var(--splitty-accent) 50%, transparent);
-  border-radius: 0 4px 4px 0;
-}
-
-.viewer-annotations-primary:hover:not(:disabled),
-.viewer-annotations-more:hover:not(:disabled) {
-  background: color-mix(in srgb, var(--splitty-accent) 55%, transparent);
-}
-
-.viewer-annotations-primary:disabled,
-.viewer-annotations-more:disabled {
-  border-color: var(--splitty-border-default);
-  background: transparent;
-  color: var(--splitty-text-muted);
-  cursor: default;
-}
-
-/* The marks' choices of this window: hide them all, or mark the resolved ones as well. */
+/*
+ * The list's tools: copy or send the review, a plain split button whose menu
+ * holds every other way, and the marks' choice of this window, the resolved
+ * ones marked as well.
+ */
 .viewer-annotations-options {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 4px;
   padding: 0 8px 6px;
+}
+
+.viewer-annotations-send {
+  display: flex;
+}
+
+.viewer-annotations-send .viewer-annotations-send-main {
+  border-radius: 4px 0 0 4px;
+}
+
+.viewer-annotations-send .viewer-annotations-more {
+  margin-left: -1px;
+  padding: 1px 5px;
+  border-radius: 0 4px 4px 0;
+}
+
+.viewer-annotations-show-resolved {
+  margin-left: auto;
 }
 
 .viewer-annotations-toggle {

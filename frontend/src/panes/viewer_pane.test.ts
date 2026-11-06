@@ -106,8 +106,8 @@ describe("ViewerPaneRenderer", { timeout: 30_000 }, () => {
     await vi.waitFor(() => expect(element.querySelector(".viewer-annotation")).not.toBeNull(), LOAD);
     const list = element.querySelector<HTMLElement>(".viewer-annotations")!;
     list.dispatchEvent(new Event("pointerenter"));
-    const send = list.querySelector<HTMLButtonElement>(".viewer-annotations-primary")!;
-    expect(send.textContent).toBe("Send to claude");
+    const send = list.querySelector<HTMLButtonElement>(".viewer-annotations-send-main")!;
+    expect(send.textContent).toBe("Send");
     send.click();
 
     await vi.waitFor(() => expect(screen.socket.sentOfType("input")).toHaveLength(1));

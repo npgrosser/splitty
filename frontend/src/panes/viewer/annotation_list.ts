@@ -59,7 +59,7 @@ export interface ListEntry {
 export interface ListHeader {
   readonly open: number;
   readonly resolved: number;
-  /** The main hand-over action, such as "Send to claude" or "Send Again to claude". */
+  /** The hand-over action: "Send", "Send Again", or "Send…" without the terminal it came from. */
   readonly send: string;
   readonly sendTitle: string;
   /** Whether the review holds anything: an open annotation. */
@@ -82,6 +82,8 @@ export interface AnnotationListActions {
   reply(id: string, body: string, replyId?: string): string | undefined;
   removeReply(id: string, replyId: string): void;
   addComment(): void;
+  /** Copy the review as Markdown. */
+  copy(): void;
   send(anchor: HTMLElement): void;
   /** The menu of every way to hand the review over. */
   more(anchor: HTMLElement): void;
@@ -387,6 +389,7 @@ class EntryView {
 export class AnnotationList {
   readonly element: HTMLElement;
   private readonly countLabel: HTMLElement;
+  private readonly copyButton: HTMLButtonElement;
   private readonly sendButton: HTMLButtonElement;
   private readonly moreButton: HTMLButtonElement;
   private readonly resolvedMarksButton: HTMLButtonElement;
@@ -410,15 +413,17 @@ export class AnnotationList {
     close.setAttribute("aria-label", "Hide annotations");
     header.append(this.countLabel, close);
 
+    // Handing the review over is one way to use it among others, so it is
+    // a plain tool next to Copy, not the column's main action.
+    const options = element(doc, "div", "viewer-annotations-options");
+    this.copyButton = button(doc, "viewer-annotations-toggle viewer-annotations-copy", "Copy", "Copy the review as Markdown", () => this.actions.copy());
     const send = element(doc, "div", "viewer-annotations-send");
-    this.sendButton = button(doc, "viewer-annotations-primary", "Send", "", (node) => this.actions.send(node));
-    this.moreButton = button(doc, "viewer-annotations-more", "▾", "More ways to hand the review over", (node) => this.actions.more(node));
+    this.sendButton = button(doc, "viewer-annotations-toggle viewer-annotations-send-main", "Send", "", (node) => this.actions.send(node));
+    this.moreButton = button(doc, "viewer-annotations-toggle viewer-annotations-more", "▾", "More ways to hand the review over", (node) => this.actions.more(node));
     this.moreButton.setAttribute("aria-label", "More ways to hand the review over");
     send.append(this.sendButton, this.moreButton);
-
-    const options = element(doc, "div", "viewer-annotations-options");
     this.resolvedMarksButton = button(doc, "viewer-annotations-toggle viewer-annotations-show-resolved", "Show Resolved", "Mark the passages of resolved annotations as well", () => this.actions.toggleResolved());
-    options.append(this.resolvedMarksButton);
+    options.append(this.copyButton, send, this.resolvedMarksButton);
 
     const scroll = element(doc, "div", "viewer-annotations-scroll");
     this.openList = element(doc, "ol", "viewer-annotations-list");
@@ -433,7 +438,7 @@ export class AnnotationList {
     this.empty = element(doc, "p", "viewer-annotations-empty", "No annotations yet. Select a passage to annotate it, or add a general comment.");
     scroll.append(this.openList, this.resolvedGroup, this.empty);
     this.addButton = button(doc, "viewer-annotations-add", "Add Comment", "Add a comment on the whole document", () => this.actions.addComment());
-    this.element.append(header, send, options, scroll, this.addButton);
+    this.element.append(header, options, scroll, this.addButton);
     // The column's own menu: none. The pane's would act on the document.
     this.element.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -458,6 +463,7 @@ export class AnnotationList {
     this.sendButton.textContent = header.send;
     this.sendButton.title = header.sendTitle;
     this.sendButton.disabled = !header.sendable;
+    this.copyButton.disabled = !header.sendable;
     this.moreButton.disabled = header.open + header.resolved === 0;
     this.resolvedMarksButton.setAttribute("aria-pressed", String(header.resolvedShown));
     this.resolvedMarksButton.disabled = header.resolved === 0;

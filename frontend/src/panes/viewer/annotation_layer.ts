@@ -341,6 +341,7 @@ export class AnnotationLayer {
       reply: (id, body, replyId) => this.reply(id, body, replyId),
       removeReply: (id, replyId) => this.removeReply(id, replyId),
       addComment: () => this.openForm({ kind: "comment" }),
+      copy: () => void this.copy(),
       send: (anchor) => this.sendToDefault(anchor),
       more: (anchor) => this.showMenuAt(anchor, this.handoverItems()),
       close: () => this.setChoice("closed"),
@@ -806,15 +807,19 @@ export class AnnotationLayer {
     };
   }
 
-  /** The main hand-over action: to the origin, or to a terminal the user chooses; again when nothing is pending. */
+  /**
+   * The hand-over action: to the origin, named in its title, or to a
+   * terminal the user chooses; again when nothing is pending.
+   */
   private sendLabel(again: boolean): { send: string; sendTitle: string } {
     const origin = this.options.handover.origin();
     const verb = again ? "Send Again" : "Send";
+    const what = again ? "the review of all open annotations" : "the review of the annotations not sent yet";
     return {
-      send: `${verb} to ${origin ? origin.title : "Terminal…"}`,
-      sendTitle: again
-        ? "Paste the review of all open annotations into the terminal again, without submitting it"
-        : "Paste the review of the annotations not sent yet into the terminal, without submitting it",
+      send: origin ? verb : `${verb}…`,
+      sendTitle: origin
+        ? `Paste ${what} into ${origin.title}, without submitting it`
+        : `Paste ${what} into a terminal of this screen, without submitting it`,
     };
   }
 
