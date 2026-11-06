@@ -1,4 +1,10 @@
-## ADDED Requirements
+# viewer-panes Specification
+
+## Purpose
+
+Viewer panes show a file of the server's machine, or a text such as a terminal selection, inside a window next to the terminal it came from: Markdown and HTML rendered without running or loading anything, other text with highlighting, and images. A process in a pane opens one with `splitty open <file>`, the window reads the document over its own connection, so it works the same on a host, and a shown file follows its changes.
+
+## Requirements
 
 ### Requirement: Viewer Panes
 A viewer pane SHALL be a pane of the role `viewer` that carries a `viewer` record and no session. The record SHALL hold the pane's document as `source`, either a file on the server's machine (`kind` `file`, with its absolute `path`) or a text the server keeps for the pane (`kind` `text`, with its `title`); the terminal pane it was opened from as `originPaneId`, when there is one; and a `revision` that starts at 1. The pane's title SHALL be the file's name or the text's title, and its working directory the file's directory or, for a text, the directory given when it was opened. A window SHALL give the viewer panes it creates IDs of the form `viewer-<16 hex>`. Payload shapes are in `docs/protocol.ts`.
