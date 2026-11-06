@@ -688,6 +688,8 @@ describe("threads", () => {
     expect(store.get("v1", "ann-0000000000000001")!.replies!.map((each) => each.author)).toEqual(["agent", "user"]);
     const replies = [...entry(shown, 1).querySelectorAll<HTMLElement>("li.viewer-reply")];
     expect(replies.map((each) => each.querySelector(".viewer-reply-author")!.textContent)).toEqual(["Agent (claude)", "You"]);
+    // The thread's first message names its sender as well.
+    expect(entry(shown, 1).querySelector(".viewer-annotation-author")!.textContent).toBe("You");
     expect(entry(shown, 1).querySelector<HTMLElement>(".viewer-reply-box")!.hidden).toBe(true);
   });
 

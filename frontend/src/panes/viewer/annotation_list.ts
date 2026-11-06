@@ -122,7 +122,7 @@ function preview(text: string): string {
   return text.length > QUOTE_PREVIEW ? `${text.slice(0, QUOTE_PREVIEW)}…` : text;
 }
 
-/** How the list names the author of a reply. */
+/** How the list names the author of an annotation or a reply. */
 export function replyAuthor(reply: Pick<ListReply, "author" | "title">): string {
   if (reply.author === "user") return "You";
   return reply.title ? `Agent (${reply.title})` : "Agent";
@@ -328,6 +328,9 @@ class EntryView {
 
     const parts: HTMLElement[] = [head];
     if (entry.quote !== undefined) parts.push(element(doc, "div", "viewer-annotation-quote", preview(entry.quote)));
+    // The thread's first message names its sender as each reply does; only
+    // the user annotates, agents reply.
+    parts.push(element(doc, "div", "viewer-annotation-author", replyAuthor({ author: "user" })));
     if (entry.kind === "change") {
       parts.push(entry.deletion
         ? element(doc, "div", "viewer-annotation-deletion", "Delete this passage")
