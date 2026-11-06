@@ -1,53 +1,217 @@
 # Design
 
-> Draft design notes from 2026-11-04; revisit against the specs before implementation.
-
 ## Context
 
-See proposal.md for motivation and scope. Current state that shapes the approach:
+`splitty-open` introduces viewer panes: a pane record with role `viewer` and a `viewer` record (`source` as a file path or a text with a title, `originPaneId`, `revision`), no session, read in chunks over the window's connection and shown either rendered (Markdown, HTML, in a shadow root after DOMPurify) or as source (CodeMirror 6, read-only). A terminal selection opens as a `text` document. This change adds annotations to those panes and the hand-over of a review to a terminal.
 
-- **No pane without a session.** The workspace model knows the roles `viewer` and `webview`, but no operation creates a pane without a session, and the frontend registers only the `terminal` component (dockview throws on unknown components by design). `splitty-open` and `notes-and-tags` need the same pane kind.
-- **`splitty open`** is the confirmed external editor handoff (`splitty open [path] [--with vscode|zed]`, `cli` spec); `--in splitty` is reserved for an in-Splitty destination.
-- **Files already move through the protocol**: drop upload (into the paste cache or a folder, never replacing a file), image paste, `splitty download`. The paste cache (`~/.cache/splitty/paste/`, cleaned after 24 hours or beyond the newest 100) is the model for a review cache, and "insert the path at the prompt" is the established hand-over to an agent.
-- **The scratchpad** belongs to a session, is stored with it and is invisible to agents in panes.
-- **The agent socket** (`SPLITTY_AGENT_SOCK`) scopes the CLI for agents; attachment, credential, administration and lifecycle commands are rejected.
-- **No frames.** Web-app panes are gone and the CSP forbids frames (SR-01/SR-02); the desktop shells render no other origin (SR-27).
+What exists and shapes the approach:
 
-## Direction
+- **The scratchpad** (`session-scratchpad`) is the model for client-written state on the server: a screen operation over `mux-protocol` only, refused by the control API, stripped from its answers, nudging the other clients, persisted in `state.json`, a capability in `mux.welcome`, a store per connection in the window (`lib/scratchpad.ts`) with a settle time against older snapshots, and confirmations before text is lost.
+- **Hand-over paths**: a terminal pane pastes text through its emulator (`emulator.paste`, a bracketed paste when the program enabled it); a drop uploads files with `upload` into the server's paste directory and inserts their quoted paths; `saveAsDownload` saves a blob as a download of the window in the browser and both desktop shells; `set_scratchpad` replaces a scratchpad's text. ghostty-web reports the bracketed paste mode (`hasBracketedPaste()`), xterm.js through `modes.bracketedPasteMode`.
+- **Shadow Mode**: the window applies its own operations at once and sends them without waiting; the originating client gets no nudge for its own operation.
+- **The reducer is pure**: validation and application carry no I/O, and an operation has the same wire format on both transports, even where only one transport accepts it.
 
-1. **One pane for files and diffs.** Diff view, file viewer and annotations are one pane with an annotation gutter, not three features. The renderers of `splitty-open` cover the formats that are not text.
-2. **Anchoring by quote.** Path, line range, quoted text and, for a diff, side and base, comparable to the text-quote selector of W3C Web Annotation. After a change the annotation is re-anchored by its quote; if the quote is gone it is marked stale and kept.
-3. **The review round is the unit.** Annotations are pending until sent or discarded and live on the server, so a reload keeps them. After sending, only the cache file remains.
-4. **Delivery as text, like drop and paste.** The review goes into a cache file on the target terminal's machine and its path is inserted at the prompt; a short review goes in as text; or both into the scratchpad first. Nothing presses Enter. Sending is the moment the content becomes visible to the agent, in line with the scratchpad being invisible to agents. Format sketch:
+## Goals / Non-Goals
 
-   ```markdown
-   ## docs/remote.md:42-47
-   > Remote sessions keep running when you close the app …
-   Question: does this also hold when the host reboots?
+**Goals:**
+- Annotate any document a viewer pane shows, in the rendered view and in the source, including terminal selections.
+- Keep annotations on the server with their pane, visible to every window of the connection and through a daemon restart, and never to agents before the user sends them.
+- Find annotations again after the document changes, and keep those whose passage is gone.
+- One Markdown review per pane that an agent reads without explanation, handed to a terminal at its prompt without Enter.
 
-   ## crates/splitty-server/src/ws/codec.rs:118 (diff, new side)
-   > if len > MAX_FRAME {
-   Suggestion: take the limit from the configuration instead of a constant.
-   ```
+**Non-Goals:**
+- Diffs (`review-diffs`) and editing (`viewer-quick-edit`).
+- A review across several panes or files in one round; threads, replies, resolution by an agent.
+- A command that waits for a review and prints it (see Open Questions).
+- Annotations on images, binary files and documents beyond the rendered limit shown as source only (the source view annotates those).
 
-5. **The agent enters through the CLI, not MCP.** Human and agent use the same command. Opening a pane only displays content and launches nothing native, so it needs no confirmation like `splitty open --with`. A pane an agent opens goes next to the agent's own pane on its screen and does not take focus. The agent never reads pending annotations, only what the user sends.
-6. **Read-only first, quick edit later.** Writing is a new capability: a save is refused when the file changed since it was loaded (the agent may be editing the same file), only existing regular files, with a size limit.
+## Decisions
+
+### D1. Annotations live in the viewer record, one round per pane
+
+`PaneState.viewer.annotations` holds the pane's pending annotations in creation order, absent while empty. They live and end with the pane like a scratchpad with its session: through moves, floating, stacking, another screen, a reload and, in daemon mode, a restart; closing the pane ends them. Reusing the pane for the same file (`splitty open` again) keeps them, since the document is the same.
+
+Alternatives: a review per screen or per server collecting annotations from several panes, as a pull-request review does across files. More useful for diffs over many files, but it needs its own lifetime rules (what a closed pane leaves behind) and a place in the UI; per pane matches how a plan or an answer is reviewed today. `review-diffs` can add a screen-level round when it needs one.
+
+### D2. Two operations that touch single annotations (provisional, tbd)
+
+```ts
+{ type: "put_annotations", paneId, annotations: ViewerAnnotation[] }  // 1..100, adds or replaces by id
+{ type: "remove_annotations", paneId, ids: string[] }                  // 1..100, unknown ids are ignored
+```
+
+A replaced annotation keeps its place in the order; a new one is appended. Both are screen-level operations, accepted only over `mux-protocol`; the control API refuses them with 400 as it refuses `set_scratchpad`. Both bump the screen revision and nudge the other clients.
+
+Alternative: one `set_annotations` with the whole list, last write wins, as the scratchpad does. Two windows adding annotations at the same time would then lose one window's annotation, and a window holding an older list would undo removals. Per-annotation operations make concurrent additions merge and leave last write wins only for edits of the same annotation. Ending a round removes exactly the annotations that were handed over, so one added meanwhile in another window stays.
+
+### D3. The annotation record
+
+```ts
+interface ViewerAnnotation {
+  id: string;                 // "ann-" + 16 lowercase hex, generated by the window
+  kind: "comment" | "question" | "change" | "delete";
+  body?: string;              // the remark; required for comment and question
+  replacement?: string;       // kind "change": the suggested text, required, not empty
+  target?: AnnotationTarget;  // absent: a general comment (comment or question only)
+}
+
+interface AnnotationTarget {
+  view: "source" | "rendered";  // which text the quote was taken from
+  quote: string;                // the selected text, not empty
+  prefix: string;               // up to 32 characters before it in that text
+  suffix: string;               // up to 32 characters after it
+  startLine: number;            // 1-based source lines of the passage when it was annotated
+  endLine: number;
+}
+```
+
+Limits, checked by the reducer: at most 100 annotations per pane; `body`, `replacement` and `quote` at most 16,384 bytes each, `prefix` and `suffix` at most 256 bytes each; lines from 1 to 10,000,000 with `startLine ≤ endLine`; at most 262,144 bytes of text per pane over all annotations. A `delete` and a `change` need a target. An operation that breaks a limit is rejected as a whole and changes nothing.
+
+Lines are those of the document's source. In the rendered view they come from the source lines of the rendered blocks (`data-source-line` from markdown-it's block map). A rendered HTML document has no such map, so its rendered annotations carry `startLine` 1 and `endLine` the document's last line, and the review names them by their quote only. The quote anchors; lines only order, label and break ties.
+
+### D4. Anchoring by quote, done in the window
+
+The server stores what the window sends and never interprets the text. The window anchors each annotation against the document it shows (pure functions in `lib/viewer/anchoring.ts`), in the text of the annotation's view: the source text, or the rendered view's text content.
+
+1. Find every occurrence of `quote` in the text. One occurrence: anchored there.
+2. Several: the occurrence whose surrounding text matches `prefix` and `suffix` best, ties broken by the distance of its line to `startLine`.
+3. None: the same with runs of whitespace collapsed on both sides (a reflowed paragraph).
+4. Still none: **stale**. The annotation stays in the list, marked as not found in the current version, with its recorded lines and quote, and it is part of the review with that note.
+
+A stale annotation anchors again when a later version contains the quote. Anchoring runs on every new version of the document and on a switch between the views; an annotation of the other view shows as a line marker in the source view and as a marker on the covering block in the rendered view, and its text highlight shows only in its own view.
+
+Alternative: positions (offsets, line and column) as the anchor. They break on the first edit above the passage, which is the normal case while an agent rewrites its plan. Quote plus context is the W3C Web Annotation text-quote selector in short form and what review tools use for documents that change.
+
+### D5. Highlights without changing the rendered DOM
+
+- Source view: CodeMirror mark decorations for the anchored ranges and a gutter marker per annotated line range, from a state field the viewer updates on each anchoring.
+- Rendered view: the CSS Custom Highlight API (`CSS.highlights` with a `Highlight` of `Range`s, styled by `::highlight(splitty-annotation)` in the shadow root's stylesheet). It leaves the sanitized DOM untouched, so a reload or a re-render needs no unwrapping, and nothing is inserted into the document. Where the API is missing, the rendered view marks only the covering blocks.
+- A selection in the shadow root is read with `Selection.getComposedRanges` and, where that is missing, `ShadowRoot.getSelection`.
+
+Alternative: wrapping highlighted text in `<mark>` elements. It changes the sanitized DOM, splits elements across block boundaries and has to be undone before every anchoring pass.
+
+### D6. Making an annotation
+
+A selection inside a viewer, in either view, shows a small toolbar next to it with the four kinds; the viewer's context menu offers the same entries over a selection. Choosing one opens a form at the passage: a text field for the remark and, for a suggested change, one for the replacement, prefilled with the quote. Ctrl+Enter or Cmd+Enter saves, Escape cancels. The pane's annotation list offers a general comment or question. A selection longer than the quote limit says so instead of opening the form.
+
+Editing an annotation opens the same form; deleting one removes it at once with an undo in a notice.
+
+### D7. The annotation list
+
+A collapsible column inside the viewer pane, on its right, open while the pane holds annotations unless the user closed it for that pane (a per-window preference, like the scratchpad area). It lists the anchored annotations in document order, then the stale ones, then the general comments in creation order; each shows its kind, its lines, the start of its quote and the remark, scrolls to its passage on click, and offers edit and delete. Its header holds the count and the hand-over actions. The pane's tab shows a marker with the count while annotations exist, as a scratchpad marks its tab.
+
+### D8. The review as Markdown (provisional, tbd)
+
+Built in the window from the current anchoring (`lib/viewer/review.ts`, pure):
+
+````markdown
+# Review of PLAN.md
+
+Document: /home/me/app/PLAN.md
+
+## 1. Lines 12-14, question
+> Cache the session list and invalidate it
+> on every change.
+
+Why not compute it on demand? The list has at most 20 entries.
+
+## 2. Line 30, suggested change
+> retry three times
+
+Replace with:
+```
+retry with exponential backoff, at most five times
+```
+
+## 3. Line 41, delete
+> This section is obsolete.
+
+## 4. Lines 50-52, comment (passage not found in the current version)
+> The old wording of the passage.
+
+Still relevant after the rewrite?
+
+## General comments
+
+- Split step 4 into two steps.
+````
+
+- The heading names the file's name, `Document:` its absolute path; for a text document the heading names its title and the path line is left out.
+- Annotations are numbered in the list's order. The heading line carries the current lines, for a stale annotation the recorded ones with the note, and for a passage of a rendered HTML page none (`## 5. Passage, comment`).
+- Quotes are blockquotes, line by line. Replacements are fenced, with a fence longer than any run of backticks in the text. A `delete` without a remark has none.
+- General comments come last as a list, questions prefixed with `Question:`.
+- No instruction to the agent is added; a general comment is the place for one.
+
+Alternatives: JSON (exact, but noisier for an agent to read and for the user to check before sending); one line per annotation in the `path:line` form compilers use (compact, but long quotes and replacements become unreadable).
+
+### D9. Handing a review over (provisional, tbd)
+
+The list's header offers:
+
+- **Send to `<terminal>`**, the main action: the viewer's origin when it still exists as a terminal pane, on any screen; otherwise the button asks for a terminal of the screen. A menu next to it offers every terminal pane of the screen and the other forms of sending.
+- **Send** pastes the review into the terminal as the user's own paste would (`emulator.paste`, bracketed when the program enabled it), without Enter, and focuses that terminal. When the program has not enabled bracketed paste and the review has more than one line, the window sends it as a file instead and says so, since a shell would run every line.
+- **Send as file** stores the review with the existing `upload` in the target server's paste directory as `review-<document name>.md` and inserts its quoted path at the prompt, as a drop with path insertion does. The paste directory's retention applies.
+- **Send to scratchpad** appends the review to the target session's scratchpad, separated by a blank line, and opens the scratchpad area, when the server announced `scratchpad-v1` and the result stays within the scratchpad's limit; otherwise the action is unavailable or says why.
+- **Copy as Markdown** writes the review to the clipboard.
+- **Save as file** saves it as a download of the window, `review-<document name>.md`.
+- **Clear** removes all annotations of the pane, with an undo in a notice.
+
+Sending in any form ends the round: the window removes the annotations it sent (`remove_annotations` with their IDs) and offers an undo in a notice for ten seconds, which puts them back (`put_annotations`); the sent text stays sent. Copying and saving keep the round, since they do not reach the agent.
+
+Alternatives: keeping sent annotations as greyed-out history (a second state for every annotation, and the next round starts cluttered); sending as a file by default (an agent may need a permission to read outside its project, and a pasted text is visible at once); pressing Enter after the paste (the user reads the prompt before it is submitted, as with every hand-over in Splitty).
+
+### D10. Confirmations
+
+Closing a viewer pane with annotations asks first, as closing a pane with a scratchpad text does, and closing several panes asks once for all. Quitting a window whose embedded server would end viewer panes with annotations asks as well; a daemon's window does not ask. The existing close guard (`lib/close_guard.ts`) gains the annotation count as a reason.
+
+### D11. Concurrency in the window
+
+The store per connection (`lib/viewer/annotations.ts`) holds the server's annotations from each snapshot and the window's own operations. A snapshot replaces the list, except for the annotations this window put or removed during the last two seconds (the scratchpad's settle time), whose local state stays until a snapshot shows it or the time passes. An open form keeps its text when another window changes the same annotation; saving it then replaces the other window's edit.
+
+### D12. Capability and older peers
+
+The server announces `viewer-annotations-v1`. A window offers annotations for a connection only when its server announced it, as for scratchpads. A server that knows viewer panes but not annotations rejects the operations as unknown; a window without annotations keeps the record's `annotations` unread, since it drops unknown fields.
+
+### D13. What crosses which boundary
+
+- Window snapshots carry the annotations (bounded by D3's limits).
+- `GET /api/mux/state` and `GET /api/mux/screen/{id}` leave `annotations` out of every viewer record; the control API refuses `put_annotations` and `remove_annotations`; the CLI has no command for them. An agent sees a review only as the text or file the user sends to its terminal.
+- `state.json` holds them with their viewer pane.
+- Grant sockets carry nothing of viewer panes, as before.
+
+## Frontend structure
+
+- `lib/viewer/annotations.ts`: the store per connection, validation mirroring the server's limits, the operations.
+- `lib/viewer/anchoring.ts`: quote search, context scoring, whitespace fallback, stale state; line mapping for both views.
+- `lib/viewer/review.ts`: the Markdown review.
+- `panes/viewer/annotation_list.ts`, `annotation_form.ts`, `selection_toolbar.ts`: the UI pieces inside the viewer pane.
+- The source view gains the decoration and gutter extensions; the rendered view gains the highlight registry and the selection reading.
+- `lib/close_guard.ts` and the quit confirmation gain annotations as a reason.
+
+## Risks / Trade-offs
+
+- [The rendered text of HTML maps to no source lines] → such annotations carry the whole document as their lines, sort by their position in the page, and the review names them by their quote only; annotating the source of an HTML file keeps exact lines.
+- [A quote that occurs often, such as a single word] → context and the original line decide; the selection toolbar asks for a longer selection when the quote is shorter than three characters.
+- [The CSS Custom Highlight API is missing in an older WebKitGTK] → block markers instead of text highlights in the rendered view; the source view is unaffected.
+- [Pasting a long review into a busy terminal] → nothing is submitted without Enter, and the review is at most about 260 KB by the limits.
+- [Two windows editing the same annotation] → last write wins for that annotation, as for a scratchpad.
+
+## Migration Plan
+
+None. Panes without `annotations` have none; an older window ignores the field.
+
+## Architecture impact
+
+No new crate, top-level module or relationship between components: the record, the operations and their validation extend `splitty-core`'s `mux`; the server's mux handler and control API extend what they do for scratchpads. The `web` container's description in `architecture/landscape.c4` gains the annotations; `docs/architecture.md`'s section "Viewer Panes" gains annotations and the review.
+
+## Provisional decisions
+
+Decided for this change, marked in `openspec/open-decisions.md` (2026-11-06):
+
+- **D2**: per-annotation operations instead of a whole list.
+- **D8**: the Markdown format of a review.
+- **D9**: paste as the main hand-over, sending ends the round with an undo, a file instead of a paste for programs without bracketed paste.
 
 ## Open Questions
 
-- **Editor component**: Monaco (feels like VS Code, the strongest diff editor, several MB, web workers) or CodeMirror 6 (lighter and modular, has a merge view).
-- **Markdown**: annotate the rendered view (needs a mapping from rendered blocks to source lines) or the source.
-- **Diff scope**: working tree, index, last commit, or everything since the agent's pane was opened (a baseline taken then); untracked files.
-- **Where pending reviews live**: with the target session like the scratchpad, per screen, or per server; what happens when the target session ends; which clients of a multi-attached screen see them.
-- **Review cache**: location and retention; whether an agent that reads outside its project only after a permission prompt needs the file inside the repository instead (for example a gitignored `.splitty/review/`).
-- **Large and binary files**; live update while the agent edits a shown file.
-- **Clients**: which may open review panes and send (the local hub, isolated remote windows, pages opened through `splitty connect`).
-- **Command names**: `splitty open --in splitty`, and `splitty review` or `splitty diff` for diffs.
-
-## Considered Alternatives
-
-- **Splitty as a VS Code extension showing one session.** `splitty attach` in VS Code's integrated terminal already does that, also under Remote-SSH against the host's daemon. A headless attach adds nothing over tmux. Not pursued.
-- **The full Splitty UI as a webview in VS Code's panel**, replacing the integrated terminal with persistent sessions and screens. Feasible, but VS Code also evaluates key presses in webviews for its own shortcuts; the webview's origin does not pass Splitty's origin and bootstrap checks, so the extension would relay the connection or, under Remote-SSH, map the port; and it would be a third frontend environment next to the browser and the desktop apps, where editor handoff, downloads and notifications each need their own path. Parked: it serves people who work mainly in VS Code, not Splitty as the main window.
-- **Embedding a full VS Code** (openvscode-server or code-server on the host, shown in a pane). It reverses SR-01/SR-02 and SR-27; open builds use Open VSX and lack the extensions licensed only for Microsoft's build (Remote-SSH, Pylance, C/C++); and it adds a second server with its own authentication per host. Such a server can already be opened in a browser tab through a port forward.
-- **VS Code's services around Monaco** (monaco-vscode-api, Theia): a large maintenance burden for what a review pane needs.
-- **An "Open in Splitty" VS Code extension**: a small bridge from VS Code's explorer to a Splitty tab in that folder through the existing CLI. Independent of this change; only worth it once it is missed.
+- A command that opens a document for review and waits until the user sends the review, printing it on standard output, would let an agent harness block on a review as plan-mode hooks do. It needs a delivery path from the window to the CLI caller and a rule for an agent socket; not part of this change.

@@ -217,6 +217,11 @@ By area, at 2026-11-04. C = client core, W = window-local by design, D = domain 
 - V: the emulators, overlays, settings sections.
 - W: the window and platform helpers.
 
+**Viewer panes** (added on 2026-11-06 by `splitty-open` and `review-pane`)
+
+- C, UI-free: the document reader (`lib/viewer/documents.ts`), the choice of presentation (`presentation.ts`), the annotation store, anchoring and the review (`annotations.ts`, `anchoring.ts`, `review.ts`).
+- V: the source view (CodeMirror), the rendered view in its shadow root, the annotation list, form and selection toolbar.
+
 Findings that are bugs or dead code are listed in `docs/issues/openspec-baseline-findings.md` ("Client layering", 2026-11-04).
 
 ## Architecture impact
