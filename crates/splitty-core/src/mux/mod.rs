@@ -28,15 +28,17 @@ pub use effects::Effect;
 pub use grid::{find_neighbor, project_grid, PaneRect};
 pub use ops::{Arrangement, Direction, Op, ScreenOp, ViewerPlacement};
 pub use state::{
-    equal_sizes, replace_node, Axis, FloatBounds, FloatingEntry, LayoutNode, PaneRole, PaneState,
-    ParentInfo, ScreenInfo, ScreenState, SessionEntry, SessionStatus, SlotLocation, ViewerSource,
-    ViewerState, WorkspaceState, SCRATCHPAD_LIMIT, VIEWER_PATH_LIMIT, VIEWER_TEXT_LIMIT,
-    VIEWER_TITLE_LIMIT,
+    equal_sizes, replace_node, AnnotationKind, AnnotationTarget, AnnotationView, Axis, FloatBounds,
+    FloatingEntry, LayoutNode, PaneRole, PaneState, ParentInfo, ScreenInfo, ScreenState,
+    SessionEntry, SessionStatus, SlotLocation, ViewerAnnotation, ViewerSource, ViewerState,
+    WorkspaceState, ANNOTATION_CONTEXT_LIMIT, ANNOTATION_COUNT_LIMIT, ANNOTATION_LINE_LIMIT,
+    ANNOTATION_PANE_TEXT_LIMIT, ANNOTATION_TEXT_LIMIT, SCRATCHPAD_LIMIT, VIEWER_PATH_LIMIT,
+    VIEWER_TEXT_LIMIT, VIEWER_TITLE_LIMIT,
 };
 pub use store::Store;
 
 pub use reducer::{reduce_screen, reduce_workspace, shown_viewer};
-pub use validate::{validate_screen_op, viewer_path_is_valid};
+pub use validate::{annotation_id_is_valid, validate_screen_op, viewer_path_is_valid};
 
 use thiserror::Error;
 
@@ -146,6 +148,41 @@ pub enum MuxError {
 
     #[error("a viewer's cwd must be an absolute path")]
     ViewerCwdNotAbsolute,
+
+    #[error("pane {0} is not a viewer pane")]
+    NotAViewerPane(PaneId),
+
+    #[error("an annotation op carries 1 to {limit} entries, got {got}")]
+    AnnotationBatchInvalid { limit: usize, got: usize },
+
+    #[error("an annotation ID must be ann- and 16 lowercase hex characters")]
+    AnnotationIdInvalid,
+
+    #[error("annotation {0} appears more than once in the op")]
+    AnnotationRepeated(String),
+
+    #[error("annotation {id}: {reason}")]
+    AnnotationInvalid { id: String, reason: &'static str },
+
+    #[error(
+        "annotation {id}: its lines must lie between 1 and {}, the first not after the last",
+        state::ANNOTATION_LINE_LIMIT
+    )]
+    AnnotationLinesInvalid { id: String },
+
+    #[error("annotation {id}: its {field} holds at most {limit} bytes, got {got}")]
+    AnnotationFieldTooLong {
+        id: String,
+        field: &'static str,
+        limit: usize,
+        got: usize,
+    },
+
+    #[error("a viewer pane holds at most {limit} annotations, got {got}")]
+    AnnotationsTooMany { limit: usize, got: usize },
+
+    #[error("a viewer pane's annotations hold at most {limit} bytes of text, got {got}")]
+    AnnotationsTooLong { limit: usize, got: usize },
 
     #[error("{0}")]
     Internal(String),

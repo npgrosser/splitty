@@ -5,7 +5,8 @@
 //! - `ScreenState` -- a single screen with its layout tree, panes, sessions, and floating windows.
 //! - `LayoutNode` -- recursive tree: `Slot` (leaf with pane stack) or `Split` (branch with axis/sizes).
 //! - `PaneState` / `SessionEntry` -- metadata for panes and PTY sessions.
-//! - `ViewerState` -- the document a viewer pane shows (`viewer-panes`).
+//! - `ViewerState` -- the document a viewer pane shows (`viewer-panes`) and its
+//!   annotations (`viewer-annotations`).
 //! - `FloatingEntry` -- a detached overlay window with its own layout and bounds.
 
 use std::collections::HashMap;
@@ -120,6 +121,9 @@ pub struct ViewerState {
     pub origin_pane_id: Option<PaneId>,
     /// Starts at 1 and rises when `open_viewer` shows the same file again.
     pub revision: u64,
+    /// The pane's pending annotations in creation order (`viewer-annotations`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<ViewerAnnotation>,
 }
 
 /// A viewer pane's document: a file on the server's machine, read when a
@@ -147,6 +151,88 @@ pub const VIEWER_TEXT_LIMIT: usize = 256 * 1024;
 
 /// The longest title of a `text` document, in characters.
 pub const VIEWER_TITLE_LIMIT: usize = 200;
+
+/// A remark a window made on a viewer pane's document (`viewer-annotations`).
+/// The server keeps it as it came and never interprets its text.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewerAnnotation {
+    /// `ann-` and 16 lowercase hex characters, chosen by the window.
+    pub id: String,
+    pub kind: AnnotationKind,
+    /// The remark; a comment and a question need one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// The suggested text of a `change`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<String>,
+    /// The passage; none for a general comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<AnnotationTarget>,
+}
+
+impl ViewerAnnotation {
+    /// The bytes of its texts that count against a pane's limit: quote,
+    /// context, remark and replacement.
+    pub fn text_bytes(&self) -> usize {
+        let target = self.target.as_ref().map_or(0, |target| {
+            target.quote.len() + target.prefix.len() + target.suffix.len()
+        });
+        let text = |text: &Option<String>| text.as_ref().map_or(0, String::len);
+        target + text(&self.body) + text(&self.replacement)
+    }
+}
+
+/// What an annotation asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationKind {
+    Comment,
+    Question,
+    /// A suggested replacement of the passage.
+    Change,
+    /// A suggested deletion of the passage.
+    Delete,
+}
+
+/// The passage an annotation is about, found again by its quote.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotationTarget {
+    /// The text the quote was taken from.
+    pub view: AnnotationView,
+    pub quote: String,
+    /// Context before and after the quote in that text.
+    pub prefix: String,
+    pub suffix: String,
+    /// The passage's 1-based source lines when it was annotated.
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+/// The view of a viewer pane a passage was selected in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationView {
+    Source,
+    Rendered,
+}
+
+/// The most annotations of one viewer pane, and of one operation.
+pub const ANNOTATION_COUNT_LIMIT: usize = 100;
+
+/// The longest remark, replacement or quote, in bytes of UTF-8.
+pub const ANNOTATION_TEXT_LIMIT: usize = 16 * 1024;
+
+/// The longest context before or after a quote, in bytes of UTF-8.
+pub const ANNOTATION_CONTEXT_LIMIT: usize = 256;
+
+/// The highest source line a passage names.
+pub const ANNOTATION_LINE_LIMIT: u32 = 10_000_000;
+
+/// The most text of all annotations of one viewer pane
+/// ([`ViewerAnnotation::text_bytes`]), in bytes.
+pub const ANNOTATION_PANE_TEXT_LIMIT: usize = 256 * 1024;
 
 /// A PTY process record in the mux state (not the actual PTY — just the data).
 #[derive(Clone, Debug, Serialize, Deserialize)]

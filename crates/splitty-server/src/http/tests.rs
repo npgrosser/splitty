@@ -28,6 +28,7 @@ use crate::hub::{Hub, HOST_LOST, VERSION};
 
 const WAIT: Duration = Duration::from_secs(10);
 
+mod annotations;
 mod conformance;
 mod editor;
 mod files;

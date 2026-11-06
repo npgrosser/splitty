@@ -2,7 +2,7 @@
 //!
 //! `reduce_workspace` handles workspace-level ops (create/close/rename screen).
 //! `reduce_screen` handles screen-level ops (split, close, resize, move, float, dock,
-//! open a viewer).
+//! open a viewer, annotate one).
 //! Both return `(new_state, effects)` without performing any I/O.
 
 use super::effects::Effect;
@@ -430,6 +430,18 @@ pub fn reduce_screen(
             )?,
             vec![],
         ),
+
+        ScreenOp::PutAnnotations {
+            pane_id,
+            annotations,
+        } => (
+            reduce_put_annotations(state, &pane_id, annotations)?,
+            vec![],
+        ),
+
+        ScreenOp::RemoveAnnotations { pane_id, ids } => {
+            (reduce_remove_annotations(state, &pane_id, &ids)?, vec![])
+        }
     };
 
     new_state.revision += 1;
@@ -717,6 +729,7 @@ fn reduce_open_viewer(
                 source,
                 origin_pane_id,
                 revision: 1,
+                annotations: Vec::new(),
             }),
         },
     );
@@ -833,6 +846,49 @@ pub fn shown_viewer(before: &ScreenState, after: &ScreenState) -> Option<(PaneId
         }
     }
     reused
+}
+
+// ── put_annotations, remove_annotations ───────────────────────────────────
+
+/// The annotations of the viewer pane `pane_id`, to change.
+fn annotations_mut<'a>(
+    state: &'a mut ScreenState,
+    pane_id: &PaneId,
+) -> Result<&'a mut Vec<ViewerAnnotation>, MuxError> {
+    state
+        .panes
+        .get_mut(pane_id)
+        .and_then(|pane| pane.viewer.as_mut())
+        .map(|viewer| &mut viewer.annotations)
+        .ok_or_else(|| MuxError::NotAViewerPane(pane_id.clone()))
+}
+
+/// Replace each annotation with the same ID in its place and append the
+/// others (`viewer-annotations`, Saving Annotations Through The Window).
+fn reduce_put_annotations(
+    mut state: ScreenState,
+    pane_id: &PaneId,
+    annotations: Vec<ViewerAnnotation>,
+) -> Result<ScreenState, MuxError> {
+    let held = annotations_mut(&mut state, pane_id)?;
+    for annotation in annotations {
+        match held.iter_mut().find(|held| held.id == annotation.id) {
+            Some(place) => *place = annotation,
+            None => held.push(annotation),
+        }
+    }
+    Ok(state)
+}
+
+/// Remove the annotations with these IDs; IDs the pane does not hold are
+/// ignored.
+fn reduce_remove_annotations(
+    mut state: ScreenState,
+    pane_id: &PaneId,
+    ids: &[String],
+) -> Result<ScreenState, MuxError> {
+    annotations_mut(&mut state, pane_id)?.retain(|annotation| !ids.contains(&annotation.id));
+    Ok(state)
 }
 
 // ── close_pane ─────────────────────────────────────────────────────────────
@@ -2826,6 +2882,7 @@ mod tests {
                 source: ViewerSource::File { path: PLAN.into() },
                 origin_pane_id: Some(PaneId::from("p1")),
                 revision: 1,
+                annotations: vec![],
             })
         );
         assert_eq!(
@@ -3582,8 +3639,9 @@ mod tests {
         assert_eq!(shape(&screen.root), ["slot [] None"]);
     }
 
-    /// viewer-panes, Viewer Pane Lifetime (Moved to another screen) and the
-    /// layout ops of every other pane: the record goes along unchanged.
+    /// viewer-panes, Viewer Pane Lifetime (Moved to another screen),
+    /// viewer-annotations, Annotation Lifetime, and the layout ops of every
+    /// other pane: the record goes along unchanged, annotations included.
     #[test]
     fn a_viewer_keeps_its_record_through_moves_and_layout_ops() {
         let store = two_screen_store();
@@ -3597,6 +3655,18 @@ mod tests {
                 })),
             )
             .expect("opened");
+        store
+            .dispatch_screen(
+                &scr1,
+                put(
+                    "v1",
+                    vec![serde_json::json!({
+                        "id": ann(1), "kind": "question", "body": "Why?",
+                        "target": passage(serde_json::json!({"quote": "answer", "startLine": 1, "endLine": 1})),
+                    })],
+                ),
+            )
+            .expect("annotated");
         store.dispatch(split_op("scr1", "p1", "p3")).expect("split");
         let pane = |store: &crate::mux::Store, screen: &str| {
             serde_json::to_value(
@@ -3606,6 +3676,7 @@ mod tests {
             .expect("pane")
         };
         let record = pane(&store, "scr1");
+        assert_eq!(record["viewer"]["annotations"][0]["id"], ann(1));
         let sessions = |store: &crate::mux::Store| {
             workspace_summary(&store.get_workspace_state())
                 .into_iter()
@@ -3734,5 +3805,677 @@ mod tests {
             assert_eq!(file_name(path), name, "{path}");
             assert_eq!(parent_dir(path), dir, "{path}");
         }
+    }
+
+    // ── put_annotations, remove_annotations (viewer-annotations) ───
+
+    /// Screen `screen1` with the terminal `p1` and the viewer `v1` of PLAN.md.
+    fn viewer_screen() -> ScreenState {
+        reduce_screen(
+            single_pane_screen(),
+            open_viewer(
+                serde_json::json!({"paneId": "p1", "newPaneId": "v1", "source": file(PLAN)}),
+            ),
+        )
+        .expect("viewer")
+        .0
+    }
+
+    /// An annotation ID of the form windows give them.
+    fn ann(n: u32) -> String {
+        format!("ann-{n:016x}")
+    }
+
+    fn question(id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id, "kind": "question", "body": "Why not five times?",
+            "target": {
+                "view": "source", "quote": "retry three times", "prefix": "On failure, ",
+                "suffix": " before giving up", "startLine": 30, "endLine": 30,
+            },
+        })
+    }
+
+    fn comment(id: &str, body: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "kind": "comment", "body": body})
+    }
+
+    /// A passage of line 3 with `fields` in place of the defaults.
+    fn passage(fields: serde_json::Value) -> serde_json::Value {
+        let mut target = serde_json::json!({
+            "view": "source", "quote": "retry", "prefix": "", "suffix": "",
+            "startLine": 3, "endLine": 3,
+        });
+        if let (Some(target), Some(fields)) = (target.as_object_mut(), fields.as_object()) {
+            target.extend(fields.clone());
+        }
+        target
+    }
+
+    fn put(pane: &str, annotations: Vec<serde_json::Value>) -> ScreenOp {
+        serde_json::from_value(serde_json::json!({
+            "type": "put_annotations", "paneId": pane, "annotations": annotations,
+        }))
+        .expect("wire op")
+    }
+
+    fn remove(pane: &str, ids: &[String]) -> ScreenOp {
+        serde_json::from_value(serde_json::json!({
+            "type": "remove_annotations", "paneId": pane, "ids": ids,
+        }))
+        .expect("wire op")
+    }
+
+    fn annotation_ids(state: &ScreenState, pane: &str) -> Vec<String> {
+        viewer_of(state, pane)
+            .annotations
+            .into_iter()
+            .map(|annotation| annotation.id)
+            .collect()
+    }
+
+    /// viewer-annotations, Annotations On A Viewer Pane and Saving Annotations
+    /// Through The Window: the record on the wire, in creation order and
+    /// absent while the pane holds none; unknown kinds and views are no ops.
+    #[test]
+    fn annotations_keep_their_wire_shape_and_are_absent_while_there_are_none() {
+        let state = viewer_screen();
+        let wire = serde_json::to_value(&state.panes[&PaneId::from("v1")]).expect("pane");
+        assert!(wire["viewer"].get("annotations").is_none(), "{wire}");
+
+        let change = serde_json::json!({
+            "id": ann(2), "kind": "change", "replacement": "retry with backoff",
+            "target": {
+                "view": "rendered", "quote": "retry three times", "prefix": "", "suffix": ".",
+                "startLine": 30, "endLine": 31,
+            },
+        });
+        let general = comment(&ann(3), "Split step 4 into two steps.");
+        let (state, _) = reduce_screen(
+            state,
+            put(
+                "v1",
+                vec![question(&ann(1)), change.clone(), general.clone()],
+            ),
+        )
+        .expect("put");
+        let pane = &state.panes[&PaneId::from("v1")];
+        let wire = serde_json::to_value(pane).expect("pane");
+        assert_eq!(
+            wire["viewer"]["annotations"],
+            serde_json::json!([question(&ann(1)), change, general])
+        );
+        let back: PaneState = serde_json::from_value(wire).expect("pane");
+        assert_eq!(back.viewer, pane.viewer);
+
+        let (state, _) =
+            reduce_screen(state, remove("v1", &[ann(1), ann(2), ann(3)])).expect("removed");
+        let wire = serde_json::to_value(&state.panes[&PaneId::from("v1")]).expect("pane");
+        assert!(wire["viewer"].get("annotations").is_none(), "{wire}");
+
+        for annotation in [
+            serde_json::json!({"id": ann(1), "kind": "praise", "body": "x"}),
+            serde_json::json!({"id": ann(1), "kind": "delete", "target": passage(serde_json::json!({"view": "diff"}))}),
+            serde_json::json!({"id": ann(1), "kind": "delete", "target": passage(serde_json::json!({"startLine": -1}))}),
+            serde_json::json!({"id": ann(1), "kind": "delete", "target": {"view": "source", "quote": "retry"}}),
+        ] {
+            let op = serde_json::json!({
+                "type": "put_annotations", "paneId": "v1", "annotations": [annotation],
+            });
+            assert!(
+                serde_json::from_value::<ScreenOp>(op.clone()).is_err(),
+                "{op}"
+            );
+        }
+    }
+
+    /// viewer-annotations, Annotations On A Viewer Pane (A question on a
+    /// passage): kept as it came, without an effect.
+    #[test]
+    fn a_question_on_a_passage_keeps_its_quote_view_lines_context_and_remark() {
+        let state = viewer_screen();
+        let (next, effects) =
+            reduce_screen(state.clone(), put("v1", vec![question(&ann(1))])).expect("put");
+        assert!(effects.is_empty());
+        assert_eq!(next.revision, state.revision + 1);
+        assert_eq!(
+            viewer_of(&next, "v1").annotations,
+            [ViewerAnnotation {
+                id: ann(1),
+                kind: AnnotationKind::Question,
+                body: Some("Why not five times?".into()),
+                replacement: None,
+                target: Some(AnnotationTarget {
+                    view: AnnotationView::Source,
+                    quote: "retry three times".into(),
+                    prefix: "On failure, ".into(),
+                    suffix: " before giving up".into(),
+                    start_line: 30,
+                    end_line: 30,
+                }),
+            }]
+        );
+        assert_eq!(
+            viewer_of(&next, "v1").revision,
+            1,
+            "the document is the same"
+        );
+        assert_eq!(shape(&next.root), shape(&state.root));
+        assert_eq!(next.sessions.len(), 1);
+    }
+
+    /// viewer-annotations, Annotations On A Viewer Pane (A general comment): a
+    /// comment or a question without a passage.
+    #[test]
+    fn a_general_comment_has_no_target() {
+        let (next, effects) = reduce_screen(
+            viewer_screen(),
+            put(
+                "v1",
+                vec![
+                    comment(&ann(1), "Split step 4 into two steps."),
+                    serde_json::json!({"id": ann(2), "kind": "question", "body": "Is step 5 needed?"}),
+                ],
+            ),
+        )
+        .expect("put");
+        assert!(effects.is_empty());
+        let annotations = viewer_of(&next, "v1").annotations;
+        assert_eq!(annotations[0].kind, AnnotationKind::Comment);
+        assert_eq!(annotations[0].target, None);
+        assert_eq!(
+            annotations[0].body.as_deref(),
+            Some("Split step 4 into two steps.")
+        );
+        assert_eq!(annotations[1].kind, AnnotationKind::Question);
+        assert_eq!(annotations[1].target, None);
+    }
+
+    /// viewer-annotations, Saving Annotations Through The Window: a put
+    /// replaces an annotation with the same ID in its place and appends new
+    /// ones; a remove ignores IDs the pane does not hold; both raise the
+    /// screen's revision and have no effect.
+    #[test]
+    fn a_put_replaces_in_place_and_appends_and_a_remove_ignores_unknown_ids() {
+        let (state, _) = reduce_screen(
+            viewer_screen(),
+            put(
+                "v1",
+                vec![
+                    comment(&ann(1), "a"),
+                    comment(&ann(2), "b"),
+                    comment(&ann(3), "c"),
+                ],
+            ),
+        )
+        .expect("put");
+        let (state, effects) = reduce_screen(
+            state,
+            put(
+                "v1",
+                vec![comment(&ann(4), "d"), comment(&ann(2), "b, edited")],
+            ),
+        )
+        .expect("put");
+        assert!(effects.is_empty());
+        assert_eq!(
+            annotation_ids(&state, "v1"),
+            [ann(1), ann(2), ann(3), ann(4)]
+        );
+        assert_eq!(
+            viewer_of(&state, "v1").annotations[1].body.as_deref(),
+            Some("b, edited")
+        );
+
+        let revision = state.revision;
+        let (state, effects) =
+            reduce_screen(state, remove("v1", &[ann(2), ann(9)])).expect("removed");
+        assert!(effects.is_empty());
+        assert_eq!(annotation_ids(&state, "v1"), [ann(1), ann(3), ann(4)]);
+        assert_eq!(state.revision, revision + 1);
+
+        let (state, _) = reduce_screen(state, remove("v1", &[ann(9)])).expect("unknown IDs");
+        assert_eq!(annotation_ids(&state, "v1"), [ann(1), ann(3), ann(4)]);
+        assert_eq!(state.revision, revision + 2);
+    }
+
+    /// viewer-annotations, Saving Annotations Through The Window (Two windows
+    /// add at the same time): each window's put names only its own
+    /// annotation, so in either order the pane holds both.
+    #[test]
+    fn two_windows_adding_at_the_same_time_keep_both_annotations() {
+        let from_a = || put("v1", vec![question(&ann(1))]);
+        let from_b = || put("v1", vec![comment(&ann(2), "Mention the timeout.")]);
+        for (first, second, order) in [
+            (from_a(), from_b(), [ann(1), ann(2)]),
+            (from_b(), from_a(), [ann(2), ann(1)]),
+        ] {
+            let store = store_with(viewer_screen());
+            let screen_id = ScreenId::from("screen1");
+            for op in [first, second] {
+                assert!(store
+                    .dispatch_screen(&screen_id, op)
+                    .expect("put")
+                    .is_empty());
+            }
+            let screen = store.get_screen(&screen_id).expect("screen");
+            assert_eq!(annotation_ids(&screen, "v1"), order);
+        }
+    }
+
+    /// viewer-annotations, Annotations On A Viewer Pane (One annotation too
+    /// many): counted after the op, so a replacement still fits and a new one
+    /// fits again once one is removed.
+    #[test]
+    fn one_annotation_too_many_is_rejected_and_the_pane_keeps_its_hundred() {
+        let store = store_with(viewer_screen());
+        let screen_id = ScreenId::from("screen1");
+        let hundred = (0..100).map(|n| comment(&ann(n), "x")).collect();
+        store
+            .dispatch_screen(&screen_id, put("v1", hundred))
+            .expect("a hundred");
+        let before = store.get_screen(&screen_id).expect("screen");
+
+        for op in [
+            put("v1", vec![comment(&ann(100), "one more")]),
+            put(
+                "v1",
+                vec![comment(&ann(7), "edited"), comment(&ann(100), "one more")],
+            ),
+        ] {
+            let error = store.dispatch_screen(&screen_id, op).expect_err("too many");
+            assert!(
+                matches!(
+                    error,
+                    MuxError::AnnotationsTooMany {
+                        limit: 100,
+                        got: 101
+                    }
+                ),
+                "{error}"
+            );
+            let after = store.get_screen(&screen_id).expect("screen");
+            assert_eq!(annotation_ids(&after, "v1"), annotation_ids(&before, "v1"));
+            assert_eq!(after.revision, before.revision);
+        }
+
+        store
+            .dispatch_screen(&screen_id, put("v1", vec![comment(&ann(7), "edited")]))
+            .expect("a replacement");
+        store
+            .dispatch_screen(&screen_id, remove("v1", &[ann(0)]))
+            .expect("removed");
+        store
+            .dispatch_screen(
+                &screen_id,
+                put("v1", vec![comment(&ann(100), "now it fits")]),
+            )
+            .expect("fits again");
+        let screen = store.get_screen(&screen_id).expect("screen");
+        assert_eq!(viewer_of(&screen, "v1").annotations.len(), 100);
+    }
+
+    /// viewer-annotations, Annotations On A Viewer Pane (A terminal pane): both
+    /// ops are rejected for a pane that is not a viewer pane or does not
+    /// exist, and the workspace stays unchanged.
+    #[test]
+    fn annotations_on_a_terminal_pane_are_rejected() {
+        let store = store_with(viewer_screen());
+        let screen_id = ScreenId::from("screen1");
+        let before = serde_json::to_value(store.get_workspace_state()).expect("workspace");
+        for (op, expected) in [
+            (
+                put("p1", vec![question(&ann(1))]),
+                "pane p1 is not a viewer pane",
+            ),
+            (remove("p1", &[ann(1)]), "pane p1 is not a viewer pane"),
+            (put("p9", vec![question(&ann(1))]), "pane p9 not found"),
+            (remove("p9", &[ann(1)]), "pane p9 not found"),
+        ] {
+            let error = store
+                .dispatch_screen(&screen_id, op)
+                .expect_err(expected)
+                .to_string();
+            assert_eq!(error, expected);
+            assert_eq!(
+                serde_json::to_value(store.get_workspace_state()).expect("workspace"),
+                before
+            );
+        }
+    }
+
+    /// viewer-annotations, Annotations On A Viewer Pane: every rule of an
+    /// annotation and of both ops, each rejected as a whole, also when other
+    /// annotations of the op are valid, without changing the workspace.
+    #[test]
+    fn invalid_annotations_are_rejected_and_leave_the_workspace_unchanged() {
+        let long = "x".repeat(ANNOTATION_TEXT_LIMIT + 1);
+        let long_context = "x".repeat(ANNOTATION_CONTEXT_LIMIT + 1);
+        let full_quote = "q".repeat(ANNOTATION_TEXT_LIMIT);
+        let delete = |n: u32, target: serde_json::Value| serde_json::json!({"id": ann(n), "kind": "delete", "target": target});
+        let change = |replacement: &str| {
+            serde_json::json!({
+                "id": ann(1), "kind": "change", "replacement": replacement,
+                "target": passage(serde_json::json!({})),
+            })
+        };
+        let cases: Vec<(ScreenOp, &str)> = vec![
+            (put("v1", vec![]), "1 to 100 entries, got 0"),
+            (
+                put("v1", (0..101).map(|n| comment(&ann(n), "x")).collect()),
+                "1 to 100 entries, got 101",
+            ),
+            (
+                put("v1", vec![comment("ann-0123456789ABCDEF", "x")]),
+                "ann- and 16 lowercase hex",
+            ),
+            (
+                put("v1", vec![comment("ann-0123456789abcde", "x")]),
+                "ann- and 16 lowercase hex",
+            ),
+            (
+                put("v1", vec![comment("ann-0123456789abcdeg", "x")]),
+                "ann- and 16 lowercase hex",
+            ),
+            (
+                put("v1", vec![comment("note-0123456789abcdef", "x")]),
+                "ann- and 16 lowercase hex",
+            ),
+            (
+                put("v1", vec![comment(&ann(1), "a"), comment(&ann(1), "b")]),
+                "appears more than once",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![serde_json::json!({"id": ann(1), "kind": "comment"})],
+                ),
+                "needs a remark",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![comment(&ann(1), "fine"), comment(&ann(2), " \n\t")],
+                ),
+                "needs a remark",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![serde_json::json!({
+                        "id": ann(1), "kind": "question", "body": "",
+                        "target": passage(serde_json::json!({})),
+                    })],
+                ),
+                "needs a remark",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![serde_json::json!({
+                        "id": ann(1), "kind": "change", "target": passage(serde_json::json!({})),
+                    })],
+                ),
+                "needs a replacement",
+            ),
+            (put("v1", vec![change("")]), "needs a replacement"),
+            (
+                put(
+                    "v1",
+                    vec![serde_json::json!({"id": ann(1), "kind": "change", "replacement": "x"})],
+                ),
+                "needs a passage",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![serde_json::json!({"id": ann(1), "kind": "delete"})],
+                ),
+                "needs a passage",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![delete(1, passage(serde_json::json!({"quote": ""})))],
+                ),
+                "needs a quote",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![delete(1, passage(serde_json::json!({"startLine": 0})))],
+                ),
+                "lines must lie between 1 and 10000000",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![delete(
+                        1,
+                        passage(serde_json::json!({"startLine": 5, "endLine": 4})),
+                    )],
+                ),
+                "lines must lie between 1 and 10000000",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![delete(
+                        1,
+                        passage(serde_json::json!({"endLine": 10_000_001})),
+                    )],
+                ),
+                "lines must lie between 1 and 10000000",
+            ),
+            (
+                put("v1", vec![comment(&ann(1), &long)]),
+                "remark holds at most 16384 bytes, got 16385",
+            ),
+            (
+                put("v1", vec![change(&long)]),
+                "replacement holds at most 16384 bytes",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![delete(1, passage(serde_json::json!({"quote": long})))],
+                ),
+                "quote holds at most 16384 bytes",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![delete(
+                        1,
+                        passage(serde_json::json!({"prefix": long_context})),
+                    )],
+                ),
+                "prefix holds at most 256 bytes, got 257",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![delete(
+                        1,
+                        passage(serde_json::json!({"suffix": long_context})),
+                    )],
+                ),
+                "suffix holds at most 256 bytes",
+            ),
+            (
+                put(
+                    "v1",
+                    (0..17)
+                        .map(|n| delete(n, passage(serde_json::json!({"quote": full_quote}))))
+                        .collect(),
+                ),
+                "at most 262144 bytes of text, got 278528",
+            ),
+            (remove("v1", &[]), "1 to 100 entries, got 0"),
+            (
+                remove("v1", &(0..101).map(ann).collect::<Vec<_>>()),
+                "1 to 100 entries, got 101",
+            ),
+            (
+                remove("v1", &[ann(1), "ann-1".into()]),
+                "ann- and 16 lowercase hex",
+            ),
+        ];
+        let store = store_with(viewer_screen());
+        let screen_id = ScreenId::from("screen1");
+        store
+            .dispatch_screen(&screen_id, put("v1", vec![comment(&ann(1), "kept")]))
+            .expect("one annotation");
+        let before = serde_json::to_value(store.get_workspace_state()).expect("workspace");
+        for (op, expected) in cases {
+            let name = format!("{op:?}").chars().take(160).collect::<String>();
+            let error = store
+                .dispatch_screen(&screen_id, op)
+                .expect_err(&name)
+                .to_string();
+            assert!(error.contains(expected), "{name}: {error}");
+            assert_eq!(
+                serde_json::to_value(store.get_workspace_state()).expect("workspace"),
+                before,
+                "{name}"
+            );
+        }
+    }
+
+    /// viewer-annotations, Annotations On A Viewer Pane: the limits themselves
+    /// are admitted, and a replaced annotation's text is not counted twice.
+    #[test]
+    fn annotation_limits_admit_their_bounds() {
+        let text = "ä".repeat(ANNOTATION_TEXT_LIMIT / 2);
+        let context = "x".repeat(ANNOTATION_CONTEXT_LIMIT);
+        let store = store_with(viewer_screen());
+        let screen_id = ScreenId::from("screen1");
+        store
+            .dispatch_screen(
+                &screen_id,
+                put(
+                    "v1",
+                    vec![serde_json::json!({
+                        "id": ann(1), "kind": "change", "body": text, "replacement": text,
+                        "target": passage(serde_json::json!({
+                            "quote": text, "prefix": context, "suffix": context,
+                            "startLine": 1, "endLine": ANNOTATION_LINE_LIMIT,
+                        })),
+                    })],
+                ),
+            )
+            .expect("each field at its limit");
+
+        let store = store_with(viewer_screen());
+        let quote = "q".repeat(ANNOTATION_TEXT_LIMIT);
+        let deletes = |from: u32, to: u32| {
+            (from..to)
+                .map(|n| {
+                    serde_json::json!({
+                        "id": ann(n), "kind": "delete",
+                        "target": passage(serde_json::json!({"quote": quote})),
+                    })
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(16 * ANNOTATION_TEXT_LIMIT, ANNOTATION_PANE_TEXT_LIMIT);
+        store
+            .dispatch_screen(&screen_id, put("v1", deletes(0, 16)))
+            .expect("the pane's text at its limit");
+        store
+            .dispatch_screen(&screen_id, put("v1", deletes(3, 4)))
+            .expect("a replacement of the same size");
+        let error = store
+            .dispatch_screen(&screen_id, put("v1", vec![comment(&ann(16), "x")]))
+            .expect_err("one byte more");
+        assert!(
+            matches!(error, MuxError::AnnotationsTooLong { got, .. } if got == ANNOTATION_PANE_TEXT_LIMIT + 1),
+            "{error}"
+        );
+
+        let store = store_with(viewer_screen());
+        store
+            .dispatch_screen(
+                &screen_id,
+                put("v1", (0..100).map(|n| comment(&ann(n), "x")).collect()),
+            )
+            .expect("a hundred in one op");
+        store
+            .dispatch_screen(
+                &screen_id,
+                remove("v1", &(0..100).map(ann).collect::<Vec<_>>()),
+            )
+            .expect("a hundred removed in one op");
+    }
+
+    /// viewer-annotations, Annotation Lifetime (Opened again from the CLI): the
+    /// reused pane keeps its annotations.
+    #[test]
+    fn a_viewer_opened_again_keeps_its_annotations() {
+        let (state, _) = reduce_screen(
+            viewer_screen(),
+            put("v1", vec![question(&ann(1)), comment(&ann(2), "Shorter.")]),
+        )
+        .expect("put");
+        let annotations = viewer_of(&state, "v1").annotations;
+        let (state, effects) = reduce_screen(
+            state,
+            open_viewer(serde_json::json!({"paneId": "p1", "source": file(PLAN)})),
+        )
+        .expect("opened again");
+        assert!(effects.is_empty());
+        assert_eq!(state.panes.len(), 2, "the pane is reused");
+        let viewer = viewer_of(&state, "v1");
+        assert_eq!(viewer.revision, 2);
+        assert_eq!(viewer.annotations, annotations);
+    }
+
+    /// viewer-annotations, Annotation Lifetime (Pane closed): the annotations
+    /// end with their pane and with their screen; the same file opens again
+    /// in a pane without any.
+    #[test]
+    fn annotations_end_with_their_pane_and_their_screen() {
+        let store = two_screen_store();
+        let scr1 = ScreenId::from("scr1");
+        for op in [
+            open_viewer(
+                serde_json::json!({"paneId": "p1", "newPaneId": "v1", "source": file(PLAN)}),
+            ),
+            put("v1", vec![question(&ann(1))]),
+        ] {
+            store.dispatch_screen(&scr1, op).expect("applied");
+        }
+        let effects = store
+            .dispatch_screen(
+                &scr1,
+                ScreenOp::ClosePane {
+                    pane_id: PaneId::from("v1"),
+                    resulting_sizes: None,
+                },
+            )
+            .expect("closed");
+        assert!(effects.is_empty(), "no session ended");
+        store
+            .dispatch_screen(
+                &scr1,
+                open_viewer(
+                    serde_json::json!({"paneId": "p1", "newPaneId": "v2", "source": file(PLAN)}),
+                ),
+            )
+            .expect("opened again");
+        let screen = store.get_screen(&scr1).expect("screen");
+        assert!(!screen.panes.contains_key(&PaneId::from("v1")));
+        assert!(viewer_of(&screen, "v2").annotations.is_empty());
+
+        store
+            .dispatch_screen(&scr1, put("v2", vec![question(&ann(1))]))
+            .expect("put");
+        store
+            .dispatch(Op::CloseScreen {
+                screen_id: scr1.clone(),
+            })
+            .expect("screen closed");
+        let workspace = serde_json::to_string(&store.get_workspace_state()).expect("workspace");
+        assert!(!workspace.contains(&ann(1)), "{workspace}");
     }
 }

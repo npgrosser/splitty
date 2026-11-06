@@ -569,11 +569,27 @@ pub(crate) fn without_scratchpads(screen: &mut mux::ScreenState) {
     }
 }
 
+/// A viewer pane's annotations are a window's alone as well
+/// (`viewer-annotations`): an agent sees a review only as what the user sends
+/// to its terminal.
+fn without_annotations(screen: &mut mux::ScreenState) {
+    for viewer in screen
+        .panes
+        .values_mut()
+        .filter_map(|pane| pane.viewer.as_mut())
+    {
+        viewer.annotations.clear();
+    }
+}
+
 pub(crate) async fn get_mux_state(state: &ServiceState) -> Payload<Value> {
     // Nor the text a viewer pane shows (`viewer-panes`); windows read it with
     // `viewer.read` over their own connection.
     let mut ws = state.mux_store.get_workspace_state().without_viewer_texts();
-    ws.screens.values_mut().for_each(without_scratchpads);
+    for screen in ws.screens.values_mut() {
+        without_scratchpads(screen);
+        without_annotations(screen);
+    }
     Payload(serde_json::to_value(&ws).unwrap_or(json!({})))
 }
 
@@ -583,6 +599,7 @@ pub(crate) async fn get_mux_screen(state: &ServiceState, id: String) -> Reply {
         Some(screen) => {
             let mut screen = screen.without_viewer_texts();
             without_scratchpads(&mut screen);
+            without_annotations(&mut screen);
             Payload(serde_json::to_value(&screen).unwrap_or(json!({}))).into_reply()
         }
         None => (
@@ -601,11 +618,14 @@ pub(crate) struct MuxOpRequest {
 }
 
 pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Reply {
-    if req.op.get("type").and_then(|t| t.as_str()) == Some("set_scratchpad") {
-        // Only a window sets a scratchpad (`session-scratchpad`).
+    if let Some(op @ ("set_scratchpad" | "put_annotations" | "remove_annotations")) =
+        req.op.get("type").and_then(|t| t.as_str())
+    {
+        // Only a window sets a scratchpad (`session-scratchpad`) or annotates a
+        // viewer pane (`viewer-annotations`).
         return (
             StatusCode::BAD_REQUEST,
-            Payload(json!({"ok": false, "error": "set_scratchpad is only accepted from a window"})),
+            Payload(json!({"ok": false, "error": format!("{op} is only accepted from a window")})),
         )
             .into_reply();
     }

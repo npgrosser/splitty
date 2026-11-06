@@ -593,13 +593,16 @@ impl ServerEvent {
                 "tab-select-v1".into(),
                 // viewer-panes, Viewer Capability.
                 "viewer-v1".into(),
+                // viewer-annotations, Annotations Capability.
+                "viewer-annotations-v1".into(),
             ],
             server_mode,
         }
     }
 
     /// A screen's snapshot, without the text of its `text` viewer documents
-    /// (`viewer-panes`, Document Text Outside Snapshots).
+    /// (`viewer-panes`, Document Text Outside Snapshots); viewer annotations
+    /// stay, since windows show them (`viewer-annotations`).
     pub fn mux_screen_snapshot(screen: ScreenState) -> Self {
         Self::MuxScreenSnapshot {
             id: generate_event_id(),
@@ -726,7 +729,8 @@ mod tests {
                 "scratchpad-v1",
                 "layout-arrange-v1",
                 "tab-select-v1",
-                "viewer-v1"
+                "viewer-v1",
+                "viewer-annotations-v1"
             ])
         );
         assert_eq!(wire["type"], "mux.welcome");

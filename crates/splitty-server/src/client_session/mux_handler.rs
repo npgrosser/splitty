@@ -160,6 +160,15 @@ impl MuxHandler {
             .get("newPaneId")
             .and_then(|v| v.as_str())
             .map(String::from);
+        // The viewer pane an annotation op names, reported back if the op is
+        // rejected (`viewer-annotations`).
+        let annotation_op = matches!(op_type.as_str(), "put_annotations" | "remove_annotations");
+        let annotated_pane = msg
+            .op
+            .get("paneId")
+            .and_then(|v| v.as_str())
+            .filter(|_| annotation_op)
+            .map(String::from);
 
         // The target of a pane moved to another screen, nudged with its source.
         let mut moved_to = None;
@@ -277,13 +286,16 @@ impl MuxHandler {
                     // Starts and ends no session, yet both screens changed.
                     self.nudge_others(&[&screen_id, &target]);
                 }
-                let viewer_change =
-                    op_type == "open_viewer" || (op_type == "close_pane" && effects.is_empty());
+                let viewer_change = matches!(
+                    op_type.as_str(),
+                    "open_viewer" | "put_annotations" | "remove_annotations"
+                ) || (op_type == "close_pane" && effects.is_empty());
                 if op_type == "set_scratchpad" || op_type == "arrange_panes" || viewer_change {
                     // Starts and ends no session either, yet the other
                     // windows show the text (`session-scratchpad`), the
-                    // arrangement (`arrange-panes`) or the viewer pane that
-                    // came or went (`viewer-panes`).
+                    // arrangement (`arrange-panes`), the viewer pane that
+                    // came or went (`viewer-panes`) or its annotations
+                    // (`viewer-annotations`).
                     self.nudge_others(&[&screen_id]);
                 }
                 self.run_effects(effects, &screen_id, &op_type).await;
@@ -320,13 +332,14 @@ impl MuxHandler {
                     );
                 }
 
-                // A rejected arrangement makes the window resync its screen
-                // (mux-protocol, Window Layout Changes Reach the Server).
-                if new_pane_id.is_some() || op_type == "arrange_panes" {
+                // A rejected arrangement or annotation op makes the window
+                // show the server's state again (mux-protocol, Rejected Op
+                // Reporting).
+                if new_pane_id.is_some() || op_type == "arrange_panes" || annotation_op {
                     self.send_event(&ServerEvent::mux_op_failed(
                         op_type,
                         Some(msg.screen_id.clone()),
-                        new_pane_id,
+                        annotated_pane.or(new_pane_id),
                         e.to_string(),
                     ))
                     .await;
@@ -937,5 +950,203 @@ mod tests {
             .panes
             .contains_key(&PaneId::from("viewer-0123456789abcdef")));
         assert_eq!(screen.sessions.len(), 1, "no session ended");
+    }
+
+    /// A window's handler on `store`, as `client_id`, whose broadcasts to the
+    /// other clients land in `others`.
+    fn window(
+        store: &Arc<Store>,
+        client_id: &str,
+        others: &Arc<std::sync::Mutex<Vec<Value>>>,
+    ) -> (MuxHandler, splitty_transport::queue::Receiver<Message>) {
+        let (sender, sent) = ClientSender::channel();
+        let backend = Arc::new(splitty_core::pty::manager::Manager::new());
+        let runner = Arc::new(EffectRunner::new(backend.clone()));
+        let jobs = crate::jobs::Jobs::new(
+            store.clone(),
+            backend,
+            runner.clone(),
+            EnvContext::default(),
+            Default::default(),
+        );
+        let shell_profiles = splitty_core::shell_profiles::state_from_settings(&Default::default());
+        let recorded = others.clone();
+        let handler = MuxHandler::new(
+            store.clone(),
+            Arc::new(sender),
+            client_id.to_string(),
+            "daemon".to_string(),
+            runner,
+            Arc::new(RwLock::new(shell_profiles)),
+            EnvContext::default(),
+            Arc::new(move |events, _| {
+                recorded.lock().expect("recorder").extend(
+                    events
+                        .iter()
+                        .map(|event| serde_json::to_value(event).expect("event")),
+                )
+            }),
+            jobs,
+        );
+        (handler, sent)
+    }
+
+    fn next_text(sent: &mut splitty_transport::queue::Receiver<Message>) -> Value {
+        match sent.try_recv().map(|message| message.value) {
+            Ok(Message::Text(text)) => serde_json::from_str(text.as_str()).expect("JSON"),
+            other => panic!("expected a text message, got {other:?}"),
+        }
+    }
+
+    /// viewer-annotations, Annotations Capability and Saving Annotations
+    /// Through The Window (A second window sees the annotation), and
+    /// mux-protocol, Change Propagation to Other Clients (Annotation added by
+    /// a client): the welcome announces annotations; a put and a remove nudge
+    /// the other clients and not the sender, and the second window's resync
+    /// shows the annotation, then none.
+    #[tokio::test]
+    async fn an_annotation_reaches_the_other_windows_and_not_its_sender() {
+        let store = Arc::new(Store::new());
+        store
+            .dispatch(Op::CreateScreen {
+                name: None,
+                screen_id: Some(ScreenId::from("screen-1")),
+                new_pane_id: Some(PaneId::from("terminal-1")),
+                shell_profile_id: None,
+            })
+            .expect("screen");
+        let open: ScreenOp = serde_json::from_value(serde_json::json!({
+            "type": "open_viewer", "paneId": "terminal-1", "newPaneId": "viewer-0123456789abcdef",
+            "source": {"kind": "file", "path": "/home/me/app/PLAN.md"},
+        }))
+        .expect("wire op");
+        store
+            .dispatch_screen(&ScreenId::from("screen-1"), open)
+            .expect("viewer");
+        let others = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (a, mut sent_a) = window(&store, "window-a", &others);
+        let (b, mut sent_b) = window(&store, "window-b", &Default::default());
+        let nudges = || others.lock().expect("recorder").clone();
+        let resync = r#"{"type":"mux.resync","screenId":"screen-1"}"#;
+
+        a.send_welcome().await;
+        let welcome = next_text(&mut sent_a);
+        assert!(
+            welcome["capabilities"]
+                .as_array()
+                .is_some_and(|all| all.iter().any(|c| c == "viewer-annotations-v1")),
+            "{welcome}"
+        );
+
+        let annotation = serde_json::json!({
+            "id": "ann-0123456789abcdef", "kind": "question", "body": "Why not five times?",
+            "target": {
+                "view": "source", "quote": "retry three times", "prefix": "On failure, ",
+                "suffix": ".", "startLine": 30, "endLine": 30,
+            },
+        });
+        let put = serde_json::json!({
+            "type": "mux.op", "screenId": "screen-1",
+            "op": {"type": "put_annotations", "paneId": "viewer-0123456789abcdef", "annotations": [annotation]},
+        });
+        assert!(a.try_handle(&put.to_string()).await);
+        let nudged = nudges();
+        assert_eq!(nudged.len(), 1, "{nudged:?}");
+        assert_eq!(nudged[0]["type"], "mux.nudge");
+        assert_eq!(nudged[0]["reason"], "mux_op");
+        assert_eq!(nudged[0]["screenId"], "screen-1");
+        assert!(sent_a.try_recv().is_err(), "the sender gets nothing");
+
+        assert!(b.try_handle(resync).await);
+        let snapshot = next_text(&mut sent_b);
+        assert_eq!(snapshot["type"], "mux.screen_snapshot");
+        assert_eq!(
+            snapshot["screen"]["panes"]["viewer-0123456789abcdef"]["viewer"]["annotations"],
+            serde_json::json!([annotation])
+        );
+
+        let remove = r#"{"type":"mux.op","screenId":"screen-1","op":{"type":"remove_annotations","paneId":"viewer-0123456789abcdef","ids":["ann-0123456789abcdef"]}}"#;
+        assert!(a.try_handle(remove).await);
+        let nudged = nudges();
+        assert_eq!(nudged.len(), 2, "{nudged:?}");
+        assert_eq!(nudged[1]["type"], "mux.nudge");
+        assert_eq!(nudged[1]["screenId"], "screen-1");
+        assert!(sent_a.try_recv().is_err(), "the sender gets nothing");
+        assert!(b.try_handle(resync).await);
+        let snapshot = next_text(&mut sent_b);
+        let viewer = &snapshot["screen"]["panes"]["viewer-0123456789abcdef"]["viewer"];
+        assert!(viewer.get("annotations").is_none(), "{viewer}");
+    }
+
+    /// mux-protocol, Rejected Op Reporting (Rejected annotation): a put that
+    /// would give viewer pane `v1` its 101st annotation, and a remove with a
+    /// malformed ID, are reported to their sender with the pane; nobody else
+    /// hears of them, and the pane is unchanged.
+    #[tokio::test]
+    async fn a_rejected_annotation_is_reported_to_its_sender_only() {
+        let store = Arc::new(Store::new());
+        store
+            .dispatch(Op::CreateScreen {
+                name: None,
+                screen_id: Some(ScreenId::from("s1")),
+                new_pane_id: Some(PaneId::from("p1")),
+                shell_profile_id: None,
+            })
+            .expect("screen");
+        let comment = |n: u32| serde_json::json!({"id": format!("ann-{n:016x}"), "kind": "comment", "body": "x"});
+        for op in [
+            serde_json::json!({
+                "type": "open_viewer", "paneId": "p1", "newPaneId": "v1",
+                "source": {"kind": "file", "path": "/home/me/app/PLAN.md"},
+            }),
+            serde_json::json!({
+                "type": "put_annotations", "paneId": "v1",
+                "annotations": (0..100).map(comment).collect::<Vec<_>>(),
+            }),
+        ] {
+            let op: ScreenOp = serde_json::from_value(op).expect("wire op");
+            store
+                .dispatch_screen(&ScreenId::from("s1"), op)
+                .expect("applied");
+        }
+        let before = store.get_screen(&ScreenId::from("s1")).expect("screen");
+        let others = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (a, mut sent_a) = window(&store, "window-a", &others);
+
+        for (op, kind) in [
+            (
+                serde_json::json!({"type": "put_annotations", "paneId": "v1", "annotations": [comment(100)]}),
+                "put_annotations",
+            ),
+            (
+                serde_json::json!({"type": "remove_annotations", "paneId": "v1", "ids": ["ann-1"]}),
+                "remove_annotations",
+            ),
+        ] {
+            let message = serde_json::json!({"type": "mux.op", "screenId": "s1", "op": op});
+            assert!(a.try_handle(&message.to_string()).await);
+            let failed = next_text(&mut sent_a);
+            assert_eq!(failed["type"], "mux.op_failed", "{failed}");
+            assert_eq!(failed["op"], kind);
+            assert_eq!(failed["screenId"], "s1");
+            assert_eq!(failed["paneId"], "v1");
+            assert!(
+                failed["error"]
+                    .as_str()
+                    .is_some_and(|error| !error.is_empty()),
+                "{failed}"
+            );
+            assert!(sent_a.try_recv().is_err(), "nothing else for the sender");
+        }
+        assert!(
+            others.lock().expect("recorder").is_empty(),
+            "no other client hears of it"
+        );
+        let after = store.get_screen(&ScreenId::from("s1")).expect("screen");
+        assert_eq!(after.revision, before.revision);
+        assert_eq!(
+            after.panes[&PaneId::from("v1")].viewer,
+            before.panes[&PaneId::from("v1")].viewer
+        );
     }
 }

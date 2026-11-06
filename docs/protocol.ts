@@ -130,6 +130,48 @@ interface ViewerState {
   originPaneId?: string;
   /** Starts at 1; rises when `open_viewer` shows the same file again. */
   revision: number;
+  /**
+   * The pane's pending annotations in creation order, absent while there are
+   * none (servers with "viewer-annotations-v1", see `viewer-annotations`).
+   * Snapshots carry them; GET /api/mux/state and GET /api/mux/screen/{id}
+   * leave them out. They live and end with the pane.
+   */
+  annotations?: ViewerAnnotation[];
+}
+
+/**
+ * A remark a window made on a viewer pane's document. The server stores it
+ * as it came and never interprets its text. A pane holds at most 100, with at
+ * most 262,144 bytes of quote, prefix, suffix, body and replacement over all.
+ */
+interface ViewerAnnotation {
+  /** "ann-" and 16 lowercase hex characters, chosen by the window; unique within the pane. */
+  id: string;
+  /** "change" suggests a replacement of the passage, "delete" its deletion. */
+  kind: "comment" | "question" | "change" | "delete";
+  /**
+   * The remark, at most 16,384 bytes of UTF-8; a comment and a question need
+   * one that is not only whitespace.
+   */
+  body?: string;
+  /** The suggested text of a "change": required, not empty, at most 16,384 bytes. */
+  replacement?: string;
+  /** The passage; absent for a general comment, which is a comment or a question. */
+  target?: AnnotationTarget;
+}
+
+/** A passage, found again by its quote; the lines only order and label it. */
+interface AnnotationTarget {
+  /** Which text the quote was taken from. */
+  view: "source" | "rendered";
+  /** The selected text: not empty, at most 16,384 bytes. */
+  quote: string;
+  /** Context before and after the quote in that text, each at most 256 bytes ("" for none). */
+  prefix: string;
+  suffix: string;
+  /** 1-based source lines when annotated: 1 <= startLine <= endLine <= 10,000,000. */
+  startLine: number;
+  endLine: number;
 }
 
 type ViewerSource =
@@ -725,7 +767,7 @@ interface MuxWelcome extends ServerEvent {
   clientId: string;
   screens: ScreenInfo[];
   serverMode?: "embedded" | "daemon";
-  capabilities?: string[]; // includes "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1" and "viewer-v1"; absent on old servers
+  capabilities?: string[]; // includes "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "viewer-v1" and "viewer-annotations-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -760,8 +802,10 @@ interface MuxNudge extends ServerEvent {
 
 /**
  * A WebSocket op was rejected, sent to its client only: for an op that names a
- * pane to create (`paneId`, so the client stops waiting for mux.pane_spawned)
- * and for `arrange_panes` (no `paneId`; the window resyncs `screenId`).
+ * pane to create (`paneId`, so the client stops waiting for mux.pane_spawned),
+ * for `arrange_panes` (no `paneId`; the window resyncs `screenId`), and for
+ * `put_annotations` and `remove_annotations` (`paneId` is the viewer pane; the
+ * window shows the server's annotations again). Never a nudge to others.
  */
 interface MuxOpFailed extends ServerEvent {
   type: "mux.op_failed";
@@ -1067,6 +1111,37 @@ interface OpenViewerOp {
   cwd?: string;
 }
 
+/**
+ * Add annotations to a viewer pane, or replace those with the same `id` in
+ * their place (servers with "viewer-annotations-v1"). Only a window sends it,
+ * over the WebSocket; POST /api/mux/op answers 400. Refused as a whole, with
+ * nothing changed, for a pane that is not a viewer pane, fewer than 1 or more
+ * than 100 annotations, an `id` of another form or twice in the op, an
+ * annotation that breaks the rules of ViewerAnnotation, or a pane that would
+ * hold more than 100 annotations or 262,144 bytes of their text; the sender
+ * then gets mux.op_failed with the pane. No effect. Applied: other clients get
+ * `mux.nudge` for the screen; the sender gets nothing.
+ */
+interface PutAnnotationsOp {
+  type: "put_annotations";
+  paneId: string;
+  annotations: ViewerAnnotation[];
+}
+
+/**
+ * Remove annotations of a viewer pane by `id`; ids the pane does not hold are
+ * ignored. Only a window sends it, over the WebSocket; POST /api/mux/op
+ * answers 400. Refused, with mux.op_failed and the pane to the sender, for a
+ * pane that is not a viewer pane, fewer than 1 or more than 100 ids, or an id
+ * of another form. No effect. Applied: other clients get `mux.nudge` for the
+ * screen; the sender gets nothing.
+ */
+interface RemoveAnnotationsOp {
+  type: "remove_annotations";
+  paneId: string;
+  ids: string[];
+}
+
 interface SetScreenOwnershipOp {
   type: "set_screen_ownership";
   screenId: string;
@@ -1088,6 +1163,8 @@ type Operation =
   | MovePaneToScreenOp
   | SetScratchpadOp
   | OpenViewerOp
+  | PutAnnotationsOp
+  | RemoveAnnotationsOp
   | SetScreenOwnershipOp;
 
 // ============================================================================
@@ -1338,15 +1415,18 @@ type ClientCommand =
  *   404 { ok: false, error: string }     // screen/panel not found
  *
  * For open_viewer, `paneId` is the viewer pane that shows the document and
- * `reused` is true when that pane existed before.
+ * `reused` is true when that pane existed before. set_scratchpad,
+ * put_annotations and remove_annotations are a window's alone: answered 400
+ * without a change.
  */
 
 /**
  * GET /api/mux/state
  *
  * Returns the full WorkspaceState. Used by `splitty list-panes`,
- * `splitty list-screens`, etc. No session carries its scratchpad and no
- * `text` viewer document its text, here and in GET /api/mux/screen/:id.
+ * `splitty list-screens`, etc. No session carries its scratchpad, no `text`
+ * viewer document its text and no viewer pane its annotations, here and in
+ * GET /api/mux/screen/:id.
  *
  * Response:
  *   200 WorkspaceState
@@ -1415,7 +1495,8 @@ type ClientCommand =
  * Key properties:
  * - No ACK for accepted mux.ops; the server answers only with the
  *   mux.pane_spawned events an op causes, and with mux.op_failed when it
- *   rejects an op that would create a pane or an arrange_panes
+ *   rejects an op that would create a pane, an arrange_panes or an
+ *   annotation op
  * - Every op runs its effects, from the WebSocket as from the CLI
  *   (POST /api/mux/op): the server spawns and kills pane sessions, and the
  *   client attaches to a spawned session after mux.pane_spawned

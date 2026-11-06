@@ -270,4 +270,69 @@ mod tests {
             })
         );
     }
+
+    /// server-modes, Workspace Persistence In Daemon Mode (Annotations
+    /// persisted), and viewer-annotations, Annotation Lifetime (Daemon
+    /// restart): `state.json` holds the annotations in the viewer record once
+    /// the op is applied, and the restored pane holds the same ones.
+    #[test]
+    fn annotations_survive_state_json_and_the_restore() {
+        use crate::ids::{PaneId, ScreenId};
+        use crate::mux::ScreenOp;
+
+        let dir = tempfile::tempdir().expect("fixture");
+        let path = dir.path().join("state.json");
+        let mut store = Store::new();
+        let file = path.clone();
+        store.set_on_change(move |state| save_at(&file, state).expect("persist"));
+        let screen_id = ScreenId::from("s");
+        store
+            .dispatch(Op::CreateScreen {
+                name: None,
+                screen_id: Some(screen_id.clone()),
+                new_pane_id: Some(PaneId::from("p1")),
+                shell_profile_id: None,
+            })
+            .expect("screen");
+        let annotations = serde_json::json!([
+            {
+                "id": "ann-00000000000000a1", "kind": "question", "body": "Why not five times?",
+                "target": {
+                    "view": "source", "quote": "retry three times", "prefix": "On failure, ",
+                    "suffix": ".", "startLine": 30, "endLine": 30,
+                },
+            },
+            {"id": "ann-00000000000000a2", "kind": "comment", "body": "Split step 4."},
+        ]);
+        for op in [
+            serde_json::json!({
+                "type": "open_viewer", "paneId": "p1", "newPaneId": "v1",
+                "source": {"kind": "file", "path": "/home/me/app/PLAN.md"},
+            }),
+            serde_json::json!({"type": "put_annotations", "paneId": "v1", "annotations": annotations}),
+        ] {
+            let op: ScreenOp = serde_json::from_value(op).expect("wire op");
+            assert!(store
+                .dispatch_screen(&screen_id, op)
+                .expect("op")
+                .is_empty());
+        }
+
+        let written: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("state.json")).expect("JSON");
+        assert_eq!(
+            written["screens"]["s"]["panes"]["v1"]["viewer"]["annotations"],
+            annotations
+        );
+        let mut restored: WorkspaceState = serde_json::from_value(written).expect("restore");
+        super::super::restore_jobs(&mut restored, &std::collections::HashSet::new());
+        let effects = super::super::restore_effects(&restored, |_| false);
+        assert_eq!(effects.len(), 1, "only the terminal starts");
+        let restored = Store::with_state(restored);
+        let screen = restored.get_screen(&screen_id).expect("screen");
+        assert_eq!(
+            screen.panes[&PaneId::from("v1")].viewer,
+            store.get_screen(&screen_id).expect("screen").panes[&PaneId::from("v1")].viewer
+        );
+    }
 }

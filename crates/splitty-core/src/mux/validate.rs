@@ -7,8 +7,10 @@ use std::collections::HashSet;
 
 use super::ops::{Arrangement, ScreenOp, ViewerPlacement};
 use super::state::{
-    equal_sizes, LayoutNode, ScreenState, SlotLocation, ViewerSource, SCRATCHPAD_LIMIT,
-    VIEWER_PATH_LIMIT, VIEWER_TEXT_LIMIT, VIEWER_TITLE_LIMIT,
+    equal_sizes, AnnotationKind, LayoutNode, PaneRole, ScreenState, SlotLocation, ViewerAnnotation,
+    ViewerSource, ANNOTATION_CONTEXT_LIMIT, ANNOTATION_COUNT_LIMIT, ANNOTATION_LINE_LIMIT,
+    ANNOTATION_PANE_TEXT_LIMIT, ANNOTATION_TEXT_LIMIT, SCRATCHPAD_LIMIT, VIEWER_PATH_LIMIT,
+    VIEWER_TEXT_LIMIT, VIEWER_TITLE_LIMIT,
 };
 use super::MuxError;
 use crate::ids::*;
@@ -58,6 +60,13 @@ pub fn validate_screen_op(state: &ScreenState, op: &ScreenOp) -> Result<(), MuxE
             source,
             cwd.as_deref(),
         ),
+        ScreenOp::PutAnnotations {
+            pane_id,
+            annotations,
+        } => validate_put_annotations(state, pane_id, annotations),
+        ScreenOp::RemoveAnnotations { pane_id, ids } => {
+            validate_remove_annotations(state, pane_id, ids)
+        }
     }
 }
 
@@ -131,6 +140,174 @@ pub fn viewer_path_is_valid(path: &str) -> bool {
         && !path
             .split('/')
             .any(|segment| segment == "." || segment == "..")
+}
+
+/// The annotations of the viewer pane `pane_id`.
+fn held_annotations<'a>(
+    state: &'a ScreenState,
+    pane_id: &PaneId,
+) -> Result<&'a [ViewerAnnotation], MuxError> {
+    let pane = state
+        .panes
+        .get(pane_id)
+        .ok_or_else(|| MuxError::PaneNotFound(pane_id.clone()))?;
+    match &pane.viewer {
+        Some(viewer) if pane.role == Some(PaneRole::Viewer) => Ok(&viewer.annotations),
+        _ => Err(MuxError::NotAViewerPane(pane_id.clone())),
+    }
+}
+
+/// An annotation op carries 1 to [`ANNOTATION_COUNT_LIMIT`] entries.
+fn validate_annotation_batch(len: usize) -> Result<(), MuxError> {
+    if len == 0 || len > ANNOTATION_COUNT_LIMIT {
+        return Err(MuxError::AnnotationBatchInvalid {
+            limit: ANNOTATION_COUNT_LIMIT,
+            got: len,
+        });
+    }
+    Ok(())
+}
+
+/// The pane's annotations after the op, replaced in place and new ones
+/// appended, stay within the pane's limits (`viewer-annotations`,
+/// Annotations On A Viewer Pane).
+fn validate_put_annotations(
+    state: &ScreenState,
+    pane_id: &PaneId,
+    annotations: &[ViewerAnnotation],
+) -> Result<(), MuxError> {
+    let held = held_annotations(state, pane_id)?;
+    validate_annotation_batch(annotations.len())?;
+    let mut put = HashSet::new();
+    for annotation in annotations {
+        validate_annotation(annotation)?;
+        if !put.insert(annotation.id.as_str()) {
+            return Err(MuxError::AnnotationRepeated(annotation.id.clone()));
+        }
+    }
+    let kept = || held.iter().filter(|held| !put.contains(held.id.as_str()));
+    let count = kept().count() + annotations.len();
+    if count > ANNOTATION_COUNT_LIMIT {
+        return Err(MuxError::AnnotationsTooMany {
+            limit: ANNOTATION_COUNT_LIMIT,
+            got: count,
+        });
+    }
+    let bytes = kept()
+        .chain(annotations)
+        .map(ViewerAnnotation::text_bytes)
+        .sum::<usize>();
+    if bytes > ANNOTATION_PANE_TEXT_LIMIT {
+        return Err(MuxError::AnnotationsTooLong {
+            limit: ANNOTATION_PANE_TEXT_LIMIT,
+            got: bytes,
+        });
+    }
+    Ok(())
+}
+
+/// A removal names 1 to [`ANNOTATION_COUNT_LIMIT`] IDs of the annotation ID
+/// form; the pane need not hold them.
+fn validate_remove_annotations(
+    state: &ScreenState,
+    pane_id: &PaneId,
+    ids: &[String],
+) -> Result<(), MuxError> {
+    held_annotations(state, pane_id)?;
+    validate_annotation_batch(ids.len())?;
+    if !ids.iter().all(|id| annotation_id_is_valid(id)) {
+        return Err(MuxError::AnnotationIdInvalid);
+    }
+    Ok(())
+}
+
+/// One annotation on its own: its ID, the fields its kind needs, its
+/// passage and the limits of each text.
+fn validate_annotation(annotation: &ViewerAnnotation) -> Result<(), MuxError> {
+    if !annotation_id_is_valid(&annotation.id) {
+        return Err(MuxError::AnnotationIdInvalid);
+    }
+    let target = annotation.target.as_ref();
+    for (field, text, limit) in [
+        ("remark", annotation.body.as_deref(), ANNOTATION_TEXT_LIMIT),
+        (
+            "replacement",
+            annotation.replacement.as_deref(),
+            ANNOTATION_TEXT_LIMIT,
+        ),
+        (
+            "quote",
+            target.map(|target| target.quote.as_str()),
+            ANNOTATION_TEXT_LIMIT,
+        ),
+        (
+            "prefix",
+            target.map(|target| target.prefix.as_str()),
+            ANNOTATION_CONTEXT_LIMIT,
+        ),
+        (
+            "suffix",
+            target.map(|target| target.suffix.as_str()),
+            ANNOTATION_CONTEXT_LIMIT,
+        ),
+    ] {
+        let got = text.map_or(0, str::len);
+        if got > limit {
+            return Err(MuxError::AnnotationFieldTooLong {
+                id: annotation.id.clone(),
+                field,
+                limit,
+                got,
+            });
+        }
+    }
+    let invalid = |reason| {
+        Err(MuxError::AnnotationInvalid {
+            id: annotation.id.clone(),
+            reason,
+        })
+    };
+    let remark = annotation
+        .body
+        .as_deref()
+        .is_some_and(|body| !body.trim().is_empty());
+    match annotation.kind {
+        AnnotationKind::Comment | AnnotationKind::Question if !remark => {
+            return invalid("a comment or a question needs a remark");
+        }
+        AnnotationKind::Change if annotation.replacement.as_deref().is_none_or(str::is_empty) => {
+            return invalid("a change needs a replacement");
+        }
+        AnnotationKind::Change | AnnotationKind::Delete if target.is_none() => {
+            return invalid("a change or a deletion needs a passage");
+        }
+        _ => {}
+    }
+    if let Some(target) = target {
+        if target.quote.is_empty() {
+            return invalid("a passage needs a quote");
+        }
+        if target.start_line < 1
+            || target.start_line > target.end_line
+            || target.end_line > ANNOTATION_LINE_LIMIT
+        {
+            return Err(MuxError::AnnotationLinesInvalid {
+                id: annotation.id.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Whether `id` has the form of an annotation ID: `ann-` and 16 lowercase
+/// hex characters.
+pub fn annotation_id_is_valid(id: &str) -> bool {
+    id.strip_prefix("ann-").is_some_and(|hex| {
+        hex.len() == 16
+            && hex
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    })
 }
 
 fn validate_set_scratchpad(

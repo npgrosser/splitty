@@ -49,6 +49,7 @@ mod tests {
             "splitty download build/report.pdf",
             "splitty open PLAN.md",
             "Opened <path> in pane <id>",
+            "pasted at your prompt or as an inserted file path",
         ] {
             assert!(guide.contains(term), "guide missing {term}");
         }

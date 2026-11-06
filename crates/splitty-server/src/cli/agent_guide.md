@@ -81,6 +81,10 @@ the same file brings its pane forward (`Showing <path> in pane <id>`) instead of
 one. A regular file of at most 8 MiB; a folder, `--editor` or `--with vscode|zed`
 request the user's editor instead, with a confirmation.
 
+The user may annotate the document in that pane and send you the review. It reaches
+you only as text pasted at your prompt or as an inserted file path; annotations the
+user has not sent cannot be read through `splitty` or the control socket.
+
 ## Hand a file to the user
 
 From an ordinary pane (not under `SPLITTY_AGENT_SOCK`), offer a file on this server to

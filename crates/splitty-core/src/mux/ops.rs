@@ -1,12 +1,13 @@
 //! Operation types dispatched by clients to mutate mux state.
 //!
 //! `Op` covers workspace-level actions (create/close/rename screen, set active).
-//! `ScreenOp` covers screen-level actions (split, close, resize, move, float, dock).
+//! `ScreenOp` covers screen-level actions (split, close, resize, move, float, dock,
+//! viewers and their annotations).
 //! Both are consumed by the corresponding reducers.
 
 use serde::{Deserialize, Serialize};
 
-use super::state::{Axis, FloatBounds, ViewerSource};
+use super::state::{Axis, FloatBounds, ViewerAnnotation, ViewerSource};
 use crate::ids::*;
 
 /// Direction for spatial navigation and move operations.
@@ -201,6 +202,20 @@ pub enum ScreenOp {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cwd: Option<String>,
     },
+
+    /// Add annotations to a viewer pane, or replace those with the same ID in
+    /// their place. Only a window's mux connection sends it
+    /// (`viewer-annotations`).
+    #[serde(rename_all = "camelCase")]
+    PutAnnotations {
+        pane_id: PaneId,
+        annotations: Vec<ViewerAnnotation>,
+    },
+
+    /// Remove a viewer pane's annotations by ID, ignoring IDs it does not
+    /// hold. Only a window's mux connection sends it (`viewer-annotations`).
+    #[serde(rename_all = "camelCase")]
+    RemoveAnnotations { pane_id: PaneId, ids: Vec<String> },
 }
 
 /// A layout tree as `arrange_panes` carries it: like the root layout, but
