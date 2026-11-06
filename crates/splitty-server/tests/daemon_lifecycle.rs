@@ -1253,12 +1253,34 @@ fn owned_native_child_pipes_end_only_their_embedded_sessions() {
     }
     let sandbox = Sandbox::new();
     sandbox.start_daemon();
-    let (screen, pane, _) = sandbox.shell();
+    let (screen, pane, session) = sandbox.shell();
     let home = sandbox.home.path().display().to_string();
     sandbox.type_line(&screen, &pane, &format!("echo $$ > {home}/persistent-pid"));
     let persistent = sandbox.wait_for("persistent-pid");
     let record = fs::read(sandbox.info_path()).unwrap();
-    let state = fs::read(sandbox.config_dir().join("state.json")).unwrap();
+    // The independent daemon observes its own shell after screen creation.
+    // Snapshot only after that metadata is persisted, so its background write
+    // cannot be mistaken for an embedded helper changing the workspace.
+    let state_path = sandbox.config_dir().join("state.json");
+    let deadline = Instant::now() + READ_TIMEOUT;
+    let state = loop {
+        let bytes = fs::read(&state_path).unwrap();
+        let workspace: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let entry = &workspace["screens"][&screen]["sessions"][&session];
+        if entry["cwd"].as_str().is_some_and(|cwd| !cwd.is_empty())
+            && entry["busy"] == false
+            && entry["displayTitle"]
+                .as_str()
+                .is_some_and(|title| title != "Terminal")
+        {
+            break bytes;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "daemon shell metadata was not persisted"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    };
     struct Restore<'a>(&'a Sandbox, Vec<u8>);
     impl Drop for Restore<'_> {
         fn drop(&mut self) {
