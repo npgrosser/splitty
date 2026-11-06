@@ -1,4 +1,10 @@
-## ADDED Requirements
+# viewer-annotations Specification
+
+## Purpose
+
+Annotations are a review of a document in a viewer pane: comments, questions, and suggested changes or deletions, each on a quoted passage or on the document as a whole. They are kept with the pane and find their passage again by its text when the file changes. The window turns them into a review in Markdown and hands it to the terminal the document was opened from, usually an agent's, or to another terminal, the scratchpad, the clipboard or a file. Annotations are made and read only through the window: processes in panes cannot read or change them and see a review only when the user sends it.
+
+## Requirements
 
 ### Requirement: Annotations On A Viewer Pane
 A viewer pane (see `viewer-panes`) SHALL carry a list of annotations, empty when the pane opens. Each annotation SHALL have an ID chosen by the window, of the form `ann-` followed by 16 lowercase hex characters, unique within its pane, and a kind: `comment`, `question`, `change` (a suggested replacement) or `delete` (a suggested deletion). An annotation SHALL either name a passage as its target, with the view it was taken from (`source` or `rendered`), the quoted text, up to 32 characters of context before and after it, and the source lines of the passage when it was annotated, or name no passage as a general comment, which SHALL be a `comment` or a `question`. A `comment` and a `question` SHALL carry a remark; a `change` SHALL carry a replacement that is not empty and MAY carry a remark; a `delete` MAY carry a remark. A pane SHALL hold at most 100 annotations and at most 262,144 bytes of text over all of them; a remark, a replacement and a quote SHALL be at most 16,384 bytes each and a context at most 256 bytes; lines SHALL lie between 1 and 10,000,000 with the first not after the last. The server SHALL refuse an operation that breaks these rules, or names a pane that is not a viewer pane, as a whole and without changing the workspace. A window SHALL offer annotations for documents shown as text, rendered or as source, and none for images and binary files.

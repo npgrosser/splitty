@@ -43,7 +43,7 @@ The control API SHALL read and modify the same workspace state that native and W
 - **THEN** the returned screen contains the new pane
 
 ### Requirement: Workspace and Screen Queries
-`GET /api/mux/state` SHALL return the complete workspace state, and `GET /api/mux/screen/{id}` SHALL return the state of a single screen, with payload shapes as described by `WorkspaceState` and `ScreenState` in `docs/protocol.ts`, except that no session carries its `scratchpad` (see `session-scratchpad`) and no viewer pane's `text` document carries its text (see `viewer-panes`). A request for an unknown screen id MUST answer status 404 with the JSON body `{"error": "screen not found"}`.
+`GET /api/mux/state` SHALL return the complete workspace state, and `GET /api/mux/screen/{id}` SHALL return the state of a single screen, with payload shapes as described by `WorkspaceState` and `ScreenState` in `docs/protocol.ts`, except that no session carries its `scratchpad` (see `session-scratchpad`), no viewer pane's `text` document carries its text (see `viewer-panes`), and no viewer pane carries its `annotations` (see `viewer-annotations`). A request for an unknown screen id MUST answer status 404 with the JSON body `{"error": "screen not found"}`.
 
 #### Scenario: Existing screen
 - **WHEN** a client sends `GET /api/mux/screen/{id}` for an existing screen
@@ -60,6 +60,10 @@ The control API SHALL read and modify the same workspace state that native and W
 #### Scenario: Viewer text omitted
 - **WHEN** a viewer pane shows a terminal selection and a process in a pane sends `GET /api/mux/state` over the control socket
 - **THEN** the viewer pane appears with its `viewer` record but without the selected text
+
+#### Scenario: Annotations omitted
+- **WHEN** a viewer pane holds annotations and a client sends `GET /api/mux/state` or `GET /api/mux/screen/{id}` for its screen
+- **THEN** the viewer pane appears with its `viewer` record but without `annotations`
 
 ### Requirement: Screen Summary List
 `GET /api/mux/screens` SHALL return a JSON array with one entry per screen in workspace screen order, each carrying `id`, `name`, `paneCount` and `active`, where `active` is true for exactly the workspace's active screen and false for all others.
@@ -80,7 +84,7 @@ The control API SHALL read and modify the same workspace state that native and W
 - **THEN** the response has `serverMode` `daemon`, `screens` 2 and `sessions` 3
 
 ### Requirement: Submitting Layout Operations
-`POST /api/mux/op` SHALL accept a JSON body `{"screenId": string, "op": object}` and apply `op` to the workspace with the semantics defined in `workspace-model`. On success the server MUST respond with status 200 and `{"ok": true, "revision": n, "screenId": string, "created": array}`, where `screenId` is the actual affected screen, `n` is its post-op revision or zero if it was removed, and `created` lists the `paneId` and `sessionId` of successfully started sessions. For `open_viewer` the response SHALL also carry `paneId`, the viewer pane that shows the document, and `reused`, true when that pane existed before (see `viewer-panes`, Reopening A File). Managed-job operations SHALL use the same semantics, authorization and idempotency as the job endpoints. A session spawn failure MUST NOT be answered as `ok: true`. An op of type `set_scratchpad` MUST be refused with status 400 and leave the workspace unchanged (see `session-scratchpad`).
+`POST /api/mux/op` SHALL accept a JSON body `{"screenId": string, "op": object}` and apply `op` to the workspace with the semantics defined in `workspace-model`. On success the server MUST respond with status 200 and `{"ok": true, "revision": n, "screenId": string, "created": array}`, where `screenId` is the actual affected screen, `n` is its post-op revision or zero if it was removed, and `created` lists the `paneId` and `sessionId` of successfully started sessions. For `open_viewer` the response SHALL also carry `paneId`, the viewer pane that shows the document, and `reused`, true when that pane existed before (see `viewer-panes`, Reopening A File). Managed-job operations SHALL use the same semantics, authorization and idempotency as the job endpoints. A session spawn failure MUST NOT be answered as `ok: true`. An op of type `set_scratchpad`, `put_annotations` or `remove_annotations` MUST be refused with status 400 and leave the workspace unchanged (see `session-scratchpad` and `viewer-annotations`).
 
 #### Scenario: Split a pane
 - **WHEN** a client posts `{"screenId": "s1", "op": {"type": "split_pane", "paneId": "p1", "axis": "horizontal"}}` and the op is valid for screen `s1`
@@ -107,6 +111,10 @@ The control API SHALL read and modify the same workspace state that native and W
 #### Scenario: Open the same file again
 - **WHEN** the same request is posted again while that viewer pane exists
 - **THEN** the server responds with the same `paneId` and `reused` true, and the screen holds no new pane
+
+#### Scenario: Annotations refused
+- **WHEN** a client posts an op of type `put_annotations` or `remove_annotations`
+- **THEN** the server responds with status 400, and no annotation changes
 
 ### Requirement: Operation Targeting
 The server SHALL apply the op types `create_screen`, `close_screen`, `rename_screen`, `set_active_screen` and `move_pane_to_screen` as workspace operations and the existing other layout op types as screen operations on the screen named by `screenId`. `close_screen`, `rename_screen` and `set_active_screen` target `screenId`; `move_pane_to_screen` moves from `screenId`; `create_screen` ignores the envelope's `screenId`, takes the new screen's id from the op's own `screenId` field or generates one, and uses the default shell profile when the op names none. A screen operation whose `paneId` the named screen does not hold, while another screen does, SHALL be applied to the screen that holds the pane, so a shell whose pane moved keeps targeting it; a managed job's pane never moves, so for it the mismatch stays a conflicting target. Managed-job operations SHALL target their declared placement or job ID, as specified in `workspace-model`, and reject conflicting envelope targets rather than retargeting silently; an owner's tab or split placement whose screen no longer holds its pane SHALL follow the pane, an agent grant's SHALL NOT (see `access-control`).

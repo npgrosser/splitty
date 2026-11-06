@@ -32,7 +32,7 @@ A screen's layout tree SHALL consist of two node kinds: a `slot`, which holds an
 - **THEN** both panes occupy the same area and only one of them is shown at a time
 
 ### Requirement: Layout Operations
-The server SHALL change the workspace only through operations: workspace-level `create_screen`, `close_screen`, `rename_screen`, `set_active_screen`, `reorder_screens`, `move_pane_to_screen`, and screen-level `split_pane`, `new_tab`, `close_pane`, `resize_split`, `move_pane`, `arrange_panes`, `select_tab`, `float_pane`, `dock_pane`, `move_float`, `set_scratchpad`, `open_viewer`, plus `create_job`, `stop_job`, `forget_job`, and trusted job lifecycle/ownership operations. An operation SHALL have the same effect on the model whether it arrives over `mux-protocol` or `control-api`, except `set_scratchpad`, which only `mux-protocol` accepts (see `session-scratchpad`). Job operations SHALL preserve the authorization and idempotency rules of `managed-jobs` at every entry point; lifecycle and ownership updates SHALL not be accepted as arbitrary client-authored state.
+The server SHALL change the workspace only through operations: workspace-level `create_screen`, `close_screen`, `rename_screen`, `set_active_screen`, `reorder_screens`, `move_pane_to_screen`, and screen-level `split_pane`, `new_tab`, `close_pane`, `resize_split`, `move_pane`, `arrange_panes`, `select_tab`, `float_pane`, `dock_pane`, `move_float`, `set_scratchpad`, `open_viewer`, `put_annotations`, `remove_annotations`, plus `create_job`, `stop_job`, `forget_job`, and trusted job lifecycle/ownership operations. An operation SHALL have the same effect on the model whether it arrives over `mux-protocol` or `control-api`, except `set_scratchpad`, `put_annotations` and `remove_annotations`, which only `mux-protocol` accepts (see `session-scratchpad` and `viewer-annotations`). Job operations SHALL preserve the authorization and idempotency rules of `managed-jobs` at every entry point; lifecycle and ownership updates SHALL not be accepted as arbitrary client-authored state.
 
 #### Scenario: Same op from two transports
 - **WHEN** an identical `split_pane` op is applied once via a WebSocket client and once via the HTTP control API against identical workspaces
@@ -53,6 +53,10 @@ The server SHALL change the workspace only through operations: workspace-level `
 #### Scenario: Viewer from both transports
 - **WHEN** an identical `open_viewer` op is applied once via a WebSocket client and once via the HTTP control API against identical workspaces
 - **THEN** both resulting workspaces hold the same viewer pane in the same place, and neither spawns a session
+
+#### Scenario: Annotations only through the window
+- **WHEN** a `put_annotations` or `remove_annotations` op arrives over the control API
+- **THEN** the server refuses it, and the workspace stays unchanged
 
 ### Requirement: Atomic Rejection
 The server MUST validate every operation against the current state and MUST leave the whole workspace unchanged when an operation is rejected. A rejected operation SHALL NOT spawn or end any session.
