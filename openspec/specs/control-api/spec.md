@@ -84,7 +84,7 @@ The control API SHALL read and modify the same workspace state that native and W
 - **THEN** the response has `serverMode` `daemon`, `screens` 2 and `sessions` 3
 
 ### Requirement: Submitting Layout Operations
-`POST /api/mux/op` SHALL accept a JSON body `{"screenId": string, "op": object}` and apply `op` to the workspace with the semantics defined in `workspace-model`. On success the server MUST respond with status 200 and `{"ok": true, "revision": n, "screenId": string, "created": array}`, where `screenId` is the actual affected screen, `n` is its post-op revision or zero if it was removed, and `created` lists the `paneId` and `sessionId` of successfully started sessions. For `open_viewer` the response SHALL also carry `paneId`, the viewer pane that shows the document, `reused`, true when that pane existed before (see `viewer-panes`, Reopening A File), and `viewerRevision`, the revision of that pane's viewer record after the operation. Managed-job operations SHALL use the same semantics, authorization and idempotency as the job endpoints. A session spawn failure MUST NOT be answered as `ok: true`. An op of type `set_scratchpad`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies` or `mark_sent` MUST be refused with status 400 and leave the workspace unchanged (see `session-scratchpad` and `viewer-annotations`).
+`POST /api/mux/op` SHALL accept a JSON body `{"screenId": string, "op": object}` and apply `op` to the workspace with the semantics defined in `workspace-model`. On success the server MUST respond with status 200 and `{"ok": true, "revision": n, "screenId": string, "created": array}`, where `screenId` is the actual affected screen, `n` is its post-op revision or zero if it was removed, and `created` lists the `paneId` and `sessionId` of successfully started sessions. For `open_viewer` the response SHALL also carry `paneId`, the viewer pane that shows the document, `reused`, true when that pane existed before (see `viewer-panes`, Reopening A File), and `viewerRevision`, the revision of that pane's viewer record after the operation. Managed-job operations SHALL use the same semantics, authorization and idempotency as the job endpoints. A session spawn failure MUST NOT be answered as `ok: true`. An op of type `apply_template`, `set_scratchpad`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies` or `mark_sent` MUST be refused with status 400 and leave the workspace unchanged (see `session-scratchpad` and `viewer-annotations`).
 
 #### Scenario: Split a pane
 - **WHEN** a client posts `{"screenId": "s1", "op": {"type": "split_pane", "paneId": "p1", "axis": "horizontal"}}` and the op is valid for screen `s1`
@@ -363,3 +363,10 @@ Launch JSON SHALL be at most 128 KiB, with at most 256 arguments totaling 64 KiB
 #### Scenario: Caller gone
 - **WHEN** the waiting process is killed
 - **THEN** the wait ends, and `v1`'s viewer record no longer names it
+
+### Requirement: Template Extraction Endpoint
+Authenticated windows SHALL extract a template with `POST /api/templates/extract/screen` or native `template.extract`, using the request and response in docs/protocol.ts. Missing screens SHALL return 404 and screens with no tiled terminals SHALL return 400. This endpoint SHALL NOT be exposed on owner control or restricted agent sockets.
+
+#### Scenario: Transport parity
+- **WHEN** the same extraction is requested over authenticated HTTP and native API
+- **THEN** both return equivalent templates or equivalent errors without changing the screen

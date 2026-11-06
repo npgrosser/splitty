@@ -1,10 +1,10 @@
-# Spec Delta
+# templates Specification
 
 ## Purpose
 
 Templates capture reusable terminal layouts and launch data, and apply them through the authoritative workspace on the target server.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Authoritative Template Application
 Applying a template SHALL replace an existing screen or create a new screen with its terminal tabs, splits, ratios and floating bounds. The target server SHALL own every resulting pane and session. The window SHALL project the layout immediately and attach only to server-confirmed sessions.

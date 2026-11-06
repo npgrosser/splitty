@@ -1,10 +1,10 @@
-# Spec Delta
+# settings Specification
 
 ## Purpose
 
 Settings belong to each server and govern its terminal, workspace, appearance, shell, editor, and notification behavior for all connected windows.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Server Settings and Metadata
 The server SHALL return its current settings at `GET /api/home/settings` and defaults and field limits at `GET /api/home/settings/metadata`, including numeric bounds and steps and allowed values. Defaults MUST reflect that server's platform and profile detection. A window SHALL derive controls and reset values from this metadata when available.

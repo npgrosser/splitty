@@ -188,7 +188,7 @@ Control commands that act on a pane or screen SHALL use `--pane` and `--screen` 
 - **THEN** the CLI reports the server's error and exits with status 1
 
 ### Requirement: Layout and Screen Commands
-`split`, `close-pane`, `new-screen [--name <name>]`, `close-screen` and `rename-screen <name>` SHALL each submit one multiplexer operation through the mux operation endpoint (see `control-api`), whose effect is specified in `workspace-model`, and print a one-line confirmation on success. `split` SHALL request a `vertical` split (new pane below, stacked top to bottom; see `workspace-model`, Layout Tree Shape) by default and a `horizontal` split (new pane to the right, side by side) with `-H`/`--horizontal`.
+`split`, `close-pane`, `new-screen [--name <name>]`, `close-screen` and `rename-screen <name>` SHALL each submit one multiplexer operation through the mux operation endpoint (see `control-api`), whose effect is specified in `workspace-model`, and print a one-line confirmation on success. `split` SHALL request a `vertical` split (new pane below, stacked top to bottom; see `workspace-model`, Layout Tree Shape) by default and a `horizontal` split (new pane to the right, side by side) with `-H`/`--horizontal`. Plain-text pane listings SHALL render control and bidirectional formatting characters in metadata as visible replacement characters rather than terminal instructions or extra lines; JSON output SHALL retain JSON escaping.
 
 #### Scenario: Default split
 - **WHEN** a user runs `splitty split` inside a pane
@@ -578,7 +578,7 @@ The guide SHALL explain listing existing jobs before launch, background placemen
 - **THEN** the CLI prints an error that the command is not available on this platform and exits with status 1
 
 ### Requirement: Attach Target Selection
-`<target>` SHALL name a pane or a session by its id, or by a prefix of at least 4 characters that matches exactly one pane or session id of the server; a target that matches none or several SHALL fail with a command error naming the candidates. Without a target, on a terminal, the command SHALL list the server's panes bound to a session, numbered, with screen name, pane title and working directory, and attach to the one the user picks. It SHALL NOT default to `SPLITTY_PANE_ID`.
+`<target>` SHALL name a pane or a session by its id, or by a prefix of at least 4 characters that matches exactly one pane or session id of the server; a target that matches none or several SHALL fail with a command error naming the candidates. Without a target, on a terminal, the command SHALL list the server's panes bound to a session, numbered, with screen name, pane title and working directory, and attach to the one the user picks. It SHALL NOT default to `SPLITTY_PANE_ID`. Plain-text pane listings SHALL render control and bidirectional formatting characters in metadata as visible replacement characters rather than terminal instructions or extra lines; JSON output SHALL retain JSON escaping.
 
 #### Scenario: Pane by prefix
 - **WHEN** a pane's id starts with `3f9a` and no other pane or session id does, and the user runs `splitty attach 3f9a`
@@ -599,6 +599,10 @@ The guide SHALL explain listing existing jobs before launch, background placemen
 #### Scenario: Own session refused
 - **WHEN** the target resolves to the session named by the command's own `SPLITTY_SESSION_ID`
 - **THEN** the CLI prints `Error: cannot attach to the session this command runs in` and exits with status 1
+
+#### Scenario: Process metadata contains terminal controls
+- **WHEN** a pane title or working directory contains control or bidirectional formatting characters
+- **THEN** the attach listing displays visible replacements and does not execute terminal instructions or forge extra rows
 
 ### Requirement: Attach Server And Credential
 `splitty attach` SHALL use the server given by both `--addr` and `--token`, otherwise the daemon recorded in the daemon info file, never `SPLITTY_SOCK`. For a daemon it SHALL verify and negotiate the private client endpoint and use its native session stream, without reading a token file or opening TCP. An explicit `--addr` with `--token` continues to target an explicitly running browser gateway using its guarded WebSocket. It SHALL print no credential. Without either server it SHALL use the keepers of this machine (Attach Without A Daemon), and without those fail with a command error naming both ways.

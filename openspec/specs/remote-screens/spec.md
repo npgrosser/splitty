@@ -20,6 +20,9 @@ Before the relay the hub SHALL send only these application text messages:
 
 After `remote.ready`, the hub SHALL send no application message of its own; transport negotiation/liveness is outside this application stream. When the connection to the host ends, it SHALL close the WebSocket with code 4001 or the native stream with the equivalent host-lost reason. When the socket closes, it SHALL end its `ssh` process. Each socket SHALL use an SSH connection of its own. Once `remote.ready` is sent, the server SHALL record the target as a recent host (see `remote-hosts`, Known Hosts).
 
+
+The ready message SHALL include `update: {available, keepsSessions}`. Every hub error SHALL include `retryable`; the client SHALL use this classification when present and retain legacy classification only for older hubs. After readiness the hub SHALL validate and persist the handshake directory without interpreting relayed frames. Invalid or unwritable cache data SHALL not fail an otherwise usable connection.
+
 #### Scenario: Connect a host without Splitty
 - **WHEN** a client opens `/ws/remote?target=vm1` with a valid ticket and `vm1` has no Splitty
 - **THEN** it receives `remote.progress` messages for the install and the daemon start, then `remote.ready` with `started` true, then the host daemon's `mux.welcome`
@@ -39,6 +42,10 @@ After `remote.ready`, the hub SHALL send no application message of its own; tran
 #### Scenario: Ready from a daemon that keeps its sessions
 - **WHEN** a client opens `/ws/remote` for a host whose daemon keeps its sessions
 - **THEN** its `remote.ready` carries `keepsSessions` true in `daemon`
+
+#### Scenario: Authoritative retry classification
+- **WHEN** a reconnect fails and the hub reports `retryable: false`
+- **THEN** the client stops automatic retrying even if an older client classified that error code as transient
 
 ### Requirement: Remote Screen Protocol Check
 Before it starts the bridge, the server SHALL require a supported native transport and compare the host daemon's protocol version from the handshake with its own. It SHALL accept the same version and the one before (see `remote-hosts`, Protocol Version). A missing or unsupported native transport SHALL also be incompatible. Otherwise it SHALL send `remote.error` with code `incompatible`, the daemon's `version`, `protocol` and `keepsSessions`, and its `screens` as in `remote.ready`, and close the socket. Ordinary connection SHALL NOT stop or replace the host's daemon. A positively eligible legacy daemon SHALL additionally report a structured migration offer; a blocked legacy daemon SHALL report `migration_unavailable` with its reason.
@@ -159,6 +166,9 @@ The client SHALL retain host groups for recently connected hosts even when they 
 
 The intent SHALL apply to one connection attempt and be consumed before a potentially mutating command; reconnect and ambiguous completion SHALL NOT replay it. Successful replacement SHALL report update progress and require a fresh handshake for the intended native daemon. A daemon already running the intended version SHALL remain running. Migration offers SHALL be structured metadata rather than inferred from message text; blocked legacy migration SHALL use `migration_unavailable` and SHALL NOT offer an ordinary update that cannot succeed.
 
+
+The hub SHALL report ordinary update availability only when the daemon version has lower SemVer precedence than its own version, accepting one optional `v` prefix and ignoring build metadata. Unknown versions SHALL not imply an available update. Availability SHALL also require the verified instance, session preservation and matching prepared replacement required by the shared replacement plan. The window SHALL use this metadata, including the keeper behavior, rather than comparing versions itself. This metadata SHALL never bypass the replacement checks above.
+
 #### Scenario: Update a compatible older host
 - **WHEN** a user confirms updating an older native daemon with keepers and a matching replacement
 - **THEN** the instance-bound update preserves keeper sessions and connects to the freshly verified replacement
@@ -174,6 +184,10 @@ The intent SHALL apply to one connection attempt and be consumed before a potent
 #### Scenario: Migration unavailable
 - **WHEN** legacy process identity or keeper compatibility cannot be verified
 - **THEN** the UI explains the blocked reason and does not present a working update action or end sessions
+
+#### Scenario: Newer or unparseable host version
+- **WHEN** the daemon version is newer, equal in precedence, or unparseable
+- **THEN** update availability is false and the window offers no ordinary update
 
 ### Requirement: Port Forwards Through The Hub
 The server SHALL offer forwards from a local port to a port of a host:
@@ -249,6 +263,9 @@ Hidden hosts SHALL be excluded from catalog reads. An update for a hidden host S
 
 The file `remote-catalog.json` SHALL be written atomically with mode 0600 in the private configuration directory. It SHALL keep at most 20 host entries, each with at most 200 screens. Targets SHALL be valid and canonical, screen ids unique per host with 1–256 characters, names at most 200 characters, and pane counts nonnegative integers. Invalid writes and unknown fields SHALL be rejected without modifying the saved directory. Missing or corrupt files SHALL read as empty. The endpoints SHALL require the ordinary API authentication and origin checks and SHALL NOT be exposed on the control socket.
 
+
+After successful host readiness the hub SHALL store the handshake screen directory through the same validation and hidden-host rules. A local client MAY report later directory observations using `hub.catalog.observe` with `{target,screens}`; admitted observations SHALL be processed in connection order and SHALL never connect a host. Persistence and invalidation SHALL be handled by the hub; legacy PUT remains available.
+
 #### Scenario: Host directories survive a local restart
 - **WHEN** directories for `vm1` and `vm2` are saved and `vm1` is updated
 - **THEN** a subsequent read after server reconstruction returns the updated `vm1` directory and the unchanged `vm2` directory
@@ -264,6 +281,14 @@ The file `remote-catalog.json` SHALL be written atomically with mode 0600 in the
 #### Scenario: Late observation after removal
 - **WHEN** an already attached host publishes its screen list after that host was forgotten
 - **THEN** it remains hidden and no cached directory is recreated
+
+#### Scenario: Catalog without a window writer
+- **WHEN** host readiness lists screens and the window sends no catalog PUT
+- **THEN** the local cache stores those screens, including a successful empty directory
+
+#### Scenario: Ordered observations
+- **WHEN** one local connection reports a screen rename and then removal
+- **THEN** the final cache reflects the removal and late hidden-host observations cannot recreate a forgotten directory
 
 ### Requirement: Screen Default Names Per Host
 The client SHALL assign new default screen names as `Screen N`, using the smallest unused positive integer independently for local screens and for each remote host. Known unopened screens on that same host SHALL reserve their names. Existing server, restored and user-selected names SHALL remain unchanged. A pending default name that collides with a newly discovered screen on its host SHALL be adjusted before creation; names on another host SHALL NOT affect it.
@@ -452,3 +477,37 @@ An authorized native main client SHALL have equivalents of the existing host, pr
 #### Scenario: Native saved forwarding
 - **WHEN** a native main window deliberately connects a host
 - **THEN** only that host's enabled saved forwards/reverse forwards may restore, with the existing Stop, Forget, ordering and endpoint-exclusion rules
+
+### Requirement: Merged Host Directory
+`GET /api/remote/directory` and native `remote.directory.get` SHALL return a deduplicated directory and saved host order using the shapes in `docs/protocol.ts`. It SHALL combine known hosts, aliases, cached screens, and hosts of saved or active forwards and reverse forwards, excluding hidden hosts and applying saved group order. Reads SHALL not connect hosts. Native remote-window and restricted callers SHALL not gain this operation.
+
+#### Scenario: Sources merged without connection
+- **WHEN** one host appears in SSH configuration, cached screens and saved forwards and another appears only in reverse forwards
+- **THEN** both visible hosts appear once, with aliases and cached screen data preserved, in saved group order, and no SSH process starts
+
+#### Scenario: Forgotten host still has a tunnel
+- **WHEN** a hidden host retains an active forward
+- **THEN** the passive directory excludes it and the forward keeps running
+
+#### Scenario: Restricted caller
+- **WHEN** a remote-window native connection or owner/grant control socket requests the merged local directory
+- **THEN** the request is rejected and no metadata is exposed
+
+### Requirement: Hub Changes On The Local Connection
+A hub supporting `hub-host-decisions-v1` SHALL notify local clients with `hub.changed` after host metadata, active or saved forwards, restoration errors, or supervised up/down state changes. Notifications MAY coalesce, but a subscribed client SHALL be able to refresh the final state. They SHALL not be injected into host relays. Clients SHALL refresh passively on notification and reconnect, without polling a supporting hub or starting tunnels.
+
+#### Scenario: Another window edits a mapping
+- **WHEN** one window saves, pauses or forgets a mapping
+- **THEN** other subscribed local windows refresh the resulting state without waiting for a poll
+
+#### Scenario: A forward loses its SSH process
+- **WHEN** a forward or reverse forward becomes down and is subsequently rebuilt
+- **THEN** local clients are notified of changes and passive reads expose the current state
+
+#### Scenario: Notification during a local mutation
+- **WHEN** an invalidation arrives while the window is changing a mapping
+- **THEN** a refresh after the mutation reads the latest state and no stale response resurrects removed data
+
+#### Scenario: Reconnect and old hubs
+- **WHEN** a client reconnects to the local hub
+- **THEN** it refreshes current metadata and forwards; polling is used only if the hub lacks the capability

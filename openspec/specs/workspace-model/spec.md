@@ -32,7 +32,7 @@ A screen's layout tree SHALL consist of two node kinds: a `slot`, which holds an
 - **THEN** both panes occupy the same area and only one of them is shown at a time
 
 ### Requirement: Layout Operations
-The server SHALL change the workspace only through operations: workspace-level `create_screen`, `close_screen`, `rename_screen`, `set_active_screen`, `reorder_screens`, `move_pane_to_screen`, and screen-level `split_pane`, `new_tab`, `close_pane`, `resize_split`, `move_pane`, `arrange_panes`, `select_tab`, `float_pane`, `dock_pane`, `move_float`, `set_scratchpad`, `open_viewer`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies`, `mark_sent`, plus `create_job`, `stop_job`, `forget_job`, trusted job lifecycle/ownership operations, and trusted viewer operations the server derives from control API requests: an agent's reply to an annotation, and the start and end of a wait for a review (see `viewer-annotations`). An operation SHALL have the same effect on the model whether it arrives over `mux-protocol` or `control-api`, except `set_scratchpad`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies` and `mark_sent`, which only `mux-protocol` accepts (see `session-scratchpad` and `viewer-annotations`). Job operations SHALL preserve the authorization and idempotency rules of `managed-jobs` at every entry point; lifecycle and ownership updates SHALL not be accepted as arbitrary client-authored state, and neither SHALL the trusted viewer operations over any transport.
+The server SHALL change the workspace only through operations: workspace-level `apply_template`, `create_screen`, `close_screen`, `rename_screen`, `set_active_screen`, `reorder_screens`, `move_pane_to_screen`, and screen-level `split_pane`, `new_tab`, `close_pane`, `resize_split`, `move_pane`, `arrange_panes`, `select_tab`, `float_pane`, `dock_pane`, `move_float`, `set_scratchpad`, `open_viewer`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies`, `mark_sent`, plus `create_job`, `stop_job`, `forget_job`, trusted job lifecycle/ownership operations, and trusted viewer operations the server derives from control API requests: an agent's reply to an annotation, and the start and end of a wait for a review (see `viewer-annotations`). An operation SHALL have the same effect on the model whether it arrives over `mux-protocol` or `control-api`, except `apply_template`, `set_scratchpad`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies` and `mark_sent`, which only `mux-protocol` accepts (see `templates`, `session-scratchpad` and `viewer-annotations`). Job operations SHALL preserve the authorization and idempotency rules of `managed-jobs` at every entry point; lifecycle and ownership updates SHALL not be accepted as arbitrary client-authored state, and neither SHALL the trusted viewer operations over any transport.
 
 #### Scenario: Same op from two transports
 - **WHEN** an identical `split_pane` op is applied once via a WebSocket client and once via the HTTP control API against identical workspaces
@@ -106,7 +106,7 @@ The server SHALL use a client-supplied `screenId` (on `create_screen`) and `newP
 - **THEN** the new viewer pane has that ID, and no session is created
 
 ### Requirement: Screen Creation
-On `create_screen` the server SHALL create a screen whose root layout is a single slot holding one new `terminal` pane backed by one new session. The session SHALL use the shell profile given in the op, or the server's default shell profile when none is given. A new screen SHALL be appended to the end of the screen order, and SHALL become the active screen only if the workspace had no active screen. If `screenId` names an existing screen without any pane, the server SHALL re-create that screen in place: its layout becomes a single slot with the new pane, it keeps its name unless the op gives one, and it keeps its place in the screen order. If `screenId` names an existing screen that has at least one pane, in its root layout or in a floating entry, the server SHALL reject the op with a "screen already exists" error.
+On `create_screen` the server SHALL create a screen whose root layout is a single slot holding one new `terminal` pane backed by one new session. The session SHALL use the shell profile given in the op, or the server's default shell profile when none is given. A new screen SHALL be appended to the end of the screen order, and SHALL become the active screen only if the workspace had no active screen. If `screenId` names an existing screen without any pane, the server SHALL re-create that screen in place: its layout becomes a single slot with the new pane, it keeps its name unless the op gives one, and it keeps its place in the screen order. If `screenId` names an existing screen that has at least one pane, in its root layout or in a floating entry, the server SHALL reject the op with a "screen already exists" error. If no name is supplied or retained, the server SHALL assign the first unused name Screen N within this workspace.
 
 #### Scenario: First screen becomes active
 - **WHEN** `create_screen` is applied to a workspace without screens
@@ -183,7 +183,7 @@ On `new_tab` the server SHALL require that `paneId` exists in a slot of the scre
 - **AND** all other groups and their sizes remain unchanged
 
 ### Requirement: Split Session Inheritance
-The session of a pane created by `split_pane` or `new_tab` SHALL start in the op's `cwd` if given, else in the source pane's known working directory, else in the source session's working directory. It SHALL use the op's shell profile if given, else the source session's shell profile, else, for a source pane without a session such as a viewer pane, the default shell profile. The source session's legacy shell value SHALL be inherited only when the op names no shell profile.
+The session of a pane created by `split_pane` or `new_tab` SHALL start in the op's `cwd` if given, else in the source pane's known working directory, else in the source session's working directory. It SHALL use the op's shell profile if given, else the source session's shell profile, else, for a source pane without a session such as a viewer pane, the default shell profile. The source session's legacy shell value SHALL be inherited only when the op names no shell profile. On a server advertising serverDerivedPaneState, clients SHALL send cwd and shell profile only when explicitly selected; new tabs and splits use the same server inheritance.
 
 #### Scenario: Inherit profile and directory
 - **WHEN** a pane whose session uses profile `zsh` in `/work` is split without `cwd` or profile
@@ -362,7 +362,7 @@ On `move_pane_to_screen` with the source screen as the envelope's `screenId`, a 
 - **AND** no session is started or ended
 
 ### Requirement: New Screen from a Pane Move
-With `createScreen: true`, `move_pane_to_screen` SHALL create the target as a new screen with that ID, named `screenName` when given, holding only the pane and placed right after the source in the screen order.
+With `createScreen: true`, `move_pane_to_screen` SHALL create the target as a new screen with that ID, named `screenName` when given, holding only the pane and placed right after the source in the screen order. When screenName is omitted, the server SHALL assign the first unused name Screen N within this workspace.
 
 #### Scenario: Move to a new screen
 - **WHEN** `move_pane_to_screen` moves `p2` from `s1` to `s9` with `createScreen` true and `screenName` "Logs"
@@ -429,3 +429,22 @@ On `select_tab` the server SHALL require that `paneId` exists in a slot of the s
 #### Scenario: A pane in no slot
 - **WHEN** `select_tab` names a pane ID the screen does not hold
 - **THEN** the op is rejected and the layout is unchanged
+
+### Requirement: Applying a Template Layout
+The `apply_template` operation SHALL register a complete terminal layout atomically before running lifecycle effects. Replacement SHALL retain the screen name and order and increase its revision; creation SHALL use the supplied screen ID and template name. Every supplied pane ID SHALL be unique throughout the workspace.
+
+#### Scenario: Atomic replacement
+- **WHEN** a valid replacement or creation is accepted
+- **THEN** every new pane is registered and replaced sessions are ended through the normal lifecycle
+- **AND** invalid templates or colliding IDs leave all workspace state unchanged
+
+### Requirement: Server Close On Exit
+The owning server SHALL apply its close_on_exit setting to ordinary terminal panes without requiring a client: always closes any exit, graceful only a known zero exit, never retains. Managed job panes SHALL retain their outcome. Automatic closure SHALL use the normal pane closing behavior, retaining an empty screen.
+
+#### Scenario: Unattended exit
+- **WHEN** an ordinary pane exits successfully while no client is attached and close_on_exit is graceful
+- **THEN** its pane and session are removed and its empty screen remains
+
+#### Scenario: Retained outcomes
+- **WHEN** an ordinary pane fails under graceful, exits under never, or a managed job exits under any policy
+- **THEN** the pane and its output remain available
