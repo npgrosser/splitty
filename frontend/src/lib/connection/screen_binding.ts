@@ -181,17 +181,27 @@ export class ScreenBinding {
 // same everywhere.
 
 const layoutBindings = new Map<string, ScreenBinding>();
+/** Each screen's layout by its key in the window, for a pane that reaches into another screen. */
+const screenLayouts = new Map<string, { readonly api: DockviewApi; readonly binding: ScreenBinding }>();
 
 export function registerScreenApi(api: DockviewApi, binding: ScreenBinding): void {
   layoutBindings.set(api.id, binding);
+  screenLayouts.set(binding.key, { api, binding });
 }
 
 export function unregisterScreenApi(api: DockviewApi): void {
+  const binding = layoutBindings.get(api.id);
   layoutBindings.delete(api.id);
+  if (binding && screenLayouts.get(binding.key)?.api.id === api.id) screenLayouts.delete(binding.key);
 }
 
 export function bindingForApi(api: DockviewApi): ScreenBinding | undefined {
   return layoutBindings.get(api.id);
+}
+
+/** The layout and binding of the screen with the window key `key`. */
+export function layoutForScreen(key: string): { readonly api: DockviewApi; readonly binding: ScreenBinding } | undefined {
+  return screenLayouts.get(key);
 }
 
 /** The session shown in `paneId` of the screen whose layout is `api`. */

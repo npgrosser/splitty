@@ -86,7 +86,7 @@ Closing a viewer pane that holds annotations SHALL ask first, as closing a pane 
 - **THEN** the window asks before quitting
 
 ### Requirement: The Review
-A window SHALL turn a pane's annotations into one Markdown text, the review: a heading with the file's name or the text document's title; for a file, its absolute path; then each annotation in the order of the pane's list, numbered, with its current lines, or its recorded lines and a note when its passage was not found, no lines for a passage of a rendered HTML page, its kind, its quote as a block quote, its remark, and for a `change` its replacement in a fenced block that its text cannot close; and the general comments last. The review SHALL contain nothing else.
+A window SHALL turn a pane's annotations into one Markdown text, the review: a heading with the file's name or the text document's title; for a file, its absolute path; then each annotation in the order of the pane's list, numbered, with its current lines, or its recorded lines and a note when its passage was not found, no lines for a passage of a rendered HTML page, its kind, its quote as a block quote, its remark, and for a `change` its replacement in a fenced block that its text cannot close; and the general comments last. The review SHALL contain nothing else. Control characters other than tab and line feed, and characters that change the direction of text, SHALL appear in the review as U+FFFD, wherever they come from, so that a pasted review cannot end a bracketed paste early or act as terminal input.
 
 #### Scenario: A plan with a question and a suggested change
 - **WHEN** a pane showing `/home/me/app/PLAN.md` holds a question on lines 12 to 14 and a suggested change on line 30
@@ -95,6 +95,10 @@ A window SHALL turn a pane's annotations into one Markdown text, the review: a h
 #### Scenario: A terminal selection
 - **WHEN** a pane showing a terminal selection titled `Selection from claude` holds a comment
 - **THEN** the review's heading names that title, and no path follows
+
+#### Scenario: A quote with an escape sequence
+- **WHEN** an annotated passage of a document holds the characters ESC `[201~` followed by a line of text
+- **THEN** the review shows U+FFFD in place of ESC, and pasting it ends no bracketed paste
 
 ### Requirement: Handing A Review To A Terminal
 A window SHALL offer to send a pane's review to a terminal pane of the same workspace: by default the viewer's origin while it exists as a terminal pane, otherwise one the user chooses among the terminal panes of the screen. Sending SHALL paste the review into the terminal as the user's own paste would, without submitting it, and focus that terminal. When the terminal's program has not enabled bracketed paste and the review has more than one line, the window SHALL instead store the review as a file and insert its path, and say so. The window SHALL also offer to store the review as a file on that terminal's server with `upload` and insert its quoted path, as a drop with path insertion does, and, when that server announced `scratchpad-v1` and the result stays within the scratchpad's limit, to append it to the terminal's scratchpad. Sending in any of these forms SHALL end the round: the window SHALL remove the annotations it sent and, for ten seconds, offer to put them back; an annotation added in the meantime SHALL stay. Copying the review to the clipboard and saving it as a download of the window SHALL keep the annotations.

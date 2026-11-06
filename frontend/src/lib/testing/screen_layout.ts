@@ -57,11 +57,13 @@ class NoResizeObserver {
   disconnect(): void {}
 }
 
-export function testScreen(options: { clientId?: string } = {}): TestScreen {
+/** `capabilities` are what the server announces; viewer panes without more. */
+export function testScreen(options: { clientId?: string; capabilities?: readonly string[] } = {}): TestScreen {
   const globals = globalThis as { ResizeObserver?: unknown };
   globals.ResizeObserver ??= NoResizeObserver;
   const { socket, conn } = fakeServer("local");
-  const welcome = (clientId: string) => socket.message({ type: "mux.welcome", clientId, screens: [], capabilities: [VIEWER_CAPABILITY] });
+  const capabilities = options.capabilities ?? [VIEWER_CAPABILITY];
+  const welcome = (clientId: string) => socket.message({ type: "mux.welcome", clientId, screens: [], capabilities });
   welcome(options.clientId ?? "client-1");
 
   const root = document.createElement("div");

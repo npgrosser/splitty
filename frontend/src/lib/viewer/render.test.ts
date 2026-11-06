@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { HOST_STYLE, RenderedDocument } from "./render.ts";
+import { lastLine } from "./anchoring.ts";
+import { ACTIVE_HIGHLIGHT, HIGHLIGHT, HOST_STYLE, RenderedDocument, renderedText, shadowSelection, type BoundaryRange } from "./render.ts";
 import { cssValueAllowed, documentSelector, sanitizeHtml } from "./sanitize.ts";
 
 /** A script that marks the document when it runs, `data-ran-<name>` on its root element. */
@@ -272,5 +273,161 @@ describe("documentSelector", () => {
   it("puts the wrappers in place of html, :root and body", () => {
     expect(documentSelector("html body .x")).toBe("[data-splitty-html] [data-splitty-body] .x");
     expect(documentSelector(":root, body > p, .body, #html, tbody")).toBe("[data-splitty-html], [data-splitty-body] > p, .body, #html, tbody");
+  });
+});
+
+// viewer-annotations: the rendered view's text, selections in its shadow root and its marks.
+describe("annotations in a rendered document", () => {
+  const PLAN = "# Plan\n\nThe first step.\n\n- retry three times\n- ship it\n";
+
+  function plan() {
+    const { rendered, root } = setup("/home/me/app/PLAN.md");
+    rendered.render("markdown", PLAN, lastLine(PLAN));
+    return { rendered, root, model: rendered.textModel()! };
+  }
+
+  function textNode(root: ShadowRoot, text: string): Text {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if ((node as Text).data.includes(text)) return node as Text;
+    }
+    throw new Error(`no text node with ${text}`);
+  }
+
+  function boundary(startContainer: Node, startOffset: number, endContainer = startContainer, endOffset = startOffset): BoundaryRange {
+    return { startContainer, startOffset, endContainer, endOffset, collapsed: startContainer === endContainer && startOffset === endOffset };
+  }
+
+  /** A selection of the document as an engine with `getComposedRanges` reports it. */
+  function selectComposed(range: BoundaryRange, form: "options" | "roots" = "options") {
+    const selection = {
+      rangeCount: 0,
+      getComposedRanges: (arg: unknown) => {
+        if (form === "roots" && !(arg instanceof ShadowRoot)) throw new TypeError("shadow roots expected");
+        return [range];
+      },
+    };
+    return vi.spyOn(document, "getSelection").mockReturnValue(selection as unknown as Selection);
+  }
+
+  afterEach(() => vi.restoreAllMocks());
+
+  it("gives the text with the source lines of its blocks", () => {
+    const { model } = plan();
+    const at = (text: string) => model.text.indexOf(text);
+    expect(model.text).toContain("Plan");
+    expect(model.text).not.toContain(".markdown-body");
+    expect(model.lines(at("Plan"), at("Plan") + 4)).toEqual({ startLine: 1, endLine: 1 });
+    expect(model.lines(at("first"), at("first") + 5)).toEqual({ startLine: 3, endLine: 3 });
+    expect(model.lines(at("retry"), at("retry") + 17)).toEqual({ startLine: 5, endLine: 5 });
+    expect(model.lines(at("first"), at("times") + 5)).toEqual({ startLine: 3, endLine: 5 });
+    expect(model.lines(at("first"), at("ship") + 4)).toEqual({ startLine: 3, endLine: 6 });
+  });
+
+  it("spans a passage of an HTML page over all of its source lines", () => {
+    const { rendered } = setup();
+    rendered.render("html", "<style>p { color: red }</style><p>one</p><p>two</p>", 7);
+    const model = rendered.textModel()!;
+    expect(model.text).not.toContain("color");
+    expect(model.lines(0, 3)).toEqual({ startLine: 1, endLine: 7 });
+  });
+
+  it("finds the offsets of boundary points in text and between nodes", () => {
+    const { root, model } = plan();
+    const retry = textNode(root, "retry three times");
+    const start = model.text.indexOf("retry three times");
+    expect(model.offsetOf(retry, 6)).toBe(start + 6);
+    expect(model.offsetOf(retry.parentElement!, 0)).toBe(start);
+    const body = root.querySelector(".markdown-body")!;
+    expect(model.offsetOf(body, body.childNodes.length)).toBe(model.text.length);
+    expect(model.offsetOf(document.body, 0)).toBeUndefined();
+    expect(model.offsetsOf(boundary(retry, 12, retry, 6))).toEqual({ start: start + 6, end: start + 12 });
+    expect(model.range(start, start + 5)!.toString()).toBe("retry");
+    expect(model.range(start, start)).toBeNull();
+  });
+
+  it("reads a selection in its shadow root with getComposedRanges in either form", () => {
+    const { rendered, root, model } = plan();
+    const retry = textNode(root, "retry three times");
+    const start = model.text.indexOf("retry");
+    const selected = boundary(retry, 0, retry, 17);
+
+    selectComposed(selected);
+    expect(shadowSelection(root)).toBe(selected);
+    expect(rendered.selectedPassage()).toEqual({ start, end: start + 17, range: selected });
+    vi.restoreAllMocks();
+
+    selectComposed(selected, "roots");
+    expect(shadowSelection(root)).toBe(selected);
+  });
+
+  it("reads a selection from the shadow root's own selection where there is no getComposedRanges", () => {
+    const { root } = plan();
+    const retry = textNode(root, "retry three times");
+    const selected = boundary(retry, 0, retry, 5);
+    vi.spyOn(document, "getSelection").mockReturnValue(null);
+    Object.assign(root, { getSelection: () => ({ rangeCount: 1, getRangeAt: () => selected }) });
+    expect(shadowSelection(root)).toBe(selected);
+  });
+
+  it("takes no selection that is empty or leaves the shadow root", () => {
+    const { rendered, root } = plan();
+    const retry = textNode(root, "retry three times");
+    selectComposed(boundary(retry, 3));
+    expect(shadowSelection(root)).toBeNull();
+    vi.restoreAllMocks();
+    selectComposed(boundary(retry, 0, document.body, 0));
+    expect(shadowSelection(root)).toBeNull();
+    expect(rendered.selectedPassage()).toBeUndefined();
+  });
+
+  it("marks the blocks of passages and of source lines where the engine has no highlights", () => {
+    const { rendered, root, model } = plan();
+    const start = model.text.indexOf("retry");
+    rendered.setMarks([{ start, end: start + 5 }]);
+    const items = root.querySelectorAll("li");
+    expect(items[0].getAttribute("data-splitty-mark")).toBe("");
+    expect(items[1].hasAttribute("data-splitty-mark")).toBe(false);
+
+    // A source annotation on line 3 and an active one on the list's lines: the innermost blocks.
+    rendered.setMarks([], [{ startLine: 3, endLine: 3 }, { startLine: 5, endLine: 6, active: true }]);
+    expect(root.querySelector("p")!.getAttribute("data-splitty-mark")).toBe("");
+    expect([...items].map((item) => item.getAttribute("data-splitty-mark"))).toEqual(["active", "active"]);
+    expect(root.querySelector("ul")!.hasAttribute("data-splitty-mark")).toBe(false);
+
+    rendered.render("markdown", PLAN, lastLine(PLAN));
+    expect(root.querySelectorAll("[data-splitty-mark]")).toHaveLength(0);
+  });
+
+  it("highlights passages with the window's highlights and takes them away again", () => {
+    const highlights = new Map<string, Set<AbstractRange>>();
+    vi.stubGlobal("Highlight", class extends Set<AbstractRange> {});
+    vi.stubGlobal("CSS", { highlights });
+    try {
+      const { rendered, model } = plan();
+      const start = model.text.indexOf("retry");
+      const first = model.text.indexOf("first");
+      rendered.setMarks([{ start, end: start + 17 }, { start: first, end: first + 5, active: true }]);
+      expect([...highlights.get(HIGHLIGHT)!].map(String)).toEqual(["retry three times"]);
+      expect([...highlights.get(ACTIVE_HIGHLIGHT)!].map(String)).toEqual(["first"]);
+
+      rendered.setMarks([]);
+      expect(highlights.get(HIGHLIGHT)!.size).toBe(0);
+      rendered.setMarks([{ start, end: start + 5 }]);
+      rendered.destroy();
+      expect(highlights.get(HIGHLIGHT)!.size).toBe(0);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("renders the text of a document shown as source without a live document", () => {
+    const { model } = plan();
+    const before = document.body.innerHTML;
+    const detached = renderedText(document, "markdown", PLAN, lastLine(PLAN));
+    expect(detached.text).toBe(model.text);
+    const start = detached.text.indexOf("retry");
+    expect(detached.lines(start, start + 5)).toEqual({ startLine: 5, endLine: 5 });
+    expect(document.body.innerHTML).toBe(before);
   });
 });

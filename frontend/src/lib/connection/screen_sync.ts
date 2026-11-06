@@ -31,6 +31,7 @@ export function connectScreenSync(conn: ServerConnection, policy: ScreenSyncPoli
     onWelcome: (_clientId, screens) => policy.welcome(screens),
     onSnapshot: (state) => {
       conn.scratchpads.snapshot(state);
+      conn.annotations.snapshot(state);
       policy.snapshot(state);
       // After the layout: a shown viewer pane whose revision rose reads at once.
       conn.viewers.snapshot(state);

@@ -38,14 +38,18 @@ const state = (root: LayoutNode, panes: PaneState[]): ScreenState => ({
  * A screen with the viewer panes of `panes`, in a window that has not loaded
  * the view yet: the modules are loaded anew, after the view's mock.
  */
-async function open(root: LayoutNode, panes: PaneState[]) {
+async function open(root: LayoutNode, panes: PaneState[], capabilities?: string[]) {
   vi.resetModules();
   const { testScreen } = await import("../lib/testing/screen_layout.ts");
   const { applyScreenSnapshot } = await import("../layout/screen_snapshot.ts");
   const { VIEW_LOAD_FAILED } = await import("./viewer_pane.ts");
-  const screen = testScreen();
+  const screen = testScreen({ capabilities });
   screens.push(screen);
-  const apply = (root: LayoutNode, panes: PaneState[]) => applyScreenSnapshot(screen.api, screen.binding, state(root, panes));
+  // As the connection's snapshot handler does: the annotations first, then the layout.
+  const apply = (root: LayoutNode, panes: PaneState[]) => {
+    screen.binding.conn.annotations.snapshot(state(root, panes));
+    applyScreenSnapshot(screen.api, screen.binding, state(root, panes));
+  };
   apply(root, panes);
   return { screen, apply, VIEW_LOAD_FAILED };
 }
@@ -77,6 +81,43 @@ describe("ViewerPaneRenderer", { timeout: 30_000 }, () => {
     apply(row(slot("docs", ["v1"]), slot("more", ["v2"])), [plan, viewer("v2", "/home/me/app/NOTES.md")]);
     const next = screen.content("v2").element;
     await vi.waitFor(() => expect(next.querySelector(".viewer-bar-label")?.textContent).toBe("/home/me/app/NOTES.md"), LOAD);
+  });
+
+  // viewer-annotations, Handing A Review To A Terminal: Send to the agent.
+  it("sends a pane's review to its origin terminal and gives that terminal the keyboard", async () => {
+    const annotation = {
+      id: "ann-0123456789abcdef", kind: "question" as const, body: "Why three?",
+      target: { view: "source" as const, quote: "retry three times", prefix: "", suffix: "", startLine: 1, endLine: 1 },
+    };
+    const plan = viewer("v1", "/home/me/app/PLAN.md");
+    const annotated: PaneState = { ...plan, viewer: { ...plan.viewer!, annotations: [annotation] } };
+    const agent: PaneState = { id: "t1", role: "terminal", title: "claude", sessionId: "sess-1" };
+    const { screen } = await open(row(slot("main", ["t1"]), slot("docs", ["v1"])), [agent, annotated], ["viewer-v1", "viewer-annotations-v1"]);
+    const { TerminalSession } = await import("../lib/terminal/terminal_session.ts");
+    const { fakeEmulator } = await import("../lib/testing/fake_server.ts");
+    const emulator = fakeEmulator();
+    (emulator as { bracketedPaste: boolean }).bracketedPaste = true;
+    const session = new TerminalSession(screen.binding.conn.sessions, "sess-1", emulator);
+    session.wire();
+    screen.binding.linkPane("t1", "sess-1");
+    screen.answerReads({ v1: "retry three times\n" });
+
+    const element = screen.content("v1").element;
+    await vi.waitFor(() => expect(element.querySelector(".viewer-annotation")).not.toBeNull(), LOAD);
+    const list = element.querySelector<HTMLElement>(".viewer-annotations")!;
+    list.dispatchEvent(new Event("pointerenter"));
+    const send = list.querySelector<HTMLButtonElement>(".viewer-annotations-primary")!;
+    expect(send.textContent).toBe("Send to claude");
+    send.click();
+
+    await vi.waitFor(() => expect(screen.socket.sentOfType("input")).toHaveLength(1));
+    expect(screen.socket.sentOfType("input")[0]).toMatchObject({ id: "sess-1", data: expect.stringMatching(/^# Review of PLAN\.md\n/) });
+    expect(screen.socket.sentOfType("mux.op").map((message) => message.op)).toEqual([
+      { type: "remove_annotations", paneId: "v1", ids: [annotation.id] },
+    ]);
+    expect(screen.binding.conn.annotations.count("v1")).toBe(0);
+    await vi.waitFor(() => expect((emulator as unknown as { focusCount: number }).focusCount).toBe(1));
+    session.dispose();
   });
 
   it("builds no view for a pane closed while the view loads", async () => {

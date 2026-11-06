@@ -78,12 +78,48 @@ describe("SourceView", () => {
 
   it("replaces its text in place and clears its marks", () => {
     const view = mount("old\n");
-    view.setMarks([{ from: 0, to: 3, className: "cm-viewer-marked" }]);
+    view.setMarks([{ from: 0, to: 3, startLine: 1, endLine: 1 }]);
     expect(view.dom.querySelectorAll(".cm-viewer-marked")).toHaveLength(1);
     expect(view.dom.querySelectorAll(".cm-viewer-mark")).toHaveLength(1);
     view.setText("new\ntext\n");
     expect(editorOf(view).state.doc.toString()).toBe("new\ntext\n");
     expect(view.dom.querySelectorAll(".cm-viewer-marked")).toHaveLength(0);
+  });
+
+  // viewer-annotations, Annotations In The Pane: a passage of the source view
+  // is marked, and every line of an annotation has a bar beside it.
+  it("marks annotated passages and puts one bar beside each of their lines", () => {
+    const view = mount("one\ntwo\nthree\nfour\n");
+    view.setMarks([
+      { from: 4, to: 13, startLine: 2, endLine: 3 },
+      { from: 4, to: 7, startLine: 2, endLine: 2, active: true },
+      // A passage of the rendered view: its lines only.
+      { startLine: 3, endLine: 4 },
+      // Lines past the text end at its last line.
+      { startLine: 4, endLine: 90 },
+    ]);
+    const bars = [...view.dom.querySelectorAll(".cm-viewer-marks .cm-gutterElement")]
+      .filter((element) => element.querySelector(".cm-viewer-mark"));
+    expect(bars).toHaveLength(4);
+    expect(view.dom.querySelector(".cm-viewer-marked-active")!.textContent).toBe("two");
+    const marked = [...view.dom.querySelectorAll(".cm-viewer-marked")].map((element) => element.textContent).join("|");
+    expect(marked).toContain("three");
+    expect(marked).not.toContain("four");
+
+    view.setMarks([]);
+    expect(view.dom.querySelectorAll(".cm-viewer-mark")).toHaveLength(0);
+    expect(view.dom.querySelectorAll(".cm-viewer-marked")).toHaveLength(0);
+  });
+
+  it("tells when the selection changes", () => {
+    const parent = document.createElement("div");
+    document.body.append(parent);
+    const changed = vi.fn();
+    const view = new SourceView(parent, { text: "alpha beta\n", wrap: false, onSelectionChange: changed });
+    views.push(view);
+    editorOf(view).dispatch({ selection: { anchor: 0, head: 5 } });
+    expect(changed).toHaveBeenCalledTimes(1);
+    expect(view.selection()?.text).toBe("alpha");
   });
 
   it("wraps lines on request", () => {

@@ -72,9 +72,21 @@ export function viewerPaneTitle(record: ViewerRecord | undefined): string {
   return record.source.kind === "file" ? fileName(record.source.path) : record.source.title;
 }
 
-/** The params of a snapshot's viewer pane. */
+/**
+ * The params of a snapshot's viewer pane. Its annotations stay with the
+ * connection's store (`annotations.ts`): a change of them alone leaves the
+ * params as they are, so it never touches the layout.
+ */
 export function viewerPanelParams(pane: PaneState, supported: boolean): ViewerPanelParams {
-  return { viewer: { ...(pane.viewer ? { record: pane.viewer } : {}), supported, ...(pane.cwd ? { cwd: pane.cwd } : {}) } };
+  const record = pane.viewer ? panelRecord(pane.viewer) : undefined;
+  return { viewer: { ...(record ? { record } : {}), supported, ...(pane.cwd ? { cwd: pane.cwd } : {}) } };
+}
+
+/** A viewer record without its annotations. */
+function panelRecord(record: ViewerRecord): ViewerRecord {
+  if (!record.annotations) return record;
+  const { annotations: _annotations, ...rest } = record;
+  return rest;
 }
 
 /**

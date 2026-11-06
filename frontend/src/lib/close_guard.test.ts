@@ -1,9 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
 import type { DockviewApi } from "dockview-core";
 import {
-  guardedClose, guardedCloseMultiple, hostScreensOpen, onCloseRequest, runningOnQuit, scratchpadsOnQuit,
+  annotationsOnQuit, guardedClose, guardedCloseMultiple, hostScreensOpen, onCloseRequest, runningOnQuit, scratchpadsOnQuit,
   type CloseRequest,
 } from "./close_guard.ts";
+import type { ScreenState, ViewerAnnotation } from "./protocol/types.ts";
 import { ScreenBinding, registerScreenApi, unregisterScreenApi } from "./connection/screen_binding.ts";
 import { addConnection, localConnection, removeConnection } from "./connection/registry.ts";
 import { fakeEmulator, fakeServer } from "./testing/fake_server.ts";
@@ -108,5 +109,66 @@ describe("scratchpad text that closing would lose", () => {
     local.mux.serverMode = "embedded";
     local.sessions.unregister(shell);
     expect(scratchpadsOnQuit()).toBe(0);
+  });
+});
+
+describe("annotations that closing would lose", () => {
+  const comment = (n: number): ViewerAnnotation => ({ id: `ann-${n.toString(16).padStart(16, "0")}`, kind: "comment", body: `Remark ${n}.` });
+
+  function screen(panes: Record<string, number>): ScreenState {
+    const entries = Object.entries(panes).map(([id, count]) => [id, {
+      id,
+      role: "viewer",
+      viewer: { source: { kind: "file", path: `/home/me/app/${id}.md` }, revision: 1, annotations: Array.from({ length: count }, (_, i) => comment(i + 1)) },
+    }]);
+    return { id: "screen-1", root: { type: "slot", id: "s1", paneIds: Object.keys(panes) }, panes: Object.fromEntries(entries), sessions: {} } as unknown as ScreenState;
+  }
+
+  // viewer-annotations, Confirmation Before Annotations Are Lost: Close a viewer with annotations.
+  it("asks before closing a viewer pane that holds annotations, once for several", () => {
+    const { conn } = fakeServer("host:vm3", "vm3");
+    const binding = new ScreenBinding("screen-key", conn, "screen-1");
+    const api = { id: "dv-annotations" } as unknown as DockviewApi;
+    registerScreenApi(api, binding);
+    conn.annotations.snapshot(screen({ v1: 3, v2: 2, v3: 0 }));
+    const requests: CloseRequest[] = [];
+    const off = onCloseRequest((request) => requests.push(request));
+
+    const empty = vi.fn();
+    guardedClose(api, "v3", empty);
+    expect(empty).toHaveBeenCalledTimes(1);
+
+    const close = vi.fn();
+    guardedClose(api, "v1", close);
+    expect(close).not.toHaveBeenCalled();
+    expect(requests).toMatchObject([{ paneId: "v1", processName: "", scratchpads: 0, annotations: 3 }]);
+    requests[0].close();
+    expect(close).toHaveBeenCalledTimes(1);
+
+    const two = vi.fn();
+    guardedCloseMultiple(api, [{ id: "v1", close }, { id: "v2", close: two }, { id: "v3", close: empty }]);
+    expect(empty).toHaveBeenCalledTimes(2);
+    expect(requests[1]).toMatchObject({ processName: "", annotations: 5 });
+    requests[1].close();
+    expect(two).toHaveBeenCalledTimes(1);
+
+    off();
+    unregisterScreenApi(api);
+    conn.dispose();
+  });
+
+  // viewer-annotations, Confirmation Before Annotations Are Lost: Quit an embedded window.
+  it("counts the annotations of the local viewer panes the window shows on quit, unless a daemon keeps them", () => {
+    const local = localConnection();
+    local.annotations.snapshot(screen({ v1: 3, v2: 1 }));
+    expect(annotationsOnQuit()).toBe(0);
+    const shown = local.annotations.mount("v1");
+    expect(annotationsOnQuit()).toBe(3);
+    local.mux.serverMode = "daemon";
+    expect(annotationsOnQuit()).toBe(0);
+    local.mux.serverMode = "embedded";
+    shown();
+    expect(annotationsOnQuit()).toBe(0);
+    local.annotations.snapshot(screen({}));
   });
 });

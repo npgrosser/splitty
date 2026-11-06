@@ -507,4 +507,34 @@ describe("viewer pane menu", () => {
     items.find((entry) => entry.label === "Copy Path")!.action();
     expect(writeText.mock.calls).toEqual([["chosen"], ["/home/me/app/PLAN.md"]]);
   });
+
+  // viewer-annotations: the kinds for a selected passage, a general comment and the list.
+  it("annotates the selection, adds a general comment and shows the list", () => {
+    const { api } = screen("local");
+    const annotations = {
+      selection: "passage" as const, annotate: vi.fn(), addComment: vi.fn(), listShown: false, toggleList: vi.fn(),
+    };
+    const items = viewerMenuItems(paneId, api, controls({ selection: () => "retry three times", annotations }));
+    expect(labels(items).slice(0, 7)).toEqual([
+      "Copy", "Comment on Selection", "Ask About Selection", "Suggest Change", "Suggest Deletion", "Add Comment", "Show Annotations",
+    ]);
+    items.find((entry) => entry.label === "Ask About Selection")!.action();
+    expect(annotations.annotate).toHaveBeenCalledWith("question");
+    items.find((entry) => entry.label === "Suggest Deletion")!.action();
+    expect(annotations.annotate).toHaveBeenLastCalledWith("delete");
+    items.find((entry) => entry.label === "Add Comment")!.action();
+    expect(annotations.addComment).toHaveBeenCalled();
+    items.find((entry) => entry.label === "Show Annotations")!.action();
+    expect(annotations.toggleList).toHaveBeenCalled();
+
+    const short = viewerMenuItems(paneId, api, controls({ annotations: { ...annotations, selection: "short", listShown: true } }));
+    const comment = short.find((entry) => entry.label === "Comment on Selection")!;
+    expect(comment).toMatchObject({ disabled: true, detail: "Select a longer passage" });
+    expect(labels(short)).toContain("Hide Annotations");
+    const long = viewerMenuItems(paneId, api, controls({ annotations: { ...annotations, selection: "long" } }));
+    expect(long.find((entry) => entry.label === "Suggest Change")).toMatchObject({ disabled: true, detail: "Over 16 KB" });
+    const none = viewerMenuItems(paneId, api, controls({ annotations: { ...annotations, selection: "none" } }));
+    expect(labels(none)).not.toContain("Comment on Selection");
+    expect(labels(none)).toContain("Add Comment");
+  });
 });

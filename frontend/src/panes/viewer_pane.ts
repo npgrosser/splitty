@@ -21,22 +21,34 @@
  * window's document, from the reader's cached content and the view's state; a
  * panel built anew for the pane, as when a snapshot rebuilds its screen, starts
  * from the state the last one left (`viewer_view_state.ts`).
+ *
+ * Where the server keeps annotations (`viewer-annotations`), the view gets
+ * the connection's store and the terminals a review can go to: the viewer's
+ * origin while it exists as a terminal pane, on any screen, and the terminal
+ * panes of the viewer's screen.
  */
 
 import type { GroupPanelPartInitParameters, IContentRenderer, PanelUpdateEvent } from "dockview-core";
 import { toast } from "svelte-sonner";
-import { bindingForApi } from "../lib/connection/screen_binding.ts";
+import { bindingForApi, layoutForScreen, type ScreenBinding } from "../lib/connection/screen_binding.ts";
+import type { ServerConnection } from "../lib/connection/server_connection.ts";
 import { viewerMenuItems } from "../lib/context_menus.ts";
+import { saveAsDownload } from "../lib/file_offers.ts";
 import { openViewerFile } from "../lib/panes.ts";
 import type { ViewerRecord } from "../lib/protocol/types.ts";
+import { MAX_TITLE, plainText } from "../lib/protocol/untrusted.ts";
+import { scratchpadOf, toggleScratchpad } from "../lib/scratchpad.ts";
 import { getTheme, subscribeTheme } from "../lib/theme.ts";
 import type { DocumentWatch } from "../lib/viewer/documents.ts";
+import { UNDO_MS, type ReviewTarget } from "../lib/viewer/handover.ts";
 import { MAX_FILE_BYTES, MAX_TEXT_BYTES } from "../lib/viewer/limits.ts";
-import { sameViewerSource, viewerParams } from "../lib/viewer/panel.ts";
+import { isViewerPanel, sameViewerSource, viewerParams } from "../lib/viewer/panel.ts";
 import { syntaxColors } from "../lib/viewer/syntax_colors.ts";
 import { openExternalTarget } from "../lib/window.ts";
 import { openPaneLink } from "../stores/ports.svelte.ts";
+import { setActiveScreen } from "../stores/screens.svelte.ts";
 import { showContextMenu } from "../stores/ui.svelte.ts";
+import type { LayerNotices, ReviewHandover } from "./viewer/annotation_layer.ts";
 import type { ViewerView } from "./viewer_view.ts";
 import { keepViewerState, takeViewerState, type ViewerViewState } from "./viewer_view_state.ts";
 
@@ -69,6 +81,76 @@ function applyTheme(element: HTMLElement): void {
   if (theme.terminal["selection-bg"]) element.style.setProperty("--sv-selection", theme.terminal["selection-bg"]);
   element.style.background = theme.ui["surface-base"] ?? "";
   element.style.color = theme.ui["text-primary"] ?? "";
+}
+
+/** The notices of annotations and hand-overs, as the window's toasts. */
+const notices: LayerNotices = {
+  sent: (message, undo) => toast.success(message, { duration: UNDO_MS, action: { label: "Undo", onClick: undo } }),
+  undoable: (message, undo) => toast(message, { duration: UNDO_MS, action: { label: "Undo", onClick: undo } }),
+  info: (message) => toast(message),
+  error: (message, detail) => toast.error(message, detail ? { description: plainText(detail, 500) } : undefined),
+};
+
+/** The terminal pane `paneId` of `conn` as a review target, while it shows a session in this window. */
+function terminalTarget(conn: ServerConnection, paneId: string): ReviewTarget | undefined {
+  const session = conn.sessions.forPane(paneId);
+  const screen = conn.sessions.screenForPane(paneId);
+  if (!session || !screen) return undefined;
+  const layout = () => layoutForScreen(screen);
+  const panel = layout()?.api.getPanel(paneId);
+  const title = plainText(panel?.title || session.lastOscTitle || session.lastTitle || "", MAX_TITLE).trim() || "Terminal";
+  const reveal = () => {
+    const current = layout();
+    if (!current) return;
+    setActiveScreen(screen);
+    current.api.getPanel(paneId)?.api.setActive();
+  };
+  const focus = () => requestAnimationFrame(() => session.emulator.focus());
+  return {
+    paneId,
+    title,
+    bracketedPaste: () => session.emulator.bracketedPaste,
+    paste: (text) => session.emulator.paste(text),
+    reveal: () => {
+      reveal();
+      focus();
+    },
+    upload: (file) => conn.sessions.uploadFile(file),
+    ...(conn.mux.scratchpads ? {
+      scratchpad: {
+        text: () => conn.scratchpads.text(session.id),
+        set: (text: string) => {
+          const wireId = layout()?.binding.wireId;
+          if (!wireId) return;
+          conn.scratchpads.edit(wireId, session.id, text);
+          conn.scratchpads.flush(session.id);
+        },
+        open: () => {
+          reveal();
+          if (scratchpadOf(paneId) === "closed") requestAnimationFrame(() => toggleScratchpad(paneId));
+        },
+      },
+    } : {}),
+  };
+}
+
+/** The terminals a viewer's review can go to: its origin, and the terminal panes of its screen. */
+function reviewHandover(binding: ScreenBinding, record: () => ViewerRecord | undefined): ReviewHandover {
+  const conn = binding.conn;
+  return {
+    origin: () => {
+      const origin = record()?.originPaneId;
+      return origin ? terminalTarget(conn, origin) : undefined;
+    },
+    terminals: () => {
+      const api = layoutForScreen(binding.key)?.api;
+      if (!api) return [];
+      return api.panels
+        .filter((panel) => !isViewerPanel(panel))
+        .map((panel) => terminalTarget(conn, panel.id))
+        .filter((target): target is ReviewTarget => target !== undefined);
+    },
+  };
 }
 
 export class ViewerPaneRenderer implements IContentRenderer {
@@ -114,6 +196,22 @@ export class ViewerPaneRenderer implements IContentRenderer {
       if (conn.kind === "remote") openPaneLink(conn.key, url);
       else openExternalTarget({ url });
     };
+    const source = this.record?.source;
+    const annotations = source && supported ? {
+      store: conn.annotations,
+      paneId: api.id,
+      screenId: () => binding.wireId,
+      available: () => conn.mux.annotations,
+      document: source.kind === "file" ? { kind: "file" as const, path: source.path } : { kind: "text" as const, title: source.title },
+      handover: reviewHandover(binding, () => this.record),
+      notices,
+      showMenu: showContextMenu,
+      writeClipboard: (text: string) => navigator.clipboard.writeText(text),
+      download: (name: string, blob: Blob) => void saveAsDownload(name, blob),
+    } : undefined;
+    // Its annotations end with an embedded server while it is shown (`close_guard.ts`).
+    if (source && supported) this.cleanups.push(conn.annotations.mount(api.id));
+
     // The view in the element's current document, from the state the last one left.
     const mount = (module: ViewModule) => {
       const state = this.view?.viewState() ?? this.state;
@@ -129,6 +227,7 @@ export class ViewerPaneRenderer implements IContentRenderer {
           description: "Its path leaves the root folder or holds characters a viewer pane does not take.",
         }),
         reload: () => this.watch?.reload(),
+        annotations,
       });
       this.element.replaceChildren(this.view.element);
       if (this.watch) this.view.update(this.watch.state);
@@ -193,6 +292,7 @@ export class ViewerPaneRenderer implements IContentRenderer {
         wrap: () => view?.wrapping,
         toggleWrap: () => view?.toggleWrap(),
         path: source?.kind === "file" ? source.path : undefined,
+        annotations: view?.annotationMenu(),
       }), event.clientX, event.clientY);
     });
 
@@ -242,13 +342,16 @@ export class ViewerPaneRenderer implements IContentRenderer {
     pane.className = "viewer-pane";
     const body = doc.createElement("div");
     body.className = "viewer-body";
+    const main = doc.createElement("div");
+    main.className = "viewer-main";
     const notice = doc.createElement("div");
     notice.className = "viewer-notice";
     const text = doc.createElement("p");
     text.className = "viewer-notice-text";
     text.textContent = VIEW_LOAD_FAILED;
     notice.append(text);
-    body.append(notice);
+    main.append(notice);
+    body.append(main);
     pane.append(body);
     this.element.replaceChildren(pane);
   }

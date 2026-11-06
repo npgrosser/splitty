@@ -13,6 +13,7 @@ import { visibleShellProfiles } from "./shell_profile_model.ts";
 import { emitUICommand } from "./client_commands.ts";
 import { getScreens, type Screen } from "../stores/screens.svelte.ts";
 import { scratchpadOf, toggleScratchpad } from "./scratchpad.ts";
+import type { AnnotationKind } from "./protocol/types.ts";
 import type { TerminalSession } from "./terminal/terminal_session.ts";
 import { MAX_TEXT_BYTES, isViewerCwd, utf8Length, viewerTitle } from "./viewer/limits.ts";
 
@@ -144,6 +145,47 @@ export interface ViewerMenuControls {
   toggleWrap(): void;
   /** The file, for a file document. */
   readonly path?: string;
+  /** The pane's annotations, while it can hold them. */
+  readonly annotations?: AnnotationMenuControls;
+}
+
+/** What a viewer pane's menu offers for its annotations (`viewer-annotations`). */
+export interface AnnotationMenuControls {
+  /** A selected passage, one too short or too long to annotate, or none. */
+  readonly selection: "passage" | "short" | "long" | "none";
+  annotate(kind: AnnotationKind): void;
+  addComment(): void;
+  readonly listShown: boolean;
+  toggleList(): void;
+}
+
+const ANNOTATE_ITEMS: readonly { kind: AnnotationKind; label: string }[] = [
+  { kind: "comment", label: "Comment on Selection" },
+  { kind: "question", label: "Ask About Selection" },
+  { kind: "change", label: "Suggest Change" },
+  { kind: "delete", label: "Suggest Deletion" },
+];
+
+/** The annotation entries of a viewer pane's menu. */
+function annotationItems(controls: AnnotationMenuControls): ContextMenuItem[] {
+  const items: ContextMenuItem[] = [];
+  const selection = controls.selection;
+  if (selection !== "none") {
+    const detail = selection === "short" ? "Select a longer passage" : selection === "long" ? "Over 16 KB" : undefined;
+    for (const { kind, label } of ANNOTATE_ITEMS) {
+      items.push({
+        label,
+        action: () => controls.annotate(kind),
+        disabled: selection !== "passage",
+        ...(detail ? { detail } : {}),
+      });
+    }
+  }
+  items.push(
+    { label: "Add Comment", action: () => controls.addComment() },
+    { label: controls.listShown ? "Hide Annotations" : "Show Annotations", action: () => controls.toggleList() },
+  );
+  return items;
 }
 
 /** The context menu of a viewer pane. */
@@ -158,8 +200,9 @@ export function viewerMenuItems(paneId: string, api: DockviewApi, controls: View
       disabled: !selection,
     },
     { label: "", action: () => {}, separator: true },
-    { label: "Reload", action: () => controls.reload() },
   ];
+  if (controls.annotations) items.push(...annotationItems(controls.annotations), { label: "", action: () => {}, separator: true });
+  items.push({ label: "Reload", action: () => controls.reload() });
   if (mode) items.push({ label: mode === "rendered" ? "Show Source" : "Show Rendered", action: () => controls.toggleMode() });
   if (wrap !== undefined) items.push({ label: wrap ? "Unwrap Lines" : "Wrap Lines", action: () => controls.toggleWrap() });
   const path = controls.path;

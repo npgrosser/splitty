@@ -9,8 +9,10 @@
  * Mod+F is the exception and searches the document.
  *
  * Positions are UTF-16 offsets into the text and lines are 1-based, as in
- * `anchoring.ts`; marks (decorations with a gutter marker on their first
- * line) are the hook for annotations.
+ * `anchoring.ts`. Annotations show as marks (`viewer-annotations`, D5): a
+ * decoration over the passage of the source view's own annotations, and a
+ * bar in the gutter beside the lines of every annotated passage, those of
+ * the rendered view included.
  */
 
 import {
@@ -21,7 +23,7 @@ import {
 } from "@codemirror/commands";
 import { syntaxHighlighting } from "@codemirror/language";
 import { closeSearchPanel, findNext, findPrevious, openSearchPanel, search } from "@codemirror/search";
-import { Compartment, EditorState, Prec, RangeSet, StateEffect, StateField, type Extension } from "@codemirror/state";
+import { Compartment, EditorSelection, EditorState, Prec, RangeSet, StateEffect, StateField, type Extension } from "@codemirror/state";
 import {
   Decoration, EditorView, GutterMarker, drawSelection, gutter, highlightActiveLineGutter, keymap, lineNumbers,
   type DecorationSet, type KeyBinding,
@@ -38,11 +40,19 @@ export interface SourceSelection {
   readonly endLine: number;
 }
 
+/** An annotated passage: its text, where it has one in this view, and its lines. */
 export interface SourceMark {
-  readonly from: number;
-  readonly to: number;
-  readonly className: string;
+  /** UTF-16 offsets of the passage, `to` exclusive; absent for a passage of the other view. */
+  readonly from?: number;
+  readonly to?: number;
+  readonly startLine: number;
+  readonly endLine: number;
+  /** The passage the user chose. */
+  readonly active?: boolean;
 }
+
+/** The most lines one mark puts a bar beside. */
+const MAX_MARKED_LINES = 10_000;
 
 const isMac = typeof navigator !== "undefined" && /mac/i.test(navigator.platform);
 
@@ -109,8 +119,9 @@ const theme = EditorView.theme({
   ".cm-panel.cm-search label": { color: "var(--splitty-text-secondary)", marginRight: "6px" },
   ".cm-panel.cm-search [name=close]": { color: "var(--splitty-text-secondary)", backgroundColor: "transparent", border: "none" },
   ".cm-viewer-marks .cm-gutterElement": { padding: "0 2px" },
-  ".cm-viewer-mark": { width: "6px", height: "6px", marginTop: "0.5em", borderRadius: "50%", backgroundColor: "var(--splitty-accent)" },
-  ".cm-viewer-marked": { backgroundColor: "var(--splitty-accent-muted)" },
+  ".cm-viewer-mark": { width: "3px", height: "100%", borderRadius: "1px", backgroundColor: "var(--splitty-accent)" },
+  ".cm-viewer-marked": { backgroundColor: "var(--splitty-annotation-bg, var(--splitty-accent-muted))" },
+  ".cm-viewer-marked-active": { backgroundColor: "var(--splitty-annotation-active-bg, var(--splitty-accent-muted))" },
   ".sv-keyword": { color: "var(--sv-keyword)" },
   ".sv-string": { color: "var(--sv-string)" },
   ".sv-number": { color: "var(--sv-number)" },
@@ -146,16 +157,24 @@ interface Marks {
 
 const setMarks = StateEffect.define<readonly SourceMark[]>();
 
+const markedPassage = Decoration.mark({ class: "cm-viewer-marked" });
+const activePassage = Decoration.mark({ class: "cm-viewer-marked cm-viewer-marked-active" });
+
 function buildMarks(marks: readonly SourceMark[], state: EditorState): Marks {
-  const length = state.doc.length;
+  const doc = state.doc;
   const decorations = [];
-  const markers = [];
+  const lines = new Set<number>();
   for (const mark of marks) {
-    const from = Math.max(0, Math.min(length, mark.from));
-    const to = Math.max(from, Math.min(length, mark.to));
-    if (to > from) decorations.push(Decoration.mark({ class: mark.className }).range(from, to));
-    markers.push(markMarker.range(state.doc.lineAt(from).from));
+    if (mark.from !== undefined && mark.to !== undefined) {
+      const from = Math.max(0, Math.min(doc.length, mark.from));
+      const to = Math.max(from, Math.min(doc.length, mark.to));
+      if (to > from) decorations.push((mark.active ? activePassage : markedPassage).range(from, to));
+    }
+    const first = Math.max(1, Math.min(doc.lines, mark.startLine));
+    const last = Math.min(doc.lines, Math.max(first, mark.endLine), first + MAX_MARKED_LINES - 1);
+    for (let line = first; line <= last; line++) lines.add(line);
   }
+  const markers = [...lines].sort((a, b) => a - b).map((line) => markMarker.range(doc.line(line).from));
   return { decorations: Decoration.set(decorations, true), markers: RangeSet.of(markers, true) };
 }
 
@@ -176,6 +195,8 @@ export interface SourceViewOptions {
   /** Highlighting by this name; none for plain text. */
   readonly fileName?: string;
   readonly wrap: boolean;
+  /** Called when the selection changes. */
+  onSelectionChange?(): void;
 }
 
 export class SourceView {
@@ -203,6 +224,9 @@ export class SourceView {
       this.wrapping.of(options.wrap ? EditorView.lineWrapping : []),
       marksField,
       theme,
+      EditorView.updateListener.of((update) => {
+        if (update.selectionSet) options.onSelectionChange?.();
+      }),
     ];
     this.view = new EditorView({
       parent,
@@ -252,9 +276,24 @@ export class SourceView {
     };
   }
 
-  /** Mark passages of the text; a later `setText` clears them. */
+  /** Mark annotated passages and their lines; replaces earlier marks, and a later `setText` clears them. */
   setMarks(marks: readonly SourceMark[]): void {
     this.view.dispatch({ effects: setMarks.of(marks) });
+  }
+
+  /** Where the selection's head is on the screen, or undefined without a selection or layout. */
+  selectionHead(): { left: number; top: number; bottom: number } | undefined {
+    const { from, to, head } = this.view.state.selection.main;
+    if (from === to) return undefined;
+    return this.view.coordsAtPos(head, head === from ? 1 : -1) ?? undefined;
+  }
+
+  /** Bring a passage into view, in the middle where it fits. */
+  scrollToPassage(from: number, to: number): void {
+    const length = this.view.state.doc.length;
+    const start = Math.max(0, Math.min(length, from));
+    const range = EditorSelection.range(start, Math.max(start, Math.min(length, to)));
+    this.view.dispatch({ effects: EditorView.scrollIntoView(range, { y: "center" }) });
   }
 
   firstVisibleLine(): number {

@@ -45,6 +45,16 @@ Rendered documents run no scripts and load nothing: images show only when embedd
 
 A viewer pane splits, stacks, floats and moves like a terminal. Splitting it opens a terminal in the file's folder.
 
+## Review a document
+
+Select a passage in a viewer pane, rendered or as source, and choose **Comment**, **Ask**, **Suggest Change** or **Suggest Deletion** from the toolbar next to the selection or from the context menu. A suggested change starts with the selected text as its replacement. `Ctrl+Enter` (`Cmd+Enter` on macOS) saves, `Escape` cancels. **Add Comment** in the annotation list adds a comment on the whole document.
+
+The list on the right of the pane shows the annotations in document order, with their lines; a click scrolls to the passage. When the file changes, annotations find their passage again by its text; one whose passage is gone stays in the list, marked as not found. Annotations are kept with the pane, also through a reload and, on a daemon, a restart. Closing the pane asks first.
+
+**Send to `<terminal>`** pastes the review into the terminal the document was opened from, without Enter, so you can read it and add to it before submitting. The review is Markdown: the document's path, then each annotation with its lines, the quoted passage, your remark and a suggested replacement. Sending ends the round and removes the sent annotations; **Undo** in the notice brings them back for ten seconds. The menu next to the button sends to another terminal of the screen, as a file whose path is inserted at the prompt, or into the terminal's scratchpad, and copies or saves the review. A program that has not enabled bracketed paste gets the review as a file, since a shell would run each pasted line.
+
+Processes in panes cannot read or change annotations through `splitty`; an agent sees a review only when you send it. Terminal selections opened in a viewer can be annotated the same way, for example to answer a long reply of an agent point by point.
+
 ## Open files in your editor: `splitty open --editor`
 
 From a Splitty terminal, open folders, or files with `--editor` or `--with`, in VS Code or Zed on your computer:

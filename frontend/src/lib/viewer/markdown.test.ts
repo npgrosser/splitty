@@ -11,6 +11,13 @@ describe("markdownToHtml", () => {
     expect(html).toContain(`<li data-source-line="7" data-source-line-end="7">two</li>`);
   });
 
+  it("leaves the blank lines after the last item of a list out of its lines", () => {
+    const html = markdownToHtml("1. one\n2. two\n\nClosing words.\n");
+    expect(html).toContain(`<ol data-source-line="1" data-source-line-end="2">`);
+    expect(html).toContain(`<li data-source-line="2" data-source-line-end="2">two</li>`);
+    expect(html).toContain(`<p data-source-line="4" data-source-line-end="4">Closing words.</p>`);
+  });
+
   it("marks code blocks with their lines and language, unhighlighted", () => {
     const html = markdownToHtml("Text\n\n```rust title=x\nfn main() {}\n```\n\n    indented\n");
     expect(html).toContain(`<pre data-source-line="3" data-source-line-end="5"><code class="language-rust" data-language="rust">fn main() {}\n</code></pre>`);

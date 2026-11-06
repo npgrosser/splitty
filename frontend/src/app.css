@@ -609,6 +609,10 @@ body,
 /* ── Viewer Panes ── */
 
 .viewer-pane {
+  /* Annotated passages (viewer-annotations): the source view, the rendered document and its blocks. */
+  --splitty-annotation-bg: color-mix(in srgb, var(--splitty-accent) 24%, transparent);
+  --splitty-annotation-active-bg: color-mix(in srgb, var(--splitty-accent) 46%, transparent);
+  --splitty-annotation-block-bg: color-mix(in srgb, var(--splitty-accent) 10%, transparent);
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -616,11 +620,20 @@ body,
   outline: none;
 }
 
+/* The document's area and, on its right, the list of annotations. */
 .viewer-body {
   position: relative;
+  display: flex;
   flex: 1 1 auto;
   min-height: 0;
   overflow: hidden;
+}
+
+.viewer-main {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
 }
 
 .viewer-document {
@@ -724,6 +737,477 @@ body,
   flex: 0 0 auto;
   padding: 0 7px;
   line-height: 16px;
+}
+
+.viewer-bar-annotations[aria-pressed="true"] {
+  color: var(--splitty-text-primary);
+  border-color: var(--splitty-accent-muted);
+}
+
+/* ── Viewer Annotations ── */
+
+.viewer-annotations {
+  display: flex;
+  flex: 0 0 auto;
+  flex-direction: column;
+  width: clamp(200px, 34%, 340px);
+  max-width: 50%;
+  min-height: 0;
+  box-sizing: border-box;
+  border-left: 1px solid var(--splitty-border-default);
+  background: var(--splitty-surface-raised);
+  color: var(--splitty-text-primary);
+  font-size: 12px;
+}
+
+.viewer-annotations[hidden],
+.viewer-annotations-empty[hidden],
+.viewer-annotations-add[hidden],
+.viewer-selection-toolbar[hidden],
+.viewer-selection-kinds[hidden],
+.viewer-selection-note[hidden],
+.viewer-form-field[hidden],
+.viewer-form-problem[hidden],
+.splitty-tab-annotations[hidden] {
+  display: none;
+}
+
+.viewer-annotations-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  padding: 5px 6px 5px 10px;
+  color: var(--splitty-text-secondary);
+  font-size: 11px;
+}
+
+.viewer-annotations-icon {
+  margin: 0;
+  padding: 0 5px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--splitty-text-muted);
+  font: inherit;
+  font-size: 14px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.viewer-annotations-icon:hover {
+  background: var(--splitty-hover-bg);
+  color: var(--splitty-text-primary);
+}
+
+.viewer-annotations-send {
+  display: flex;
+  padding: 0 8px 8px;
+}
+
+.viewer-annotations-primary,
+.viewer-annotations-more {
+  margin: 0;
+  padding: 4px 8px;
+  border: 1px solid var(--splitty-accent);
+  background: var(--splitty-accent-muted);
+  color: var(--splitty-text-primary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.viewer-annotations-primary {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 4px 0 0 4px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-annotations-more {
+  flex: 0 0 auto;
+  padding: 4px 7px;
+  border-left-color: color-mix(in srgb, var(--splitty-accent) 50%, transparent);
+  border-radius: 0 4px 4px 0;
+}
+
+.viewer-annotations-primary:hover:not(:disabled),
+.viewer-annotations-more:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--splitty-accent) 55%, transparent);
+}
+
+.viewer-annotations-primary:disabled,
+.viewer-annotations-more:disabled {
+  border-color: var(--splitty-border-default);
+  background: transparent;
+  color: var(--splitty-text-muted);
+  cursor: default;
+}
+
+.viewer-annotations-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0 0 4px;
+  overflow-y: auto;
+  list-style: none;
+}
+
+.viewer-annotation {
+  margin: 0 6px 4px;
+  padding: 6px 8px;
+  border: 1px solid transparent;
+  border-left: 3px solid var(--splitty-accent-muted);
+  border-radius: 4px;
+  background: var(--splitty-surface-base);
+  cursor: pointer;
+  outline: none;
+}
+
+.viewer-annotation:hover {
+  background: var(--splitty-hover-bg);
+}
+
+.viewer-annotation:focus-visible {
+  border-color: var(--splitty-accent-muted);
+}
+
+.viewer-annotation.active {
+  border-left-color: var(--splitty-accent);
+  background: var(--splitty-active-bg);
+}
+
+.viewer-annotation.stale {
+  border-left-color: var(--splitty-warning);
+}
+
+.viewer-annotation-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 11px;
+}
+
+.viewer-annotation-kind {
+  color: var(--splitty-accent);
+  font-weight: 600;
+}
+
+.viewer-annotation[data-kind="question"] .viewer-annotation-kind {
+  color: var(--splitty-warning);
+}
+
+.viewer-annotation[data-kind="change"] .viewer-annotation-kind {
+  color: var(--splitty-success);
+}
+
+.viewer-annotation[data-kind="delete"] .viewer-annotation-kind {
+  color: var(--splitty-danger);
+}
+
+.viewer-annotation-where {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--splitty-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewer-annotation.stale .viewer-annotation-where {
+  color: var(--splitty-warning);
+}
+
+.viewer-annotation-tools {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 2px;
+  opacity: 0;
+}
+
+.viewer-annotation:hover .viewer-annotation-tools,
+.viewer-annotation:focus-within .viewer-annotation-tools,
+.viewer-annotation.active .viewer-annotation-tools {
+  opacity: 1;
+}
+
+.viewer-annotation-tool {
+  margin: 0;
+  padding: 0 4px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--splitty-text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.viewer-annotation-tool:hover {
+  background: var(--splitty-hover-bg);
+  color: var(--splitty-text-primary);
+}
+
+.viewer-annotation-quote,
+.viewer-annotation-replacement {
+  max-height: 4.4em;
+  margin-top: 4px;
+  padding-left: 6px;
+  overflow: hidden;
+  border-left: 2px solid var(--splitty-border-default);
+  color: var(--splitty-text-secondary);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.viewer-annotation-replacement {
+  border-left-color: var(--splitty-success);
+}
+
+.viewer-annotation-body {
+  margin-top: 4px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.viewer-annotations-empty {
+  margin: 2px 10px 6px;
+  color: var(--splitty-text-muted);
+  line-height: 1.5;
+}
+
+.viewer-annotations-add {
+  margin: 4px 8px 8px;
+  padding: 4px 8px;
+  border: 1px dashed var(--splitty-border-default);
+  border-radius: 4px;
+  background: transparent;
+  color: var(--splitty-text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.viewer-annotations-add:hover {
+  border-color: var(--splitty-accent);
+  color: var(--splitty-text-primary);
+}
+
+.viewer-selection-toolbar {
+  position: absolute;
+  z-index: 20;
+  max-width: calc(100% - 16px);
+  box-sizing: border-box;
+  padding: 3px;
+  border: 1px solid var(--splitty-border-default);
+  border-radius: 5px;
+  background: var(--splitty-surface-overlay);
+  box-shadow: 0 4px 14px var(--splitty-shadow);
+  color: var(--splitty-text-primary);
+  font-size: 12px;
+}
+
+.viewer-selection-kinds {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px;
+}
+
+.viewer-selection-kind {
+  margin: 0;
+  padding: 3px 8px;
+  border: 0;
+  border-radius: 3px;
+  background: transparent;
+  color: var(--splitty-text-primary);
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.viewer-selection-kind:hover {
+  background: var(--splitty-hover-bg);
+}
+
+.viewer-selection-note {
+  max-width: 44ch;
+  margin: 0;
+  padding: 3px 8px;
+  color: var(--splitty-text-secondary);
+  line-height: 1.45;
+}
+
+.viewer-annotation-form {
+  position: absolute;
+  z-index: 21;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: min(420px, calc(100% - 16px));
+  max-height: calc(100% - 16px);
+  box-sizing: border-box;
+  padding: 10px;
+  overflow: auto;
+  border: 1px solid var(--splitty-border-default);
+  border-radius: 6px;
+  background: var(--splitty-surface-overlay);
+  box-shadow: 0 8px 24px var(--splitty-shadow);
+  color: var(--splitty-text-primary);
+  font-size: 12px;
+}
+
+.viewer-form-header {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.viewer-form-title {
+  font-weight: 600;
+}
+
+.viewer-form-kinds {
+  display: inline-flex;
+  overflow: hidden;
+  border: 1px solid var(--splitty-border-default);
+  border-radius: 4px;
+}
+
+.viewer-form-kind {
+  margin: 0;
+  padding: 2px 8px;
+  border: 0;
+  background: transparent;
+  color: var(--splitty-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.viewer-form-kind + .viewer-form-kind {
+  border-left: 1px solid var(--splitty-border-default);
+}
+
+.viewer-form-kind:hover {
+  color: var(--splitty-text-primary);
+}
+
+.viewer-form-kind.selected {
+  background: var(--splitty-active-bg);
+  color: var(--splitty-text-primary);
+}
+
+.viewer-form-label {
+  color: var(--splitty-text-secondary);
+  font-size: 11px;
+}
+
+.viewer-form-quote {
+  max-height: 8.7em;
+  margin: 0;
+  padding: 6px 8px;
+  overflow: auto;
+  border-left: 2px solid var(--splitty-accent);
+  border-radius: 3px;
+  background: var(--splitty-surface-base);
+  color: var(--splitty-text-secondary);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.viewer-form-quote:focus-visible {
+  outline: 1px solid var(--splitty-accent);
+}
+
+.viewer-form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.viewer-form-text {
+  width: 100%;
+  min-height: 3.6em;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  resize: vertical;
+  border: 1px solid var(--splitty-border-default);
+  border-radius: 4px;
+  outline: none;
+  background: var(--splitty-surface-base);
+  color: var(--splitty-text-primary);
+  font: 12px/1.45 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+.viewer-form-text:focus {
+  border-color: var(--splitty-accent);
+}
+
+.viewer-form-problem {
+  margin: 0;
+  color: var(--splitty-danger);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.viewer-form-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.viewer-form-hint {
+  flex: 1 1 auto;
+  color: var(--splitty-text-muted);
+  font-size: 11px;
+}
+
+.viewer-form-button {
+  margin: 0;
+  padding: 3px 10px;
+  border: 1px solid var(--splitty-border-default);
+  border-radius: 4px;
+  background: var(--splitty-surface-raised);
+  color: var(--splitty-text-secondary);
+  font: inherit;
+  cursor: pointer;
+}
+
+.viewer-form-button:hover {
+  border-color: var(--splitty-accent);
+  color: var(--splitty-text-primary);
+}
+
+.viewer-form-save {
+  border-color: var(--splitty-accent);
+  background: var(--splitty-accent-muted);
+  color: var(--splitty-text-primary);
+}
+
+/* A viewer tab's count of annotations; a click opens the pane's list. */
+.splitty-tab-annotations {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 15px;
+  height: 14px;
+  box-sizing: border-box;
+  padding: 0 4px;
+  border-radius: 7px;
+  background: var(--splitty-accent-muted);
+  color: var(--splitty-text-primary);
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  cursor: pointer;
 }
 
 /* ── Terminal Search ── */

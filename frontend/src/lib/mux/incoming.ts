@@ -13,6 +13,7 @@ import type {
 } from "../protocol/types.ts";
 import { MAX_NAME, MAX_TITLE, MAX_VALUE, optionalBounded, optionalText } from "../protocol/untrusted.ts";
 import { SCRATCHPAD_LIMIT } from "../scratchpad.ts";
+import { receivedAnnotations } from "../viewer/annotations.ts";
 import { isViewerPath, isViewerTitle } from "../viewer/limits.ts";
 
 /** Deeper layout trees are cut off; no real layout comes close. */
@@ -129,6 +130,8 @@ function paneState(id: string, raw: Raw): PaneState {
  * stays a viewer pane that says it cannot be shown (`viewer-panes`, Viewer
  * Capability). A source of an unknown kind is malformed. Nothing but the
  * listed fields is kept, so a text a server put into a snapshot goes no further.
+ * Its annotations are checked by the server's rules (`viewer-annotations`);
+ * malformed ones are dropped and the list is bounded by the pane's limits.
  */
 function viewerRecord(value: unknown): ViewerRecord | undefined {
   if (!isRecord(value) || !isRecord(value.source)) return undefined;
@@ -136,10 +139,12 @@ function viewerRecord(value: unknown): ViewerRecord | undefined {
   const revision = value.revision;
   if (!source || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) return undefined;
   const origin = value.originPaneId;
+  const annotations = receivedAnnotations(value.annotations);
   return {
     source,
     revision,
     ...(typeof origin === "string" && origin.length > 0 && origin.length <= 256 ? { originPaneId: origin } : {}),
+    ...(annotations.length > 0 ? { annotations } : {}),
   };
 }
 

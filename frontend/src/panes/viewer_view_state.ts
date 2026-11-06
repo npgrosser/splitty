@@ -1,6 +1,7 @@
 /**
- * How a viewer pane's view was left: its mode, its wrap choice and where
- * reading stood (`viewer-panes`, Keeping A Shown Document Current). A view
+ * How a viewer pane's view was left: its mode, its wrap choice, where
+ * reading stood (`viewer-panes`, Keeping A Shown Document Current) and
+ * whether its annotation list was open (`viewer-annotations`). A view
  * built again for the same pane starts from it: after a snapshot rebuilt the
  * pane's screen (`layout/screen_snapshot.ts`), after a move to or from a
  * popout window, and on the screen a pane was moved to.
@@ -21,6 +22,11 @@ export interface ViewerViewState {
   /** Line wrapping as chosen in the pane; without a choice it follows the document's kind. */
   readonly wrap?: boolean;
   readonly position?: ViewerPosition;
+  /**
+   * The annotation list as the user left it (`viewer-annotations`, D7);
+   * without a choice it is open while the pane holds annotations.
+   */
+  readonly annotations?: "open" | "closed";
 }
 
 /** More than the panes of a screen rebuilt at once; the oldest goes first. */

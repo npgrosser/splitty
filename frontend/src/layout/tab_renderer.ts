@@ -6,6 +6,7 @@ import { bindingForApi } from "../lib/connection/screen_binding.ts";
 import { toggleScratchpad } from "../lib/scratchpad.ts";
 import { scratchpadIcon } from "../panes/scratchpad_area.ts";
 import { viewerParams } from "../lib/viewer/panel.ts";
+import { showAnnotationList } from "../lib/viewer/annotations.ts";
 
 /**
  * Custom tab renderer with close guard, context menu, and wheel navigation.
@@ -58,6 +59,29 @@ export class SplittyTabRenderer implements ITabRenderer {
       };
       update();
       this.cleanups.push(scratchpads.subscribe(update));
+    }
+
+    // A viewer pane's annotations (viewer-annotations): their count; a click opens the pane's list.
+    const annotations = viewerParams(params.params) ? bindingForApi(params.containerApi)?.conn.annotations : undefined;
+    if (annotations) {
+      const count = document.createElement("span");
+      count.className = "splitty-tab-annotations";
+      count.addEventListener("click", (e) => {
+        e.stopPropagation();
+        api.setActive();
+        showAnnotationList(api.id);
+      });
+      this.element.appendChild(count);
+      const update = () => {
+        const n = annotations.count(api.id);
+        count.hidden = n === 0;
+        count.textContent = n > 0 ? String(n) : "";
+        const label = n === 1 ? "1 annotation" : `${n} annotations`;
+        count.title = `${label}, not sent yet`;
+        count.setAttribute("aria-label", label);
+      };
+      update();
+      this.cleanups.push(annotations.subscribe(update));
     }
 
     // Close button

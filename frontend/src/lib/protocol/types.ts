@@ -290,6 +290,40 @@ export interface ViewerRecord {
   originPaneId?: string;
   /** Starts at 1; a reopen from the CLI raises it, and a window that shows the pane reads it again. */
   revision: number;
+  /**
+   * The pane's pending annotations in creation order (`viewer-annotations`);
+   * absent while there are none. Kept by the connection's annotation store,
+   * never in a panel's params.
+   */
+  annotations?: ViewerAnnotation[];
+}
+
+export type AnnotationKind = "comment" | "question" | "change" | "delete";
+
+/** A remark on a viewer pane's document, made in a window (`viewer-annotations`). */
+export interface ViewerAnnotation {
+  /** `ann-` and 16 lowercase hex characters, chosen by the window. */
+  id: string;
+  kind: AnnotationKind;
+  /** The remark; a comment and a question need one. */
+  body?: string;
+  /** The suggested text of a `change`, not empty. */
+  replacement?: string;
+  /** The passage; absent for a general comment. */
+  target?: AnnotationTarget;
+}
+
+/** A passage of a document, found again by its quote; the lines only order and label it. */
+export interface AnnotationTarget {
+  /** The text the quote was taken from: the source, or the text of the rendered view. */
+  view: "source" | "rendered";
+  quote: string;
+  /** Up to 32 characters before and after the quote in that text. */
+  prefix: string;
+  suffix: string;
+  /** 1-based source lines of the passage when it was annotated. */
+  startLine: number;
+  endLine: number;
 }
 
 export type ViewerPlacement = "right" | "left" | "above" | "below" | "tab";
@@ -380,7 +414,10 @@ export type MuxOperation =
   | { type: "move_float"; floatingId: string; bounds: { x: number; y: number; w: number; h: number } }
   // A session's whole scratchpad; only a window sends it (`session-scratchpad`).
   | { type: "set_scratchpad"; sessionId: string; text: string }
-  | OpenViewerOp;
+  | OpenViewerOp
+  // A viewer pane's annotations, added or replaced by id, and removed (`viewer-annotations`).
+  | { type: "put_annotations"; paneId: string; annotations: ViewerAnnotation[] }
+  | { type: "remove_annotations"; paneId: string; ids: string[] };
 
 /**
  * A viewer pane next to `paneId` (`viewer-panes`, Opening A Viewer); no session, no

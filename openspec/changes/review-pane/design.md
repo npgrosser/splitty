@@ -87,6 +87,7 @@ Alternative: positions (offsets, line and column) as the anchor. They break on t
 - Source view: CodeMirror mark decorations for the anchored ranges and a gutter marker per annotated line range, from a state field the viewer updates on each anchoring.
 - Rendered view: the CSS Custom Highlight API (`CSS.highlights` with a `Highlight` of `Range`s, styled by `::highlight(splitty-annotation)` in the shadow root's stylesheet). It leaves the sanitized DOM untouched, so a reload or a re-render needs no unwrapping, and nothing is inserted into the document. Where the API is missing, the rendered view marks only the covering blocks.
 - A selection in the shadow root is read with `Selection.getComposedRanges` and, where that is missing, `ShadowRoot.getSelection`.
+- In Markdown each view also marks the other view's passages (a line marker in the source, a block marker in the rendered view). A passage of a rendered HTML page has no source lines of its own, so it marks nothing in the source view, and a source passage marks no block of a rendered HTML page.
 
 Alternative: wrapping highlighted text in `<mark>` elements. It changes the sanitized DOM, splits elements across block boundaries and has to be undone before every anchoring pass.
 
@@ -94,11 +95,11 @@ Alternative: wrapping highlighted text in `<mark>` elements. It changes the sani
 
 A selection inside a viewer, in either view, shows a small toolbar next to it with the four kinds; the viewer's context menu offers the same entries over a selection. Choosing one opens a form at the passage: a text field for the remark and, for a suggested change, one for the replacement, prefilled with the quote. Ctrl+Enter or Cmd+Enter saves, Escape cancels. The pane's annotation list offers a general comment or question. A selection longer than the quote limit says so instead of opening the form.
 
-Editing an annotation opens the same form; deleting one removes it at once with an undo in a notice.
+Editing an annotation opens the same form; deleting one removes it at once with an undo in a notice. The form shows the quote as it will be stored, read-only, so text a document hides with CSS becomes visible there. A general comment offers only a comment and a question.
 
 ### D7. The annotation list
 
-A collapsible column inside the viewer pane, on its right, open while the pane holds annotations unless the user closed it for that pane (a per-window preference, like the scratchpad area). It lists the anchored annotations in document order, then the stale ones, then the general comments in creation order; each shows its kind, its lines, the start of its quote and the remark, scrolls to its passage on click, and offers edit and delete. Its header holds the count and the hand-over actions. The pane's tab shows a marker with the count while annotations exist, as a scratchpad marks its tab.
+A collapsible column inside the viewer pane, on its right, open while the pane holds annotations unless the user closed it for that pane (a per-window preference, like the scratchpad area). It lists the anchored annotations in document order, then the stale ones, then the general comments in creation order; each shows its kind, its lines, the start of its quote and the remark, scrolls to its passage on click, and offers edit and delete. Its header holds the count and the hand-over actions. The pane's tab shows a marker with the count while annotations exist, as a scratchpad marks its tab; a click on it opens the list. A button with the count in the viewer bar and an entry of the viewer's menu open and close the column, also while it is empty, which is where a general comment starts; the choice is kept per pane for the window's lifetime (provisional, tbd).
 
 ### D8. The review as Markdown (provisional, tbd)
 
@@ -141,6 +142,8 @@ Still relevant after the rewrite?
 - Quotes are blockquotes, line by line. Replacements are fenced, with a fence longer than any run of backticks in the text. A `delete` without a remark has none.
 - General comments come last as a list, questions prefixed with `Question:`.
 - No instruction to the agent is added; a general comment is the place for one.
+- Control characters other than tab and line feed, and the characters that change the direction of text, become U+FFFD wherever they occur (path, title, quote, remark, replacement), so a pasted review can neither end a bracketed paste early nor act as terminal input.
+- A review stored as a file is named `review-<name>.md`: the document's name without a Markdown extension, other characters than letters, digits, `.`, `_` and `-` replaced by `-`, at most 96 characters.
 
 Alternatives: JSON (exact, but noisier for an agent to read and for the user to check before sending); one line per annotation in the `path:line` form compilers use (compact, but long quotes and replacements become unreadable).
 
@@ -156,7 +159,7 @@ The list's header offers:
 - **Save as file** saves it as a download of the window, `review-<document name>.md`.
 - **Clear** removes all annotations of the pane, with an undo in a notice.
 
-Sending in any form ends the round: the window removes the annotations it sent (`remove_annotations` with their IDs) and offers an undo in a notice for ten seconds, which puts them back (`put_annotations`); the sent text stays sent. Copying and saving keep the round, since they do not reach the agent.
+A paste leaves out the review's final line breaks, so nothing in it reads as Enter. Sending in any form ends the round: the window removes the annotations it sent (`remove_annotations` with their IDs) and offers an undo in a notice for ten seconds, which puts them back (`put_annotations`); the sent text stays sent. Copying and saving keep the round, since they do not reach the agent.
 
 Alternatives: keeping sent annotations as greyed-out history (a second state for every annotation, and the next round starts cluttered); sending as a file by default (an agent may need a permission to read outside its project, and a pasted text is visible at once); pressing Enter after the paste (the user reads the prompt before it is submitted, as with every hand-over in Splitty).
 
@@ -166,7 +169,7 @@ Closing a viewer pane with annotations asks first, as closing a pane with a scra
 
 ### D11. Concurrency in the window
 
-The store per connection (`lib/viewer/annotations.ts`) holds the server's annotations from each snapshot and the window's own operations. A snapshot replaces the list, except for the annotations this window put or removed during the last two seconds (the scratchpad's settle time), whose local state stays until a snapshot shows it or the time passes. An open form keeps its text when another window changes the same annotation; saving it then replaces the other window's edit.
+The store per connection (`lib/viewer/annotations.ts`) holds the server's annotations from each snapshot and the window's own operations. A snapshot replaces the list, except for the annotations this window put or removed during the last two seconds (the scratchpad's settle time), whose local state stays until a snapshot shows it or the time passes. An open form keeps its text when another window changes the same annotation; saving it then replaces the other window's edit. A snapshot that still contradicts the window's own state when the settle time has passed makes the window ask for the screen once more and then show what the server holds, since the server tells the sender nothing about an operation it applied; a rejected operation (`mux.op_failed`) drops the window's state for it at once.
 
 ### D12. Capability and older peers
 
@@ -181,12 +184,13 @@ The server announces `viewer-annotations-v1`. A window offers annotations for a 
 
 ## Frontend structure
 
-- `lib/viewer/annotations.ts`: the store per connection, validation mirroring the server's limits, the operations.
+- `lib/viewer/annotations.ts`: the store per connection (held by `ServerConnection`), the settle time, the client side of the server's rules, the operations, and a registry through which a tab marker opens a pane's list.
 - `lib/viewer/anchoring.ts`: quote search, context scoring, whitespace fallback, stale state; line mapping for both views.
-- `lib/viewer/review.ts`: the Markdown review.
-- `panes/viewer/annotation_list.ts`, `annotation_form.ts`, `selection_toolbar.ts`: the UI pieces inside the viewer pane.
-- The source view gains the decoration and gutter extensions; the rendered view gains the highlight registry and the selection reading.
-- `lib/close_guard.ts` and the quit confirmation gain annotations as a reason.
+- `lib/viewer/review.ts`: the Markdown review and its file name.
+- `lib/viewer/handover.ts`: sending a review to a terminal target (paste, file, scratchpad) and ending the round, on a small target interface that knows no panes or sessions.
+- `panes/viewer/annotation_layer.ts` joins annotations to a viewer pane's view: anchoring per version, marks, and the pieces `selection_toolbar.ts`, `annotation_form.ts` and `annotation_list.ts`. `panes/viewer_pane.ts` builds the terminal targets from the screen's sessions, the scratchpads, `upload` and the window's notices.
+- The source view gains the decoration and gutter extensions; the rendered view gains the highlight registry and the selection reading; the terminal emulators report whether the program enabled bracketed paste.
+- `lib/close_guard.ts` and the quit confirmation gain annotations as a reason; annotations stay out of the panels' parameters, so a change of them alone leaves the window's layout as it is.
 
 ## Risks / Trade-offs
 
@@ -195,6 +199,7 @@ The server announces `viewer-annotations-v1`. A window offers annotations for a 
 - [The CSS Custom Highlight API is missing in an older WebKitGTK] → block markers instead of text highlights in the rendered view; the source view is unaffected.
 - [Pasting a long review into a busy terminal] → nothing is submitted without Enter, and the review is at most about 260 KB by the limits.
 - [Two windows editing the same annotation] → last write wins for that annotation, as for a scratchpad.
+- [Text a document hides with CSS is part of a selection in the rendered view] → a quote can carry text the user did not see, such as an instruction aimed at the agent, into the review. The form shows the quote as it is stored, the review is pasted without Enter so the user reads it at the prompt, and the source view hides nothing.
 
 ## Migration Plan
 
@@ -211,6 +216,7 @@ Decided for this change, marked in `openspec/open-decisions.md` (2026-11-06):
 - **D2**: per-annotation operations instead of a whole list.
 - **D8**: the Markdown format of a review.
 - **D9**: paste as the main hand-over, sending ends the round with an undo, a file instead of a paste for programs without bracketed paste.
+- **D7**: the list column opened and closed per pane for the window's lifetime, by a bar button with the count, a menu entry and the tab marker.
 
 ## Open Questions
 

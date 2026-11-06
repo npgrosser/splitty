@@ -42,10 +42,16 @@ function frontMatter(state: StateBlock, startLine: number, endLine: number, sile
 }
 
 function sourceLines(state: StateCore): void {
+  const lines = state.src.split("\n");
   for (const token of state.tokens) {
     if (!token.map || !token.block || token.nesting === -1) continue;
-    token.attrSet("data-source-line", String(token.map[0] + 1));
-    token.attrSet("data-source-line-end", String(Math.max(token.map[0] + 1, token.map[1])));
+    const start = token.map[0];
+    let end = Math.max(start + 1, token.map[1]);
+    // The last item of a list, and the list, reach over the blank lines after
+    // them; those are not part of a passage taken from the block.
+    while (end > start + 1 && (lines[end - 1] ?? "").trim() === "") end--;
+    token.attrSet("data-source-line", String(start + 1));
+    token.attrSet("data-source-line-end", String(end));
   }
 }
 

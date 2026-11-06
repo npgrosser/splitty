@@ -27,7 +27,7 @@ Out of scope:
 
 ### Modified Capabilities
 - `workspace-model`: "Layout Operations" gains `put_annotations` and `remove_annotations`, which only `mux-protocol` accepts.
-- `mux-protocol`: "Change Propagation to Other Clients" nudges the other clients after both operations.
+- `mux-protocol`: "Change Propagation to Other Clients" nudges the other clients after both operations, and "Rejected Op Reporting" answers a rejected one with `mux.op_failed`, so the window shows the server's annotations again.
 - `control-api`: "Workspace and Screen Queries" omit annotations, and "Submitting Layout Operations" refuses both operations.
 - `access-control`: "File Transfers Need The User" admits the upload of a review the user sends to a pane as a file.
 - `server-modes`: "Workspace Persistence In Daemon Mode" keeps the annotations with their viewer pane.

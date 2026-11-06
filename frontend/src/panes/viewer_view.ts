@@ -15,15 +15,21 @@
  * path: the file a relative link opens, the URL of a web link, or that the
  * pane opens nothing for it. The bar and the notices are outside the rendered
  * document's shadow host.
+ *
+ * Annotations (`viewer-annotations`) are the layer's (`viewer/annotation_layer.ts`):
+ * it gets the document's texts from here and is told whenever the document,
+ * its version or its view changes.
  */
 
 import type { ViewerRecord } from "../lib/protocol/types.ts";
+import { lastLine, sourceText } from "../lib/viewer/anchoring.ts";
 import type { DocumentState, ReadFailure, ViewerDocument } from "../lib/viewer/documents.ts";
 import type { DocumentLink } from "../lib/viewer/links.ts";
 import { decodeText, fileName, imageDataUrl, presentationOf, type Presentation } from "../lib/viewer/presentation.ts";
-import { RenderedDocument } from "../lib/viewer/render.ts";
+import { RenderedDocument, renderedText, type RenderedText } from "../lib/viewer/render.ts";
 import { SourceView } from "../lib/viewer/source_view.ts";
 import { formatBytes } from "../lib/terminal/image_paste.ts";
+import { AnnotationLayer, type AnnotatedContent, type AnnotationLayerOptions, type AnnotationMenu } from "./viewer/annotation_layer.ts";
 import type { ViewerMode, ViewerPosition, ViewerViewState } from "./viewer_view_state.ts";
 
 export type { ViewerMode } from "./viewer_view_state.ts";
@@ -44,6 +50,8 @@ export interface ViewerViewOptions {
   /** A relative link of a rendered document names no path a viewer pane can show. */
   refuseLink(): void;
   reload(): void;
+  /** The pane's annotations, where its server keeps them (`viewer-annotations`). */
+  readonly annotations?: AnnotationLayerOptions;
 }
 
 interface Shown {
@@ -51,6 +59,10 @@ interface Shown {
   readonly presentation: Presentation;
   readonly bytes: Uint8Array;
   text?: string;
+  /** The text with line breaks as `\n`, as the source view shows it and source annotations anchor in it. */
+  source?: string;
+  /** The rendered view's text, rendered for it alone while the source is shown. */
+  rendered?: RenderedText;
 }
 
 /** What the bar says for a link that opens nothing. */
@@ -109,6 +121,7 @@ export class ViewerView {
    */
   private position: ViewerPosition | undefined;
   private layoutWatch: ResizeObserver | null = null;
+  private layer: AnnotationLayer | null = null;
 
   constructor(doc: Document, private readonly options: ViewerViewOptions) {
     this.doc = doc;
@@ -118,13 +131,15 @@ export class ViewerView {
     this.pending = options.state?.position;
     this.element = element(doc, "div", "viewer-pane");
     const body = element(doc, "div", "viewer-body");
+    const main = element(doc, "div", "viewer-main");
     this.documentBox = element(doc, "div", "viewer-document");
     // Scroll events do not bubble; the capture phase sees those of the source
     // view's scroller and of the rendered document's host.
     this.documentBox.addEventListener("scroll", this.notePosition, { capture: true, passive: true });
     this.notice = element(doc, "div", "viewer-notice");
     this.notice.hidden = true;
-    body.append(this.documentBox, this.notice);
+    main.append(this.documentBox, this.notice);
+    body.append(main);
 
     const bar = element(doc, "div", "viewer-bar");
     this.barLabel = element(doc, "span", "viewer-bar-label");
@@ -135,6 +150,17 @@ export class ViewerView {
     this.toggle.addEventListener("click", () => this.toggleMode());
     bar.append(this.barLabel, this.toggle);
     this.element.append(body, bar);
+
+    if (options.annotations && this.record && options.supported) {
+      this.layer = new AnnotationLayer(
+        doc,
+        { body, main, documentBox: this.documentBox, bar },
+        () => this.annotatedContent(),
+        options.annotations,
+        options.state?.annotations,
+        () => this.focus(),
+      );
+    }
 
     if (!this.record || !options.supported) {
       this.showNotice(options.supported
@@ -159,6 +185,8 @@ export class ViewerView {
   setRecord(record: ViewerRecord): void {
     this.record = record;
     this.showLabel();
+    // Another origin is another terminal to send the review to.
+    this.layer?.contentChanged();
   }
 
   update(state: DocumentState): void {
@@ -187,11 +215,18 @@ export class ViewerView {
   /** How the view is left, for the pane's next view. */
   viewState(): ViewerViewState {
     const position = this.pending ?? this.position;
+    const annotations = this.layer ? this.layer.listChoice : this.options.state?.annotations;
     return {
       mode: this.mode,
       ...(this.wrapChoice !== undefined ? { wrap: this.wrapChoice } : {}),
       ...(position ? { position } : {}),
+      ...(annotations ? { annotations } : {}),
     };
+  }
+
+  /** What the context menu offers for annotations; undefined where the pane offers none. */
+  annotationMenu(): AnnotationMenu | undefined {
+    return this.layer?.menu();
   }
 
   toggleMode(): void {
@@ -227,6 +262,8 @@ export class ViewerView {
   destroy(): void {
     this.layoutWatch?.disconnect();
     this.layoutWatch = null;
+    this.layer?.destroy();
+    this.layer = null;
     this.clearDocument();
     this.element.remove();
   }
@@ -247,6 +284,7 @@ export class ViewerView {
       nodes.push(button);
     }
     this.notice.replaceChildren(...nodes);
+    this.layer?.contentChanged();
   }
 
   private showFailure(failure: ReadFailure): void {
@@ -277,6 +315,34 @@ export class ViewerView {
     return shown.text;
   }
 
+  private sourceOf(shown: Shown): string {
+    shown.source ??= sourceText(this.textOf(shown));
+    return shown.source;
+  }
+
+  /** The document as annotations need it (`viewer/annotation_layer.ts`). */
+  private annotatedContent(): AnnotatedContent {
+    const shown = this.shown;
+    const presentation = shown?.presentation;
+    const text = shown && (presentation?.kind === "rendered" || presentation?.kind === "source");
+    const visible = !this.documentBox.hidden;
+    return {
+      version: shown?.version,
+      shown: !visible ? null : this.rendered ? "rendered" : this.source ? "source" : null,
+      format: presentation?.kind === "rendered" ? presentation.format : undefined,
+      sourceText: text ? this.sourceOf(shown) : undefined,
+      renderedText: () => {
+        if (!shown || presentation?.kind !== "rendered") return undefined;
+        const live = this.rendered?.textModel();
+        if (live) return live;
+        shown.rendered ??= renderedText(this.doc, presentation.format, this.textOf(shown), lastLine(this.sourceOf(shown)));
+        return shown.rendered;
+      },
+      source: this.source,
+      rendered: this.rendered,
+    };
+  }
+
   /** Show `shown`; `rebuild` replaces the document's view instead of updating it. */
   private present(shown: Shown, rebuild: boolean): void {
     const { presentation } = shown;
@@ -296,13 +362,14 @@ export class ViewerView {
           pointLink: (link) => this.showLink(link),
         });
         this.documentBox.append(this.rendered.host);
-        this.rendered.render(presentation.format, this.textOf(shown));
+        this.rendered.render(presentation.format, this.textOf(shown), lastLine(this.sourceOf(shown)));
         this.restorePosition();
       } else {
         const fraction = this.rendered.scrollFraction();
-        this.rendered.render(presentation.format, this.textOf(shown));
+        this.rendered.render(presentation.format, this.textOf(shown), lastLine(this.sourceOf(shown)));
         this.rendered.scrollToFraction(fraction);
       }
+      this.layer?.contentChanged();
       return;
     }
 
@@ -311,11 +378,17 @@ export class ViewerView {
       if (rebuild || !this.source) {
         this.clearDocument();
         const wrap = this.wrapChoice ?? (source.kind === "text" || presentation.kind === "rendered");
-        this.source = new SourceView(this.documentBox, { text: this.textOf(shown), fileName: name, wrap });
+        this.source = new SourceView(this.documentBox, {
+          text: this.sourceOf(shown),
+          fileName: name,
+          wrap,
+          onSelectionChange: () => this.layer?.selectionChanged(),
+        });
         this.restorePosition();
       } else {
-        this.source.setText(this.textOf(shown), name);
+        this.source.setText(this.sourceOf(shown), name);
       }
+      this.layer?.contentChanged();
       return;
     }
 
@@ -330,6 +403,7 @@ export class ViewerView {
       box.append(image);
       this.still = box;
       this.documentBox.append(box);
+      this.layer?.contentChanged();
       return;
     }
     // A binary file: its size, none of its bytes.
@@ -337,6 +411,7 @@ export class ViewerView {
     box.append(element(this.doc, "p", "viewer-notice-text", `A binary file of ${formatBytes(presentation.size)}. Its content is not shown.`));
     this.still = box;
     this.documentBox.append(box);
+    this.layer?.contentChanged();
   }
 
   private clearDocument(): void {

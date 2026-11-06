@@ -6,6 +6,8 @@ import { gridArrangement, sameShape } from "./arrangement.ts";
 import { ScreenBinding } from "../lib/connection/screen_binding.ts";
 import type { LayoutNode, PaneState, ScreenState, ViewerRecord } from "../lib/protocol/types.ts";
 import { testScreen, type TerminalStandIn, type TestScreen } from "../lib/testing/screen_layout.ts";
+import { ANNOTATIONS_CAPABILITY } from "../lib/viewer/annotations.ts";
+import { VIEWER_CAPABILITY } from "../lib/viewer/limits.ts";
 import { viewerRecordOf } from "../lib/viewer/panel.ts";
 import { showContextMenu } from "../stores/ui.svelte.ts";
 
@@ -253,8 +255,8 @@ describe("snapshots applied in place", () => {
     id: "s1", revision: 1, root, floating: [], panes: Object.fromEntries(panes.map(pane => [pane.id, pane])), sessions: {},
   });
 
-  function open(): TestScreen & { added: string[]; removed: string[] } {
-    const screen = testScreen();
+  function open(capabilities?: string[]): TestScreen & { added: string[]; removed: string[] } {
+    const screen = testScreen({ capabilities });
     screens.push(screen);
     const added: string[] = [];
     const removed: string[] = [];
@@ -286,6 +288,47 @@ describe("snapshots applied in place", () => {
     expect(viewerRecordOf(api.getPanel("v1"))).toMatchObject({ revision: 2, originPaneId: "t2" });
     expect(api.activePanel?.id).toBe("t1");
     expect(globalThis.document.activeElement).toBe(shell.input);
+  });
+
+  // viewer-annotations: another window's annotation reaches the pane's list
+  // and marks, and the layout stays as it is.
+  it("keeps every panel and the shown document when only a viewer's annotations change", { timeout: 30_000 }, async () => {
+    const screen = open([VIEWER_CAPABILITY, ANNOTATIONS_CAPABILITY]);
+    const { api, binding } = screen;
+    const layout = row(slot("left", ["t1"]), slot("right", ["v1"]));
+    // As the connection's snapshot handler does: the annotations first, then the layout.
+    const apply = (next: ScreenState) => {
+      binding.conn.annotations.snapshot(next);
+      applyScreenSnapshot(api, binding, next);
+    };
+    apply(state(layout, [terminal("t1"), viewer("v1", PLAN)]));
+    screen.answerReads({ v1: "# Plan\n\nThe first step.\n" });
+    // The view's libraries load with the first viewer pane: slow while other test files run.
+    await vi.waitFor(() => expect(pane(screen, "v1").querySelector(".viewer-rendered")).not.toBeNull(), { timeout: 15_000 });
+    api.getPanel("t1")!.api.setActive();
+    const shell = screen.content<TerminalStandIn>("t1");
+    shell.input.focus();
+    const content = screen.content("v1");
+    const rendered = pane(screen, "v1").querySelector(".viewer-rendered");
+    screen.added.length = 0;
+
+    const annotations = [{
+      id: "ann-0123456789abcdef", kind: "comment" as const, body: "Which step?",
+      target: { view: "rendered" as const, quote: "The first step.", prefix: "Plan\n", suffix: "\n", startLine: 3, endLine: 3 },
+    }];
+    // An annotation op raises only the screen's revision.
+    apply({ ...state(layout, [terminal("t1"), viewer("v1", PLAN, { annotations })]), revision: 2 });
+    expect(screen.added).toEqual([]);
+    expect(screen.removed).toEqual([]);
+    expect(screen.content("t1")).toBe(shell);
+    expect(screen.content("v1")).toBe(content);
+    expect(pane(screen, "v1").querySelector(".viewer-rendered")).toBe(rendered);
+    expect(viewerRecordOf(api.getPanel("v1"))).not.toHaveProperty("annotations");
+    expect(pane(screen, "v1").querySelectorAll(".viewer-annotation")).toHaveLength(1);
+    expect(rendered!.shadowRoot!.querySelector("[data-splitty-mark]")!.textContent).toBe("The first step.");
+    expect(api.activePanel?.id).toBe("t1");
+    expect(globalThis.document.activeElement).toBe(shell.input);
+    expect(screen.socket.sentOfType("mux.op")).toEqual([]);
   });
 
   it("adds a viewer beside a terminal, and one as a tab of its group, without taking the front or the focus", () => {

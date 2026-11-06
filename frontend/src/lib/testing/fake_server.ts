@@ -66,6 +66,8 @@ export interface FakeEmulator extends TerminalEmulator {
   disposed: boolean;
   /** The grid that fits the pane, what `measure()` returns; null without layout. */
   pane: { cols: number; rows: number } | null;
+  /** Whether the program enabled bracketed paste; settable. */
+  bracketedPaste: boolean;
   /** The user types into the terminal. */
   type(data: string): void;
 }
@@ -85,6 +87,7 @@ export function fakeEmulator(): FakeEmulator {
     element: undefined,
     cursorRow: 0,
     isAlternateScreen: false,
+    bracketedPaste: false,
     write(data: Uint8Array) { emulator.written.push(decoder.decode(data)); },
     onData(cb: (data: string) => void) { dataListeners.add(cb); return () => dataListeners.delete(cb); },
     onResize(cb: (cols: number, rows: number) => void) { resizeListeners.add(cb); return () => resizeListeners.delete(cb); },

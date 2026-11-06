@@ -150,6 +150,58 @@ describe("MuxClient", () => {
     expect(socket.sentOfType("mux.resync")).toEqual([{ type: "mux.resync", screenId: "screen-1" }]);
   });
 
+  // viewer-annotations, Annotations Capability (Host without annotations): the
+  // flag follows every welcome; a rejected annotation op goes to the listeners
+  // and resyncs its screen, and rejects no spawn waiter of the same pane.
+  it("offers annotations only for a server that announces them, and resyncs a rejected annotation op", async () => {
+    welcome();
+    expect(mux.annotations).toBe(false);
+    socket.message({ type: "mux.welcome", clientId: "c1", screens: [], capabilities: ["viewer-v1", "viewer-annotations-v1"] });
+    expect(mux.annotations).toBe(true);
+    socket.message({ type: "mux.welcome", clientId: "c1", screens: [], capabilities: ["viewer-v1"] });
+    expect(mux.viewers).toBe(true);
+    expect(mux.annotations).toBe(false);
+
+    const failures: unknown[] = [];
+    const stop = mux.onOpFailed((failure) => failures.push(failure));
+    let settled = false;
+    const spawn = mux.waitForPaneSpawned("viewer-0123456789abcdef", 60_000);
+    void spawn.then(() => { settled = true; }, () => { settled = true; });
+    socket.message({ type: "mux.op_failed", op: "put_annotations", screenId: "screen-1", paneId: "viewer-0123456789abcdef", error: "pane viewer-0123456789abcdef holds 100 annotations" });
+    socket.message({ type: "mux.op_failed", op: "remove_annotations", paneId: 7, error: "no screen" });
+    expect(failures).toEqual([
+      { op: "put_annotations", screenId: "screen-1", paneId: "viewer-0123456789abcdef", error: "pane viewer-0123456789abcdef holds 100 annotations" },
+      { op: "remove_annotations", error: "no screen" },
+    ]);
+    expect(socket.sentOfType("mux.resync")).toEqual([{ type: "mux.resync", screenId: "screen-1" }]);
+    await Promise.resolve();
+    expect(settled).toBe(false);
+
+    stop();
+    socket.message({ type: "mux.op_failed", op: "put_annotations", screenId: "screen-1", paneId: "v1", error: "again" });
+    expect(failures).toHaveLength(2);
+    socket.message({ type: "mux.pane_spawned", paneId: "viewer-0123456789abcdef", sessionId: "" });
+  });
+
+  // viewer-annotations, Saving Annotations Through The Window: snapshots carry
+  // a viewer pane's annotations, malformed entries dropped, absent while empty.
+  it("keeps a viewer pane's annotations from a snapshot by the server's rules", () => {
+    const seen: ScreenState[] = [];
+    mux.setHandlers({ onSnapshot: (screen) => seen.push(screen) });
+    const annotation = { id: "ann-0123456789abcdef", kind: "comment", body: "Looks good." };
+    const viewer = (annotations: unknown) => ({ role: "viewer", viewer: { source: { kind: "file", path: "/home/me/app/PLAN.md" }, revision: 1, annotations } });
+    const panes: Record<string, unknown> = {
+      v1: viewer([annotation, { id: "ann-bad", kind: "comment", body: "x" }, { ...annotation, body: "same ID" }]),
+      v2: viewer([]),
+      v3: viewer("not a list"),
+    };
+    socket.message({ type: "mux.screen_snapshot", screen: { id: "screen-1", root: { type: "slot", id: "s1", paneIds: Object.keys(panes) }, panes } });
+    const got = seen[0].panes;
+    expect(got.v1.viewer!.annotations).toEqual([annotation]);
+    expect(got.v2.viewer).not.toHaveProperty("annotations");
+    expect(got.v3.viewer).not.toHaveProperty("annotations");
+  });
+
   // viewer-panes, Viewer Panes and Viewer Capability: a malformed record
   // leaves a viewer pane that says it cannot be shown; Document Text Outside
   // Snapshots: a text a snapshot carries anyway goes no further.

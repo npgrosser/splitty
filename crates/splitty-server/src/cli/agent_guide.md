@@ -83,7 +83,10 @@ request the user's editor instead, with a confirmation.
 
 The user may annotate the document in that pane and send you the review. It reaches
 you only as text pasted at your prompt or as an inserted file path; annotations the
-user has not sent cannot be read through `splitty` or the control socket.
+user has not sent cannot be read through `splitty` or the control socket. The review
+is Markdown: the document's name and path, then numbered sections with the lines, the
+kind (comment, question, suggested change, delete), the passage as a block quote, the
+remark and a fenced replacement, and general comments last.
 
 ## Hand a file to the user
 

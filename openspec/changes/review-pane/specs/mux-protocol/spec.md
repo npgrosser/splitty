@@ -32,3 +32,21 @@ When an op submitted over the WebSocket spawns or terminates sessions, the serve
 - **WHEN** client A sends `put_annotations` on screen `s1` while client B is connected
 - **THEN** client B SHALL receive `mux.nudge` with reason `mux_op` and `screenId` `s1`
 - **AND** client A SHALL NOT receive it
+
+### Requirement: Rejected Op Reporting
+When the server rejects a recognized op that names a pane to create (`newPaneId`) because it fails validation (see `workspace-model`), it SHALL send `mux.op_failed` to the originating client only, carrying the op `type`, the `screenId`, that `paneId`, and an error message. When it rejects a recognized `arrange_panes`, `put_annotations` or `remove_annotations` op because it fails validation, it SHALL send `mux.op_failed` to the originating client only, carrying the op `type`, the `screenId` and an error message, and for the annotation ops the viewer pane's `paneId`.
+
+#### Scenario: Rejected pane-creating op
+- **WHEN** a client sends a `mux.op` with `newPaneId` `p9` that the server rejects
+- **THEN** the client SHALL receive `mux.op_failed` with `paneId` `p9` and a non-empty `error`
+- **AND** no other client SHALL receive it
+
+#### Scenario: Rejected arrangement
+- **WHEN** a client sends `arrange_panes` on screen `s1` that misses one of its panes
+- **THEN** the client SHALL receive `mux.op_failed` with `op` `arrange_panes`, `screenId` `s1` and a non-empty `error`
+- **AND** no other client SHALL receive it
+
+#### Scenario: Rejected annotation
+- **WHEN** a client sends `put_annotations` for viewer pane `v1` on screen `s1` that would give the pane a 101st annotation
+- **THEN** the client SHALL receive `mux.op_failed` with `op` `put_annotations`, `screenId` `s1`, `paneId` `v1` and a non-empty `error`
+- **AND** no other client SHALL receive it

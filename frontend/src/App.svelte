@@ -3,7 +3,7 @@
   import { getAuthState, getAuthError, getConnectionError, getConnectionRetryLabel, retryConnection, handleTokenSubmit, initAuth } from "./stores/auth.svelte.ts";
   import { settings } from "./stores/settings.svelte.ts";
   import { getTheme, subscribeTheme } from "./lib/theme.ts";
-  import { onCloseRequest, runningOnQuit, scratchpadsOnQuit, hostScreensOpen, type CloseRequest, type RunningProcess } from "./lib/close_guard.ts";
+  import { onCloseRequest, runningOnQuit, scratchpadsOnQuit, annotationsOnQuit, hostScreensOpen, type CloseRequest, type RunningProcess } from "./lib/close_guard.ts";
   import { onTemplateApprovalRequest, type TemplateApprovalRequest } from "./lib/template_guard.ts";
   import { warmup } from "./lib/terminal/terminal_mount.ts";
   import { forEachConnection, localConnection } from "./lib/connection/registry.ts";
@@ -30,7 +30,7 @@
   let theme = $state(getTheme());
   let closeRequest = $state<CloseRequest | null>(null);
   /** Quitting while processes run in local panes, which end with the app. */
-  let quitRequest = $state<{ processes: RunningProcess[]; scratchpads: number; hostScreens: boolean; quit: () => void } | null>(null);
+  let quitRequest = $state<{ processes: RunningProcess[]; scratchpads: number; annotations: number; hostScreens: boolean; quit: () => void } | null>(null);
   let templateRequest = $state<TemplateApprovalRequest | null>(null);
   let windowTitle = $state("Splitty");
   let maximized = $state(false);
@@ -92,9 +92,10 @@
         win.onCloseRequested(async (event) => {
           const processes = runningOnQuit();
           const scratchpads = scratchpadsOnQuit();
-          if (processes.length > 0 || scratchpads > 0) {
+          const annotations = annotationsOnQuit();
+          if (processes.length > 0 || scratchpads > 0 || annotations > 0) {
             event.preventDefault();
-            quitRequest = { processes, scratchpads, hostScreens: hostScreensOpen(), quit: () => { win.destroy(); } };
+            quitRequest = { processes, scratchpads, annotations, hostScreens: hostScreensOpen(), quit: () => { win.destroy(); } };
           }
         }).then((fn) => { quitCleanup = fn; });
       });
@@ -104,8 +105,9 @@
       quitCleanup = electron.onCloseRequested(() => {
         const processes = runningOnQuit();
         const scratchpads = scratchpadsOnQuit();
-        if (processes.length > 0 || scratchpads > 0) {
-          quitRequest = { processes, scratchpads, hostScreens: hostScreensOpen(), quit: forceClose };
+        const annotations = annotationsOnQuit();
+        if (processes.length > 0 || scratchpads > 0 || annotations > 0) {
+          quitRequest = { processes, scratchpads, annotations, hostScreens: hostScreensOpen(), quit: forceClose };
         } else {
           forceClose();
         }
@@ -113,7 +115,7 @@
     } else {
       // Web / PWA: use native beforeunload dialog
       const handleBeforeUnload = (e: BeforeUnloadEvent) => {
-        if (runningOnQuit().length > 0 || scratchpadsOnQuit() > 0) {
+        if (runningOnQuit().length > 0 || scratchpadsOnQuit() > 0 || annotationsOnQuit() > 0) {
           e.preventDefault();
         }
       };
@@ -158,6 +160,7 @@
     processName={closeRequest?.processName ?? ""}
     applicationTitle={closeRequest?.applicationTitle}
     scratchpads={closeRequest?.scratchpads ?? 0}
+    annotations={closeRequest?.annotations ?? 0}
     onConfirm={() => {
       closeRequest?.close();
       closeRequest = null;
@@ -170,6 +173,7 @@
     processes={quitRequest?.processes ?? []}
     hostScreens={quitRequest?.hostScreens ?? false}
     scratchpads={quitRequest?.scratchpads ?? 0}
+    annotations={quitRequest?.annotations ?? 0}
     onConfirm={() => {
       quitRequest?.quit();
       quitRequest = null;
