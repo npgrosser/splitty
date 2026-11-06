@@ -152,7 +152,7 @@ The server SHALL apply `rename_screen` and `set_active_screen` only to existing 
 - **THEN** the screen order becomes `[C, A, B]`
 
 ### Requirement: Splitting a Pane
-On `split_pane` the server SHALL require that the source pane exists and lies in the screen's root layout; panes in floating entries cannot be split. The server SHALL add a new `terminal` pane with a new session in a new slot next to the source pane's slot, after it by default or before it when `newPaneIndex` is 0. If the source slot's parent split has the requested axis, the new slot SHALL be inserted as a sibling and the parent's sizes SHALL be set to `resultingSizes` or to equal fractions. Otherwise the source slot SHALL be replaced by a new split of the requested axis containing both slots, with sizes `resultingSizes` or `[0.5, 0.5]`. When given, `resultingSizes` MUST consist of non-negative values summing to 1 within 0.01.
+On `split_pane` the server SHALL require that the source pane exists and lies in the screen's root layout; panes in floating entries cannot be split. The server SHALL add a new `terminal` pane with a new session in a new slot next to the source pane's slot, after it by default or before it when `newPaneIndex` is 0. If the source slot's parent split has the requested axis, the new slot SHALL be inserted as a sibling and the parent's sizes SHALL be set to `resultingSizes` or to equal fractions. Otherwise the source slot SHALL be replaced by a new split of the requested axis containing both slots, with sizes `resultingSizes` or `[0.5, 0.5]`. When given, `resultingSizes` MUST contain exactly one finite, non-negative value per child of the resulting split and sum to 1 within 0.01: one more than the existing parent child count when inserting a sibling, otherwise two. Invalid sizes SHALL leave the complete workspace, its revisions and sessions unchanged.
 
 #### Scenario: Split a lone pane
 - **WHEN** `split_pane` with axis `horizontal` is applied to the only pane `p1` of a screen
@@ -167,6 +167,18 @@ On `split_pane` the server SHALL require that the source pane exists and lies in
 #### Scenario: Invalid resulting sizes
 - **WHEN** `split_pane` carries `resultingSizes` `[0.5, 0.3]`
 - **THEN** the op is rejected and the layout is unchanged
+
+#### Scenario: Explicit sizes when adding a sibling
+- **WHEN** a same-axis split adds a third child with `resultingSizes` `[0.2, 0.3, 0.5]`
+- **THEN** the split has three children with those sizes, including when the source is nested or the new pane is inserted before it
+
+#### Scenario: Wrong size count for an existing parent
+- **WHEN** a same-axis split would add a third child but supplies `[0.5, 0.5]`
+- **THEN** the op is rejected without changing state or starting a session
+
+#### Scenario: Wrapping a slot in another axis
+- **WHEN** a split wraps a slot in a new split on a different axis
+- **THEN** exactly two explicit sizes are accepted and a three-entry array is rejected
 
 ### Requirement: Creating a Tab
 On `new_tab` the server SHALL require that `paneId` exists in a slot of the screen's root layout or a floating entry. It SHALL append a new terminal pane to that same slot, mark it as the slot's active pane and spawn exactly one session. Existing split nodes, slot IDs, sizes and floating bounds SHALL remain unchanged. Frontend new-tab actions SHALL send `new_tab`; snapshots SHALL restore panes of one slot as tabs in one group, including floating groups.

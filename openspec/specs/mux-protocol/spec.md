@@ -142,7 +142,7 @@ When an op submitted over the WebSocket successfully starts a session for a pane
 - **THEN** the originating client receives failure rather than a successful spawn event, and synchronized job state reports `failed`
 
 ### Requirement: Rejected Op Reporting
-When the server rejects a recognized op that names a pane to create (`newPaneId`) because it fails validation (see `workspace-model`), it SHALL send `mux.op_failed` to the originating client only, carrying the op `type`, the `screenId`, that `paneId`, and an error message. When it rejects a recognized `apply_template`, `arrange_panes`, `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies` or `mark_sent` op because it fails validation, it SHALL send `mux.op_failed` to the originating client only, carrying the op `type`, the `screenId` and an error message, and for the annotation ops the viewer pane's `paneId`.
+When the server rejects a parsed layout op during validation or application, it SHALL send `mux.op_failed` to the originating client only, carrying the op `type`, the `screenId` and a non-empty error. The event SHALL retain `newPaneId` as `paneId` for pane-creating ops, and the viewer's `paneId` for annotation ops. The window SHALL request `mux.resync` when that failure names a screen, including non-pane-creating layout ops. The silent `select_tab` exception in Selected Tabs Reach the Server and the malformed/unknown-message policy remain unchanged.
 
 #### Scenario: Rejected pane-creating op
 - **WHEN** a client sends a `mux.op` with `newPaneId` `p9` that the server rejects
@@ -164,8 +164,17 @@ When the server rejects a recognized op that names a pane to create (`newPaneId`
 - **THEN** the client SHALL receive `mux.op_failed` with `op` `put_replies`, `screenId` `s1`, `paneId` `v1` and a non-empty `error`
 - **AND** no other client SHALL receive it
 
+#### Scenario: Rejected layout edit without a new pane
+- **WHEN** a client sends a parsed `resize_split`, `move_pane`, `float_pane`, `move_float`, `dock_pane` or workspace op that is rejected without naming `newPaneId`
+- **THEN** it receives `mux.op_failed` with the op and screen identifiers and requests that screen's snapshot
+- **AND** other clients receive neither that failure nor an op-change nudge
+
+#### Scenario: Failure without a screen identifier
+- **WHEN** a window receives a failure without a usable `screenId`
+- **THEN** it reports the failure to its consumers without sending an invalid screen resync
+
 ### Requirement: Change Propagation to Other Clients
-When an op submitted over the WebSocket spawns or terminates sessions, the server SHALL send every other connected client the op's `mux.pane_spawned` events followed by `mux.nudge` with reason `mux_op` and the op's `screenId`; the originating client SHALL NOT receive that nudge. When a `move_pane_to_screen` op is applied, the server SHALL send every other connected client `mux.nudge` with reason `mux_op` for the source screen and for the target screen, and none to the originating client. When a `set_scratchpad`, an `arrange_panes`, an `open_viewer`, a `put_annotations`, a `remove_annotations`, a `put_replies`, a `remove_replies` or a `mark_sent` op is applied, or a `close_pane` op that ends no session, the server SHALL send every other connected client `mux.nudge` with reason `mux_op` for its screen, and none to the originating client. When the server adds an agent's reply, or starts or ends a wait for a review (see `viewer-annotations`), it SHALL send every connected client `mux.nudge` with reason `mux_op` for the screen of the viewer pane.
+For an accepted layout op on a native or browser connection, the server SHALL notify every other connected client of the screens the op changed, added or removed using `mux.nudge` with reason `mux_op` and their actual screen IDs. All successful `mux.pane_spawned` events SHALL precede the op's nudges; each affected screen SHALL be nudged at most once per op. The originator SHALL receive no success nudge. The documented `select_tab` exception remains silent. A workspace order or active-screen change with no changed screen SHALL produce one nudge without a `screenId`. When the server adds an agent's reply, or starts or ends a wait for a review (see `viewer-annotations`), it SHALL send every connected client `mux.nudge` with reason `mux_op` for the viewer's screen.
 
 #### Scenario: Session-changing op from a client
 - **WHEN** client A sends a `mux.op` on screen `s1` that spawns a session while client B is connected
@@ -200,6 +209,22 @@ When an op submitted over the WebSocket spawns or terminates sessions, the serve
 #### Scenario: Reply of an agent
 - **WHEN** a pane process adds a reply to an annotation of a viewer pane on screen `s1` through the control API while clients A and B are connected
 - **THEN** A and B SHALL each receive `mux.nudge` with reason `mux_op` and `screenId` `s1`
+
+#### Scenario: Layout edit without process effects
+- **WHEN** client A changes split sizes, moves, floats or docks a pane, moves floating bounds, or renames a screen without starting or stopping a session
+- **THEN** client B receives one nudge for the affected screen and client A receives none
+
+#### Scenario: Workspace-only mutation
+- **WHEN** client A changes screen order or active screen without changing a screen's state
+- **THEN** client B receives one `mux_op` nudge without `screenId` and client A receives none
+
+#### Scenario: Closing a screen without sessions
+- **WHEN** client A closes an empty or viewer-only screen
+- **THEN** client B receives a nudge naming the removed screen even though the op has no process effects
+
+#### Scenario: Generated and affected screen identifiers
+- **WHEN** an op creates a server-generated screen or changes both source and target screens
+- **THEN** its nudges identify the actual affected screens rather than an empty or unrelated request envelope ID, without duplicates
 
 ### Requirement: Propagation of HTTP-Applied Ops
 When an op is applied through the HTTP API (see `control-api`), the server SHALL send every connected client `mux.nudge` with reason `cli_op` and the actual affected screen's ID, preceded by `mux.pane_spawned` for each session the op successfully spawned. A newly generated screen ID SHALL never be replaced by the empty request envelope's ID. Managed-job lifecycle changes SHALL synchronize their affected pane state without requiring a UI output subscription.

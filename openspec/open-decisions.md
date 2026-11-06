@@ -8,6 +8,8 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`mux-layout-consistency` MLC-1 workspace-only invalidation** (2026-11-07, provisional, tbd): retain the existing screenless `mux.nudge` for order/activation changes without changed screens. Current clients' workspace-directory reconciliation (including removal and order) is separate from this notification-delivery fix; no new directory protocol is added before the GPUI spike.
+
 - **`splitty-open` D2 rendering without a frame** (2026-11-06, provisional, tbd): Markdown and HTML are sanitized with DOMPurify and rendered into a contained shadow root of the pane; images only from `data:` URLs; the CSPs keep `frame-src 'none'`. Alternative: a sandboxed `srcdoc` iframe (relaxes `frame-src` in three policies, blocked by the Tauri navigation hook on macOS and Linux, and keeps annotations out of the rendered view) or a separate credential-free origin.
 - **`splitty-open` D3 CodeMirror 6** (2026-11-06, provisional, tbd): text and code are shown in a read-only CodeMirror 6 view with languages loaded on demand. Alternative: Monaco (several MB, workers that need `worker-src`/`blob:` in three policies).
 - **`splitty-open` D4 limits and the pull protocol** (2026-11-06, provisional, tbd): files up to 8 MiB, texts up to 256 KiB, 1 MiB chunks pulled one by one with a version check, at most 4 reads in flight per connection. Alternative: larger limits, or the server pushing all chunks.
