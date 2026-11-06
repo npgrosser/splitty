@@ -118,6 +118,33 @@ impl MuxHandler {
     /// potentially large operation a second time. The caller retains its lease.
     pub(super) async fn handle_value(&self, value: Value) {
         match value.get("type").and_then(Value::as_str) {
+            Some("mux.extract_template") => {
+                let request_id = value.get("requestId").and_then(Value::as_str).unwrap_or("");
+                let screen_id = value.get("screenId").and_then(Value::as_str).unwrap_or("");
+                let name = value.get("name").and_then(Value::as_str).unwrap_or("");
+                let root = value.get("root").and_then(Value::as_str).unwrap_or("");
+                let result = self
+                    .store
+                    .get_screen(&ScreenId::from(screen_id))
+                    .ok_or_else(|| {
+                        splitty_core::mux::MuxError::ScreenNotFound(ScreenId::from(screen_id))
+                    })
+                    .and_then(|screen| {
+                        self.effect_runner
+                            .extract_template(screen, name.into(), root)
+                    });
+                let response = match result {
+                    Ok(template) => {
+                        serde_json::json!({"type":"mux.template_extracted", "requestId":request_id, "template":template})
+                    }
+                    Err(error) => {
+                        serde_json::json!({"type":"mux.template_extracted", "requestId":request_id, "error":error.to_string()})
+                    }
+                };
+                if let Err(error) = self.sender.try_send_json(&response) {
+                    tracing::debug!(%error, "template extraction response not queued");
+                }
+            }
             Some(codec::MSG_MUX_OP) => {
                 if let Ok(msg) = serde_json::from_value::<MuxOpMsg>(value) {
                     self.handle_op(msg).await;
@@ -205,6 +232,17 @@ impl MuxHandler {
         // The target of a pane moved to another screen, nudged with its source.
         let mut moved_to = None;
         let result = match op_type.as_str() {
+            "apply_template" => {
+                match serde_json::from_value::<splitty_core::mux::ApplyTemplate>(msg.op) {
+                    Ok(request) => self.store.dispatch(Op::ApplyTemplate {
+                        screen_id: screen_id.clone(),
+                        request: Box::new(request),
+                    }),
+                    Err(error) => Err(splitty_core::mux::MuxError::InvalidTemplate(
+                        error.to_string(),
+                    )),
+                }
+            }
             "move_pane_to_screen" => {
                 let field = |name: &str| msg.op.get(name).and_then(|v| v.as_str());
                 let (Some(pane_id), Some(target)) = (field("paneId"), field("targetScreenId"))
@@ -383,7 +421,11 @@ impl MuxHandler {
                 // A rejected arrangement or annotation op makes the window
                 // show the server's state again (mux-protocol, Rejected Op
                 // Reporting).
-                if new_pane_id.is_some() || op_type == "arrange_panes" || annotation_op {
+                if new_pane_id.is_some()
+                    || op_type == "arrange_panes"
+                    || op_type == "apply_template"
+                    || annotation_op
+                {
                     self.send_event(&ServerEvent::mux_op_failed(
                         op_type,
                         Some(msg.screen_id.clone()),
@@ -522,6 +564,126 @@ impl MuxHandler {
 mod tests {
     use super::*;
     use crate::client_session::Message;
+
+    #[tokio::test]
+    async fn template_apply_announces_only_real_spawns_before_nudge_and_resyncs_authoritative_layout(
+    ) {
+        use splitty_core::pty::Backend;
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let store = Arc::new(Store::new());
+        let (sender, mut sent) = ClientSender::channel();
+        let backend = Arc::new(splitty_core::pty::manager::Manager::new());
+        let runner = Arc::new(EffectRunner::new(backend.clone()));
+        let jobs = crate::jobs::Jobs::new(
+            store.clone(),
+            backend.clone(),
+            runner.clone(),
+            EnvContext::default(),
+            Default::default(),
+        );
+        let broadcasts = Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
+        let recorded = broadcasts.clone();
+        let handler = MuxHandler::new(
+            store.clone(),
+            Arc::new(sender),
+            "client".into(),
+            "daemon".into(),
+            runner,
+            Arc::new(RwLock::new(Default::default())),
+            EnvContext::default(),
+            Arc::new(move |events, _| {
+                recorded.lock().unwrap().extend(
+                    events
+                        .iter()
+                        .map(|event| serde_json::to_value(event).unwrap()),
+                )
+            }),
+            jobs,
+            Default::default(),
+        );
+        let request = serde_json::json!({"type":"mux.op","screenId":"screen","op": {
+            "type":"apply_template", "createScreen":true, "paneIds":{"a":"a","b":"b"},
+            "template":{"name":"T","panes":{"a":{},"b":{"shell_profile":"missing-profile"}},"layout":{"slot":["a","b"]}}
+        }});
+        handler.handle_value(request).await;
+        let mut replies = Vec::new();
+        while let Ok(message) = sent.try_recv() {
+            if let Message::Text(text) = message.value {
+                replies.push(serde_json::from_str::<Value>(text.as_str()).unwrap());
+            }
+        }
+        // The backend may fall back for an unavailable profile; only actual successful
+        // creates are announced, and every other result names its failed pane.
+        assert_eq!(replies.len(), 2);
+        for reply in &replies {
+            assert!(matches!(
+                reply["type"].as_str(),
+                Some("mux.pane_spawned" | "mux.op_failed")
+            ));
+            if reply["type"] == "mux.pane_spawned" {
+                assert!(backend.get(reply["sessionId"].as_str().unwrap()).is_some());
+            } else {
+                assert!(reply["paneId"].as_str().is_some());
+            }
+        }
+        {
+            let broadcast = broadcasts.lock().unwrap();
+            assert_eq!(broadcast.last().unwrap()["type"], "mux.nudge");
+            assert!(broadcast[..broadcast.len() - 1]
+                .iter()
+                .all(|event| event["type"] == "mux.pane_spawned"));
+        }
+        handler
+            .handle_value(serde_json::json!({"type":"mux.resync","screenId":"screen"}))
+            .await;
+        let Message::Text(text) = sent.recv().await.unwrap().value else {
+            panic!("snapshot")
+        };
+        let snapshot: Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(snapshot["screen"]["panes"].as_object().unwrap().len(), 2);
+        handler.handle_value(serde_json::json!({"type":"mux.extract_template","screenId":"screen","requestId":"read","name":"Saved"})).await;
+        let Message::Text(text) = sent.recv().await.unwrap().value else {
+            panic!("template")
+        };
+        assert_eq!(
+            serde_json::from_str::<Value>(text.as_str()).unwrap()["requestId"],
+            "read"
+        );
+        let before = serde_json::to_value(store.get_workspace_state()).unwrap();
+        handler.handle_value(serde_json::json!({"type":"mux.op","screenId":"screen","op":{"type":"apply_template","template":42}})).await;
+        let Message::Text(text) = sent.recv().await.unwrap().value else {
+            panic!("failure")
+        };
+        let failure: Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(failure["type"], "mux.op_failed");
+        assert_eq!(failure["screenId"], "screen");
+        assert_eq!(
+            serde_json::to_value(store.get_workspace_state()).unwrap(),
+            before
+        );
+        backend.shutdown(false).await.unwrap();
+        handler
+            .handle_value(
+                serde_json::json!({"type":"mux.op","screenId":"screen","op":{
+                    "type":"apply_template","paneIds":{"a":"replacement"},
+                    "template":{"name":"Replacement","panes":{"a":{}},"layout":{"slot":"a"}}
+                }}),
+            )
+            .await;
+        let Message::Text(text) = sent.recv().await.unwrap().value else {
+            panic!("spawn failure")
+        };
+        let failed: Value = serde_json::from_str(text.as_str()).unwrap();
+        assert_eq!(failed["type"], "mux.op_failed");
+        assert_eq!(failed["paneId"], "replacement");
+        assert_eq!(failed["screenId"], "screen");
+        assert!(sent.try_recv().is_err(), "no phantom spawn result");
+        let replaced = store.get_screen(&ScreenId::from("screen")).unwrap();
+        assert_eq!(replaced.panes.len(), 1);
+        assert_eq!(replaced.name.as_deref(), Some("T"));
+    }
 
     /// A reloading client's `create_screen` for a screen the server already
     /// holds is refused, and that client is told with `mux.op_failed`

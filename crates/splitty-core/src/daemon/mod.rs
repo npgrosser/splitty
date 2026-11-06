@@ -370,6 +370,7 @@ pub fn restore_effects(
                 session_id,
                 pane_id: pane_id.clone(),
                 screen_id: screen.id.clone(),
+                restore_mode: session.restore_mode.clone(),
                 command: session.command.clone(),
                 cwd: session.cwd.clone().or_else(|| pane.cwd.clone()),
                 shell_profile_id: session.shell_profile_id.clone(),

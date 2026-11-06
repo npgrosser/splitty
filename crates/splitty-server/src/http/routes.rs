@@ -210,6 +210,7 @@ pub(crate) fn api_routes_with(hub: Arc<Hub>) -> Router<AppState> {
         )
         // Templates
         .route("/api/templates", get(list_templates))
+        .route("/api/templates/extract/screen", post(extract_template))
         .route(
             "/api/templates/{slug}",
             get(get_template)
@@ -511,6 +512,15 @@ async fn patch_server_settings(
     Json(_partial): Json<Value>,
 ) -> Response {
     operations::patch_server_settings(&_state.service, _partial)
+        .await
+        .into_response()
+}
+
+async fn extract_template(
+    State(state): State<AppState>,
+    Json(body): Json<operations::ExtractTemplateRequest>,
+) -> Response {
+    operations::extract_template(&state.service, body)
         .await
         .into_response()
 }

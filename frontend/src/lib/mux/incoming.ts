@@ -186,6 +186,7 @@ function sessionState(id: string, raw: Raw): SessionState {
     ...(raw.restartPolicy === "never" ? { restartPolicy: "never" as const } : {}),
     shellProfileId: optionalString(raw.shellProfileId),
     command: optionalBounded(raw.command, MAX_VALUE),
+    ...(raw.restoreMode === "replay" || raw.restoreMode === "shell" || raw.restoreMode === "close" ? { restoreMode: raw.restoreMode } : {}),
     cwd: optionalBounded(raw.cwd, MAX_VALUE),
     shell: optionalBounded(raw.shell, MAX_VALUE),
     status,

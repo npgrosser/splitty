@@ -451,6 +451,44 @@ pub(crate) async fn patch_server_settings(_state: &ServiceState, _partial: Value
 
 // ── Templates ───────────────────────────────────────────────────────────────
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct ExtractTemplateRequest {
+    screen_id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    root: String,
+}
+
+pub(crate) async fn extract_template(
+    state: &ServiceState,
+    request: ExtractTemplateRequest,
+) -> Reply {
+    let Some(screen) = state
+        .mux_store
+        .get_screen(&ScreenId::from(request.screen_id.as_str()))
+    else {
+        return (
+            StatusCode::NOT_FOUND,
+            Payload(json!({"error": "screen not found"})),
+        )
+            .into_reply();
+    };
+    match state
+        .client_state
+        .effect_runner
+        .extract_template(screen, request.name, &request.root)
+    {
+        Ok(template) => Payload(template).into_reply(),
+        Err(error) => (
+            StatusCode::BAD_REQUEST,
+            Payload(json!({"error": error.to_string()})),
+        )
+            .into_reply(),
+    }
+}
+
 pub(crate) async fn list_templates(state: &ServiceState) -> Reply {
     match state.template_store.list() {
         Ok(summaries) => {
@@ -624,7 +662,7 @@ pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Repl
     let _publication = state.client_state.effect_runner.publication.lock().await;
     if let Some(
         op @ ("set_scratchpad" | "put_annotations" | "remove_annotations" | "put_replies"
-        | "remove_replies" | "mark_sent"),
+        | "remove_replies" | "mark_sent" | "apply_template"),
     ) = req.op.get("type").and_then(|t| t.as_str())
     {
         // Only a window sets a scratchpad (`session-scratchpad`), annotates a

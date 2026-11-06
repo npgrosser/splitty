@@ -16,6 +16,7 @@ pub enum Effect {
         pane_id: PaneId,
         screen_id: ScreenId,
         command: Option<String>,
+        restore_mode: Option<String>,
         cwd: Option<String>,
         shell_profile_id: Option<String>,
         shell: Option<String>,

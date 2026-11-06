@@ -52,6 +52,10 @@ pub enum Op {
         exit_code: Option<i32>,
         close: bool,
     },
+    ApplyTemplate {
+        screen_id: ScreenId,
+        request: Box<super::ApplyTemplate>,
+    },
     /// An already authorized launch. Authority is never deserialized from a client.
     CreateJob(Box<super::jobs::JobAdmission>),
     /// Server lifecycle facts and owner-only mutations, not public wire operations.

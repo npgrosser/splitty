@@ -66,9 +66,8 @@
   import { plainText } from "../../lib/protocol/untrusted.ts";
   import { toast } from "svelte-sonner";
   import { applyScreenSnapshot } from "../../layout/screen_snapshot.ts";
-  import { applyTemplate } from "../../layout/template_apply.ts";
+  import { templateIntent } from "../../lib/template_intent.ts";
   import { guardedApplyTemplate } from "../../lib/template_guard.ts";
-  import { extractTemplate } from "../../layout/template_extract.ts";
   import { setupKeyboardShortcuts, setupTabRevealKeys } from "../../lib/workspace/keyboard_shortcuts.ts";
   import { toggleScratchpad } from "../../lib/scratchpad.ts";
   import type { ClientCommand, Template } from "../../lib/protocol/types.ts";
@@ -630,28 +629,56 @@
   // a template that carries shell commands must show them and be confirmed
   // before anything is written into a PTY. Templates without commands apply
   // straight through.
-  function handleApplyTemplate(template: Template, root?: string) {
-    const api = getActiveApi();
-    if (!api) return;
-    guardedApplyTemplate(template, (approved) => applyTemplate(api, approved, root));
-  }
+  const newTemplateScreens = new Map<string, string>();
 
-  function handleApplyTemplateInNewScreen(template: Template, root?: string) {
-    guardedApplyTemplate(template, (approved) => {
-      const screen = createScreen();
-      requestAnimationFrame(() => {
-        const api = views.api(screen.id);
-        if (api) {
-          applyTemplate(api, approved, root);
+  function applyTemplateToScreen(template: Template, root: string | undefined, inNewScreen: boolean) {
+    const source = getScreens().find(s => s.id === getActiveScreenId());
+    const conn = source && connectionFor(source.conn);
+    if (!source || !conn || !getActiveApi()) return;
+    if (!conn.mux.templates) {
+      toast.error("Update this server to use templates");
+      if (conn.kind === "remote") askUpdate(conn.key);
+      return;
+    }
+    guardedApplyTemplate(template, approved => {
+      try {
+        if (!conn.mux.templates || connectionFor(source.conn) !== conn || !getScreens().some(screen => screen.id === source.id)) {
+          throw Error("The template’s target connection changed; apply it again.");
         }
-      });
+        const wireId = inNewScreen ? newScreenId() : source.wireId;
+        const intent = templateIntent(approved, wireId, root, inNewScreen);
+        if (intent.skippedWeb) toast.warning("Skipped web panes: open their URLs in your browser instead.");
+        if (inNewScreen) {
+          if (conn.key === "local") startup.expect(wireId);
+          else remoteSyncs.get(conn.key)?.adopt(wireId, approved.name);
+        }
+        const screen = !inNewScreen ? source : conn.key === "local"
+          ? createScreen(approved.name, wireId)
+          : addRemoteScreen(conn.key, wireId, { name: approved.name });
+        if (inNewScreen) newTemplateScreens.set(`${conn.key}/${wireId}`, screen.id);
+        // Queue before mount: no throwaway pane or frame timing dependency.
+        views.snapshot(conn.key, screen.id, intent.screen);
+        conn.mux.sendOp(wireId, intent.op);
+      } catch (error) { toast.error(String(error)); }
     });
   }
 
-  function handleExtractTemplate(name: string, root?: string): Template {
-    const api = getActiveApi();
-    if (!api) throw new Error("No active screen");
-    return extractTemplate(api, name, root);
+  function handleApplyTemplate(template: Template, root?: string) {
+    applyTemplateToScreen(template, root, false);
+  }
+
+  function handleApplyTemplateInNewScreen(template: Template, root?: string) {
+    applyTemplateToScreen(template, root, true);
+  }
+
+  function templatesSupported(_revision: number): boolean {
+    return views.binding(activeScreenId)?.conn.mux.templates ?? false;
+  }
+
+  function handleExtractTemplate(name: string, root?: string): Promise<Template> {
+    const binding = views.binding(getActiveScreenId());
+    if (!binding) return Promise.reject(Error("No active screen"));
+    return binding.conn.mux.extractTemplate(binding.wireId, name, root);
   }
 
   // ── Drawer Helpers ──
@@ -822,6 +849,25 @@
           remoteSyncs.delete(conn.key);
         });
       }
+      cleanups.push(conn.mux.onOpFailed(failure => {
+        if (failure.op !== "apply_template") return;
+        toast.error(failure.error);
+        const key = `${conn.key}/${failure.screenId}`;
+        const created = newTemplateScreens.get(key);
+        if (created && !failure.paneId) {
+          if (conn.kind === "remote" && failure.screenId) {
+            remoteSyncs.get(conn.key)?.forget(created);
+            remoteSyncs.get(conn.key)?.terminated(failure.screenId);
+          }
+          forgetScreen(created); removeScreen(created);
+        }
+        newTemplateScreens.delete(key);
+      }));
+      cleanups.push(conn.socket.onDisconnect(() => { connectionsVersion++; }));
+      cleanups.push(conn.socket.onMessage(message => {
+        if (message.type === "mux.welcome") connectionsVersion++;
+        if (message.type === "mux.screen_snapshot") newTemplateScreens.delete(`${conn.key}/${message.screen.id}`);
+      }));
       cleanups.push(watchEditorRequests(conn));
       cleanups.push(watchFileOffers(conn));
       // Before the screen sync: the server hears this window's state ahead of any attach.
@@ -1041,4 +1087,6 @@
   onApply={handleApplyTemplate}
   onApplyNewScreen={handleApplyTemplateInNewScreen}
   onExtract={handleExtractTemplate}
+  supported={templateDialogOpen && templatesSupported(connectionsVersion)}
+  onUpdate={() => { const screen = getScreens().find(s => s.id === activeScreenId); if (screen?.conn !== "local" && screen) askUpdate(screen.conn); else toast.info("Update Splitty to use templates."); }}
 />

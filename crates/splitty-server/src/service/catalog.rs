@@ -113,6 +113,7 @@ operations! {
     ShellProfilesUpdate, "shellProfiles.update", "PUT", "/api/shell-profiles", Backend, ["body"], MAX_API_BODY, Mutation, Ordinary;
     ServerSettingsGet, "serverSettings.get", "GET", "/api/server/settings", Backend, [], MAX_API_BODY, Read, Ordinary;
     ServerSettingsUpdate, "serverSettings.update", "PATCH", "/api/server/settings", Backend, ["body"], MAX_API_BODY, Mutation, Ordinary;
+    TemplateExtract, "template.extract", "POST", "/api/templates/extract/screen", Backend, ["body"], MAX_API_BODY, Read, Ordinary;
     TemplateList, "template.list", "GET", "/api/templates", Backend, [], MAX_API_BODY, Read, Ordinary;
     TemplateGet, "template.get", "GET", "/api/templates/{slug}", Backend, ["slug"], MAX_API_BODY, Read, Ordinary;
     TemplateSave, "template.save", "POST", "/api/templates/{slug}", Backend, ["slug", "body"], MAX_API_BODY, Mutation, Ordinary;
@@ -278,6 +279,7 @@ pub const SESSION_OPERATIONS: &[&str] = &[
     "hide",
     "mux.op",
     "mux.resync",
+    "mux.extract_template",
     "editor.register",
     "editor.result",
     "file.register",

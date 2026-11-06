@@ -22,7 +22,9 @@ mod ops;
 mod reducer;
 mod state;
 mod store;
+mod templates;
 mod validate;
+pub use templates::{extract_template, template_directory, ApplyTemplate, TEMPLATE_CAPABILITY};
 
 pub use effects::Effect;
 pub use grid::{find_neighbor, project_grid, PaneRect};
@@ -51,6 +53,8 @@ use crate::ids::*;
 /// Errors from mux operations.
 #[derive(Debug, Error)]
 pub enum MuxError {
+    #[error("invalid template: {0}")]
+    InvalidTemplate(String),
     #[error("pane {0} not found")]
     PaneNotFound(PaneId),
 

@@ -1236,3 +1236,91 @@ async fn embedded_connector_retains_owner_budget_and_revocation_through_ready() 
         .unwrap();
     healthy.shutdown().await;
 }
+
+#[tokio::test]
+async fn template_extraction_matches_native_and_http_and_control_cannot_apply_or_extract() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = state(ADDR, dir.path());
+    let template = json!({"name":"T", "panes":{"a":{"command":"editor", "dir":"/project/src", "restore_mode":"close"}}, "layout":{"slot":"a"}});
+    state
+        .mux_store
+        .dispatch(Op::ApplyTemplate {
+            screen_id: "screen".into(),
+            request: Box::new(
+                serde_json::from_value(
+                    json!({"template":template,"createScreen":true,"paneIds":{"a":"pane"}}),
+                )
+                .unwrap(),
+            ),
+        })
+        .unwrap();
+    state
+        .mux_store
+        .dispatch(Op::CreateScreen {
+            name: None,
+            screen_id: Some("empty".into()),
+            new_pane_id: Some("gone".into()),
+            shell_profile_id: None,
+        })
+        .unwrap();
+    state
+        .mux_store
+        .dispatch_screen(
+            &"empty".into(),
+            ScreenOp::ClosePane {
+                pane_id: "gone".into(),
+                resulting_sizes: None,
+            },
+        )
+        .unwrap();
+    let browser = crate::http::build_router(state.clone());
+    let owner = crate::http::build_control_router(state.clone());
+    let (mut peer, task) = framed(&state, Role::Remote).await;
+    for (id, screen_id, expected) in [(1, "screen", 200), (2, "missing", 404), (3, "empty", 400)] {
+        let body = json!({"screenId":screen_id,"name":"Saved","root":"/project"});
+        framed_call(&peer, id, "template.extract", json!({"body":body}));
+        let native = framed_reply(&mut peer).await;
+        let http = exchange(
+            &browser,
+            api("POST", "/api/templates/extract/screen", Some(&body)),
+        )
+        .await;
+        assert_eq!(native.status, expected);
+        assert_eq!(native.status, http.0.as_u16());
+        assert_eq!(serde_json::from_str::<Value>(&native.body).unwrap(), http.1);
+        if expected == 200 {
+            assert_eq!(http.1["panes"]["pane"]["dir"], "./src");
+            assert_eq!(http.1["panes"]["pane"]["restore_mode"], "close");
+        }
+        assert_eq!(
+            exchange(
+                &owner,
+                api("POST", "/api/templates/extract/screen", Some(&body))
+            )
+            .await
+            .0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    let apply = json!({"screenId":"screen", "op":{"type":"apply_template", "template":template}});
+    assert_eq!(
+        exchange(&owner, api("POST", "/api/mux/op", Some(&apply)))
+            .await
+            .0,
+        StatusCode::BAD_REQUEST
+    );
+    framed_call(&peer, 4, "mux.op", json!({"body":apply}));
+    assert_eq!(framed_reply(&mut peer).await.status, 400);
+    let scoped = crate::http::jobs::routes(
+        Arc::downgrade(&state.client_state.jobs),
+        crate::jobs::Actor::Agent("restricted".into()),
+    );
+    for path in ["/api/mux/op", "/api/templates/extract/screen"] {
+        assert_eq!(
+            exchange(&scoped, api("POST", path, Some(&apply))).await.0,
+            StatusCode::NOT_FOUND
+        );
+    }
+    peer.shutdown().await;
+    task.await.unwrap().unwrap();
+}

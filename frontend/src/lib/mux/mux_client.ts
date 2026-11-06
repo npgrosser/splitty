@@ -16,7 +16,7 @@
  */
 
 import type { ConnSocket } from "../protocol/socket.ts";
-import type { MuxOperation, OpenViewerOp, ScreenInfo, ScreenState, OutgoingMessage, ViewerPlacement } from "../protocol/types.ts";
+import type { MuxOperation, OpenViewerOp, ScreenInfo, ScreenState, OutgoingMessage, ViewerPlacement, Template } from "../protocol/types.ts";
 import { plainText, MAX_TEXT } from "../protocol/untrusted.ts";
 import { ANNOTATIONS_CAPABILITY, ANNOTATION_OPS } from "../viewer/annotations.ts";
 import { VIEWER_CAPABILITY } from "../viewer/limits.ts";
@@ -74,6 +74,11 @@ export class MuxClient {
   viewers = false;
   /** Whether the server keeps annotations on viewer panes (`viewer-annotations`, Annotations Capability); without it the window offers none. */
   annotations = false;
+  templates = false;
+  private readonly earlySpawns = new Map<string, string | Error>();
+  private readonly templatePanes = new Map<string, readonly string[]>();
+  private readonly extractions = new Map<string, { resolve: (template: Template) => void; reject: (error: Error) => void }>();
+  private extractionCounter = 0;
 
   // mux-protocol, Client Resynchronization: no `create_screen` before the
   // current connection's `mux.welcome`. Sent earlier, it reaches the server ahead
@@ -92,6 +97,10 @@ export class MuxClient {
       socket.onMessage((msg) => this.handle(msg)),
       socket.onDisconnect(() => {
         this.welcomed = false;
+        this.templates = false;
+        this.earlySpawns.clear();
+        this.templatePanes.clear();
+        for (const request of this.extractions.values()) request.reject(new Error("Connection ended during template extraction"));
         this.disconnectedOnce = true;
         this.heldCreateScreens.length = 0;
         for (const waiter of this.waiters.values()) waiter.reject(new Error("Connection ended before pane creation was confirmed; its outcome is unknown."));
@@ -113,7 +122,26 @@ export class MuxClient {
       if (!this.disconnectedOnce && this.heldCreateScreens.length < 64) this.heldCreateScreens.push({ screenId, op });
       return;
     }
+    if (op.type === "apply_template") {
+      if (!this.welcomed || !this.templates) throw Error("Update this server to apply templates");
+      this.templatePanes.set(screenId, Object.values(op.paneIds));
+    }
     this.socket.send({ type: "mux.op", screenId, op });
+  }
+
+  extractTemplate(screenId: string, name: string, root = ""): Promise<Template> {
+    if (!this.welcomed || !this.templates) return Promise.reject(Error("Update this server to extract templates"));
+    if (this.extractions.size >= 8) return Promise.reject(Error("Too many template extraction requests"));
+    const requestId = `template-${++this.extractionCounter}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => settle(() => reject(Error("Template extraction timed out"))), 10000);
+      const settle = (done: () => void) => { clearTimeout(timer); this.extractions.delete(requestId); done(); };
+      this.extractions.set(requestId, {
+        resolve: template => settle(() => resolve(template)),
+        reject: error => settle(() => reject(error)),
+      });
+      this.socket.send({ type: "mux.extract_template", requestId, screenId, name, root });
+    });
   }
 
   /** Request a full state resync for a screen. */
@@ -135,6 +163,9 @@ export class MuxClient {
    * Both are recoverable — the caller spawns the session itself instead.
    */
   waitForPaneSpawned(paneId: string, timeoutMs = 8000): Promise<string> {
+    const early = this.earlySpawns.get(paneId);
+    this.earlySpawns.delete(paneId);
+    if (early !== undefined) return early instanceof Error ? Promise.reject(early) : Promise.resolve(early);
     return new Promise<string>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.waiters.delete(paneId);
@@ -160,6 +191,9 @@ export class MuxClient {
     this.unsubscribes = [];
     this.handlers = {};
     this.failureListeners.clear();
+    this.earlySpawns.clear();
+    this.templatePanes.clear();
+    for (const request of this.extractions.values()) request.reject(Error("Connection disposed"));
     for (const waiter of this.waiters.values()) waiter.reject(new Error("Connection disposed before pane creation was confirmed."));
     this.heldCreateScreens.length = 0;
   }
@@ -176,6 +210,7 @@ export class MuxClient {
         this.arrangements = Array.isArray(msg.capabilities) && msg.capabilities.includes("layout-arrange-v1");
         this.tabSelections = Array.isArray(msg.capabilities) && msg.capabilities.includes("tab-select-v1");
         this.viewers = Array.isArray(msg.capabilities) && msg.capabilities.includes(VIEWER_CAPABILITY);
+        this.templates = Array.isArray(msg.capabilities) && msg.capabilities.includes("server-templates-v1");
         this.annotations = Array.isArray(msg.capabilities) && msg.capabilities.includes(ANNOTATIONS_CAPABILITY);
         this.welcomed = true;
         this.handlers.onWelcome?.(this.clientId ?? "", screens);
@@ -198,9 +233,22 @@ export class MuxClient {
         );
         break;
 
+      case "mux.template_extracted": {
+        const request = this.extractions.get(msg.requestId);
+        if (typeof msg.error === "string") request?.reject(Error(plainText(msg.error, MAX_TEXT)));
+        else if (msg.template && typeof msg.template === "object") request?.resolve(msg.template);
+        else request?.reject(Error("Invalid extracted template"));
+        break;
+      }
+
       case "mux.pane_spawned":
         if (typeof msg.paneId === "string" && typeof msg.sessionId === "string") {
-          this.waiters.get(msg.paneId)?.resolve(msg.sessionId);
+          const waiter = this.waiters.get(msg.paneId);
+          if (waiter) waiter.resolve(msg.sessionId);
+          else if ([...this.templatePanes.values()].some(ids => ids.includes(msg.paneId))) {
+            if (this.earlySpawns.size >= 256) this.earlySpawns.delete(this.earlySpawns.keys().next().value!);
+            this.earlySpawns.set(msg.paneId, msg.sessionId);
+          }
         }
         break;
 
@@ -214,6 +262,15 @@ export class MuxClient {
             .get(paneId)
             ?.reject(new PaneSpawnRejectedError(paneId, op, String(msg.error)));
         }
+        if (op === "apply_template" && screenId !== undefined) {
+          const ids = paneId ? [paneId] : this.templatePanes.get(screenId) ?? [];
+          for (const id of ids) {
+            const error = new PaneSpawnRejectedError(id, op, String(msg.error));
+            const waiter = this.waiters.get(id);
+            if (waiter) waiter.reject(error);
+            else this.earlySpawns.set(id, error);
+          }
+        }
         const failure: OpFailure = {
           op,
           ...(screenId !== undefined ? { screenId } : {}),
@@ -224,7 +281,7 @@ export class MuxClient {
         // The server kept its own layout or annotations: the screen shows them
         // again. A refused viewer pane spawns nothing to wait for, so its panel
         // goes the same way.
-        if ((op === "arrange_panes" || op === "open_viewer" || ANNOTATION_OPS.has(op)) && screenId !== undefined) this.resync(screenId);
+        if ((op === "apply_template" || op === "arrange_panes" || op === "open_viewer" || ANNOTATION_OPS.has(op)) && screenId !== undefined) this.resync(screenId);
         break;
       }
     }

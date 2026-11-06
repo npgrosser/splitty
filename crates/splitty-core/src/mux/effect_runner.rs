@@ -80,6 +80,44 @@ impl EffectRunner {
         }
     }
 
+    /// Observe process metadata outside the pure conversion before extraction.
+    pub fn extract_template(
+        &self,
+        mut screen: super::ScreenState,
+        name: String,
+        root: &str,
+    ) -> Result<crate::template::Template, super::MuxError> {
+        for pane in screen.panes.values_mut() {
+            let Some(session_id) = &pane.session_id else {
+                continue;
+            };
+            let Some(handle) = self.pty_backend.get(session_id.as_str()) else {
+                continue;
+            };
+            let title = handle.title();
+            if !title.cwd.is_empty() {
+                pane.cwd = Some(title.cwd);
+            }
+            if let Some(session) = screen.sessions.get_mut(session_id) {
+                if !title.proc.is_empty() {
+                    session.command = if title.base_shell {
+                        None
+                    } else {
+                        Some(if title.cmdline.is_empty() {
+                            title.proc
+                        } else {
+                            title.cmdline
+                        })
+                    };
+                }
+                if let Some(profile) = handle.shell_profile_id() {
+                    session.shell_profile_id = Some(profile.into());
+                }
+            }
+        }
+        super::extract_template(&screen, name, root)
+    }
+
     /// Execute a batch of effects, returning every target and its actual outcome.
     ///
     /// All effects are attempted even if some fail; errors are collected and returned.
@@ -133,6 +171,7 @@ impl EffectRunner {
                 pane_id,
                 screen_id,
                 command,
+                restore_mode,
                 cwd,
                 shell_profile_id,
                 shell,
@@ -159,7 +198,7 @@ impl EffectRunner {
                     rows: 24,
                     dir: cwd.unwrap_or_default(),
                     command: command.unwrap_or_default(),
-                    restore_mode: String::new(),
+                    restore_mode: restore_mode.unwrap_or_default(),
                     extra_env,
                 };
 
@@ -191,6 +230,7 @@ mod tests {
         Create {
             id: String,
             extra_env: Vec<String>,
+            launch: (String, String, String, String),
         },
         Program {
             id: String,
@@ -205,6 +245,7 @@ mod tests {
         calls: Mutex<Vec<MockCall>>,
         create_error: Mutex<Option<PtyError>>,
         close_error: Mutex<Option<PtyError>>,
+        observation: Mutex<Option<TitleInfo>>,
     }
 
     impl MockBackend {
@@ -213,6 +254,7 @@ mod tests {
                 calls: Mutex::new(Vec::new()),
                 create_error: Mutex::new(None),
                 close_error: Mutex::new(None),
+                observation: Mutex::new(None),
             }
         }
 
@@ -235,6 +277,7 @@ mod tests {
     struct StubSession {
         id: String,
         done_rx: tokio::sync::watch::Receiver<bool>,
+        title: TitleInfo,
     }
 
     impl StubSession {
@@ -244,6 +287,7 @@ mod tests {
                 Self {
                     id: id.to_string(),
                     done_rx: rx,
+                    title: TitleInfo::default(),
                 },
                 tx,
             )
@@ -282,7 +326,7 @@ mod tests {
             0
         }
         fn title(&self) -> TitleInfo {
-            TitleInfo::default()
+            self.title.clone()
         }
         fn osc_title_watch(&self) -> tokio::sync::watch::Receiver<crate::pty::OscTitleEvent> {
             tokio::sync::watch::channel(crate::pty::OscTitleEvent::default()).1
@@ -336,13 +380,22 @@ mod tests {
             self.calls.lock().unwrap().push(MockCall::Create {
                 id: opts.id.clone(),
                 extra_env: opts.extra_env.clone(),
+                launch: (
+                    opts.command.clone(),
+                    opts.dir.clone(),
+                    opts.shell_profile_id.clone(),
+                    opts.restore_mode.clone(),
+                ),
             });
             let (session, _tx) = StubSession::new(&opts.id);
             Ok(Arc::new(session))
         }
 
-        fn get(&self, _id: &str) -> Option<Arc<dyn SessionHandle>> {
-            None
+        fn get(&self, id: &str) -> Option<Arc<dyn SessionHandle>> {
+            let title = self.observation.lock().unwrap().clone()?;
+            let (mut session, _) = StubSession::new(id);
+            session.title = title;
+            Some(Arc::new(session))
         }
 
         fn close(&self, id: &str) -> Result<(), PtyError> {
@@ -369,6 +422,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn template_extraction_observes_foreground_command_and_base_shell_on_the_server() {
+        use crate::mux::{ApplyTemplate, Op, Store};
+        let request: ApplyTemplate = serde_json::from_value(serde_json::json!({
+            "createScreen":true, "paneIds":{"a":"pane"},
+            "template":{"name":"T","panes":{"a":{"command":"old-command","restore_mode":"shell","shell_profile":"profile"}},"layout":{"slot":"a"}}
+        })).unwrap();
+        let store = Store::new();
+        store
+            .dispatch(Op::ApplyTemplate {
+                screen_id: "screen".into(),
+                request: Box::new(request),
+            })
+            .unwrap();
+        let screen = store.get_screen(&"screen".into()).unwrap();
+        let backend = Arc::new(MockBackend::new());
+        *backend.observation.lock().unwrap() = Some(TitleInfo {
+            proc: "editor".into(),
+            cmdline: "editor file.rs".into(),
+            cwd: "/project/src".into(),
+            base_shell: false,
+        });
+        let runner = EffectRunner::new(backend.clone());
+        let template = runner
+            .extract_template(screen.clone(), "Saved".into(), "/project")
+            .unwrap();
+        assert_eq!(template.panes["pane"].command, "editor file.rs");
+        assert_eq!(template.panes["pane"].dir, "./src");
+        assert_eq!(template.panes["pane"].restore_mode, "shell");
+        assert_eq!(template.panes["pane"].shell_profile, "profile");
+        backend
+            .observation
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .base_shell = true;
+        let shell = runner.extract_template(screen, "Saved".into(), "").unwrap();
+        assert!(shell.panes["pane"].command.is_empty());
+        assert!(shell.panes["pane"].restore_mode.is_empty());
+    }
+
     #[tokio::test]
     async fn spawn_session_calls_create_with_env_vars() {
         let backend = Arc::new(MockBackend::new());
@@ -379,9 +474,10 @@ mod tests {
             session_id: SessionId::from("sess-1"),
             pane_id: PaneId::from("pane-1"),
             screen_id: ScreenId::from("screen-1"),
+            restore_mode: Some("close".into()),
             command: Some("/bin/bash".to_string()),
             cwd: Some("/home/user".to_string()),
-            shell_profile_id: None,
+            shell_profile_id: Some("profile".into()),
             shell: None,
         }];
 
@@ -402,8 +498,21 @@ mod tests {
         let calls = backend.calls();
         assert_eq!(calls.len(), 1);
         match &calls[0] {
-            MockCall::Create { id, extra_env } => {
+            MockCall::Create {
+                id,
+                extra_env,
+                launch,
+            } => {
                 assert_eq!(id, "sess-1");
+                assert_eq!(
+                    launch,
+                    &(
+                        "/bin/bash".into(),
+                        "/home/user".into(),
+                        "profile".into(),
+                        "close".into()
+                    )
+                );
                 assert!(extra_env.contains(&"SPLITTY_PANE_ID=pane-1".to_string()));
                 assert!(extra_env.contains(&"SPLITTY_SCREEN_ID=screen-1".to_string()));
                 assert!(
@@ -461,6 +570,7 @@ mod tests {
                 session_id: SessionId::from("s1"),
                 pane_id: PaneId::from("p1"),
                 screen_id: ScreenId::from("sc1"),
+                restore_mode: None,
                 command: None,
                 cwd: None,
                 shell_profile_id: None,
@@ -493,6 +603,7 @@ mod tests {
                 session_id: SessionId::from("s-fail"),
                 pane_id: PaneId::from("p-fail"),
                 screen_id: ScreenId::from("sc-fail"),
+                restore_mode: None,
                 command: None,
                 cwd: None,
                 shell_profile_id: None,
@@ -501,10 +612,20 @@ mod tests {
             Effect::KillSession {
                 session_id: SessionId::from("s-ok"),
             },
+            Effect::SpawnSession {
+                session_id: "s-success".into(),
+                pane_id: "p-success".into(),
+                screen_id: "sc-fail".into(),
+                command: None,
+                restore_mode: None,
+                cwd: None,
+                shell_profile_id: None,
+                shell: None,
+            },
         ];
 
         let errors = runner.execute(effects, &env).await;
-        assert_eq!(errors.len(), 2);
+        assert_eq!(errors.len(), 3);
         assert!(errors[0]
             .result
             .as_ref()
@@ -513,9 +634,10 @@ mod tests {
             .contains("oops"));
         assert!(errors[0].spawned().is_none());
         assert!(errors[1].result.is_ok());
+        assert_eq!(errors[2].spawned().unwrap().1, PaneId::from("p-success"));
 
         let calls = backend.calls();
-        assert_eq!(calls.len(), 1);
+        assert_eq!(calls.len(), 2);
         assert!(matches!(&calls[0], MockCall::Close(id) if id == "s-ok"));
     }
 

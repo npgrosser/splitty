@@ -130,6 +130,7 @@ pub(super) fn reduce_create_job(
                         job_id: None,
                         restart_policy: RestartPolicy::Shell,
                         shell_profile_id: None,
+                        restore_mode: None,
                         command: None,
                         cwd: None,
                         shell: None,

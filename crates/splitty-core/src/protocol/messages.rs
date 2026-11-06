@@ -613,6 +613,7 @@ impl ServerEvent {
                 "viewer-v1".into(),
                 // viewer-annotations, Annotations Capability.
                 "viewer-annotations-v1".into(),
+                crate::mux::TEMPLATE_CAPABILITY.into(),
             ],
             server_mode,
         }
@@ -748,7 +749,8 @@ mod tests {
                 "layout-arrange-v1",
                 "tab-select-v1",
                 "viewer-v1",
-                "viewer-annotations-v1"
+                "viewer-annotations-v1",
+                "server-templates-v1"
             ])
         );
         assert_eq!(wire["type"], "mux.welcome");

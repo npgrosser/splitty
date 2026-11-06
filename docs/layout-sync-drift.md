@@ -145,8 +145,9 @@ Fix (change `arrange-panes`): after a drop or a divider drag the window sends it
 - **Cascade (dominant).** Once a pane is unknown, every pane split off it is created by the fallback
   and is therefore unknown too. A single miss produces a whole family of warnings; only the first
   one is diagnostically interesting.
-- **Template panes.** They carry `command`/`dir`, which `split_pane` cannot express, so they spawn
-  directly by design (`directSpawn` in `template_apply.ts`). Splitting off them fails.
+- **Template panes — resolved 2026-11-06.** `apply_template` carries the complete layout and launch data,
+  registers every terminal and runs its effects on the server. The window projects the intent through the
+  snapshot renderer and attaches only to confirmed sessions; the old direct-spawn path is removed.
 - **Ops dropped during a snapshot rebuild.** A screen's binding drops its ops while its
   `suppressOps` is set (`ScreenBinding.sendOp`, `frontend/src/lib/connection/screen_binding.ts`;
   per screen since `connection-scoped-frontend`, for all screens before), which covers the rebuild

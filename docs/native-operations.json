@@ -89,6 +89,18 @@
       "deadlineMs": 30000
     },
     {
+      "operation": "template.extract",
+      "method": "POST",
+      "path": "/api/templates/extract/screen",
+      "scope": "backend",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
       "operation": "template.list",
       "method": "GET",
       "path": "/api/templates",
@@ -671,6 +683,7 @@
     "hide",
     "mux.op",
     "mux.resync",
+    "mux.extract_template",
     "editor.register",
     "editor.result",
     "file.register",

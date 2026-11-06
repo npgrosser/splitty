@@ -20,7 +20,7 @@ export interface TemplatePane {
 }
 
 export interface TemplateLayoutNode {
-  slot?: string[];
+  slot?: string | string[];
   split?: "horizontal" | "vertical";
   children?: TemplateLayoutNode[];
   ratio?: number;
@@ -67,6 +67,7 @@ export interface EditorRequest {
 }
 export type IncomingMessage =
   | { type: "hub.catalog.observe"; target: string; screens: readonly {id: string; name?: string; panes: number}[] }
+  | { type: "mux.extract_template"; requestId: string; screenId: string; name: string; root?: string }
   | { type: "editor.register" }
   | { type: "editor.result"; requestId: string; outcome: EditorOutcome }
   | { type: "create"; shell?: string; shellProfileId?: string; cols?: number; rows?: number; command?: string; dir?: string; root?: string; restoreMode?: RestoreMode; paneId?: string; screenId?: string }
@@ -256,6 +257,7 @@ export type OutgoingMessage =
   // Notification
   | NotificationMessage
   // Mux
+  | { type: "mux.template_extracted"; requestId: string; template?: Template; error?: string }
   | MuxWelcome
   | MuxScreenSnapshot
   | MuxNudge
@@ -412,6 +414,7 @@ export type ViewerPlacement = "right" | "left" | "above" | "below" | "tab";
 export interface SessionState {
   displayTitle?: string;
   busy?: boolean;
+  restoreMode?: RestoreMode;
   id: string;
   jobId?: string;
   restartPolicy?: "shell" | "never";
@@ -474,7 +477,10 @@ export interface JobControlError {
   code: string; error: string; requestId?: string; jobId?: string; screenId?: string; paneId?: string; sessionId?: string;
 }
 
+export interface ApplyTemplateOp { type: "apply_template"; template: Template; paneIds: Record<string, string>; root?: string; createScreen?: boolean }
+
 export type MuxOperation =
+  | ApplyTemplateOp
   | ({ type: "create_job" } & JobLaunch)
   | { type: "stop_job" | "forget_job"; jobId: string }
   | { type: "split_pane"; paneId: string; axis: "horizontal" | "vertical"; newPaneId?: string; resultingSizes?: number[]; newPaneIndex?: number; cwd?: string; shellProfileId?: string }

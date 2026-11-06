@@ -267,6 +267,7 @@ interface SessionState {
   displayTitle?: string;
   /** Known non-base-shell foreground process; false after exit. */
   busy?: boolean;
+  restoreMode?: "replay" | "shell" | "close";
   id: string;
   jobId?: string;
   restartPolicy?: "shell" | "never";
@@ -550,12 +551,36 @@ interface MuxConnect {
   clientId?: string;
 }
 
+/** Saved YAML/JSON template format (unchanged). Web panes are skipped, never rendered. */
+interface Template {
+  name: string;
+  panes: Record<string, { type?: "terminal" | "webview"; url?: string; command?: string; dir?: string; restore_mode?: "replay" | "shell" | "close"; shell_profile?: string }>;
+  layout: TemplateLayout;
+  floating?: { layout: TemplateLayout; bounds: { x: number; y: number; w: number; h: number } }[];
+}
+interface TemplateLayout { slot?: string | string[]; split?: "horizontal" | "vertical"; children?: TemplateLayout[]; ratio?: number }
+/** Window-only intent; the envelope screenId names the replaced/new screen.
+ * Server registers all panes atomically and runs their launch effects. Invalid
+ * references, reused IDs and non-slot floating layouts reject without mutation. */
+interface ApplyTemplateOp {
+  type: "apply_template";
+  template: Template;
+  paneIds?: Record<string, string>; // windows always supply every terminal's ID
+  root?: string;
+  createScreen?: boolean; // default false; true requires a new screen ID
+}
+/** Same read as POST /api/templates/extract/screen and native template.extract.
+ * API body omits type/requestId; response is Template (404 missing, 400 empty).
+ * Session form keeps browser hub extraction on the screen's own connection. */
+interface ExtractTemplate { type: "mux.extract_template"; requestId: string; screenId: string; name?: string; root?: string }
+interface TemplateExtracted { type: "mux.template_extracted"; requestId: string; template?: Template; error?: string }
+
 /**
  * Fire-and-forget layout operation. Client has already applied the
  * change locally — this informs the server so it can update its state.
  *
- * The server does NOT respond to this message (no ACK, no reject).
- * At Single-Attach there are no conflicts to handle.
+ * Successful launches produce mux.pane_spawned; rejected creation/layout
+ * intents produce mux.op_failed, and other windows receive a nudge.
  */
 interface MuxOp {
   type: "mux.op";
@@ -614,6 +639,7 @@ type ClientMessage =
   | MuxAttach
   | MuxDetach
   | MuxOp
+  | ExtractTemplate
   | MuxResync;
 
 // ============================================================================
@@ -848,7 +874,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "viewer-v1" and "viewer-annotations-v1"; absent on old servers
+  capabilities?: string[]; // includes "hub-host-decisions-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "viewer-v1" and "viewer-annotations-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -881,6 +907,9 @@ interface MuxNudge extends ServerEvent {
   screenId?: string;
 }
 
+/** One successful PTY creation; failures never advertise an absent session. */
+interface MuxPaneSpawned extends ServerEvent { type: "mux.pane_spawned"; paneId: string; sessionId: string }
+
 /**
  * A WebSocket op was rejected, sent to its client only: for an op that names a
  * pane to create (`paneId`, so the client stops waiting for mux.pane_spawned),
@@ -888,7 +917,8 @@ interface MuxNudge extends ServerEvent {
  * `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies`
  * and `mark_sent`, also when the op does not parse (`paneId` is the viewer
  * pane; the window shows the server's annotations again). Never a nudge to
- * others.
+ * others. apply_template always reports rejection with screenId, and names
+ * paneId for an individual spawn failure; the window resyncs without spawning.
  */
 interface MuxOpFailed extends ServerEvent {
   type: "mux.op_failed";
@@ -971,6 +1001,9 @@ type ServerMessage =
   | NotificationMessage
   // Mux
   | MuxWelcome
+  | TemplateExtracted
+  | MuxPaneSpawned
+  | MuxOpFailed
   | MuxScreenSnapshot
   | MuxNudge
   | MuxBusy
@@ -1314,6 +1347,7 @@ interface SetScreenOwnershipOp {
 }
 
 type Operation =
+  | ApplyTemplateOp
   | SplitPanelOp
   | NewTabOp
   | ClosePanelOp
@@ -2622,6 +2656,7 @@ export type NativeCall =
   | { operation: "shellProfiles.update"; args: { body: unknown; } }
   | { operation: "serverSettings.get"; args?: { } }
   | { operation: "serverSettings.update"; args: { body: unknown; } }
+  | { operation: "template.extract"; args: { body: { screenId: string; name?: string; root?: string } } }
   | { operation: "template.list"; args?: { } }
   | { operation: "template.get"; args: { slug: string; } }
   | { operation: "template.save"; args: { slug: string; body: unknown; } }

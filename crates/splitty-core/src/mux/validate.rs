@@ -900,6 +900,7 @@ mod tests {
                 job_id: None,
                 restart_policy: Default::default(),
                 shell_profile_id: None,
+                restore_mode: None,
                 command: None,
                 cwd: None,
                 shell: None,

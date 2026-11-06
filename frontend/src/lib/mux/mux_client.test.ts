@@ -354,3 +354,32 @@ it("revokes pane-spawn waits on disconnect before a timeout can trigger a fallba
   const wait = mux.waitForPaneSpawned("p"); const failed = expect(wait).rejects.toThrow("outcome is unknown");
   socket.drop(); socket.message({ type: "mux.pane_spawned", paneId: "p", sessionId: "late" }); await failed;
 });
+
+it("gates template actions on the capability without a legacy spawn fallback", async () => {
+  welcome();
+  const op = { type: "apply_template" as const, template: { name: "T", panes: { a: {} }, layout: { slot: ["a"] } }, paneIds: { a: "p" } };
+  expect(() => mux.sendOp("s", op)).toThrow("Update");
+  await expect(mux.extractTemplate("s", "T")).rejects.toThrow("Update");
+  expect(socket.sent).toEqual([]);
+});
+it("retains template spawn results until delayed mount and rejects every pending pane on rejection", async () => {
+  socket.message({ type: "mux.welcome", capabilities: ["server-templates-v1"], screens: [] });
+  mux.sendOp("s", { type: "apply_template", template: { name: "T", panes: { a: {}, b: {} }, layout: { slot: ["a", "b"] } }, paneIds: { a: "p", b: "q" } });
+  socket.message({ type: "mux.pane_spawned", paneId: "p", sessionId: "session" });
+  await expect(mux.waitForPaneSpawned("p")).resolves.toBe("session");
+  const pending = mux.waitForPaneSpawned("q");
+  socket.message({ type: "mux.op_failed", op: "apply_template", screenId: "s", error: "invalid template" });
+  await expect(pending).rejects.toThrow("invalid template");
+  expect(socket.sentOfType("mux.resync")).toEqual([{ type: "mux.resync", screenId: "s" }]);
+});
+it("extracts on its connection and propagates errors and disconnects", async () => {
+  socket.message({ type: "mux.welcome", capabilities: ["server-templates-v1"], screens: [] });
+  const first = mux.extractTemplate("s", "Saved", "/project");
+  const request = socket.sentOfType("mux.extract_template")[0];
+  expect(request).toMatchObject({ screenId: "s", name: "Saved", root: "/project" });
+  socket.message({ type: "mux.template_extracted", requestId: request.requestId, error: "no tiled terminals" });
+  await expect(first).rejects.toThrow("no tiled terminals");
+  const second = mux.extractTemplate("s", "Saved");
+  socket.drop();
+  await expect(second).rejects.toThrow("Connection ended");
+});

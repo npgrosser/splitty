@@ -53,6 +53,8 @@ function panelFor(binding: ScreenBinding, screen: ScreenState, paneId: string): 
     params: {
       ...jobParams(screen, paneId),
       existingSessionId: pane?.sessionId,
+      muxManaged: !pane?.sessionId,
+      serverSpawnOnly: true,
       dir: pane?.cwd ?? session?.cwd,
       command: session?.command,
       shellProfileId: session?.shellProfileId,
@@ -318,7 +320,7 @@ function letGo(binding: ScreenBinding, previous: ScreenState | undefined, screen
   const session = binding.sessionForPane(panel.id);
   if (!session) return;
   const listed = (state: ScreenState | undefined) => Object.values(state?.panes ?? {}).some(pane => pane.sessionId === session.id);
-  if (listed(screen) || listed(previous)) session.detach();
+  if (screen.revision === 0 || listed(screen) || listed(previous)) session.detach();
 }
 
 // ── Building ──

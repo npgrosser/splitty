@@ -27,6 +27,7 @@ export interface TerminalPaneParams {
   restoreMode?: RestoreMode;
   shellProfileId?: string;
   existingSessionId?: string;
+  serverSpawnOnly?: boolean;
   /** The server spawns this pane's PTY (a mux op was sent for it) — wait for
    *  `mux.pane_spawned` and attach instead of creating a session directly. */
   muxManaged?: boolean;
@@ -213,7 +214,7 @@ export class TerminalPaneRenderer implements IContentRenderer {
           .catch((err) => {
             const recoverable = err instanceof PaneSpawnedTimeoutError
               || err instanceof PaneSpawnRejectedError;
-            if (!recoverable || paneParams?.jobId) throw err;
+            if (!recoverable || paneParams?.jobId || paneParams?.serverSpawnOnly) throw err;
             console.warn(`pane ${api.id}: ${err.message} — spawning directly`);
             return spawnDirectly();
           });

@@ -314,14 +314,12 @@ Hardening candidates, not open holes.
 Found by the inventory of `frontend/src` for `frontend-client-core` (2026-11-04). The draft change named in each
 entry fixes it; entries without one are small fixes or belong to `frontend-client-core`.
 
-- **An applied template never reaches the server** (`server-templates`). `layout/template_apply.ts` creates
-  every pane with `directSpawn` and sends no op to add it, while the replaced panels send `close_pane`. The
-  server's screen ends up empty, so other windows, the CLI and a reload do not see the template's panes. "Apply in
-  new screen" also assumes the new view mounts within one animation frame (`Workspace.svelte`), and applies
-  nothing when it does not.
+- **Applied templates did not reach the server — resolved 2026-11-06** (`server-templates`).
+  One `apply_template` intent now registers the complete layout and runs server-owned spawns. The window uses
+  queued optimistic snapshots, so applying in a new screen no longer depends on mounting within one frame.
 - **Fixed by `hub-host-decisions` (2026-11-06): newer-host update offers and keeper wording.**
-  Windows consume explicit hub SemVer/update metadata. Unknown, equal and newer versions and hosts without
-  session preservation receive no ordinary update offer; keeper-aware messages describe preservation.
+  Windows consume explicit hub update eligibility. Unknown, equal and newer versions, unverified instances
+  and hosts without session preservation or a matching replacement receive no ordinary update offer.
 - **Fractional scroll sensitivities** (`settings-authority`). The xterm settings send steps of 0.1 and 0.5 into
   integer fields (`terminal.xterm.scrollSensitivity`, `fastScrollSensitivity`), so the update cannot be parsed.
   This follows from the types and was not reproduced. The window keeps its optimistic value until a reload. Window
@@ -361,8 +359,8 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
   - A snapshot that adds, removes or moves a terminal pane still rebuilds the screen (only viewer and job panes are
     applied in place), and keys typed before the rebuilt terminal has attached again are lost.
   - A panel added in the window can be closed by a snapshot the server built before it received the window's op.
-  - A grid that holds only viewer panes extracts to a template the server refuses (an empty slot), as a grid without
-    panes did before.
+  - A grid that holds only viewer panes used to extract an invalid empty-slot template. Resolved 2026-11-06
+    (`server-templates`): server extraction rejects screens without tiled terminals with a visible error.
   - The server commands `pane.copy` and `pane.clear` do nothing for viewer panes.
   - `socket.ts`: a doc comment sits above the wrong function, and `belongsToConnection` is used only by its test.
 

@@ -9,10 +9,12 @@
     onClose: () => void;
     onApply: (template: Template, root?: string) => void;
     onApplyNewScreen: (template: Template, root?: string) => void;
-    onExtract: (name: string, root?: string) => Template;
+    onExtract: (name: string, root?: string) => Promise<Template>;
+    supported: boolean;
+    onUpdate: () => void;
   }
 
-  let { open, onClose, onApply, onApplyNewScreen, onExtract }: Props = $props();
+  let { open, onClose, onApply, onApplyNewScreen, onExtract, supported, onUpdate }: Props = $props();
 
   const theme = $derived(getTheme());
 
@@ -105,6 +107,7 @@
   // ── Apply ──
 
   async function applySelected(newScreen = false) {
+    if (!supported) return;
     const item = templates[selectedIndex];
     if (!item) return;
     try {
@@ -146,7 +149,8 @@
 
   // ── Save ──
 
-  function startSave() {
+  async function startSave() {
+    if (!supported) return;
     mode = "save";
     saveName = "";
     saveUseRoot = false;
@@ -155,7 +159,7 @@
 
     // Extract now so we can show per-pane command toggles
     try {
-      const tmpl = onExtract("", undefined);
+      const tmpl = await onExtract("", undefined);
       saveTemplate_ = tmpl;
       // Default: all commands enabled
       const toggles: Record<string, boolean> = {};
@@ -163,7 +167,8 @@
         if (pane.command) toggles[name] = true;
       }
       paneToggles = toggles;
-    } catch {
+    } catch (e) {
+      error = String(e);
       saveTemplate_ = null;
       paneToggles = {};
     }
@@ -187,9 +192,10 @@
 
       // Re-extract with root if needed
       if (saveUseRoot && saveRoot.trim()) {
-        const reExtracted = onExtract(name, saveRoot.trim());
+        const reExtracted = await onExtract(name, saveRoot.trim());
         tmpl.panes = reExtracted.panes;
         tmpl.layout = reExtracted.layout;
+        tmpl.floating = reExtracted.floating;
       }
 
       // Strip commands from toggled-off panes
@@ -361,6 +367,7 @@
                   <span class="template-item-actions">
                     <button
                       class="template-btn-screen"
+                      disabled={!supported}
                       onclick={(e: MouseEvent) => { e.stopPropagation(); applySelected(true); }}
                       title="Apply in new screen"
                     >+ Screen</button>
@@ -376,9 +383,14 @@
           {/if}
         </div>
 
+        {#if !supported}
+          <p>Update this server to apply or extract templates.</p>
+          <button class="template-btn-sm" onclick={onUpdate}>Update server</button>
+        {/if}
         <!-- Save button -->
         <button
           class="template-btn-save"
+          disabled={!supported}
           onclick={startSave}
         >
           Save current layout as template...

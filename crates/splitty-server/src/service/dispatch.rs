@@ -88,6 +88,7 @@ impl State {
             Operation::ShellProfilesUpdate => op::put_shell_profiles(self, body!()).await,
             Operation::ServerSettingsGet => op::get_server_settings(self).await.into_reply(),
             Operation::ServerSettingsUpdate => op::patch_server_settings(self, body).await,
+            Operation::TemplateExtract => op::extract_template(self, body!()).await,
             Operation::TemplateList => op::list_templates(self).await,
             Operation::TemplateGet => op::get_template(self, slug).await,
             Operation::TemplateSave => op::save_template(self, slug, body).await,
