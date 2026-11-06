@@ -141,14 +141,18 @@ const theme = EditorView.theme({
   ".cm-viewer-mark": { width: "3px", height: "100%", borderRadius: "1px", backgroundColor: "var(--splitty-accent)" },
   ".cm-viewer-mark-changed": { backgroundColor: "var(--splitty-warning)" },
   ".cm-viewer-mark-resolved": { backgroundColor: "var(--splitty-text-muted)" },
-  ".cm-viewer-marked": { backgroundColor: "var(--splitty-annotation-bg, var(--splitty-accent-muted))" },
-  ".cm-viewer-marked-changed": {
-    backgroundColor: "var(--splitty-annotation-changed-bg, var(--splitty-accent-muted))",
-    textDecoration: "underline dotted var(--splitty-warning)",
+  // Underlined, not filled, so that a mark does not look like a selection.
+  ".cm-viewer-marked": {
+    textDecoration: "underline 2px var(--splitty-annotation-line, var(--splitty-accent))",
+    textUnderlineOffset: "3px",
   },
-  ".cm-viewer-marked-resolved": { backgroundColor: "var(--splitty-annotation-resolved-bg, var(--splitty-hover-bg))" },
-  ".cm-viewer-marked-hover": { backgroundColor: "var(--splitty-annotation-hover-bg, var(--splitty-accent-muted))", cursor: "pointer" },
-  ".cm-viewer-marked-active": { backgroundColor: "var(--splitty-annotation-active-bg, var(--splitty-accent-muted))" },
+  ".cm-viewer-marked-changed": { textDecoration: "underline dotted 2px var(--splitty-annotation-changed-line, var(--splitty-warning))" },
+  ".cm-viewer-marked-resolved": { textDecoration: "underline 1px var(--splitty-annotation-resolved-line, var(--splitty-text-muted))" },
+  ".cm-viewer-marked-hover": { textDecoration: "underline 3px var(--splitty-annotation-hover-line, var(--splitty-accent))", cursor: "pointer" },
+  ".cm-viewer-marked-active": {
+    backgroundColor: "var(--splitty-annotation-active-bg, var(--splitty-accent-muted))",
+    textDecoration: "underline 3px var(--splitty-annotation-hover-line, var(--splitty-accent))",
+  },
   ".sv-keyword": { color: "var(--sv-keyword)" },
   ".sv-string": { color: "var(--sv-string)" },
   ".sv-number": { color: "var(--sv-number)" },

@@ -610,16 +610,17 @@ body,
 
 .viewer-pane {
   /*
-   * Annotated passages (viewer-annotations): the source view, the rendered
-   * document and its blocks; a passage that changed since it was annotated,
-   * and one of a resolved annotation, in their own colors.
+   * Annotated passages (viewer-annotations): underlined in the source view
+   * and the rendered document, framed as blocks, so that a mark does not
+   * look like a selection; a passage that changed since it was annotated,
+   * and one of a resolved annotation, in their own colors. Only the
+   * annotation open in the list gets a light background as well.
    */
-  --splitty-annotation-bg: color-mix(in srgb, var(--splitty-accent) 24%, transparent);
-  --splitty-annotation-active-bg: color-mix(in srgb, var(--splitty-accent) 46%, transparent);
-  --splitty-annotation-hover-bg: color-mix(in srgb, var(--splitty-accent) 36%, transparent);
-  --splitty-annotation-block-bg: color-mix(in srgb, var(--splitty-accent) 10%, transparent);
-  --splitty-annotation-changed-bg: color-mix(in srgb, var(--splitty-warning) 20%, transparent);
-  --splitty-annotation-resolved-bg: color-mix(in srgb, var(--splitty-text-muted) 16%, transparent);
+  --splitty-annotation-line: color-mix(in srgb, var(--splitty-accent) 75%, transparent);
+  --splitty-annotation-hover-line: var(--splitty-accent);
+  --splitty-annotation-active-bg: color-mix(in srgb, var(--splitty-accent) 14%, transparent);
+  --splitty-annotation-changed-line: var(--splitty-warning);
+  --splitty-annotation-resolved-line: color-mix(in srgb, var(--splitty-text-muted) 85%, transparent);
   display: flex;
   flex-direction: column;
   width: 100%;
@@ -960,6 +961,7 @@ body,
 }
 
 .viewer-annotation {
+  position: relative;
   margin: 0 6px 4px;
   padding: 6px 8px;
   border: 1px solid transparent;
@@ -1066,17 +1068,27 @@ body,
   color: var(--splitty-warning);
 }
 
+/*
+ * Edit, Resolve and Delete float over the end of the header while the entry
+ * is hovered, focused or open, so that they take no room from its lines.
+ */
 .viewer-annotation-tools {
+  position: absolute;
+  top: 3px;
+  right: 4px;
   display: flex;
-  flex: 0 0 auto;
   gap: 2px;
-  opacity: 0;
+  padding: 1px 2px;
+  border: 1px solid var(--splitty-border-subtle);
+  border-radius: 4px;
+  background: var(--splitty-surface-raised);
+  visibility: hidden;
 }
 
 .viewer-annotation:hover .viewer-annotation-tools,
 .viewer-annotation:focus-within .viewer-annotation-tools,
 .viewer-annotation.active .viewer-annotation-tools {
-  opacity: 1;
+  visibility: visible;
 }
 
 .viewer-annotation-tool {
