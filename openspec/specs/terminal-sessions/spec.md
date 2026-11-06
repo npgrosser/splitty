@@ -89,7 +89,7 @@ The server SHALL start the session in the requested working directory, resolved 
 - **THEN** the session starts in the server user's home directory instead of failing
 
 ### Requirement: Session Environment
-The server SHALL start every session with `TERM=xterm-256color`, `COLORTERM=truecolor` and `SPLITTY_SESSION_ID` set to the session id. It SHALL set `SPLITTY_PANE_ID` and `SPLITTY_SCREEN_ID` when the session was spawned for a pane or the `create` request names a `paneId` or `screenId`. Ordinary sessions SHALL receive `SPLITTY_SOCK` when configured; agent-owned managed jobs SHALL instead receive only their `SPLITTY_AGENT_SOCK` as specified in `access-control`. Which values MUST NOT appear in a session's environment is defined in `access-control` (Pane Environment Carries No Credential).
+The server SHALL start every session with `TERM=xterm-256color`, `COLORTERM=truecolor`, `FORCE_HYPERLINK=1` and `SPLITTY_SESSION_ID` set to the session id. `FORCE_HYPERLINK` makes programs that detect hyperlink support from the environment send OSC 8 hyperlinks, which open the whole target even where the program wraps a link across lines itself. It SHALL set `SPLITTY_PANE_ID` and `SPLITTY_SCREEN_ID` when the session was spawned for a pane or the `create` request names a `paneId` or `screenId`. Ordinary sessions SHALL receive `SPLITTY_SOCK` when configured; agent-owned managed jobs SHALL instead receive only their `SPLITTY_AGENT_SOCK` as specified in `access-control`. Which values MUST NOT appear in a session's environment is defined in `access-control` (Pane Environment Carries No Credential).
 
 #### Scenario: Pane-bound session environment
 - **WHEN** a client sends ordinary session `create` with `paneId` `p1` and `screenId` `s1`

@@ -129,8 +129,10 @@ Line numbers refer to the tree at commit `b495e1c`.
   window; the ghostty-web renderer gave local panes no links at all. All now go through `lib/terminal/hyperlinks.ts`
   and `openExternalTarget`. Plain detected links already took the native opener (`plugin:opener|open_url`, scope
   `http://*`, `https://*`) and work in the browser; a refusal there was only a console warning and is now an error
-  notice with the opener's reason. Next: a check in the desktop apps; long URLs that a TUI hard-wraps
-  (Claude Code) are still matched only up to the line break.
+  notice with the opener's reason. Next: a check in the desktop apps. Long URLs that a TUI hard-wraps were
+  matched only up to the line break; sessions now start with `FORCE_HYPERLINK=1`, so Claude Code sends them as
+  OSC 8 hyperlinks that open whole from every line (Codex sends them without it). Plain text that a program wraps
+  itself is still matched per line, and xterm.js underlines only the hovered line of a wrapped hyperlink.
 - **The pane menu's Paste and the `pane.paste` command paste nothing in Chromium, Edge, WebView2 (Windows app) and
   Electron** (verified in Chromium on 2026-10-15): both call `navigator.clipboard.readText()`
   (`lib/context_menus.ts`, `Workspace.svelte`), which the page's own `Permissions-Policy: clipboard-read=()` blocks

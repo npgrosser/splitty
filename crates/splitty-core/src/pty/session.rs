@@ -403,6 +403,11 @@ fn build_spec(
     // Set environment
     cmd.env("TERM", "xterm-256color");
     cmd.env("COLORTERM", "truecolor");
+    // Both renderers open OSC 8 hyperlinks, but programs such as Claude Code
+    // send them only to terminals they recognize. A TUI that wraps a long URL
+    // itself breaks it into separate lines, and only a hyperlink still opens
+    // the whole URL from every part of it.
+    cmd.env("FORCE_HYPERLINK", "1");
     cmd.env("SPLITTY_SESSION_ID", &id);
 
     // Add extra environment variables
@@ -2377,6 +2382,7 @@ mod spec_tests {
                 .map(|(_, v)| v.as_str())
         };
         assert_eq!(env("TERM"), Some("xterm-256color"));
+        assert_eq!(env("FORCE_HYPERLINK"), Some("1"));
         assert_eq!(env("SPLITTY_SESSION_ID"), Some("spec-1"));
         assert_eq!(env("SPLITTY_SOCK"), Some("/run/splitty/daemon.sock"));
         assert_eq!(env("SPLITTY_TOKEN"), None, "never a credential");
