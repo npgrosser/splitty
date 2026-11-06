@@ -148,6 +148,54 @@ Line numbers refer to the tree at commit `b495e1c`.
 - The pane-to-session lookup for `create` with `paneId` is never wired in production, so such a `create` always
   starts a new random session instead of reusing the pane's (`dispatcher.rs:138-150`).
 - `shell_name` claims to be case-insensitive but is not (`pty/startup.rs:75-87`).
+- **Fixed: TUIs such as Claude Code and Codex rendered garbled** (escape sequence tails such as `;153;153;153m`
+  shown as text, lines shifted or duplicated) until a resize made them repaint (2026-11-06). Causes, in
+  `frontend/src/lib/terminal/` unless named otherwise:
+  - panes on an inactive screen took a new size into their emulator without reporting it, and a resize overtook
+    output still batched or still in xterm.js's parser (`terminal_session.ts`, `ordered_output.ts`);
+  - the synchronized update (DEC 2026) around each frame's batch landed inside a sequence that the frame boundary
+    split, or right before a REP, and its ESC[?2026l ended a synchronized update of the program's own;
+  - xterm.js 6.0 drops a character whose write ends after its bytes E2 80 (`…`, `—`, `’`), also at every 128 KiB of
+    a larger write; batches now end between characters;
+  - the reset written when the alternate screen ends came after the batch being parsed, possibly inside a sequence;
+  - the replay's end cancelled with CAN a sequence that the live output went on with (`replay_output.ts`, and
+    `pty/replay.rs` for `splitty attach`);
+  - widths came from the graphemes addon's plain "15" provider, which gives combining marks and the emoji variation
+    selector a column of their own (`⚠️` took three columns, the programs count two), and were set only after the
+    addons had loaded asynchronously;
+  - the emulator took a reported size before the server answered, so output written for the old size was parsed at
+    the new one;
+  - once the size arbiter had forgotten a session (no connection reports a size for it or streams it, as after a
+    reconnect or a new window), the report after an attach set the PTY to the size it had, so `redraw: true` made
+    nobody redraw; it now nudges then (`protocol/sizing.rs`);
+  - a failed resize counted as applied and was published, and the same report was skipped later; the PTY now keeps
+    its size and the arbiter tries again (`protocol/sizing.rs`);
+  - the replay filters did not end a sequence at CAN, SUB or an ESC, so a query after a sequence that never ended
+    got through, and a cancelled clipboard write swallowed the output after it (`replay_output.ts`,
+    `pty/replay.rs`).
+- Still open from the same review:
+  - **No `size` before the replay of a session the size arbiter forgot** (`prune` in `protocol/sizing.rs`): the
+    replay is parsed at the pane's size, not the PTY's. The redraw after the attach repaints full-screen programs;
+    plain output stays wrapped at the pane's width. Needs the PTY's size from the session.
+  - **Size events are not ordered with the output.** The server resizes the PTY, publishes the size and streams
+    output on separate tasks (`protocol/sizing.rs`, `watch_size` and `stream_output` in `protocol/dispatcher.rs`),
+    and the `watch` channel coalesces sizes, so a client can parse a repaint at the old size or old output at the
+    new one.
+  - **A reattach can show old live frames before the replay.** Frames sent before the server handled `detach` that
+    arrive after the new `attach` count as replay (`attach_registry.ts`), so the fresh emulator gets them twice, the
+    first copy possibly starting inside a sequence. Happens when a snapshot rebuilds a screen while a session
+    writes; a fix needs a marker for the replay's start.
+  - **The replay starts wherever the ring cut**, possibly inside a sequence, and without the modes set before it,
+    such as a scrolling region (`pty/ringbuffer.rs`).
+  - **Keeper recovery continues across lost bytes**: `lost: true` is only logged, and the remaining bytes go to the
+    running streams (`keeper/client.rs`).
+  - **A keeper replay above 8 MiB is cut silently** (`install` and `MAX_BEHIND` in `keeper/process.rs`), only with a
+    scrollback size above that.
+  - **Output after `created` can be lost** when the native IPC delivers it in the same chunk as `created`: the view
+    is wired only after the awaited promise (`createTerminalSession` in `terminal_mount.ts`). Affects the direct
+    spawn path, not panes the server spawns.
+  - **Output is credited before xterm.js parses it**; past xterm.js's 50 MB write buffer limit a write throws and
+    its batch is lost (`native_socket.ts`, `ordered_output.ts`).
 - Not specced yet: shell-integration injection (`ZDOTDIR`, the Bash startup bootstrap and
   `SPLITTY_SHELL_INTEGRATION` in `pty/session.rs`). Belongs to a later terminal-intelligence capability.
 
