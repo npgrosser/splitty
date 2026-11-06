@@ -9,10 +9,11 @@
  */
 
 import type {
-  FloatingEntry, LayoutNode, PaneState, ScreenInfo, ScreenState, SessionState,
+  FloatingEntry, LayoutNode, PaneState, ScreenInfo, ScreenState, SessionState, ViewerRecord, ViewerSource,
 } from "../protocol/types.ts";
 import { MAX_NAME, MAX_TITLE, MAX_VALUE, optionalBounded, optionalText } from "../protocol/untrusted.ts";
 import { SCRATCHPAD_LIMIT } from "../scratchpad.ts";
+import { isViewerPath, isViewerTitle } from "../viewer/limits.ts";
 
 /** Deeper layout trees are cut off; no real layout comes close. */
 const MAX_LAYOUT_DEPTH = 64;
@@ -111,6 +112,7 @@ function table<T>(value: unknown, entry: (id: string, raw: Raw) => T): Record<st
 
 function paneState(id: string, raw: Raw): PaneState {
   const role = raw.role === "webview" || raw.role === "viewer" ? raw.role : "terminal";
+  const viewer = role === "viewer" ? viewerRecord(raw.viewer) : undefined;
   return {
     id,
     ...(typeof raw.jobId === "string" ? { jobId: optionalBounded(raw.jobId, 256) } : {}),
@@ -118,7 +120,37 @@ function paneState(id: string, raw: Raw): PaneState {
     title: optionalText(raw.title, MAX_TITLE),
     cwd: optionalBounded(raw.cwd, MAX_VALUE),
     role,
+    ...(viewer ? { viewer } : {}),
   };
+}
+
+/**
+ * A viewer pane's record, or undefined when it is malformed: the pane then
+ * stays a viewer pane that says it cannot be shown (`viewer-panes`, Viewer
+ * Capability). A source of an unknown kind is malformed. Nothing but the
+ * listed fields is kept, so a text a server put into a snapshot goes no further.
+ */
+function viewerRecord(value: unknown): ViewerRecord | undefined {
+  if (!isRecord(value) || !isRecord(value.source)) return undefined;
+  const source = viewerSource(value.source);
+  const revision = value.revision;
+  if (!source || typeof revision !== "number" || !Number.isSafeInteger(revision) || revision < 0) return undefined;
+  const origin = value.originPaneId;
+  return {
+    source,
+    revision,
+    ...(typeof origin === "string" && origin.length > 0 && origin.length <= 256 ? { originPaneId: origin } : {}),
+  };
+}
+
+function viewerSource(raw: Raw): ViewerSource | undefined {
+  if (raw.kind === "file") {
+    return typeof raw.path === "string" && isViewerPath(raw.path) ? { kind: "file", path: raw.path } : undefined;
+  }
+  if (raw.kind === "text") {
+    return typeof raw.title === "string" && isViewerTitle(raw.title) ? { kind: "text", title: raw.title } : undefined;
+  }
+  return undefined;
 }
 
 function sessionState(id: string, raw: Raw): SessionState {

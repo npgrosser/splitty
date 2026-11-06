@@ -32,6 +32,8 @@ export function connectScreenSync(conn: ServerConnection, policy: ScreenSyncPoli
     onSnapshot: (state) => {
       conn.scratchpads.snapshot(state);
       policy.snapshot(state);
+      // After the layout: a shown viewer pane whose revision rose reads at once.
+      conn.viewers.snapshot(state);
     },
     onNudge: (_reason, wireId) => policy.nudge(wireId),
   });

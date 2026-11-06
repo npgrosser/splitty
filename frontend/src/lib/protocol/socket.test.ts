@@ -96,3 +96,7 @@ describe("decodeOutputFrame", () => {
 it("never queues upload cancellation for another connection", () => {
   expect(belongsToConnection({ type: "upload_cancel", requestId: "u" })).toBe(true);
 });
+
+it("never queues a viewer read for another connection", () => {
+  expect(belongsToConnection({ type: "viewer.read", requestId: "r", paneId: "p", offset: 0 })).toBe(true);
+});

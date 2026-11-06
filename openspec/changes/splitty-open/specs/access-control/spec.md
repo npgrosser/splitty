@@ -26,6 +26,10 @@ A client SHALL render a Markdown or HTML document without executing any script, 
 - **WHEN** a Markdown document holds `![x](/api/mux/state)`
 - **THEN** the window sends no request for it and shows the image's alt text
 
+#### Scenario: A load hidden in a style
+- **WHEN** an HTML document's style sheet or `style` attribute holds `background: var(--x, url(/api/mux/state))` or a `url()` spelled with CSS escapes inside `var()`
+- **THEN** the window sends no request for it
+
 #### Scenario: An overlay
 - **WHEN** an HTML document holds an element with `position: fixed` covering the whole viewport
 - **THEN** that element stays inside the viewer pane, and the rest of the window remains usable

@@ -63,6 +63,26 @@ export function sameArrangement(a: Arrangement, b: Arrangement): boolean {
     && a.children.every((child, i) => sameArrangement(child, b.children[i]));
 }
 
+/**
+ * Whether two arrangements hold the same panes in the same rows, columns and
+ * tab groups, in the same tab order, whatever their sizes and active tabs.
+ */
+export function sameShape(a: Arrangement, b: Arrangement): boolean {
+  if (a.type === "slot" || b.type === "slot") {
+    return a.type === "slot" && b.type === "slot"
+      && a.paneIds.length === b.paneIds.length
+      && a.paneIds.every((id, i) => id === b.paneIds[i]);
+  }
+  return a.axis === b.axis
+    && a.children.length === b.children.length
+    && a.children.every((child, i) => sameShape(child, b.children[i]));
+}
+
+/** The arrangement without the panes of `omit`; slots and splits left empty fall away. */
+export function withoutPanes(root: Arrangement, omit: ReadonlySet<string>): Arrangement {
+  return strip(root, omit) ?? EMPTY;
+}
+
 /** The slots of an arrangement, depth first. */
 export function arrangementSlots(root: Arrangement): Extract<Arrangement, { type: "slot" }>[] {
   return root.type === "slot" ? [root] : root.children.flatMap(arrangementSlots);
@@ -72,6 +92,11 @@ export function arrangementSlots(root: Arrangement): Extract<Arrangement, { type
 export function withActivePane(root: Arrangement, paneId: string): Arrangement {
   if (root.type === "slot") return root.paneIds.includes(paneId) ? { ...root, activePaneId: paneId } : root;
   return { ...root, children: root.children.map(child => withActivePane(child, paneId)) };
+}
+
+function strip(node: Arrangement, omit: ReadonlySet<string>): Arrangement | null {
+  if (node.type === "slot") return slot(node.paneIds.filter(id => !omit.has(id)), node.activePaneId);
+  return split(node.axis, node.children.map((child, i) => ({ node: strip(child, omit), size: node.sizes[i] ?? 0 })));
 }
 
 function fromGrid(node: GridObject, axis: Axis): Arrangement | null {

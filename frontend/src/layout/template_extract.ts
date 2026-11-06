@@ -1,6 +1,7 @@
 import type { DockviewApi } from "dockview-core";
 import type { Template, TemplateLayoutNode, TemplatePane, RestoreMode } from "../lib/protocol/types.ts";
 import { sessionForPane } from "../lib/connection/screen_binding.ts";
+import { isViewerPanel } from "../lib/viewer/panel.ts";
 
 interface SerializedNode {
   type: "leaf" | "branch";
@@ -20,7 +21,7 @@ interface LeafData {
  */
 function extractGroupPanes(
   api: DockviewApi,
-  group: { panels: Iterable<{ id: string; title?: string; params: unknown }> },
+  group: { panels: Iterable<{ id: string; title?: string; params: unknown; view?: { contentComponent?: string } }> },
   panes: Record<string, TemplatePane>,
   startCounter: number,
   root?: string,
@@ -31,7 +32,9 @@ function extractGroupPanes(
   // No webview branch here (security review SR-01/SR-12): there
   // are no webview panes left to extract, and emitting `type: "webview"` into a
   // saved template would produce a file that a future reader might act on.
+  // Viewer panes are left out too: a template starts terminals only.
   for (const panel of group.panels) {
+    if (isViewerPanel(panel)) continue;
     const session = sessionForPane(api, panel.id);
     let command: string | undefined;
     let dir: string | undefined;
@@ -121,7 +124,7 @@ export function extractTemplate(api: DockviewApi, name: string, root?: string): 
   }
 
   const rootOrientation = grid.orientation === "HORIZONTAL" ? "horizontal" : "vertical";
-  const layout = convertNode(grid.root as SerializedNode, rootOrientation, groupToPaneNames);
+  const layout = convertNode(grid.root as SerializedNode, rootOrientation, groupToPaneNames) ?? { slot: [] };
 
   const floating: { layout: TemplateLayoutNode; bounds: { x: number; y: number; w: number; h: number } }[] = [];
   const containerWidth = api.width;
@@ -153,27 +156,37 @@ export function extractTemplate(api: DockviewApi, name: string, root?: string): 
   return tmpl;
 }
 
+/**
+ * The template layout of a grid node, or null when it holds no pane of the
+ * template: a group of viewer panes only is left out, and its siblings share
+ * its space.
+ */
 function convertNode(
   node: SerializedNode,
   parentOrientation: "horizontal" | "vertical",
   groupMap: Map<string, string[]>,
-): TemplateLayoutNode {
+): TemplateLayoutNode | null {
   if (node.type === "leaf") {
     const data = node.data as LeafData;
-    const names = groupMap.get(data.id) ?? ["unknown"];
-    return { slot: names };
+    const names = groupMap.get(data.id);
+    return names ? { slot: names } : null;
   }
 
   const children = node.data as SerializedNode[];
   const childOrientation = parentOrientation === "horizontal" ? "vertical" : "horizontal";
 
-  if (children.length === 1) {
-    return convertNode(children[0], childOrientation, groupMap);
+  const kept = children
+    .map((child) => ({ child, layoutNode: convertNode(child, childOrientation, groupMap) }))
+    .filter((entry): entry is { child: SerializedNode; layoutNode: TemplateLayoutNode } => entry.layoutNode !== null);
+  if (kept.length === 0) return null;
+  if (kept.length === 1) {
+    const only = kept[0].layoutNode;
+    delete only.ratio;
+    return only;
   }
 
-  const totalSize = children.reduce((sum, c) => sum + (c.size ?? 0), 0);
-  const converted = children.map((child) => {
-    const layoutNode = convertNode(child, childOrientation, groupMap);
+  const totalSize = kept.reduce((sum, { child }) => sum + (child.size ?? 0), 0);
+  const converted = kept.map(({ child, layoutNode }) => {
     if (totalSize > 0 && child.size != null) {
       layoutNode.ratio = Math.round((child.size / totalSize) * 1000) / 1000;
     }

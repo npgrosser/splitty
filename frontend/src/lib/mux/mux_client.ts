@@ -16,7 +16,8 @@
  */
 
 import type { ConnSocket } from "../protocol/socket.ts";
-import type { MuxOperation, ScreenInfo, ScreenState, OutgoingMessage } from "../protocol/types.ts";
+import type { MuxOperation, OpenViewerOp, ScreenInfo, ScreenState, OutgoingMessage, ViewerPlacement } from "../protocol/types.ts";
+import { VIEWER_CAPABILITY } from "../viewer/limits.ts";
 import { screenList, screenState } from "./incoming.ts";
 
 export interface MuxHandlers {
@@ -57,6 +58,8 @@ export class MuxClient {
   arrangements = false;
   /** Whether the server takes a selected tab as `select_tab` (mux-protocol, Selected Tabs Reach the Server). */
   tabSelections = false;
+  /** Whether the server has viewer panes (`viewer-panes`, Viewer Capability); without it the window offers none. */
+  viewers = false;
 
   // mux-protocol, Client Resynchronization: no `create_screen` before the
   // current connection's `mux.welcome`. Sent earlier, it reaches the server ahead
@@ -149,6 +152,7 @@ export class MuxClient {
         this.scratchpads = Array.isArray(msg.capabilities) && msg.capabilities.includes("scratchpad-v1");
         this.arrangements = Array.isArray(msg.capabilities) && msg.capabilities.includes("layout-arrange-v1");
         this.tabSelections = Array.isArray(msg.capabilities) && msg.capabilities.includes("tab-select-v1");
+        this.viewers = Array.isArray(msg.capabilities) && msg.capabilities.includes(VIEWER_CAPABILITY);
         this.welcomed = true;
         this.handlers.onWelcome?.(this.clientId ?? "", screens);
         for (const { screenId, op } of this.heldCreateScreens.splice(0)) {
@@ -182,8 +186,9 @@ export class MuxClient {
             .get(msg.paneId)
             ?.reject(new PaneSpawnRejectedError(msg.paneId, String(msg.op), String(msg.error)));
         }
-        // The server kept its own layout: the screen shows it again.
-        if (msg.op === "arrange_panes" && typeof msg.screenId === "string") this.resync(msg.screenId);
+        // The server kept its own layout: the screen shows it again. A refused
+        // viewer pane spawns nothing to wait for, so its panel goes the same way.
+        if ((msg.op === "arrange_panes" || msg.op === "open_viewer") && typeof msg.screenId === "string") this.resync(msg.screenId);
         break;
     }
   }
@@ -209,4 +214,20 @@ export function newTabOp(paneId: string, newPaneId: string, cwd?: string, shellP
 
 export function createScreenOp(screenId: string, name?: string, initialPaneId?: string, shellProfileId?: string): MuxOperation {
   return { type: "create_screen", screenId, name, newPaneId: initialPaneId, shellProfileId };
+}
+
+/** A viewer pane `newPaneId` for `source`, placed next to `paneId` (`viewer-panes`, Opening A Viewer). */
+export function openViewerOp(
+  newPaneId: string,
+  source: OpenViewerOp["source"],
+  options: { paneId?: string; placement?: ViewerPlacement; cwd?: string } = {},
+): OpenViewerOp {
+  return {
+    type: "open_viewer",
+    ...(options.paneId ? { paneId: options.paneId } : {}),
+    ...(options.placement ? { placement: options.placement } : {}),
+    newPaneId,
+    source,
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+  };
 }

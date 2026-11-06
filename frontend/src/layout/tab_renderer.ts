@@ -5,6 +5,7 @@ import { tabMenuItems } from "../lib/context_menus.ts";
 import { bindingForApi } from "../lib/connection/screen_binding.ts";
 import { toggleScratchpad } from "../lib/scratchpad.ts";
 import { scratchpadIcon } from "../panes/scratchpad_area.ts";
+import { viewerParams } from "../lib/viewer/panel.ts";
 
 /**
  * Custom tab renderer with close guard, context menu, and wheel navigation.
@@ -29,11 +30,12 @@ export class SplittyTabRenderer implements ITabRenderer {
   init(params: TabPartInitParameters): void {
     const api = params.api;
 
-    // Title element
+    // Title element; a viewer pane's tab without a title says what it is.
+    const fallback = viewerParams(params.params) ? "Viewer" : "Terminal";
     const titleEl = document.createElement("span");
     titleEl.className = "dv-default-tab-content";
-    titleEl.textContent = api.title ?? "Terminal";
-    this.element.title = api.title ?? "Terminal";
+    titleEl.textContent = api.title ?? fallback;
+    this.element.title = api.title ?? fallback;
     this.element.appendChild(titleEl);
 
     // Shown while the pane's scratchpad holds text (session-scratchpad)

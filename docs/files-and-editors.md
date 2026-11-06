@@ -26,14 +26,33 @@ splitty download build/            # a folder goes as build.zip
 
 Splitty shows the offer with **Save** and **Dismiss** in the windows that show this terminal; Save stores the file as a download of the window, and the desktop app can then show it in the file manager. The command waits until the file is saved, dismissed or the offer expires after 60 seconds. A folder is packed into a zip first (in `~/.cache/splitty/download/`, removed when the command ends) with everything below it except symbolic links and special files; up to 512 MB per file or packed folder.
 
-## Open files in your editor: `splitty open`
+## View files in Splitty: `splitty open`
 
-From a Splitty terminal, open files or folders in VS Code or Zed on your computer:
+From a Splitty terminal, `splitty open <file>` shows the file in a viewer pane to the right of that terminal:
+
+```sh
+splitty open PLAN.md              # rendered Markdown, switchable to its source
+splitty open report.html          # rendered HTML
+splitty open src/main.rs          # source with syntax highlighting
+splitty open --tab build.log      # as a tab next to the terminal instead of a split
+```
+
+Markdown and HTML are rendered, other text files are shown as source with line numbers and highlighting, and images as images. The viewer reads the file from the terminal's server, so a file on an SSH host is shown from that host. While the pane is visible it follows changes to the file within a couple of seconds, and running `splitty open` again for the same file brings its pane to the front instead of opening another one, so an agent can show its plan or report and update it as it goes. Further files from the same terminal open as tabs next to the first one, so the terminal keeps its width. Nothing needs confirming, since only the file is shown. Files up to 8 MB.
+
+Rendered documents run no scripts and load nothing: images show only when embedded as `data:` URLs, links to websites open in the system browser, and relative links open the linked file in another viewer tab.
+
+**A terminal selection** opens the same way: select text in a terminal, for example a long answer of an agent, right-click and choose **Open Selection in Viewer**. The pane keeps the selected text, on a daemon also through a restart; processes in panes cannot read it through `splitty`.
+
+A viewer pane splits, stacks, floats and moves like a terminal. Splitting it opens a terminal in the file's folder.
+
+## Open files in your editor: `splitty open --editor`
+
+From a Splitty terminal, open folders, or files with `--editor` or `--with`, in VS Code or Zed on your computer:
 
 ```sh
 splitty open                      # current directory
 splitty open ../another-project
-splitty open src/main.rs
+splitty open --editor src/main.rs
 splitty open --with zed .
 ```
 

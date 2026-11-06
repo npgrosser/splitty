@@ -655,7 +655,8 @@ fn reduce_open_viewer(
     let origin_pane_id = anchor
         .as_ref()
         .and_then(|anchor| viewer_origin(&state, anchor));
-    if new_pane_id.is_none() {
+    let from_cli = new_pane_id.is_none();
+    if from_cli {
         if let Some(shown) = viewer_showing(&state, &source) {
             select_in_slot(&mut state, &shown)?;
             if let Some(viewer) = state
@@ -685,11 +686,18 @@ fn reduce_open_viewer(
         ViewerPlacement::Above => Some((Axis::Vertical, true)),
         ViewerPlacement::Tab => None,
     };
+    // A further document the CLI shows for a terminal joins the group of the
+    // first viewer opened from that terminal instead of splitting it again.
+    let group = match &anchor {
+        Some(anchor) if from_cli && split.is_some() => viewer_of_terminal(&state, anchor),
+        _ => None,
+    };
     match anchor {
         // A split only beside a pane of the root layout: a floating entry
         // holds no splits, so every placement there is a tab.
-        Some(anchor) => match split {
-            Some((axis, before)) if state.root.find_slot(&anchor).is_some() => {
+        Some(anchor) => match (group, split) {
+            (Some(viewer), _) => push_tab(&mut state, &viewer, &new_pane_id)?,
+            (None, Some((axis, before))) if state.root.find_slot(&anchor).is_some() => {
                 insert_beside(&mut state.root, &anchor, axis, before, &new_pane_id, None)?;
             }
             _ => push_tab(&mut state, &anchor, &new_pane_id)?,
@@ -730,6 +738,28 @@ fn viewer_showing(state: &ScreenState, source: &ViewerSource) -> Option<PaneId> 
                 .get(id)
                 .and_then(|pane| pane.viewer.as_ref())
                 .is_some_and(|viewer| &viewer.source == source)
+        })
+}
+
+/// The first viewer pane in layout order (the root layout depth first, then
+/// the floating entries) whose origin is the terminal pane `anchor`.
+fn viewer_of_terminal(state: &ScreenState, anchor: &PaneId) -> Option<PaneId> {
+    let terminal = state.panes.get(anchor)?;
+    if !matches!(
+        terminal.role.clone().unwrap_or_default(),
+        PaneRole::Terminal
+    ) {
+        return None;
+    }
+    std::iter::once(&state.root)
+        .chain(state.floating.iter().map(|entry| &entry.root))
+        .flat_map(LayoutNode::collect_pane_ids)
+        .find(|id| {
+            state
+                .panes
+                .get(id)
+                .and_then(|pane| pane.viewer.as_ref())
+                .is_some_and(|viewer| viewer.origin_pane_id.as_ref() == Some(anchor))
         })
 }
 
@@ -2813,6 +2843,59 @@ mod tests {
             })
         );
         assert!(wire.get("sessionId").is_none(), "{wire}");
+    }
+
+    /// viewer-panes, Opening A Viewer (A second document of the same
+    /// terminal): through the CLI, a further document of a terminal becomes a
+    /// tab of the group of that terminal's first viewer; a window's op, or a
+    /// document of another terminal, still splits.
+    #[test]
+    fn a_second_document_of_the_same_terminal_joins_its_viewer_group() {
+        let (state, _) = reduce_screen(
+            single_pane_screen(),
+            open_viewer(serde_json::json!({"paneId": "p1", "source": file(PLAN)})),
+        )
+        .expect("first");
+        let first = state
+            .root
+            .collect_pane_ids()
+            .into_iter()
+            .find(|id| id != &PaneId::from("p1"))
+            .expect("viewer");
+        let (state, _) = reduce_screen(
+            state,
+            open_viewer(
+                serde_json::json!({"paneId": "p1", "source": file("/home/me/app/notes.md")}),
+            ),
+        )
+        .expect("second");
+        let ids = state.root.collect_pane_ids();
+        assert_eq!(ids.len(), 3, "{ids:?}");
+        let second = ids[2].clone();
+        assert_eq!(
+            shape(&state.root),
+            [
+                "Horizontal [0.5, 0.5]".to_string(),
+                r#"slot [PaneId("p1")] None"#.to_string(),
+                format!("slot [{first:?}, {second:?}] Some({second:?})"),
+            ]
+        );
+
+        // A window places its own viewer, so its op splits as asked.
+        let (state, _) = reduce_screen(
+            state,
+            open_viewer(serde_json::json!({
+                "paneId": "p1", "newPaneId": "v9", "source": file("/home/me/app/other.md"),
+            })),
+        )
+        .expect("window");
+        assert!(
+            matches!(
+                state.root.find_slot(&PaneId::from("v9")),
+                Some(LayoutNode::Slot { pane_ids, .. }) if pane_ids.len() == 1
+            ),
+            "a slot of its own"
+        );
     }
 
     /// viewer-panes, Viewer Panes (A text document) and Document Text Outside

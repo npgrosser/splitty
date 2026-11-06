@@ -303,6 +303,18 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
   `overlay.toggle`, the Drawer's "Templates" placeholder, `SplittyWebSocket.reconnect`, `setAuthState`,
   `loadTheme`, the unread `terminal.theme` setting, and the identical `getUnreadForPane`/`getUnreadForSession`.
   `editor_target.ts` exists in `frontend/`, `frontend-electron/` and, in Rust, in the Tauri shell.
+- Found on 2026-11-06 with `splitty-open`:
+  - `terminalDirectoryItems` matches only `terminal-…` pane IDs, so terminals the CLI creates (`pane-…`) get no folder
+    actions in their context menu.
+  - `applyScreenSnapshot` restores the window's previous active tabs, so a snapshot alone cannot change the shown tab;
+    viewer panes whose revision rose and new viewer panes the server made active are the exceptions.
+  - A snapshot that adds, removes or moves a terminal pane still rebuilds the screen (only viewer and job panes are
+    applied in place), and keys typed before the rebuilt terminal has attached again are lost.
+  - A panel added in the window can be closed by a snapshot the server built before it received the window's op.
+  - A grid that holds only viewer panes extracts to a template the server refuses (an empty slot), as a grid without
+    panes did before.
+  - The server commands `pane.copy` and `pane.clear` do nothing for viewer panes.
+  - `socket.ts`: a doc comment sits above the wrong function, and `belongsToConnection` is used only by its test.
 
 ## Stale documentation
 
@@ -358,6 +370,8 @@ that area touches them.
 - **workspace-model:** `move_pane` sizes (`resultingSizes`, `sourceResultingSizes`); successful `float_pane`/`dock_pane`/`move_float`; active-pane fallback
   in a stack; closing the last root pane; closing a floating pane; `newPaneIndex: 0`; `set_active_screen`;
   active-screen fallback on close.
+- **web frontend:** `RenderedDocument`'s fallback for engines without `adoptedStyleSheets` (the cleaned sheet
+  serialized into a `<style>` of the shadow root and parsed again) has no test.
 - **mux-protocol:** everything except the binary frame layout: welcome contents, heartbeat, malformed input,
   resync, `pane_spawned`/`op_failed`, nudge propagation and spawn-before-nudge ordering, `command` broadcast,
   disconnect, client reconnect.
@@ -404,8 +418,8 @@ three times in a row. Both pick local ports that another test running in paralle
 - `splitty-remote` `tunnel::supervisor::tests::forwards_take_the_asked_port_or_any_free_one`: `connect` returned
   fewer than two forwards (`free_port()` releases its reservation before the forward binds).
 - `splitty-server` `hub::forwards::tests::ipv6_occupation_blocks_saved_open_and_supervisor_rebuild_without_moving`:
-  binding `[::1]` on the port the forward had just used again failed (seen 2026-10-31 under the same load; passed
-  in the next run).
+  binding `[::1]` on the port the forward had just used again failed (seen 2026-10-31 under the same load and
+  again on 2026-11-06; passed in the next run and five times alone).
 - `splitty-server` `hub::reverse::tests::a_host_has_at_most_32_reverse_forwards`: `HostPortConflict` for a port
   another test had taken (seen on 2026-11-06 in a full run; passed alone and in the rerun).
 - `splitty-core` unit tests for `x86_64-unknown-linux-musl` in release mode (the payload job of the release

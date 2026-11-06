@@ -1,0 +1,107 @@
+// @vitest-environment jsdom
+import { EditorView } from "@codemirror/view";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { SourceView, leavesToWindow } from "./source_view.ts";
+
+// The settings the shortcuts read query media features when they load;
+// jsdom has no matchMedia.
+vi.hoisted(() => {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: (media: string) => ({
+      matches: false, media, onchange: null,
+      addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent: () => false,
+    }),
+  });
+});
+
+function key(init: KeyboardEventInit): KeyboardEvent {
+  return new KeyboardEvent("keydown", { bubbles: true, cancelable: true, ...init });
+}
+
+let views: SourceView[] = [];
+
+function mount(text: string, options: { fileName?: string; wrap?: boolean } = {}): SourceView {
+  const parent = document.createElement("div");
+  document.body.append(parent);
+  const view = new SourceView(parent, { text, fileName: options.fileName, wrap: options.wrap ?? false });
+  views.push(view);
+  return view;
+}
+
+function editorOf(view: SourceView): EditorView {
+  return EditorView.findFromDOM(view.dom)!;
+}
+
+afterEach(() => {
+  for (const view of views) view.destroy();
+  views = [];
+  document.body.replaceChildren();
+});
+
+// viewer-panes, Showing A Document: the source view leaves Splitty's keys to
+// the window, so pane shortcuts work from a viewer as from a terminal.
+describe("leavesToWindow", () => {
+  it("passes Splitty's keys by and keeps the search key", () => {
+    const splitty = (event: KeyboardEvent) => (event.altKey && ["d", "w"].includes(event.key)) || (event.ctrlKey && event.key === "f");
+    expect(leavesToWindow(key({ key: "d", altKey: true }), splitty)).toBe(true);
+    expect(leavesToWindow(key({ key: "w", altKey: true }), splitty)).toBe(true);
+    expect(leavesToWindow(key({ key: "f", ctrlKey: true }), splitty)).toBe(false);
+    expect(leavesToWindow(key({ key: "ArrowDown" }), splitty)).toBe(false);
+  });
+
+  it("asks Splitty's own shortcuts by default", () => {
+    expect(leavesToWindow(key({ key: "w", altKey: true }))).toBe(true);
+    expect(leavesToWindow(key({ key: "f", ctrlKey: true }))).toBe(false);
+    expect(leavesToWindow(key({ key: "a", ctrlKey: true }))).toBe(false);
+  });
+});
+
+describe("SourceView", () => {
+  it("shows the text read-only with line numbers", () => {
+    const view = mount("fn main() {\n    println!(\"hi\");\n}\n", { fileName: "main.rs" });
+    const editor = editorOf(view);
+    expect(editor.state.readOnly).toBe(true);
+    expect(view.dom.querySelector(".cm-lineNumbers")).not.toBeNull();
+    expect(editor.state.doc.lines).toBe(4);
+  });
+
+  it("names the selection's text, offsets and lines", () => {
+    const view = mount("one\ntwo\nthree\n");
+    expect(view.selection()).toBeUndefined();
+    editorOf(view).dispatch({ selection: { anchor: 9, head: 2 } });
+    expect(view.selection()).toEqual({ text: "e\ntwo\nt", from: 2, to: 9, startLine: 1, endLine: 3 });
+    // A selection that ends at a line's start does not take that line.
+    editorOf(view).dispatch({ selection: { anchor: 4, head: 8 } });
+    expect(view.selection()).toEqual({ text: "two\n", from: 4, to: 8, startLine: 2, endLine: 2 });
+  });
+
+  it("replaces its text in place and clears its marks", () => {
+    const view = mount("old\n");
+    view.setMarks([{ from: 0, to: 3, className: "cm-viewer-marked" }]);
+    expect(view.dom.querySelectorAll(".cm-viewer-marked")).toHaveLength(1);
+    expect(view.dom.querySelectorAll(".cm-viewer-mark")).toHaveLength(1);
+    view.setText("new\ntext\n");
+    expect(editorOf(view).state.doc.toString()).toBe("new\ntext\n");
+    expect(view.dom.querySelectorAll(".cm-viewer-marked")).toHaveLength(0);
+  });
+
+  it("wraps lines on request", () => {
+    const view = mount("a long line\n", { wrap: true });
+    expect(view.wrap).toBe(true);
+    expect(view.dom.querySelector(".cm-lineWrapping")).not.toBeNull();
+    view.setWrap(false);
+    expect(view.wrap).toBe(false);
+    expect(view.dom.querySelector(".cm-lineWrapping")).toBeNull();
+  });
+
+  it("does not take Splitty's keys from the window", () => {
+    const view = mount("text\n");
+    const content = view.dom.querySelector(".cm-content")!;
+    const split = key({ key: "d", altKey: true });
+    let reached = false;
+    window.addEventListener("keydown", () => { reached = true; }, { once: true });
+    content.dispatchEvent(split);
+    expect(reached).toBe(true);
+  });
+});

@@ -30,11 +30,12 @@ export interface ConnSocket {
  */
 /**
  * Messages that belong to the connection they were sent on: images, file
- * chunks, file offers and editor requests answer state of that connection
- * only, so a socket never queues them for a reconnect.
+ * chunks, file offers, editor requests and viewer reads answer state of that
+ * connection only, so a socket never queues them for a reconnect.
  */
 export function belongsToConnection(msg: IncomingMessage): boolean {
-  return msg.type === "save_image" || msg.type === "upload" || msg.type === "upload_cancel" || msg.type.startsWith("file.") || msg.type.startsWith("editor.");
+  return msg.type === "save_image" || msg.type === "upload" || msg.type === "upload_cancel"
+    || msg.type.startsWith("file.") || msg.type.startsWith("editor.") || msg.type.startsWith("viewer.");
 }
 
 export function decodeOutputFrame(bytes: Uint8Array): { id: string; payload: Uint8Array } | null {

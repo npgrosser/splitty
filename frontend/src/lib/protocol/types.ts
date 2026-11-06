@@ -90,6 +90,10 @@ export type IncomingMessage =
   | { type: "file.accept"; offerId: string }
   | { type: "file.decline"; offerId: string }
   | { type: "file.read"; offerId: string; offset: number }
+  // A viewer pane's document (`viewer-v1`), read in chunks: offset 0 first, every later
+  // chunk with the `version` of the first answer; `ifVersion` (offset 0 only) asks for
+  // `viewer.unchanged` when the document still has that version.
+  | { type: "viewer.read"; requestId: string; paneId: string; offset: number; version?: string; ifVersion?: string }
   // Mux messages
   | { type: "mux.op"; screenId: string; op: MuxOperation }
   | { type: "mux.resync"; screenId: string };
@@ -134,6 +138,15 @@ export interface FileOffer extends ServerEvent { type: "file.offer"; offerId: st
 export interface FileChunk extends ServerEvent { type: "file.chunk"; offerId: string; offset: number; data: string; eof: boolean }
 export type FileClosedReason = "taken" | "expired" | "declined" | "disconnected" | "failed";
 export interface FileClosed extends ServerEvent { type: "file.closed"; offerId: string; reason: FileClosedReason }
+
+// --- Server -> Client: Viewer Documents (`viewer-v1`) ---
+
+/** A chunk of a viewer pane's document at `offset`: base64, at most 1 MiB decoded; `size` is the whole document's. */
+export interface ViewerChunk extends ServerEvent { type: "viewer.chunk"; requestId: string; offset: number; size: number; version: string; data: string; eof: boolean }
+/** The document still has the version the read named in `ifVersion`. */
+export interface ViewerUnchanged extends ServerEvent { type: "viewer.unchanged"; requestId: string; version: string }
+export type ViewerFailureCode = "unknown_pane" | "not_found" | "not_a_file" | "too_large" | "unreadable" | "changed" | "busy" | "invalid";
+export interface ViewerFailed extends ServerEvent { type: "viewer.failed"; requestId: string; code: ViewerFailureCode; error: string }
 
 // --- Server -> Client: Session Stream Events ---
 
@@ -202,6 +215,10 @@ export type OutgoingMessage =
   | FileOffer
   | FileChunk
   | FileClosed
+  // Viewer documents
+  | ViewerChunk
+  | ViewerUnchanged
+  | ViewerFailed
   // Session stream
   | TitleChanged
   | SemanticBoundary
@@ -260,7 +277,22 @@ export interface PaneState {
   title?: string;
   cwd?: string;
   role?: "terminal" | "webview" | "viewer";
+  /** A viewer pane's record (`viewer-panes`); absent for other panes and for a malformed record. */
+  viewer?: ViewerRecord;
 }
+
+/** What a viewer pane shows: a file on its server's machine, or a text its server keeps (never in a snapshot). */
+export type ViewerSource = { kind: "file"; path: string } | { kind: "text"; title: string };
+
+export interface ViewerRecord {
+  source: ViewerSource;
+  /** The terminal pane the viewer was opened from. */
+  originPaneId?: string;
+  /** Starts at 1; a reopen from the CLI raises it, and a window that shows the pane reads it again. */
+  revision: number;
+}
+
+export type ViewerPlacement = "right" | "left" | "above" | "below" | "tab";
 
 export interface SessionState {
   id: string;
@@ -347,4 +379,19 @@ export type MuxOperation =
   | { type: "dock_pane"; floatingId: string; paneId?: string }
   | { type: "move_float"; floatingId: string; bounds: { x: number; y: number; w: number; h: number } }
   // A session's whole scratchpad; only a window sends it (`session-scratchpad`).
-  | { type: "set_scratchpad"; sessionId: string; text: string };
+  | { type: "set_scratchpad"; sessionId: string; text: string }
+  | OpenViewerOp;
+
+/**
+ * A viewer pane next to `paneId` (`viewer-panes`, Opening A Viewer); no session, no
+ * effect. A window always names `newPaneId` and adds the panel first.
+ */
+export interface OpenViewerOp {
+  type: "open_viewer";
+  paneId?: string;
+  placement?: ViewerPlacement;
+  newPaneId?: string;
+  source: { kind: "file"; path: string } | { kind: "text"; title: string; text: string };
+  /** A text's directory. */
+  cwd?: string;
+}

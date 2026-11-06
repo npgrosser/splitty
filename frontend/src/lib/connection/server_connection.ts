@@ -2,7 +2,8 @@
  * A connection to one Splitty server.
  *
  * It owns everything that speaks to that server: the socket, the mux client,
- * the attach registry, the session client and the server-command handlers.
+ * the attach registry, the session client, the reader of its viewer panes'
+ * documents and the server-command handlers.
  * Nothing in it is shared with another connection, so ids a server sends
  * (screens, panes, sessions) are only ever resolved against that server's
  * objects. The local server, the one that served the page, is the connection
@@ -15,6 +16,7 @@ import { MuxClient } from "../mux/mux_client.ts";
 import { AttachRegistry } from "../terminal/attach_registry.ts";
 import { SessionClient } from "../terminal/session_client.ts";
 import { Scratchpads } from "../scratchpad.ts";
+import { ViewerDocuments } from "../viewer/documents.ts";
 import { parseCommand } from "./routing.ts";
 
 /** `local`, or `host:<target>` for a connection to another host. */
@@ -38,6 +40,8 @@ export class ServerConnection {
   readonly sessions: SessionClient;
   /** Its sessions' scratchpads, fed by its snapshots (`session-scratchpad`). */
   readonly scratchpads: Scratchpads;
+  /** The documents of its viewer panes, read over its socket (`viewer-panes`). */
+  readonly viewers: ViewerDocuments;
   private readonly commandHandlers = new Set<(command: ClientCommand) => void>();
   private unsubscribe: () => void;
 
@@ -54,6 +58,7 @@ export class ServerConnection {
     this.sessions = new SessionClient(socket, this.attachments);
     this.scratchpads = new Scratchpads((screenId, sessionId, text) =>
       this.mux.sendOp(screenId, { type: "set_scratchpad", sessionId, text }));
+    this.viewers = new ViewerDocuments(socket);
     this.unsubscribe = socket.onMessage((msg) => {
       if (msg.type !== "command") return;
       const command = parseCommand(msg.command);
@@ -76,6 +81,7 @@ export class ServerConnection {
     this.unsubscribe();
     this.commandHandlers.clear();
     this.mux.dispose();
+    this.viewers.dispose();
     this.sessions.dispose();
     this.attachments.dispose();
   }

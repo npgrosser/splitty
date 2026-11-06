@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { MuxClient, PaneSpawnRejectedError, PaneSpawnedTimeoutError, createScreenOp, splitOp } from "./mux_client.ts";
+import { MuxClient, PaneSpawnRejectedError, PaneSpawnedTimeoutError, createScreenOp, openViewerOp, splitOp } from "./mux_client.ts";
 import { FakeSocket } from "../testing/fake_server.ts";
 import type { ScreenInfo, ScreenState } from "../protocol/types.ts";
 
@@ -132,6 +132,69 @@ describe("MuxClient", () => {
     expect(mux.tabSelections).toBe(true);
     socket.message({ type: "mux.welcome", clientId: "c1", screens: [], capabilities: ["layout-arrange-v1"] });
     expect(mux.tabSelections).toBe(false);
+  });
+
+  // viewer-panes, Viewer Capability (Host without viewers): the flag follows
+  // every welcome; a refused open_viewer spawns nothing, so the screen resyncs.
+  it("offers viewer panes only for a server that announces them, and resyncs a refused one", () => {
+    welcome();
+    expect(mux.viewers).toBe(false);
+    socket.message({ type: "mux.welcome", clientId: "c1", screens: [], capabilities: ["scratchpad-v1", "viewer-v1"] });
+    expect(mux.viewers).toBe(true);
+    socket.message({ type: "mux.welcome", clientId: "c1", screens: [], capabilities: ["scratchpad-v1"] });
+    expect(mux.viewers).toBe(false);
+
+    socket.message({ type: "mux.op_failed", op: "open_viewer", error: "no screen" });
+    expect(socket.sentOfType("mux.resync")).toEqual([]);
+    socket.message({ type: "mux.op_failed", op: "open_viewer", screenId: "screen-1", paneId: "viewer-0123456789abcdef", error: "the path must be absolute" });
+    expect(socket.sentOfType("mux.resync")).toEqual([{ type: "mux.resync", screenId: "screen-1" }]);
+  });
+
+  // viewer-panes, Viewer Panes and Viewer Capability: a malformed record
+  // leaves a viewer pane that says it cannot be shown; Document Text Outside
+  // Snapshots: a text a snapshot carries anyway goes no further.
+  it("keeps a viewer pane's record from a snapshot only when it is well formed", () => {
+    const seen: ScreenState[] = [];
+    mux.setHandlers({ onSnapshot: (screen) => seen.push(screen) });
+    const file = (path: unknown) => ({ source: { kind: "file", path }, revision: 1 });
+    const panes: Record<string, unknown> = {
+      v1: { role: "viewer", title: "PLAN.md", cwd: "/home/me/app", viewer: { source: { kind: "file", path: "/home/me/app/PLAN.md" }, originPaneId: "p1", revision: 2, extra: 1 } },
+      v2: { role: "viewer", viewer: { source: { kind: "text", title: "Selection from claude", text: "the selected text" }, revision: 1 } },
+      relative: { role: "viewer", viewer: file("docs/plan.md") },
+      dotted: { role: "viewer", viewer: file("/home/me/app/../secrets.txt") },
+      control: { role: "viewer", viewer: file("/home/me/a\nb") },
+      long: { role: "viewer", viewer: file(`/${"a".repeat(4096)}`) },
+      url: { role: "viewer", viewer: { source: { kind: "url", url: "https://example.com" }, revision: 1 } },
+      revision: { role: "viewer", viewer: { source: { kind: "file", path: "/home/me/a" }, revision: -1 } },
+      fraction: { role: "viewer", viewer: { source: { kind: "file", path: "/home/me/a" }, revision: 1.5 } },
+      untitled: { role: "viewer", viewer: { source: { kind: "text", title: "" }, revision: 1 } },
+      titled: { role: "viewer", viewer: { source: { kind: "text", title: "x".repeat(201) }, revision: 1 } },
+      missing: { role: "viewer" },
+      p1: { role: "terminal", viewer: file("/home/me/a") },
+    };
+    socket.message({ type: "mux.screen_snapshot", screen: { id: "screen-1", root: { type: "slot", id: "s1", paneIds: Object.keys(panes) }, panes } });
+
+    const got = seen[0].panes;
+    expect(got.v1).toEqual({
+      id: "v1", title: "PLAN.md", cwd: "/home/me/app", role: "viewer",
+      viewer: { source: { kind: "file", path: "/home/me/app/PLAN.md" }, originPaneId: "p1", revision: 2 },
+    });
+    expect(got.v2.viewer).toEqual({ source: { kind: "text", title: "Selection from claude" }, revision: 1 });
+    for (const id of ["relative", "dotted", "control", "long", "url", "revision", "fraction", "untitled", "titled", "missing"]) {
+      expect(got[id].role, id).toBe("viewer");
+      expect(got[id], id).not.toHaveProperty("viewer");
+    }
+    expect(got.p1).not.toHaveProperty("viewer");
+  });
+
+  // viewer-panes, Opening A Viewer: only the fields given are sent.
+  it("builds open_viewer ops", () => {
+    expect(openViewerOp("viewer-0123456789abcdef", { kind: "file", path: "/home/me/app/PLAN.md" }, { paneId: "p1", placement: "right" })).toEqual({
+      type: "open_viewer", paneId: "p1", placement: "right", newPaneId: "viewer-0123456789abcdef", source: { kind: "file", path: "/home/me/app/PLAN.md" },
+    });
+    expect(openViewerOp("viewer-0123456789abcdef", { kind: "text", title: "Notes", text: "a" }, { cwd: "/home/me" })).toEqual({
+      type: "open_viewer", newPaneId: "viewer-0123456789abcdef", source: { kind: "text", title: "Notes", text: "a" }, cwd: "/home/me",
+    });
   });
 
   // session-scratchpad, Saving Through The Window: the text keeps its lines, bounded.

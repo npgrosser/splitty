@@ -606,6 +606,126 @@ body,
   border-color: var(--splitty-border-default);
 }
 
+/* ── Viewer Panes ── */
+
+.viewer-pane {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100%;
+  outline: none;
+}
+
+.viewer-body {
+  position: relative;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.viewer-document {
+  width: 100%;
+  height: 100%;
+}
+
+.viewer-document[hidden],
+.viewer-notice[hidden],
+.viewer-bar-button[hidden] {
+  display: none;
+}
+
+.viewer-notice,
+.viewer-binary {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  height: 100%;
+  padding: 24px;
+  box-sizing: border-box;
+  text-align: center;
+  color: var(--splitty-text-secondary);
+  font-size: 12px;
+}
+
+.viewer-notice.muted {
+  color: var(--splitty-text-muted);
+}
+
+.viewer-notice-text {
+  max-width: 46ch;
+  margin: 0;
+  line-height: 1.5;
+}
+
+.viewer-notice-button,
+.viewer-bar-button {
+  margin: 0;
+  padding: 2px 9px;
+  border: 1px solid var(--splitty-border-default);
+  border-radius: 4px;
+  background: var(--splitty-surface-raised);
+  color: var(--splitty-text-secondary);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.viewer-notice-button:hover,
+.viewer-bar-button:hover {
+  color: var(--splitty-text-primary);
+  border-color: var(--splitty-accent);
+}
+
+.viewer-image {
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  height: 100%;
+  padding: 16px;
+  box-sizing: border-box;
+  overflow: auto;
+}
+
+.viewer-image img {
+  max-width: 100%;
+  background: repeating-conic-gradient(var(--splitty-hover-bg) 0 25%, transparent 0 50%) 0 0 / 16px 16px;
+}
+
+.viewer-bar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 8px;
+  height: 22px;
+  padding: 0 8px;
+  border-top: 1px solid var(--splitty-border-subtle);
+  background: var(--splitty-surface-raised);
+  color: var(--splitty-text-muted);
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 11px;
+}
+
+.viewer-bar-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Where a link of the document leads, in place of its path. */
+.viewer-bar-label.viewer-bar-link {
+  color: var(--splitty-text-secondary);
+}
+
+.viewer-bar-button {
+  flex: 0 0 auto;
+  padding: 0 7px;
+  line-height: 16px;
+}
+
 /* ── Terminal Search ── */
 
 .terminal-search {
