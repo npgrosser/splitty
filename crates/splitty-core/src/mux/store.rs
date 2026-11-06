@@ -21,14 +21,13 @@ type OnChange = Box<dyn Fn(&WorkspaceState) + Send + Sync>;
 pub struct Store {
     state: RwLock<WorkspaceState>,
     on_change: Option<OnChange>,
+    /// The number of applied changes, for whoever waits for the next one.
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 impl Store {
     pub fn new() -> Self {
-        Self {
-            state: RwLock::new(WorkspaceState::default()),
-            on_change: None,
-        }
+        Self::with_state(WorkspaceState::default())
     }
 
     /// Create a store initialized with existing workspace state (for daemon restart).
@@ -36,7 +35,14 @@ impl Store {
         Self {
             state: RwLock::new(state),
             on_change: None,
+            changes: tokio::sync::watch::Sender::new(0),
         }
+    }
+
+    /// A receiver that sees every successful dispatch after it was taken,
+    /// as a rising count; what changed is read from the store.
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     /// Set a callback invoked after every successful dispatch with the new state.
@@ -55,6 +61,18 @@ impl Store {
     /// server never learned about — would drop every screen on the floor and
     /// every following op would fail too.
     pub fn dispatch(&self, op: Op) -> Result<Vec<Effect>, MuxError> {
+        self.dispatch_inspect(op, |_, _| ())
+            .map(|(effects, ())| effects)
+    }
+
+    /// Dispatch like [`Self::dispatch`], and hand `inspect` the workspace
+    /// from before and after the op while the lock is still held, so that
+    /// what it reads belongs to this op alone. A rejected op is not inspected.
+    pub fn dispatch_inspect<R>(
+        &self,
+        op: Op,
+        inspect: impl FnOnce(&WorkspaceState, &WorkspaceState) -> R,
+    ) -> Result<(Vec<Effect>, R), MuxError> {
         let mut state = self.state.write().unwrap();
         let rollback = state.clone();
         let (new_state, effects) = match reduce_workspace(std::mem::take(&mut *state), op) {
@@ -65,10 +83,13 @@ impl Store {
             }
         };
         *state = new_state;
+        let inspected = inspect(&rollback, &state);
         if let Some(ref cb) = self.on_change {
             cb(&state);
         }
-        Ok(effects)
+        self.changes
+            .send_modify(|count| *count = count.wrapping_add(1));
+        Ok((effects, inspected))
     }
 
     /// Dispatch a screen-level operation (convenience for ModifyScreen).
@@ -163,6 +184,34 @@ impl Store {
                 })
             })
             .collect()
+    }
+
+    /// The document of the viewer pane `pane_id`, on whichever screen holds
+    /// it; none when no pane of the role `viewer` has that ID.
+    pub fn viewer_source(&self, pane_id: &PaneId) -> Option<ViewerSource> {
+        let state = self.state.read().expect("workspace lock");
+        state.screens.values().find_map(|screen| {
+            let pane = screen.panes.get(pane_id)?;
+            if pane.role != Some(PaneRole::Viewer) {
+                return None;
+            }
+            Some(pane.viewer.as_ref()?.source.clone())
+        })
+    }
+
+    /// The wait for a review that the viewer pane `pane_id` names, on
+    /// whichever screen holds it (`viewer-annotations`, Waiting For A Review).
+    pub fn review_wait(&self, pane_id: &PaneId) -> Option<ReviewWait> {
+        let state = self.state.read().expect("workspace lock");
+        state.screens.values().find_map(|screen| {
+            screen
+                .panes
+                .get(pane_id)?
+                .viewer
+                .as_ref()?
+                .review_wait
+                .clone()
+        })
     }
 
     /// Get the session ID for a pane (searches all screens).
@@ -320,6 +369,50 @@ mod tests {
                 .len(),
             2
         );
+    }
+
+    #[test]
+    fn an_inspected_dispatch_sees_its_own_op_and_a_rejected_one_is_not_inspected() {
+        let store = Store::new();
+        store
+            .dispatch(Op::CreateScreen {
+                name: None,
+                screen_id: Some(ScreenId::from("scr1")),
+                new_pane_id: Some(PaneId::from("p1")),
+                shell_profile_id: None,
+            })
+            .unwrap();
+        let open = |pane: &str| Op::ModifyScreen {
+            screen_id: ScreenId::from("scr1"),
+            op: serde_json::from_value(serde_json::json!({
+                "type": "open_viewer", "paneId": pane,
+                "source": {"kind": "file", "path": "/home/me/app/PLAN.md"},
+            }))
+            .expect("wire op"),
+        };
+        let shown = |before: &WorkspaceState, after: &WorkspaceState| {
+            let id = ScreenId::from("scr1");
+            crate::mux::shown_viewer(before.screens.get(&id)?, after.screens.get(&id)?)
+        };
+        let (effects, first) = store.dispatch_inspect(open("p1"), shown).expect("opened");
+        assert!(effects.is_empty());
+        let (pane, reused) = first.expect("a viewer pane");
+        assert!(!reused);
+        assert_eq!(
+            store.viewer_source(&pane),
+            Some(ViewerSource::File {
+                path: "/home/me/app/PLAN.md".into()
+            })
+        );
+        assert_eq!(store.viewer_source(&PaneId::from("p1")), None);
+        let (_, again) = store.dispatch_inspect(open("p1"), shown).expect("again");
+        assert_eq!(again, Some((pane, true)));
+
+        let mut inspected = false;
+        assert!(store
+            .dispatch_inspect(open("absent"), |_, _| inspected = true)
+            .is_err());
+        assert!(!inspected);
     }
 
     #[test]

@@ -62,6 +62,16 @@ macro_rules! define_id {
     };
 }
 
+/// `prefix`, a hyphen and 16 random lowercase hex characters, e.g.
+/// "viewer-0123456789abcdef": the form of the IDs of viewer panes, replies and
+/// review waits (`viewer-panes`, `viewer-annotations`).
+pub fn hex_id(prefix: &str) -> String {
+    use rand::Rng;
+    let mut bytes = [0u8; 8];
+    rand::thread_rng().fill(&mut bytes);
+    format!("{prefix}-{}", hex::encode(bytes))
+}
+
 define_id!(PaneId);
 define_id!(ScreenId);
 define_id!(SessionId);

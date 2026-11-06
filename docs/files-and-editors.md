@@ -26,14 +26,92 @@ splitty download build/            # a folder goes as build.zip
 
 Splitty shows the offer with **Save** and **Dismiss** in the windows that show this terminal; Save stores the file as a download of the window, and the desktop app can then show it in the file manager. The command waits until the file is saved, dismissed or the offer expires after 60 seconds. A folder is packed into a zip first (in `~/.cache/splitty/download/`, removed when the command ends) with everything below it except symbolic links and special files; up to 512 MB per file or packed folder.
 
-## Open files in your editor: `splitty open`
+## View files in Splitty: `splitty open`
 
-From a Splitty terminal, open files or folders in VS Code or Zed on your computer:
+From a Splitty terminal, `splitty open <file>` shows the file in a viewer pane to the right of that terminal:
+
+```sh
+splitty open PLAN.md              # rendered Markdown, switchable to its source
+splitty open report.html          # rendered HTML
+splitty open src/main.rs          # source with syntax highlighting
+splitty open --tab build.log      # as a tab next to the terminal instead of a split
+```
+
+Markdown and HTML are rendered, other text files are shown as source with line numbers and highlighting, and images as images. The viewer reads the file from the terminal's server, so a file on an SSH host is shown from that host. While the pane is visible it follows changes to the file within a couple of seconds, and running `splitty open` again for the same file brings its pane to the front instead of opening another one, so an agent can show its plan or report and update it as it goes. Further files from the same terminal open as tabs next to the first one, so the terminal keeps its width. Nothing needs confirming, since only the file is shown. Files up to 8 MB.
+
+Rendered documents run no scripts and load nothing: images show only when embedded as `data:` URLs, links to websites open in the system browser, and relative links open the linked file in another viewer tab.
+
+**A terminal selection** opens the same way: select text in a terminal, for example a long answer of an agent, right-click and choose **Open Selection in Viewer**. The pane keeps the selected text, on a daemon also through a restart; processes in panes cannot read it through `splitty`.
+
+A viewer pane splits, stacks, floats and moves like a terminal. Splitting it opens a terminal in the file's folder.
+
+## Review a document
+
+Select a passage in a viewer pane, rendered or as source, and choose **Comment** or **Suggest Change** from the toolbar next to the selection or from the context menu. A comment holds a remark or a question. A suggested change starts with the selected text as its replacement; empty the replacement to suggest deleting the passage. `Ctrl+Enter` (`Cmd+Enter` on macOS) saves, `Escape` cancels. **Add Comment** in the annotation list adds a comment on the whole document.
+
+The list on the right of the pane shows each annotation with its number, its lines and its thread of replies: the open ones in document order, then those whose passage was not found, then the general comments, and the resolved ones folded below them. A click on an entry scrolls to its passage, and a click on a marked passage, or on the bar beside its lines, opens the list on its thread; where passages overlap, the shortest comes first and another click goes on to the next. When the file changes, annotations find their passage again by its text; a reworded passage is marked as changed where it most likely is now, and one that is gone stays in the list, marked as not found. **Move to Selection** gives an annotation the passage selected in the document. **Resolve** keeps an annotation with its thread but leaves it out of reviews and marks; **Reopen** brings it back. The eye in the pane's bar hides the marks, except for the annotation you choose in the list; **Show Resolved** in the list marks the resolved ones as well. Both change only what this window shows. Annotations are kept with the pane, also through a reload and, on a daemon, a restart. Closing the pane asks first.
+
+**Copy** at the top of the list copies the review as Markdown. **Send** pastes it into the terminal the document was opened from (its title names the terminal), without Enter, so you can read it and add to it before submitting. The review is Markdown: the document's path, then each annotation with its number and lines, the quoted passage, your remark, a suggested replacement and the replies of its thread, and a last line naming the command an agent replies with. It holds what you have not sent yet: new and edited annotations, and threads with a new reply of yours. Sending keeps the annotations and marks what the review held as sent; when nothing is new, the button reads **Send Again** and sends all open annotations. Copying marks nothing. The menu next to the button sends to another terminal of the screen, as a file whose path is inserted at the prompt, or into the terminal's scratchpad, and copies or saves the review; copying and saving mark nothing. A program that has not enabled bracketed paste gets the review as a file, since a shell would run each pasted line.
+
+An agent in a pane of the same screen reads what you sent and replies in a thread:
+
+```sh
+splitty comments PLAN.md                  # the sent annotations of PLAN.md with their threads
+splitty comments reply PLAN.md 2 'Switched to on-demand computation.'
+```
+
+The reply appears in the thread as plain text, with the title of the agent's pane; answer it with **Reply** and send again. `splitty comments` shows an agent only what you sent, and an agent adds nothing but replies. That keeps drafts out of an agent's context; it is no boundary against your own programs, which can still read the workspace file, close the pane or type into a terminal. `splitty comments` lists the open annotations, `--all` the resolved ones as well, and `--json` prints the server's answer. An agent names the document by its path or by the viewer pane's ID, which the review's last line uses; a terminal selection shown in a viewer has only the ID.
+
+An agent can also wait for your verdict on a file, or on a text it pipes in:
+
+```sh
+splitty review PLAN.md
+splitty review --text --title Plan < plan.md
+```
+
+The pane then shows a banner, `<title> waits for a review`, with a field for an overall comment and two verdicts:
+
+- **Approve** lets the command go on with status 0. Comments not yet sent go along as notes, and the command prints them as a review; with none it prints nothing.
+- **Request Changes** answers with the review, which the command prints, and ends it with status 3. It also works without any comment, as a plain rejection.
+
+Text in the overall comment field becomes a general comment, with its own number and thread, before the answer goes out. The review starts with its verdict (`Verdict: approved` or `Verdict: changes requested`) and lists the general comments before the comments on passages; it notes when the file changed while the command waited. The answered annotations are marked as sent. `--json` prints the outcome as JSON with the same status. Closing the pane first ends the command with status 1. While a command waits, the pane's tab shows an hourglass, so a waiting review in a background tab is not missed. A text piped in is rendered as Markdown, or shown as plain text with `--format text`. Piped in again from the same pane with the same title, it replaces the text of its viewer pane, which keeps its annotations; while a command still waits for that pane, a second one fails and changes nothing. Two commands started at once cannot take each other's answer: the one whose text the other replaced before it waited fails.
+
+### Plans of Claude Code
+
+As a hook of Claude Code, `splitty review` takes over the approval of a plan when Claude Code leaves plan mode. Add this to Claude Code's settings (`~/.claude/settings.json`, or `.claude/settings.json` of a project):
+
+```json
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          { "type": "command", "command": "splitty review --hook claude-code", "timeout": 86400 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+When Claude Code in a Splitty terminal asks to approve its plan, the plan opens in a viewer pane next to it, titled `Plan`, instead of Claude Code's own dialog:
+
+- **Approve** leaves plan mode. Comments not yet sent go along as notes: Claude Code gets the plan followed by a rule and the review.
+- **Request Changes** keeps Claude Code in plan mode with the review as the reason; its next plan replaces the text of the same pane, which keeps the annotations and their threads.
+
+Wherever the hook cannot review, it decides nothing, and Claude Code shows its own dialog: outside a Splitty terminal, for another event or tool, when the server is too old, when the pane is closed before an answer or the connection ends. The hook never approves on its own. The `timeout`, in seconds, is how long Claude Code waits for your verdict before it falls back to its dialog. `PreToolUse` works as the event as well; it runs on every call of the tool, also where Claude Code's permission mode would not ask. The plan is taken from the tool's input, or from the plan file it names.
+
+Terminal selections opened in a viewer can be annotated the same way, for example to answer a long reply of an agent point by point.
+
+## Open files in your editor: `splitty open --editor`
+
+From a Splitty terminal, open folders, or files with `--editor` or `--with`, in VS Code or Zed on your computer:
 
 ```sh
 splitty open                      # current directory
 splitty open ../another-project
-splitty open src/main.rs
+splitty open --editor src/main.rs
 splitty open --with zed .
 ```
 

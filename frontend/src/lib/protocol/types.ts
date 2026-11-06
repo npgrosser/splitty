@@ -90,6 +90,15 @@ export type IncomingMessage =
   | { type: "file.accept"; offerId: string }
   | { type: "file.decline"; offerId: string }
   | { type: "file.read"; offerId: string; offset: number }
+  // A viewer pane's document (`viewer-v1`), read in chunks: offset 0 first, every later
+  // chunk with the `version` of the first answer; `ifVersion` (offset 0 only) asks for
+  // `viewer.unchanged` when the document still has that version.
+  | { type: "viewer.read"; requestId: string; paneId: string; offset: number; version?: string; ifVersion?: string }
+  // The window's answer to a process that waits for a review of a viewer pane
+  // (`viewer-annotations-v1`): a verdict, with a review of at most 1 MiB that an
+  // approval may and a request for changes must carry.
+  // Answered by `viewer.review_answered` to this connection only.
+  | ViewerReviewAnswer
   // Mux messages
   | { type: "mux.op"; screenId: string; op: MuxOperation }
   | { type: "mux.resync"; screenId: string };
@@ -134,6 +143,32 @@ export interface FileOffer extends ServerEvent { type: "file.offer"; offerId: st
 export interface FileChunk extends ServerEvent { type: "file.chunk"; offerId: string; offset: number; data: string; eof: boolean }
 export type FileClosedReason = "taken" | "expired" | "declined" | "disconnected" | "failed";
 export interface FileClosed extends ServerEvent { type: "file.closed"; offerId: string; reason: FileClosedReason }
+
+// --- Server -> Client: Viewer Documents (`viewer-v1`) ---
+
+/** A chunk of a viewer pane's document at `offset`: base64, at most 1 MiB decoded; `size` is the whole document's. */
+export interface ViewerChunk extends ServerEvent { type: "viewer.chunk"; requestId: string; offset: number; size: number; version: string; data: string; eof: boolean }
+/** The document still has the version the read named in `ifVersion`. */
+export interface ViewerUnchanged extends ServerEvent { type: "viewer.unchanged"; requestId: string; version: string }
+export type ViewerFailureCode = "unknown_pane" | "not_found" | "not_a_file" | "too_large" | "unreadable" | "changed" | "busy" | "invalid";
+export interface ViewerFailed extends ServerEvent { type: "viewer.failed"; requestId: string; code: ViewerFailureCode; error: string }
+
+// --- Viewer Reviews (`viewer-annotations-v1`) ---
+
+/** The user's verdict on a document a process waits for. */
+export type ReviewOutcome = "approved" | "changes_requested";
+/** A window's answer to the wait `waitId` on viewer pane `paneId`. */
+export interface ViewerReviewAnswer {
+  type: "viewer.review_answer";
+  screenId: string;
+  paneId: string;
+  waitId: string;
+  outcome: ReviewOutcome;
+  /** The review: optional with `approved` (its notes), required with `changes_requested`. */
+  review?: string;
+}
+/** The server's acknowledgement of one `viewer.review_answer`; `accepted` only for the answer that settled the wait. */
+export interface ViewerReviewAnswered extends ServerEvent { type: "viewer.review_answered"; paneId: string; waitId: string; accepted: boolean }
 
 // --- Server -> Client: Session Stream Events ---
 
@@ -202,6 +237,11 @@ export type OutgoingMessage =
   | FileOffer
   | FileChunk
   | FileClosed
+  // Viewer documents
+  | ViewerChunk
+  | ViewerUnchanged
+  | ViewerFailed
+  | ViewerReviewAnswered
   // Session stream
   | TitleChanged
   | SemanticBoundary
@@ -260,7 +300,112 @@ export interface PaneState {
   title?: string;
   cwd?: string;
   role?: "terminal" | "webview" | "viewer";
+  /** A viewer pane's record (`viewer-panes`); absent for other panes and for a malformed record. */
+  viewer?: ViewerRecord;
 }
+
+/** What a viewer pane shows: a file on its server's machine, or a text its server keeps (never in a snapshot). */
+/** A text's `format` `markdown` renders it as a Markdown document; plain text without one. */
+export type ViewerSource = { kind: "file"; path: string } | { kind: "text"; title: string; format?: "markdown" };
+
+export interface ViewerRecord {
+  source: ViewerSource;
+  /** The terminal pane the viewer was opened from. */
+  originPaneId?: string;
+  /** Starts at 1; a reopen from the CLI raises it, and a window that shows the pane reads it again. */
+  revision: number;
+  /**
+   * The pane's annotations in creation order, each with its thread
+   * (`viewer-annotations`); absent while there are none. Kept by the
+   * connection's annotation store, never in a panel's params.
+   */
+  annotations?: ViewerAnnotation[];
+  /** The highest number the pane has given an annotation; absent while 0. Never in a panel's params. */
+  lastAnnotationNumber?: number;
+  /** A process waits for the user's review of the pane's document; the server never persists it. */
+  reviewWait?: ReviewWait;
+}
+
+/** A process that waits for a review of a viewer pane (`viewer-annotations`, Waiting For A Review). */
+export interface ReviewWait {
+  /** `wait-` and 16 lowercase hex characters, chosen by the server. */
+  id: string;
+  /** The waiting process's pane. */
+  paneId: string;
+  /** That pane's title when the wait started; untrusted text. */
+  title: string;
+}
+
+/** `comment`, or `change`: a suggested replacement of the passage, where an empty one suggests deleting it. */
+export type AnnotationKind = "comment" | "change";
+
+/** A remark on a viewer pane's document, made in a window (`viewer-annotations`); it opens a thread. */
+export interface ViewerAnnotation {
+  /** `ann-` and 16 lowercase hex characters, chosen by the window. */
+  id: string;
+  /** Given by the server when it adds the annotation; never in `put_annotations`. */
+  number?: number;
+  kind: AnnotationKind;
+  /** The remark; a comment needs one. */
+  body?: string;
+  /** The suggested text of a `change`; empty suggests deleting the passage. */
+  replacement?: string;
+  /** The passage; absent for a general comment, which is a comment. */
+  target?: AnnotationTarget;
+  /** Absent while the annotation is open. */
+  status?: "resolved";
+  /** The user handed the annotation itself over to an agent. */
+  sent?: true;
+  /** The thread, in the order the replies were added; kept by the server, never in `put_annotations`. */
+  replies?: AnnotationReply[];
+}
+
+/** A reply in an annotation's thread: the user's, from a window, or an agent's, through the control API. */
+export interface AnnotationReply {
+  /** `rep-` and 16 lowercase hex characters; a window chooses the user's, the server an agent's. */
+  id: string;
+  author: "user" | "agent";
+  body: string;
+  /** The user handed the reply over; user replies only. */
+  sent?: true;
+  /** The pane an agent's reply came from, and that pane's title then; agent replies only, untrusted text. */
+  from?: { paneId: string; title: string };
+}
+
+/** A reply of the user as `put_replies` carries it. */
+export interface UserReply {
+  id: string;
+  author: "user";
+  body: string;
+  sent?: true;
+}
+
+/** A passage of a document, found again by its quote; the lines only order and label it. */
+/**
+ * An entry of the user as a review held it, in `mark_sent`: an annotation with its kind,
+ * remark, replacement and passage, or a reply of the user with its text in `body`.
+ */
+export interface SentEntry {
+  id: string;
+  kind?: AnnotationKind;
+  body?: string;
+  replacement?: string;
+  target?: AnnotationTarget;
+}
+
+export interface AnnotationTarget {
+  /** The text the quote was taken from: the source, or the text of the rendered view. */
+  view: "source" | "rendered";
+  quote: string;
+  /** Up to 32 characters before and after the quote in that text. */
+  prefix: string;
+  suffix: string;
+  /** 1-based source lines of the passage when it was annotated. */
+  startLine: number;
+  endLine: number;
+}
+
+export type ViewerPlacement = "right" | "left" | "above" | "below" | "tab";
 
 export interface SessionState {
   id: string;
@@ -347,4 +492,35 @@ export type MuxOperation =
   | { type: "dock_pane"; floatingId: string; paneId?: string }
   | { type: "move_float"; floatingId: string; bounds: { x: number; y: number; w: number; h: number } }
   // A session's whole scratchpad; only a window sends it (`session-scratchpad`).
-  | { type: "set_scratchpad"; sessionId: string; text: string };
+  | { type: "set_scratchpad"; sessionId: string; text: string }
+  | OpenViewerOp
+  // A viewer pane's annotations, added or replaced by id (without number and
+  // replies), and removed with their replies (`viewer-annotations`); a window's alone.
+  | { type: "put_annotations"; paneId: string; annotations: ViewerAnnotation[] }
+  | { type: "remove_annotations"; paneId: string; ids: string[] }
+  // The user's replies in one thread, added or replaced by id, and replies of either author removed.
+  | { type: "put_replies"; paneId: string; annotationId: string; replies: UserReply[] }
+  | { type: "remove_replies"; paneId: string; annotationId: string; ids: string[] }
+  // Annotations and user replies handed over to an agent, each with the content the review
+  // held; an entry that reads otherwise by now stays pending, agents' reply ids are ignored.
+  | { type: "mark_sent"; paneId: string; entries: SentEntry[] };
+
+/**
+ * A viewer pane next to `paneId` (`viewer-panes`, Opening A Viewer); no session, no
+ * effect. A window always names `newPaneId` and adds the panel first.
+ */
+export interface OpenViewerOp {
+  type: "open_viewer";
+  paneId?: string;
+  placement?: ViewerPlacement;
+  newPaneId?: string;
+  source: { kind: "file"; path: string } | { kind: "text"; title: string; text: string; format?: "markdown" };
+  /** A text's directory. */
+  cwd?: string;
+  /**
+   * With a `text` source and no `newPaneId`: replace the text of the viewer of
+   * the same title and origin (`viewer-panes`, Reopening A File). The CLI's
+   * `splitty review --text` sets it; a window never does.
+   */
+  replace?: true;
+}

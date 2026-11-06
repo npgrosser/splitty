@@ -1,9 +1,15 @@
 import type { DockviewApi, DockviewGroupPanel } from "dockview-core";
 import { bindingForApi } from "./connection/screen_binding.ts";
-import { createScreenOp, newTabOp, splitOp } from "./mux/mux_client.ts";
-import type { RestoreMode } from "./protocol/types.ts";
+import { createScreenOp, newTabOp, openViewerOp, splitOp } from "./mux/mux_client.ts";
+import type { OpenViewerOp, RestoreMode, ViewerPlacement, ViewerRecord } from "./protocol/types.ts";
 import { getDefaultShellProfileId } from "./shell_profiles.ts";
-import { newPaneId } from "./ids.ts";
+import { newPaneId, newViewerPaneId } from "./ids.ts";
+import { MAX_TEXT_BYTES, isViewerCwd, isViewerPath, isViewerTitle, utf8Length, wellFormed } from "./viewer/limits.ts";
+import {
+  VIEWER_COMPONENT, findViewerPanel, firstViewerOf, isViewerPanel, viewerDirectoryOf, viewerPaneTitle, viewerRecordOf,
+  type ViewerPanelParams,
+} from "./viewer/panel.ts";
+import { arrangementSlots } from "../layout/arrangement.ts";
 
 /**
  * Add a terminal pane to the screen whose layout is `api` and register it with
@@ -49,9 +55,11 @@ export function addTerminalPane(
     ?? api.activePanel?.id
     ?? api.panels[0]?.id;
 
-  // Inherit CWD from the pane we split off when not explicitly provided
+  // Inherit CWD from the pane we split off when not explicitly provided; a
+  // viewer pane has no session, and a terminal next to it starts in its
+  // directory (workspace-model, Split Session Inheritance).
   const dir = options?.dir ?? (refPaneId
-    ? binding.sessionForPane(refPaneId)?.lastCwd
+    ? binding.sessionForPane(refPaneId)?.lastCwd ?? viewerDirectoryOf(api.getPanel(refPaneId))
     : undefined);
   // Shell profiles are the local server's. Another server does not know their
   // ids, and a split there inherits its pane's profile on that server.
@@ -110,6 +118,108 @@ export function addTerminalPane(
   return id;
 }
 
+/**
+ * Add a viewer pane for `source` to the screen whose layout is `api`, next to
+ * `anchor`, and send `open_viewer` with its id (`viewer-panes`, Opening A
+ * Viewer). The panel is there at once; the server adds the same pane, or
+ * refuses the op and the screen's next snapshot removes the panel again.
+ *
+ * Returns the pane's id, or undefined when nothing was added: the layout has no
+ * binding, its server has no viewer panes, or the source is outside the
+ * server's limits.
+ *
+ * A directional placement beside a terminal that already has viewers becomes a
+ * tab of the first of them in layout order, as the server groups the CLI's
+ * viewers per terminal; the op names that viewer, which passes the terminal on
+ * as origin. A directional placement next to a pane of a floating group or a
+ * popout window becomes a tab: the server places directionally only in the
+ * root layout.
+ */
+export function addViewerPane(
+  api: DockviewApi,
+  options: {
+    source: OpenViewerOp["source"];
+    /** The pane the viewer goes next to. */
+    anchor?: string;
+    /** `right` by default. */
+    placement?: ViewerPlacement;
+    /** A text's directory. */
+    cwd?: string;
+  },
+): string | undefined {
+  const binding = bindingForApi(api);
+  if (!binding || !binding.conn.mux.viewers) return undefined;
+  // The server's rules (`viewer-panes`, Opening A Viewer): an op it would
+  // refuse is never sent.
+  const source: OpenViewerOp["source"] = options.source.kind === "text"
+    ? { ...options.source, text: wellFormed(options.source.text) }
+    : options.source;
+  if (source.kind === "file" ? !isViewerPath(source.path) : !isViewerTitle(source.title) || utf8Length(source.text) > MAX_TEXT_BYTES) {
+    return undefined;
+  }
+  const cwd = options.cwd && isViewerCwd(options.cwd) ? options.cwd : undefined;
+  let anchor = options.anchor ? api.getPanel(options.anchor) : undefined;
+  if (options.anchor && !anchor) return undefined;
+  let placement = options.placement ?? "right";
+  if (anchor && placement !== "tab" && !isViewerPanel(anchor)) {
+    // The terminal's viewers in the layout order the window knows: its grid as
+    // last arranged, then every other panel.
+    const order = binding.arrangement ? arrangementSlots(binding.arrangement).flatMap((slot) => slot.paneIds) : [];
+    const sibling = firstViewerOf(anchor.id, api.panels, order);
+    if (sibling) {
+      anchor = sibling;
+      placement = "tab";
+    }
+  }
+  if (anchor && placement !== "tab" && anchor.group.api.location.type !== "grid") placement = "tab";
+
+  // As the server sets it: a terminal anchor, or a viewer anchor's own origin.
+  const originPaneId = anchor ? (isViewerPanel(anchor) ? viewerRecordOf(anchor)?.originPaneId : anchor.id) : undefined;
+  const record: ViewerRecord = {
+    source: source.kind === "file" ? { kind: "file", path: source.path } : { kind: "text", title: source.title },
+    revision: 1,
+    ...(originPaneId ? { originPaneId } : {}),
+  };
+  const params: ViewerPanelParams = { viewer: { record, supported: true, ...(cwd ? { cwd } : {}) } };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  let position: any;
+  if (anchor && placement === "tab") position = { referenceGroup: anchor.group, direction: "within" };
+  else if (anchor) position = { referencePanel: anchor.id, direction: placement };
+  else if (api.panels.length > 0) position = { direction: "right" };
+
+  const id = newViewerPaneId();
+  api.addPanel({
+    id,
+    component: VIEWER_COMPONENT,
+    title: viewerPaneTitle(record),
+    params,
+    renderer: "always",
+    position,
+  });
+  binding.sendOp(openViewerOp(id, source, {
+    ...(anchor ? { paneId: anchor.id, placement } : {}),
+    ...(cwd ? { cwd } : {}),
+  }));
+  // The server makes a new tab its slot's active one: no select_tab for it.
+  if (anchor && placement === "tab") binding.noteActiveTab(anchor.group.panels.map((panel) => panel.id), id);
+  return id;
+}
+
+/**
+ * Show the file `path` in a viewer pane of the screen whose layout is `api`,
+ * as a relative link of a rendered document does: a viewer pane that shows it
+ * already comes to the front, or a new one opens as a tab next to `anchor`,
+ * which passes its origin on.
+ */
+export function openViewerFile(api: DockviewApi, path: string, anchor: string): string | undefined {
+  const existing = findViewerPanel(api, path);
+  if (existing) {
+    existing.api.setActive();
+    return existing.id;
+  }
+  return addViewerPane(api, { source: { kind: "file", path }, anchor, placement: "tab" });
+}
 
 // REMOVED: addWebviewPane (security review SR-01/SR-02).
 //

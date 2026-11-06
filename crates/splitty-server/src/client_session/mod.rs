@@ -11,7 +11,10 @@
 //! - [`handler`] — per-connection message loop (upgrade, dispatch, cleanup).
 //! - [`mux_handler`] — handles `mux.*` protocol messages (op, resync).
 //! - [`ports`] — `ports.changed`, the ports processes of the sessions listen on.
+//! - [`reviews`] — waits for a review of a viewer pane and the windows'
+//!   answers to them.
 //! - [`sender`] — ordered client sender.
+//! - [`viewer`] — `viewer.read`, the documents of viewer panes.
 
 pub mod codec;
 pub mod editor;
@@ -19,7 +22,9 @@ pub mod files;
 mod handler;
 mod mux_handler;
 pub mod ports;
+pub mod reviews;
 pub mod sender;
+pub mod viewer;
 
 pub use connection::{connect, connect_admitted, connect_with, Connection, Input, Message};
 mod connection;
@@ -44,6 +49,8 @@ pub struct ClientState {
     pub admission: Arc<splitty_transport::admission::Backend>,
     pub editor_requests: Arc<editor::EditorRequests>,
     pub file_offers: Arc<files::FileOffers>,
+    /// The processes waiting for a review of a viewer pane.
+    pub reviews: Arc<reviews::Reviews>,
     pub jobs: Arc<crate::jobs::Jobs>,
     pub clients: Mutex<HashMap<String, ClientEntry>>,
     pub mux_store: Arc<Store>,
@@ -96,6 +103,7 @@ impl ClientState {
             admission: splitty_transport::admission::Backend::new(),
             editor_requests: Arc::new(editor::EditorRequests::default()),
             file_offers: Arc::new(files::FileOffers::default()),
+            reviews: Arc::new(reviews::Reviews::default()),
             jobs,
             clients: Mutex::new(HashMap::new()),
             mux_store,

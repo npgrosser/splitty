@@ -1,12 +1,30 @@
+// @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { jobCanAttach, jobParams, topology } from "./job_snapshot.ts";
+import { layoutArrangement, sameShape, withoutPanes } from "./arrangement.ts";
+import { jobCanAttach, jobParams } from "./job_snapshot.ts";
 import { applyScreenSnapshot } from "./screen_snapshot.ts";
 import { screenState } from "../lib/mux/incoming.ts";
-import type { ScreenState } from "../lib/protocol/types.ts";
-import type { DockviewApi } from "dockview-core";
-import { ScreenBinding } from "../lib/connection/screen_binding.ts";
+import type { LayoutNode, ScreenState } from "../lib/protocol/types.ts";
+import { testScreen, type TerminalStandIn, type TestScreen } from "../lib/testing/screen_layout.ts";
 
-afterEach(() => vi.unstubAllGlobals());
+// The viewer pane's modules query media features when they load; jsdom has no matchMedia.
+vi.hoisted(() => {
+  Object.defineProperty(window, "matchMedia", {
+    configurable: true,
+    value: (media: string) => ({
+      matches: false, media, onchange: null,
+      addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent: () => false,
+    }),
+  });
+});
+
+let layouts: TestScreen[] = [];
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  for (const layout of layouts) layout.dispose();
+  layouts = [];
+});
 
 function screen(state: "running" | "failed" | "interrupted" | "exited" = "running"): ScreenState {
   return { id: "s", revision: 2, root: { type: "slot", id: "slot", paneIds: ["user", "job"], activePaneId: "user" },
@@ -31,8 +49,9 @@ describe("managed job snapshots", () => {
   it("recognizes additive job topology without hiding moves of existing panes", () => {
     const old = { type: "slot" as const, id: "a", paneIds: ["user"] };
     const next = { type: "split" as const, id: "root", axis: "horizontal" as const, sizes: [.5, .5], children: [old, {type: "slot" as const, id: "b", paneIds: ["job"]}] };
-    expect(topology(next, new Set(["job"]))).toEqual(topology(old, new Set()));
-    expect(topology(next, new Set())).not.toEqual(topology(old, new Set()));
+    const shape = (node: LayoutNode, omit: string[]) => withoutPanes(layoutArrangement(node), new Set(omit));
+    expect(sameShape(shape(next, ["job"]), shape(old, []))).toBe(true);
+    expect(sameShape(shape(next, []), shape(old, []))).toBe(false);
   });
 
   it.each(["tab", "left", "right", "above", "below"])("keeps the existing renderer, active tab and actual focus for background %s updates", (placement) => {
@@ -45,47 +64,41 @@ describe("managed job snapshots", () => {
       }
       return result;
     };
-    class Element { isConnected = true; focus = vi.fn(); }
-    const focused = new Element();
-    vi.stubGlobal("HTMLElement", Element);
-    vi.stubGlobal("document", { activeElement: focused });
-    const frames: (() => void)[] = [];
-    vi.stubGlobal("requestAnimationFrame", (cb: () => void) => frames.push(cb));
-    const group = { activePanel: undefined as unknown, api: { setSize: vi.fn() } };
-    const panels = new Map<string, any>();
-    let active: any;
-    const panel = (id: string, params = {}) => {
-      const result: any = { id, params, group, api: {
-        close: vi.fn(() => panels.delete(id)), setActive: vi.fn(() => { active = result; group.activePanel = result; }),
-      } };
-      panels.set(id, result); return result;
+    const userOnly = () => {
+      const result = screen();
+      delete result.panes.job;
+      result.root = { type: "slot", id: "slot", paneIds: ["user"], activePaneId: "user" };
+      result.jobs = {};
+      return result;
     };
-    const user = panel("user"); active = user; group.activePanel = user;
-    const api = { get panels() { return [...panels.values()]; }, get activePanel() { return active; }, groups: [group],
-      getPanel: (id: string) => panels.get(id), addPanel: (options: any) => { const p = panel(options.id, options.params); p.api.setActive(); return p; }, width: 800, height: 600 } as unknown as DockviewApi;
-    const binding = { suppressOps: false, suppressFocus: false, isActive: () => true,
-      sessionForPane: vi.fn(), clearFloatingIds: vi.fn(), registerFloatingId: vi.fn(),
-      activeTabs: new Set(), noteActiveTab: ScreenBinding.prototype.noteActiveTab } as unknown as ScreenBinding;
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal("requestAnimationFrame", (cb: FrameRequestCallback) => frames.push(cb));
+    const layout = testScreen();
+    layouts.push(layout);
+    const { api, binding } = layout;
+    // The window shows the user's terminal, which has the keyboard.
+    applyScreenSnapshot(api, binding, userOnly());
+    const user = layout.content<TerminalStandIn>("user");
+    user.input.focus();
+
     applyScreenSnapshot(api, binding, placedScreen());
-    expect(user.api.close).not.toHaveBeenCalled();
-    expect(active).toBe(user);
-    expect(focused.focus).toHaveBeenCalled();
-    expect(panels.get("job").params.jobId).toBe("job-id");
-    const job = panels.get("job");
+    expect(layout.content("user")).toBe(user);
+    expect(api.activePanel?.id).toBe("user");
+    expect(document.activeElement).toBe(user.input);
+    expect(api.getPanel("job")!.params?.jobId).toBe("job-id");
+    const job = layout.content("job");
     // A newer explicit user choice must survive later metadata snapshots and
     // previously scheduled animation-frame callbacks.
-    job.api.setActive();
+    api.getPanel("job")!.api.setActive();
     applyScreenSnapshot(api, binding, placedScreen("exited"));
-    expect(panels.get("job")).toBe(job);
-    expect(active).toBe(job);
-    for (const frame of frames) frame();
-    expect(active).toBe(job);
+    expect(layout.content("job")).toBe(job);
+    expect(api.activePanel?.id).toBe("job");
+    for (const frame of frames.splice(0)) frame(0);
+    expect(api.activePanel?.id).toBe("job");
     expect(binding.suppressOps).toBe(false);
-    focused.isConnected = false;
-    const calls = focused.focus.mock.calls.length;
-    const removed = screen(); delete removed.panes.job; removed.root.paneIds = ["user"]; removed.jobs = {};
-    applyScreenSnapshot(api, binding, removed);
-    expect(panels.has("job")).toBe(false);
-    expect(focused.focus.mock.calls.length).toBe(calls);
+
+    applyScreenSnapshot(api, binding, userOnly());
+    expect(api.getPanel("job")).toBeUndefined();
+    expect(layout.content("user")).toBe(user);
   });
 });

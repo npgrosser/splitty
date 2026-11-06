@@ -540,11 +540,11 @@ The guide SHALL explain listing existing jobs before launch, background placemen
 - **THEN** it finds the ordinary `split` command, while a scoped reader is told to use only allowed job operations and not bypass its grant
 
 ### Requirement: Open In Client Editor
-`splitty open [path] [--with vscode|zed]` SHALL request opening an existing file or folder in the attached client editor. Omitted path means `.`; relative paths SHALL resolve against the caller's current directory on the originating machine. The command SHALL use `SPLITTY_SESSION_ID` or explicit `--session` and existing control discovery. Shell integration SHALL NOT define a `splitty-open` function or any other alias for it.
+`splitty open [path] [--with vscode|zed] [--editor]` SHALL request opening an existing folder, or with `--with` or `--editor` an existing file, in the attached client editor; `--editor` uses the client's preferred editor. Omitted path means `.`; relative paths SHALL resolve against the caller's current directory on the originating machine. The command SHALL use `SPLITTY_SESSION_ID` or explicit `--session` and existing control discovery. A file without `--with` and `--editor` goes to a viewer pane instead (see Open In A Viewer Pane). Shell integration SHALL NOT define a `splitty-open` function or any other alias for it.
 
 #### Scenario: Relative file and default folder
-- **WHEN** a pane invokes `splitty open src/main.rs`, or invokes `splitty open` without a path
-- **THEN** it requests respectively the resolved file or current directory of the caller, never a path on the client PC for a remote session
+- **WHEN** a pane invokes `splitty open --editor src/main.rs`, or invokes `splitty open` without a path
+- **THEN** it requests respectively the resolved file or current directory of the caller in the client editor, never a path on the client PC for a remote session
 
 #### Scenario: Invalid input or missing context
 - **WHEN** the file is missing, special, unsupported, or the session is absent, or an unknown editor is selected
@@ -736,3 +736,116 @@ A folder's archive SHALL hold one top-level folder of the folder's name with eve
 #### Scenario: Too large
 - **WHEN** a folder packs to more than 512 MiB
 - **THEN** the command fails with a usage error naming the limit, no window is asked, and no archive remains in the cache
+
+### Requirement: Open In A Viewer Pane
+`splitty open <path>` SHALL show an existing regular file in a viewer pane when neither `--with` nor `--editor` is given (see `viewer-panes`). The CLI SHALL resolve the path against its current directory, following symbolic links, refuse anything but a regular file and a file over 8 MiB with a usage error, and submit `open_viewer` without `newPaneId` through the mux operation endpoint (see `control-api`) for the pane and screen given by `--pane` and `--screen`, else by `SPLITTY_PANE_ID` and `SPLITTY_SCREEN_ID`, with `placement` `right`, or `tab` with `--tab`. It SHALL ask for no confirmation and wait for no window, print `Opened <path> in pane <pane-id>`, or `Showing <path> in pane <pane-id>` when an existing viewer pane shows the file again, and exit with status 0. A server that does not know `open_viewer` SHALL be reported as needing an update. Under `SPLITTY_AGENT_SOCK` the command SHALL stay refused (see Scoped Administrative Commands Are Refused).
+
+#### Scenario: A plan next to the agent
+- **WHEN** a process in pane `p1` runs `splitty open PLAN.md`
+- **THEN** a viewer pane showing the resolved file appears to the right of `p1`, and the command prints `Opened /home/me/app/PLAN.md in pane <id>` and exits 0
+
+#### Scenario: Opened again after an edit
+- **WHEN** the same process runs `splitty open PLAN.md` again while that viewer pane exists
+- **THEN** no further pane appears, the existing one shows the file again, and the command prints `Showing /home/me/app/PLAN.md in pane <id>`
+
+#### Scenario: As a tab
+- **WHEN** a process in pane `p1` runs `splitty open --tab notes.txt`
+- **THEN** the viewer pane becomes the active tab of `p1`'s slot
+
+#### Scenario: A folder still goes to the editor
+- **WHEN** a pane runs `splitty open src`
+- **THEN** the CLI requests the folder in the client editor as before
+
+#### Scenario: Too large
+- **WHEN** a pane runs `splitty open build/app.log` for a file of 20 MiB
+- **THEN** the command fails with a usage error naming the limit, and no pane appears
+
+### Requirement: Comments Command
+`splitty comments [<document>] [--all] [--json]` SHALL print what an agent may read of the annotations on the viewer panes of the caller's screen (see `viewer-annotations`, Agents Read And Reply To Handed-Over Threads), or of one document. A document is a path, resolved against the current directory and following symbolic links, of a file that a viewer pane of the screen shows, or the ID of a viewer pane of the screen. The command SHALL print each document with its path or title and its viewer pane's ID, and under it each annotation with its number, lines, kind, quote, remark, replacement and replies, as Markdown in the form of the review, the open ones only unless `--all` is given; with `--json` it SHALL print the response of the comment endpoint (see `control-api`, Viewer Comment Requests). It SHALL exit with status 0, also when there is nothing to print, which it SHALL say. `splitty comments reply <document> <number> <text>` SHALL add `<text>`, or standard input when `<text>` is `-`, as an agent's reply to the annotation with that number, print `Replied to #<number> in <document>` and exit with status 0. The caller's pane and screen SHALL come from `--pane` and `--screen`, else from `SPLITTY_PANE_ID` and `SPLITTY_SCREEN_ID`. A document that no viewer pane of the screen shows, a path that several viewer panes of the screen show, an unknown number, an annotation the user has not handed over and a reply that breaks the limits SHALL fail with a message that names the cause, and exit status 1. A server that does not know the endpoints SHALL be reported as needing an update. Under `SPLITTY_AGENT_SOCK` both commands SHALL be refused (see Scoped Administrative Commands Are Refused).
+
+#### Scenario: Read a sent review
+- **WHEN** the user has sent a review of `/home/me/app/PLAN.md` to an agent's terminal and the agent runs `splitty comments PLAN.md` in `/home/me/app`
+- **THEN** the command prints the handed-over annotations with their numbers, quotes, remarks and replies, and exits 0
+
+#### Scenario: Reply
+- **WHEN** the agent runs `splitty comments reply PLAN.md 2 "Switched to on-demand computation."`
+- **THEN** annotation #2 holds that text as an agent's reply, and the command prints `Replied to #2 in /home/me/app/PLAN.md`
+
+#### Scenario: Nothing sent yet
+- **WHEN** the agent runs `splitty comments PLAN.md` before the user has handed anything over
+- **THEN** the command says that there are no comments and exits 0
+
+#### Scenario: Two viewers of one file
+- **WHEN** two viewer panes of the screen show `PLAN.md` and the agent replies naming the path
+- **THEN** the command fails with a message that names both viewer panes' IDs, and nothing changes
+
+#### Scenario: Under a grant
+- **WHEN** a process with `SPLITTY_AGENT_SOCK` set runs `splitty comments`
+- **THEN** the command is refused
+
+### Requirement: Review Command
+`splitty review <path>` SHALL show a file as `splitty open <path>` does (see Open In A Viewer Pane), and `splitty review --text [--title <title>] [--format markdown|text]` SHALL show the text read from standard input, at most 256 KiB, as a text document titled `<title>`, `Review` by default, with `replace` set (see `viewer-panes`, Reopening A File), and with the `format` `markdown` unless `--format text` asks for plain text. The command SHALL then wait until the user answers in a window (see `viewer-annotations`, Waiting For A Review), and print to standard error which viewer pane it waits for. When the user approves, the command SHALL print the review to standard output when the approval carries one, nothing otherwise, and exit with status 0. When the user requests changes, it SHALL print the review to standard output and exit with status 3. With `--json` it SHALL print `{"outcome":"approved"}`, `{"outcome":"approved","review":<review>}` or `{"outcome":"changes_requested","review":<review>}` instead, with the same exit status. The wait SHALL be for the revision of the document the command showed. When the viewer pane closes before an answer, when a process already waits for that pane, which leaves the pane's document as it was, when another command's document took the pane before the wait began, or when the connection to the server ends, the command SHALL say so and exit with status 1. Interrupting the command SHALL end its wait. The caller's pane and screen SHALL come from `--pane` and `--screen`, else from `SPLITTY_PANE_ID` and `SPLITTY_SCREEN_ID`. Under `SPLITTY_AGENT_SOCK` the command SHALL be refused.
+
+#### Scenario: A plan reviewed
+- **WHEN** an agent pipes its plan into `splitty review --text --title Plan` and the user comments on two passages and requests changes
+- **THEN** the command prints the review with its verdict and both comments and exits 3
+
+#### Scenario: A plan rendered
+- **WHEN** an agent pipes a Markdown plan into `splitty review --text --title Plan`
+- **THEN** the viewer pane renders it as Markdown; with `--format text` it shows the plan as plain text
+
+#### Scenario: The next revision of the plan
+- **WHEN** the agent pipes a revised plan into the same command from the same pane
+- **THEN** the viewer pane of the first plan shows the revised text with its annotations, and the command waits again
+
+#### Scenario: Approved
+- **WHEN** the user approves the document without notes
+- **THEN** the command prints nothing to standard output and exits 0
+
+#### Scenario: Approved with notes
+- **WHEN** the user approves the document with a new comment
+- **THEN** the command prints the review with the comment and exits 0
+
+#### Scenario: Outcome as JSON
+- **WHEN** the command runs with `--json` and the user approves without notes, or requests changes
+- **THEN** it prints `{"outcome":"approved"}` and exits 0, or prints `{"outcome":"changes_requested","review":…}` and exits 3
+
+#### Scenario: Two reviews at once
+- **WHEN** two `splitty review --text --title Plan` commands run at once in one pane, and the second's text replaces the first's before the first command waits
+- **THEN** the first command says that another document took the pane and exits 1, and the second waits for the review of its own text
+
+#### Scenario: The pane closed
+- **WHEN** the user closes the viewer pane while the command waits
+- **THEN** the command says that the review was closed without an answer and exits 1
+
+### Requirement: Review Hook For Claude Code
+`splitty review --hook claude-code` SHALL serve as a command hook of Claude Code for the hook events `PermissionRequest` and `PreToolUse` of the tool `ExitPlanMode`. It SHALL read the event, at most 1 MiB of JSON, from standard input, and take the plan from the event's `tool_input.plan`, or else from the file that `tool_input.planFilePath` names when that is an absolute path of a regular file of at most 256 KiB. It SHALL show the plan and wait for the user's verdict as `splitty review --text --title Plan` does (see Review Command), and then print one JSON object for Claude Code and exit with status 0:
+- on an approval without notes, a decision that allows the tool call;
+- on an approval with notes, a decision that allows the tool call with the tool's input, whose `plan` is followed by a rule and the review;
+- on a request for changes, a decision that denies the tool call with the review as its message.
+
+The decision SHALL have the form the event asks for: for `PermissionRequest` a `hookSpecificOutput` with a `decision` of `behavior` `allow` or `deny`, the latter with a `message`; for `PreToolUse` a `hookSpecificOutput` with `permissionDecision` `allow`, carrying the tool's input as `updatedInput`, or `deny` with a `permissionDecisionReason`. The review in a decision SHALL have control characters other than tab and line feed, characters that change the direction of text, and invisible format characters replaced by U+FFFD. When the command cannot review, because it runs outside a Splitty terminal, the event is for another event or tool or holds no plan, the server cannot be reached or waits for no reviews, the viewer pane closes before an answer, or the connection ends, it SHALL print nothing to standard output, say why on standard error and exit with status 0, so that Claude Code asks the user itself. It SHALL NOT decide without the user's verdict.
+
+#### Scenario: A plan approved
+- **WHEN** Claude Code, running in a Splitty pane, calls `ExitPlanMode` with a plan and the hook `splitty review --hook claude-code` for `PermissionRequest`, and the user approves the plan in the viewer pane
+- **THEN** the command prints `{"hookSpecificOutput":{"decision":{"behavior":"allow"},"hookEventName":"PermissionRequest"}}` and exits 0
+
+#### Scenario: Changes requested
+- **WHEN** the user comments on a step of the plan and requests changes
+- **THEN** the command prints a decision with `behavior` `deny` and the review, which starts with its heading and `Verdict: changes requested`, as its `message`, and exits 0
+
+#### Scenario: Approved with notes
+- **WHEN** the user comments on a step and approves
+- **THEN** the decision allows the call, and its `updatedInput` holds the event's tool input with the plan followed by a rule and the review
+
+#### Scenario: Before the tool runs
+- **WHEN** the hook runs for `PreToolUse` and the user approves without notes
+- **THEN** the command prints a `hookSpecificOutput` with `permissionDecision` `allow` and the event's tool input as `updatedInput`
+
+#### Scenario: Outside Splitty
+- **WHEN** the hook runs in a terminal that is not a Splitty pane
+- **THEN** the command prints nothing to standard output, says why on standard error and exits 0, and Claude Code shows its own dialog
+
+#### Scenario: The plan in a file
+- **WHEN** the event's `tool_input` holds no `plan` but a `planFilePath` of a Markdown file
+- **THEN** the viewer pane shows that file's text as the plan

@@ -66,6 +66,13 @@ export interface TerminalEmulator {
   /** Write text to the terminal as if pasted. */
   paste(text: string): void;
 
+  /**
+   * Whether the program in the terminal enabled bracketed paste (mode 2004):
+   * a paste then reaches it as one piece of text, and its line breaks submit
+   * nothing.
+   */
+  readonly bracketedPaste: boolean;
+
   /** Clear the terminal scrollback and screen. */
   clear(): void;
 

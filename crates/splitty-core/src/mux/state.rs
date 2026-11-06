@@ -5,6 +5,9 @@
 //! - `ScreenState` -- a single screen with its layout tree, panes, sessions, and floating windows.
 //! - `LayoutNode` -- recursive tree: `Slot` (leaf with pane stack) or `Split` (branch with axis/sizes).
 //! - `PaneState` / `SessionEntry` -- metadata for panes and PTY sessions.
+//! - `ViewerState` -- the document a viewer pane shows (`viewer-panes`), its
+//!   annotations with their threads and the wait for a review
+//!   (`viewer-annotations`).
 //! - `FloatingEntry` -- a detached overlay window with its own layout and bounds.
 
 use std::collections::HashMap;
@@ -104,6 +107,423 @@ pub struct PaneState {
     pub cwd: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<PaneRole>,
+    /// The document of a pane of the role `viewer`, which has no session.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub viewer: Option<ViewerState>,
+}
+
+/// What a viewer pane shows (`viewer-panes`).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", from = "StoredViewer")]
+pub struct ViewerState {
+    pub source: ViewerSource,
+    /// The terminal pane the viewer was opened from, kept when that pane closes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_pane_id: Option<PaneId>,
+    /// Starts at 1 and rises when `open_viewer` shows the same file again.
+    pub revision: u64,
+    /// The pane's annotations in creation order, each with its thread
+    /// (`viewer-annotations`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<ViewerAnnotation>,
+    /// The highest number the pane has given an annotation; a number is never
+    /// given twice in a pane.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub last_annotation_number: u32,
+    /// The process that waits for a review of the pane. It lives in memory
+    /// only: `state.json` never holds it, and it is never read back
+    /// (`server-modes`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_wait: Option<ReviewWait>,
+}
+
+impl ViewerState {
+    /// A new pane's record: revision 1, no annotations.
+    pub fn new(source: ViewerSource, origin_pane_id: Option<PaneId>) -> Self {
+        Self {
+            source,
+            origin_pane_id,
+            revision: 1,
+            annotations: Vec::new(),
+            last_annotation_number: 0,
+            review_wait: None,
+        }
+    }
+}
+
+/// A viewer record as it is read: from `state.json`, the only place one is
+/// read from. A wait is never read back, and annotations of builds before
+/// numbers get theirs in creation order.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredViewer {
+    source: ViewerSource,
+    #[serde(default)]
+    origin_pane_id: Option<PaneId>,
+    revision: u64,
+    #[serde(default)]
+    annotations: Vec<ViewerAnnotation>,
+    #[serde(default)]
+    last_annotation_number: u32,
+}
+
+impl From<StoredViewer> for ViewerState {
+    fn from(stored: StoredViewer) -> Self {
+        let StoredViewer {
+            source,
+            origin_pane_id,
+            revision,
+            mut annotations,
+            last_annotation_number,
+        } = stored;
+        let mut last = annotations
+            .iter()
+            .map(|annotation| annotation.number)
+            .fold(last_annotation_number, u32::max);
+        for annotation in annotations.iter_mut().filter(|a| a.number == 0) {
+            last = last.saturating_add(1);
+            annotation.number = last;
+        }
+        Self {
+            source,
+            origin_pane_id,
+            revision,
+            annotations,
+            last_annotation_number: last,
+            review_wait: None,
+        }
+    }
+}
+
+fn is_zero(number: &u32) -> bool {
+    *number == 0
+}
+
+fn is_false(flag: &bool) -> bool {
+    !*flag
+}
+
+/// A process that waits for the user's review of a viewer pane
+/// (`viewer-annotations`, Waiting For A Review).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewWait {
+    /// `wait-` and 16 lowercase hex characters, chosen by the server.
+    pub id: String,
+    /// The waiting process's pane.
+    pub pane_id: PaneId,
+    /// That pane's title when the wait started, at most
+    /// [`REPLY_TITLE_LIMIT`] bytes.
+    pub title: String,
+}
+
+/// A viewer pane's document: a file on the server's machine, read when a
+/// window shows it, or a text the server keeps in the pane record.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ViewerSource {
+    File {
+        path: String,
+    },
+    Text {
+        title: String,
+        /// Left out of snapshots and control API answers
+        /// (`ScreenState::without_viewer_texts`).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        text: String,
+        /// How a window shows the text; plain text when absent.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        format: Option<TextFormat>,
+    },
+}
+
+/// How a window shows a `text` document other than as plain text
+/// (`viewer-panes`, Showing A Document).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextFormat {
+    Markdown,
+}
+
+/// The longest path of a `file` document, in bytes.
+pub const VIEWER_PATH_LIMIT: usize = 4096;
+
+/// The longest text of a `text` document, in bytes of UTF-8.
+pub const VIEWER_TEXT_LIMIT: usize = 256 * 1024;
+
+/// The longest title of a `text` document, in characters.
+pub const VIEWER_TITLE_LIMIT: usize = 200;
+
+/// A remark a window made on a viewer pane's document, and its thread
+/// (`viewer-annotations`). The server keeps its texts as they came and never
+/// interprets them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", from = "StoredAnnotation")]
+pub struct ViewerAnnotation {
+    /// `ann-` and 16 lowercase hex characters, chosen by the window.
+    pub id: String,
+    /// Given by the server when it adds the annotation, from 1; 0 only in a
+    /// `put_annotations`, which carries none.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub number: u32,
+    pub kind: AnnotationKind,
+    /// The remark; a comment needs one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    /// The suggested text of a `change`; empty suggests deleting the passage.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<String>,
+    /// The passage; none for a general comment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<AnnotationTarget>,
+    #[serde(default, skip_serializing_if = "AnnotationStatus::is_open")]
+    pub status: AnnotationStatus,
+    /// The user handed the annotation itself over to an agent.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sent: bool,
+    /// The thread in the order the replies were added; the server keeps it,
+    /// and a `put_annotations` carries none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub replies: Vec<AnnotationReply>,
+}
+
+impl ViewerAnnotation {
+    /// Whether `other` says the same as this one: kind, remark, replacement
+    /// and passage; status, number, mark and thread aside.
+    pub fn reads_as(&self, other: &ViewerAnnotation) -> bool {
+        self.kind == other.kind
+            && self.body == other.body
+            && self.replacement == other.replacement
+            && self.target == other.target
+    }
+
+    /// The bytes of its texts that count against a pane's limit: quote,
+    /// context, remark, replacement, and the text and title of each reply.
+    pub fn text_bytes(&self) -> usize {
+        let target = self.target.as_ref().map_or(0, |target| {
+            target.quote.len() + target.prefix.len() + target.suffix.len()
+        });
+        let text = |text: &Option<String>| text.as_ref().map_or(0, String::len);
+        let replies = self
+            .replies
+            .iter()
+            .map(AnnotationReply::text_bytes)
+            .sum::<usize>();
+        target + text(&self.body) + text(&self.replacement) + replies
+    }
+}
+
+/// An annotation as it is read, from a window's operation or from
+/// `state.json`: `question` from builds before threads is a comment and
+/// `delete` a change with an empty replacement. Neither is ever written.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredAnnotation {
+    id: String,
+    #[serde(default)]
+    number: u32,
+    kind: StoredKind,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    replacement: Option<String>,
+    #[serde(default)]
+    target: Option<AnnotationTarget>,
+    #[serde(default)]
+    status: AnnotationStatus,
+    #[serde(default)]
+    sent: bool,
+    #[serde(default)]
+    replies: Vec<AnnotationReply>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum StoredKind {
+    Comment,
+    Question,
+    Change,
+    Delete,
+}
+
+impl From<StoredAnnotation> for ViewerAnnotation {
+    fn from(stored: StoredAnnotation) -> Self {
+        let (kind, replacement) = match stored.kind {
+            StoredKind::Comment | StoredKind::Question => {
+                (AnnotationKind::Comment, stored.replacement)
+            }
+            StoredKind::Change => (AnnotationKind::Change, stored.replacement),
+            StoredKind::Delete => (AnnotationKind::Change, Some(String::new())),
+        };
+        Self {
+            id: stored.id,
+            number: stored.number,
+            kind,
+            body: stored.body,
+            replacement,
+            target: stored.target,
+            status: stored.status,
+            sent: stored.sent,
+            replies: stored.replies,
+        }
+    }
+}
+
+/// What an annotation asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationKind {
+    /// A remark; a question is a comment whose thread the agent answers.
+    Comment,
+    /// A suggested replacement of the passage; an empty one suggests
+    /// deleting it.
+    Change,
+}
+
+/// Whether an annotation's thread is settled; only a window changes it.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationStatus {
+    #[default]
+    Open,
+    Resolved,
+}
+
+impl AnnotationStatus {
+    pub fn is_open(&self) -> bool {
+        *self == Self::Open
+    }
+}
+
+/// A reply in an annotation's thread (`viewer-annotations`, Threads): the
+/// user's, from a window, or an agent's, from the control API.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotationReply {
+    /// `rep-` and 16 lowercase hex characters: a window chooses the user's,
+    /// the server an agent's.
+    pub id: String,
+    pub author: ReplyAuthor,
+    pub body: String,
+    /// The user handed the reply over; the user's replies only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub sent: bool,
+    /// The pane an agent's reply came from and its title then; agents'
+    /// replies only, set by the server.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<ReplyFrom>,
+}
+
+impl AnnotationReply {
+    /// The bytes that count against a pane's limit: the text and the title.
+    pub fn text_bytes(&self) -> usize {
+        self.body.len() + self.from.as_ref().map_or(0, |from| from.title.len())
+    }
+}
+
+/// Who wrote a reply.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReplyAuthor {
+    User,
+    Agent,
+}
+
+/// Where an agent's reply came from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReplyFrom {
+    pub pane_id: PaneId,
+    /// The pane's title when the reply arrived, at most
+    /// [`REPLY_TITLE_LIMIT`] bytes.
+    pub title: String,
+}
+
+/// The passage an annotation is about, found again by its quote.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AnnotationTarget {
+    /// The text the quote was taken from.
+    pub view: AnnotationView,
+    pub quote: String,
+    /// Context before and after the quote in that text.
+    pub prefix: String,
+    pub suffix: String,
+    /// The passage's 1-based source lines when it was annotated.
+    pub start_line: u32,
+    pub end_line: u32,
+}
+
+/// The view of a viewer pane a passage was selected in.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnnotationView {
+    Source,
+    Rendered,
+}
+
+/// The most annotations of one viewer pane, and of one operation.
+pub const ANNOTATION_COUNT_LIMIT: usize = 100;
+
+/// The longest remark, replacement, quote or reply, in bytes of UTF-8.
+pub const ANNOTATION_TEXT_LIMIT: usize = 16 * 1024;
+
+/// The longest context before or after a quote, in bytes of UTF-8.
+pub const ANNOTATION_CONTEXT_LIMIT: usize = 256;
+
+/// The highest source line a passage names.
+pub const ANNOTATION_LINE_LIMIT: u32 = 10_000_000;
+
+/// The most text of all annotations of one viewer pane and their replies
+/// ([`ViewerAnnotation::text_bytes`]), in bytes.
+pub const ANNOTATION_PANE_TEXT_LIMIT: usize = 256 * 1024;
+
+/// The most replies of one thread, and of one reply operation.
+pub const REPLY_COUNT_LIMIT: usize = 50;
+
+/// The longest title of an agent's reply or of a waiting pane, in bytes of
+/// UTF-8.
+pub const REPLY_TITLE_LIMIT: usize = 256;
+
+/// The most entries of one `mark_sent`: 100 threads of 51 entries.
+pub const MARK_SENT_LIMIT: usize = 5_100;
+
+/// An entry of the user as a review held it, named in `mark_sent`: an
+/// annotation with its kind, remark, replacement and passage, or one of the
+/// user's replies with its text (`viewer-annotations`, Handing A Review To A
+/// Terminal).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SentEntry {
+    pub id: String,
+    /// An annotation's kind; none for a reply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<AnnotationKind>,
+    /// An annotation's remark, or a reply's text.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replacement: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<AnnotationTarget>,
+}
+
+impl SentEntry {
+    /// Whether `annotation` still reads as the review held it.
+    pub fn holds_annotation(&self, annotation: &ViewerAnnotation) -> bool {
+        self.id == annotation.id
+            && self.kind == Some(annotation.kind)
+            && self.body == annotation.body
+            && self.replacement == annotation.replacement
+            && self.target == annotation.target
+    }
+
+    /// Whether the user's `reply` still reads as the review held it.
+    pub fn holds_reply(&self, reply: &AnnotationReply) -> bool {
+        self.id == reply.id
+            && reply.author == ReplyAuthor::User
+            && self.body.as_deref() == Some(reply.body.as_str())
+    }
 }
 
 /// A PTY process record in the mux state (not the actual PTY — just the data).
@@ -243,6 +663,19 @@ impl LayoutNode {
         }
     }
 
+    /// Find the slot that contains the given pane ID, for changing it.
+    pub fn find_slot_mut(&mut self, pane_id: &PaneId) -> Option<&mut Self> {
+        if matches!(self, Self::Slot { pane_ids, .. } if pane_ids.contains(pane_id)) {
+            return Some(self);
+        }
+        match self {
+            Self::Slot { .. } => None,
+            Self::Split { children, .. } => children
+                .iter_mut()
+                .find_map(|child| child.find_slot_mut(pane_id)),
+        }
+    }
+
     /// Find a node by its ID.
     pub fn find_node(&self, node_id: &NodeId) -> Option<&Self> {
         if self.id() == node_id {
@@ -373,6 +806,14 @@ impl ScreenState {
         }
     }
 
+    /// The IDs of the panes in layout order: the root layout's slots, then
+    /// those of the floating entries, each slot's tabs in their order.
+    pub fn panes_in_layout_order(&self) -> impl Iterator<Item = PaneId> + '_ {
+        std::iter::once(&self.root)
+            .chain(self.floating.iter().map(|entry| &entry.root))
+            .flat_map(LayoutNode::collect_pane_ids)
+    }
+
     /// Find the slot location for a pane (root or floating).
     pub fn find_slot_location(&self, pane_id: &PaneId) -> Option<SlotLocation> {
         if self.root.find_slot(pane_id).is_some() {
@@ -389,6 +830,35 @@ impl ScreenState {
     /// Count total panes in the root layout (not floating).
     pub fn count_root_panes(&self) -> usize {
         self.root.count_panes()
+    }
+
+    /// The screen without the text of its `text` viewer documents, as
+    /// snapshots and the control API show it; windows read the text with
+    /// `viewer.read`.
+    pub fn without_viewer_texts(mut self) -> Self {
+        for pane in self.panes.values_mut() {
+            if let Some(ViewerState {
+                source: ViewerSource::Text { text, .. },
+                ..
+            }) = &mut pane.viewer
+            {
+                *text = String::new();
+            }
+        }
+        self
+    }
+}
+
+impl WorkspaceState {
+    /// The workspace without the text of its `text` viewer documents
+    /// (`ScreenState::without_viewer_texts`).
+    pub fn without_viewer_texts(mut self) -> Self {
+        self.screens = self
+            .screens
+            .into_iter()
+            .map(|(id, screen)| (id, screen.without_viewer_texts()))
+            .collect();
+        self
     }
 }
 

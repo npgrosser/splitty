@@ -1515,3 +1515,396 @@ async fn explicit_serve_open_and_token_options_stay_gateway_local() {
         .join("config/splitty/auth-token")
         .exists());
 }
+
+// ── cli: comments and reviews ───────────────────────────────────────────────
+
+type Window =
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// A window of `server`: a WebSocket with a ticket and the page's origin,
+/// past its welcome.
+async fn window(server: &TestServer) -> Window {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    let ticket = server.ws_ticket().await;
+    let mut request = format!("ws://127.0.0.1:{}/ws?ticket={ticket}", server.port)
+        .into_client_request()
+        .expect("request");
+    request
+        .headers_mut()
+        .insert("Origin", server.own_origin().parse().expect("origin"));
+    let (mut window, _) = tokio_tungstenite::connect_async(request)
+        .await
+        .expect("WebSocket");
+    message_of(&mut window, "mux.welcome").await;
+    window
+}
+
+/// The next message of `window` of type `kind`, past others.
+async fn message_of(window: &mut Window, kind: &str) -> serde_json::Value {
+    use futures::StreamExt;
+    use tokio_tungstenite::tungstenite::Message;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if let Message::Text(text) = window.next().await.expect("open").expect("message") {
+                let value: serde_json::Value = serde_json::from_str(&text).expect("JSON");
+                if value["type"] == kind {
+                    return value;
+                }
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("no {kind} in time"))
+}
+
+async fn send(window: &mut Window, value: serde_json::Value) {
+    use futures::SinkExt;
+    window
+        .send(tokio_tungstenite::tungstenite::Message::Text(
+            value.to_string().into(),
+        ))
+        .await
+        .expect("send");
+}
+
+/// Screen `s-cli` as `window` sees it after everything it sent before.
+async fn screen(window: &mut Window) -> serde_json::Value {
+    send(
+        window,
+        serde_json::json!({"type": "mux.resync", "screenId": "s-cli"}),
+    )
+    .await;
+    message_of(window, "mux.screen_snapshot").await["screen"].clone()
+}
+
+/// The text viewer titled `Plan`, the wait for its review and its record,
+/// once a `splitty review` waits for it.
+async fn waiting_review(window: &mut Window) -> (String, String, serde_json::Value) {
+    loop {
+        let screen = screen(window).await;
+        let waiting = screen["panes"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .find_map(|(id, pane)| {
+                let viewer = &pane["viewer"];
+                let wait = viewer["reviewWait"]["id"].as_str()?;
+                (viewer["source"]["title"] == "Plan")
+                    .then(|| (id.clone(), wait.to_owned(), viewer.clone()))
+            });
+        if let Some(waiting) = waiting {
+            return waiting;
+        }
+        message_of(window, "mux.nudge").await;
+    }
+}
+
+/// `splitty` run in `dir` from the pane `p-agent` of screen `s-cli`, which
+/// finds the server through `SPLITTY_SOCK` only.
+fn cli(server: &TestServer, dir: &Path) -> Command {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_splitty"));
+    command
+        .current_dir(dir)
+        .env_clear()
+        .env("HOME", server.home_path())
+        .env("SPLITTY_SOCK", control_socket_of(server))
+        .env("SPLITTY_SCREEN_ID", "s-cli")
+        .env("SPLITTY_PANE_ID", "p-agent")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    command
+}
+
+/// `command` with `args`, run to its end off the runtime's thread.
+async fn run(mut command: Command, args: &[&str]) -> std::process::Output {
+    command.args(args);
+    tokio::task::spawn_blocking(move || command.output().expect("splitty"))
+        .await
+        .expect("run")
+}
+
+/// `splitty review <args>` with `text` on standard input, left waiting.
+fn review(server: &TestServer, dir: &Path, args: &[&str], text: &str) -> Child {
+    let mut child = cli(server, dir)
+        .arg("review")
+        .args(args)
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("splitty review");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(text.as_bytes())
+        .expect("text");
+    child
+}
+
+async fn finished(child: Child) -> std::process::Output {
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        tokio::task::spawn_blocking(move || child.wait_with_output().expect("splitty review")),
+    )
+    .await
+    .expect("the command ends in time")
+    .expect("wait")
+}
+
+/// cli, Comments Command (Nothing sent yet, Read a sent review, Reply, Two
+/// viewers of one file), Review Command (A plan reviewed, The next revision
+/// of the plan, Approved, Outcome as JSON, The pane closed) and Review Hook
+/// For Claude Code (Changes requested, Outside Splitty): the
+/// real `splitty` in a pane's environment against a real server, answered by
+/// a window over the WebSocket. Smoke: only here are the CLI's discovery of
+/// the server, its output and its exit status visible; the endpoints are
+/// tested in process (`http::tests::annotations`, `http::tests::reviews`).
+#[cfg(unix)]
+#[tokio::test]
+async fn an_agent_reads_and_answers_a_review_through_the_cli() {
+    use serde_json::json;
+    let server = TestServer::start();
+    let created = TestServer::client()
+        .post(server.url("/api/mux/op"))
+        .bearer_auth(&server.token)
+        .json(&json!({
+            "screenId": "s-cli",
+            "op": {"type": "create_screen", "screenId": "s-cli", "newPaneId": "p-agent"},
+        }))
+        .send()
+        .await
+        .expect("create_screen");
+    assert_eq!(created.status(), reqwest::StatusCode::OK);
+    let dir = server.home_path().join("app");
+    std::fs::create_dir(&dir).expect("app");
+    let dir = dir.canonicalize().expect("canonical");
+    std::fs::write(
+        dir.join("PLAN.md"),
+        "# Plan\n\nOn failure, retry three times.\n\nThen cache the list.\n",
+    )
+    .expect("plan");
+    let plan = dir.join("PLAN.md").to_str().expect("UTF-8").to_owned();
+    let mut window = window(&server).await;
+
+    let opened = run(cli(&server, &dir), &["open", "PLAN.md"]).await;
+    assert!(opened.status.success(), "{opened:?}");
+    let stdout = String::from_utf8(opened.stdout).expect("UTF-8");
+    let viewer = stdout.trim().rsplit(' ').next().expect("pane").to_owned();
+    assert!(viewer.starts_with("viewer-"), "{stdout}");
+
+    let listed = run(cli(&server, &dir), &["comments", "PLAN.md"]).await;
+    assert!(listed.status.success(), "{listed:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&listed.stdout),
+        format!("No comments on {plan}.\n"),
+        "nothing sent yet"
+    );
+
+    let handed_over = json!([
+        {"id": "ann-0000000000000001", "kind": "comment", "body": "Why not five times?",
+         "target": {"view": "source", "quote": "retry three times", "prefix": "On failure, ",
+                    "suffix": ".", "startLine": 3, "endLine": 3}},
+        {"id": "ann-0000000000000002", "kind": "change", "replacement": "compute it on demand",
+         "target": {"view": "source", "quote": "cache the list", "prefix": "Then ",
+                    "suffix": ".", "startLine": 5, "endLine": 5}},
+    ]);
+    send(
+        &mut window,
+        json!({"type": "mux.op", "screenId": "s-cli", "op": {
+            "type": "put_annotations", "paneId": viewer, "annotations": handed_over,
+        }}),
+    )
+    .await;
+    // The review held both as they were put.
+    send(
+        &mut window,
+        json!({"type": "mux.op", "screenId": "s-cli", "op": {
+            "type": "mark_sent", "paneId": viewer, "entries": handed_over,
+        }}),
+    )
+    .await;
+    let annotations = screen(&mut window).await["panes"][&viewer]["viewer"]["annotations"].clone();
+    assert_eq!(annotations[1]["sent"], true, "{annotations}");
+
+    let listed = run(cli(&server, &dir), &["comments", "PLAN.md"]).await;
+    assert!(listed.status.success(), "{listed:?}");
+    let listing = String::from_utf8(listed.stdout).expect("UTF-8");
+    for part in [
+        "# Review of PLAN.md".to_owned(),
+        format!("Document: {plan}\nViewer pane: {viewer}"),
+        "## #1 Line 3, comment\n> retry three times\n\nWhy not five times?".to_owned(),
+        "## #2 Line 5, suggested change\n> cache the list\n\nReplace with:\n```\ncompute it on demand\n```"
+            .to_owned(),
+    ] {
+        assert!(listing.contains(&part), "{part}\n---\n{listing}");
+    }
+
+    let replied = run(
+        cli(&server, &dir),
+        &[
+            "comments",
+            "reply",
+            "PLAN.md",
+            "2",
+            "Switched to on-demand computation.",
+        ],
+    )
+    .await;
+    assert!(replied.status.success(), "{replied:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&replied.stdout),
+        format!("Replied to #2 in {plan}\n")
+    );
+    let thread =
+        screen(&mut window).await["panes"][&viewer]["viewer"]["annotations"][1]["replies"].clone();
+    assert_eq!(thread[0]["author"], "agent", "{thread}");
+    assert_eq!(thread[0]["body"], "Switched to on-demand computation.");
+    assert_eq!(thread[0]["from"]["paneId"], "p-agent", "{thread}");
+    let listed = run(cli(&server, &dir), &["comments", &viewer, "--json"]).await;
+    assert!(listed.status.success(), "{listed:?}");
+    let answer: serde_json::Value = serde_json::from_slice(&listed.stdout).expect("JSON");
+    assert_eq!(
+        answer["documents"][0]["annotations"][1]["replies"][0]["body"],
+        "Switched to on-demand computation.",
+        "{answer}"
+    );
+
+    send(
+        &mut window,
+        json!({"type": "mux.op", "screenId": "s-cli", "op": {
+            "type": "open_viewer", "paneId": "p-agent", "newPaneId": "viewer-00000000000000aa",
+            "placement": "tab", "source": {"kind": "file", "path": plan},
+        }}),
+    )
+    .await;
+    screen(&mut window).await;
+    let refused = run(
+        cli(&server, &dir),
+        &["comments", "reply", "PLAN.md", "1", "Which one?"],
+    )
+    .await;
+    assert_eq!(refused.status.code(), Some(1), "{refused:?}");
+    let error = String::from_utf8_lossy(&refused.stderr);
+    assert!(
+        error.contains(&viewer) && error.contains("viewer-00000000000000aa"),
+        "two viewers of one file: {error}"
+    );
+
+    let first = "1. Retry three times.\n2. Cache the list.\n";
+    let changes = "# Review of Plan\n\nVerdict: changes requested\n\n## #1 Line 1, comment\n> Retry three times.\n\nWhy not five times?\n";
+    let child = review(&server, &dir, &["--text", "--title", "Plan"], first);
+    let (plan_pane, wait, record) = waiting_review(&mut window).await;
+    assert_eq!(record["source"]["kind"], "text", "{record}");
+    let mut revision = record["revision"].as_u64().expect("revision");
+    send(
+        &mut window,
+        json!({"type": "viewer.review_answer", "screenId": "s-cli", "paneId": plan_pane,
+               "waitId": wait, "outcome": "changes_requested", "review": changes}),
+    )
+    .await;
+    assert_eq!(
+        message_of(&mut window, "viewer.review_answered").await["accepted"],
+        true
+    );
+    let output = finished(child).await;
+    // Only the binary's exit path shows the status of a request for changes.
+    assert_eq!(output.status.code(), Some(3), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), changes);
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains(&plan_pane),
+        "{output:?}"
+    );
+
+    let revised = "1. Retry five times with backoff.\n2. Cache the list.\n";
+    for (json, printed) in [(false, ""), (true, "{\"outcome\":\"approved\"}\n")] {
+        let args: &[&str] = if json {
+            &["--text", "--title", "Plan", "--json"]
+        } else {
+            &["--text", "--title", "Plan"]
+        };
+        let child = review(&server, &dir, args, revised);
+        let (again, wait, record) = waiting_review(&mut window).await;
+        assert_eq!(again, plan_pane, "the next revision goes to the same pane");
+        let shown = record["revision"].as_u64().expect("revision");
+        assert!(shown > revision, "the pane shows the new text: {record}");
+        revision = shown;
+        send(
+            &mut window,
+            json!({"type": "viewer.review_answer", "screenId": "s-cli", "paneId": again,
+                   "waitId": wait, "outcome": "approved"}),
+        )
+        .await;
+        assert_eq!(
+            message_of(&mut window, "viewer.review_answered").await["accepted"],
+            true
+        );
+        let output = finished(child).await;
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), printed);
+    }
+
+    // Claude Code's hook: the plan of its event goes to the same pane, and a
+    // request for changes is a denial with the review, with status 0.
+    let event = json!({
+        "hook_event_name": "PermissionRequest", "tool_name": "ExitPlanMode",
+        "cwd": dir, "tool_input": {"plan": revised},
+    })
+    .to_string();
+    let child = review(&server, &dir, &["--hook", "claude-code"], &event);
+    let (again, wait, record) = waiting_review(&mut window).await;
+    assert_eq!(again, plan_pane, "{record}");
+    send(
+        &mut window,
+        json!({"type": "viewer.review_answer", "screenId": "s-cli", "paneId": again,
+               "waitId": wait, "outcome": "changes_requested", "review": changes}),
+    )
+    .await;
+    assert_eq!(
+        message_of(&mut window, "viewer.review_answered").await["accepted"],
+        true
+    );
+    let output = finished(child).await;
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let decision: serde_json::Value = serde_json::from_slice(&output.stdout).expect("decision");
+    assert_eq!(
+        decision,
+        json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+               "decision": {"behavior": "deny", "message": changes}}})
+    );
+    // Outside a Splitty terminal the hook decides nothing, and only the
+    // binary's exit path shows that it still exits 0.
+    let mut outside = cli(&server, &dir);
+    outside.env_remove("SPLITTY_PANE_ID");
+    let mut child = outside
+        .args(["review", "--hook", "claude-code"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("splitty review");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(event.as_bytes())
+        .expect("event");
+    let output = finished(child).await;
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Claude Code asks the user itself"),
+        "{output:?}"
+    );
+
+    let child = review(&server, &dir, &["--text", "--title", "Plan"], revised);
+    let (pane, _, _) = waiting_review(&mut window).await;
+    send(
+        &mut window,
+        json!({"type": "mux.op", "screenId": "s-cli", "op": {"type": "close_pane", "paneId": pane}}),
+    )
+    .await;
+    let output = finished(child).await;
+    assert_eq!(output.status.code(), Some(1), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("closed without an answer"),
+        "{output:?}"
+    );
+}

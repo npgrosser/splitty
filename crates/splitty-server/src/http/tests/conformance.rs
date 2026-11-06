@@ -649,6 +649,22 @@ async fn queries_errors_and_service_identity_match_browser_and_native() {
             Some(json!({"sessionId":"missing","path":"/tmp/file"})),
         ),
         (
+            Operation::ViewerCommentReply,
+            json!({"body":{"screenId":"missing","paneId":"p1","document":"/tmp/file","number":1,"body":"x"}}),
+            "POST",
+            "/api/viewer/comments/reply",
+            Some(
+                json!({"screenId":"missing","paneId":"p1","document":"/tmp/file","number":1,"body":"x"}),
+            ),
+        ),
+        (
+            Operation::ViewerReviewWait,
+            json!({"body":{"screenId":"missing","paneId":"p1","viewerPaneId":"v1"}}),
+            "POST",
+            "/api/viewer/review/wait",
+            Some(json!({"screenId":"missing","paneId":"p1","viewerPaneId":"v1"})),
+        ),
+        (
             Operation::JobInspect,
             json!({"id":"missing"}),
             "GET",

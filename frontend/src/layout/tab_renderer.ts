@@ -5,6 +5,11 @@ import { tabMenuItems } from "../lib/context_menus.ts";
 import { bindingForApi } from "../lib/connection/screen_binding.ts";
 import { toggleScratchpad } from "../lib/scratchpad.ts";
 import { scratchpadIcon } from "../panes/scratchpad_area.ts";
+import { viewerParams } from "../lib/viewer/panel.ts";
+import { showAnnotationList } from "../lib/viewer/annotations.ts";
+
+/** An hourglass: a process waits for the review of the pane. */
+const REVIEW_WAIT_ICON = `<svg width="11" height="11" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M4 1.5h8M4 14.5h8M5 1.5v2.5c0 1.6 3 2.6 3 4s-3 2.4-3 4v2.5M11 1.5v2.5c0 1.6-3 2.6-3 4s3 2.4 3 4v2.5"/></svg>`;
 
 /**
  * Custom tab renderer with close guard, context menu, and wheel navigation.
@@ -29,11 +34,12 @@ export class SplittyTabRenderer implements ITabRenderer {
   init(params: TabPartInitParameters): void {
     const api = params.api;
 
-    // Title element
+    // Title element; a viewer pane's tab without a title says what it is.
+    const fallback = viewerParams(params.params) ? "Viewer" : "Terminal";
     const titleEl = document.createElement("span");
     titleEl.className = "dv-default-tab-content";
-    titleEl.textContent = api.title ?? "Terminal";
-    this.element.title = api.title ?? "Terminal";
+    titleEl.textContent = api.title ?? fallback;
+    this.element.title = api.title ?? fallback;
     this.element.appendChild(titleEl);
 
     // Shown while the pane's scratchpad holds text (session-scratchpad)
@@ -56,6 +62,49 @@ export class SplittyTabRenderer implements ITabRenderer {
       };
       update();
       this.cleanups.push(scratchpads.subscribe(update));
+    }
+
+    // A viewer pane's open annotations (viewer-annotations): their count; a click opens the pane's list.
+    const annotations = viewerParams(params.params) ? bindingForApi(params.containerApi)?.conn.annotations : undefined;
+    if (annotations) {
+      const count = document.createElement("span");
+      count.className = "splitty-tab-annotations";
+      count.addEventListener("click", (e) => {
+        e.stopPropagation();
+        api.setActive();
+        showAnnotationList(api.id);
+      });
+      this.element.appendChild(count);
+      const update = () => {
+        const n = annotations.openCount(api.id);
+        count.hidden = n === 0;
+        count.textContent = n > 0 ? String(n) : "";
+        const label = n === 1 ? "1 open annotation" : `${n} open annotations`;
+        count.title = `${label}; show the list`;
+        count.setAttribute("aria-label", label);
+      };
+      update();
+      this.cleanups.push(annotations.subscribe(update));
+
+      // A process waits for the pane's review (review-verdict, D7): a marker
+      // that names the waiting pane and makes the viewer pane active.
+      const waiting = document.createElement("span");
+      waiting.className = "splitty-tab-review-wait";
+      waiting.innerHTML = REVIEW_WAIT_ICON;
+      waiting.addEventListener("click", (e) => {
+        e.stopPropagation();
+        api.setActive();
+      });
+      this.element.insertBefore(waiting, count);
+      const updateWait = () => {
+        const wait = annotations.waitOf(api.id);
+        waiting.hidden = !wait;
+        const label = wait ? `${wait.title || "A command"} waits for your review` : "";
+        waiting.title = label;
+        waiting.setAttribute("aria-label", label);
+      };
+      updateWait();
+      this.cleanups.push(annotations.subscribe(updateWait));
     }
 
     // Close button

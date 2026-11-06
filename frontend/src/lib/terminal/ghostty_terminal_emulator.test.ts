@@ -3,6 +3,7 @@ import { afterEach, expect, it, vi } from "vitest";
 const fixture = vi.hoisted(() => ({
   parser: {}, load: vi.fn(), terminal: vi.fn(), font: vi.fn(), input: vi.fn(),
   focusEvents: true, screen: "normal", wheel: undefined as ((e: unknown) => boolean) | undefined,
+  bracketedPaste: undefined as boolean | undefined,
 }));
 vi.mock("ghostty-web", () => ({
   Ghostty: { load: fixture.load },
@@ -17,6 +18,10 @@ vi.mock("ghostty-web", () => ({
     attachCustomWheelEventHandler(handler: (e: unknown) => boolean) { fixture.wheel = handler; }
     input(data: string, wasUserInput?: boolean) { fixture.input(data, wasUserInput); }
     hasFocusEvents() { return fixture.focusEvents; }
+    hasBracketedPaste() {
+      if (fixture.bracketedPaste === undefined) throw new Error("Terminal must be opened");
+      return fixture.bracketedPaste;
+    }
     getMode() { return false; }
   },
   FitAddon: class {}, OSC8LinkProvider: class {}, UrlRegexProvider: class {},
@@ -29,7 +34,10 @@ vi.mock("../window.ts", () => ({ windowAPI: {} }));
 vi.mock("../zoom.ts", () => ({ zoomedFontSize: (size: number) => size }));
 vi.mock("./terminal_shared.ts", () => ({ ensureFont: fixture.font, isCopyShortcut: () => false, wheelDeltaToLines: () => 3 }));
 vi.mock("./hyperlinks.ts", () => ({ openInBrowser: vi.fn() }));
-afterEach(() => { vi.resetModules(); vi.clearAllMocks(); fixture.focusEvents = true; fixture.screen = "normal"; });
+afterEach(() => {
+  vi.resetModules(); vi.clearAllMocks();
+  fixture.focusEvents = true; fixture.screen = "normal"; fixture.bracketedPaste = undefined;
+});
 
 /** A pane container with ghostty-web's hidden textarea inside it. */
 class FakeElement extends EventTarget {
@@ -100,4 +108,16 @@ it("retries the same packaged resource after an initialization error without a d
   expect(fixture.load).toHaveBeenCalledTimes(2);
   expect(fixture.load.mock.calls[0][0]).toBe(fixture.load.mock.calls[1][0]);
   expect(fixture.terminal).toHaveBeenCalledOnce();
+});
+
+// viewer-annotations, Handing A Review To A Terminal: whether a review can go as a paste.
+it("reports the bracketed paste mode the application set, and none before the terminal is open", async () => {
+  const { GhosttyTerminalEmulator } = await import("./ghostty_terminal_emulator.ts");
+  fixture.load.mockResolvedValue(fixture.parser); fixture.font.mockResolvedValue(undefined);
+  const emulator = await GhosttyTerminalEmulator.create();
+  expect(emulator.bracketedPaste).toBe(false);
+  fixture.bracketedPaste = true;
+  expect(emulator.bracketedPaste).toBe(true);
+  fixture.bracketedPaste = false;
+  expect(emulator.bracketedPaste).toBe(false);
 });

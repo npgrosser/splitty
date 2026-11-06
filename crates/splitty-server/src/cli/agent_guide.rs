@@ -47,6 +47,21 @@ mod tests {
             "does NOT replay jobs",
             "old grants/cursors expire",
             "splitty download build/report.pdf",
+            "splitty open PLAN.md",
+            "Opened <path> in pane <id>",
+            "pasted at your prompt or as an inserted file path",
+            "splitty comments PLAN.md --all",
+            "splitty comments reply PLAN.md 2",
+            "Replied to #<number> in <document>",
+            "splitty review --hook claude-code",
+            "name one by its ID",
+            "splitty review PLAN.md",
+            "splitty review --text --title Plan",
+            "{\"outcome\":\"approved\"}",
+            "{\"outcome\":\"changes_requested\",\"review\":\"...\"}",
+            "prints the review and exits 3",
+            "Verdict: changes requested",
+            "exits 1 when the pane closes",
         ] {
             assert!(guide.contains(term), "guide missing {term}");
         }

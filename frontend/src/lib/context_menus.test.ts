@@ -10,14 +10,20 @@ const notice = vi.hoisted(() => ({ info: vi.fn(), error: vi.fn() }));
 vi.mock("svelte-sonner", () => ({ toast: notice }));
 vi.mock("./platform.ts", () => ({ get shellKind() { return state.shellKind; }, get isRemoteSession() { return state.isRemoteSession; } }));
 vi.mock("./shortcuts.ts", () => ({ shortcutKey: () => "" }));
-vi.mock("./panes.ts", () => ({ addTerminalPane: vi.fn() }));
+// Viewer panes are added for real, so a menu's viewers reach the layout.
+vi.mock("./panes.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./panes.ts")>();
+  return { addTerminalPane: vi.fn(), addViewerPane: vi.fn(actual.addViewerPane) };
+});
 vi.mock("./close_guard.ts", () => ({ guardedClose: vi.fn(), guardedCloseMultiple: vi.fn() }));
 vi.mock("../stores/ui.svelte.ts", () => ({ toggleDrawer: vi.fn(), getDrawerState: () => "closed" }));
 vi.mock("./shell_profiles.ts", () => ({ getShellProfiles: vi.fn(), shellProfileIcon: vi.fn() }));
 vi.mock("./shell_profile_model.ts", () => ({ visibleShellProfiles: vi.fn() }));
 vi.mock("./window.ts", () => ({ openExternalTarget: vi.fn() }));
 
-import { moveToScreenItem, paneMenuItems, tabMenuItems } from "./context_menus.ts";
+import { moveToScreenItem, paneMenuItems, selectionForViewer, tabMenuItems, viewerMenuItems, type ViewerMenuControls } from "./context_menus.ts";
+import { addTerminalPane, addViewerPane } from "./panes.ts";
+import { guardedClose } from "./close_guard.ts";
 import { subscribeUICommands, type UICommand } from "./client_commands.ts";
 import type { Screen } from "../stores/screens.svelte.ts";
 import { setLocalWslDistro } from "../stores/connections.svelte.ts";
@@ -354,4 +360,188 @@ it.each(["disconnect", "rebind"])("discards clipboard input when its target chan
   expect(paste).not.toHaveBeenCalled();
   expect(original.socket.sentOfType("input")).toEqual([]);
   for (const server of servers) expect(server.socket.sentOfType("input")).toEqual([]);
+});
+
+// viewer-panes, Terminal Selection In A Viewer.
+describe("Open Selection in Viewer", () => {
+  interface Group {
+    id: string;
+    api: { location: { type: string } };
+    panels: { id: string }[];
+  }
+
+  /** A terminal of a host in a grid group of its own; a viewer opened beside it gets a group of its own. */
+  function terminal(capabilities: string[], selection: string, title = "claude") {
+    const selected = screen("host:vm1", "/home/me/app");
+    selected.socket.message({ type: "mux.welcome", clientId: "c1", screens: [], capabilities });
+    selected.session.emulator.getSelection = () => selection;
+    const panels = new Map<string, { id: string; title: string; group: Group; params: unknown; view: { contentComponent: string } }>();
+    const place = (id: string, group: Group, fields: { title: string; component: string; params?: unknown }) => {
+      const panel = { id, title: fields.title, group, params: fields.params ?? {}, view: { contentComponent: fields.component } };
+      group.panels.push(panel);
+      panels.set(id, panel);
+      return panel;
+    };
+    let groups = 0;
+    const group = (): Group => ({ id: `g${++groups}`, api: { location: { type: "grid" } }, panels: [] });
+    place(paneId, group(), { title, component: "terminal" });
+    Object.defineProperty(selected.api, "panels", { get: () => [...panels.values()] });
+    Object.assign(selected.api, {
+      getPanel: (id: string) => panels.get(id),
+      addPanel: vi.fn((options: { id: string; title: string; component: string; params: unknown; position?: { referenceGroup?: Group } }) =>
+        place(options.id, options.position?.referenceGroup ?? group(), options)),
+    });
+    return { ...selected, panels };
+  }
+  const item = (api: DockviewApi) => paneMenuItems(paneId, api).find((entry) => entry.label === "Open Selection in Viewer");
+
+  // An agent's answer.
+  it("opens the selection to the right of the terminal, its origin", () => {
+    const { api } = terminal(["viewer-v1"], "The answer   \n  - step one\t\n\n");
+    const items = paneMenuItems(paneId, api);
+    const index = items.findIndex((entry) => entry.label === "Open Selection in Viewer");
+    expect(items[index - 1].label).toBe("Paste");
+    items[index].action();
+    expect(addViewerPane).toHaveBeenCalledExactlyOnceWith(api, {
+      source: { kind: "text", title: "Selection from claude", text: "The answer\n  - step one\n\n" },
+      anchor: paneId,
+      placement: "right",
+      cwd: "/home/me/app",
+    });
+  });
+
+  it("titles the viewer after a pane without a title, within the title limit", () => {
+    const { api } = terminal(["viewer-v1"], "text", "");
+    item(api)!.action();
+    expect(vi.mocked(addViewerPane).mock.calls[0][1].source).toMatchObject({ title: "Selection from Terminal" });
+
+    const long = terminal(["viewer-v1"], "text", "x".repeat(300));
+    vi.mocked(addViewerPane).mockClear();
+    item(long.api)!.action();
+    const title = (vi.mocked(addViewerPane).mock.calls[0][1].source as { title: string }).title;
+    expect([...title]).toHaveLength(200);
+  });
+
+  // Nothing selected.
+  it("is not offered without a selection", () => {
+    expect(item(terminal(["viewer-v1"], "").api)).toBeUndefined();
+    expect(item(terminal(["viewer-v1"], "  \n\t ").api)).toBeUndefined();
+  });
+
+  // Viewer Capability: Host without viewers.
+  it("is not offered for a host without viewer panes", () => {
+    expect(item(terminal(["scratchpad-v1"], "The answer").api)).toBeUndefined();
+  });
+
+  it("refuses a selection over the text limit with a notice and sends nothing", () => {
+    const { api, socket } = terminal(["viewer-v1"], "é".repeat(131_073));
+    item(api)!.action();
+    expect(notice.error).toHaveBeenCalledWith("The selection is too large for a viewer", expect.objectContaining({ description: expect.stringContaining("256 KB") }));
+    expect(addViewerPane).not.toHaveBeenCalled();
+    expect(socket.sentOfType("mux.op")).toEqual([]);
+  });
+
+  // A second selection from the same terminal joins the first one's group,
+  // as the server groups the CLI's viewers per terminal.
+  it("opens a second selection of the terminal as a tab of its first viewer", () => {
+    const { api, socket, session } = terminal(["viewer-v1"], "first answer");
+    item(api)!.action();
+    session.emulator.getSelection = () => "second answer";
+    item(api)!.action();
+
+    const ops = socket.sentOfType("mux.op").map((message) => message.op);
+    expect(ops).toEqual([
+      expect.objectContaining({ type: "open_viewer", paneId, placement: "right", source: expect.objectContaining({ text: "first answer" }) }),
+      expect.objectContaining({ type: "open_viewer", placement: "tab", source: expect.objectContaining({ text: "second answer" }) }),
+    ]);
+    const [first, second] = ops as { newPaneId: string; paneId: string }[];
+    expect(second.paneId).toBe(first.newPaneId);
+    expect(api.getPanel(second.newPaneId)!.group).toBe(api.getPanel(first.newPaneId)!.group);
+    expect(api.getPanel(second.newPaneId)!.group).not.toBe(api.getPanel(paneId)!.group);
+    // Both name the terminal as their origin.
+    for (const op of [first, second]) {
+      expect(api.getPanel(op.newPaneId)!.params).toMatchObject({ viewer: { record: { originPaneId: paneId } } });
+    }
+  });
+
+  it("removes trailing whitespace from every line", () => {
+    expect(selectionForViewer("a  \r\nb\u00a0\nc")).toBe("a\nb\nc");
+  });
+});
+
+describe("viewer pane menu", () => {
+  function controls(fields: Partial<ViewerMenuControls> = {}): ViewerMenuControls {
+    return {
+      selection: () => "", reload: vi.fn(), mode: () => undefined, toggleMode: vi.fn(), wrap: () => undefined, toggleWrap: vi.fn(),
+      ...fields,
+    };
+  }
+  const labels = (items: ReturnType<typeof viewerMenuItems>) => items.filter((entry) => !entry.separator).map((entry) => entry.label);
+
+  it("offers copying, reloading, splitting as terminals and closing", () => {
+    const { api } = screen("local");
+    const items = viewerMenuItems(paneId, api, controls());
+    expect(labels(items)).toEqual(["Copy", "Reload", "Split Right", "Split Down", "Move to Screen", "Show Drawer", "Close Pane"]);
+    expect(items.find((entry) => entry.label === "Copy")!.disabled).toBe(true);
+    items.find((entry) => entry.label === "Split Right")!.action();
+    expect(addTerminalPane).toHaveBeenCalledWith(api, { direction: "right", referencePanel: paneId });
+    items.find((entry) => entry.label === "Close Pane")!.action();
+    expect(guardedClose).toHaveBeenCalledWith(api, paneId, expect.any(Function));
+  });
+
+  it("switches a rendered document to its source and wraps the source's lines", () => {
+    const { api } = screen("local");
+    const viewer = controls({ selection: () => "chosen", mode: () => "rendered", wrap: () => false, path: "/home/me/app/PLAN.md" });
+    const items = viewerMenuItems(paneId, api, viewer);
+    expect(labels(items)).toEqual(["Copy", "Reload", "Show Source", "Wrap Lines", "Copy Path", "Split Right", "Split Down", "Move to Screen", "Show Drawer", "Close Pane"]);
+    items.find((entry) => entry.label === "Show Source")!.action();
+    expect(viewer.toggleMode).toHaveBeenCalled();
+    items.find((entry) => entry.label === "Reload")!.action();
+    expect(viewer.reload).toHaveBeenCalled();
+    expect(labels(viewerMenuItems(paneId, api, controls({ mode: () => "source", wrap: () => true })))).toContain("Show Rendered");
+    expect(labels(viewerMenuItems(paneId, api, controls({ mode: () => "source", wrap: () => true })))).toContain("Unwrap Lines");
+
+    const writeText = vi.fn(() => Promise.resolve());
+    vi.stubGlobal("navigator", { clipboard: { writeText } });
+    items.find((entry) => entry.label === "Copy")!.action();
+    items.find((entry) => entry.label === "Copy Path")!.action();
+    expect(writeText.mock.calls).toEqual([["chosen"], ["/home/me/app/PLAN.md"]]);
+  });
+
+  // viewer-annotations: the two kinds for a selected passage, a general comment, the list and the marks.
+  it("annotates the selection, adds a general comment and shows the list", () => {
+    const { api } = screen("local");
+    const annotations = {
+      selection: "passage" as const, annotate: vi.fn(), addComment: vi.fn(), listShown: false, toggleList: vi.fn(),
+      marksHidden: false, toggleMarks: vi.fn(), resolvedShown: false, toggleResolved: vi.fn(),
+    };
+    const items = viewerMenuItems(paneId, api, controls({ selection: () => "retry three times", annotations }));
+    expect(labels(items).slice(0, 8)).toEqual([
+      "Copy", "Comment on Selection", "Suggest Change", "Add Comment", "Show Annotations", "Hide Marks", "Show Resolved", "Reload",
+    ]);
+    items.find((entry) => entry.label === "Comment on Selection")!.action();
+    expect(annotations.annotate).toHaveBeenCalledWith("comment");
+    items.find((entry) => entry.label === "Suggest Change")!.action();
+    expect(annotations.annotate).toHaveBeenLastCalledWith("change");
+    items.find((entry) => entry.label === "Add Comment")!.action();
+    expect(annotations.addComment).toHaveBeenCalled();
+    items.find((entry) => entry.label === "Show Annotations")!.action();
+    expect(annotations.toggleList).toHaveBeenCalled();
+    items.find((entry) => entry.label === "Hide Marks")!.action();
+    expect(annotations.toggleMarks).toHaveBeenCalled();
+    items.find((entry) => entry.label === "Show Resolved")!.action();
+    expect(annotations.toggleResolved).toHaveBeenCalled();
+
+    const short = viewerMenuItems(paneId, api, controls({
+      annotations: { ...annotations, selection: "short", listShown: true, marksHidden: true, resolvedShown: true },
+    }));
+    const comment = short.find((entry) => entry.label === "Comment on Selection")!;
+    expect(comment).toMatchObject({ disabled: true, detail: "Select a longer passage" });
+    expect(labels(short)).toEqual(expect.arrayContaining(["Hide Annotations", "Show Marks", "Hide Resolved"]));
+    const long = viewerMenuItems(paneId, api, controls({ annotations: { ...annotations, selection: "long" } }));
+    expect(long.find((entry) => entry.label === "Suggest Change")).toMatchObject({ disabled: true, detail: "Over 16 KB" });
+    const none = viewerMenuItems(paneId, api, controls({ annotations: { ...annotations, selection: "none" } }));
+    expect(labels(none)).not.toContain("Comment on Selection");
+    expect(labels(none)).toContain("Add Comment");
+  });
 });

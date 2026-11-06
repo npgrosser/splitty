@@ -1,12 +1,17 @@
 //! Operation types dispatched by clients to mutate mux state.
 //!
-//! `Op` covers workspace-level actions (create/close/rename screen, set active).
-//! `ScreenOp` covers screen-level actions (split, close, resize, move, float, dock).
+//! `Op` covers workspace-level actions (create/close/rename screen, set active)
+//! and the trusted operations the server derives itself (job lifecycle, an
+//! agent's reply, the start and end of a wait for a review); it has no wire
+//! form. `ScreenOp` covers screen-level actions (split, close, resize, move,
+//! float, dock, viewers, their annotations and threads), as clients send them.
 //! Both are consumed by the corresponding reducers.
 
 use serde::{Deserialize, Serialize};
 
-use super::state::{Axis, FloatBounds};
+use super::state::{
+    AnnotationReply, Axis, FloatBounds, ReviewWait, SentEntry, ViewerAnnotation, ViewerSource,
+};
 use crate::ids::*;
 
 /// Direction for spatial navigation and move operations.
@@ -19,6 +24,19 @@ pub enum Direction {
     Above,
     #[serde(alias = "down")]
     Below,
+}
+
+/// Where `open_viewer` puts a new viewer pane relative to its anchor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ViewerPlacement {
+    #[default]
+    Right,
+    Left,
+    Above,
+    Below,
+    /// The last tab of the anchor's slot, in the root layout or a floating entry.
+    Tab,
 }
 
 /// Top-level operation. Dispatched by the workspace reducer.
@@ -65,6 +83,37 @@ pub enum Op {
         create_screen: bool,
         screen_name: Option<String>,
     },
+
+    /// An agent's reply to annotation `number` of viewer pane `pane_id` on
+    /// `screen_id`, derived from a control API request: the server chose the
+    /// reply's ID and its `from` (`viewer-annotations`, Agents Read And Reply
+    /// To Handed-Over Threads). Never deserialized from a client.
+    AgentReply {
+        screen_id: ScreenId,
+        pane_id: PaneId,
+        number: u32,
+        reply: AnnotationReply,
+    },
+
+    /// A process starts waiting for a review of viewer pane `pane_id` on
+    /// `screen_id` (`viewer-annotations`, Waiting For A Review). Never
+    /// deserialized from a client.
+    StartReviewWait {
+        screen_id: ScreenId,
+        pane_id: PaneId,
+        wait: ReviewWait,
+        /// The viewer's `revision` the waiting process showed; another one
+        /// refuses the wait, so that an answer judges that revision.
+        revision: Option<u64>,
+    },
+
+    /// The wait `wait_id` of viewer pane `pane_id` ended, on whichever screen
+    /// the pane is now. Never deserialized from a client.
+    EndReviewWait { pane_id: PaneId, wait_id: String },
+}
+
+fn is_false(flag: &bool) -> bool {
+    !*flag
 }
 
 /// Screen-level operation. Dispatched by the screen reducer.
@@ -170,6 +219,74 @@ pub enum ScreenOp {
     /// window's mux connection sends it (`session-scratchpad`).
     #[serde(rename_all = "camelCase")]
     SetScratchpad { session_id: SessionId, text: String },
+
+    /// Show a document in a viewer pane next to `pane_id`, or around the root
+    /// layout without it; no session, no effect (`viewer-panes`). Without
+    /// `new_pane_id`, a file a viewer pane of the screen already shows is
+    /// shown again in that pane.
+    #[serde(rename_all = "camelCase")]
+    OpenViewer {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pane_id: Option<PaneId>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        placement: Option<ViewerPlacement>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_pane_id: Option<PaneId>,
+        source: ViewerSource,
+        /// The working directory of a `text` document; a file's is its directory.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cwd: Option<String>,
+        /// With a `text` source and without `new_pane_id`: give the text to the
+        /// first viewer pane of the screen that shows a text of the same title
+        /// and origin, keeping its annotations (`viewer-panes`, Reopening A
+        /// File).
+        #[serde(default, skip_serializing_if = "is_false")]
+        replace: bool,
+    },
+
+    /// Add annotations to a viewer pane, or replace those with the same ID in
+    /// their place. Only a window's mux connection sends it
+    /// (`viewer-annotations`).
+    #[serde(rename_all = "camelCase")]
+    PutAnnotations {
+        pane_id: PaneId,
+        annotations: Vec<ViewerAnnotation>,
+    },
+
+    /// Remove a viewer pane's annotations by ID with their replies, ignoring
+    /// IDs it does not hold. Only a window's mux connection sends it
+    /// (`viewer-annotations`).
+    #[serde(rename_all = "camelCase")]
+    RemoveAnnotations { pane_id: PaneId, ids: Vec<String> },
+
+    /// Add replies of the user to an annotation's thread, or replace the
+    /// user's replies with the same ID in their place. Only a window's mux
+    /// connection sends it (`viewer-annotations`).
+    #[serde(rename_all = "camelCase")]
+    PutReplies {
+        pane_id: PaneId,
+        annotation_id: String,
+        replies: Vec<AnnotationReply>,
+    },
+
+    /// Remove replies of either author from an annotation's thread, ignoring
+    /// IDs it does not hold. Only a window's mux connection sends it.
+    #[serde(rename_all = "camelCase")]
+    RemoveReplies {
+        pane_id: PaneId,
+        annotation_id: String,
+        ids: Vec<String>,
+    },
+
+    /// Mark annotations and the user's replies as handed over to an agent,
+    /// each named with the content the review held: an entry that reads
+    /// otherwise by now stays pending, and agents' replies and IDs the pane
+    /// does not hold are ignored. Only a window's mux connection sends it.
+    #[serde(rename_all = "camelCase")]
+    MarkSent {
+        pane_id: PaneId,
+        entries: Vec<SentEntry>,
+    },
 }
 
 /// A layout tree as `arrange_panes` carries it: like the root layout, but

@@ -1,7 +1,8 @@
 <!--
-  Asks before the desktop app quits while processes run in local panes: the
-  local server ends with the window, and with it those processes. Screens of
-  hosts are only detached and keep running there.
+  Asks before the desktop app quits while processes run in local panes, or
+  scratchpads or viewer panes hold what the user wrote: the local server ends
+  with the window, and with it all of that. Screens of hosts are only detached
+  and keep running there.
 -->
 <script lang="ts">
   import { getTheme } from "../../lib/theme.ts";
@@ -15,11 +16,13 @@
     hostScreens: boolean;
     /** How many of the local sessions' scratchpads hold text, which end too. */
     scratchpads?: number;
+    /** How many annotations the local viewer panes hold, which end too. */
+    annotations?: number;
     onConfirm: () => void;
     onCancel: () => void;
   }
 
-  let { open, processes, hostScreens, scratchpads = 0, onConfirm, onCancel }: Props = $props();
+  let { open, processes, hostScreens, scratchpads = 0, annotations = 0, onConfirm, onCancel }: Props = $props();
   const theme = $derived(getTheme());
   const SHOWN = 3;
   const shown = $derived(processes.slice(0, SHOWN));
@@ -64,13 +67,18 @@
           {scratchpads === 1 ? "A scratchpad holds text, which ends" : `${scratchpads} scratchpads hold text, which end`} with Splitty.
         </p>
       {/if}
+      {#if annotations > 0}
+        <p class="dialog-text">
+          {annotations === 1 ? "An annotation and its replies end" : `${annotations} annotations and their replies end`} with Splitty.
+        </p>
+      {/if}
       {#if hostScreens}
         <p class="dialog-text">Screens on hosts keep running there.</p>
       {/if}
       <div class="dialog-actions">
         <button onclick={onCancel} class="dialog-btn">Cancel</button>
         <button onclick={onConfirm} class="dialog-btn-danger">
-          {processes.length + scratchpads === 1 ? "Quit and end it" : "Quit and end them"}
+          {processes.length + scratchpads + annotations === 1 ? "Quit and end it" : "Quit and end them"}
         </button>
       </div>
     </div>

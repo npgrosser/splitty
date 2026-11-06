@@ -16,13 +16,25 @@
  */
 
 import type { ConnSocket } from "../protocol/socket.ts";
-import type { MuxOperation, ScreenInfo, ScreenState, OutgoingMessage } from "../protocol/types.ts";
+import type { MuxOperation, OpenViewerOp, ScreenInfo, ScreenState, OutgoingMessage, ViewerPlacement } from "../protocol/types.ts";
+import { plainText, MAX_TEXT } from "../protocol/untrusted.ts";
+import { ANNOTATIONS_CAPABILITY, ANNOTATION_OPS } from "../viewer/annotations.ts";
+import { VIEWER_CAPABILITY } from "../viewer/limits.ts";
 import { screenList, screenState } from "./incoming.ts";
 
 export interface MuxHandlers {
   onWelcome?: (clientId: string, screens: ScreenInfo[]) => void;
   onSnapshot?: (screen: ScreenState) => void;
   onNudge?: (reason: string, screenId?: string) => void;
+}
+
+/** An op of this client the server rejected (`mux.op_failed`), with its fields checked. */
+export interface OpFailure {
+  readonly op: string;
+  readonly screenId?: string;
+  readonly paneId?: string;
+  /** The server's reason, as plain text. */
+  readonly error: string;
 }
 
 interface PaneSpawnedWaiter {
@@ -57,6 +69,10 @@ export class MuxClient {
   arrangements = false;
   /** Whether the server takes a selected tab as `select_tab` (mux-protocol, Selected Tabs Reach the Server). */
   tabSelections = false;
+  /** Whether the server has viewer panes (`viewer-panes`, Viewer Capability); without it the window offers none. */
+  viewers = false;
+  /** Whether the server keeps annotations on viewer panes (`viewer-annotations`, Annotations Capability); without it the window offers none. */
+  annotations = false;
 
   // mux-protocol, Client Resynchronization: no `create_screen` before the
   // current connection's `mux.welcome`. Sent earlier, it reaches the server ahead
@@ -67,6 +83,7 @@ export class MuxClient {
   private readonly heldCreateScreens: { screenId: string; op: MuxOperation }[] = [];
   private handlers: MuxHandlers = {};
   private readonly waiters = new Map<string, PaneSpawnedWaiter>();
+  private readonly failureListeners = new Set<(failure: OpFailure) => void>();
   private unsubscribes: (() => void)[];
 
   constructor(private readonly socket: ConnSocket) {
@@ -103,6 +120,12 @@ export class MuxClient {
     this.socket.send({ type: "mux.resync", screenId });
   }
 
+  /** Called for every op of this client the server rejects. Returns the removal. */
+  onOpFailed(listener: (failure: OpFailure) => void): () => void {
+    this.failureListeners.add(listener);
+    return () => this.failureListeners.delete(listener);
+  }
+
   /**
    * Wait for a mux.pane_spawned event for a specific pane.
    * Resolves with the sessionId when the server spawns the PTY.
@@ -135,6 +158,7 @@ export class MuxClient {
     for (const unsubscribe of this.unsubscribes) unsubscribe();
     this.unsubscribes = [];
     this.handlers = {};
+    this.failureListeners.clear();
     for (const waiter of this.waiters.values()) waiter.reject(new Error("Connection disposed before pane creation was confirmed."));
     this.heldCreateScreens.length = 0;
   }
@@ -149,6 +173,8 @@ export class MuxClient {
         this.scratchpads = Array.isArray(msg.capabilities) && msg.capabilities.includes("scratchpad-v1");
         this.arrangements = Array.isArray(msg.capabilities) && msg.capabilities.includes("layout-arrange-v1");
         this.tabSelections = Array.isArray(msg.capabilities) && msg.capabilities.includes("tab-select-v1");
+        this.viewers = Array.isArray(msg.capabilities) && msg.capabilities.includes(VIEWER_CAPABILITY);
+        this.annotations = Array.isArray(msg.capabilities) && msg.capabilities.includes(ANNOTATIONS_CAPABILITY);
         this.welcomed = true;
         this.handlers.onWelcome?.(this.clientId ?? "", screens);
         for (const { screenId, op } of this.heldCreateScreens.splice(0)) {
@@ -176,15 +202,29 @@ export class MuxClient {
         }
         break;
 
-      case "mux.op_failed":
-        if (typeof msg.paneId === "string") {
+      case "mux.op_failed": {
+        const op = typeof msg.op === "string" ? msg.op : "";
+        const screenId = typeof msg.screenId === "string" ? msg.screenId : undefined;
+        const paneId = typeof msg.paneId === "string" ? msg.paneId : undefined;
+        // An annotation op names the viewer pane it was for, which nothing waits for.
+        if (paneId !== undefined && !ANNOTATION_OPS.has(op)) {
           this.waiters
-            .get(msg.paneId)
-            ?.reject(new PaneSpawnRejectedError(msg.paneId, String(msg.op), String(msg.error)));
+            .get(paneId)
+            ?.reject(new PaneSpawnRejectedError(paneId, op, String(msg.error)));
         }
-        // The server kept its own layout: the screen shows it again.
-        if (msg.op === "arrange_panes" && typeof msg.screenId === "string") this.resync(msg.screenId);
+        const failure: OpFailure = {
+          op,
+          ...(screenId !== undefined ? { screenId } : {}),
+          ...(paneId !== undefined ? { paneId } : {}),
+          error: plainText(msg.error, MAX_TEXT),
+        };
+        for (const listener of [...this.failureListeners]) listener(failure);
+        // The server kept its own layout or annotations: the screen shows them
+        // again. A refused viewer pane spawns nothing to wait for, so its panel
+        // goes the same way.
+        if ((op === "arrange_panes" || op === "open_viewer" || ANNOTATION_OPS.has(op)) && screenId !== undefined) this.resync(screenId);
         break;
+      }
     }
   }
 }
@@ -209,4 +249,20 @@ export function newTabOp(paneId: string, newPaneId: string, cwd?: string, shellP
 
 export function createScreenOp(screenId: string, name?: string, initialPaneId?: string, shellProfileId?: string): MuxOperation {
   return { type: "create_screen", screenId, name, newPaneId: initialPaneId, shellProfileId };
+}
+
+/** A viewer pane `newPaneId` for `source`, placed next to `paneId` (`viewer-panes`, Opening A Viewer). */
+export function openViewerOp(
+  newPaneId: string,
+  source: OpenViewerOp["source"],
+  options: { paneId?: string; placement?: ViewerPlacement; cwd?: string } = {},
+): OpenViewerOp {
+  return {
+    type: "open_viewer",
+    ...(options.paneId ? { paneId: options.paneId } : {}),
+    ...(options.placement ? { placement: options.placement } : {}),
+    newPaneId,
+    source,
+    ...(options.cwd ? { cwd: options.cwd } : {}),
+  };
 }

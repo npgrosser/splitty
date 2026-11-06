@@ -10,6 +10,8 @@ export interface CloseRequest {
   applicationTitle?: string;
   /** How many of the closing panes have a scratchpad that holds text (`session-scratchpad`). */
   scratchpads: number;
+  /** How many annotations the closing viewer panes hold, which closing them ends (`viewer-annotations`). */
+  annotations: number;
   close: () => void;
 }
 
@@ -34,21 +36,28 @@ function holdsScratchpad(api: DockviewApi, paneId: string): boolean {
   return session !== undefined && scratchpads.text(session) !== "";
 }
 
+/** How many annotations a viewer pane holds, which closing the pane ends. */
+function annotationsOf(api: DockviewApi, paneId: string): number {
+  return bindingForApi(api)?.conn.annotations.count(paneId) ?? 0;
+}
+
 /**
  * Attempt to close a pane of the screen whose layout is `api`. If a process is
- * running or its scratchpad holds text, triggers the confirmation dialog
- * instead of closing immediately.
+ * running, its scratchpad holds text or it holds annotations, triggers the
+ * confirmation dialog instead of closing immediately.
  */
 export function guardedClose(api: DockviewApi, paneId: string, close: () => void): void {
   const session = sessionForPane(api, paneId);
   const running = session && !session.lastIsBaseShell ? session : undefined;
   const scratchpads = holdsScratchpad(api, paneId) ? 1 : 0;
-  if ((running || scratchpads > 0) && listener) {
+  const annotations = annotationsOf(api, paneId);
+  if ((running || scratchpads > 0 || annotations > 0) && listener) {
     listener({
       paneId,
       processName: running ? running.lastTitle || running.lastCmdline || "unknown" : "",
       applicationTitle: running?.lastOscTitle || undefined,
       scratchpads,
+      annotations,
       close,
     });
   } else {
@@ -89,6 +98,16 @@ export function scratchpadsOnQuit(): number {
   return [...local.sessions.all()].filter((session) => local.scratchpads.text(session.id) !== "").length;
 }
 
+/**
+ * How many annotations the local server's viewer panes that this window shows
+ * hold, which quitting ends with them. A daemon keeps them (`viewer-annotations`).
+ */
+export function annotationsOnQuit(): number {
+  const local = localConnection();
+  if (local.mux.serverMode === "daemon") return 0;
+  return local.annotations.shownCount();
+}
+
 /** Whether a host's screens are open, which quitting only detaches. */
 export function hostScreensOpen(): boolean {
   return connections().some((conn) => conn.kind !== "local");
@@ -96,21 +115,25 @@ export function hostScreensOpen(): boolean {
 
 /**
  * Close multiple panels of the screen whose layout is `api`. Idle panels are
- * closed immediately. If any run a process or hold scratchpad text, a single
- * confirmation dialog is shown; on confirm they are closed together.
+ * closed immediately. If any run a process, hold scratchpad text or hold
+ * annotations, a single confirmation dialog is shown; on confirm they are
+ * closed together.
  */
 export function guardedCloseMultiple(api: DockviewApi, panels: { id: string; close: () => void }[]): void {
   const idle: typeof panels = [];
   const asking: typeof panels = [];
   const running: typeof panels = [];
   let scratchpads = 0;
+  let annotations = 0;
   for (const p of panels) {
     const session = sessionForPane(api, p.id);
     const runs = Boolean(session && !session.lastIsBaseShell);
     const holds = holdsScratchpad(api, p.id);
+    const annotated = annotationsOf(api, p.id);
     if (runs) running.push(p);
     if (holds) scratchpads++;
-    if (runs || holds) {
+    annotations += annotated;
+    if (runs || holds || annotated > 0) {
       asking.push(p);
     } else {
       idle.push(p);
@@ -129,6 +152,7 @@ export function guardedCloseMultiple(api: DockviewApi, panels: { id: string; clo
       processName: name ? name + suffix : "",
       applicationTitle: session?.lastOscTitle || undefined,
       scratchpads,
+      annotations,
       close: () => {
         for (let i = asking.length - 1; i >= 0; i--) {
           asking[i].close();

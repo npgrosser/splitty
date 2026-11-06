@@ -78,6 +78,14 @@ More in [Files and editors](docs/files-and-editors.md).
 - **Scratchpad.** Each terminal has one (Cmd/Alt+J) for drafting the next
   prompt while the agent works. It stays with the session, and the agent
   can't read it.
+- **Viewer panes.** `splitty open PLAN.md` shows a file next to the terminal,
+  Markdown and HTML rendered, and follows its changes, so an agent can show
+  you its plan or report. A terminal selection opens the same way from the
+  context menu. Comment on passages or suggest changes, send the review to
+  the agent's terminal as Markdown, and follow the agent's replies in each
+  thread; `splitty review` lets an agent wait for your verdict, and as a
+  hook of Claude Code it opens each plan for approval
+  ([setup](docs/files-and-editors.md#plans-of-claude-code)).
 
 To get started, add this to your `CLAUDE.md` or `AGENTS.md`:
 
@@ -143,7 +151,7 @@ things on top:
 | `splitty connect user@host` | Opens a host in the browser, without the desktop app |
 | `splitty serve` | Serves the UI to a browser on this machine |
 | `splitty daemon start` | Starts an independent persistent local backend (macOS, Linux) |
-| `splitty open <path>` | From inside a pane: opens a file in your editor |
+| `splitty open <path>` | From inside a pane: shows a file in a viewer pane next to it; folders and `--editor` go to your editor |
 | `splitty run`, `splitty logs` | Managed background processes, mostly for agents |
 
 Everything about the command is in [`docs/cli.md`](docs/cli.md).

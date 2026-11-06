@@ -96,3 +96,8 @@ describe("decodeOutputFrame", () => {
 it("never queues upload cancellation for another connection", () => {
   expect(belongsToConnection({ type: "upload_cancel", requestId: "u" })).toBe(true);
 });
+
+it("never queues a viewer read or a review answer for another connection", () => {
+  expect(belongsToConnection({ type: "viewer.read", requestId: "r", paneId: "p", offset: 0 })).toBe(true);
+  expect(belongsToConnection({ type: "viewer.review_answer", screenId: "s", paneId: "p", waitId: "wait-0123456789abcdef", outcome: "approved" })).toBe(true);
+});

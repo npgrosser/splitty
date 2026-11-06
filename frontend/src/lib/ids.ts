@@ -23,6 +23,15 @@ export function newPaneId(): string {
   return `terminal-${randomHex(8)}`;
 }
 
+/**
+ * A new viewer pane id (`viewer-panes`). Only the window's own viewer panes
+ * carry the prefix; the server names those the CLI opens `pane-…`, so a pane's
+ * kind is its component, never its id.
+ */
+export function newViewerPaneId(): string {
+  return `viewer-${randomHex(8)}`;
+}
+
 /** A new id for a screen of the local server, which is also its key in the window. */
 export function newScreenId(): string {
   return `screen-${randomHex(8)}`;

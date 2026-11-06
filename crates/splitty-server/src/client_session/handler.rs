@@ -60,7 +60,11 @@ pub(super) async fn run(
         client_state.env.clone(),
         broadcast_fn,
         client_state.jobs.clone(),
+        client_state.reviews.clone(),
     ));
+
+    // `viewer.read`, answered off this loop (`viewer-panes`).
+    let viewer_reads = super::viewer::Reads::new(client_state.mux_store.clone(), sender.clone());
 
     // Every foreign event uses the pending notification queue, including
     // broadcasts racing registration. Welcome reaches the main output first.
@@ -142,6 +146,7 @@ pub(super) async fn run(
                                 Some("file.accept") => { offers.accept(&client_id, &value).await; continue; }
                                 Some("file.decline") => { offers.decline(&client_id, &value).await; continue; }
                                 Some("file.read") => { offers.read(&client_id, &value).await; continue; }
+                                Some(codec::MSG_VIEWER_READ) => { viewer_reads.read(&value); continue; }
                                 _ => {}
                             }
                             if value["type"]=="mux.op" {
@@ -167,8 +172,8 @@ pub(super) async fn run(
                                 }
                             }else if value["type"]=="close"{client_state.jobs.close_jobs(None,None,value["id"].as_str()).await;}
                         }
-                        // Try mux handler first
-                        if value["type"].as_str().is_some_and(|kind| kind.starts_with("mux.")) {
+                        // Try mux handler first; it answers waits for a review too.
+                        if value["type"].as_str().is_some_and(|kind| kind.starts_with("mux.") || kind == codec::MSG_VIEWER_REVIEW_ANSWER) {
                             mux_handler.handle_value(value).await;
                             continue;
                         }

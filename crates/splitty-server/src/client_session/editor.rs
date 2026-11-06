@@ -42,10 +42,13 @@ pub enum Outcome {
 pub type Failure = (u16, &'static str, &'static str);
 
 pub fn validate_path(path: &str) -> Result<(), Failure> {
-    if !path.starts_with('/') || path.starts_with("//") || path.len() > 4096
-        || path.contains('\\') || path.chars().any(|c| c.is_control() || matches!(c, '\u{200b}'..='\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2060}'..='\u{206f}' | '\u{feff}'))
-        || path.split('/').any(|p| p == "." || p == "..") {
-        return Err((400, "invalid_path", "A supported absolute path without control characters or dot segments is required"));
+    // The same rules as a viewer pane's path.
+    if !splitty_core::mux::viewer_path_is_valid(path) {
+        return Err((
+            400,
+            "invalid_path",
+            "A supported absolute path without control characters or dot segments is required",
+        ));
     }
     Ok(())
 }

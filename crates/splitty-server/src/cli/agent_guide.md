@@ -64,6 +64,88 @@ splitty split -H
 This opens a shell to the right; `splitty split` opens one below. A managed program
 is different: its pane runs that program and does not become a shell after exit.
 
+## Show a file to the user
+
+From an ordinary pane (not under `SPLITTY_AGENT_SOCK`), show a plan, a report or any
+other text file of this server in a read-only viewer pane next to your pane:
+
+```sh
+splitty open PLAN.md
+splitty open --tab build/report.html
+```
+
+No confirmation is asked; the command prints `Opened <path> in pane <id>` and exits 0.
+Markdown and HTML are rendered without running scripts. The pane reads the file again
+while it is shown, so rewrite the file to update it; running `splitty open` again for
+the same file brings its pane forward (`Showing <path> in pane <id>`) instead of adding
+one. A regular file of at most 8 MiB; a folder, `--editor` or `--with vscode|zed`
+request the user's editor instead, with a confirmation.
+
+The user may annotate the document in that pane and send you the review. It reaches
+you as text pasted at your prompt or as an inserted file path. The review is Markdown:
+the document's name and path, the general comments, then numbered sections with the
+lines, the kind (comment, suggested change or suggested deletion), the passage as a
+block quote, the remark, a fenced replacement and the replies of the thread, and a last
+line with the command that replies in a thread.
+
+## Read and answer comments
+
+From an ordinary pane, read what the user handed over on the viewer panes of your
+screen, and reply in a thread by its number:
+
+```sh
+splitty comments
+splitty comments PLAN.md --all
+splitty comments reply PLAN.md 2 'Switched to on-demand computation.'
+splitty comments reply viewer-0123456789abcdef 3 - <<'EOF'
+Done: `make clean` is no longer a step, and $HOME is left as it was.
+EOF
+```
+
+`splitty comments` prints the handed-over annotations in the form of the review, the
+open ones unless `--all`; `--json` prints the server's answer. With nothing to print it
+says so and exits 0. Drafts the user has not sent are not shown. A document is a file
+that a viewer pane of your screen shows, or the ID of a viewer pane, which the review's
+last line names; when two panes show one file, name one by its ID. Put a reply in single
+quotes, or pass `-` and the text on standard input with a quoted heredoc (`<<'EOF'`), so
+that the shell expands nothing in it. A reply is plain text of
+at most 16 KiB, shown in the thread with your pane's title; the command prints
+`Replied to #<number> in <document>`. Only the user resolves or changes an annotation.
+
+## Wait for the user's review
+
+Show a document and wait for the user's verdict, an approval or a request for changes:
+
+```sh
+splitty review PLAN.md
+splitty review --text --title Plan < plan.md
+```
+
+The command names the viewer pane on standard error and waits as long as the user
+takes. On approval it exits 0 and prints nothing, or the review when the user added
+notes: go ahead and take the notes into account. When the user requests changes it
+prints the review and exits 3: revise the document as the review asks and review it
+again; a review without comments is a plain rejection, so ask what to do instead. Under
+its heading, a review that answers you carries `Verdict: approved` or
+`Verdict: changes requested`, and a `Note:` line when the file changed during the review.
+With `--json` it prints
+`{"outcome":"approved"}`, `{"outcome":"approved","review":"..."}` or
+`{"outcome":"changes_requested","review":"..."}`, with the same exit status.
+It exits 1 when the pane closes, when another process already
+waits for that pane, when another command's text took the pane before this one waited
+(run one review at a time per title), or when the connection ends; interrupt it to stop
+waiting. A text,
+at most 256 KiB from standard input, is rendered as Markdown (`--format text` shows it as
+plain text) and replaces the text of your earlier one with the same title, keeping its
+threads, so review each revision of a plan under the same title. If your tool calls time
+out, a timeout ends the wait: run the command in the background, or run it again with the
+same title and text to wait again.
+
+Where the user set up `splitty review --hook claude-code` as a hook of Claude Code,
+leaving plan mode opens your plan in a viewer pane by itself: do not review that plan
+again with `splitty review`. A request for changes reaches you as the refusal of
+`ExitPlanMode` with the review; revise the plan as it asks and leave plan mode again.
+
 ## Hand a file to the user
 
 From an ordinary pane (not under `SPLITTY_AGENT_SOCK`), offer a file on this server to

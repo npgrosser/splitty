@@ -230,6 +230,15 @@ export class GhosttyTerminalEmulator implements TerminalEmulator {
     this.terminal.paste(text);
   }
 
+  get bracketedPaste(): boolean {
+    try {
+      return this.terminal.hasBracketedPaste();
+    } catch {
+      // Not opened yet: no program has asked for anything.
+      return false;
+    }
+  }
+
   clear(): void {
     this.terminal.clear();
   }

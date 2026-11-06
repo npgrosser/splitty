@@ -26,16 +26,23 @@ mod validate;
 
 pub use effects::Effect;
 pub use grid::{find_neighbor, project_grid, PaneRect};
-pub use ops::{Arrangement, Direction, Op, ScreenOp};
+pub use ops::{Arrangement, Direction, Op, ScreenOp, ViewerPlacement};
 pub use state::{
-    equal_sizes, replace_node, Axis, FloatBounds, FloatingEntry, LayoutNode, PaneRole, PaneState,
-    ParentInfo, ScreenInfo, ScreenState, SessionEntry, SessionStatus, SlotLocation, WorkspaceState,
-    SCRATCHPAD_LIMIT,
+    equal_sizes, replace_node, AnnotationKind, AnnotationReply, AnnotationStatus, AnnotationTarget,
+    AnnotationView, Axis, FloatBounds, FloatingEntry, LayoutNode, PaneRole, PaneState, ParentInfo,
+    ReplyAuthor, ReplyFrom, ReviewWait, ScreenInfo, ScreenState, SentEntry, SessionEntry,
+    SessionStatus, SlotLocation, ViewerAnnotation, ViewerSource, ViewerState, WorkspaceState,
+    ANNOTATION_CONTEXT_LIMIT, ANNOTATION_COUNT_LIMIT, ANNOTATION_LINE_LIMIT,
+    ANNOTATION_PANE_TEXT_LIMIT, ANNOTATION_TEXT_LIMIT, MARK_SENT_LIMIT, REPLY_COUNT_LIMIT,
+    REPLY_TITLE_LIMIT, SCRATCHPAD_LIMIT, VIEWER_PATH_LIMIT, VIEWER_TEXT_LIMIT, VIEWER_TITLE_LIMIT,
 };
 pub use store::Store;
 
-pub use reducer::{reduce_screen, reduce_workspace};
-pub use validate::validate_screen_op;
+pub use reducer::{reduce_screen, reduce_workspace, shown_viewer};
+pub use validate::{
+    annotation_id_is_valid, reply_id_is_valid, reply_text_is_valid, validate_screen_op,
+    viewer_path_is_valid,
+};
 
 use thiserror::Error;
 
@@ -127,6 +134,114 @@ pub enum MuxError {
 
     #[error("a scratchpad holds at most {limit} bytes, got {got}")]
     ScratchpadTooLong { limit: usize, got: usize },
+
+    #[error(
+        "a viewer's file path must be absolute and at most {} bytes long, and hold no leading //, backslash, . or .. segment, control character or invisible formatting character",
+        state::VIEWER_PATH_LIMIT
+    )]
+    ViewerPathInvalid,
+
+    #[error("a viewer's text holds at most {limit} bytes, got {got}")]
+    ViewerTextTooLong { limit: usize, got: usize },
+
+    #[error(
+        "a viewer's title must have 1 to {} characters and no control characters",
+        state::VIEWER_TITLE_LIMIT
+    )]
+    ViewerTitleInvalid,
+
+    #[error("a viewer's cwd must be an absolute path")]
+    ViewerCwdNotAbsolute,
+
+    #[error("pane {0} is not a viewer pane")]
+    NotAViewerPane(PaneId),
+
+    #[error("an annotation op carries 1 to {limit} entries, got {got}")]
+    AnnotationBatchInvalid { limit: usize, got: usize },
+
+    #[error("an annotation ID must be ann- and 16 lowercase hex characters")]
+    AnnotationIdInvalid,
+
+    #[error("annotation {0} appears more than once in the op")]
+    AnnotationRepeated(String),
+
+    #[error("annotation {id}: {reason}")]
+    AnnotationInvalid { id: String, reason: &'static str },
+
+    #[error(
+        "annotation {id}: its lines must lie between 1 and {}, the first not after the last",
+        state::ANNOTATION_LINE_LIMIT
+    )]
+    AnnotationLinesInvalid { id: String },
+
+    #[error("annotation {id}: its {field} holds at most {limit} bytes, got {got}")]
+    AnnotationFieldTooLong {
+        id: String,
+        field: &'static str,
+        limit: usize,
+        got: usize,
+    },
+
+    #[error("a viewer pane holds at most {limit} annotations, got {got}")]
+    AnnotationsTooMany { limit: usize, got: usize },
+
+    #[error("a viewer pane's annotations hold at most {limit} bytes of text, got {got}")]
+    AnnotationsTooLong { limit: usize, got: usize },
+
+    #[error("annotation {id}: {reason}")]
+    AnnotationPutInvalid { id: String, reason: &'static str },
+
+    #[error("pane {pane} holds no annotation {id}")]
+    AnnotationNotFound { pane: PaneId, id: String },
+
+    #[error("pane {pane} holds no annotation #{number}")]
+    AnnotationNumberNotFound { pane: PaneId, number: u32 },
+
+    #[error("annotation #{number} of pane {pane} has not been handed over")]
+    AnnotationNotSent { pane: PaneId, number: u32 },
+
+    #[error("a reply op carries 1 to {limit} entries, got {got}")]
+    ReplyBatchInvalid { limit: usize, got: usize },
+
+    #[error("a reply ID must be rep- and 16 lowercase hex characters")]
+    ReplyIdInvalid,
+
+    #[error("reply {0} appears more than once in the pane or the op")]
+    ReplyRepeated(String),
+
+    #[error("reply {id}: {reason}")]
+    ReplyInvalid { id: String, reason: &'static str },
+
+    #[error("reply {id}: its text holds at most {limit} bytes, got {got}")]
+    ReplyTooLong {
+        id: String,
+        limit: usize,
+        got: usize,
+    },
+
+    #[error("reply {0} is an agent's reply, which a window does not change")]
+    AgentReplyPut(String),
+
+    #[error("a thread holds at most {limit} replies, got {got}")]
+    RepliesTooMany { limit: usize, got: usize },
+
+    #[error("mark_sent carries 1 to {limit} entries, got {got}")]
+    MarkSentBatchInvalid { limit: usize, got: usize },
+
+    #[error("mark_sent takes annotation and reply IDs only")]
+    MarkSentIdInvalid,
+
+    #[error("replace applies only to a text document opened without newPaneId")]
+    ViewerReplaceInvalid,
+
+    #[error("viewer pane {0} already has a process waiting for its review")]
+    ReviewWaitBusy(PaneId),
+
+    #[error("viewer pane {0} shows another revision of its document than the one to review")]
+    ReviewRevisionChanged(PaneId),
+
+    #[error("no viewer pane holds the wait {0}")]
+    ReviewWaitNotFound(String),
 
     #[error("{0}")]
     Internal(String),

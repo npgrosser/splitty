@@ -36,6 +36,12 @@ pub const MSG_HIDE: &str = "hide";
 pub const MSG_MUX_OP: &str = "mux.op";
 pub const MSG_MUX_RESYNC: &str = "mux.resync";
 
+/// One chunk of a viewer pane's document (`viewer-panes`, Reading A Document).
+pub const MSG_VIEWER_READ: &str = "viewer.read";
+/// A window's answer to a process waiting for a review of a viewer pane
+/// (`mux-protocol`, Review Answers).
+pub const MSG_VIEWER_REVIEW_ANSWER: &str = "viewer.review_answer";
+
 // ---------------------------------------------------------------------------
 // Request — transport-agnostic client-to-server message
 // ---------------------------------------------------------------------------
@@ -588,16 +594,23 @@ impl ServerEvent {
                 "layout-arrange-v1".into(),
                 // mux-protocol, Selected Tabs Reach the Server.
                 "tab-select-v1".into(),
+                // viewer-panes, Viewer Capability.
+                "viewer-v1".into(),
+                // viewer-annotations, Annotations Capability.
+                "viewer-annotations-v1".into(),
             ],
             server_mode,
         }
     }
 
+    /// A screen's snapshot, without the text of its `text` viewer documents
+    /// (`viewer-panes`, Document Text Outside Snapshots); viewer annotations
+    /// stay, since windows show them (`viewer-annotations`).
     pub fn mux_screen_snapshot(screen: ScreenState) -> Self {
         Self::MuxScreenSnapshot {
             id: generate_event_id(),
             timestamp: now_millis(),
-            screen,
+            screen: screen.without_viewer_texts(),
         }
     }
 
@@ -718,7 +731,9 @@ mod tests {
                 "managed-jobs-v1",
                 "scratchpad-v1",
                 "layout-arrange-v1",
-                "tab-select-v1"
+                "tab-select-v1",
+                "viewer-v1",
+                "viewer-annotations-v1"
             ])
         );
         assert_eq!(wire["type"], "mux.welcome");

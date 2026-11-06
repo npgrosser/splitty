@@ -19,6 +19,7 @@
   import SettingsPanel from "./SettingsPanel.svelte";
   import type { DockviewApi } from "dockview-core";
   import { sessionForPane } from "../../lib/connection/screen_binding.ts";
+  import { isViewerPanel } from "../../lib/viewer/panel.ts";
   import { unreadCountForScreen, unreadForPane, unreadTitlesForScreen } from "../../stores/notifications.svelte.ts";
   import { markPaneRead } from "../../lib/notifications.ts";
   import { hostIndicator, hostTooltip, type HostIndicator } from "../../lib/remote/screen_status.ts";
@@ -233,6 +234,8 @@
     groupId: string;
     title: string;
     isBaseShell: boolean;
+    /** A viewer pane: a document, neither a running process nor an idle shell. */
+    isViewer: boolean;
   }
 
   // ── Collect pane info for a screen ──
@@ -240,12 +243,14 @@
     const api = screenApis.get(screenId);
     if (!api) return [];
     return api.panels.map((panel) => {
-      const session = sessionForPane(api, panel.id);
+      const isViewer = isViewerPanel(panel);
+      const session = isViewer ? undefined : sessionForPane(api, panel.id);
       return {
         paneId: panel.id,
         groupId: String((panel.group as any)?.id ?? ""),
-        title: panel.title ?? "Terminal",
-        isBaseShell: !session || session.lastIsBaseShell,
+        title: panel.title ?? (isViewer ? "Viewer" : "Terminal"),
+        isBaseShell: !isViewer && (!session || session.lastIsBaseShell),
+        isViewer,
       };
     });
   }
@@ -525,12 +530,15 @@
               {@const paneNotif = unreadForPane(screen.conn, pane.paneId)}
               <button
                 class="drawer-pane-item"
-                class:running={!pane.isBaseShell}
+                class:running={!pane.isBaseShell && !pane.isViewer}
                 class:idle={pane.isBaseShell}
+                class:viewer={pane.isViewer}
                 title={pane.title || "shell"}
                 onclick={(e) => { e.stopPropagation(); markPaneRead(screen.conn, pane.paneId); onActivatePane(screen.id, pane.paneId); }}
               >
-                {#if icon}
+                {#if pane.isViewer}
+                  <span class="drawer-pane-doc" aria-hidden="true"><svg width="10" height="10" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M4 1.5h5.5L13 5v9.5H4z"/><path d="M9.5 1.5V5H13"/></svg></span>
+                {:else if icon}
                   <span class="drawer-pane-icon">{icon}</span>
                 {:else}
                   <span class="drawer-pane-dot"></span>
@@ -822,6 +830,8 @@
 .drawer-pane-item.running .drawer-pane-dot::after { background: var(--splitty-text-primary); }
 
 .drawer-pane-icon { flex-shrink: 0; width: 12px; text-align: center; font-size: 10px; line-height: 1; }
+.drawer-pane-doc { flex-shrink: 0; width: 12px; display: flex; align-items: center; justify-content: center; }
+.drawer-pane-item.viewer { color: var(--splitty-text-secondary); }
 .drawer-pane-item.running .drawer-pane-icon { color: var(--splitty-text-primary); font-size: 12px; filter: drop-shadow(0 0 2px currentColor); }
 .drawer-pane-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 

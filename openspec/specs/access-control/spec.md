@@ -270,7 +270,7 @@ Each server process SHALL offer a local control channel as a Unix socket. A daem
 - **THEN** the new daemon's control socket has the path the shell's `SPLITTY_SOCK` names, and `splitty list-screens` run in that shell reaches the new daemon
 
 ### Requirement: Control Socket Route Set
-The owner control socket SHALL route only these multiplexer endpoints: `GET /api/mux/state`, `GET /api/mux/screens`, `GET /api/mux/screen/{id}`, `POST /api/mux/op`, `GET /api/mux/neighbor`, `GET /api/mux/status` and `POST /api/session/{id}/send`, plus `POST /api/editor/open` for confirmed client editor requests, `POST /api/file/offer` for file offers the user saves in a window, and the job and local agent-administration endpoints specified in `control-api`. Every other path MUST answer 404 there, in particular configuration, shell profiles, themes, templates, stats, and the credential-minting endpoints `/api/session`, `/api/bootstrap` and `/api/ws-ticket`. The separate restricted agent sockets SHALL expose only their fixed subset below. No local socket SHALL mint browser or network credentials.
+The owner control socket SHALL route only these multiplexer endpoints: `GET /api/mux/state`, `GET /api/mux/screens`, `GET /api/mux/screen/{id}`, `POST /api/mux/op`, `GET /api/mux/neighbor`, `GET /api/mux/status` and `POST /api/session/{id}/send`, plus `POST /api/editor/open` for confirmed client editor requests, `POST /api/file/offer` for file offers the user saves in a window, `GET /api/viewer/comments` and `POST /api/viewer/comments/reply` for what the user handed over on viewer panes and agents' replies to it, `POST /api/viewer/review/wait` for waits for the user's review, and the job and local agent-administration endpoints specified in `control-api`. Every other path MUST answer 404 there, in particular configuration, shell profiles, themes, templates, stats, and the credential-minting endpoints `/api/session`, `/api/bootstrap` and `/api/ws-ticket`. The separate restricted agent sockets SHALL expose only their fixed subset below. No local socket SHALL mint browser or network credentials.
 
 #### Scenario: Multiplexer status over the socket
 - **WHEN** a pane process sends `GET /api/mux/status` over the owner control socket without any credential
@@ -293,6 +293,11 @@ The owner control socket SHALL route only these multiplexer endpoints: `GET /api
 - **WHEN** the owner socket receives `POST /api/file/offer`
 - **THEN** it may offer the file to the windows of the session, which save it only on the user's Save
 - **AND** the same route on a restricted grant socket answers 404
+
+#### Scenario: Comments on the owner socket
+- **WHEN** the owner socket receives `GET /api/viewer/comments` or `POST /api/viewer/comments/reply`
+- **THEN** it returns only what the user handed over on the viewer panes of the caller's screen, and adds at most an agent's reply
+- **AND** the same routes and `POST /api/viewer/review/wait` on a restricted grant socket answer 404
 
 ### Requirement: Pane Environment Carries No Credential
 When the server spawns a terminal session, it SHALL pass the owner control socket path as `SPLITTY_SOCK` for ordinary sessions, or the restricted grant socket as `SPLITTY_AGENT_SOCK` for an agent-owned managed job. An agent-owned job MUST NOT receive `SPLITTY_SOCK`, including an inherited value. The server MUST NOT set the process token, a session id used as an authentication credential, a bootstrap code, a ticket or the server's HTTP address in the session's environment (in particular it sets neither `SPLITTY_TOKEN` nor `SPLITTY_SERVER`). Other variables given to sessions are defined in `terminal-sessions`.
@@ -623,7 +628,7 @@ Saved preferences SHALL contain at most 32 entries per target and 256 in total, 
 - **AND** neither it nor the runtime error exposed by GET contains a Splitty credential
 
 ### Requirement: File Transfers Need The User
-A client SHALL send `save_image` and `upload` only for the user's own drop or paste into a pane or a scratchpad, only to the server of that pane's connection, and SHALL paste or insert the returned paths only there. A server SHALL store an upload under its temporary directory by default, or under the existing absolute directory explicitly selected by the user. In both cases the server SHALL sanitize the filename; `name` SHALL NOT select a directory. Durable uploads SHALL never overwrite files or follow an existing destination symlink. A client SHALL read an offered file only after the user chose Save for it, only from the connection that offered it, and SHALL save it only as a download of the window under its sanitized name. File bytes SHALL be relayed by the hub like any other session message and SHALL NOT be passed to a shell.
+A client SHALL send `save_image` and `upload` only for the user's own drop or paste into a pane or a scratchpad, or for a review the user sends to a terminal pane as a file (see `viewer-annotations`), only to the server of that pane's connection, and SHALL paste or insert the returned paths only there. A server SHALL store an upload under its temporary directory by default, or under the existing absolute directory explicitly selected by the user. In both cases the server SHALL sanitize the filename; `name` SHALL NOT select a directory. Durable uploads SHALL never overwrite files or follow an existing destination symlink. A client SHALL read an offered file only after the user chose Save for it, only from the connection that offered it, and SHALL save it only as a download of the window under its sanitized name. File bytes SHALL be relayed by the hub like any other session message and SHALL NOT be passed to a shell.
 
 #### Scenario: Upload name with a path
 - **WHEN** an upload names `../../.ssh/authorized_keys`
@@ -632,6 +637,10 @@ A client SHALL send `save_image` and `upload` only for the user's own drop or pa
 #### Scenario: Offer without Save
 - **WHEN** a host offers a file and the user does nothing
 - **THEN** the window reads nothing and the offer expires
+
+#### Scenario: A review sent as a file
+- **WHEN** the user sends a review to a terminal pane as a file
+- **THEN** the window uploads it to the server of that pane's connection under its temporary directory and inserts the returned path only in that pane
 
 ### Requirement: Showing A Saved Download
 A desktop shell SHALL show a file in the system file manager only for a download of its main window that it saved itself and that finished, named by the page with that download's `blob:` URL (`reveal_download` in the Tauri app, `download:reveal` in the Electron app, both under Desktop Shell Command Scope). It SHALL NOT take a path or a file name from the page, SHALL NOT tell the page where it saved the file, and SHALL refuse every other URL, an unfinished, failed or cancelled download, and a download beyond the most recent 32.
@@ -769,3 +778,45 @@ A reverse-share reservation SHALL be durable before exposure and cover actual lo
 - **WHEN** the same verified machine, boot and PID namespace reports a different immutable birth identity for the saved worker PID
 - **THEN** recovery may release that worker generation without signaling the replacement process
 - **AND** a changed effective UID without a birth-identity change does not authorize release
+
+### Requirement: Viewer Documents Stay With Their Connection
+A client SHALL read a viewer pane's document only over the connection whose screen holds the pane, and SHALL show it only in that pane. A server SHALL read for a viewer pane only the file its record names, only to answer `viewer.read` on the connection that sent it, and SHALL never write, create or delete a file for a viewer pane. Every client connection of a server MAY open viewer panes and read their documents, the authority it already has by starting a terminal on that server. The control API, and with it the processes in panes, MAY open viewer panes but SHALL NOT read a document's content or a `text` document's text, except the passages that annotations the user handed over quote (see `viewer-annotations`, Agents Read And Reply To Handed-Over Threads). A restricted agent grant socket SHALL do neither.
+
+#### Scenario: A host names a local path
+- **WHEN** a host's snapshot holds a viewer pane naming `/home/me/.ssh/id_ed25519` and the window shows that host's screen next to local screens
+- **THEN** the window reads the document only over the host's connection, the local server reads nothing, and the host answers from its own file system
+
+#### Scenario: A process in a pane reads the workspace
+- **WHEN** a viewer pane shows a terminal selection and a process in a pane sends `GET /api/mux/state` over the owner control socket
+- **THEN** the answer holds the viewer pane without the selected text
+
+#### Scenario: A handed-over quote
+- **WHEN** the user handed over a comment on a passage of a terminal selection shown in a viewer pane, and a process in a pane sends `GET /api/viewer/comments` over the owner control socket
+- **THEN** the answer holds the comment with its quoted passage, and neither the rest of the selected text nor annotations the user has not handed over
+
+#### Scenario: Grant socket
+- **WHEN** an agent grant socket receives `POST /api/mux/op` with `open_viewer`
+- **THEN** it answers 404 and no pane appears
+
+### Requirement: Rendered Documents Are Inert
+A client SHALL render a Markdown or HTML document without executing any script, event handler attribute or `javascript:` URL in it, without frames, objects, embedded documents or forms, and without loading anything over the network or from Splitty's own origin: images SHALL show only from `data:` URLs. The rendered document SHALL stay inside its pane: its styles SHALL apply only within the rendered document, and nothing it positions SHALL cover anything outside the pane. A link SHALL open an `http:` or `https:` URL through the external opener, a relative link the named file in a viewer pane, and a link to an anchor the position within the document; any other link SHALL do nothing. Rendering SHALL need no change to Frontend Security Headers: `frame-src 'none'` stays.
+
+#### Scenario: A script in an HTML report
+- **WHEN** a viewer pane renders an HTML file holding `<script>`, an `onerror` attribute and a `javascript:` link
+- **THEN** no script runs and the link does nothing when clicked
+
+#### Scenario: An image from the server's origin
+- **WHEN** a Markdown document holds `![x](/api/mux/state)`
+- **THEN** the window sends no request for it and shows the image's alt text
+
+#### Scenario: A load hidden in a style
+- **WHEN** an HTML document's style sheet or `style` attribute holds `background: var(--x, url(/api/mux/state))` or a `url()` spelled with CSS escapes inside `var()`
+- **THEN** the window sends no request for it
+
+#### Scenario: An overlay
+- **WHEN** an HTML document holds an element with `position: fixed` covering the whole viewport
+- **THEN** that element stays inside the viewer pane, and the rest of the window remains usable
+
+#### Scenario: A link to a website
+- **WHEN** the user clicks an `https:` link in a rendered document
+- **THEN** the system browser opens it, and the window does not navigate

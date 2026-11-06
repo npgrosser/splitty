@@ -39,14 +39,18 @@ Line numbers refer to the tree at commit `b495e1c`.
   `connection-scoped-frontend`; before that change the group header's buttons sent no op at all.
 - **Ordinary session status never leaves `starting` in the model** (managed jobs added by `cli-control` do track their lifecycle), and ordinary pane title/cwd/role are never updated after
   creation. The daemon's respawn check for exited sessions (`daemon/mod.rs:108`) therefore never sees live data.
-- Pane roles `webview` and `viewer` exist in the model, but no op creates them.
+- The pane role `webview` exists in the model, but no op creates it (`viewer` panes come from `open_viewer` since
+  `splitty-open`).
+- A job pane placed as a tab does not become its slot's active pane, unlike `new_tab` and `open_viewer` with `tab`
+  (found on 2026-11-06).
 
 ### mux-protocol
 
 - **Layout-only ops never reach other clients.** A WebSocket op that spawns or ends no session sends no nudge
   (`ws/mux_handler.rs:245`), so rename, `resize_split`, `move_pane`, float and `set_active_screen` drift silently
   between clients. Matters as soon as two clients are open (roadmap 101). Exceptions: `move_pane_to_screen`,
-  `set_scratchpad` and, since `arrange-panes`, `arrange_panes`, which carries a window's drags and divider moves.
+  `set_scratchpad` and, since `arrange-panes`, `arrange_panes`, which carries a window's drags and divider moves;
+  since `splitty-open` also `open_viewer` and a `close_pane` that ends no session.
 - **Rejected ops are only reported when they carry `newPaneId`** (or are `arrange_panes`, since `arrange-panes`), and an op that fails to parse is dropped before
   `mux.op_failed` even then (`ws/mux_handler.rs:194`); the client waits for its own timeout.
 - **`mux.pane_spawned` is sent even when the spawn failed**; effect errors are only logged
@@ -91,6 +95,12 @@ Line numbers refer to the tree at commit `b495e1c`.
   was already redeemed, and the launcher never sends the `bootstrap` stdin line the server supports
   (contradicting the comment at `main.rs:797-806`).
 - `startedAt` / `daemon status` show raw Unix seconds; `chrono_now` claims ISO 8601 (`main.rs:1215`).
+- **A `state.json` with a record this version does not know is dropped as a whole** (found on 2026-11-06 with
+  `splitty-open`). `load_state` returns `None` on any parse error (`daemon/persistence.rs`), so a pane role or a
+  viewer `source` kind written by a newer version, after a downgrade, starts an empty workspace, and the next
+  change overwrites the file. Tolerant variants or a backup of the unreadable file would keep it.
+- **Debug logs carry client text** (found on 2026-11-06): the mux handler logs every op at debug level, including
+  a scratchpad's text and a viewer pane's terminal selection.
 - **A macOS host detects no listening ports** (found on 2026-10-19 with `remote-macos-hosts`). The port scan reads
   `/proc` only (`pty/ports.rs`), so a Mac host's caption and Hosts panel offer no detected ports and
   `remote.autoForwardPorts` forwards nothing there; forwarding a port by number works. Candidate fix: `lsof -nP
@@ -178,6 +188,8 @@ Hardening candidates, not open holes.
   (`http/session.rs`).
 - `state.json` and `daemon.log` are written with the default umask, protected only by the 0700 directory
   (`daemon/persistence.rs:23-26`, `main.rs:1017-1021`).
+- `grant_command_allowed` lets layout commands through to grant sockets whose routes answer 404 there, so an agent
+  under a grant gets a not-found error instead of a refusal (found on 2026-11-06).
 - Binding `[::1]` passes the loopback and Host checks, but the origin allowlist only has `127.0.0.1`/`localhost`
   (`http/mod.rs:61-66`), so the UI gets 403 from its own server. Broken, not insecure.
 - Not specced yet, needs a capability decision (likely a future `desktop-shell`): navigation and opener policy of
@@ -291,6 +303,18 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
   `overlay.toggle`, the Drawer's "Templates" placeholder, `SplittyWebSocket.reconnect`, `setAuthState`,
   `loadTheme`, the unread `terminal.theme` setting, and the identical `getUnreadForPane`/`getUnreadForSession`.
   `editor_target.ts` exists in `frontend/`, `frontend-electron/` and, in Rust, in the Tauri shell.
+- Found on 2026-11-06 with `splitty-open`:
+  - `terminalDirectoryItems` matches only `terminal-…` pane IDs, so terminals the CLI creates (`pane-…`) get no folder
+    actions in their context menu.
+  - `applyScreenSnapshot` restores the window's previous active tabs, so a snapshot alone cannot change the shown tab;
+    viewer panes whose revision rose and new viewer panes the server made active are the exceptions.
+  - A snapshot that adds, removes or moves a terminal pane still rebuilds the screen (only viewer and job panes are
+    applied in place), and keys typed before the rebuilt terminal has attached again are lost.
+  - A panel added in the window can be closed by a snapshot the server built before it received the window's op.
+  - A grid that holds only viewer panes extracts to a template the server refuses (an empty slot), as a grid without
+    panes did before.
+  - The server commands `pane.copy` and `pane.clear` do nothing for viewer panes.
+  - `socket.ts`: a doc comment sits above the wrong function, and `belongsToConnection` is used only by its test.
 
 ## Stale documentation
 
@@ -346,6 +370,8 @@ that area touches them.
 - **workspace-model:** `move_pane` sizes (`resultingSizes`, `sourceResultingSizes`); successful `float_pane`/`dock_pane`/`move_float`; active-pane fallback
   in a stack; closing the last root pane; closing a floating pane; `newPaneIndex: 0`; `set_active_screen`;
   active-screen fallback on close.
+- **web frontend:** `RenderedDocument`'s fallback for engines without `adoptedStyleSheets` (the cleaned sheet
+  serialized into a `<style>` of the shadow root and parsed again) has no test.
 - **mux-protocol:** everything except the binary frame layout: welcome contents, heartbeat, malformed input,
   resync, `pane_spawned`/`op_failed`, nudge propagation and spawn-before-nudge ordering, `command` broadcast,
   disconnect, client reconnect.
@@ -392,8 +418,10 @@ three times in a row. Both pick local ports that another test running in paralle
 - `splitty-remote` `tunnel::supervisor::tests::forwards_take_the_asked_port_or_any_free_one`: `connect` returned
   fewer than two forwards (`free_port()` releases its reservation before the forward binds).
 - `splitty-server` `hub::forwards::tests::ipv6_occupation_blocks_saved_open_and_supervisor_rebuild_without_moving`:
-  binding `[::1]` on the port the forward had just used again failed (seen 2026-10-31 under the same load; passed
-  in the next run).
+  binding `[::1]` on the port the forward had just used again failed (seen 2026-10-31 under the same load and
+  again on 2026-11-06; passed in the next run and five times alone).
+- `splitty-server` `hub::reverse::tests::a_host_has_at_most_32_reverse_forwards`: `HostPortConflict` for a port
+  another test had taken (seen on 2026-11-06 in a full run; passed alone and in the rerun).
 - `splitty-core` unit tests for `x86_64-unknown-linux-musl` in release mode (the payload job of the release
   workflow): the test process sometimes dies with SIGSEGV while the `keeper::process` and `pty::session` tests
   spawn processes, in about 1 of 15 runs, already at v0.1.29. The v0.1.30 release run needed a rerun of that job.

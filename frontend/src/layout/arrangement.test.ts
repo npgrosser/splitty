@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { arrangementSlots, gridArrangement, layoutArrangement, sameArrangement, withActivePane } from "./arrangement.ts";
+import { arrangementSlots, gridArrangement, layoutArrangement, sameArrangement, sameShape, withActivePane, withoutPanes } from "./arrangement.ts";
 import type { LayoutNode } from "../lib/protocol/types.ts";
 
 const leaf = (views: string[], size: number, activeView = views[0]) =>
@@ -97,5 +97,48 @@ describe("arrangement of the grid", () => {
     ]);
     expect(arrangementSlots(root)[0].activePaneId).toBe("p1");
     expect(withActivePane(root, "p9")).toEqual(root);
+  });
+
+  // What a snapshot applied in place compares (layout/screen_snapshot.ts).
+  it("leaves panes out, and the slots and splits they leave empty", () => {
+    // p1 | (p2 above v1 v2)
+    const root = layoutArrangement({
+      type: "split", id: "row", axis: "horizontal", sizes: [0.5, 0.5], children: [
+        { type: "slot", id: "a", paneIds: ["p1"] },
+        { type: "split", id: "column", axis: "vertical", sizes: [0.5, 0.5], children: [
+          { type: "slot", id: "b", paneIds: ["p2"] },
+          { type: "slot", id: "c", paneIds: ["v1", "v2"], activePaneId: "v2" },
+        ] },
+      ],
+    });
+    expect(withoutPanes(root, new Set(["v2"]))).toMatchObject({
+      type: "split", axis: "horizontal", children: [
+        { type: "slot", paneIds: ["p1"] },
+        { type: "split", axis: "vertical", children: [{ type: "slot", paneIds: ["p2"] }, { type: "slot", paneIds: ["v1"] }] },
+      ],
+    });
+    // The column keeps one slot, which takes its place in the row.
+    expect(withoutPanes(root, new Set(["v1", "v2"]))).toEqual({
+      type: "split", axis: "horizontal", sizes: [0.5, 0.5], children: [
+        { type: "slot", paneIds: ["p1"] },
+        { type: "slot", paneIds: ["p2"] },
+      ],
+    });
+    expect(withoutPanes(root, new Set(["p1", "p2", "v1", "v2"]))).toEqual({ type: "slot", paneIds: [] });
+  });
+
+  it("compares the shape of two arrangements without their sizes and active tabs", () => {
+    const row = (sizes: number[], left: string[], active?: string) => layoutArrangement({
+      type: "split", id: "row", axis: "horizontal", sizes, children: [
+        { type: "slot", id: "a", paneIds: left, ...(active ? { activePaneId: active } : {}) },
+        { type: "slot", id: "b", paneIds: ["p3"] },
+      ],
+    });
+    expect(sameShape(row([0.5, 0.5], ["p1", "p2"], "p2"), row([0.8, 0.2], ["p1", "p2"], "p1"))).toBe(true);
+    expect(sameShape(row([0.5, 0.5], ["p1", "p2"]), row([0.5, 0.5], ["p2", "p1"]))).toBe(false);
+    expect(sameShape(row([0.5, 0.5], ["p1", "p2"]), row([0.5, 0.5], ["p1"]))).toBe(false);
+    const column = { ...row([0.5, 0.5], ["p1", "p2"]), axis: "vertical" as const };
+    expect(sameShape(row([0.5, 0.5], ["p1", "p2"]), column)).toBe(false);
+    expect(sameShape(row([0.5, 0.5], ["p1", "p2"]), { type: "slot", paneIds: ["p1", "p2", "p3"] })).toBe(false);
   });
 });

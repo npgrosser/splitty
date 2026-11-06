@@ -1,5 +1,7 @@
 import { DockviewComponent, type DockviewApi, type AddPanelOptions, type DockviewTheme } from "dockview-core";
 import { TerminalPaneRenderer, type TerminalPaneParams } from "../panes/terminal_pane.ts";
+import { ViewerPaneRenderer } from "../panes/viewer_pane.ts";
+import { VIEWER_COMPONENT } from "../lib/viewer/panel.ts";
 import { getSplittyTheme } from "./dockview_theme.ts";
 import { SplittyTabRenderer } from "./tab_renderer.ts";
 import { GroupControlsRenderer } from "./group_controls_renderer.ts";
@@ -15,13 +17,16 @@ function nextPanelId(): string {
 /**
  * Manages a single DockviewComponent instance.
  *
- * Wraps the framework-agnostic dockview-core API, registers the terminal
- * component factory, and provides convenience methods for adding panes.
+ * Wraps the framework-agnostic dockview-core API, registers the terminal and
+ * viewer component factories, and provides convenience methods for adding
+ * panes.
  *
  * There is deliberately no "webview" component (security review
  * SR-01/SR-02): an unknown component name throws, so a stale layout or
  * template that still names one fails loudly instead of silently rendering an
- * iframe. Callers strip such panes before they reach dockview.
+ * iframe. Callers strip such panes before they reach dockview. The viewer
+ * component renders documents without a frame and runs nothing of them
+ * (`access-control`, Rendered Documents Are Inert).
  */
 export class DockviewManager {
   private dockview: DockviewComponent;
@@ -32,6 +37,8 @@ export class DockviewManager {
         switch (options.name) {
           case "terminal":
             return new TerminalPaneRenderer();
+          case VIEWER_COMPONENT:
+            return new ViewerPaneRenderer();
           default:
             throw new Error(`Unknown component: ${options.name}`);
         }

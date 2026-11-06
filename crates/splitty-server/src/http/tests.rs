@@ -28,6 +28,7 @@ use crate::hub::{Hub, HOST_LOST, VERSION};
 
 const WAIT: Duration = Duration::from_secs(10);
 
+mod annotations;
 mod conformance;
 mod editor;
 mod files;
@@ -36,7 +37,9 @@ mod managed_jobs;
 mod move_pane;
 mod mux_tabs;
 mod pty_size;
+mod reviews;
 mod scratchpad;
+mod viewer;
 
 /// The state `serve` builds, for a server on `listen_addr` with its files in
 /// `dir`.

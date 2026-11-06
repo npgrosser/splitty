@@ -302,6 +302,10 @@ export class XtermTerminalEmulator implements TerminalEmulator {
     this.terminal.paste(text);
   }
 
+  get bracketedPaste(): boolean {
+    return this.terminal.modes.bracketedPasteMode;
+  }
+
   clear(): void {
     this.terminal.clear();
   }

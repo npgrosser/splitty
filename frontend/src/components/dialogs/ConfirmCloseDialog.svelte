@@ -9,11 +9,20 @@
     applicationTitle?: string;
     /** How many closing panes have a scratchpad that holds text. */
     scratchpads?: number;
+    /** How many annotations the closing viewer panes hold. */
+    annotations?: number;
     onConfirm: () => void;
     onCancel: () => void;
   }
 
-  let { open, processName, applicationTitle, scratchpads = 0, onConfirm, onCancel }: Props = $props();
+  let { open, processName, applicationTitle, scratchpads = 0, annotations = 0, onConfirm, onCancel }: Props = $props();
+
+  const title = $derived(
+    processName ? "Close running process?"
+    : scratchpads > 0 && annotations > 0 ? "Close and lose scratchpad text and annotations?"
+    : annotations > 0 ? "Close and lose annotations?"
+    : "Close and lose scratchpad text?",
+  );
 
   const theme = $derived(getTheme());
 
@@ -38,9 +47,7 @@
     role="dialog"
   >
     <div class="dialog-panel">
-      <h2 class="dialog-title">
-        {processName ? "Close running process?" : "Close and lose scratchpad text?"}
-      </h2>
+      <h2 class="dialog-title">{title}</h2>
 
       {#if processName}
         <p class="dialog-text">
@@ -57,6 +64,11 @@
         <p class="dialog-text">
           {scratchpads === 1 ? "A scratchpad holds text, which" : `${scratchpads} scratchpads hold text, which`}
           closing ends with {scratchpads === 1 ? "its session" : "their sessions"}.
+        </p>
+      {/if}
+      {#if annotations > 0}
+        <p class="dialog-text">
+          {annotations === 1 ? "Closing deletes an annotation and its replies." : `Closing deletes ${annotations} annotations and their replies.`}
         </p>
       {/if}
 
