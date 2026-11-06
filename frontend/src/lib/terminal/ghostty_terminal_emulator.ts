@@ -136,6 +136,7 @@ export class GhosttyTerminalEmulator implements TerminalEmulator {
     this.attachShiftEnterHandler(container);
     this.attachOptionArrowHandler(container);
     this.attachWheelHandler();
+    this.attachFocusReporting(container);
   }
 
   async openDeferred(container: HTMLElement): Promise<{ cols: number; rows: number }> {
@@ -293,6 +294,14 @@ export class GhosttyTerminalEmulator implements TerminalEmulator {
 
   // ── Internal ──
 
+  /**
+   * Bytes for the application, as if typed. Unlike xterm.js, ghostty-web's
+   * `input` writes to the screen unless `wasUserInput` is set.
+   */
+  private send(data: string): void {
+    this.terminal.input(data, true);
+  }
+
   private flushWrites(): void {
     if (this.writeBuf.length === 0) return;
     const chunks = this.writeBuf;
@@ -342,7 +351,7 @@ export class GhosttyTerminalEmulator implements TerminalEmulator {
       if (e.key === "Enter" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey) {
         e.preventDefault();
         e.stopImmediatePropagation();
-        this.terminal.input("\x1b[13;2u");
+        this.send("\x1b[13;2u");
       }
     };
     container.addEventListener("keydown", handler, true);
@@ -361,7 +370,7 @@ export class GhosttyTerminalEmulator implements TerminalEmulator {
       if (seq) {
         e.preventDefault();
         e.stopImmediatePropagation();
-        this.terminal.input(seq);
+        this.send(seq);
       }
     };
     container.addEventListener("keydown", handler, true);
@@ -392,9 +401,33 @@ export class GhosttyTerminalEmulator implements TerminalEmulator {
       const prefix = this.terminal.getMode(1) ? "\x1bO" : "\x1b[";
       const seq = wholeLines < 0 ? `${prefix}A` : `${prefix}B`;
       for (let i = 0; i < lines; i++) {
-        this.terminal.input(seq);
+        this.send(seq);
       }
       return true;
+    });
+  }
+
+  /**
+   * Focus reporting (DEC mode 1004), which ghostty-web tracks but never sends:
+   * `ESC [ I` when the pane gains focus and `ESC [ O` when it loses it,
+   * including to another window. Focus moves between the container and
+   * ghostty-web's hidden textarea count as staying focused.
+   */
+  private attachFocusReporting(container: HTMLElement): void {
+    let focused = false;
+    const inside = (target: EventTarget | null) => target !== null && container.contains(target as Node);
+    const report = (now: boolean) => {
+      if (now === focused) return;
+      focused = now;
+      if (this.terminal.hasFocusEvents()) this.send(now ? "\x1b[I" : "\x1b[O");
+    };
+    const onIn = (e: FocusEvent) => { if (!inside(e.relatedTarget)) report(true); };
+    const onOut = (e: FocusEvent) => { if (!inside(e.relatedTarget)) report(false); };
+    container.addEventListener("focusin", onIn);
+    container.addEventListener("focusout", onOut);
+    this.cleanups.push(() => {
+      container.removeEventListener("focusin", onIn);
+      container.removeEventListener("focusout", onOut);
     });
   }
 }
