@@ -1,6 +1,6 @@
 # Proposal
 
-> Draft created on 2026-11-04. Specs, design and tasks are written when this change is next. Part 1 of the sequence in `frontend-client-core` (design, "Sequence"); independent of parts 2 to 4. Related: `workspace-restore` (it rebuilds layouts with launch data too and may share the conversion), `review-pane` and `splitty-open` (pane kinds a template may hold later).
+> Planned on 2026-11-06 from the draft of 2026-11-04. Part 1 of the sequence in `frontend-client-core` (design, "Sequence"); independent of parts 2 to 4. Related: `workspace-restore` (it rebuilds layouts with launch data too and may share the conversion), `review-pane` and `splitty-open` (pane kinds a template may hold later).
 
 ## Why
 
@@ -20,12 +20,12 @@ Templates are applied and extracted in the window. The server only stores them.
   - The effect runner spawns each pane's session with the template's command, working directory (root plus relative directory), shell profile and restore mode.
   - The window attaches through `mux.pane_spawned`, as after a split. A rejected op comes back as `mux.op_failed`, and the window resyncs. Other windows get a nudge. Every window, the CLI and a reload see the result.
 - **Extract on the server.** The server builds a template from one of its screens: layout, floating entries, and per pane its command, working directory, profile and restore mode. The window only names and saves the result.
-- **Consent stays in the window.** A template's commands are still listed and confirmed before they run (SR-12). Which callers may apply a template that contains commands is settled with `access-control` when this change is next.
+- **Consent stays in the window.** A template's commands are still listed and confirmed before they run (SR-12). Only authenticated window session connections may apply templates; owner control and generic mux APIs reject this op.
 - **The window stops building layouts.** The template dialog sends the op. `layout/template_apply.ts`, `layout/template_extract.ts` and "apply in new screen" with its throwaway pane are removed. Against a server without the new capability, applying is unavailable and the host's update is offered (`frontend-client-core` CC-9).
 
 ## Capabilities
 
-To be decided when the change is next. Likely candidates:
+The following contracts cover the authoritative template path:
 
 ### New Capabilities
 
@@ -36,7 +36,7 @@ To be decided when the change is next. Likely candidates:
 - `workspace-model`: an op that replaces a screen's layout from a template, or creates a screen from one; whether the IDs of the new panes come from the client or the server.
 - `mux-protocol`: the op, its capability flag, the resulting `mux.pane_spawned` and nudges.
 - `access-control`: which connections may apply a template with commands.
-- `control-api`: extraction (an HTTP read beside `/api/templates`), and whether the CLI may apply a template.
+- `control-api`: extraction (an HTTP read beside `/api/templates`), with no CLI template application.
 
 ## Impact
 
