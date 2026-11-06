@@ -3930,7 +3930,7 @@ dependencies = [
 
 [[package]]
 name = "splitty-architecture"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "proc-macro2",
  "serde",
@@ -3941,7 +3941,7 @@ dependencies = [
 
 [[package]]
 name = "splitty-core"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -3968,7 +3968,7 @@ dependencies = [
 
 [[package]]
 name = "splitty-gui"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64 0.22.1",
  "gtk",
@@ -3995,7 +3995,7 @@ dependencies = [
 
 [[package]]
 name = "splitty-remote"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "dirs 6.0.0",
  "nix 0.29.0",
@@ -4012,7 +4012,7 @@ dependencies = [
 
 [[package]]
 name = "splitty-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "async-trait",
  "axum",
@@ -4052,7 +4052,7 @@ dependencies = [
 
 [[package]]
 name = "splitty-transport"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "rand 0.8.8",
  "serde",
