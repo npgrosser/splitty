@@ -536,11 +536,29 @@ mod linux_tests {
         nix::unistd::getuid().as_raw()
     }
 
+    /// A port nothing listens on, each once and outside the kernel's
+    /// automatic range, so that no parallel test binding port 0 takes it
+    /// before the relay binds it. The hub's tests take theirs from 20000 to
+    /// 29999 (`hub::testing::free_port`); these come from 30000 on.
     fn free_port() -> u16 {
-        StdListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .and_then(|listener| listener.local_addr())
-            .expect("free port")
-            .port()
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static NEXT: AtomicU32 = AtomicU32::new(30000);
+        let automatic: Vec<u16> = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+            .unwrap()
+            .split_whitespace()
+            .map(|number| number.parse().unwrap())
+            .collect();
+        loop {
+            let number = NEXT.fetch_add(1, Ordering::Relaxed);
+            assert!(number < 32000, "relay fixture port pool exhausted");
+            let port = u16::try_from(number).expect("bounded fixture port");
+            if (automatic[0]..=automatic[1]).contains(&port) {
+                continue;
+            }
+            if StdListener::bind((Ipv4Addr::LOCALHOST, port)).is_ok() {
+                return port;
+            }
+        }
     }
 
     fn private_dir(root: &Path) -> PathBuf {

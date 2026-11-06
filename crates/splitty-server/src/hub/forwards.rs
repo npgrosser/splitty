@@ -765,7 +765,7 @@ async fn supervise(
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::hub::testing::ScriptedHost;
+    use crate::hub::testing::{free_port, ScriptedHost};
     use futures::poll;
     use std::net::TcpListener;
     use std::time::Duration;
@@ -785,16 +785,6 @@ mod tests {
             }
             Err(error) => panic!("IPv6 probe failed for a reason other than absence: {error}"),
         }
-    }
-
-    fn free_port() -> u16 {
-        tunnel::reserve(PortForward {
-            local: 0,
-            remote: 5173,
-        })
-        .expect("free localhost")
-        .0
-        .local
     }
 
     async fn settle(manager: &Forwards) {

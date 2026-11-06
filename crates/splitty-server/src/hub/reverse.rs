@@ -791,17 +791,10 @@ fn valid(document: &ReversePreferences) -> bool {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
-    use crate::hub::testing::ScriptedHost;
+    use crate::hub::testing::{free_port, ScriptedHost};
     use std::net::{Ipv4Addr, TcpListener};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    fn free_port() -> u16 {
-        TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
-            .and_then(|listener| listener.local_addr())
-            .expect("free port")
-            .port()
-    }
 
     fn manager(host: &ScriptedHost, dir: &std::path::Path) -> Reverses {
         Reverses::new(Arc::new(host.clone()), dir.join("config"))

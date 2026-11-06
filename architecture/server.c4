@@ -158,7 +158,7 @@ model {
 
     http -> embed 'FrontendAssets, themed_index_html'
     http -> client_session 'WebSocket upgrade, WsState; PortWatch in tests'
-    http -> hub 'Hub, serve, known_hosts, remembered_screens, remember_screens, open_forward_with, forwards, stop_forward, forward_preferences, save_forward, forget_forward, reserve_local_port, open_reverse, reverses, stop_reverse, reverse_preferences, save_reverse, forget_reverse, ForwardError, Code, MAX_MESSAGE; a scripted host, HOST_LOST and VERSION in tests'
+    http -> hub 'Hub, serve, known_hosts, remembered_screens, remember_screens, open_forward_with, forwards, stop_forward, forward_preferences, save_forward, forget_forward, reserve_local_port, open_reverse, reverses, stop_reverse, reverse_preferences, save_reverse, forget_reverse, ForwardError, Code, MAX_MESSAGE; a scripted host, its fixture ports, HOST_LOST and VERSION in tests'
     control -> http 'AppState, build_control_router'
     control -> service 'Compose owner control without browser credentials'
 

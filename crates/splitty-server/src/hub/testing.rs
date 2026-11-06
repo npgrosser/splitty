@@ -28,6 +28,39 @@ use super::{Connector, Forwarding, HubError, VERSION};
 /// The daemon's first message on every bridge of a scripted host.
 pub const WELCOME: &str = r#"{"type":"mux.welcome","clientId":"c1","screens":[]}"#;
 
+/// A port nothing listens on here, on `127.0.0.1` or `::1`, which a forward
+/// therefore takes as asked. The hub's and the HTTP tests take their ports
+/// from this one pool, each port once and outside the kernel's automatic
+/// range: a port that a test frees is not handed to a parallel test, through
+/// the pool or through binding port 0, before the test has seen it free
+/// again. The relay's tests have a pool of their own from 30000 on.
+pub fn free_port() -> u16 {
+    use std::sync::atomic::AtomicU32;
+    static NEXT: AtomicU32 = AtomicU32::new(20000);
+    #[cfg(target_os = "linux")]
+    let automatic: Vec<u16> = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
+        .unwrap()
+        .split_whitespace()
+        .map(|number| number.parse().unwrap())
+        .collect();
+    loop {
+        let number = NEXT.fetch_add(1, Ordering::Relaxed);
+        assert!(number < 30000, "fixture port pool exhausted");
+        let port = u16::try_from(number).expect("bounded fixture port");
+        #[cfg(target_os = "linux")]
+        if (automatic[0]..=automatic[1]).contains(&port) {
+            continue;
+        }
+        let Ok(_listener) = std::net::TcpListener::bind(("127.0.0.1", port)) else {
+            continue;
+        };
+        let ipv6 = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port));
+        if !matches!(ipv6, Err(error) if error.kind() == std::io::ErrorKind::AddrInUse) {
+            return port;
+        }
+    }
+}
+
 /// What a scripted host does when the hub prepares it.
 #[derive(Clone, Copy)]
 pub enum Prepare {

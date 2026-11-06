@@ -459,17 +459,19 @@ that area touches them.
 
 ## Flaky tests
 
-Seen on 2026-10-31 in a full `cargo test --workspace` under load (WSL, desktop app running); each passed alone
-three times in a row. Both pick local ports that another test running in parallel can take in between.
-
-- `splitty-server` `http::tests::a_host_has_at_most_32_forwards`: one of the fixed ports 41001–41032 got no `200`.
-- `splitty-remote` `tunnel::supervisor::tests::forwards_take_the_asked_port_or_any_free_one`: `connect` returned
-  fewer than two forwards (`free_port()` releases its reservation before the forward binds).
-- `splitty-server` `hub::forwards::tests::ipv6_occupation_blocks_saved_open_and_supervisor_rebuild_without_moving`:
-  binding `[::1]` on the port the forward had just used again failed (seen 2026-10-31 under the same load and
-  again on 2026-11-06; passed in the next run and five times alone).
-- `splitty-server` `hub::reverse::tests::a_host_has_at_most_32_reverse_forwards`: `HostPortConflict` for a port
-  another test had taken (seen on 2026-11-06 in a full run; passed alone and in the rerun).
+- **Fixed (2026-11-06): fixture ports and the instance lock in `splitty-server`'s tests.** Seen since 2026-10-31
+  in full runs under load, and in the release run of v0.2.1
+  (`hub::forwards::tests::stop_during_rebuild_waits_for_setup_and_port_release`); each passed alone. The tests
+  of `http`, `hub::forwards` and `hub::reverse` had fixed ports (41001–41033) or ports the kernel handed out for
+  port 0, and a port one test had just freed went to a parallel test before the first bound it again. They now
+  take ports from one pool in `hub::testing::free_port` (from 20000 on, outside the kernel's automatic range,
+  each port once), `host::relay`'s tests from a pool of their own (from 30000 on). Separately,
+  `native::endpoint::tests::private_modes_both_peer_checks_and_instance_lock_are_mandatory` took the instance
+  lock again right after dropping it, while a descriptor copy from a parallel test's fork could still hold the
+  `flock` until its `exec`; it now waits up to 5 s for the lock, as the inheritance test already did. 20 runs of
+  the full `splitty-server` unit tests passed in a row afterwards (before: about 1 failure in 8). The
+  `splitty-remote` test listed here before, `forwards_take_the_asked_port_or_any_free_one`, no longer exists;
+  the tunnel tests hold their port reservations.
 - `splitty-core` unit tests for `x86_64-unknown-linux-musl` in release mode (the payload job of the release
   workflow): the test process sometimes dies with SIGSEGV while the `keeper::process` and `pty::session` tests
   spawn processes, in about 1 of 15 runs, already at v0.1.29. The v0.1.30 release run needed a rerun of that job.

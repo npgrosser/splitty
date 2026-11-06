@@ -23,7 +23,7 @@ use tower::ServiceExt;
 
 use super::{allowed_origins, apply_middleware, routes, session::SessionStore, AppState};
 use crate::client_session::ports::{PortWatch, Scan};
-use crate::hub::testing::{Prepare, ScriptedHost, WELCOME};
+use crate::hub::testing::{free_port, Prepare, ScriptedHost, WELCOME};
 use crate::hub::{Hub, HOST_LOST, VERSION};
 
 const WAIT: Duration = Duration::from_secs(10);
@@ -1764,38 +1764,6 @@ async fn run_a_listener_started_in_a_session_reaches_the_clients_and_so_does_its
 
 const FORWARDS: &str = "/api/remote/forwards";
 
-/// A port nothing listens on here, on `127.0.0.1` or `::1`, which a forward
-/// therefore takes as asked.
-fn free_port() -> u16 {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    // Keep fixture ports unique after probe/handoff and outside the kernel's
-    // automatic range, where another parallel fixture could reuse a freed
-    // number before the SSH-bind or final-release assertion observes it.
-    static NEXT: AtomicU32 = AtomicU32::new(20000);
-    #[cfg(target_os = "linux")]
-    let automatic: Vec<u16> = std::fs::read_to_string("/proc/sys/net/ipv4/ip_local_port_range")
-        .unwrap()
-        .split_whitespace()
-        .map(|number| number.parse().unwrap())
-        .collect();
-    loop {
-        let number = NEXT.fetch_add(1, Ordering::Relaxed);
-        assert!(number < 25000, "HTTP fixture port pool exhausted");
-        let port = u16::try_from(number).expect("bounded fixture port");
-        #[cfg(target_os = "linux")]
-        if (automatic[0]..=automatic[1]).contains(&port) {
-            continue;
-        }
-        let Ok(_listener) = std::net::TcpListener::bind(("127.0.0.1", port)) else {
-            continue;
-        };
-        let ipv6 = std::net::TcpListener::bind((std::net::Ipv6Addr::LOCALHOST, port));
-        if !matches!(ipv6, Err(error) if error.kind() == std::io::ErrorKind::AddrInUse) {
-            return port;
-        }
-    }
-}
-
 /// What the forward at local `port` answers: the scripted host's listener
 /// names the host's port it forwards.
 fn through(port: u16) -> String {
@@ -1984,23 +1952,34 @@ async fn a_host_has_at_most_32_forwards() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let router = router(&state(ADDR, dir.path()), hub(&host, dir.path()));
-    // Ports that need not be free here: a busy one moves.
-    for port in 41001..=41032 {
+    let ports: Vec<u16> = (0..33).map(|_| free_port()).collect();
+    for &port in &ports[..32] {
         let (status, body) =
             exchange(&router, api("POST", FORWARDS, Some(&forward("vm1", port)))).await;
         assert_eq!(status, StatusCode::OK, "{port}: {body}");
     }
-    let (status, body) =
-        exchange(&router, api("POST", FORWARDS, Some(&forward("vm1", 41033)))).await;
+    let (status, body) = exchange(
+        &router,
+        api("POST", FORWARDS, Some(&forward("vm1", ports[32]))),
+    )
+    .await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
     assert_eq!(body["code"], "forward_limit", "{body}");
     assert!(
         body["error"].as_str().expect("error").contains("32"),
         "{body}"
     );
-    let (status, _) = exchange(&router, api("POST", FORWARDS, Some(&forward("vm1", 41032)))).await;
+    let (status, _) = exchange(
+        &router,
+        api("POST", FORWARDS, Some(&forward("vm1", ports[31]))),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "an existing forward");
-    let (status, _) = exchange(&router, api("POST", FORWARDS, Some(&forward("vm2", 41033)))).await;
+    let (status, _) = exchange(
+        &router,
+        api("POST", FORWARDS, Some(&forward("vm2", ports[32]))),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK, "another host");
     assert_eq!(host.asked().len(), 33);
 }
