@@ -621,6 +621,7 @@ pub(crate) struct MuxOpRequest {
 }
 
 pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Reply {
+    let _publication = state.client_state.effect_runner.publication.lock().await;
     if let Some(
         op @ ("set_scratchpad" | "put_annotations" | "remove_annotations" | "put_replies"
         | "remove_replies" | "mark_sent"),

@@ -105,6 +105,77 @@ impl ReplayFilter {
     }
 }
 
+/// Filter a complete buffered replay without allocating a second scrollback.
+/// Read and write cursors only move forward; retained bytes never overwrite
+/// bytes the parser has yet to inspect. A trailing incomplete sequence is kept.
+pub fn filter_in_place(data: &mut Vec<u8>) {
+    let mut write = 0;
+    let mut pending: Option<usize> = None;
+    for read in 0..data.len() {
+        let byte = data[read];
+        let Some(mut start) = pending else {
+            if byte == ESC {
+                pending = Some(read);
+            } else if byte != ENQ {
+                data[write] = byte;
+                write += 1;
+            }
+            continue;
+        };
+        let string = read > start + 1 && is_string(data.get(start + 1).copied());
+        if byte == CAN || byte == SUB {
+            data.copy_within(start..read + 1, write);
+            write += read + 1 - start;
+            pending = None;
+            continue;
+        }
+        if byte == ESC && !string {
+            data.copy_within(start..read, write);
+            write += read - start;
+            pending = Some(read);
+            continue;
+        }
+        if string && read > start + 2 && data[read - 1] == ESC && byte != 0x5c {
+            data.copy_within(start..read - 1, write);
+            write += read - 1 - start;
+            start = read - 1;
+            pending = Some(start);
+            if byte == ESC {
+                data[write] = ESC;
+                write += 1;
+                pending = Some(read);
+                continue;
+            }
+        }
+        let length = read + 1 - start;
+        let kind = data[start + 1];
+        if length == 2 && (kind == CSI || is_string(Some(kind))) {
+            continue;
+        }
+        let complete = match kind {
+            OSC | DCS | APC | PM => {
+                (kind == OSC && byte == BEL)
+                    || (length > 2 && data[read - 1] == ESC && byte == 0x5c)
+            }
+            CSI => length > 2 && (0x40..=0x7e).contains(&byte),
+            _ => true,
+        };
+        if complete {
+            if !has_side_effect(&data[start..read + 1]) {
+                data.copy_within(start..read + 1, write);
+                write += length;
+            }
+            pending = None;
+        }
+    }
+    if let Some(start) = pending {
+        let end = data.len();
+        data.copy_within(start..end, write);
+        write += end - start;
+    }
+    data.truncate(write);
+}
+
 /// Whether the sequence introduced by `kind` is a string: OSC, DCS, APC or PM.
 fn is_string(kind: Option<u8>) -> bool {
     matches!(kind, Some(OSC | DCS | APC | PM))
@@ -175,7 +246,43 @@ mod tests {
         let mut out = filter.push(&bytes[..split]);
         out.extend(filter.push(&bytes[split..]));
         out.extend(filter.finish());
+        let mut in_place = bytes.to_vec();
+        filter_in_place(&mut in_place);
+        assert_eq!(in_place, out, "in-place parser agrees at every split");
         out
+    }
+
+    #[test]
+    fn in_place_filter_matches_streaming_parser_on_mixed_control_bytes() {
+        let fragments: &[&[u8]] = &[
+            b"plain",
+            b"\x1b",
+            b"\x1b]52;c;copy",
+            b"\x07",
+            b"\x1b[6n",
+            b"\x18",
+            b"\x1a",
+            b"\x1b[31m",
+            b"\x1bP$qm",
+            b"\x05",
+            b"\xff\xc3\xa4",
+            b"\x1b\\",
+            b"\x1b[",
+            b"\x1b]2;title",
+        ];
+        for seed in 0..100 {
+            let mut data = vec![];
+            let mut cursor = seed;
+            for _ in 0..64 {
+                cursor = (cursor * 71 + 19) % 997;
+                data.extend_from_slice(fragments[cursor % fragments.len()]);
+            }
+            let mut filter = ReplayFilter::new();
+            let mut expected = filter.push(&data);
+            expected.extend(filter.finish());
+            filter_in_place(&mut data);
+            assert_eq!(data, expected, "seed {seed}");
+        }
     }
 
     #[test]

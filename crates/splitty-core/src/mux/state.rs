@@ -530,6 +530,10 @@ impl SentEntry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionEntry {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_title: Option<String>,
+    #[serde(default)]
+    pub busy: bool,
     pub id: SessionId,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub job_id: Option<JobId>,

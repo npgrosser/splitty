@@ -13,6 +13,36 @@ function wiredSession(conn: ReturnType<typeof fakeServer>["conn"], sessionId: st
 }
 
 describe("SessionClient", () => {
+  it("uses bounded server titles and busy state only on capable hosts", () => {
+    const { socket, conn } = fakeServer("local");
+    const { session } = wiredSession(conn, "sess-1");
+    const titles: string[] = [];
+    session.onTitleChange((title) => titles.push(title));
+    const event = { type: "title" as const, sessionId: "sess-1", title: "bash", cwd: "/home/me", baseShell: true, displayTitle: "bash: ~", busy: false };
+    socket.message(event);
+    expect(titles.at(-1)).toBe("bash");
+    expect(session.lastBusy).toBeUndefined();
+    socket.message({ type: "mux.welcome", clientId: "client", screens: [], capabilities: ["serverDerivedPaneState"] });
+    socket.message(event);
+    expect(titles.at(-1)).toBe("bash: ~");
+    expect(session.lastBusy).toBe(false);
+    socket.message({ ...event, baseShell: false, title: "vim", displayTitle: "Editing notes", busy: true });
+    expect(titles.at(-1)).toBe("Editing notes");
+    expect(session.lastBusy).toBe(true);
+    socket.message({ type: "mux.screen_snapshot", screen: { id: "screen", name: "Work", revision: 1,
+      root: { type: "slot", id: "slot", paneIds: [] }, floating: [], panes: {},
+      sessions: { "sess-1": { id: "sess-1", status: "running", displayTitle: "Snapshot title", busy: false } },
+    } });
+    expect(session.lastBusy).toBe(false);
+    expect(titles.at(-1)).toBe("Snapshot title");
+    socket.message({ ...event, displayTitle: "x".repeat(MAX_TITLE + 20) });
+    expect(session.lastDisplayTitle?.length).toBe(MAX_TITLE);
+    socket.message({ type: "mux.welcome", clientId: "older", screens: [] });
+    socket.message(event);
+    expect(session.lastDisplayTitle).toBeUndefined();
+    session.detach();
+  });
+
   it("sends one create at a time, in request order", async () => {
     const { socket, conn } = fakeServer("local");
     const a = conn.sessions.requestSession({ cols: 80, rows: 24, paneId: "terminal-a" });

@@ -36,6 +36,7 @@ mod gateway;
 mod managed_jobs;
 mod move_pane;
 mod mux_tabs;
+mod pane_state;
 mod pty_size;
 mod reviews;
 mod scratchpad;

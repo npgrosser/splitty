@@ -54,6 +54,63 @@ pub struct TitleInfo {
     pub base_shell: bool,
 }
 
+impl TitleInfo {
+    /// Shared display policy for snapshots, listings and attached clients.
+    pub fn display_title(&self, osc_title: &str, home: &str) -> String {
+        self.raw_display_title(osc_title, home)
+            .chars()
+            .filter(|c| {
+                !c.is_control() && !matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+            })
+            .take(500)
+            .collect()
+    }
+
+    fn raw_display_title(&self, osc_title: &str, home: &str) -> String {
+        let title = if !self.base_shell && !osc_title.is_empty() {
+            osc_title
+        } else {
+            &self.proc
+        };
+        if title.is_empty() {
+            return "Terminal".into();
+        }
+        let name = title
+            .trim()
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(title)
+            .trim_start_matches('-')
+            .to_lowercase();
+        if !matches!(
+            name.as_str(),
+            "bash" | "zsh" | "sh" | "fish" | "dash" | "ksh" | "csh" | "tcsh" | "nu" | "pwsh"
+        ) {
+            return title.into();
+        }
+        if self.cwd.is_empty() {
+            return name;
+        }
+        let cwd = if !home.is_empty() && self.cwd == home {
+            "~".into()
+        } else if !home.is_empty()
+            && self
+                .cwd
+                .strip_prefix(home)
+                .is_some_and(|suffix| suffix.starts_with('/'))
+        {
+            format!("~{}", &self.cwd[home.len()..])
+        } else {
+            self.cwd.clone()
+        };
+        format!("{name}: {cwd}")
+    }
+
+    pub fn busy(&self) -> bool {
+        !self.base_shell && !self.proc.is_empty()
+    }
+}
+
 /// Event pushed through the OSC title watch channel.
 #[derive(Clone, Debug)]
 pub struct OscTitleEvent {
@@ -323,4 +380,41 @@ pub enum PtyError {
     WriteFailed(#[from] io::Error),
     #[error("PTY error: {0}")]
     Other(String),
+}
+
+#[cfg(test)]
+mod display_tests {
+    use super::TitleInfo;
+    #[test]
+    fn display_title_and_busy_follow_process_and_home_boundaries() {
+        let mut info = TitleInfo {
+            proc: "/bin/-BASH".into(),
+            cwd: "/home/me/work".into(),
+            base_shell: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            info.display_title("stale application title", "/home/me"),
+            "bash: ~/work"
+        );
+        assert!(!info.busy());
+        info.cwd = "/home/meeting".into();
+        assert_eq!(info.display_title("", "/home/me"), "bash: /home/meeting");
+        info.base_shell = false;
+        info.proc = "vim".into();
+        assert!(info.busy());
+        assert_eq!(
+            info.display_title("Editing notes", "/home/me"),
+            "Editing notes"
+        );
+        assert_eq!(info.display_title("", "/home/me"), "vim");
+        assert_eq!(
+            info.display_title("notes\n\u{009b}31m\u{202e}", "/home/me"),
+            "notes31m"
+        );
+        assert_eq!(info.display_title(&"x".repeat(600), "/home/me").len(), 500);
+        info.proc.clear();
+        assert!(!info.busy());
+        assert_eq!(info.display_title("", "/home/me"), "Terminal");
+    }
 }

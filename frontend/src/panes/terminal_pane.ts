@@ -260,13 +260,14 @@ export class TerminalPaneRenderer implements IContentRenderer {
         const unsubTitle = s.onTitleChange((title, cwd) => {
           if (this.disposed) return;
           if (paneParams?.jobId) return;
-          api.setTitle(formatTitle(title, cwd, conn.sessions.homeDir));
+          api.setTitle(s.lastDisplayTitle ?? formatTitle(title, cwd, conn.sessions.homeDir));
         });
         this.cleanups.push(unsubTitle);
 
         const unsubEnd = s.onEnd((exitCode) => {
           if (this.disposed) return;
           if (paneParams?.jobId) return; // Keep the output of completed jobs visible.
+          if (conn.sessions.serverDerivedPaneState) return;
           const mode = getSettings().terminal.closeOnExit;
           if (mode === "always" || (mode === "graceful" && exitCode === 0)) {
             api.close();

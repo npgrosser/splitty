@@ -149,10 +149,10 @@ fn table<'a>(panes: impl Iterator<Item = &'a Pane>, numbered: bool) -> String {
                 } else {
                     String::new()
                 },
-                pane.screen.clone(),
-                pane.title.clone(),
-                pane.cwd.clone(),
-                pane.id.chars().take(8).collect(),
+                crate::cli::display_cell(&pane.screen),
+                crate::cli::display_cell(&pane.title),
+                crate::cli::display_cell(&pane.cwd),
+                crate::cli::display_cell(&pane.id.chars().take(8).collect::<String>()),
             ]
         })
         .collect();
@@ -195,6 +195,21 @@ mod tests {
     const A: &str = "3f9a1111-0000-4000-8000-000000000001";
     const B: &str = "3f9a2222-0000-4000-8000-000000000002";
     const C: &str = "c0de3333-0000-4000-8000-000000000003";
+
+    #[test]
+    fn listing_cells_cannot_emit_controls_or_hide_text() {
+        let pane = Pane {
+            id: "pane".into(),
+            session_id: "sess".into(),
+            screen: "Work\nInjected".into(),
+            title: "title\u{1b}[2J\u{202e}".into(),
+            cwd: "/work\u{009b}31m".into(),
+        };
+        let shown = list(&[pane]);
+        assert_eq!(shown.lines().count(), 1);
+        assert!(!shown.contains(['\u{1b}', '\u{009b}', '\u{202e}']));
+        assert!(shown.contains("title�[2J�"));
+    }
 
     fn state() -> Value {
         json!({

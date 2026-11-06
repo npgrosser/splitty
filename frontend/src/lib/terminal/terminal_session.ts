@@ -62,6 +62,8 @@ export class TerminalSession {
   lastCmdline = "";
   /** Whether the foreground process is the session's original shell. */
   lastIsBaseShell = false;
+  lastBusy?: boolean;
+  lastDisplayTitle?: string;
   /** Last known OSC application title (set by the process via OSC 2). */
   lastOscTitle = "";
   private titleCallback: ((title: string, cwd: string) => void) | null = null;
@@ -296,11 +298,21 @@ export class TerminalSession {
 
   /** The session's process ended (`closed` on its connection). */
   handleClosed(exitCode: number): void {
+    if (this.client.serverDerivedPaneState) this.lastBusy = false;
     if (this.endCallback) {
       this.endCallback(exitCode);
     } else {
       const encoder = new TextEncoder();
       this.emulator.write(encoder.encode("\r\n\x1b[90m[session ended]\x1b[0m\r\n"));
+    }
+  }
+
+  /** Authoritative derived fields also arrive in workspace snapshots. */
+  handleDerivedMetadata(displayTitle?: string, busy?: boolean): void {
+    if (busy !== undefined) this.lastBusy = busy;
+    if (displayTitle !== undefined) {
+      this.lastDisplayTitle = displayTitle;
+      this.titleCallback?.(displayTitle, this.lastCwd);
     }
   }
 
@@ -310,9 +322,11 @@ export class TerminalSession {
     this.lastCwd = event.cwd;
     this.lastCmdline = event.cmdline;
     this.lastIsBaseShell = event.baseShell;
+    this.lastBusy = event.busy;
+    this.lastDisplayTitle = event.displayTitle;
     this.lastOscTitle = event.oscTitle;
     if (this.titleCallback) {
-      const title = (!event.baseShell && event.oscTitle) ? event.oscTitle : event.title;
+      const title = event.displayTitle ?? ((!event.baseShell && event.oscTitle) ? event.oscTitle : event.title);
       this.titleCallback(title, event.cwd);
     }
   }

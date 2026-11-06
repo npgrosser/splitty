@@ -7,6 +7,7 @@ pub mod catalog;
 mod dispatch;
 pub(crate) mod jobs;
 pub(crate) mod operations;
+pub(crate) mod pane_state;
 pub mod reply;
 pub(crate) mod review;
 pub mod runtime;

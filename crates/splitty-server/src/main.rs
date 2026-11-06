@@ -1234,7 +1234,13 @@ async fn async_main() {
                                 .get("sessionId")
                                 .and_then(|v| v.as_str())
                                 .unwrap_or("-");
-                            println!("{}\t{}\t{}\tsession={}", id, title, cwd, session);
+                            println!(
+                                "{}\t{}\t{}\tsession={}",
+                                cli::display_cell(id),
+                                cli::display_cell(title),
+                                cli::display_cell(cwd),
+                                cli::display_cell(session)
+                            );
                         }
                     }
                 }

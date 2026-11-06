@@ -42,6 +42,16 @@ pub enum ViewerPlacement {
 /// Top-level operation. Dispatched by the workspace reducer.
 #[derive(Clone, Debug)]
 pub enum Op {
+    /// Trusted process facts; never decoded from a client operation.
+    UpdateSessionMetadata {
+        session_id: SessionId,
+        display_title: String,
+        cwd: String,
+        busy: bool,
+        exited: bool,
+        exit_code: Option<i32>,
+        close: bool,
+    },
     /// An already authorized launch. Authority is never deserialized from a client.
     CreateJob(Box<super::jobs::JobAdmission>),
     /// Server lifecycle facts and owner-only mutations, not public wire operations.

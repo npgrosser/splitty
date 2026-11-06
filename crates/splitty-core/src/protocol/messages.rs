@@ -206,6 +206,8 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         cmdline: Option<String>,
         base_shell: bool,
+        display_title: String,
+        busy: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         osc_title: Option<String>,
     },
@@ -486,6 +488,17 @@ impl ServerEvent {
         base_shell: bool,
         osc_title: Option<String>,
     ) -> Self {
+        let info = crate::pty::TitleInfo {
+            proc: title.clone(),
+            cwd: cwd.clone(),
+            cmdline: String::new(),
+            base_shell,
+        };
+        let home = dirs::home_dir()
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let display_title = info.display_title(osc_title.as_deref().unwrap_or_default(), &home);
+        let busy = info.busy();
         Self::TitleChanged {
             id: generate_event_id(),
             timestamp: now_millis(),
@@ -494,6 +507,8 @@ impl ServerEvent {
             cwd,
             cmdline,
             base_shell,
+            display_title,
+            busy,
             osc_title,
         }
     }
@@ -873,6 +888,8 @@ mod tests {
         assert_eq!(json["cmdline"], "vim main.rs");
         assert_eq!(json["baseShell"], false);
         assert_eq!(json["oscTitle"], "✳ vim");
+        assert_eq!(json["displayTitle"], "✳ vim");
+        assert_eq!(json["busy"], true);
     }
 
     #[test]

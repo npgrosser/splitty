@@ -35,6 +35,8 @@ export interface SessionCreation {
 
 /** A `title` event, checked and capped. */
 export interface SessionTitle {
+  displayTitle?: string;
+  busy?: boolean;
   title: string;
   cwd: string;
   cmdline: string;
@@ -118,6 +120,7 @@ export class SessionClient {
   uploadControl = false;
   /** This server decides PTY sizes (`pty-size-v1` in its latest welcome). */
   sizing = false;
+  serverDerivedPaneState = false;
 
   private readonly sessions = new Map<string, TerminalSession>();
   private readonly paneToSession = new Map<string, string>();
@@ -413,8 +416,20 @@ export class SessionClient {
       case "mux.welcome":
         this.transferGeneration++;
         this.uploadControl = Array.isArray(msg.capabilities) && msg.capabilities.includes("upload-control-v1");
+        this.serverDerivedPaneState = Array.isArray(msg.capabilities) && msg.capabilities.includes("serverDerivedPaneState");
         this.sizing = Array.isArray(msg.capabilities) && msg.capabilities.includes(SIZE_CAPABILITY);
         break;
+      case "mux.screen_snapshot": {
+        if (!this.serverDerivedPaneState || !msg.screen?.sessions) break;
+        for (const entry of Object.values(msg.screen.sessions)) {
+          if (!entry || typeof entry.id !== "string") continue;
+          this.sessions.get(entry.id)?.handleDerivedMetadata(
+            typeof entry.displayTitle === "string" ? plainText(entry.displayTitle, MAX_TITLE) : undefined,
+            typeof entry.busy === "boolean" ? entry.busy : undefined,
+          );
+        }
+        break;
+      }
       case "size": {
         const size = ptySize(msg);
         if (!size || typeof msg.sessionId !== "string") break;
@@ -436,6 +451,8 @@ export class SessionClient {
           cwd: optionalBounded(msg.cwd, MAX_VALUE) ?? "",
           cmdline: optionalBounded(msg.cmdline, MAX_VALUE) ?? "",
           baseShell: msg.baseShell === true,
+          displayTitle: this.serverDerivedPaneState && typeof msg.displayTitle === "string" ? plainText(msg.displayTitle, MAX_TITLE) : undefined,
+          busy: this.serverDerivedPaneState && typeof msg.busy === "boolean" ? msg.busy : undefined,
           oscTitle: plainText(msg.oscTitle, MAX_TITLE),
         });
         this.metadataChanged();

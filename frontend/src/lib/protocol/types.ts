@@ -173,7 +173,7 @@ export interface ViewerReviewAnswered extends ServerEvent { type: "viewer.review
 
 // --- Server -> Client: Session Stream Events ---
 
-export interface TitleChanged extends SessionEvent { type: "title"; title: string; cwd: string; cmdline?: string; baseShell: boolean; oscTitle?: string }
+export interface TitleChanged extends SessionEvent { type: "title"; title: string; cwd: string; cmdline?: string; baseShell: boolean; oscTitle?: string; displayTitle?: string; busy?: boolean }
 export interface SemanticBoundary extends SessionEvent { type: "osc133"; action: string; exitCode?: number }
 export interface Bell extends SessionEvent { type: "bell" }
 export type SizePolicy = "active" | "latest" | "smallest";
@@ -410,6 +410,8 @@ export interface AnnotationTarget {
 export type ViewerPlacement = "right" | "left" | "above" | "below" | "tab";
 
 export interface SessionState {
+  displayTitle?: string;
+  busy?: boolean;
   id: string;
   jobId?: string;
   restartPolicy?: "shell" | "never";

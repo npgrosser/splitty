@@ -48,7 +48,7 @@ function annotationsOf(api: DockviewApi, paneId: string): number {
  */
 export function guardedClose(api: DockviewApi, paneId: string, close: () => void): void {
   const session = sessionForPane(api, paneId);
-  const running = session && !session.lastIsBaseShell ? session : undefined;
+  const running = session && (session.lastBusy ?? !session.lastIsBaseShell) ? session : undefined;
   const scratchpads = holdsScratchpad(api, paneId) ? 1 : 0;
   const annotations = annotationsOf(api, paneId);
   if ((running || scratchpads > 0 || annotations > 0) && listener) {
@@ -82,7 +82,7 @@ export function runningOnQuit(): RunningProcess[] {
   if (local.mux.serverMode === "daemon") return [];
   const running: RunningProcess[] = [];
   for (const session of local.sessions.all()) {
-    if (session.lastIsBaseShell) continue;
+    if (!(session.lastBusy ?? !session.lastIsBaseShell)) continue;
     running.push({ name: session.lastTitle || session.lastCmdline || "unknown", title: session.lastOscTitle || undefined });
   }
   return running;
@@ -127,7 +127,7 @@ export function guardedCloseMultiple(api: DockviewApi, panels: { id: string; clo
   let annotations = 0;
   for (const p of panels) {
     const session = sessionForPane(api, p.id);
-    const runs = Boolean(session && !session.lastIsBaseShell);
+    const runs = Boolean(session && (session.lastBusy ?? !session.lastIsBaseShell));
     const holds = holdsScratchpad(api, p.id);
     const annotated = annotationsOf(api, p.id);
     if (runs) running.push(p);

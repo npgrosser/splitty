@@ -124,6 +124,8 @@ pub(super) fn reduce_create_job(
                 screen.sessions.insert(
                     session_id.clone(),
                     SessionEntry {
+                        display_title: None,
+                        busy: false,
                         id: session_id,
                         job_id: None,
                         restart_policy: RestartPolicy::Shell,

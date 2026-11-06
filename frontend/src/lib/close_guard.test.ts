@@ -17,6 +17,16 @@ function running(session: TerminalSession, title: string): TerminalSession {
 }
 
 describe("the quit guard", () => {
+  it("trusts the server busy flag over a legacy base-shell predicate", () => {
+    const local = running(new TerminalSession(localConnection().sessions, "sess-derived", fakeEmulator()), "vim");
+    local.lastBusy = false;
+    expect(runningOnQuit()).toEqual([]);
+    local.lastBusy = true;
+    local.lastIsBaseShell = true;
+    expect(runningOnQuit()).toEqual([{ name: "vim", title: undefined }]);
+    localConnection().sessions.unregister(local);
+  });
+
   // remote-screens: quitting only collapses remote screens, their processes keep running.
   it("counts only the local server's running processes", () => {
     expect(hostScreensOpen()).toBe(false);

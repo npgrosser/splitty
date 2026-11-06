@@ -137,6 +137,7 @@ pub fn build(
             .to_string(),
         server_mode: server_mode.to_string(),
     });
+    super::pane_state::start(&state);
     Runtime {
         state,
         pty: pty_manager,

@@ -263,6 +263,10 @@ type ViewerSource =
  * or removed; no shell config/global install or already-running shell is modified.
  */
 interface SessionState {
+  /** Server-derived display text; available with serverDerivedPaneState. */
+  displayTitle?: string;
+  /** Known non-base-shell foreground process; false after exit. */
+  busy?: boolean;
   id: string;
   jobId?: string;
   restartPolicy?: "shell" | "never";
@@ -735,6 +739,9 @@ interface TitleChanged extends SessionEvent {
   cwd: string;
   cmdline?: string;
   baseShell: boolean;
+  /** Same display policy as the mux session snapshot and ordinary pane title; plain text, at most 500 characters. */
+  displayTitle?: string;
+  busy?: boolean;
   /** OSC 0/2 window title (e.g. "✻ Claude Code"). */
   oscTitle?: string;
 }
@@ -841,7 +848,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "viewer-v1" and "viewer-annotations-v1"; absent on old servers
+  capabilities?: string[]; // includes "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "viewer-v1" and "viewer-annotations-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -2839,3 +2846,11 @@ interface HubCatalogObservation {
   target: string;
   screens: { id: string; name?: string; panes: number }[];
 }
+/**
+ * serverDerivedPaneState: ordinary terminal panes follow the owning server's
+ * terminal.closeOnExit policy (always / graceful / never); managed jobs remain.
+ * Clients omit cwd/profile for inherited splits/tabs unless explicitly selected.
+ * Replay bytes before attached are filtered at the server for terminal report
+ * queries and clipboard operations. Live bytes and trailing incomplete sequences
+ * retain normal behavior. Older-host client replay protection remains enabled.
+ */

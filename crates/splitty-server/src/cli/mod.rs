@@ -12,6 +12,19 @@ pub mod viewer;
 pub use discovery::{discover, ServerInfo, Transport};
 use serde_json::{json, Value};
 
+/// Render a server-provided listing cell without terminal controls or line breaks.
+pub fn display_cell(text: &str) -> String {
+    text.chars()
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}') {
+                '\u{fffd}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 pub async fn request(
     server: &ServerInfo,
     method: &str,

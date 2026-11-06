@@ -16,12 +16,100 @@ use super::validate::{
 use super::MuxError;
 use crate::ids::*;
 
+fn default_screen_name(state: &WorkspaceState) -> String {
+    for n in 1.. {
+        let name = format!("Screen {n}");
+        if !state
+            .screens
+            .values()
+            .any(|screen| screen.name.as_ref() == Some(&name))
+        {
+            return name;
+        }
+    }
+    unreachable!("finite workspace")
+}
+
 /// Apply a workspace-level operation. Returns new state + effects.
 pub fn reduce_workspace(
     mut state: WorkspaceState,
     op: Op,
 ) -> Result<(WorkspaceState, Vec<Effect>), MuxError> {
     match op {
+        Op::UpdateSessionMetadata {
+            session_id,
+            display_title,
+            cwd,
+            busy,
+            exited,
+            exit_code,
+            close,
+        } => {
+            let Some(screen) = state
+                .screens
+                .values_mut()
+                .find(|s| s.sessions.contains_key(&session_id))
+            else {
+                return Ok((state, vec![]));
+            };
+            let Some(session) = screen.sessions.get_mut(&session_id) else {
+                unreachable!("located session")
+            };
+            let managed = session.job_id.is_some()
+                || session.restart_policy == super::jobs::RestartPolicy::Never;
+            let status = if exited {
+                SessionStatus::Exited
+            } else {
+                SessionStatus::Running
+            };
+            let changed = session.display_title.as_deref() != Some(&display_title)
+                || session.cwd.as_deref() != Some(&cwd)
+                || session.busy != busy
+                || (!managed && (session.status != status || session.exit_code != exit_code));
+            session.display_title = Some(display_title.clone());
+            session.busy = busy && !exited;
+            if !cwd.is_empty() {
+                session.cwd = Some(cwd.clone());
+            }
+            if !managed {
+                session.status = status;
+                session.exit_code = exit_code;
+            }
+            let mut close_panes = vec![];
+            for pane in screen
+                .panes
+                .values_mut()
+                .filter(|p| p.session_id.as_ref() == Some(&session_id))
+            {
+                if !managed && pane.job_id.is_none() {
+                    pane.title = Some(display_title.clone());
+                    if !cwd.is_empty() {
+                        pane.cwd = Some(cwd.clone());
+                    }
+                    if exited && close {
+                        close_panes.push(pane.id.clone());
+                    }
+                }
+            }
+            let id = screen.id.clone();
+            if changed {
+                screen.revision += 1;
+            }
+            let mut effects = vec![];
+            for pane_id in close_panes {
+                let screen = state.screens.remove(&id).expect("located screen");
+                let (screen, more) = reduce_screen(
+                    screen,
+                    ScreenOp::ClosePane {
+                        pane_id,
+                        resulting_sizes: None,
+                    },
+                )?;
+                state.screens.insert(id.clone(), screen);
+                effects.extend(more);
+            }
+            Ok((state, effects))
+        }
         Op::CreateJob(admission) => reduce_create_job(state, *admission),
         Op::UpdateJob { job_id, update } => reduce_update_job(state, job_id, update),
         Op::ModifyScreen { screen_id, op } => {
@@ -72,7 +160,9 @@ pub fn reduce_workspace(
             if let Some(ref new_pane_id) = new_pane_id {
                 reject_pane_in_use(&state, new_pane_id)?;
             }
-            let name = name.or_else(|| existing.and_then(|s| s.name.clone()));
+            let name = name
+                .or_else(|| existing.and_then(|s| s.name.clone()))
+                .or_else(|| Some(default_screen_name(&state)));
             let is_new = existing.is_none();
 
             let mut screen = ScreenState::new(id.clone(), name);
@@ -95,6 +185,8 @@ pub fn reduce_workspace(
             screen.sessions.insert(
                 session_id.clone(),
                 SessionEntry {
+                    display_title: None,
+                    busy: false,
                     id: session_id.clone(),
                     job_id: None,
                     restart_policy: Default::default(),
@@ -279,6 +371,7 @@ fn reduce_move_pane_to_screen(
     if target_id == screen_id {
         return Err(MuxError::SameScreen(pane_id));
     }
+    let screen_name = screen_name.or_else(|| create_screen.then(|| default_screen_name(&state)));
     let source = state
         .screens
         .get(&screen_id)
@@ -319,7 +412,8 @@ fn reduce_move_pane_to_screen(
     source.revision += 1;
 
     let mut target = if create_screen {
-        let mut screen = ScreenState::new(target_id.clone(), screen_name);
+        let name = screen_name.or_else(|| Some(default_screen_name(&state)));
+        let mut screen = ScreenState::new(target_id.clone(), name);
         screen.root = LayoutNode::new_slot(NodeId::with_prefix("root"), vec![]);
         screen
     } else {
@@ -583,6 +677,8 @@ fn create_terminal_pane(
     state.sessions.insert(
         new_session_id.clone(),
         SessionEntry {
+            display_title: None,
+            busy: false,
             id: new_session_id.clone(),
             job_id: None,
             restart_policy: Default::default(),
@@ -1529,6 +1625,168 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
 
+    #[test]
+    fn omitted_screen_names_are_unique_and_explicit_names_survive() {
+        let mut state = WorkspaceState::default();
+        for (id, name, expected) in [
+            ("a", Some("Screen 2"), "Screen 2"),
+            ("b", None, "Screen 1"),
+            ("c", None, "Screen 3"),
+            ("d", Some(""), ""),
+        ] {
+            (state, _) = reduce_workspace(
+                state,
+                Op::CreateScreen {
+                    name: name.map(str::to_owned),
+                    screen_id: Some(id.into()),
+                    new_pane_id: Some(format!("p-{id}").into()),
+                    shell_profile_id: None,
+                },
+            )
+            .expect("create");
+            assert_eq!(
+                state.screens[&ScreenId::from(id)].name.as_deref(),
+                Some(expected)
+            );
+        }
+        (state, _) = reduce_workspace(
+            state,
+            Op::MovePaneToScreen {
+                screen_id: "b".into(),
+                pane_id: "p-b".into(),
+                target_screen_id: "e".into(),
+                create_screen: true,
+                screen_name: None,
+            },
+        )
+        .expect("move");
+        assert_eq!(
+            state.screens[&ScreenId::from("e")].name.as_deref(),
+            Some("Screen 4")
+        );
+    }
+
+    #[test]
+    fn metadata_follows_moved_session_and_inherits_for_tabs() {
+        let store = super::super::Store::new();
+        store
+            .dispatch(Op::CreateScreen {
+                name: None,
+                screen_id: Some("a".into()),
+                new_pane_id: Some("p".into()),
+                shell_profile_id: Some("fish".into()),
+            })
+            .expect("screen");
+        let session = store.get_screen(&"a".into()).expect("screen").panes[&PaneId::from("p")]
+            .session_id
+            .clone()
+            .expect("session");
+        store
+            .dispatch(Op::MovePaneToScreen {
+                screen_id: "a".into(),
+                pane_id: "p".into(),
+                target_screen_id: "b".into(),
+                create_screen: true,
+                screen_name: None,
+            })
+            .expect("move");
+        store
+            .dispatch(Op::UpdateSessionMetadata {
+                session_id: session.clone(),
+                display_title: "fish: /work".into(),
+                cwd: "/work".into(),
+                busy: true,
+                exited: false,
+                exit_code: None,
+                close: false,
+            })
+            .expect("metadata");
+        let screen = store.get_screen(&"b".into()).expect("screen");
+        assert!(screen.sessions[&session].busy);
+        assert_eq!(
+            screen.panes[&PaneId::from("p")].title.as_deref(),
+            Some("fish: /work")
+        );
+        let effects = store
+            .dispatch_screen(
+                &"b".into(),
+                ScreenOp::NewTab {
+                    pane_id: "p".into(),
+                    new_pane_id: Some("tab".into()),
+                    cwd: None,
+                    shell_profile_id: None,
+                },
+            )
+            .expect("tab");
+        assert!(
+            matches!(&effects[0], Effect::SpawnSession { cwd: Some(cwd), shell_profile_id: Some(profile), .. } if cwd == "/work" && profile == "fish")
+        );
+        let effects = store
+            .dispatch(Op::UpdateSessionMetadata {
+                session_id: session.clone(),
+                display_title: "fish".into(),
+                cwd: String::new(),
+                busy: false,
+                exited: true,
+                exit_code: Some(0),
+                close: true,
+            })
+            .expect("exit");
+        assert!(
+            matches!(&effects[0], Effect::KillSession { session_id } if session_id == &session)
+        );
+        assert!(!store
+            .get_screen(&"b".into())
+            .expect("screen")
+            .panes
+            .contains_key(&PaneId::from("p")));
+        assert!(store
+            .dispatch(Op::UpdateSessionMetadata {
+                session_id: session,
+                display_title: String::new(),
+                cwd: String::new(),
+                busy: false,
+                exited: true,
+                exit_code: Some(0),
+                close: true
+            })
+            .expect("late metadata ignored")
+            .is_empty());
+    }
+
+    #[test]
+    fn managed_session_metadata_never_replaces_job_title_or_closes_it() {
+        let mut screen = single_pane_screen();
+        screen
+            .sessions
+            .get_mut(&"s1".into())
+            .expect("session")
+            .restart_policy = super::super::jobs::RestartPolicy::Never;
+        screen.panes.get_mut(&"p1".into()).expect("pane").title = Some("Build".into());
+        let mut state = WorkspaceState::default();
+        state.screens.insert(screen.id.clone(), screen);
+        let (state, effects) = reduce_workspace(
+            state,
+            Op::UpdateSessionMetadata {
+                session_id: "s1".into(),
+                display_title: "compiler".into(),
+                cwd: "/work".into(),
+                busy: false,
+                exited: true,
+                exit_code: Some(23),
+                close: true,
+            },
+        )
+        .expect("metadata");
+        assert!(effects.is_empty());
+        assert_eq!(
+            state.screens[&ScreenId::from("screen1")].panes[&PaneId::from("p1")]
+                .title
+                .as_deref(),
+            Some("Build")
+        );
+    }
+
     fn single_pane_screen() -> ScreenState {
         let pane_id = PaneId::from("p1");
         let session_id = SessionId::from("s1");
@@ -1549,6 +1807,8 @@ mod tests {
         sessions.insert(
             session_id.clone(),
             SessionEntry {
+                display_title: None,
+                busy: false,
                 id: session_id,
                 job_id: None,
                 restart_policy: Default::default(),
@@ -1609,6 +1869,8 @@ mod tests {
         sessions.insert(
             s1.clone(),
             SessionEntry {
+                display_title: None,
+                busy: false,
                 id: s1,
                 job_id: None,
                 restart_policy: Default::default(),
@@ -1624,6 +1886,8 @@ mod tests {
         sessions.insert(
             s2.clone(),
             SessionEntry {
+                display_title: None,
+                busy: false,
                 id: s2,
                 job_id: None,
                 restart_policy: Default::default(),
@@ -2462,6 +2726,8 @@ mod tests {
         screen.sessions.insert(
             SessionId::from("s1"),
             SessionEntry {
+                display_title: None,
+                busy: false,
                 id: SessionId::from("s1"),
                 job_id: None,
                 restart_policy: Default::default(),

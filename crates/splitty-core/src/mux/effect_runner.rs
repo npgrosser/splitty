@@ -22,6 +22,9 @@ pub struct EnvContext {
 
 /// Executes side effects produced by the reducer against a PTY backend.
 pub struct EffectRunner {
+    /// Serializes ordinary layout publication with service-derived metadata.
+    /// Callers hold this from dispatch through spawn announcements and nudges.
+    pub publication: tokio::sync::Mutex<()>,
     pty_backend: Arc<dyn Backend>,
 }
 
@@ -71,7 +74,10 @@ impl EffectOutcome {
 impl EffectRunner {
     /// Create a new effect runner backed by the given PTY backend.
     pub fn new(pty_backend: Arc<dyn Backend>) -> Self {
-        Self { pty_backend }
+        Self {
+            pty_backend,
+            publication: tokio::sync::Mutex::new(()),
+        }
     }
 
     /// Execute a batch of effects, returning every target and its actual outcome.

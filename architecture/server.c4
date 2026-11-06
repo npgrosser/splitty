@@ -6,7 +6,7 @@ model {
   extend splitty.server {
 
     main = component 'main' {
-      description 'Entry point and composition root of the splitty binary (main.rs): the clap command line, serve, daemon start/stop (--end-sessions)/restart/status and the internal daemon run with the adoption of kept sessions, the session-keeper subcommand before the runtime starts, connect (text, or JSON events with --json) and remote-hosts, and the control commands, including confirmed client editor requests and file downloads to a window. Wires the PTY manager, dispatcher, notification engine, effect runner, store, WebSocket and HTTP state and the control socket.'
+      description 'Entry point and composition root of the splitty binary (main.rs): the clap command line, serve, daemon start/stop (--end-sessions)/restart/status and the internal daemon run with the adoption of kept sessions, the session-keeper subcommand before the runtime starts, connect (text, or JSON events with --json) and remote-hosts, and control commands with safely rendered process metadata, including confirmed client editor requests and file downloads to a window. Wires the PTY manager, dispatcher, notification engine, effect runner, store, WebSocket and HTTP state and the control socket.'
       metadata {
         module 'splitty'
       }
@@ -20,7 +20,7 @@ model {
     }
 
     service = component 'service' {
-      description 'Transport-independent UI operations: an explicit native operation catalog, fixed backend and local-hub roles, request validation, size limits and cancellation policy. Browser credentials and owner/grant administration are excluded.'
+      description 'Transport-independent UI operations: an explicit native operation catalog, fixed backend and local-hub roles, request validation, size limits and cancellation policy. Owns unattended mux session metadata and close-on-exit observation through trusted reducer operations. Browser credentials and owner/grant administration are excluded.'
       metadata { module 'splitty_server::service' spec 'control-api' }
     }
     native = component 'native' {

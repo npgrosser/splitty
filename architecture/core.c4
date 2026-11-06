@@ -55,7 +55,7 @@ model {
     // The mux: pure model, and the effect runner at its edge
 
     mux = component 'mux' {
-      description 'The workspace model: state, ops, validation, the pure reducer (state, op) -> (state, effects), the grid projection and the store. Managed-job launch, ownership, result and never-respawn records live with the layout. No I/O.'
+      description 'The workspace model: state, ops, validation, the pure reducer (state, op) -> (state, effects), the grid projection and the store. Managed-job launch, ownership, result and never-respawn records live with the layout. Trusted session metadata updates and omitted screen naming remain pure. No I/O.'
       metadata {
         module 'splitty_core::mux'
         spec 'workspace-model'
@@ -63,7 +63,7 @@ model {
     }
 
     effect_runner = component 'effect_runner' {
-      description 'Runs the effects the reducer returns: spawns shells or direct managed-job programs, kills sessions and builds their owner/scoped socket environment. Returns target-preserving typed outcomes, including spawn failures. The only part of the mux that touches the PTY layer.'
+      description 'Runs the effects the reducer returns: spawns shells or direct managed-job programs, kills sessions and builds their owner/scoped socket environment. Returns target-preserving typed outcomes, including spawn failures. Holds the publication gate shared by ordinary mux callers and service metadata updates. The only part of the mux that touches the PTY layer.'
       metadata {
         module 'splitty_core::mux::effect_runner'
         spec 'terminal-sessions'
@@ -73,7 +73,7 @@ model {
     // Sessions
 
     pty = component 'pty' {
-      description 'PTY sessions: the session layer (the spec of a session with installation-local CLI discovery and child PATH, scrollback, subscriptions, OSC parsing, job log text, process info) over a terminal (terminal: the trait, its factory, the PTY in this process with its reader thread and lifecycle; a daemon\'s terminals are keepers), the replay filter for terminal clients, and the scan of the TCP ports the processes of sessions listen on (/proc on Linux: loopback and wildcard listeners of each shell\'s process tree), and the owner of a TCP connection by its addresses (connection_owner, for the relay on a host).'
+      description 'PTY sessions: the session layer (the spec of a session with installation-local CLI discovery and child PATH, scrollback, subscriptions, OSC parsing, job log text, process info) over a terminal (terminal: the trait, its factory, the PTY in this process with its reader thread and lifecycle; a daemon\'s terminals are keepers), shared display-title derivation and replay filters (streaming for terminal clients, in-place for server snapshots), and the scan of the TCP ports the processes of sessions listen on (/proc on Linux: loopback and wildcard listeners of each shell\'s process tree), and the owner of a TCP connection by its addresses (connection_owner, for the relay on a host).'
       metadata {
         module 'splitty_core::pty'
         spec 'terminal-sessions'

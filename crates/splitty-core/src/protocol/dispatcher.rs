@@ -790,6 +790,10 @@ impl Connection {
 
     /// Replay buffered output in binary frames of at most [`REPLAY_CHUNK`].
     fn send_snapshot(&self, sid: &str, snapshot: splitty_transport::budget::Charged<Vec<u8>>) {
+        let snapshot = snapshot.map(|mut data| {
+            crate::pty::replay::filter_in_place(&mut data);
+            data
+        });
         for chunk in snapshot.chunks(REPLAY_CHUNK) {
             if self.sender.send_binary(sid, chunk).is_err() {
                 self.sender.close();
@@ -1652,10 +1656,48 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn replay_filters_queries_and_clipboard_before_attached_but_live_bytes_survive() {
+        let mut history = vec![b'x'; REPLAY_CHUNK - 3];
+        history.extend_from_slice(b"\x1b]52;c;Y29weQ==\x07\x1b[6n\x1b[31mred\x1b[0m");
+        let session = Arc::new(
+            MockSession::new("safe-replay")
+                .with_scrollback(history)
+                .printing_on_subscribe(b"\x1b[6n".to_vec()),
+        );
+        let backend = Arc::new(MockBackend::new().with_session(session));
+        let dispatcher = Arc::new(Dispatcher::new(backend));
+        let sender = Arc::new(MockSender::new());
+        let conn = dispatcher.new_connection(sender.clone());
+        conn.handle(&Request {
+            msg_type: MSG_ATTACH.into(),
+            id: "safe-replay".into(),
+            ..Default::default()
+        })
+        .await;
+        tokio::task::yield_now().await;
+        let output: Vec<_> = sender
+            .binary_chunks()
+            .into_iter()
+            .flat_map(|(_, bytes)| bytes)
+            .collect();
+        let mut expected = vec![b'x'; REPLAY_CHUNK - 3];
+        expected.extend_from_slice(b"\x1b[31mred\x1b[0m\x1b[6n");
+        assert_eq!(output, expected);
+        let order = sender.order();
+        let attached = order
+            .iter()
+            .position(|kind| kind == "attached")
+            .expect("attached");
+        assert_eq!(order.last().map(String::as_str), Some("binary"));
+        assert!(attached > 0);
+        conn.close();
+    }
+
+    #[tokio::test]
     async fn test_scrollback_replay_chunking() {
         // Create scrollback data larger than one chunk (32768 bytes)
         let scrollback_size = 32768 * 2 + 1000; // 2 full chunks + partial
-        let scrollback_data: Vec<u8> = (0..scrollback_size).map(|i| (i % 256) as u8).collect();
+        let scrollback_data = vec![b'x'; scrollback_size];
 
         let session =
             Arc::new(MockSession::new("sess-scroll").with_scrollback(scrollback_data.clone()));

@@ -894,6 +894,8 @@ mod tests {
         sessions.insert(
             session_id.clone(),
             SessionEntry {
+                display_title: None,
+                busy: false,
                 id: session_id,
                 job_id: None,
                 restart_policy: Default::default(),

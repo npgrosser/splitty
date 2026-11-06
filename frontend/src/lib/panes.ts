@@ -58,15 +58,16 @@ export function addTerminalPane(
   // Inherit CWD from the pane we split off when not explicitly provided; a
   // viewer pane has no session, and a terminal next to it starts in its
   // directory (workspace-model, Split Session Inheritance).
-  const dir = options?.dir ?? (refPaneId
+  const inheritOnServer = binding.conn.sessions.serverDerivedPaneState && !options?.directSpawn && !command && !existingSessionId;
+  const dir = options?.dir ?? (!inheritOnServer && refPaneId
     ? binding.sessionForPane(refPaneId)?.lastCwd ?? viewerDirectoryOf(api.getPanel(refPaneId))
     : undefined);
-  // Shell profiles are the local server's. Another server does not know their
-  // ids, and a split there inherits its pane's profile on that server.
-  const shellProfileId = binding.conn.kind !== "local"
-    ? undefined
-    : options?.shellProfileId
-      ?? (direction && refPaneId
+  // Capable hosts resolve unspecified profiles themselves; an explicit choice
+  // names a profile on that host. Keep the local defaults for older servers.
+  const shellProfileId = inheritOnServer
+    ? options?.shellProfileId
+    : binding.conn.kind !== "local" ? undefined
+      : options?.shellProfileId ?? (direction && refPaneId
         ? binding.sessionForPane(refPaneId)?.shellProfileId
         : getDefaultShellProfileId());
 

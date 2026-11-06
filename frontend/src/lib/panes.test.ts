@@ -25,6 +25,16 @@ function setup() {
 }
 
 describe("terminal pane layout operations", () => {
+  it("leaves launch inheritance to capable hosts and preserves explicit cwd", () => {
+    const { api, socket, binding } = setup();
+    binding.conn.sessions.serverDerivedPaneState = true;
+    vi.spyOn(binding, "sessionForPane").mockReturnValue({ lastCwd: "/stale" } as ReturnType<typeof binding.sessionForPane>);
+    addTerminalPane(api, { id: "new-pane" });
+    expect(socket.sentOfType("mux.op")[0].op).toMatchObject({ cwd: undefined, shellProfileId: undefined });
+    addTerminalPane(api, { id: "explicit", dir: "/chosen", shellProfileId: "host-fish" });
+    expect(socket.sentOfType("mux.op")[1].op).toMatchObject({ cwd: "/chosen", shellProfileId: "host-fish" });
+  });
+
   it("opens a keyboard tab in the active pane's slot on its host", () => {
     const { api, socket } = setup();
     addTerminalPane(api, { id: "new-pane", dir: "/work" });

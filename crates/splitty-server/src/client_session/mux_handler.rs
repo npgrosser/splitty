@@ -105,6 +105,7 @@ impl MuxHandler {
             if self.hub_decisions {
                 capabilities.push("hub-host-decisions-v1".into());
             }
+            capabilities.push("serverDerivedPaneState".into());
             capabilities.push(super::editor::CAPABILITY.into());
             capabilities.push(super::files::CAPABILITY.into());
             capabilities.push(splitty_core::protocol::sizing::CAPABILITY.into());
@@ -167,6 +168,7 @@ impl MuxHandler {
     }
 
     async fn handle_op(&self, msg: MuxOpMsg) {
+        let _publication = self.effect_runner.publication.lock().await;
         let screen_id = ScreenId::from(msg.screen_id.as_str());
 
         let op_type = msg

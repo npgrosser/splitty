@@ -225,6 +225,16 @@ Increasing request IDs belong to one generation. At most 64 requests are pending
 
 The reader thread holds its own descriptor of the PTY master, so `close` hangs up the terminal explicitly (SIGHUP to the shell and the foreground process group) and the thread ends at the EOF that follows. A stopping embedded server closes all sessions this way after its server has stopped; otherwise a session still held by a client connection would keep its shell, and with it the process, alive. A stopping daemon releases its sessions instead (`Backend::release_all`): the keepers keep the programs running for the next daemon.
 
+## Server-derived Pane State
+
+The service owns an observer (`service::pane_state`) for all mux sessions, including screens with no attached client. It samples process and OSC information every half second and dispatches trusted `UpdateSessionMetadata` facts through the pure reducer. The session ID locates the current screen, so pane moves do not leave stale titles or close the former screen's pane. Session snapshots carry `displayTitle` and `busy`; ordinary pane titles follow the display title, while managed job labels and lifecycle records remain owned by the job runtime. Busy describes a known foreground process other than the original shell, and clears at exit. `TitleInfo::display_title` applies one OSC/process/shell/home-directory display policy to snapshots and per-connection title events, removes control and bidirectional formatting characters and bounds the title to 500 characters. CLI listing cells also replace controls in cwd and other fields before printing them.
+
+Ordinary mux operations and observer updates share the effect runner's publication gate: dispatch, effects and spawn announcements complete before metadata can nudge a client. The observer applies the current host's `close_on_exit` setting after a three-second final-output grace (longer than the session stream's two-second drain bound), using normal close effects. Managed jobs are excluded and empty screens remain. The observer holds only weak ownership of the service between ticks.
+
+The `serverDerivedPaneState` welcome capability gates the web client's title and busy consumption, server ownership of exit closure and omission of unspecified launch overrides. Older hosts retain client derivation and exit handling. The reducer names omitted new screen names with the first unused `Screen N`, leaving explicit names and retained empty-screen names intact.
+
+The session dispatcher filters complete replay snapshots in place before framing with `pty::replay::filter_in_place`, preserving the snapshot's byte lease and requiring no second scrollback allocation. Its rules match the streaming CLI/web replay defense, including cancelled and incomplete sequences. The replay/attached/live boundary and the clients' legacy-server protection remain unchanged.
+
 ## Session Keepers
 
 In daemon mode every session's PTY and program belong to a keeper process of their own (`splitty_core::keeper`), so a daemon restart, an update or a daemon crash ends no session. The keeper owns the process and its terminal; the daemon is its controller; clients connect to the daemon as before, which keeps the dispatcher, the effect runner and the jobs coordinator unaware of keepers (they see `SessionHandle`s).
