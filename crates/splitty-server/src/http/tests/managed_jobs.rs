@@ -364,6 +364,30 @@ async fn managed_grant_socket_is_private_resumable_and_never_promotes_to_owner()
         1,
         "no viewer pane"
     );
+    // access-control, Comments on the owner socket: neither the comments, a
+    // reply nor a wait for a review through a grant.
+    for (method, path, body) in [
+        ("GET", "/api/viewer/comments?screenId=s1&paneId=p1", None),
+        (
+            "POST",
+            "/api/viewer/comments/reply",
+            Some(json!({"screenId":"s1","paneId":"p1","document":"/tmp/x","number":1,"body":"x"})),
+        ),
+        (
+            "POST",
+            "/api/viewer/review/wait",
+            Some(json!({"screenId":"s1","paneId":"p1","viewerPaneId":"v1"})),
+        ),
+    ] {
+        assert_eq!(
+            crate::cli::request(&server, method, path, body)
+                .await
+                .expect("viewer route denied")
+                .0,
+            404,
+            "{method} {path}"
+        );
+    }
     let (status, list) = crate::cli::request(&server, "GET", "/api/jobs", None)
         .await
         .expect("first client");

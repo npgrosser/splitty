@@ -3,7 +3,7 @@
 use super::catalog::{Operation, Rejection, Request, Role};
 use super::operations as op;
 use super::reply::{IntoReply, Payload, Reply};
-use super::{jobs, State};
+use super::{jobs, review, State};
 use http::StatusCode;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
@@ -104,6 +104,9 @@ impl State {
             Operation::SessionSend => op::post_session_send(self, id, body!()).await,
             Operation::EditorOpen => op::post_editor_open(self, body!()).await,
             Operation::FileOffer => op::post_file_offer(self, body!()).await,
+            Operation::ViewerComments => review::get_viewer_comments(self, query()).await,
+            Operation::ViewerCommentReply => review::post_comment_reply(self, body).await,
+            Operation::ViewerReviewWait => review::post_review_wait(self, body).await,
             Operation::JobList => job!(jobs.list()),
             Operation::JobLaunch => job!(jobs.launch(body!())),
             Operation::JobInspect => job!(jobs.inspect(id)),

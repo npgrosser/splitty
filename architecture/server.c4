@@ -29,7 +29,7 @@ model {
     }
 
     client_session = component 'client_session' {
-      description 'Common client connections: independent per-connection identity and cleanup, binary output frames and JSON codec, the per-connection mux handler (welcome, resync, ops and their effects), typed broadcasts through per-client notification queues that drain after welcome, and ports.changed: the listening ports of the sessions after each welcome and on change, scanned every 2 seconds while clients are connected. Ephemeral editor requests target one registered attached client, expire and cancel on disconnect; never authorize desktop launches. File offers go to every registered attached client; the first to accept reads the file in chunks, the others drop it; offers expire and end on disconnect.'
+      description 'Common client connections: independent per-connection identity and cleanup, binary output frames and JSON codec, the per-connection mux handler (welcome, resync, ops and their effects), typed broadcasts through per-client notification queues that drain after welcome, and ports.changed: the listening ports of the sessions after each welcome and on change, scanned every 2 seconds while clients are connected. Ephemeral editor requests target one registered attached client, expire and cancel on disconnect; never authorize desktop launches. File offers go to every registered attached client; the first to accept reads the file in chunks, the others drop it; offers expire and end on disconnect. Waits for a review live in memory, at most 16 and one per viewer pane; the first answer of a window settles one.'
       metadata {
         module 'splitty_server::client_session'
         spec 'mux-protocol'
@@ -96,7 +96,7 @@ model {
     }
 
     cli = component 'cli' {
-      description 'Client side of the control commands: offline version-matched agent guide, server discovery (environment, daemon.json, flags), calls to the API over TCP or the control socket, scoped agent exec with CLI PATH inheritance, external editor path requests, and file downloads to a window, packing a folder into a zip first. The server\'s WebSocket for local clients (socket: token, ticket, own origin), and attach: verified private native daemon discovery by default, an explicit authenticated browser gateway when selected, or direct keeper access without a daemon; a session in this terminal as a session protocol client (targets and the pick list, raw mode and the mode reset, the detach key, the replay without report requests, size reports).'
+      description 'Client side of the control commands: offline version-matched agent guide, server discovery (environment, daemon.json, flags), calls to the API over TCP or the control socket, scoped agent exec with CLI PATH inheritance, external editor path requests, file downloads to a window, packing a folder into a zip first, and documents in viewer panes with the comments on them and the wait for their review. The server\'s WebSocket for local clients (socket: token, ticket, own origin), and attach: verified private native daemon discovery by default, an explicit authenticated browser gateway when selected, or direct keeper access without a daemon; a session in this terminal as a session protocol client (targets and the pick list, raw mode and the mode reset, the detach key, the replay without report requests, size reports).'
       metadata {
         module 'splitty_server::cli'
         spec 'cli'
@@ -138,9 +138,9 @@ model {
     client_session -> splitty.transport.admission 'Bound live client identities before allocating state and until cleanup'
     http -> jobs 'Job routes, actor scopes, grant administration'
     http -> service 'Shared terminal-service state and explicit native operation catalog'
-    service -> client_session 'Shared session registry, dispatcher and client delivery'
+    service -> client_session 'Shared session registry, dispatcher, client delivery and the registry of review waits'
     service -> hub 'Service-owned remote host management'
-    service -> splitty.core.mux 'Workspace store'
+    service -> splitty.core.mux 'Workspace store; agent replies and review waits as trusted operations'
     service -> splitty.core.daemon 'Persist workspace changes only in daemon mode'
     service -> splitty.core.effect_runner 'Runtime composition of PTY effects and owner-control environment'
     service -> splitty.core.config 'Home and server settings'

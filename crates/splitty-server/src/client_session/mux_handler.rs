@@ -1,8 +1,9 @@
 //! Handles the `mux.*` sub-protocol for a single WebSocket connection.
 //!
-//! Processes `mux.op` and `mux.resync` messages. Sends a `mux.welcome` on connect
-//! with the screen list. No per-screen attach/detach — persistence is a server-mode
-//! property, not per-screen.
+//! Processes `mux.op` and `mux.resync` messages, and `viewer.review_answer`,
+//! a window's answer to a process waiting for a review. Sends a `mux.welcome`
+//! on connect with the screen list. No per-screen attach/detach — persistence
+//! is a server-mode property, not per-screen.
 
 use std::sync::Arc;
 use std::sync::RwLock;
@@ -34,6 +35,7 @@ pub struct MuxHandler {
     env: EnvContext,
     broadcast: BroadcastFn,
     jobs: Arc<crate::jobs::Jobs>,
+    reviews: Arc<super::reviews::Reviews>,
 }
 
 // ── Mux wire message types (client -> server) ───────────────────────────────
@@ -66,6 +68,7 @@ impl MuxHandler {
         env: EnvContext,
         broadcast: BroadcastFn,
         jobs: Arc<crate::jobs::Jobs>,
+        reviews: Arc<super::reviews::Reviews>,
     ) -> Self {
         Self {
             store,
@@ -77,6 +80,7 @@ impl MuxHandler {
             env,
             broadcast,
             jobs,
+            reviews,
         }
     }
 
@@ -117,6 +121,15 @@ impl MuxHandler {
                     tracing::warn!("invalid mux.resync message");
                 }
             }
+            Some(codec::MSG_VIEWER_REVIEW_ANSWER) => {
+                // Settled once; every answer is acknowledged to its sender
+                // only (`mux-protocol`, Review Answers). The waiting request
+                // ends the wait in the record and nudges the windows.
+                let answered = self.reviews.answer(&value);
+                if let Err(error) = self.sender.try_send_json(&answered) {
+                    tracing::debug!(%error, "a review acknowledgement was not queued");
+                }
+            }
             _ => tracing::warn!("unknown mux message type"),
         }
     }
@@ -135,7 +148,7 @@ impl MuxHandler {
         };
         if !value["type"]
             .as_str()
-            .is_some_and(|kind| kind.starts_with("mux."))
+            .is_some_and(|kind| kind.starts_with("mux.") || kind == codec::MSG_VIEWER_REVIEW_ANSWER)
         {
             return false;
         }
@@ -162,7 +175,14 @@ impl MuxHandler {
             .map(String::from);
         // The viewer pane an annotation op names, reported back if the op is
         // rejected (`viewer-annotations`).
-        let annotation_op = matches!(op_type.as_str(), "put_annotations" | "remove_annotations");
+        let annotation_op = matches!(
+            op_type.as_str(),
+            "put_annotations"
+                | "remove_annotations"
+                | "put_replies"
+                | "remove_replies"
+                | "mark_sent"
+        );
         let annotated_pane = msg
             .op
             .get("paneId")
@@ -272,6 +292,17 @@ impl MuxHandler {
                     Ok(op) => op,
                     Err(e) => {
                         tracing::warn!("mux.op: invalid op: {}", e);
+                        // A window waits for the answer to an annotation op
+                        // before it shows its own state again.
+                        if annotation_op {
+                            self.send_event(&ServerEvent::mux_op_failed(
+                                op_type,
+                                Some(msg.screen_id.clone()),
+                                annotated_pane,
+                                format!("invalid op: {e}"),
+                            ))
+                            .await;
+                        }
                         return;
                     }
                 };
@@ -288,7 +319,12 @@ impl MuxHandler {
                 }
                 let viewer_change = matches!(
                     op_type.as_str(),
-                    "open_viewer" | "put_annotations" | "remove_annotations"
+                    "open_viewer"
+                        | "put_annotations"
+                        | "remove_annotations"
+                        | "put_replies"
+                        | "remove_replies"
+                        | "mark_sent"
                 ) || (op_type == "close_pane" && effects.is_empty());
                 if op_type == "set_scratchpad" || op_type == "arrange_panes" || viewer_change {
                     // Starts and ends no session either, yet the other
@@ -510,6 +546,7 @@ mod tests {
             EnvContext::default(),
             Arc::new(|_, _| {}),
             jobs,
+            Default::default(),
         );
 
         let op = r#"{"type":"mux.op","screenId":"screen-1","op":{"type":"create_screen","screenId":"screen-1","name":"Default","newPaneId":"terminal-9"}}"#;
@@ -577,6 +614,7 @@ mod tests {
                 )
             }),
             jobs,
+            Default::default(),
         );
 
         let op = r#"{"type":"mux.op","screenId":"screen-1","op":{"type":"move_pane_to_screen","paneId":"terminal-1","targetScreenId":"screen-2"}}"#;
@@ -661,6 +699,7 @@ mod tests {
                 )
             }),
             jobs,
+            Default::default(),
         );
 
         let tabs = r#"{"type":"mux.op","screenId":"screen-1","op":{"type":"arrange_panes","root":{"type":"slot","paneIds":["terminal-1","terminal-2"],"activePaneId":"terminal-2"}}}"#;
@@ -793,6 +832,7 @@ mod tests {
                 )
             }),
             jobs,
+            Default::default(),
         );
 
         let op = format!(
@@ -874,6 +914,7 @@ mod tests {
                 )
             }),
             jobs,
+            Default::default(),
         );
         let next = |sent: &mut splitty_transport::queue::Receiver<Message>| match sent
             .try_recv()
@@ -959,6 +1000,16 @@ mod tests {
         client_id: &str,
         others: &Arc<std::sync::Mutex<Vec<Value>>>,
     ) -> (MuxHandler, splitty_transport::queue::Receiver<Message>) {
+        window_with(store, client_id, others, &Default::default())
+    }
+
+    /// [`window`], answering the waits of `reviews`.
+    fn window_with(
+        store: &Arc<Store>,
+        client_id: &str,
+        others: &Arc<std::sync::Mutex<Vec<Value>>>,
+        reviews: &Arc<super::super::reviews::Reviews>,
+    ) -> (MuxHandler, splitty_transport::queue::Receiver<Message>) {
         let (sender, sent) = ClientSender::channel();
         let backend = Arc::new(splitty_core::pty::manager::Manager::new());
         let runner = Arc::new(EffectRunner::new(backend.clone()));
@@ -987,6 +1038,7 @@ mod tests {
                 )
             }),
             jobs,
+            reviews.clone(),
         );
         (handler, sent)
     }
@@ -1038,8 +1090,8 @@ mod tests {
             "{welcome}"
         );
 
-        let annotation = serde_json::json!({
-            "id": "ann-0123456789abcdef", "kind": "question", "body": "Why not five times?",
+        let mut annotation = serde_json::json!({
+            "id": "ann-0123456789abcdef", "kind": "comment", "body": "Why not five times?",
             "target": {
                 "view": "source", "quote": "retry three times", "prefix": "On failure, ",
                 "suffix": ".", "startLine": 30, "endLine": 30,
@@ -1060,6 +1112,7 @@ mod tests {
         assert!(b.try_handle(resync).await);
         let snapshot = next_text(&mut sent_b);
         assert_eq!(snapshot["type"], "mux.screen_snapshot");
+        annotation["number"] = serde_json::json!(1);
         assert_eq!(
             snapshot["screen"]["panes"]["viewer-0123456789abcdef"]["viewer"]["annotations"],
             serde_json::json!([annotation])
@@ -1147,6 +1200,264 @@ mod tests {
         assert_eq!(
             after.panes[&PaneId::from("v1")].viewer,
             before.panes[&PaneId::from("v1")].viewer
+        );
+    }
+
+    /// Screen `s1` with the terminal `p1` and the viewer `v1`, whose
+    /// annotation #1 the user handed over and an agent replied to.
+    fn handed_over() -> Arc<Store> {
+        let store = Arc::new(Store::new());
+        store
+            .dispatch(Op::CreateScreen {
+                name: None,
+                screen_id: Some(ScreenId::from("s1")),
+                new_pane_id: Some(PaneId::from("p1")),
+                shell_profile_id: None,
+            })
+            .expect("screen");
+        for op in [
+            serde_json::json!({
+                "type": "open_viewer", "paneId": "p1", "newPaneId": "v1",
+                "source": {"kind": "file", "path": "/home/me/app/PLAN.md"},
+            }),
+            serde_json::json!({
+                "type": "put_annotations", "paneId": "v1",
+                "annotations": [{"id": "ann-0000000000000001", "kind": "comment", "body": "Why?"}],
+            }),
+            serde_json::json!({"type": "mark_sent", "paneId": "v1", "entries": [
+                {"id": "ann-0000000000000001", "kind": "comment", "body": "Why?"},
+            ]}),
+        ] {
+            let op: ScreenOp = serde_json::from_value(op).expect("wire op");
+            store
+                .dispatch_screen(&ScreenId::from("s1"), op)
+                .expect("applied");
+        }
+        store
+            .dispatch(Op::AgentReply {
+                screen_id: ScreenId::from("s1"),
+                pane_id: PaneId::from("v1"),
+                number: 1,
+                reply: splitty_core::mux::AnnotationReply {
+                    id: "rep-00000000000000a1".into(),
+                    author: splitty_core::mux::ReplyAuthor::Agent,
+                    body: "Because.".into(),
+                    sent: false,
+                    from: Some(splitty_core::mux::ReplyFrom {
+                        pane_id: PaneId::from("p1"),
+                        title: "claude".into(),
+                    }),
+                },
+            })
+            .expect("agent's reply");
+        store
+    }
+
+    /// mux-protocol, Change Propagation to Other Clients and Rejected Op
+    /// Reporting (Rejected reply): the user's reply, its removal and a
+    /// hand-over nudge the other windows and not the sender; a reply under
+    /// the ID of an agent's reply, a malformed reply and a malformed
+    /// hand-over are reported to the sender only, with the viewer pane, and
+    /// change nothing. workspace-model, Layout Operations (No client writes
+    /// an agent's reply): an agent's reply, a wait's start or its end sent
+    /// by a window has no wire form and changes nothing.
+    #[tokio::test]
+    async fn replies_and_hand_overs_nudge_the_others_and_a_rejected_reply_answers_the_sender() {
+        let store = handed_over();
+        let others = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (a, mut sent_a) = window(&store, "window-a", &others);
+        let message = |op: Value| serde_json::json!({"type": "mux.op", "screenId": "s1", "op": op});
+
+        for (count, op) in [
+            serde_json::json!({
+                "type": "put_replies", "paneId": "v1", "annotationId": "ann-0000000000000001",
+                "replies": [{"id": "rep-00000000000000b1", "author": "user", "body": "And the timeout?"}],
+            }),
+            serde_json::json!({"type": "mark_sent", "paneId": "v1", "entries": [
+                {"id": "rep-00000000000000b1", "body": "And the timeout?"},
+            ]}),
+            serde_json::json!({
+                "type": "remove_replies", "paneId": "v1", "annotationId": "ann-0000000000000001",
+                "ids": ["rep-00000000000000b1"],
+            }),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let kind = op["type"].clone();
+            assert!(a.try_handle(&message(op).to_string()).await);
+            let nudged = others.lock().expect("recorder").clone();
+            assert_eq!(nudged.len(), count + 1, "{kind}: {nudged:?}");
+            assert_eq!(nudged[count]["type"], "mux.nudge");
+            assert_eq!(nudged[count]["reason"], "mux_op");
+            assert_eq!(nudged[count]["screenId"], "s1");
+            assert!(sent_a.try_recv().is_err(), "{kind}: the sender gets nothing");
+        }
+
+        let before = store.get_screen(&ScreenId::from("s1")).expect("screen");
+        for (op, kind) in [
+            (
+                serde_json::json!({
+                    "type": "put_replies", "paneId": "v1", "annotationId": "ann-0000000000000001",
+                    "replies": [{"id": "rep-00000000000000a1", "author": "user", "body": "Rewritten."}],
+                }),
+                "put_replies",
+            ),
+            (
+                serde_json::json!({
+                    "type": "put_replies", "paneId": "v1", "annotationId": "ann-0000000000000001",
+                    "replies": [{"id": "rep-00000000000000b2", "author": "system", "body": "x"}],
+                }),
+                "put_replies",
+            ),
+            (
+                serde_json::json!({"type": "mark_sent", "paneId": "v1", "entries": []}),
+                "mark_sent",
+            ),
+            (
+                serde_json::json!({
+                    "type": "remove_replies", "paneId": "v1", "annotationId": "ann-0000000000000001",
+                    "ids": ["rep-1"],
+                }),
+                "remove_replies",
+            ),
+        ] {
+            assert!(a.try_handle(&message(op).to_string()).await);
+            let failed = next_text(&mut sent_a);
+            assert_eq!(failed["type"], "mux.op_failed", "{failed}");
+            assert_eq!(failed["op"], kind);
+            assert_eq!(failed["screenId"], "s1");
+            assert_eq!(failed["paneId"], "v1");
+            assert!(
+                failed["error"]
+                    .as_str()
+                    .is_some_and(|error| !error.is_empty()),
+                "{failed}"
+            );
+            assert!(sent_a.try_recv().is_err(), "nothing else for the sender");
+        }
+        for op in [
+            serde_json::json!({
+                "type": "agent_reply", "paneId": "v1", "number": 1,
+                "reply": {"id": "rep-00000000000000c1", "author": "agent", "body": "x",
+                          "from": {"paneId": "p1", "title": "claude"}},
+            }),
+            serde_json::json!({
+                "type": "start_review_wait", "paneId": "v1",
+                "wait": {"id": "wait-00000000000000c1", "paneId": "p1", "title": "claude"},
+            }),
+            serde_json::json!({
+                "type": "end_review_wait", "paneId": "v1", "waitId": "wait-00000000000000c1",
+            }),
+        ] {
+            assert!(a.try_handle(&message(op).to_string()).await);
+            assert!(
+                sent_a.try_recv().is_err(),
+                "a trusted operation is not an op"
+            );
+        }
+        assert!(store.review_wait(&PaneId::from("v1")).is_none());
+        assert_eq!(
+            others.lock().expect("recorder").len(),
+            3,
+            "no other client hears of a rejection"
+        );
+        let after = store.get_screen(&ScreenId::from("s1")).expect("screen");
+        assert_eq!(after.revision, before.revision);
+        let thread = &after.panes[&PaneId::from("v1")]
+            .viewer
+            .as_ref()
+            .expect("viewer")
+            .annotations[0]
+            .replies;
+        assert_eq!(thread.len(), 1);
+        assert_eq!(thread[0].body, "Because.", "the agent's reply as written");
+    }
+
+    /// mux-protocol, Review Answers (The first answer, A stale answer) and
+    /// viewer-annotations, Waiting For A Review (Two windows answer): the
+    /// first answer naming the wait settles it and reaches the waiting
+    /// process; every answer is acknowledged to its sender only, `accepted`
+    /// only for the first; an answer to a wait whose process stopped waiting,
+    /// or for another pane, changes nothing.
+    #[tokio::test]
+    async fn the_first_answer_settles_a_wait_and_every_answer_is_acknowledged_to_its_sender() {
+        use super::super::reviews::{Outcome, Reviews};
+        let store = handed_over();
+        let reviews = Arc::new(Reviews::default());
+        let others = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (a, mut sent_a) = window_with(&store, "window-a", &others, &reviews);
+        let (b, mut sent_b) = window_with(&store, "window-b", &others, &reviews);
+        let mut waiting = reviews.register(PaneId::from("v1")).expect("wait");
+        let wait = waiting.wait_id().to_owned();
+        let answer = |pane: &str, outcome: Value| {
+            let mut answer = serde_json::json!({
+                "type": "viewer.review_answer", "screenId": "s1", "paneId": pane, "waitId": wait,
+            });
+            if let (Some(answer), Some(outcome)) = (answer.as_object_mut(), outcome.as_object()) {
+                answer.extend(outcome.clone());
+            }
+            answer.to_string()
+        };
+        let before = serde_json::to_value(store.get_workspace_state()).expect("workspace");
+
+        assert!(
+            a.try_handle(&answer(
+                "v1",
+                serde_json::json!({"outcome": "feedback", "review": "# Review of PLAN.md"})
+            ))
+            .await
+        );
+        assert!(
+            b.try_handle(&answer("v1", serde_json::json!({"outcome": "approved"})))
+                .await
+        );
+        assert_eq!(
+            next_text(&mut sent_a),
+            serde_json::json!({"type": "viewer.review_answered", "paneId": "v1", "waitId": wait, "accepted": true})
+        );
+        assert_eq!(
+            next_text(&mut sent_b),
+            serde_json::json!({"type": "viewer.review_answered", "paneId": "v1", "waitId": wait, "accepted": false})
+        );
+        assert!(sent_a.try_recv().is_err() && sent_b.try_recv().is_err());
+        assert_eq!(
+            waiting.answer().await,
+            Some(Outcome::Feedback("# Review of PLAN.md".into())),
+            "the waiting process receives A's review"
+        );
+        drop(waiting);
+
+        // A stale answer: the process stopped waiting.
+        let stopped = reviews.register(PaneId::from("v1")).expect("wait");
+        let stale = stopped.wait_id().to_owned();
+        drop(stopped);
+        let message = serde_json::json!({
+            "type": "viewer.review_answer", "screenId": "s1", "paneId": "v1", "waitId": stale,
+            "outcome": "approved",
+        });
+        assert!(a.try_handle(&message.to_string()).await);
+        assert_eq!(next_text(&mut sent_a)["accepted"], false);
+        // Another pane's answer does not settle the wait of `v1`.
+        let mut held = reviews.register(PaneId::from("v1")).expect("wait");
+        let mut other_pane = message.clone();
+        other_pane["waitId"] = serde_json::json!(held.wait_id());
+        other_pane["paneId"] = serde_json::json!("v2");
+        assert!(a.try_handle(&other_pane.to_string()).await);
+        assert_eq!(next_text(&mut sent_a)["accepted"], false);
+        assert_eq!(reviews.held(), 1, "the wait of v1 still waits");
+        let answered =
+            tokio::time::timeout(std::time::Duration::from_millis(20), held.answer()).await;
+        assert!(answered.is_err(), "no answer reached it");
+
+        assert!(
+            others.lock().expect("recorder").is_empty(),
+            "answers nudge no one; the waiting request does"
+        );
+        assert_eq!(
+            serde_json::to_value(store.get_workspace_state()).expect("workspace"),
+            before,
+            "answers change no record"
         );
     }
 }

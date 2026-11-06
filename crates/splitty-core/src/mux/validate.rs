@@ -7,10 +7,11 @@ use std::collections::HashSet;
 
 use super::ops::{Arrangement, ScreenOp, ViewerPlacement};
 use super::state::{
-    equal_sizes, AnnotationKind, LayoutNode, PaneRole, ScreenState, SlotLocation, ViewerAnnotation,
-    ViewerSource, ANNOTATION_CONTEXT_LIMIT, ANNOTATION_COUNT_LIMIT, ANNOTATION_LINE_LIMIT,
-    ANNOTATION_PANE_TEXT_LIMIT, ANNOTATION_TEXT_LIMIT, SCRATCHPAD_LIMIT, VIEWER_PATH_LIMIT,
-    VIEWER_TEXT_LIMIT, VIEWER_TITLE_LIMIT,
+    equal_sizes, AnnotationKind, AnnotationReply, LayoutNode, PaneRole, ReplyAuthor, ReviewWait,
+    ScreenState, SentEntry, SlotLocation, ViewerAnnotation, ViewerSource, ViewerState,
+    ANNOTATION_CONTEXT_LIMIT, ANNOTATION_COUNT_LIMIT, ANNOTATION_LINE_LIMIT,
+    ANNOTATION_PANE_TEXT_LIMIT, ANNOTATION_TEXT_LIMIT, MARK_SENT_LIMIT, REPLY_COUNT_LIMIT,
+    REPLY_TITLE_LIMIT, SCRATCHPAD_LIMIT, VIEWER_PATH_LIMIT, VIEWER_TEXT_LIMIT, VIEWER_TITLE_LIMIT,
 };
 use super::MuxError;
 use crate::ids::*;
@@ -50,16 +51,24 @@ pub fn validate_screen_op(state: &ScreenState, op: &ScreenOp) -> Result<(), MuxE
         ScreenOp::OpenViewer {
             pane_id,
             placement,
+            new_pane_id,
             source,
             cwd,
-            ..
-        } => validate_open_viewer(
-            state,
-            pane_id.as_ref(),
-            placement.unwrap_or_default(),
-            source,
-            cwd.as_deref(),
-        ),
+            replace,
+        } => {
+            // Only the CLI replaces a text, by title and origin; a window's
+            // viewer is always a new pane.
+            if *replace && (new_pane_id.is_some() || !matches!(source, ViewerSource::Text { .. })) {
+                return Err(MuxError::ViewerReplaceInvalid);
+            }
+            validate_open_viewer(
+                state,
+                pane_id.as_ref(),
+                placement.unwrap_or_default(),
+                source,
+                cwd.as_deref(),
+            )
+        }
         ScreenOp::PutAnnotations {
             pane_id,
             annotations,
@@ -67,6 +76,15 @@ pub fn validate_screen_op(state: &ScreenState, op: &ScreenOp) -> Result<(), MuxE
         ScreenOp::RemoveAnnotations { pane_id, ids } => {
             validate_remove_annotations(state, pane_id, ids)
         }
+        ScreenOp::PutReplies {
+            pane_id,
+            annotation_id,
+            replies,
+        } => validate_put_replies(state, pane_id, annotation_id, replies),
+        ScreenOp::RemoveReplies { pane_id, ids, .. } => {
+            validate_remove_replies(state, pane_id, ids)
+        }
+        ScreenOp::MarkSent { pane_id, entries } => validate_mark_sent(state, pane_id, entries),
     }
 }
 
@@ -85,7 +103,7 @@ fn validate_open_viewer(
                 return Err(MuxError::ViewerPathInvalid);
             }
         }
-        ViewerSource::Text { title, text } => {
+        ViewerSource::Text { title, text, .. } => {
             if text.len() > VIEWER_TEXT_LIMIT {
                 return Err(MuxError::ViewerTextTooLong {
                     limit: VIEWER_TEXT_LIMIT,
@@ -142,19 +160,24 @@ pub fn viewer_path_is_valid(path: &str) -> bool {
             .any(|segment| segment == "." || segment == "..")
 }
 
-/// The annotations of the viewer pane `pane_id`.
-fn held_annotations<'a>(
-    state: &'a ScreenState,
-    pane_id: &PaneId,
-) -> Result<&'a [ViewerAnnotation], MuxError> {
+/// The record of the viewer pane `pane_id`.
+fn held_viewer<'a>(state: &'a ScreenState, pane_id: &PaneId) -> Result<&'a ViewerState, MuxError> {
     let pane = state
         .panes
         .get(pane_id)
         .ok_or_else(|| MuxError::PaneNotFound(pane_id.clone()))?;
     match &pane.viewer {
-        Some(viewer) if pane.role == Some(PaneRole::Viewer) => Ok(&viewer.annotations),
+        Some(viewer) if pane.role == Some(PaneRole::Viewer) => Ok(viewer),
         _ => Err(MuxError::NotAViewerPane(pane_id.clone())),
     }
+}
+
+/// The annotations of the viewer pane `pane_id`.
+fn held_annotations<'a>(
+    state: &'a ScreenState,
+    pane_id: &PaneId,
+) -> Result<&'a [ViewerAnnotation], MuxError> {
+    held_viewer(state, pane_id).map(|viewer| viewer.annotations.as_slice())
 }
 
 /// An annotation op carries 1 to [`ANNOTATION_COUNT_LIMIT`] entries.
@@ -168,35 +191,9 @@ fn validate_annotation_batch(len: usize) -> Result<(), MuxError> {
     Ok(())
 }
 
-/// The pane's annotations after the op, replaced in place and new ones
-/// appended, stay within the pane's limits (`viewer-annotations`,
-/// Annotations On A Viewer Pane).
-fn validate_put_annotations(
-    state: &ScreenState,
-    pane_id: &PaneId,
-    annotations: &[ViewerAnnotation],
-) -> Result<(), MuxError> {
-    let held = held_annotations(state, pane_id)?;
-    validate_annotation_batch(annotations.len())?;
-    let mut put = HashSet::new();
-    for annotation in annotations {
-        validate_annotation(annotation)?;
-        if !put.insert(annotation.id.as_str()) {
-            return Err(MuxError::AnnotationRepeated(annotation.id.clone()));
-        }
-    }
-    let kept = || held.iter().filter(|held| !put.contains(held.id.as_str()));
-    let count = kept().count() + annotations.len();
-    if count > ANNOTATION_COUNT_LIMIT {
-        return Err(MuxError::AnnotationsTooMany {
-            limit: ANNOTATION_COUNT_LIMIT,
-            got: count,
-        });
-    }
-    let bytes = kept()
-        .chain(annotations)
-        .map(ViewerAnnotation::text_bytes)
-        .sum::<usize>();
+/// The text of a pane's annotations stays within
+/// [`ANNOTATION_PANE_TEXT_LIMIT`].
+fn validate_pane_bytes(bytes: usize) -> Result<(), MuxError> {
     if bytes > ANNOTATION_PANE_TEXT_LIMIT {
         return Err(MuxError::AnnotationsTooLong {
             limit: ANNOTATION_PANE_TEXT_LIMIT,
@@ -204,6 +201,79 @@ fn validate_put_annotations(
         });
     }
     Ok(())
+}
+
+/// The pane's annotations after the op, replaced in place with their numbers
+/// and replies kept and new ones appended, stay within the pane's limits
+/// (`viewer-annotations`, Annotations On A Viewer Pane). A put carries no
+/// number and no replies: the server keeps both.
+fn validate_put_annotations(
+    state: &ScreenState,
+    pane_id: &PaneId,
+    annotations: &[ViewerAnnotation],
+) -> Result<(), MuxError> {
+    let viewer = held_viewer(state, pane_id)?;
+    let held = viewer.annotations.as_slice();
+    validate_annotation_batch(annotations.len())?;
+    let mut put = HashSet::new();
+    for annotation in annotations {
+        validate_annotation(annotation)?;
+        let invalid = |reason| {
+            Err(MuxError::AnnotationPutInvalid {
+                id: annotation.id.clone(),
+                reason,
+            })
+        };
+        if annotation.number != 0 {
+            return invalid("the server numbers annotations; a put carries no number");
+        }
+        if !annotation.replies.is_empty() {
+            return invalid("replies are put with put_replies; a put carries none");
+        }
+        if !put.insert(annotation.id.as_str()) {
+            return Err(MuxError::AnnotationRepeated(annotation.id.clone()));
+        }
+    }
+    let added = annotations
+        .iter()
+        .filter(|annotation| !held.iter().any(|held| held.id == annotation.id))
+        .count();
+    let count = held.len() + added;
+    if count > ANNOTATION_COUNT_LIMIT {
+        return Err(MuxError::AnnotationsTooMany {
+            limit: ANNOTATION_COUNT_LIMIT,
+            got: count,
+        });
+    }
+    // A pane that has given every number takes no new annotation; only a
+    // hand-edited record gets near.
+    let numbers_left = u32::MAX - viewer.last_annotation_number;
+    if usize::try_from(numbers_left).is_ok_and(|left| added > left) {
+        return Err(MuxError::Internal(
+            "the viewer pane has given every annotation number".into(),
+        ));
+    }
+    let replaced = |held: &ViewerAnnotation| annotations.iter().find(|put| put.id == held.id);
+    let bytes = held
+        .iter()
+        .map(|held| match replaced(held) {
+            Some(put) => {
+                put.text_bytes()
+                    + held
+                        .replies
+                        .iter()
+                        .map(AnnotationReply::text_bytes)
+                        .sum::<usize>()
+            }
+            None => held.text_bytes(),
+        })
+        .sum::<usize>()
+        + annotations
+            .iter()
+            .filter(|put| !held.iter().any(|held| held.id == put.id))
+            .map(ViewerAnnotation::text_bytes)
+            .sum::<usize>();
+    validate_pane_bytes(bytes)
 }
 
 /// A removal names 1 to [`ANNOTATION_COUNT_LIMIT`] IDs of the annotation ID
@@ -272,14 +342,15 @@ fn validate_annotation(annotation: &ViewerAnnotation) -> Result<(), MuxError> {
         .as_deref()
         .is_some_and(|body| !body.trim().is_empty());
     match annotation.kind {
-        AnnotationKind::Comment | AnnotationKind::Question if !remark => {
-            return invalid("a comment or a question needs a remark");
+        AnnotationKind::Comment if !remark => {
+            return invalid("a comment needs a remark");
         }
-        AnnotationKind::Change if annotation.replacement.as_deref().is_none_or(str::is_empty) => {
+        // An empty replacement suggests deleting the passage.
+        AnnotationKind::Change if annotation.replacement.is_none() => {
             return invalid("a change needs a replacement");
         }
-        AnnotationKind::Change | AnnotationKind::Delete if target.is_none() => {
-            return invalid("a change or a deletion needs a passage");
+        AnnotationKind::Change if target.is_none() => {
+            return invalid("a change needs a passage");
         }
         _ => {}
     }
@@ -302,12 +373,255 @@ fn validate_annotation(annotation: &ViewerAnnotation) -> Result<(), MuxError> {
 /// Whether `id` has the form of an annotation ID: `ann-` and 16 lowercase
 /// hex characters.
 pub fn annotation_id_is_valid(id: &str) -> bool {
-    id.strip_prefix("ann-").is_some_and(|hex| {
+    hex_id_is_valid(id, "ann-")
+}
+
+/// Whether `id` has the form of a reply ID: `rep-` and 16 lowercase hex
+/// characters.
+pub fn reply_id_is_valid(id: &str) -> bool {
+    hex_id_is_valid(id, "rep-")
+}
+
+/// Whether `id` is `prefix` and 16 lowercase hex characters.
+fn hex_id_is_valid(id: &str, prefix: &str) -> bool {
+    id.strip_prefix(prefix).is_some_and(|hex| {
         hex.len() == 16
             && hex
                 .bytes()
                 .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
     })
+}
+
+/// Whether `body` may be a reply's text: not only whitespace, and at most
+/// [`ANNOTATION_TEXT_LIMIT`] bytes.
+pub fn reply_text_is_valid(body: &str) -> bool {
+    !body.trim().is_empty() && body.len() <= ANNOTATION_TEXT_LIMIT
+}
+
+/// A reply's own fields: its ID and its text.
+fn validate_reply_text(reply: &AnnotationReply) -> Result<(), MuxError> {
+    if !reply_id_is_valid(&reply.id) {
+        return Err(MuxError::ReplyIdInvalid);
+    }
+    if reply.body.len() > ANNOTATION_TEXT_LIMIT {
+        return Err(MuxError::ReplyTooLong {
+            id: reply.id.clone(),
+            limit: ANNOTATION_TEXT_LIMIT,
+            got: reply.body.len(),
+        });
+    }
+    if reply.body.trim().is_empty() {
+        return Err(MuxError::ReplyInvalid {
+            id: reply.id.clone(),
+            reason: "a reply needs a text that is not only whitespace",
+        });
+    }
+    Ok(())
+}
+
+/// The replies of the user that `put_replies` adds to annotation
+/// `annotation_id` or replaces in its thread: 1 to [`REPLY_COUNT_LIMIT`] of
+/// them, with IDs unique in the pane, none of them an agent's, and the
+/// thread and the pane within their limits afterwards (`viewer-annotations`,
+/// Threads).
+fn validate_put_replies(
+    state: &ScreenState,
+    pane_id: &PaneId,
+    annotation_id: &str,
+    replies: &[AnnotationReply],
+) -> Result<(), MuxError> {
+    let held = held_annotations(state, pane_id)?;
+    if replies.is_empty() || replies.len() > REPLY_COUNT_LIMIT {
+        return Err(MuxError::ReplyBatchInvalid {
+            limit: REPLY_COUNT_LIMIT,
+            got: replies.len(),
+        });
+    }
+    let annotation = held
+        .iter()
+        .find(|annotation| annotation.id == annotation_id)
+        .ok_or_else(|| MuxError::AnnotationNotFound {
+            pane: pane_id.clone(),
+            id: annotation_id.to_owned(),
+        })?;
+    let mut put = HashSet::new();
+    for reply in replies {
+        validate_reply_text(reply)?;
+        let invalid = |reason| {
+            Err(MuxError::ReplyInvalid {
+                id: reply.id.clone(),
+                reason,
+            })
+        };
+        if reply.author != ReplyAuthor::User {
+            return invalid("a window writes only the user's replies");
+        }
+        if reply.from.is_some() {
+            return invalid("only an agent's reply names the pane it came from");
+        }
+        if !put.insert(reply.id.as_str()) {
+            return Err(MuxError::ReplyRepeated(reply.id.clone()));
+        }
+        if let Some(own) = annotation.replies.iter().find(|held| held.id == reply.id) {
+            if own.author == ReplyAuthor::Agent {
+                return Err(MuxError::AgentReplyPut(reply.id.clone()));
+            }
+        } else if held
+            .iter()
+            .filter(|other| other.id != annotation.id)
+            .any(|other| other.replies.iter().any(|held| held.id == reply.id))
+        {
+            return Err(MuxError::ReplyRepeated(reply.id.clone()));
+        }
+    }
+    let added = replies
+        .iter()
+        .filter(|reply| !annotation.replies.iter().any(|held| held.id == reply.id))
+        .count();
+    let count = annotation.replies.len() + added;
+    if count > REPLY_COUNT_LIMIT {
+        return Err(MuxError::RepliesTooMany {
+            limit: REPLY_COUNT_LIMIT,
+            got: count,
+        });
+    }
+    let replaced = annotation
+        .replies
+        .iter()
+        .filter(|held| put.contains(held.id.as_str()))
+        .map(AnnotationReply::text_bytes)
+        .sum::<usize>();
+    let bytes = held.iter().map(ViewerAnnotation::text_bytes).sum::<usize>() - replaced
+        + replies
+            .iter()
+            .map(AnnotationReply::text_bytes)
+            .sum::<usize>();
+    validate_pane_bytes(bytes)
+}
+
+/// A removal of replies names 1 to [`REPLY_COUNT_LIMIT`] IDs of the reply ID
+/// form; neither the annotation nor the replies need to exist any more.
+fn validate_remove_replies(
+    state: &ScreenState,
+    pane_id: &PaneId,
+    ids: &[String],
+) -> Result<(), MuxError> {
+    held_annotations(state, pane_id)?;
+    if ids.is_empty() || ids.len() > REPLY_COUNT_LIMIT {
+        return Err(MuxError::ReplyBatchInvalid {
+            limit: REPLY_COUNT_LIMIT,
+            got: ids.len(),
+        });
+    }
+    if !ids.iter().all(|id| reply_id_is_valid(id)) {
+        return Err(MuxError::ReplyIdInvalid);
+    }
+    Ok(())
+}
+
+/// `mark_sent` names 1 to [`MARK_SENT_LIMIT`] entries with IDs of
+/// annotations and replies; the pane need not hold them.
+fn validate_mark_sent(
+    state: &ScreenState,
+    pane_id: &PaneId,
+    entries: &[SentEntry],
+) -> Result<(), MuxError> {
+    held_annotations(state, pane_id)?;
+    if entries.is_empty() || entries.len() > MARK_SENT_LIMIT {
+        return Err(MuxError::MarkSentBatchInvalid {
+            limit: MARK_SENT_LIMIT,
+            got: entries.len(),
+        });
+    }
+    if !entries
+        .iter()
+        .all(|entry| annotation_id_is_valid(&entry.id) || reply_id_is_valid(&entry.id))
+    {
+        return Err(MuxError::MarkSentIdInvalid);
+    }
+    Ok(())
+}
+
+/// An agent's reply to annotation `number` of viewer pane `pane_id`: the
+/// annotation exists and was handed over, the reply is an agent's with the
+/// pane it came from, its ID is new in the pane, and the thread and the pane
+/// stay within their limits (`viewer-annotations`, Agents Read And Reply To
+/// Handed-Over Threads).
+pub(super) fn validate_agent_reply(
+    state: &ScreenState,
+    pane_id: &PaneId,
+    number: u32,
+    reply: &AnnotationReply,
+) -> Result<(), MuxError> {
+    let held = held_annotations(state, pane_id)?;
+    let annotation = held
+        .iter()
+        .find(|annotation| annotation.number == number)
+        .ok_or_else(|| MuxError::AnnotationNumberNotFound {
+            pane: pane_id.clone(),
+            number,
+        })?;
+    if !annotation.sent {
+        return Err(MuxError::AnnotationNotSent {
+            pane: pane_id.clone(),
+            number,
+        });
+    }
+    validate_reply_text(reply)?;
+    let invalid = |reason| {
+        Err(MuxError::ReplyInvalid {
+            id: reply.id.clone(),
+            reason,
+        })
+    };
+    if reply.author != ReplyAuthor::Agent || reply.sent {
+        return invalid("an agent's reply has the author agent and is never handed over");
+    }
+    match &reply.from {
+        None => return invalid("an agent's reply names the pane it came from"),
+        Some(from) if from.title.len() > REPLY_TITLE_LIMIT => {
+            return invalid("the title of an agent's reply holds at most 256 bytes");
+        }
+        Some(_) => {}
+    }
+    if held
+        .iter()
+        .any(|other| other.replies.iter().any(|held| held.id == reply.id))
+    {
+        return Err(MuxError::ReplyRepeated(reply.id.clone()));
+    }
+    let count = annotation.replies.len() + 1;
+    if count > REPLY_COUNT_LIMIT {
+        return Err(MuxError::RepliesTooMany {
+            limit: REPLY_COUNT_LIMIT,
+            got: count,
+        });
+    }
+    let bytes = held.iter().map(ViewerAnnotation::text_bytes).sum::<usize>() + reply.text_bytes();
+    validate_pane_bytes(bytes)
+}
+
+/// The start of a wait for a review of viewer pane `pane_id`: at most one
+/// per pane, with an ID of the wait form and a title within its limit.
+pub(super) fn validate_review_wait(
+    state: &ScreenState,
+    pane_id: &PaneId,
+    wait: &ReviewWait,
+    revision: Option<u64>,
+) -> Result<(), MuxError> {
+    let viewer = held_viewer(state, pane_id)?;
+    if viewer.review_wait.is_some() {
+        return Err(MuxError::ReviewWaitBusy(pane_id.clone()));
+    }
+    if revision.is_some_and(|revision| revision != viewer.revision) {
+        return Err(MuxError::ReviewRevisionChanged(pane_id.clone()));
+    }
+    if !hex_id_is_valid(&wait.id, "wait-") || wait.title.len() > REPLY_TITLE_LIMIT {
+        return Err(MuxError::Internal(
+            "a wait has a wait- ID and a title of at most 256 bytes".into(),
+        ));
+    }
+    Ok(())
 }
 
 fn validate_set_scratchpad(

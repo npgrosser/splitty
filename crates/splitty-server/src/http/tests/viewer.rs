@@ -44,7 +44,8 @@ fn viewer_panes(state: &AppState) -> usize {
 }
 
 /// control-api, Submitting Layout Operations (Open a viewer, Open the same
-/// file again), on the HTTP listener and the owner control socket.
+/// file again), on the HTTP listener and the owner control socket, with the
+/// viewer's revision each opening showed.
 #[tokio::test]
 async fn open_viewer_answers_its_pane_and_shows_the_same_file_there_again() {
     let dir = tempfile::tempdir().expect("dir");
@@ -65,6 +66,7 @@ async fn open_viewer_answers_its_pane_and_shows_the_same_file_there_again() {
         assert_eq!(first["screenId"], "s1");
         assert_eq!(first["created"], json!([]), "no session");
         assert_eq!(first["reused"], false);
+        assert_eq!(first["viewerRevision"], 1, "{channel}: {first}");
         let pane = first["paneId"].as_str().expect("paneId").to_owned();
         let screen = state
             .mux_store
@@ -84,6 +86,10 @@ async fn open_viewer_answers_its_pane_and_shows_the_same_file_there_again() {
         assert_eq!(code, StatusCode::OK, "{channel}: {again}");
         assert_eq!(again["paneId"], pane.as_str());
         assert_eq!(again["reused"], true);
+        assert_eq!(
+            again["viewerRevision"], 2,
+            "{channel}: the revision shown now"
+        );
         assert_eq!(viewer_panes(&state), 1, "{channel}: no new pane");
 
         let relative = json!({"screenId": "s1", "op": {"type": "open_viewer", "paneId": "p1", "source": {"kind": "file", "path": "docs/plan.md"}}});
@@ -141,6 +147,7 @@ async fn the_control_api_leaves_out_the_text_a_viewer_shows() {
         Some(ViewerSource::Text {
             title: "Selection from claude".into(),
             text: "the selected answer".into(),
+            format: None,
         }),
         "the record keeps the text"
     );

@@ -23,6 +23,12 @@ use super::sender::ClientSender;
 
 /// The largest file a viewer pane shows.
 pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+/// The most text a text document holds, in bytes of UTF-8, the most
+/// characters of its title, and the longest reply in a thread: the limits the
+/// CLI checks its input against before it sends it.
+pub const MAX_TEXT_BYTES: usize = VIEWER_TEXT_LIMIT;
+pub const MAX_TITLE_CHARS: usize = splitty_core::mux::VIEWER_TITLE_LIMIT;
+pub const MAX_REPLY_BYTES: usize = splitty_core::mux::ANNOTATION_TEXT_LIMIT;
 /// The most bytes of a document one `viewer.chunk` carries, decoded.
 pub const CHUNK_BYTES: u64 = 1024 * 1024;
 /// Reads of one connection in flight at once; `busy` beyond.

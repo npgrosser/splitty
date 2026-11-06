@@ -34,9 +34,9 @@ pub fn resolve(path: &Path) -> Result<String, CliError> {
 /// A checked `splitty open` of a file: the op and the screen it goes to.
 #[derive(Debug)]
 pub struct Request {
-    path: String,
-    screen: String,
-    op: Value,
+    pub(super) path: String,
+    pub(super) screen: String,
+    pub(super) op: Value,
 }
 
 /// Check the file at `path` and build the `open_viewer` op that shows it next

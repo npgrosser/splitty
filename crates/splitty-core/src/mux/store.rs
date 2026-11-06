@@ -21,14 +21,13 @@ type OnChange = Box<dyn Fn(&WorkspaceState) + Send + Sync>;
 pub struct Store {
     state: RwLock<WorkspaceState>,
     on_change: Option<OnChange>,
+    /// The number of applied changes, for whoever waits for the next one.
+    changes: tokio::sync::watch::Sender<u64>,
 }
 
 impl Store {
     pub fn new() -> Self {
-        Self {
-            state: RwLock::new(WorkspaceState::default()),
-            on_change: None,
-        }
+        Self::with_state(WorkspaceState::default())
     }
 
     /// Create a store initialized with existing workspace state (for daemon restart).
@@ -36,7 +35,14 @@ impl Store {
         Self {
             state: RwLock::new(state),
             on_change: None,
+            changes: tokio::sync::watch::Sender::new(0),
         }
+    }
+
+    /// A receiver that sees every successful dispatch after it was taken,
+    /// as a rising count; what changed is read from the store.
+    pub fn changes(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.changes.subscribe()
     }
 
     /// Set a callback invoked after every successful dispatch with the new state.
@@ -81,6 +87,8 @@ impl Store {
         if let Some(ref cb) = self.on_change {
             cb(&state);
         }
+        self.changes
+            .send_modify(|count| *count = count.wrapping_add(1));
         Ok((effects, inspected))
     }
 
@@ -188,6 +196,21 @@ impl Store {
                 return None;
             }
             Some(pane.viewer.as_ref()?.source.clone())
+        })
+    }
+
+    /// The wait for a review that the viewer pane `pane_id` names, on
+    /// whichever screen holds it (`viewer-annotations`, Waiting For A Review).
+    pub fn review_wait(&self, pane_id: &PaneId) -> Option<ReviewWait> {
+        let state = self.state.read().expect("workspace lock");
+        state.screens.values().find_map(|screen| {
+            screen
+                .panes
+                .get(pane_id)?
+                .viewer
+                .as_ref()?
+                .review_wait
+                .clone()
         })
     }
 

@@ -47,6 +47,9 @@ pub enum Deadline {
     /// The file service enforces acceptance and read-idle deadlines; a large
     /// download may legitimately outlive a fixed total request timeout.
     FileTransfer,
+    /// A wait for the user's review lasts until the user answers, the viewer
+    /// pane closes or the caller drops the request.
+    Review,
 }
 
 impl Deadline {
@@ -56,7 +59,7 @@ impl Deadline {
             Self::JobLaunch => Some(Duration::from_secs(15)),
             Self::JobLogs | Self::Editor => Some(Duration::from_secs(35)),
             Self::Forward => Some(Duration::from_secs(180)),
-            Self::FileTransfer => None,
+            Self::FileTransfer | Self::Review => None,
         }
     }
 }
@@ -126,6 +129,9 @@ operations! {
     SessionSend, "session.send", "POST", "/api/session/{id}/send", Backend, ["id", "body"], MAX_API_BODY, Mutation, Ordinary;
     EditorOpen, "editor.open", "POST", "/api/editor/open", Backend, ["body"], MAX_API_BODY, Registration, Editor;
     FileOffer, "file.offer", "POST", "/api/file/offer", Backend, ["body"], MAX_API_BODY, Registration, FileTransfer;
+    ViewerComments, "viewer.comments", "GET", "/api/viewer/comments", Backend, ["screenId?", "paneId?", "document?", "all?"], MAX_API_BODY, Read, Ordinary;
+    ViewerCommentReply, "viewer.commentReply", "POST", "/api/viewer/comments/reply", Backend, ["body"], MAX_API_BODY, Mutation, Ordinary;
+    ViewerReviewWait, "viewer.reviewWait", "POST", "/api/viewer/review/wait", Backend, ["body"], MAX_API_BODY, Registration, Review;
     JobList, "job.list", "GET", "/api/jobs", Backend, [], MAX_JOB_BODY, Read, Ordinary;
     JobLaunch, "job.launch", "POST", "/api/jobs", Backend, ["body"], MAX_JOB_BODY, Mutation, JobLaunch;
     JobInspect, "job.inspect", "GET", "/api/jobs/{id}", Backend, ["id"], MAX_JOB_BODY, Read, Ordinary;
@@ -278,6 +284,7 @@ pub const SESSION_OPERATIONS: &[&str] = &[
     "file.decline",
     "file.read",
     "viewer.read",
+    "viewer.review_answer",
 ];
 
 /// All session operations act on the assigned backend. Disconnect cancels its

@@ -194,6 +194,60 @@ enum Commands {
         session: Option<String>,
     },
 
+    /// Print the comments the user handed over on the viewer panes of this
+    /// screen, or of one document, as Markdown; `comments reply` answers in
+    /// a thread
+    #[command(args_conflicts_with_subcommands = true)]
+    Comments {
+        #[command(flatten)]
+        ctl: CtlOpts,
+        /// A file a viewer pane of this screen shows, relative to this shell,
+        /// or the ID of a viewer pane
+        document: Option<String>,
+        /// Also print resolved annotations
+        #[arg(long)]
+        all: bool,
+        /// Print the server's answer as JSON
+        #[arg(long)]
+        json: bool,
+        /// Calling pane (defaults to $SPLITTY_PANE_ID)
+        #[arg(long)]
+        pane: Option<String>,
+        /// Screen of that pane (defaults to $SPLITTY_SCREEN_ID)
+        #[arg(long)]
+        screen: Option<String>,
+        #[command(subcommand)]
+        action: Option<CommentsAction>,
+    },
+
+    /// Show a file, or a text from standard input, in a viewer pane and wait
+    /// until the user approves it or sends a review, which is printed
+    Review {
+        #[command(flatten)]
+        ctl: CtlOpts,
+        /// The file to review, relative to this shell
+        #[arg(required_unless_present = "text", conflicts_with = "text")]
+        path: Option<std::path::PathBuf>,
+        /// Review the text read from standard input (at most 256 KiB)
+        #[arg(long)]
+        text: bool,
+        /// The text document's title [default: Review]
+        #[arg(long, conflicts_with = "path")]
+        title: Option<String>,
+        /// How the window shows the text: rendered as Markdown, or as plain text
+        #[arg(long, value_parser = ["markdown", "text"], conflicts_with = "path")]
+        format: Option<String>,
+        /// Print the outcome as JSON
+        #[arg(long)]
+        json: bool,
+        /// Calling pane (defaults to $SPLITTY_PANE_ID)
+        #[arg(long)]
+        pane: Option<String>,
+        /// Screen of that pane (defaults to $SPLITTY_SCREEN_ID)
+        #[arg(long)]
+        screen: Option<String>,
+    },
+
     // ── CLI control commands ───────────────────────────────────────────
     /// Split the current pane
     Split {
@@ -399,6 +453,26 @@ enum Commands {
         pane: Option<String>,
 
         /// Target screen ID (defaults to $SPLITTY_SCREEN_ID)
+        #[arg(long)]
+        screen: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CommentsAction {
+    /// Reply in the thread of an annotation the user handed over
+    Reply {
+        /// A file a viewer pane of this screen shows, relative to this shell,
+        /// or the ID of a viewer pane
+        document: String,
+        /// The annotation's number
+        number: u32,
+        /// The reply; `-` reads it from standard input
+        text: String,
+        /// Calling pane (defaults to $SPLITTY_PANE_ID)
+        #[arg(long)]
+        pane: Option<String>,
+        /// Screen of that pane (defaults to $SPLITTY_SCREEN_ID)
         #[arg(long)]
         screen: Option<String>,
     },
@@ -885,6 +959,73 @@ async fn async_main() {
                 })?;
                 let server = discover_server(&ctl)?;
                 cli::download::download(&server, &path, &session).await
+            })
+            .await;
+        }
+        Commands::Comments {
+            ctl,
+            document,
+            all,
+            json,
+            pane,
+            screen,
+            action,
+        } => {
+            handle_ctl(async {
+                use cli::comments::{self, Caller};
+                match action {
+                    Some(CommentsAction::Reply {
+                        document,
+                        number,
+                        text,
+                        pane,
+                        screen,
+                    }) => {
+                        let caller = Caller::new(resolve_screen(&screen), resolve_pane(&pane))?;
+                        let document = comments::document(&document)?;
+                        let text = comments::reply_text(&text, std::io::stdin().lock())?;
+                        let server = discover_server(&ctl)?;
+                        comments::reply(&server, &caller, &document, number, &text).await
+                    }
+                    None => {
+                        let caller = Caller::new(resolve_screen(&screen), resolve_pane(&pane))?;
+                        let document = document.as_deref().map(comments::document).transpose()?;
+                        let server = discover_server(&ctl)?;
+                        comments::list(&server, &caller, document.as_deref(), all, json).await
+                    }
+                }
+            })
+            .await;
+        }
+        Commands::Review {
+            ctl,
+            path,
+            text,
+            title,
+            format,
+            json,
+            pane,
+            screen,
+        } => {
+            handle_ctl(async {
+                let (screen, pane) = (resolve_screen(&screen), resolve_pane(&pane));
+                let review = match path {
+                    Some(path) if !text => cli::review::file(&path, &screen, &pane)?,
+                    _ => {
+                        let text = cli::review::read_text(std::io::stdin().lock())?;
+                        let here = std::env::current_dir().ok();
+                        cli::review::text(
+                            text,
+                            title.as_deref().unwrap_or("Review"),
+                            format.as_deref() != Some("text"),
+                            &screen,
+                            &pane,
+                            here.as_deref(),
+                        )?
+                    }
+                };
+                let server = discover_server(&ctl)?;
+                cli::review::run(&server, &review, json).await
             })
             .await;
         }
@@ -2588,6 +2729,12 @@ mod editor_cli_tests {
             // cli, Open In A Viewer Pane: still refused under a grant.
             vec!["open", "PLAN.md"],
             vec!["open", "--editor", "PLAN.md"],
+            // cli, Comments Command (Under a grant) and Review Command.
+            vec!["comments"],
+            vec!["comments", "PLAN.md", "--all", "--json"],
+            vec!["comments", "reply", "PLAN.md", "2", "Done."],
+            vec!["review", "PLAN.md"],
+            vec!["review", "--text", "--title", "Plan"],
         ] {
             let parsed = Cli::try_parse_from(std::iter::once("splitty").chain(args)).unwrap();
             assert!(!grant_command_allowed(&parsed.command));
@@ -2686,6 +2833,108 @@ mod editor_cli_tests {
                 Cli::try_parse_from(["splitty", "open"].into_iter().chain(flags).chain(["a.rs"]))
                     .is_err(),
                 "{flags:?}"
+            );
+        }
+    }
+
+    /// cli, Comments Command and Review Command: the listing, `reply` with
+    /// its document, number and text, the caller's pane and screen, and a
+    /// review of a file or of a text with its title.
+    #[test]
+    fn comments_and_review_take_their_document_and_the_caller() {
+        let cli = Cli::try_parse_from([
+            "splitty", "comments", "PLAN.md", "--all", "--json", "--pane", "p1", "--screen", "s1",
+        ])
+        .expect("parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Comments { document: Some(document), all: true, json: true, pane: Some(pane), screen: Some(screen), action: None, .. }
+                if document == "PLAN.md" && pane == "p1" && screen == "s1"
+        ));
+        let cli = Cli::try_parse_from(["splitty", "comments"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Comments {
+                document: None,
+                all: false,
+                json: false,
+                action: None,
+                ..
+            }
+        ));
+        let cli = Cli::try_parse_from([
+            "splitty",
+            "comments",
+            "reply",
+            "PLAN.md",
+            "2",
+            "Switched to on-demand computation.",
+            "--pane",
+            "p1",
+        ])
+        .expect("parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Comments {
+                document: None,
+                action: Some(CommentsAction::Reply { document, number: 2, text, pane: Some(pane), screen: None }),
+                ..
+            } if document == "PLAN.md" && text == "Switched to on-demand computation." && pane == "p1"
+        ));
+        let cli = Cli::try_parse_from([
+            "splitty",
+            "comments",
+            "reply",
+            "viewer-0123456789abcdef",
+            "3",
+            "-",
+        ])
+        .expect("parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Comments { action: Some(CommentsAction::Reply { number: 3, text, .. }), .. } if text == "-"
+        ));
+        for args in [
+            vec!["comments", "reply", "PLAN.md", "two", "x"],
+            vec!["comments", "reply", "PLAN.md", "2"],
+            vec!["comments", "a.md", "b.md"],
+            vec!["comments", "PLAN.md", "reply", "PLAN.md", "2", "x"],
+        ] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("splitty").chain(args.clone())).is_err(),
+                "{args:?}"
+            );
+        }
+
+        let cli = Cli::try_parse_from(["splitty", "review", "PLAN.md", "--json"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Review { path: Some(path), text: false, title: None, json: true, .. }
+                if path == std::path::Path::new("PLAN.md")
+        ));
+        let cli =
+            Cli::try_parse_from(["splitty", "review", "--text", "--title", "Plan"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Review { path: None, text: true, title: Some(title), format: None, .. } if title == "Plan"
+        ));
+        let cli = Cli::try_parse_from(["splitty", "review", "--text", "--format", "text"])
+            .expect("parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Review { text: true, format: Some(format), .. } if format == "text"
+        ));
+        for args in [
+            vec!["review"],
+            vec!["review", "PLAN.md", "--text"],
+            vec!["review", "PLAN.md", "--title", "Plan"],
+            vec!["review", "--title", "Plan"],
+            vec!["review", "PLAN.md", "--format", "text"],
+            vec!["review", "--text", "--format", "html"],
+        ] {
+            assert!(
+                Cli::try_parse_from(std::iter::once("splitty").chain(args.clone())).is_err(),
+                "{args:?}"
             );
         }
     }

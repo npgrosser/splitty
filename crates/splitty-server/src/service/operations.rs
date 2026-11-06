@@ -570,8 +570,9 @@ pub(crate) fn without_scratchpads(screen: &mut mux::ScreenState) {
 }
 
 /// A viewer pane's annotations are a window's alone as well
-/// (`viewer-annotations`): an agent sees a review only as what the user sends
-/// to its terminal.
+/// (`viewer-annotations`): an agent reads only what the user handed over, and
+/// only through the comment endpoints (`service::review`). Their counter and
+/// a wait for a review stay out too.
 fn without_annotations(screen: &mut mux::ScreenState) {
     for viewer in screen
         .panes
@@ -579,6 +580,8 @@ fn without_annotations(screen: &mut mux::ScreenState) {
         .filter_map(|pane| pane.viewer.as_mut())
     {
         viewer.annotations.clear();
+        viewer.last_annotation_number = 0;
+        viewer.review_wait = None;
     }
 }
 
@@ -618,11 +621,14 @@ pub(crate) struct MuxOpRequest {
 }
 
 pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Reply {
-    if let Some(op @ ("set_scratchpad" | "put_annotations" | "remove_annotations")) =
-        req.op.get("type").and_then(|t| t.as_str())
+    if let Some(
+        op @ ("set_scratchpad" | "put_annotations" | "remove_annotations" | "put_replies"
+        | "remove_replies" | "mark_sent"),
+    ) = req.op.get("type").and_then(|t| t.as_str())
     {
-        // Only a window sets a scratchpad (`session-scratchpad`) or annotates a
-        // viewer pane (`viewer-annotations`).
+        // Only a window sets a scratchpad (`session-scratchpad`), annotates a
+        // viewer pane, replies as the user or hands entries over
+        // (`viewer-annotations`). Agents reply through `service::review`.
         return (
             StatusCode::BAD_REQUEST,
             Payload(json!({"ok": false, "error": format!("{op} is only accepted from a window")})),
@@ -770,7 +776,11 @@ pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Repl
                             op: screen_op,
                         },
                         |before, after| {
-                            mux::shown_viewer(before.screens.get(&id)?, after.screens.get(&id)?)
+                            let after = after.screens.get(&id)?;
+                            let (pane, reused) =
+                                mux::shown_viewer(before.screens.get(&id)?, after)?;
+                            let revision = after.panes.get(&pane)?.viewer.as_ref()?.revision;
+                            Some((pane, reused, revision))
                         },
                     )
                     .map(|(effects, shown)| {
@@ -835,9 +845,10 @@ pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Repl
                 "screenId": screen_id,
                 "created": spawned.iter().map(|(_,pane,session)|json!({"paneId":pane,"sessionId":session})).collect::<Vec<_>>(),
             });
-            if let Some((pane, reused)) = viewer {
+            if let Some((pane, reused, revision)) = viewer {
                 body["paneId"] = json!(pane);
                 body["reused"] = json!(reused);
+                body["viewerRevision"] = json!(revision);
             }
             Payload(body).into_reply()
         }

@@ -38,6 +38,9 @@ pub const MSG_MUX_RESYNC: &str = "mux.resync";
 
 /// One chunk of a viewer pane's document (`viewer-panes`, Reading A Document).
 pub const MSG_VIEWER_READ: &str = "viewer.read";
+/// A window's answer to a process waiting for a review of a viewer pane
+/// (`mux-protocol`, Review Answers).
+pub const MSG_VIEWER_REVIEW_ANSWER: &str = "viewer.review_answer";
 
 // ---------------------------------------------------------------------------
 // Request — transport-agnostic client-to-server message

@@ -273,6 +273,45 @@
       "deadlineMs": null
     },
     {
+      "operation": "viewer.comments",
+      "method": "GET",
+      "path": "/api/viewer/comments",
+      "scope": "backend",
+      "arguments": [
+        "screenId?",
+        "paneId?",
+        "document?",
+        "all?"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "viewer.commentReply",
+      "method": "POST",
+      "path": "/api/viewer/comments/reply",
+      "scope": "backend",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "viewer.reviewWait",
+      "method": "POST",
+      "path": "/api/viewer/review/wait",
+      "scope": "backend",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "registration",
+      "deadlineMs": null
+    },
+    {
       "operation": "job.list",
       "method": "GET",
       "path": "/api/jobs",
@@ -628,6 +667,7 @@
     "file.accept",
     "file.decline",
     "file.read",
-    "viewer.read"
+    "viewer.read",
+    "viewer.review_answer"
   ]
 }

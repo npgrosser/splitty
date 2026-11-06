@@ -60,6 +60,7 @@ pub(super) async fn run(
         client_state.env.clone(),
         broadcast_fn,
         client_state.jobs.clone(),
+        client_state.reviews.clone(),
     ));
 
     // `viewer.read`, answered off this loop (`viewer-panes`).
@@ -171,8 +172,8 @@ pub(super) async fn run(
                                 }
                             }else if value["type"]=="close"{client_state.jobs.close_jobs(None,None,value["id"].as_str()).await;}
                         }
-                        // Try mux handler first
-                        if value["type"].as_str().is_some_and(|kind| kind.starts_with("mux.")) {
+                        // Try mux handler first; it answers waits for a review too.
+                        if value["type"].as_str().is_some_and(|kind| kind.starts_with("mux.") || kind == codec::MSG_VIEWER_REVIEW_ANSWER) {
                             mux_handler.handle_value(value).await;
                             continue;
                         }

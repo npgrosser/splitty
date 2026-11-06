@@ -128,36 +128,101 @@ interface ViewerState {
    * when that pane closes.
    */
   originPaneId?: string;
-  /** Starts at 1; rises when `open_viewer` shows the same file again. */
+  /**
+   * Starts at 1; rises when `open_viewer` shows the same file again or gives
+   * the pane a new text with `replace`.
+   */
   revision: number;
   /**
-   * The pane's pending annotations in creation order, absent while there are
-   * none (servers with "viewer-annotations-v1", see `viewer-annotations`).
-   * Snapshots carry them; GET /api/mux/state and GET /api/mux/screen/{id}
-   * leave them out. They live and end with the pane.
+   * The pane's annotations with their threads, in creation order, absent
+   * while there are none (servers with "viewer-annotations-v1", see
+   * `viewer-annotations`). Snapshots carry them; GET /api/mux/state and
+   * GET /api/mux/screen/{id} leave them out, with the two fields below; an
+   * agent reads what the user handed over with GET /api/viewer/comments.
+   * They live and end with the pane, and stay when the pane gets a new text.
    */
   annotations?: ViewerAnnotation[];
+  /**
+   * The highest number the server gave an annotation of the pane, absent
+   * while 0; a number is never given twice in a pane.
+   */
+  lastAnnotationNumber?: number;
+  /**
+   * The process waiting for the user's verdict on the document (`splitty
+   * review`), absent while none waits. Set and cleared by the server alone,
+   * never in state.json.
+   */
+  reviewWait?: ReviewWait;
 }
 
 /**
- * A remark a window made on a viewer pane's document. The server stores it
- * as it came and never interprets its text. A pane holds at most 100, with at
- * most 262,144 bytes of quote, prefix, suffix, body and replacement over all.
+ * A remark a window made on a viewer pane's document, with its thread. The
+ * server stores the window's fields as they came and never interprets their
+ * text. A pane holds at most 100, with at most 262,144 bytes of quote,
+ * prefix, suffix, body, replacement, replies and reply titles over all. The
+ * kinds "question" and "delete" of earlier builds are read as "comment" and
+ * as "change" with an empty replacement, and never written.
  */
 interface ViewerAnnotation {
   /** "ann-" and 16 lowercase hex characters, chosen by the window; unique within the pane. */
   id: string;
-  /** "change" suggests a replacement of the passage, "delete" its deletion. */
-  kind: "comment" | "question" | "change" | "delete";
   /**
-   * The remark, at most 16,384 bytes of UTF-8; a comment and a question need
-   * one that is not only whitespace.
+   * Given by the server when it adds the annotation, lastAnnotationNumber + 1,
+   * and kept when a window replaces it; never in put_annotations.
    */
+  number?: number;
+  /** "change" suggests a replacement of the passage; an empty one, its deletion. */
+  kind: "comment" | "change";
+  /** The remark, at most 16,384 bytes of UTF-8; a comment needs one that is not only whitespace. */
   body?: string;
-  /** The suggested text of a "change": required, not empty, at most 16,384 bytes. */
+  /** The suggested text of a "change": required, at most 16,384 bytes; "" suggests deleting the passage. */
   replacement?: string;
-  /** The passage; absent for a general comment, which is a comment or a question. */
+  /** The passage; absent for a general comment, which is a comment. */
   target?: AnnotationTarget;
+  /** Absent while open ("open" is read as absent); only a window resolves or reopens. */
+  status?: "resolved";
+  /**
+   * The user handed the annotation over; only mark_sent sets it. A window that
+   * changes it puts it without, and the server drops it from a changed or new one.
+   */
+  sent?: true;
+  /**
+   * The thread in the order its replies were added, at most 50, absent while
+   * empty. Kept by the server: never in put_annotations, kept when a window
+   * replaces the annotation, gone with it.
+   */
+  replies?: AnnotationReply[];
+}
+
+/** A reply in an annotation's thread. */
+interface AnnotationReply {
+  /** "rep-" and 16 lowercase hex characters: the window's for the user's, the server's for an agent's. */
+  id: string;
+  /**
+   * A window writes the user's replies only (put_replies); an agent's come
+   * through POST /api/viewer/comments/reply and stay as written.
+   */
+  author: "user" | "agent";
+  /** At most 16,384 bytes of UTF-8, not only whitespace. */
+  body: string;
+  /** The user handed the reply over, by mark_sent alone; the user's replies only. */
+  sent?: true;
+  /**
+   * An agent's reply only: the caller's pane and the title the server knew
+   * for it, at most 256 bytes (the pane's title, else its process's, else its
+   * OSC title, else "agent").
+   */
+  from?: { paneId: string; title: string };
+}
+
+/** A process waiting for the user's review of a viewer pane's document. */
+interface ReviewWait {
+  /** "wait-" and 16 lowercase hex characters, chosen by the server. */
+  id: string;
+  /** The pane of the waiting process. */
+  paneId: string;
+  /** That pane's title, chosen as an agent reply's `from.title`. */
+  title: string;
 }
 
 /** A passage, found again by its quote; the lines only order and label it. */
@@ -180,8 +245,11 @@ type ViewerSource =
   /**
    * A text the server keeps in the pane record (and state.json). Snapshots,
    * GET /api/mux/state and GET /api/mux/screen/{id} leave `text` out.
+   * `format` "markdown" renders it as a Markdown document; plain text without
+   * it. `splitty review --text` sets it unless `--format text`; terminal
+   * selections never do. Any other value rejects the op.
    */
-  | { kind: "text"; title: string; text?: string };
+  | { kind: "text"; title: string; text?: string; format?: "markdown" };
 
 /**
  * A Session is a PTY process managed by the server.
@@ -767,6 +835,12 @@ interface MuxWelcome extends ServerEvent {
   clientId: string;
   screens: ScreenInfo[];
   serverMode?: "embedded" | "daemon";
+  /**
+   * "viewer-annotations-v1" covers annotations with their numbers, statuses
+   * and threads, the ops put_annotations, remove_annotations, put_replies,
+   * remove_replies and mark_sent, viewer.review_answer, and the endpoints
+   * under /api/viewer; a window offers none of them without it.
+   */
   capabilities?: string[]; // includes "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "viewer-v1" and "viewer-annotations-v1"; absent on old servers
 }
 
@@ -804,8 +878,10 @@ interface MuxNudge extends ServerEvent {
  * A WebSocket op was rejected, sent to its client only: for an op that names a
  * pane to create (`paneId`, so the client stops waiting for mux.pane_spawned),
  * for `arrange_panes` (no `paneId`; the window resyncs `screenId`), and for
- * `put_annotations` and `remove_annotations` (`paneId` is the viewer pane; the
- * window shows the server's annotations again). Never a nudge to others.
+ * `put_annotations`, `remove_annotations`, `put_replies`, `remove_replies`
+ * and `mark_sent`, also when the op does not parse (`paneId` is the viewer
+ * pane; the window shows the server's annotations again). Never a nudge to
+ * others.
  */
 interface MuxOpFailed extends ServerEvent {
   type: "mux.op_failed";
@@ -1094,7 +1170,8 @@ interface SetScratchpadOp {
  * characters or U+200B..U+200F, U+202A..U+202E, U+2060..U+206F, U+FEFF; a
  * text over 256 KiB of UTF-8, a title outside 1 to 200 characters or with
  * control characters, a relative `cwd`, an unknown `paneId`, a `newPaneId` in
- * use. Other clients get `mux.nudge` for the screen; the sender gets nothing.
+ * use, `replace` with a file or with `newPaneId`. Other clients get
+ * `mux.nudge` for the screen; the sender gets nothing.
  */
 interface OpenViewerOp {
   type: "open_viewer";
@@ -1109,18 +1186,29 @@ interface OpenViewerOp {
   source: ViewerSource;
   /** A text's working directory; absolute. */
   cwd?: string;
+  /**
+   * With a `text` source and without `newPaneId`: the first viewer pane of
+   * the screen in layout order that shows a text of the same title and
+   * origin gets the text (and `cwd`, when given), a raised `revision`, and
+   * becomes its slot's active pane, keeping its annotations; without one, a
+   * new pane. `splitty review --text` sets it; a window never does.
+   */
+  replace?: true;
 }
 
 /**
- * Add annotations to a viewer pane, or replace those with the same `id` in
- * their place (servers with "viewer-annotations-v1"). Only a window sends it,
+ * Add annotations to a viewer pane, numbered from lastAnnotationNumber + 1,
+ * or replace those with the same `id` in their place, keeping their number
+ * and replies (servers with "viewer-annotations-v1"). Only a window sends it,
  * over the WebSocket; POST /api/mux/op answers 400. Refused as a whole, with
  * nothing changed, for a pane that is not a viewer pane, fewer than 1 or more
  * than 100 annotations, an `id` of another form or twice in the op, an
- * annotation that breaks the rules of ViewerAnnotation, or a pane that would
- * hold more than 100 annotations or 262,144 bytes of their text; the sender
- * then gets mux.op_failed with the pane. No effect. Applied: other clients get
- * `mux.nudge` for the screen; the sender gets nothing.
+ * annotation with a `number` or `replies` (0 and [] read as absent) or that
+ * breaks the rules of ViewerAnnotation, or a pane that would hold more than
+ * 100 annotations or 262,144 bytes of their text; the sender then gets
+ * mux.op_failed with the pane. No effect. Applied: other clients get
+ * `mux.nudge` for the screen; the sender gets nothing, so a window that added
+ * an annotation asks for the screen to learn its number.
  */
 interface PutAnnotationsOp {
   type: "put_annotations";
@@ -1129,17 +1217,87 @@ interface PutAnnotationsOp {
 }
 
 /**
- * Remove annotations of a viewer pane by `id`; ids the pane does not hold are
- * ignored. Only a window sends it, over the WebSocket; POST /api/mux/op
- * answers 400. Refused, with mux.op_failed and the pane to the sender, for a
- * pane that is not a viewer pane, fewer than 1 or more than 100 ids, or an id
- * of another form. No effect. Applied: other clients get `mux.nudge` for the
- * screen; the sender gets nothing.
+ * Remove annotations of a viewer pane by `id`, with their threads; ids the
+ * pane does not hold are ignored. Only a window sends it, over the WebSocket;
+ * POST /api/mux/op answers 400. Refused, with mux.op_failed and the pane to
+ * the sender, for a pane that is not a viewer pane, fewer than 1 or more than
+ * 100 ids, or an id of another form. No effect. Applied: other clients get
+ * `mux.nudge` for the screen; the sender gets nothing.
  */
 interface RemoveAnnotationsOp {
   type: "remove_annotations";
   paneId: string;
   ids: string[];
+}
+
+/**
+ * Add the user's replies to the thread of annotation `annotationId`, or
+ * replace those with the same `id` in their place. Only a window sends it,
+ * over the WebSocket; POST /api/mux/op answers 400. Refused as a whole, with
+ * mux.op_failed and the pane to the sender, for a pane that is not a viewer
+ * pane, an annotation it does not hold, fewer than 1 or more than 50 replies,
+ * a reply whose author is not "user" or that names `from`, an `id` of another
+ * form, twice in the op, of an agent's reply or of a reply in another thread,
+ * a body that is only whitespace or over 16,384 bytes, a thread that would
+ * hold more than 50 replies, or a pane over its byte limit. No effect.
+ * Applied: other clients get `mux.nudge` for the screen; the sender gets
+ * nothing.
+ */
+interface PutRepliesOp {
+  type: "put_replies";
+  paneId: string;
+  annotationId: string;
+  replies: { id: string; author: "user"; body: string; sent?: true }[];
+}
+
+/**
+ * Remove replies of either author from the thread of `annotationId` by `id`;
+ * ids the thread does not hold, and an annotation the pane no longer holds,
+ * are ignored. Only a window sends it, over the WebSocket; POST /api/mux/op
+ * answers 400. Refused, with mux.op_failed and the pane to the sender, for a
+ * pane that is not a viewer pane, fewer than 1 or more than 50 ids, or an id
+ * of another form. No effect. Applied: other clients get `mux.nudge` for the
+ * screen; the sender gets nothing.
+ */
+interface RemoveRepliesOp {
+  type: "remove_replies";
+  paneId: string;
+  annotationId: string;
+  ids: string[];
+}
+
+/**
+ * Mark annotations and the user's replies as handed over: 1 to 5,100
+ * entries, each an "ann-" or "rep-" id with the content the review held (an
+ * annotation's kind, body, replacement and target; a reply's text as
+ * `body`). The server marks an entry only while it still reads so, compared
+ * field by field, so an edit another window saved before the mark stays
+ * pending; agents' replies and ids the pane does not hold are ignored. No
+ * put ever marks an entry: a put keeps the mark of an entry that reads as
+ * before and drops it otherwise, and a new entry starts unmarked. A window
+ * sends it after it handed a review to a terminal, a file or a scratchpad,
+ * and after the server accepted its answer to a wait. Only a window sends
+ * it, over the WebSocket; POST /api/mux/op answers 400. Refused, with
+ * mux.op_failed and the pane to the sender, for a pane that is not a viewer
+ * pane, fewer than 1 or more than 5,100 entries, or an id of another form.
+ * No effect. Applied: other clients get `mux.nudge` for the screen; the
+ * sender gets nothing.
+ *
+ * An agent's reply and the start and the end of a wait for a review are the
+ * server's own operations: they have no wire form here, so no client submits
+ * them, over the WebSocket or POST /api/mux/op. Each nudges every client
+ * (reason "mux_op") and raises the screen revision.
+ */
+interface MarkSentOp {
+  type: "mark_sent";
+  paneId: string;
+  entries: {
+    id: string;
+    kind?: "comment" | "change";
+    body?: string;
+    replacement?: string;
+    target?: AnnotationTarget;
+  }[];
 }
 
 interface SetScreenOwnershipOp {
@@ -1165,6 +1323,9 @@ type Operation =
   | OpenViewerOp
   | PutAnnotationsOp
   | RemoveAnnotationsOp
+  | PutRepliesOp
+  | RemoveRepliesOp
+  | MarkSentOp
   | SetScreenOwnershipOp;
 
 // ============================================================================
@@ -1410,14 +1571,16 @@ type ClientCommand =
  * Response:
  *   200 { ok: true, revision: number, screenId: string,
  *         created: { paneId: string; sessionId: string }[],
- *         paneId?: string, reused?: boolean }   // paneId, reused: open_viewer only
+ *         paneId?: string, reused?: boolean,
+ *         viewerRevision?: number }   // paneId, reused, viewerRevision: open_viewer only
  *   400 { ok: false, error: string }     // validation error
  *   404 { ok: false, error: string }     // screen/panel not found
  *
- * For open_viewer, `paneId` is the viewer pane that shows the document and
- * `reused` is true when that pane existed before. set_scratchpad,
- * put_annotations and remove_annotations are a window's alone: answered 400
- * without a change.
+ * For open_viewer, `paneId` is the viewer pane that shows the document,
+ * `reused` is true when that pane existed before, and `viewerRevision` is the
+ * revision of its viewer record after the operation. set_scratchpad,
+ * put_annotations, remove_annotations, put_replies, remove_replies and
+ * mark_sent are a window's alone: answered 400 without a change.
  */
 
 /**
@@ -1425,8 +1588,8 @@ type ClientCommand =
  *
  * Returns the full WorkspaceState. Used by `splitty list-panes`,
  * `splitty list-screens`, etc. No session carries its scratchpad, no `text`
- * viewer document its text and no viewer pane its annotations, here and in
- * GET /api/mux/screen/:id.
+ * viewer document its text and no viewer pane its annotations,
+ * `lastAnnotationNumber` or `reviewWait`, here and in GET /api/mux/screen/:id.
  *
  * Response:
  *   200 WorkspaceState
@@ -1455,6 +1618,78 @@ type ClientCommand =
  *
  * Response:
  *   200 { ok: true, sent: number }    // number of clients that received it
+ */
+
+/**
+ * GET /api/viewer/comments?screenId=ID&paneId=ID[&document=D][&all=true]
+ *
+ * What an agent may read of the annotations on the viewer panes of the
+ * caller's screen (`splitty comments`): `screenId` and `paneId` name the
+ * caller; a pane that moved is followed to the screen that holds it now.
+ * `document` is a viewer pane's ID ("viewer-...") or an absolute path that
+ * file viewer panes of the screen show; without it, every viewer pane of the
+ * screen in layout order. An annotation is listed when the user handed it
+ * over (`sent`), open ones only unless `all` is "true" ("false" or absent:
+ * open only); its replies are the agents' and the user's handed-over ones.
+ * Never on a grant socket.
+ *
+ * Response:
+ *   200 { documents: { paneId: string;
+ *           source: { kind: "file"; path: string } | { kind: "text"; title: string; format?: "markdown" };
+ *           annotations: { number: number; kind: "comment" | "change";
+ *             status: "open" | "resolved"; body?: string; replacement?: string;
+ *             target?: { view: "source" | "rendered"; quote: string; startLine: number; endLine: number };
+ *             replies: { author: "user" | "agent"; body: string; from?: { paneId: string; title: string } }[];
+ *           }[] }[] }   // annotations by number
+ *   400 invalid     // an empty screenId or paneId, `all` neither true nor false, a
+ *                   // document that is neither an absolute path nor a viewer pane's ID
+ *   404 not_found   // the caller's pane on no screen, a document the screen does not show
+ *   409 ambiguous   // a path several viewer panes show; the error names them
+ *
+ * POST /api/viewer/comments/reply
+ *
+ * Add an agent's reply to annotation `number` of `document` (as above), with
+ * a server-chosen ID, author "agent" and `from` the caller's pane and its
+ * title (`splitty comments reply`). A reply does not reopen a resolved
+ * annotation. Other clients get `mux.nudge` (reason "mux_op"). Never on a
+ * grant socket.
+ *
+ * Request:
+ *   { screenId: string, paneId: string, document: string, number: number, body: string }
+ *
+ * Response:
+ *   200 { ok: true, paneId: string, number: number }
+ *   400 invalid     // as above, a malformed body, a reply body that is empty, only
+ *                   // whitespace or over 16,384 bytes
+ *   404 not_found   // as above, a number the pane does not hold, an annotation not handed over
+ *   409 ambiguous   // as above
+ *   409 limit       // 50 replies in the thread, or the pane's 262,144 bytes
+ *
+ * POST /api/viewer/review/wait
+ *
+ * Wait for the user's verdict on viewer pane `viewerPaneId` of the caller's
+ * screen (`splitty review`): the server names the wait in the viewer record
+ * (`reviewWait`), nudges every client, and holds the request until the first
+ * window's viewer.review_answer, without a deadline. The wait ends with the
+ * answer, with the pane, or when the caller's connection ends, which answers
+ * nothing; each end clears `reviewWait` and nudges every client. At most one
+ * wait per viewer pane and 16 per server, in memory only. Never on a grant
+ * socket.
+ *
+ * Request:
+ *   { screenId: string, paneId: string, viewerPaneId: string,
+ *     viewerRevision?: number }   // the open_viewer answer's, when the caller showed the document
+ *
+ * Response:
+ *   200 { outcome: "approved" } | { outcome: "feedback", review: string }
+ *   400 invalid     // an empty screenId or paneId, a malformed body
+ *   404 not_found   // the caller's pane on no screen, no viewer pane `viewerPaneId` on it
+ *   409 busy        // another process waits for that pane
+ *   409 changed     // the pane shows another revision than `viewerRevision`; no wait
+ *   410 closed      // the pane closed before an answer
+ *   429 busy        // 16 waits on the server
+ *
+ * Errors of the three endpoints are JSON { code, error }.
  */
 
 /**
@@ -2296,6 +2531,33 @@ export type ViewerServerMessage =
 // Transient, connection-bound, no generic event ID. A malformed read is
 // answered `invalid` with its requestId when that is a string that fits, else "".
 
+// Answers to a wait for a review (`reviewWait` in a viewer record, see
+// POST /api/viewer/review/wait): a window sends viewer.review_answer, and the
+// server answers each one to its sender only with viewer.review_answered.
+// The first answer that names the wait and its pane settles it (`accepted`
+// true); an answer to a wait that has ended or of another pane, or one that
+// breaks these rules (an approval with a review, a feedback without one or
+// over 1 MiB, a field of the wrong type) settles nothing. The acknowledgement
+// echoes `paneId` and `waitId` when they are strings of at most 128 bytes,
+// else "". A window marks the review's entries (mark_sent) only after
+// `accepted` true. Transient, connection-bound, no generic event ID.
+export type ReviewClientMessage = {
+  type: "viewer.review_answer";
+  screenId: string;
+  /** The viewer pane. */
+  paneId: string;
+  waitId: string;
+  outcome: "approved" | "feedback";
+  /** Feedback only: the review, 1 byte to 1 MiB of UTF-8. */
+  review?: string;
+};
+export type ReviewServerMessage = {
+  type: "viewer.review_answered";
+  paneId: string;
+  waitId: string;
+  accepted: boolean;
+};
+
 // Dedicated desktop commands remain open_local_editor / open_remote_editor
 // (Electron editor:open-local / editor:open-remote) with {cwd,editor,target?,
 // wslDistro?,kind?:"file"|"folder"}; kind defaults to folder for old callers.
@@ -2358,6 +2620,9 @@ export type NativeCall =
   | { operation: "session.send"; args: { id: string; body: unknown; } }
   | { operation: "editor.open"; args: { body: unknown; } }
   | { operation: "file.offer"; args: { body: unknown; } }
+  | { operation: "viewer.comments"; args?: { screenId?: string; paneId?: string; document?: string; all?: string; } }
+  | { operation: "viewer.commentReply"; args: { body: unknown; } }
+  | { operation: "viewer.reviewWait"; args: { body: unknown; } }
   | { operation: "job.list"; args?: { } }
   | { operation: "job.launch"; args: { body: unknown; } }
   | { operation: "job.inspect"; args: { id: string; } }

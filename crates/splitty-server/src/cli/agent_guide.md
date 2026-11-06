@@ -82,11 +82,57 @@ one. A regular file of at most 8 MiB; a folder, `--editor` or `--with vscode|zed
 request the user's editor instead, with a confirmation.
 
 The user may annotate the document in that pane and send you the review. It reaches
-you only as text pasted at your prompt or as an inserted file path; annotations the
-user has not sent cannot be read through `splitty` or the control socket. The review
-is Markdown: the document's name and path, then numbered sections with the lines, the
-kind (comment, question, suggested change, delete), the passage as a block quote, the
-remark and a fenced replacement, and general comments last.
+you as text pasted at your prompt or as an inserted file path. The review is Markdown:
+the document's name and path, then numbered sections with the lines, the kind
+(comment, suggested change or suggested deletion), the passage as a block quote, the
+remark, a fenced replacement and the replies of the thread, then general comments,
+and a last line with the command that replies in a thread.
+
+## Read and answer comments
+
+From an ordinary pane, read what the user handed over on the viewer panes of your
+screen, and reply in a thread by its number:
+
+```sh
+splitty comments
+splitty comments PLAN.md --all
+splitty comments reply PLAN.md 2 'Switched to on-demand computation.'
+splitty comments reply viewer-0123456789abcdef 3 - <<'EOF'
+Done: `make clean` is no longer a step, and $HOME is left as it was.
+EOF
+```
+
+`splitty comments` prints the handed-over annotations in the form of the review, the
+open ones unless `--all`; `--json` prints the server's answer. With nothing to print it
+says so and exits 0. Drafts the user has not sent are not shown. A document is a file
+that a viewer pane of your screen shows, or the ID of a viewer pane, which the review's
+last line names; when two panes show one file, name one by its ID. Put a reply in single
+quotes, or pass `-` and the text on standard input with a quoted heredoc (`<<'EOF'`), so
+that the shell expands nothing in it. A reply is plain text of
+at most 16 KiB, shown in the thread with your pane's title; the command prints
+`Replied to #<number> in <document>`. Only the user resolves or changes an annotation.
+
+## Wait for the user's review
+
+Show a document and wait until the user approves it or sends a review:
+
+```sh
+splitty review PLAN.md
+splitty review --text --title Plan < plan.md
+```
+
+The command names the viewer pane on standard error and waits as long as the user
+takes. With a review it prints the review and exits 0; on approval it prints nothing
+and exits 0. With `--json` it prints `{"outcome":"feedback","review":"..."}` or
+`{"outcome":"approved"}`. It exits 1 when the pane closes, when another process already
+waits for that pane, when another command's text took the pane before this one waited
+(run one review at a time per title), or when the connection ends; interrupt it to stop
+waiting. A text,
+at most 256 KiB from standard input, is rendered as Markdown (`--format text` shows it as
+plain text) and replaces the text of your earlier one with the same title, keeping its
+threads, so review each revision of a plan under the same title. If your tool calls time
+out, a timeout ends the wait: run the command in the background, or run it again with the
+same title and text to wait again.
 
 ## Hand a file to the user
 

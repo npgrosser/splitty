@@ -1,10 +1,12 @@
 //! Shared bounded HTTP client for owner/scoped Unix sockets and explicit TCP.
 mod agent_guide;
 pub mod attach;
+pub mod comments;
 mod discovery;
 pub mod download;
 pub mod editor;
 pub mod jobs;
+pub mod review;
 pub mod socket;
 pub mod viewer;
 pub use discovery::{discover, ServerInfo, Transport};
@@ -21,7 +23,8 @@ pub async fn request(
 }
 
 /// [`request`] with a timeout of its own: `None` waits as long as the server
-/// takes, for requests the server bounds itself.
+/// takes, for requests the server bounds itself and for a review, which the
+/// user or the command ends.
 pub async fn request_within(
     server: &ServerInfo,
     method: &str,

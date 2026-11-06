@@ -21,6 +21,7 @@ use super::AppState;
 use crate::embed::FrontendAssets;
 use crate::hub::Hub;
 use crate::service::operations::{self, MuxOpRequest, SessionSendRequest};
+use crate::service::review;
 use crate::ws;
 
 /// Build the API router with all endpoints.
@@ -225,6 +226,10 @@ pub(crate) fn api_routes_with(hub: Arc<Hub>) -> Router<AppState> {
         .route("/api/session/{id}/send", post(post_session_send))
         .route("/api/editor/open", post(post_editor_open))
         .route("/api/file/offer", post(post_file_offer))
+        // The agent channel of viewer panes
+        .route("/api/viewer/comments", get(get_viewer_comments))
+        .route("/api/viewer/comments/reply", post(post_comment_reply))
+        .route("/api/viewer/review/wait", post(post_review_wait))
         // Stats
         .route("/api/stats", get(get_stats))
 
@@ -275,6 +280,11 @@ pub fn control_routes() -> Router<AppState> {
         .route("/api/session/{id}/send", post(post_session_send))
         .route("/api/editor/open", post(post_editor_open))
         .route("/api/file/offer", post(post_file_offer))
+        // What the user handed over on the viewer panes of the caller's
+        // screen, agents' replies to it, and waits for the user's review.
+        .route("/api/viewer/comments", get(get_viewer_comments))
+        .route("/api/viewer/comments/reply", post(post_comment_reply))
+        .route("/api/viewer/review/wait", post(post_review_wait))
 }
 
 #[derive(serde::Deserialize)]
@@ -605,6 +615,39 @@ async fn post_editor_open(
     operations::post_editor_open(&state.service, input)
         .await
         .into_response()
+}
+
+async fn get_viewer_comments(
+    State(state): State<AppState>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Response {
+    review::get_viewer_comments(&state.service, params)
+        .await
+        .into_response()
+}
+
+async fn post_comment_reply(
+    State(state): State<AppState>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    match body {
+        Ok(Json(body)) => review::post_comment_reply(&state.service, body).await,
+        Err(error) => review::invalid_body(error.body_text()),
+    }
+    .into_response()
+}
+
+/// Held until the user answers or the viewer pane closes; a closed
+/// connection drops the handler, which ends the wait.
+async fn post_review_wait(
+    State(state): State<AppState>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Response {
+    match body {
+        Ok(Json(body)) => review::post_review_wait(&state.service, body).await,
+        Err(error) => review::invalid_body(error.body_text()),
+    }
+    .into_response()
 }
 
 fn preference_rejected(error: JsonRejection) -> Response {

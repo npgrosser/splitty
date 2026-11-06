@@ -37,6 +37,7 @@ mod managed_jobs;
 mod move_pane;
 mod mux_tabs;
 mod pty_size;
+mod reviews;
 mod scratchpad;
 mod viewer;
 

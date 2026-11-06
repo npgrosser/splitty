@@ -1,15 +1,18 @@
 //! Pure reducers that transform mux state in response to operations.
 //!
-//! `reduce_workspace` handles workspace-level ops (create/close/rename screen).
+//! `reduce_workspace` handles workspace-level ops (create/close/rename screen)
+//! and the trusted ops (job lifecycle, an agent's reply, a wait for a review).
 //! `reduce_screen` handles screen-level ops (split, close, resize, move, float, dock,
-//! open a viewer, annotate one).
+//! open a viewer, annotate one, its threads).
 //! Both return `(new_state, effects)` without performing any I/O.
 
 use super::effects::Effect;
 use super::job_reducer::{mark_closing_jobs, reduce_create_job, reduce_update_job};
 use super::ops::{Direction, Op, ScreenOp, ViewerPlacement};
 use super::state::*;
-use super::validate::{arranged_root, validate_screen_op};
+use super::validate::{
+    arranged_root, validate_agent_reply, validate_review_wait, validate_screen_op,
+};
 use super::MuxError;
 use crate::ids::*;
 
@@ -195,6 +198,67 @@ pub fn reduce_workspace(
             create_screen,
             screen_name,
         ),
+
+        Op::AgentReply {
+            screen_id,
+            pane_id,
+            number,
+            reply,
+        } => {
+            let screen = state
+                .screens
+                .get_mut(&screen_id)
+                .ok_or_else(|| MuxError::ScreenNotFound(screen_id.clone()))?;
+            validate_agent_reply(screen, &pane_id, number, &reply)?;
+            if let Some(annotation) = viewer_mut(screen, &pane_id)?
+                .annotations
+                .iter_mut()
+                .find(|annotation| annotation.number == number)
+            {
+                annotation.replies.push(reply);
+            }
+            screen.revision += 1;
+            Ok((state, vec![]))
+        }
+
+        Op::StartReviewWait {
+            screen_id,
+            pane_id,
+            wait,
+            revision,
+        } => {
+            let screen = state
+                .screens
+                .get_mut(&screen_id)
+                .ok_or_else(|| MuxError::ScreenNotFound(screen_id.clone()))?;
+            validate_review_wait(screen, &pane_id, &wait, revision)?;
+            viewer_mut(screen, &pane_id)?.review_wait = Some(wait);
+            screen.revision += 1;
+            Ok((state, vec![]))
+        }
+
+        Op::EndReviewWait { pane_id, wait_id } => {
+            let names_wait = |viewer: &ViewerState| {
+                viewer
+                    .review_wait
+                    .as_ref()
+                    .is_some_and(|wait| wait.id == wait_id)
+            };
+            let screen = state
+                .screens
+                .values_mut()
+                .find(|screen| {
+                    screen
+                        .panes
+                        .get(&pane_id)
+                        .and_then(|pane| pane.viewer.as_ref())
+                        .is_some_and(names_wait)
+                })
+                .ok_or_else(|| MuxError::ReviewWaitNotFound(wait_id.clone()))?;
+            viewer_mut(screen, &pane_id)?.review_wait = None;
+            screen.revision += 1;
+            Ok((state, vec![]))
+        }
     }
 }
 
@@ -419,6 +483,7 @@ pub fn reduce_screen(
             new_pane_id,
             source,
             cwd,
+            replace,
         } => (
             reduce_open_viewer(
                 state,
@@ -427,6 +492,7 @@ pub fn reduce_screen(
                 new_pane_id,
                 source,
                 cwd,
+                replace,
             )?,
             vec![],
         ),
@@ -441,6 +507,28 @@ pub fn reduce_screen(
 
         ScreenOp::RemoveAnnotations { pane_id, ids } => {
             (reduce_remove_annotations(state, &pane_id, &ids)?, vec![])
+        }
+
+        ScreenOp::PutReplies {
+            pane_id,
+            annotation_id,
+            replies,
+        } => (
+            reduce_put_replies(state, &pane_id, &annotation_id, replies)?,
+            vec![],
+        ),
+
+        ScreenOp::RemoveReplies {
+            pane_id,
+            annotation_id,
+            ids,
+        } => (
+            reduce_remove_replies(state, &pane_id, &annotation_id, &ids)?,
+            vec![],
+        ),
+
+        ScreenOp::MarkSent { pane_id, entries } => {
+            (reduce_mark_sent(state, &pane_id, &entries)?, vec![])
         }
     };
 
@@ -654,7 +742,8 @@ fn insert_beside(
 
 // ── open_viewer ────────────────────────────────────────────────────────────
 
-/// Add a viewer pane, or show a file again in the viewer pane that shows it
+/// Add a viewer pane, or show a file again in the viewer pane that shows it,
+/// or with `replace` a text in the viewer pane of its title and origin
 /// (`viewer-panes`, Opening A Viewer and Reopening A File). No session.
 fn reduce_open_viewer(
     mut state: ScreenState,
@@ -663,30 +752,56 @@ fn reduce_open_viewer(
     new_pane_id: Option<PaneId>,
     source: ViewerSource,
     cwd: Option<String>,
+    replace: bool,
 ) -> Result<ScreenState, MuxError> {
     let origin_pane_id = anchor
         .as_ref()
         .and_then(|anchor| viewer_origin(&state, anchor));
     let from_cli = new_pane_id.is_none();
     if from_cli {
-        if let Some(shown) = viewer_showing(&state, &source) {
-            select_in_slot(&mut state, &shown)?;
-            if let Some(viewer) = state
-                .panes
-                .get_mut(&shown)
-                .and_then(|pane| pane.viewer.as_mut())
+        let shown = if replace {
+            text_viewer_of(&state, &source, origin_pane_id.as_ref())
+        } else {
+            viewer_showing(&state, &source)
+        };
+        if let Some(shown) = shown {
+            // A process waits for the user's answer on this text: replacing
+            // it would have the answer judge a text that process never
+            // showed (`viewer-panes`, Reopening A File).
+            if replace
+                && state
+                    .panes
+                    .get(&shown)
+                    .and_then(|pane| pane.viewer.as_ref())
+                    .is_some_and(|viewer| viewer.review_wait.is_some())
             {
-                viewer.revision += 1;
-                // The terminal that asked last; without one the origin stays.
-                if origin_pane_id.is_some() {
-                    viewer.origin_pane_id = origin_pane_id;
+                return Err(MuxError::ReviewWaitBusy(shown));
+            }
+            select_in_slot(&mut state, &shown)?;
+            if let Some(pane) = state.panes.get_mut(&shown) {
+                if replace && cwd.is_some() {
+                    pane.cwd = cwd;
+                }
+                if let Some(viewer) = pane.viewer.as_mut() {
+                    viewer.revision += 1;
+                    // The annotations stay; the window anchors them again in
+                    // the new text.
+                    if replace {
+                        viewer.source = source;
+                    }
+                    // The terminal that asked last; without one the origin stays.
+                    if origin_pane_id.is_some() {
+                        viewer.origin_pane_id = origin_pane_id;
+                    }
                 }
             }
             return Ok(state);
         }
     }
 
-    let new_pane_id = new_pane_id.unwrap_or_else(|| PaneId::with_prefix("pane"));
+    // A server-chosen ID has the form a window gives its viewer panes, which
+    // the CLI tells from a path (`cli`, Comments Command).
+    let new_pane_id = new_pane_id.unwrap_or_else(|| PaneId::from(hex_id("viewer")));
     let (title, cwd) = match &source {
         ViewerSource::File { path } => (file_name(path).to_string(), Some(parent_dir(path))),
         ViewerSource::Text { title, .. } => (title.clone(), cwd),
@@ -725,15 +840,34 @@ fn reduce_open_viewer(
             title: Some(title),
             cwd,
             role: Some(PaneRole::Viewer),
-            viewer: Some(ViewerState {
-                source,
-                origin_pane_id,
-                revision: 1,
-                annotations: Vec::new(),
-            }),
+            viewer: Some(ViewerState::new(source, origin_pane_id)),
         },
     );
     Ok(state)
+}
+
+/// The panes of the screen in layout order: the root layout depth first,
+/// then the floating entries.
+/// The first viewer pane in layout order that shows a `text` document with
+/// the title of `source` and whose origin is `origin`.
+fn text_viewer_of(
+    state: &ScreenState,
+    source: &ViewerSource,
+    origin: Option<&PaneId>,
+) -> Option<PaneId> {
+    let ViewerSource::Text { title, .. } = source else {
+        return None;
+    };
+    state.panes_in_layout_order().find(|id| {
+        state
+            .panes
+            .get(id)
+            .and_then(|pane| pane.viewer.as_ref())
+            .is_some_and(|viewer| {
+                matches!(&viewer.source, ViewerSource::Text { title: shown, .. } if shown == title)
+                    && viewer.origin_pane_id.as_ref() == origin
+            })
+    })
 }
 
 /// The viewer pane of the screen that already shows a `file` source, first
@@ -742,16 +876,13 @@ fn viewer_showing(state: &ScreenState, source: &ViewerSource) -> Option<PaneId> 
     let ViewerSource::File { .. } = source else {
         return None;
     };
-    std::iter::once(&state.root)
-        .chain(state.floating.iter().map(|entry| &entry.root))
-        .flat_map(LayoutNode::collect_pane_ids)
-        .find(|id| {
-            state
-                .panes
-                .get(id)
-                .and_then(|pane| pane.viewer.as_ref())
-                .is_some_and(|viewer| &viewer.source == source)
-        })
+    state.panes_in_layout_order().find(|id| {
+        state
+            .panes
+            .get(id)
+            .and_then(|pane| pane.viewer.as_ref())
+            .is_some_and(|viewer| &viewer.source == source)
+    })
 }
 
 /// The first viewer pane in layout order (the root layout depth first, then
@@ -848,46 +979,161 @@ pub fn shown_viewer(before: &ScreenState, after: &ScreenState) -> Option<(PaneId
     reused
 }
 
-// ── put_annotations, remove_annotations ───────────────────────────────────
+// ── annotations and their threads ────────────────────────────────────────
 
-/// The annotations of the viewer pane `pane_id`, to change.
-fn annotations_mut<'a>(
+/// The record of the viewer pane `pane_id`, to change.
+fn viewer_mut<'a>(
     state: &'a mut ScreenState,
     pane_id: &PaneId,
-) -> Result<&'a mut Vec<ViewerAnnotation>, MuxError> {
+) -> Result<&'a mut ViewerState, MuxError> {
     state
         .panes
         .get_mut(pane_id)
         .and_then(|pane| pane.viewer.as_mut())
-        .map(|viewer| &mut viewer.annotations)
         .ok_or_else(|| MuxError::NotAViewerPane(pane_id.clone()))
 }
 
-/// Replace each annotation with the same ID in its place and append the
-/// others (`viewer-annotations`, Saving Annotations Through The Window).
+/// Replace each annotation with the same ID in its place, keeping its number
+/// and replies, and append the others with the pane's next numbers
+/// (`viewer-annotations`, Saving Annotations Through The Window).
 fn reduce_put_annotations(
     mut state: ScreenState,
     pane_id: &PaneId,
     annotations: Vec<ViewerAnnotation>,
 ) -> Result<ScreenState, MuxError> {
-    let held = annotations_mut(&mut state, pane_id)?;
+    let viewer = viewer_mut(&mut state, pane_id)?;
     for annotation in annotations {
-        match held.iter_mut().find(|held| held.id == annotation.id) {
-            Some(place) => *place = annotation,
-            None => held.push(annotation),
+        match viewer
+            .annotations
+            .iter_mut()
+            .find(|held| held.id == annotation.id)
+        {
+            Some(place) => {
+                let number = place.number;
+                let replies = std::mem::take(&mut place.replies);
+                // Only `mark_sent` hands an entry over: a put keeps the mark
+                // of an annotation that reads as before, and drops it
+                // otherwise.
+                let sent = annotation.sent && place.sent && place.reads_as(&annotation);
+                *place = ViewerAnnotation {
+                    number,
+                    replies,
+                    sent,
+                    ..annotation
+                };
+            }
+            None => {
+                // Validation keeps a number free for every new annotation.
+                viewer.last_annotation_number = viewer.last_annotation_number.saturating_add(1);
+                viewer.annotations.push(ViewerAnnotation {
+                    number: viewer.last_annotation_number,
+                    sent: false,
+                    ..annotation
+                });
+            }
         }
     }
     Ok(state)
 }
 
-/// Remove the annotations with these IDs; IDs the pane does not hold are
-/// ignored.
+/// Remove the annotations with these IDs and their replies; IDs the pane does
+/// not hold are ignored.
 fn reduce_remove_annotations(
     mut state: ScreenState,
     pane_id: &PaneId,
     ids: &[String],
 ) -> Result<ScreenState, MuxError> {
-    annotations_mut(&mut state, pane_id)?.retain(|annotation| !ids.contains(&annotation.id));
+    viewer_mut(&mut state, pane_id)?
+        .annotations
+        .retain(|annotation| !ids.contains(&annotation.id));
+    Ok(state)
+}
+
+/// Replace each of the user's replies with the same ID in its place in the
+/// thread of `annotation_id`, and append the others (`viewer-annotations`,
+/// Threads).
+fn reduce_put_replies(
+    mut state: ScreenState,
+    pane_id: &PaneId,
+    annotation_id: &str,
+    replies: Vec<AnnotationReply>,
+) -> Result<ScreenState, MuxError> {
+    let annotation = viewer_mut(&mut state, pane_id)?
+        .annotations
+        .iter_mut()
+        .find(|annotation| annotation.id == annotation_id)
+        .ok_or_else(|| MuxError::AnnotationNotFound {
+            pane: pane_id.clone(),
+            id: annotation_id.to_owned(),
+        })?;
+    for reply in replies {
+        match annotation
+            .replies
+            .iter_mut()
+            .find(|held| held.id == reply.id)
+        {
+            // As for annotations: only `mark_sent` hands a reply over.
+            Some(place) => {
+                let sent = reply.sent && place.sent && place.body == reply.body;
+                *place = AnnotationReply { sent, ..reply };
+            }
+            None => annotation.replies.push(AnnotationReply {
+                sent: false,
+                ..reply
+            }),
+        }
+    }
+    Ok(state)
+}
+
+/// Remove replies of either author from the thread of `annotation_id`; IDs
+/// it does not hold, and an annotation the pane no longer holds, are
+/// ignored.
+fn reduce_remove_replies(
+    mut state: ScreenState,
+    pane_id: &PaneId,
+    annotation_id: &str,
+    ids: &[String],
+) -> Result<ScreenState, MuxError> {
+    if let Some(annotation) = viewer_mut(&mut state, pane_id)?
+        .annotations
+        .iter_mut()
+        .find(|annotation| annotation.id == annotation_id)
+    {
+        annotation.replies.retain(|reply| !ids.contains(&reply.id));
+    }
+    Ok(state)
+}
+
+/// Mark the annotations and the user's replies that still read as the
+/// review held them as handed over; an entry changed since, by this window or
+/// another, stays pending, and agents' replies and IDs the pane does not
+/// hold are ignored (`viewer-annotations`, Handing A Review To A Terminal).
+fn reduce_mark_sent(
+    mut state: ScreenState,
+    pane_id: &PaneId,
+    entries: &[SentEntry],
+) -> Result<ScreenState, MuxError> {
+    let entries: std::collections::HashMap<&str, &SentEntry> = entries
+        .iter()
+        .map(|entry| (entry.id.as_str(), entry))
+        .collect();
+    for annotation in &mut viewer_mut(&mut state, pane_id)?.annotations {
+        if entries
+            .get(annotation.id.as_str())
+            .is_some_and(|entry| entry.holds_annotation(annotation))
+        {
+            annotation.sent = true;
+        }
+        for reply in &mut annotation.replies {
+            if entries
+                .get(reply.id.as_str())
+                .is_some_and(|entry| entry.holds_reply(reply))
+            {
+                reply.sent = true;
+            }
+        }
+    }
     Ok(state)
 }
 
@@ -2878,12 +3124,10 @@ mod tests {
         assert_eq!(pane.session_id, None);
         assert_eq!(
             pane.viewer,
-            Some(ViewerState {
-                source: ViewerSource::File { path: PLAN.into() },
-                origin_pane_id: Some(PaneId::from("p1")),
-                revision: 1,
-                annotations: vec![],
-            })
+            Some(ViewerState::new(
+                ViewerSource::File { path: PLAN.into() },
+                Some(PaneId::from("p1")),
+            ))
         );
         assert_eq!(
             next.sessions.keys().collect::<Vec<_>>(),
@@ -2976,6 +3220,7 @@ mod tests {
             ViewerSource::Text {
                 title: "Selection from claude".into(),
                 text: "## Plan\n1. tests".into(),
+                format: None,
             }
         );
 
@@ -3472,7 +3717,17 @@ mod tests {
         assert_eq!(viewers.len(), 1, "the second open showed the same pane");
         let v1 = viewers[0].id.clone();
         assert_eq!(viewer_of(&before, v1.as_str()).revision, 2);
-        assert!(v1.as_str().starts_with("pane-"), "{v1}");
+        // The form a window gives its viewer panes, which the CLI tells from
+        // a path.
+        assert!(
+            v1.as_str()
+                .strip_prefix("viewer-")
+                .is_some_and(|hex| hex.len() == 16
+                    && hex
+                        .bytes()
+                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())),
+            "{v1}"
+        );
         assert!(
             matches!(&before.root, LayoutNode::Slot { active_pane_id, .. }
             if active_pane_id == &Some(PaneId::from("p3")))
@@ -3661,7 +3916,7 @@ mod tests {
                 put(
                     "v1",
                     vec![serde_json::json!({
-                        "id": ann(1), "kind": "question", "body": "Why?",
+                        "id": ann(1), "kind": "comment", "body": "Why?",
                         "target": passage(serde_json::json!({"quote": "answer", "startLine": 1, "endLine": 1})),
                     })],
                 ),
@@ -3807,7 +4062,7 @@ mod tests {
         }
     }
 
-    // ── put_annotations, remove_annotations (viewer-annotations) ───
+    // ── annotations and their threads (viewer-annotations) ───
 
     /// Screen `screen1` with the terminal `p1` and the viewer `v1` of PLAN.md.
     fn viewer_screen() -> ScreenState {
@@ -3826,9 +4081,15 @@ mod tests {
         format!("ann-{n:016x}")
     }
 
+    /// A reply ID of the form windows and the server give them.
+    fn rep(n: u32) -> String {
+        format!("rep-{n:016x}")
+    }
+
+    /// A comment that asks a question about a passage of line 30.
     fn question(id: &str) -> serde_json::Value {
         serde_json::json!({
-            "id": id, "kind": "question", "body": "Why not five times?",
+            "id": id, "kind": "comment", "body": "Why not five times?",
             "target": {
                 "view": "source", "quote": "retry three times", "prefix": "On failure, ",
                 "suffix": " before giving up", "startLine": 30, "endLine": 30,
@@ -3838,6 +4099,11 @@ mod tests {
 
     fn comment(id: &str, body: &str) -> serde_json::Value {
         serde_json::json!({"id": id, "kind": "comment", "body": body})
+    }
+
+    /// A suggested deletion of a passage: a change with an empty replacement.
+    fn deletion(n: u32, target: serde_json::Value) -> serde_json::Value {
+        serde_json::json!({"id": ann(n), "kind": "change", "replacement": "", "target": target})
     }
 
     /// A passage of line 3 with `fields` in place of the defaults.
@@ -3866,6 +4132,74 @@ mod tests {
         .expect("wire op")
     }
 
+    /// The user's replies `replies` to annotation `annotation` of `pane`.
+    fn put_replies(pane: &str, annotation: &str, replies: Vec<serde_json::Value>) -> ScreenOp {
+        serde_json::from_value(serde_json::json!({
+            "type": "put_replies", "paneId": pane, "annotationId": annotation, "replies": replies,
+        }))
+        .expect("wire op")
+    }
+
+    fn user_reply(id: &str, body: &str) -> serde_json::Value {
+        serde_json::json!({"id": id, "author": "user", "body": body})
+    }
+
+    fn remove_replies(pane: &str, annotation: &str, ids: &[String]) -> ScreenOp {
+        serde_json::from_value(serde_json::json!({
+            "type": "remove_replies", "paneId": pane, "annotationId": annotation, "ids": ids,
+        }))
+        .expect("wire op")
+    }
+
+    /// `mark_sent` of `entries`, each an entry as a review held it.
+    fn mark_sent(pane: &str, entries: Vec<serde_json::Value>) -> ScreenOp {
+        serde_json::from_value(serde_json::json!({
+            "type": "mark_sent", "paneId": pane, "entries": entries,
+        }))
+        .expect("wire op")
+    }
+
+    /// `mark_sent` of entries that name only their IDs.
+    fn mark_ids(pane: &str, ids: &[String]) -> ScreenOp {
+        mark_sent(
+            pane,
+            ids.iter().map(|id| serde_json::json!({"id": id})).collect(),
+        )
+    }
+
+    /// The entry of `mark_sent` for an annotation or a reply as a put
+    /// carried it: its ID with its kind, remark or text, replacement and
+    /// passage.
+    fn entry_of(put: &serde_json::Value) -> serde_json::Value {
+        let mut entry = serde_json::json!({"id": put["id"]});
+        for field in ["kind", "body", "replacement", "target"] {
+            if let Some(value) = put.get(field) {
+                entry[field] = value.clone();
+            }
+        }
+        entry
+    }
+
+    /// The trusted op of an agent in `p1`, titled `claude`, that replies
+    /// `body` to annotation `number` of `v1` on `screen1`.
+    fn agent_reply(number: u32, id: &str, body: &str) -> Op {
+        Op::AgentReply {
+            screen_id: ScreenId::from("screen1"),
+            pane_id: PaneId::from("v1"),
+            number,
+            reply: AnnotationReply {
+                id: id.into(),
+                author: ReplyAuthor::Agent,
+                body: body.into(),
+                sent: false,
+                from: Some(ReplyFrom {
+                    pane_id: PaneId::from("p1"),
+                    title: "claude".into(),
+                }),
+            },
+        }
+    }
+
     fn annotation_ids(state: &ScreenState, pane: &str) -> Vec<String> {
         viewer_of(state, pane)
             .annotations
@@ -3874,14 +4208,62 @@ mod tests {
             .collect()
     }
 
+    fn numbers(state: &ScreenState, pane: &str) -> Vec<u32> {
+        viewer_of(state, pane)
+            .annotations
+            .into_iter()
+            .map(|annotation| annotation.number)
+            .collect()
+    }
+
+    /// The annotation `id` of `v1` on `screen1` of `store`.
+    fn annotation_of(store: &crate::mux::Store, id: &str) -> ViewerAnnotation {
+        let screen = store
+            .get_screen(&ScreenId::from("screen1"))
+            .expect("screen");
+        viewer_of(&screen, "v1")
+            .annotations
+            .into_iter()
+            .find(|annotation| annotation.id == id)
+            .expect("annotation")
+    }
+
+    /// `store` with viewer `v1` on `screen1`, holding the handed-over
+    /// comments #1 and #2.
+    fn sent_store() -> crate::mux::Store {
+        let store = store_with(viewer_screen());
+        let screen_id = ScreenId::from("screen1");
+        for op in [
+            put(
+                "v1",
+                vec![question(&ann(1)), comment(&ann(2), "Shorter steps.")],
+            ),
+            mark_sent(
+                "v1",
+                vec![
+                    entry_of(&question(&ann(1))),
+                    entry_of(&comment(&ann(2), "Shorter steps.")),
+                ],
+            ),
+        ] {
+            store.dispatch_screen(&screen_id, op).expect("applied");
+        }
+        store
+    }
+
     /// viewer-annotations, Annotations On A Viewer Pane and Saving Annotations
-    /// Through The Window: the record on the wire, in creation order and
-    /// absent while the pane holds none; unknown kinds and views are no ops.
+    /// Through The Window: the record on the wire, in creation order with
+    /// numbers, and without annotations while the pane holds none; unknown
+    /// kinds and views are no ops.
     #[test]
     fn annotations_keep_their_wire_shape_and_are_absent_while_there_are_none() {
         let state = viewer_screen();
         let wire = serde_json::to_value(&state.panes[&PaneId::from("v1")]).expect("pane");
         assert!(wire["viewer"].get("annotations").is_none(), "{wire}");
+        assert!(
+            wire["viewer"].get("lastAnnotationNumber").is_none(),
+            "{wire}"
+        );
 
         let change = serde_json::json!({
             "id": ann(2), "kind": "change", "replacement": "retry with backoff",
@@ -3901,10 +4283,19 @@ mod tests {
         .expect("put");
         let pane = &state.panes[&PaneId::from("v1")];
         let wire = serde_json::to_value(pane).expect("pane");
+        let numbered = |mut annotation: serde_json::Value, number: u32| {
+            annotation["number"] = serde_json::json!(number);
+            annotation
+        };
         assert_eq!(
             wire["viewer"]["annotations"],
-            serde_json::json!([question(&ann(1)), change, general])
+            serde_json::json!([
+                numbered(question(&ann(1)), 1),
+                numbered(change, 2),
+                numbered(general, 3),
+            ])
         );
+        assert_eq!(wire["viewer"]["lastAnnotationNumber"], 3);
         let back: PaneState = serde_json::from_value(wire).expect("pane");
         assert_eq!(back.viewer, pane.viewer);
 
@@ -3912,12 +4303,15 @@ mod tests {
             reduce_screen(state, remove("v1", &[ann(1), ann(2), ann(3)])).expect("removed");
         let wire = serde_json::to_value(&state.panes[&PaneId::from("v1")]).expect("pane");
         assert!(wire["viewer"].get("annotations").is_none(), "{wire}");
+        assert_eq!(wire["viewer"]["lastAnnotationNumber"], 3, "{wire}");
 
         for annotation in [
             serde_json::json!({"id": ann(1), "kind": "praise", "body": "x"}),
-            serde_json::json!({"id": ann(1), "kind": "delete", "target": passage(serde_json::json!({"view": "diff"}))}),
-            serde_json::json!({"id": ann(1), "kind": "delete", "target": passage(serde_json::json!({"startLine": -1}))}),
-            serde_json::json!({"id": ann(1), "kind": "delete", "target": {"view": "source", "quote": "retry"}}),
+            deletion(1, passage(serde_json::json!({"view": "diff"}))),
+            deletion(1, passage(serde_json::json!({"startLine": -1}))),
+            deletion(1, serde_json::json!({"view": "source", "quote": "retry"})),
+            serde_json::json!({"id": ann(1), "kind": "comment", "body": "x", "status": "done"}),
+            serde_json::json!({"id": ann(1), "kind": "comment", "body": "x", "sent": "yes"}),
         ] {
             let op = serde_json::json!({
                 "type": "put_annotations", "paneId": "v1", "annotations": [annotation],
@@ -3929,8 +4323,150 @@ mod tests {
         }
     }
 
+    /// The wire shape of a thread and of a wait (`docs/protocol.ts`): a
+    /// resolved, handed-over annotation with a reply of the user and one of
+    /// an agent, and the wait in the record, read back as it was.
+    #[test]
+    fn a_thread_and_a_wait_have_their_wire_shape() {
+        let wire = serde_json::json!({
+            "source": {"kind": "file", "path": PLAN},
+            "originPaneId": "p1",
+            "revision": 2,
+            "annotations": [{
+                "id": ann(1), "number": 3, "kind": "comment", "body": "Why?",
+                "status": "resolved", "sent": true,
+                "replies": [
+                    {"id": rep(1), "author": "agent", "body": "Because.",
+                     "from": {"paneId": "p1", "title": "claude"}},
+                    {"id": rep(2), "author": "user", "body": "Fine.", "sent": true},
+                    {"id": rep(3), "author": "user", "body": "Not yet."},
+                ],
+            }],
+            "lastAnnotationNumber": 3,
+            "reviewWait": {"id": "wait-0123456789abcdef", "paneId": "p1", "title": "claude"},
+        });
+        let mut viewer = ViewerState::new(
+            ViewerSource::File { path: PLAN.into() },
+            Some(PaneId::from("p1")),
+        );
+        viewer.revision = 2;
+        viewer.last_annotation_number = 3;
+        viewer.review_wait = Some(ReviewWait {
+            id: "wait-0123456789abcdef".into(),
+            pane_id: PaneId::from("p1"),
+            title: "claude".into(),
+        });
+        viewer.annotations.push(ViewerAnnotation {
+            id: ann(1),
+            number: 3,
+            kind: AnnotationKind::Comment,
+            body: Some("Why?".into()),
+            replacement: None,
+            target: None,
+            status: AnnotationStatus::Resolved,
+            sent: true,
+            replies: vec![
+                AnnotationReply {
+                    id: rep(1),
+                    author: ReplyAuthor::Agent,
+                    body: "Because.".into(),
+                    sent: false,
+                    from: Some(ReplyFrom {
+                        pane_id: PaneId::from("p1"),
+                        title: "claude".into(),
+                    }),
+                },
+                AnnotationReply {
+                    id: rep(2),
+                    author: ReplyAuthor::User,
+                    body: "Fine.".into(),
+                    sent: true,
+                    from: None,
+                },
+                AnnotationReply {
+                    id: rep(3),
+                    author: ReplyAuthor::User,
+                    body: "Not yet.".into(),
+                    sent: false,
+                    from: None,
+                },
+            ],
+        });
+        assert_eq!(serde_json::to_value(&viewer).expect("viewer"), wire);
+
+        // The record is only ever read from `state.json`, which holds no wait.
+        let mut stored: ViewerState = serde_json::from_value(wire).expect("viewer");
+        assert_eq!(stored.review_wait, None, "a wait is never read back");
+        stored.review_wait = viewer.review_wait.clone();
+        assert_eq!(stored, viewer);
+    }
+
+    /// viewer-annotations (D1 of review-threads): `question` and `delete` of
+    /// builds before threads are read as a comment and as a change with an
+    /// empty replacement, from a window's op and from `state.json`, and
+    /// never written; annotations without a number get theirs in creation
+    /// order.
+    #[test]
+    fn legacy_kinds_are_read_as_comment_and_change_and_never_written() {
+        let legacy = || {
+            vec![
+                serde_json::json!({"id": ann(1), "kind": "question", "body": "Why?"}),
+                serde_json::json!({
+                    "id": ann(2), "kind": "delete", "body": "Not needed.",
+                    "target": passage(serde_json::json!({})),
+                }),
+            ]
+        };
+        let (state, _) = reduce_screen(viewer_screen(), put("v1", legacy())).expect("put");
+        let annotations = viewer_of(&state, "v1").annotations;
+        assert_eq!(annotations[0].kind, AnnotationKind::Comment);
+        assert_eq!(annotations[0].body.as_deref(), Some("Why?"));
+        assert_eq!(annotations[1].kind, AnnotationKind::Change);
+        assert_eq!(annotations[1].replacement.as_deref(), Some(""));
+        assert_eq!(annotations[1].body.as_deref(), Some("Not needed."));
+
+        let stored = serde_json::json!({
+            "source": {"kind": "file", "path": PLAN}, "revision": 1, "annotations": legacy(),
+        });
+        let viewer: ViewerState = serde_json::from_value(stored).expect("record");
+        assert_eq!(
+            viewer
+                .annotations
+                .iter()
+                .map(|a| (a.kind, a.number))
+                .collect::<Vec<_>>(),
+            [(AnnotationKind::Comment, 1), (AnnotationKind::Change, 2)]
+        );
+        assert_eq!(viewer.last_annotation_number, 2);
+        let written = serde_json::to_string(&viewer).expect("record");
+        assert!(
+            !written.contains("question") && !written.contains("delete"),
+            "{written}"
+        );
+
+        // Numbers already given stay, and the counter never falls below them.
+        let stored = serde_json::json!({
+            "source": {"kind": "file", "path": PLAN}, "revision": 1, "lastAnnotationNumber": 4,
+            "annotations": [
+                {"id": ann(1), "number": 7, "kind": "comment", "body": "a"},
+                {"id": ann(2), "kind": "comment", "body": "b"},
+            ],
+        });
+        let viewer: ViewerState = serde_json::from_value(stored).expect("record");
+        assert_eq!(
+            viewer
+                .annotations
+                .iter()
+                .map(|a| a.number)
+                .collect::<Vec<_>>(),
+            [7, 8]
+        );
+        assert_eq!(viewer.last_annotation_number, 8);
+    }
+
     /// viewer-annotations, Annotations On A Viewer Pane (A question on a
-    /// passage): kept as it came, without an effect.
+    /// passage): an open comment kept as it came, with the pane's next
+    /// number, without an effect.
     #[test]
     fn a_question_on_a_passage_keeps_its_quote_view_lines_context_and_remark() {
         let state = viewer_screen();
@@ -3942,7 +4478,8 @@ mod tests {
             viewer_of(&next, "v1").annotations,
             [ViewerAnnotation {
                 id: ann(1),
-                kind: AnnotationKind::Question,
+                number: 1,
+                kind: AnnotationKind::Comment,
                 body: Some("Why not five times?".into()),
                 replacement: None,
                 target: Some(AnnotationTarget {
@@ -3953,6 +4490,9 @@ mod tests {
                     start_line: 30,
                     end_line: 30,
                 }),
+                status: AnnotationStatus::Open,
+                sent: false,
+                replies: vec![],
             }]
         );
         assert_eq!(
@@ -3964,8 +4504,23 @@ mod tests {
         assert_eq!(next.sessions.len(), 1);
     }
 
-    /// viewer-annotations, Annotations On A Viewer Pane (A general comment): a
-    /// comment or a question without a passage.
+    /// viewer-annotations, Annotations On A Viewer Pane (A suggested
+    /// deletion): a change whose replacement is empty.
+    #[test]
+    fn a_suggested_deletion_is_a_change_with_an_empty_replacement() {
+        let (next, _) = reduce_screen(
+            viewer_screen(),
+            put("v1", vec![deletion(1, passage(serde_json::json!({})))]),
+        )
+        .expect("put");
+        let annotation = &viewer_of(&next, "v1").annotations[0];
+        assert_eq!(annotation.kind, AnnotationKind::Change);
+        assert_eq!(annotation.replacement.as_deref(), Some(""));
+        assert_eq!(annotation.body, None, "a change may go without a remark");
+    }
+
+    /// viewer-annotations, Annotations On A Viewer Pane (A general comment):
+    /// a comment without a passage; a change needs one.
     #[test]
     fn a_general_comment_has_no_target() {
         let (next, effects) = reduce_screen(
@@ -3974,7 +4529,7 @@ mod tests {
                 "v1",
                 vec![
                     comment(&ann(1), "Split step 4 into two steps."),
-                    serde_json::json!({"id": ann(2), "kind": "question", "body": "Is step 5 needed?"}),
+                    comment(&ann(2), "Is step 5 needed?"),
                 ],
             ),
         )
@@ -3987,8 +4542,16 @@ mod tests {
             annotations[0].body.as_deref(),
             Some("Split step 4 into two steps.")
         );
-        assert_eq!(annotations[1].kind, AnnotationKind::Question);
         assert_eq!(annotations[1].target, None);
+        let error = reduce_screen(
+            viewer_screen(),
+            put(
+                "v1",
+                vec![serde_json::json!({"id": ann(3), "kind": "change", "replacement": "x"})],
+            ),
+        )
+        .expect_err("a general change");
+        assert!(error.to_string().contains("needs a passage"), "{error}");
     }
 
     /// viewer-annotations, Saving Annotations Through The Window: a put
@@ -4022,6 +4585,7 @@ mod tests {
             annotation_ids(&state, "v1"),
             [ann(1), ann(2), ann(3), ann(4)]
         );
+        assert_eq!(numbers(&state, "v1"), [1, 2, 3, 4]);
         assert_eq!(
             viewer_of(&state, "v1").annotations[1].body.as_deref(),
             Some("b, edited")
@@ -4039,9 +4603,45 @@ mod tests {
         assert_eq!(state.revision, revision + 2);
     }
 
+    /// viewer-annotations, Annotations On A Viewer Pane (Numbers are not given
+    /// twice): a removed number is not given again, and a replacement keeps
+    /// its number.
+    #[test]
+    fn numbers_are_not_given_twice() {
+        let (state, _) = reduce_screen(
+            viewer_screen(),
+            put(
+                "v1",
+                vec![
+                    comment(&ann(1), "a"),
+                    comment(&ann(2), "b"),
+                    comment(&ann(3), "c"),
+                ],
+            ),
+        )
+        .expect("#1 to #3");
+        let (state, _) = reduce_screen(state, remove("v1", &[ann(3)])).expect("#3 removed");
+        let (state, _) = reduce_screen(
+            state,
+            put(
+                "v1",
+                vec![comment(&ann(4), "d"), comment(&ann(1), "a, edited")],
+            ),
+        )
+        .expect("a new comment and an edit");
+        assert_eq!(numbers(&state, "v1"), [1, 2, 4]);
+        assert_eq!(viewer_of(&state, "v1").last_annotation_number, 4);
+        let (state, _) =
+            reduce_screen(state, remove("v1", &[ann(1), ann(2), ann(4)])).expect("all removed");
+        let (state, _) =
+            reduce_screen(state, put("v1", vec![comment(&ann(5), "e")])).expect("again");
+        assert_eq!(numbers(&state, "v1"), [5]);
+    }
+
     /// viewer-annotations, Saving Annotations Through The Window (Two windows
     /// add at the same time): each window's put names only its own
-    /// annotation, so in either order the pane holds both.
+    /// annotation, so in either order the pane holds both, with different
+    /// numbers.
     #[test]
     fn two_windows_adding_at_the_same_time_keep_both_annotations() {
         let from_a = || put("v1", vec![question(&ann(1))]);
@@ -4060,6 +4660,7 @@ mod tests {
             }
             let screen = store.get_screen(&screen_id).expect("screen");
             assert_eq!(annotation_ids(&screen, "v1"), order);
+            assert_eq!(numbers(&screen, "v1"), [1, 2]);
         }
     }
 
@@ -4115,32 +4716,38 @@ mod tests {
         assert_eq!(viewer_of(&screen, "v1").annotations.len(), 100);
     }
 
-    /// viewer-annotations, Annotations On A Viewer Pane (A terminal pane): both
-    /// ops are rejected for a pane that is not a viewer pane or does not
-    /// exist, and the workspace stays unchanged.
+    /// viewer-annotations, Annotations On A Viewer Pane (A terminal pane):
+    /// every annotation op is rejected for a pane that is not a viewer pane
+    /// or does not exist, and the workspace stays unchanged.
     #[test]
     fn annotations_on_a_terminal_pane_are_rejected() {
         let store = store_with(viewer_screen());
         let screen_id = ScreenId::from("screen1");
         let before = serde_json::to_value(store.get_workspace_state()).expect("workspace");
-        for (op, expected) in [
-            (
-                put("p1", vec![question(&ann(1))]),
-                "pane p1 is not a viewer pane",
-            ),
-            (remove("p1", &[ann(1)]), "pane p1 is not a viewer pane"),
-            (put("p9", vec![question(&ann(1))]), "pane p9 not found"),
-            (remove("p9", &[ann(1)]), "pane p9 not found"),
-        ] {
-            let error = store
-                .dispatch_screen(&screen_id, op)
-                .expect_err(expected)
-                .to_string();
-            assert_eq!(error, expected);
-            assert_eq!(
-                serde_json::to_value(store.get_workspace_state()).expect("workspace"),
-                before
-            );
+        for pane in ["p1", "p9"] {
+            let expected = if pane == "p1" {
+                "pane p1 is not a viewer pane"
+            } else {
+                "pane p9 not found"
+            };
+            for op in [
+                put(pane, vec![question(&ann(1))]),
+                remove(pane, &[ann(1)]),
+                put_replies(pane, &ann(1), vec![user_reply(&rep(1), "x")]),
+                remove_replies(pane, &ann(1), &[rep(1)]),
+                mark_ids(pane, &[ann(1)]),
+            ] {
+                let name = format!("{op:?}");
+                let error = store
+                    .dispatch_screen(&screen_id, op)
+                    .expect_err(&name)
+                    .to_string();
+                assert_eq!(error, expected, "{name}");
+                assert_eq!(
+                    serde_json::to_value(store.get_workspace_state()).expect("workspace"),
+                    before
+                );
+            }
         }
     }
 
@@ -4152,7 +4759,6 @@ mod tests {
         let long = "x".repeat(ANNOTATION_TEXT_LIMIT + 1);
         let long_context = "x".repeat(ANNOTATION_CONTEXT_LIMIT + 1);
         let full_quote = "q".repeat(ANNOTATION_TEXT_LIMIT);
-        let delete = |n: u32, target: serde_json::Value| serde_json::json!({"id": ann(n), "kind": "delete", "target": target});
         let change = |replacement: &str| {
             serde_json::json!({
                 "id": ann(1), "kind": "change", "replacement": replacement,
@@ -4218,7 +4824,6 @@ mod tests {
                 ),
                 "needs a replacement",
             ),
-            (put("v1", vec![change("")]), "needs a replacement"),
             (
                 put(
                     "v1",
@@ -4236,21 +4841,43 @@ mod tests {
             (
                 put(
                     "v1",
-                    vec![delete(1, passage(serde_json::json!({"quote": ""})))],
+                    vec![{
+                        let mut numbered = comment(&ann(2), "x");
+                        numbered["number"] = serde_json::json!(5);
+                        numbered
+                    }],
+                ),
+                "carries no number",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![{
+                        let mut threaded = comment(&ann(2), "x");
+                        threaded["replies"] = serde_json::json!([user_reply(&rep(1), "y")]);
+                        threaded
+                    }],
+                ),
+                "carries none",
+            ),
+            (
+                put(
+                    "v1",
+                    vec![deletion(1, passage(serde_json::json!({"quote": ""})))],
                 ),
                 "needs a quote",
             ),
             (
                 put(
                     "v1",
-                    vec![delete(1, passage(serde_json::json!({"startLine": 0})))],
+                    vec![deletion(1, passage(serde_json::json!({"startLine": 0})))],
                 ),
                 "lines must lie between 1 and 10000000",
             ),
             (
                 put(
                     "v1",
-                    vec![delete(
+                    vec![deletion(
                         1,
                         passage(serde_json::json!({"startLine": 5, "endLine": 4})),
                     )],
@@ -4260,7 +4887,7 @@ mod tests {
             (
                 put(
                     "v1",
-                    vec![delete(
+                    vec![deletion(
                         1,
                         passage(serde_json::json!({"endLine": 10_000_001})),
                     )],
@@ -4278,14 +4905,14 @@ mod tests {
             (
                 put(
                     "v1",
-                    vec![delete(1, passage(serde_json::json!({"quote": long})))],
+                    vec![deletion(1, passage(serde_json::json!({"quote": long})))],
                 ),
                 "quote holds at most 16384 bytes",
             ),
             (
                 put(
                     "v1",
-                    vec![delete(
+                    vec![deletion(
                         1,
                         passage(serde_json::json!({"prefix": long_context})),
                     )],
@@ -4295,7 +4922,7 @@ mod tests {
             (
                 put(
                     "v1",
-                    vec![delete(
+                    vec![deletion(
                         1,
                         passage(serde_json::json!({"suffix": long_context})),
                     )],
@@ -4306,7 +4933,7 @@ mod tests {
                 put(
                     "v1",
                     (0..17)
-                        .map(|n| delete(n, passage(serde_json::json!({"quote": full_quote}))))
+                        .map(|n| deletion(n, passage(serde_json::json!({"quote": full_quote}))))
                         .collect(),
                 ),
                 "at most 262144 bytes of text, got 278528",
@@ -4368,22 +4995,17 @@ mod tests {
 
         let store = store_with(viewer_screen());
         let quote = "q".repeat(ANNOTATION_TEXT_LIMIT);
-        let deletes = |from: u32, to: u32| {
+        let deletions = |from: u32, to: u32| {
             (from..to)
-                .map(|n| {
-                    serde_json::json!({
-                        "id": ann(n), "kind": "delete",
-                        "target": passage(serde_json::json!({"quote": quote})),
-                    })
-                })
+                .map(|n| deletion(n, passage(serde_json::json!({"quote": quote}))))
                 .collect::<Vec<_>>()
         };
         assert_eq!(16 * ANNOTATION_TEXT_LIMIT, ANNOTATION_PANE_TEXT_LIMIT);
         store
-            .dispatch_screen(&screen_id, put("v1", deletes(0, 16)))
+            .dispatch_screen(&screen_id, put("v1", deletions(0, 16)))
             .expect("the pane's text at its limit");
         store
-            .dispatch_screen(&screen_id, put("v1", deletes(3, 4)))
+            .dispatch_screen(&screen_id, put("v1", deletions(3, 4)))
             .expect("a replacement of the same size");
         let error = store
             .dispatch_screen(&screen_id, put("v1", vec![comment(&ann(16), "x")]))
@@ -4406,6 +5028,968 @@ mod tests {
                 remove("v1", &(0..100).map(ann).collect::<Vec<_>>()),
             )
             .expect("a hundred removed in one op");
+    }
+
+    /// viewer-annotations, Saving Annotations Through The Window (An edit
+    /// after sending): `mark_sent` marks the annotation and the user's
+    /// reply; a put of a changed entry makes it pending again, also when it
+    /// says `sent`, and a put never hands an entry over: not a new one, and
+    /// not one that was pending. A put of an unchanged entry keeps its mark.
+    #[test]
+    fn an_edit_after_sending_is_pending_again() {
+        let store = store_with(viewer_screen());
+        let screen_id = ScreenId::from("screen1");
+        let reply = user_reply(&rep(1), "And the timeout?");
+        for op in [
+            put("v1", vec![question(&ann(1)), comment(&ann(2), "Later.")]),
+            put_replies("v1", &ann(1), vec![reply.clone()]),
+            mark_sent(
+                "v1",
+                vec![
+                    entry_of(&question(&ann(1))),
+                    entry_of(&reply),
+                    entry_of(&question(&ann(9))),
+                    entry_of(&user_reply(&rep(9), "x")),
+                ],
+            ),
+        ] {
+            store.dispatch_screen(&screen_id, op).expect("applied");
+        }
+        let sent = annotation_of(&store, &ann(1));
+        assert!(sent.sent);
+        assert!(sent.replies[0].sent);
+        assert!(!annotation_of(&store, &ann(2)).sent, "not in the review");
+
+        let mut resolved = question(&ann(1));
+        resolved["status"] = serde_json::json!("resolved");
+        resolved["sent"] = serde_json::json!(true);
+        store
+            .dispatch_screen(&screen_id, put("v1", vec![resolved]))
+            .expect("resolved");
+        assert!(annotation_of(&store, &ann(1)).sent, "unchanged, still sent");
+
+        let mut edited = question(&ann(1));
+        edited["body"] = serde_json::json!("Why not five times, with backoff?");
+        edited["sent"] = serde_json::json!(true);
+        store
+            .dispatch_screen(&screen_id, put("v1", vec![edited]))
+            .expect("edited");
+        let edited = annotation_of(&store, &ann(1));
+        assert!(!edited.sent, "pending again");
+        assert!(edited.replies[0].sent, "the reply was not changed");
+        assert_eq!(edited.number, 1);
+
+        let mut sent_reply = user_reply(&rep(1), "And the timeout, too?");
+        sent_reply["sent"] = serde_json::json!(true);
+        let mut new_reply = user_reply(&rep(2), "Never mind.");
+        new_reply["sent"] = serde_json::json!(true);
+        let mut pending = comment(&ann(2), "Later.");
+        pending["sent"] = serde_json::json!(true);
+        let mut new = comment(&ann(3), "Also the cache.");
+        new["sent"] = serde_json::json!(true);
+        for op in [
+            put_replies("v1", &ann(1), vec![sent_reply, new_reply]),
+            put("v1", vec![pending, new]),
+        ] {
+            store.dispatch_screen(&screen_id, op).expect("applied");
+        }
+        let replies = annotation_of(&store, &ann(1)).replies;
+        assert!(
+            replies.iter().all(|reply| !reply.sent),
+            "a changed and a new reply are pending: {replies:?}"
+        );
+        assert!(
+            !annotation_of(&store, &ann(2)).sent,
+            "a put does not hand over"
+        );
+        assert!(!annotation_of(&store, &ann(3)).sent, "nor does a new one");
+    }
+
+    /// viewer-annotations, Handing A Review To A Terminal (Edited
+    /// meanwhile): a review of #1 and a reply, both changed by another window
+    /// before the review's `mark_sent` arrives; neither is marked, while #2,
+    /// unchanged since the review, is.
+    #[test]
+    fn an_entry_changed_since_the_review_stays_pending() {
+        let store = store_with(viewer_screen());
+        let screen_id = ScreenId::from("screen1");
+        let reply = user_reply(&rep(1), "And the timeout?");
+        let held = vec![
+            entry_of(&question(&ann(1))),
+            entry_of(&comment(&ann(2), "Later.")),
+            entry_of(&reply),
+        ];
+        let mut rewritten = question(&ann(1));
+        rewritten["body"] = serde_json::json!("Why not ten times?");
+        let mut moved = question(&ann(1));
+        moved["target"]["startLine"] = serde_json::json!(31);
+        moved["target"]["endLine"] = serde_json::json!(31);
+        for op in [
+            put("v1", vec![question(&ann(1)), comment(&ann(2), "Later.")]),
+            put_replies("v1", &ann(1), vec![reply]),
+            // Another window, before the review is marked.
+            put("v1", vec![rewritten]),
+            put_replies("v1", &ann(1), vec![user_reply(&rep(1), "No timeout.")]),
+            mark_sent("v1", held.clone()),
+        ] {
+            store.dispatch_screen(&screen_id, op).expect("applied");
+        }
+        let first = annotation_of(&store, &ann(1));
+        assert!(!first.sent, "the remark changed");
+        assert!(!first.replies[0].sent, "the reply changed");
+        assert!(annotation_of(&store, &ann(2)).sent, "#2 reads as it did");
+
+        let mut back = question(&ann(1));
+        back["kind"] = serde_json::json!("change");
+        back["replacement"] = serde_json::json!("retry five times");
+        for (put_op, what) in [
+            (put("v1", vec![moved]), "the passage"),
+            (put("v1", vec![back]), "the kind and replacement"),
+        ] {
+            store.dispatch_screen(&screen_id, put_op).expect("put");
+            store
+                .dispatch_screen(&screen_id, mark_sent("v1", held.clone()))
+                .expect("marked");
+            assert!(!annotation_of(&store, &ann(1)).sent, "{what} changed");
+        }
+    }
+
+    /// viewer-annotations, Threads (The user answers an agent, An agent's
+    /// reply is not edited): the user's reply follows the agent's; a window
+    /// cannot put a reply under the ID of an agent's reply, and the agent's
+    /// reply stays as it was written.
+    #[test]
+    fn the_user_answers_an_agent_whose_reply_is_not_edited() {
+        let store = sent_store();
+        let screen_id = ScreenId::from("screen1");
+        store
+            .dispatch(agent_reply(2, &rep(1), "Each step is one commit."))
+            .expect("agent's reply");
+        store
+            .dispatch_screen(
+                &screen_id,
+                put_replies(
+                    "v1",
+                    &ann(2),
+                    vec![user_reply(&rep(2), "Then split step 4.")],
+                ),
+            )
+            .expect("user's reply");
+        let thread = annotation_of(&store, &ann(2)).replies;
+        assert_eq!(
+            thread
+                .iter()
+                .map(|reply| (reply.author, reply.body.as_str()))
+                .collect::<Vec<_>>(),
+            [
+                (ReplyAuthor::Agent, "Each step is one commit."),
+                (ReplyAuthor::User, "Then split step 4."),
+            ]
+        );
+
+        let before = serde_json::to_value(store.get_workspace_state()).expect("workspace");
+        let error = store
+            .dispatch_screen(
+                &screen_id,
+                put_replies("v1", &ann(2), vec![user_reply(&rep(1), "Rewritten.")]),
+            )
+            .expect_err("an agent's reply");
+        assert!(matches!(error, MuxError::AgentReplyPut(_)), "{error}");
+        assert_eq!(
+            serde_json::to_value(store.get_workspace_state()).expect("workspace"),
+            before
+        );
+
+        // A user's reply is replaced in its place; either author's reply can
+        // be removed, and unknown IDs are ignored.
+        store
+            .dispatch_screen(
+                &screen_id,
+                put_replies(
+                    "v1",
+                    &ann(2),
+                    vec![user_reply(&rep(2), "Then split step 5.")],
+                ),
+            )
+            .expect("edited");
+        assert_eq!(
+            annotation_of(&store, &ann(2)).replies[1].body,
+            "Then split step 5."
+        );
+        store
+            .dispatch_screen(&screen_id, remove_replies("v1", &ann(2), &[rep(1), rep(7)]))
+            .expect("the agent's reply removed");
+        assert_eq!(
+            annotation_of(&store, &ann(2))
+                .replies
+                .iter()
+                .map(|reply| reply.id.clone())
+                .collect::<Vec<_>>(),
+            [rep(2)]
+        );
+        store
+            .dispatch_screen(&screen_id, remove_replies("v1", &ann(9), &[rep(2)]))
+            .expect("an annotation the pane no longer holds");
+        // Removing an annotation removes its replies.
+        store
+            .dispatch_screen(&screen_id, remove("v1", &[ann(2)]))
+            .expect("removed");
+        let workspace = serde_json::to_string(&store.get_workspace_state()).expect("workspace");
+        assert!(!workspace.contains(&rep(2)), "{workspace}");
+    }
+
+    /// viewer-annotations, Threads and Saving Annotations Through The Window:
+    /// the rules of `put_replies`, `remove_replies` and `mark_sent`, each
+    /// rejected as a whole without changing the workspace.
+    #[test]
+    fn invalid_replies_and_marks_are_rejected_and_leave_the_workspace_unchanged() {
+        let store = sent_store();
+        let screen_id = ScreenId::from("screen1");
+        store
+            .dispatch_screen(
+                &screen_id,
+                put_replies("v1", &ann(1), vec![user_reply(&rep(1), "First.")]),
+            )
+            .expect("a reply");
+        let long = "x".repeat(ANNOTATION_TEXT_LIMIT + 1);
+        let cases: Vec<(ScreenOp, &str)> = vec![
+            (put_replies("v1", &ann(2), vec![]), "1 to 50 entries, got 0"),
+            (
+                put_replies(
+                    "v1",
+                    &ann(2),
+                    (10..61).map(|n| user_reply(&rep(n), "x")).collect(),
+                ),
+                "1 to 50 entries, got 51",
+            ),
+            (
+                put_replies("v1", &ann(9), vec![user_reply(&rep(2), "x")]),
+                "holds no annotation",
+            ),
+            (
+                put_replies("v1", &ann(2), vec![user_reply("rep-1", "x")]),
+                "rep- and 16 lowercase hex",
+            ),
+            (
+                put_replies("v1", &ann(2), vec![user_reply(&rep(2), " \n")]),
+                "not only whitespace",
+            ),
+            (
+                put_replies("v1", &ann(2), vec![user_reply(&rep(2), &long)]),
+                "at most 16384 bytes, got 16385",
+            ),
+            (
+                put_replies(
+                    "v1",
+                    &ann(2),
+                    vec![serde_json::json!({"id": rep(2), "author": "agent", "body": "x"})],
+                ),
+                "only the user's replies",
+            ),
+            (
+                put_replies(
+                    "v1",
+                    &ann(2),
+                    vec![serde_json::json!({
+                        "id": rep(2), "author": "user", "body": "x",
+                        "from": {"paneId": "p1", "title": "claude"},
+                    })],
+                ),
+                "names the pane it came from",
+            ),
+            (
+                put_replies(
+                    "v1",
+                    &ann(2),
+                    vec![user_reply(&rep(2), "a"), user_reply(&rep(2), "b")],
+                ),
+                "more than once",
+            ),
+            (
+                put_replies("v1", &ann(2), vec![user_reply(&rep(1), "elsewhere")]),
+                "more than once",
+            ),
+            (remove_replies("v1", &ann(1), &[]), "1 to 50 entries, got 0"),
+            (
+                remove_replies("v1", &ann(1), &[ann(1)]),
+                "rep- and 16 lowercase hex",
+            ),
+            (mark_ids("v1", &[]), "1 to 5100 entries, got 0"),
+            (
+                mark_ids("v1", &(0..5101).map(ann).collect::<Vec<_>>()),
+                "1 to 5100 entries, got 5101",
+            ),
+            (
+                mark_ids("v1", &[ann(1), "wait-0123456789abcdef".into()]),
+                "annotation and reply IDs only",
+            ),
+        ];
+        let before = serde_json::to_value(store.get_workspace_state()).expect("workspace");
+        for (op, expected) in cases {
+            let name = format!("{op:?}").chars().take(160).collect::<String>();
+            let error = store
+                .dispatch_screen(&screen_id, op)
+                .expect_err(&name)
+                .to_string();
+            assert!(error.contains(expected), "{name}: {error}");
+            assert_eq!(
+                serde_json::to_value(store.get_workspace_state()).expect("workspace"),
+                before,
+                "{name}"
+            );
+        }
+        let error = serde_json::from_value::<ScreenOp>(serde_json::json!({
+            "type": "put_replies", "paneId": "v1", "annotationId": ann(1),
+            "replies": [{"id": rep(3), "author": "system", "body": "x"}],
+        }))
+        .expect_err("an unknown author");
+        assert!(error.to_string().contains("unknown variant"), "{error}");
+    }
+
+    /// viewer-annotations, Threads and Annotations On A Viewer Pane: a thread
+    /// holds 50 replies, replies count toward the pane's text, and the
+    /// limits themselves are admitted; `mark_sent` takes 5,100 entries.
+    #[test]
+    fn reply_limits_admit_their_bounds() {
+        let store = sent_store();
+        let screen_id = ScreenId::from("screen1");
+        store
+            .dispatch_screen(
+                &screen_id,
+                put_replies(
+                    "v1",
+                    &ann(1),
+                    (0..49)
+                        .map(|n| user_reply(&rep(n), "x"))
+                        .chain([user_reply(&rep(49), &"r".repeat(ANNOTATION_TEXT_LIMIT))])
+                        .collect(),
+                ),
+            )
+            .expect("fifty replies, one at its limit");
+        let error = store
+            .dispatch_screen(
+                &screen_id,
+                put_replies("v1", &ann(1), vec![user_reply(&rep(50), "x")]),
+            )
+            .expect_err("a 51st reply");
+        assert!(
+            matches!(error, MuxError::RepliesTooMany { limit: 50, got: 51 }),
+            "{error}"
+        );
+        let error = store
+            .dispatch(agent_reply(1, &rep(51), "x"))
+            .expect_err("an agent's 51st reply");
+        assert!(
+            matches!(error, MuxError::RepliesTooMany { limit: 50, got: 51 }),
+            "{error}"
+        );
+        store
+            .dispatch_screen(
+                &screen_id,
+                put_replies("v1", &ann(1), vec![user_reply(&rep(3), "edited")]),
+            )
+            .expect("a replacement in a full thread");
+
+        let held = |store: &crate::mux::Store| {
+            let screen = store.get_screen(&screen_id).expect("screen");
+            viewer_of(&screen, "v1")
+                .annotations
+                .iter()
+                .map(ViewerAnnotation::text_bytes)
+                .sum::<usize>()
+        };
+        let room = ANNOTATION_PANE_TEXT_LIMIT - held(&store);
+        let quote = "q".repeat(ANNOTATION_TEXT_LIMIT);
+        let fill = room / ANNOTATION_TEXT_LIMIT;
+        store
+            .dispatch_screen(
+                &screen_id,
+                put(
+                    "v1",
+                    (10..10 + u32::try_from(fill).expect("few"))
+                        .map(|n| deletion(n, passage(serde_json::json!({"quote": quote}))))
+                        .collect(),
+                ),
+            )
+            .expect("the pane nearly full");
+        let left = ANNOTATION_PANE_TEXT_LIMIT - held(&store);
+        store
+            .dispatch_screen(
+                &screen_id,
+                put_replies("v1", &ann(2), vec![user_reply(&rep(60), &"y".repeat(left))]),
+            )
+            .expect("a reply that fills the pane");
+        let error = store
+            .dispatch_screen(
+                &screen_id,
+                put_replies("v1", &ann(2), vec![user_reply(&rep(61), "z")]),
+            )
+            .expect_err("one byte more");
+        assert!(
+            matches!(error, MuxError::AnnotationsTooLong { got, .. } if got == ANNOTATION_PANE_TEXT_LIMIT + 1),
+            "{error}"
+        );
+        let error = store
+            .dispatch(agent_reply(2, &rep(62), "z"))
+            .expect_err("an agent's byte more");
+        assert!(
+            matches!(error, MuxError::AnnotationsTooLong { .. }),
+            "{error}"
+        );
+
+        let ids: Vec<String> = (0..5_100)
+            .map(|n| if n % 2 == 0 { ann(n) } else { rep(n) })
+            .collect();
+        store
+            .dispatch_screen(&screen_id, mark_ids("v1", &ids))
+            .expect("5,100 entries");
+    }
+
+    /// viewer-annotations, Resolving A Thread (Resolved after the agent's
+    /// answer, Reopened): the status is part of the annotation a window
+    /// puts; resolving and reopening keep the number and the replies, and an
+    /// agent may still reply to a resolved annotation without reopening it.
+    #[test]
+    fn resolving_and_reopening_keep_number_and_replies() {
+        let store = sent_store();
+        let screen_id = ScreenId::from("screen1");
+        store
+            .dispatch(agent_reply(2, &rep(1), "Done."))
+            .expect("agent's reply");
+        let mut resolved = comment(&ann(2), "Shorter steps.");
+        resolved["status"] = serde_json::json!("resolved");
+        resolved["sent"] = serde_json::json!(true);
+        store
+            .dispatch_screen(&screen_id, put("v1", vec![resolved]))
+            .expect("resolved");
+        let annotation = annotation_of(&store, &ann(2));
+        assert_eq!(annotation.status, AnnotationStatus::Resolved);
+        assert_eq!(annotation.number, 2);
+        assert_eq!(annotation.replies.len(), 1);
+
+        store
+            .dispatch(agent_reply(2, &rep(2), "Also renamed it."))
+            .expect("a reply to a resolved annotation");
+        assert_eq!(
+            annotation_of(&store, &ann(2)).status,
+            AnnotationStatus::Resolved,
+            "an agent does not reopen it"
+        );
+
+        store
+            .dispatch_screen(
+                &screen_id,
+                put("v1", vec![comment(&ann(2), "Shorter steps.")]),
+            )
+            .expect("reopened");
+        let annotation = annotation_of(&store, &ann(2));
+        assert_eq!(annotation.status, AnnotationStatus::Open);
+        assert_eq!(annotation.number, 2);
+        assert_eq!(annotation.replies.len(), 2);
+    }
+
+    /// workspace-model, Layout Operations (No client writes an agent's
+    /// reply): the trusted viewer operations have no wire form, and the
+    /// window's operations cannot carry an agent's reply.
+    #[test]
+    fn no_client_writes_an_agents_reply() {
+        let reply = serde_json::json!({
+            "id": rep(1), "author": "agent", "body": "x",
+            "from": {"paneId": "p1", "title": "claude"},
+        });
+        for op in [
+            serde_json::json!({"type": "agent_reply", "paneId": "v1", "number": 1, "reply": reply}),
+            serde_json::json!({"type": "add_agent_reply", "paneId": "v1", "number": 1, "reply": reply}),
+            serde_json::json!({
+                "type": "start_review_wait", "paneId": "v1",
+                "wait": {"id": "wait-0123456789abcdef", "paneId": "p1", "title": "claude"},
+            }),
+            serde_json::json!({"type": "end_review_wait", "paneId": "v1", "waitId": "wait-0123456789abcdef"}),
+            serde_json::json!({"type": "review_wait", "paneId": "v1"}),
+        ] {
+            assert!(
+                serde_json::from_value::<ScreenOp>(op.clone()).is_err(),
+                "{op}"
+            );
+        }
+
+        let store = sent_store();
+        let screen_id = ScreenId::from("screen1");
+        let before = serde_json::to_value(store.get_workspace_state()).expect("workspace");
+        let mut threaded = comment(&ann(1), "x");
+        threaded["replies"] = serde_json::json!([reply]);
+        for op in [
+            put_replies("v1", &ann(1), vec![reply.clone()]),
+            put("v1", vec![threaded]),
+        ] {
+            assert!(store.dispatch_screen(&screen_id, op).is_err());
+            assert_eq!(
+                serde_json::to_value(store.get_workspace_state()).expect("workspace"),
+                before
+            );
+        }
+    }
+
+    /// viewer-annotations, Concurrent Annotation Edits (An agent replies while
+    /// the user edits) and Agents Read And Reply To Handed-Over Threads (An
+    /// agent replies, A reply to an annotation not sent): the agent's reply
+    /// survives a window's replacement of its annotation; a reply needs the
+    /// annotation's own hand-over and stays within the rules.
+    #[test]
+    fn an_agents_reply_survives_an_edit_and_needs_a_sent_annotation() {
+        let store = sent_store();
+        let screen_id = ScreenId::from("screen1");
+        let revision = store.get_screen(&screen_id).expect("screen").revision;
+        let effects = store
+            .dispatch(agent_reply(
+                1,
+                &rep(1),
+                "Switched to on-demand computation.",
+            ))
+            .expect("agent's reply");
+        assert!(effects.is_empty());
+        assert_eq!(
+            store.get_screen(&screen_id).expect("screen").revision,
+            revision + 1
+        );
+        let mut edited = question(&ann(1));
+        edited["body"] = serde_json::json!("Why not on demand?");
+        store
+            .dispatch_screen(&screen_id, put("v1", vec![edited]))
+            .expect("the window's edit");
+        let annotation = annotation_of(&store, &ann(1));
+        assert_eq!(annotation.body.as_deref(), Some("Why not on demand?"));
+        assert_eq!(
+            annotation.replies,
+            [AnnotationReply {
+                id: rep(1),
+                author: ReplyAuthor::Agent,
+                body: "Switched to on-demand computation.".into(),
+                sent: false,
+                from: Some(ReplyFrom {
+                    pane_id: PaneId::from("p1"),
+                    title: "claude".into(),
+                }),
+            }]
+        );
+
+        store
+            .dispatch_screen(&screen_id, put("v1", vec![comment(&ann(3), "Not sent.")]))
+            .expect("a pending annotation");
+        // #1 is pending again after the edit; #2 is still handed over.
+        let aimed = |screen: &str, pane: &str| {
+            let mut op = agent_reply(2, &rep(9), "x");
+            if let Op::AgentReply {
+                screen_id, pane_id, ..
+            } = &mut op
+            {
+                *screen_id = ScreenId::from(screen);
+                *pane_id = PaneId::from(pane);
+            }
+            op
+        };
+        let with = |change: &dyn Fn(&mut AnnotationReply)| {
+            let mut op = agent_reply(2, &rep(9), "x");
+            if let Op::AgentReply { reply, .. } = &mut op {
+                change(reply);
+            }
+            op
+        };
+        let cases: Vec<(Op, &str)> = vec![
+            (agent_reply(1, &rep(9), "x"), "has not been handed over"),
+            (agent_reply(3, &rep(9), "x"), "has not been handed over"),
+            (agent_reply(9, &rep(9), "x"), "holds no annotation #9"),
+            (agent_reply(2, &rep(9), " \t"), "not only whitespace"),
+            (
+                agent_reply(2, &rep(9), &"x".repeat(ANNOTATION_TEXT_LIMIT + 1)),
+                "at most 16384 bytes",
+            ),
+            (agent_reply(2, &rep(1), "again"), "more than once"),
+            (agent_reply(2, "rep-x", "x"), "rep- and 16 lowercase hex"),
+            (aimed("screen1", "p1"), "is not a viewer pane"),
+            (aimed("screen1", "v9"), "pane v9 not found"),
+            (aimed("screen9", "v1"), "screen screen9 not found"),
+            (
+                with(&|reply| reply.from = None),
+                "names the pane it came from",
+            ),
+            (
+                with(&|reply| {
+                    reply.from = Some(ReplyFrom {
+                        pane_id: PaneId::from("p1"),
+                        title: "t".repeat(REPLY_TITLE_LIMIT + 1),
+                    });
+                }),
+                "at most 256 bytes",
+            ),
+            (
+                with(&|reply| reply.author = ReplyAuthor::User),
+                "author agent",
+            ),
+            (with(&|reply| reply.sent = true), "author agent"),
+        ];
+        let before = serde_json::to_value(store.get_workspace_state()).expect("workspace");
+        for (op, expected) in cases {
+            let name = format!("{op:?}").chars().take(200).collect::<String>();
+            let error = store.dispatch(op).expect_err(&name).to_string();
+            assert!(error.contains(expected), "{name}: {error}");
+            assert_eq!(
+                serde_json::to_value(store.get_workspace_state()).expect("workspace"),
+                before,
+                "{name}"
+            );
+        }
+    }
+
+    /// viewer-annotations, Waiting For A Review: a wait starts and ends with
+    /// trusted operations that raise the revision; one per pane; its end
+    /// finds the pane on another screen, and a closed pane has no wait to
+    /// end.
+    #[test]
+    fn a_wait_starts_and_ends_once_per_viewer_pane() {
+        let store = two_screen_store();
+        let scr1 = ScreenId::from("scr1");
+        store
+            .dispatch_screen(
+                &scr1,
+                open_viewer(
+                    serde_json::json!({"paneId": "p1", "newPaneId": "v1", "source": file(PLAN)}),
+                ),
+            )
+            .expect("viewer");
+        let wait = |id: &str| ReviewWait {
+            id: id.into(),
+            pane_id: PaneId::from("p1"),
+            title: "claude".into(),
+        };
+        let start = |screen: &str, pane: &str, id: &str| Op::StartReviewWait {
+            screen_id: ScreenId::from(screen),
+            pane_id: PaneId::from(pane),
+            wait: wait(id),
+            revision: None,
+        };
+        let end = |id: &str| Op::EndReviewWait {
+            pane_id: PaneId::from("v1"),
+            wait_id: id.into(),
+        };
+        const W1: &str = "wait-0000000000000001";
+        const W2: &str = "wait-0000000000000002";
+        let revision = |store: &crate::mux::Store, screen: &str| {
+            store
+                .get_screen(&ScreenId::from(screen))
+                .expect("screen")
+                .revision
+        };
+        let before = revision(&store, "scr1");
+        assert!(store
+            .dispatch(start("scr1", "v1", W1))
+            .expect("started")
+            .is_empty());
+        assert_eq!(revision(&store, "scr1"), before + 1);
+        let screen = store.get_screen(&scr1).expect("screen");
+        assert_eq!(viewer_of(&screen, "v1").review_wait, Some(wait(W1)));
+
+        for (op, expected) in [
+            (start("scr1", "v1", W2), "already has a process waiting"),
+            (start("scr1", "p1", W2), "is not a viewer pane"),
+            (start("scr1", "v9", W2), "pane v9 not found"),
+            (start("scr9", "v1", W2), "screen scr9 not found"),
+            (
+                start("scr1", "v1", "wait-1"),
+                "already has a process waiting",
+            ),
+            (end(W2), "no viewer pane holds the wait"),
+        ] {
+            let error = store.dispatch(op).expect_err(expected).to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+        assert_eq!(revision(&store, "scr1"), before + 1);
+
+        // The pane moved with its record; the wait ends there.
+        store
+            .dispatch(move_op("scr1", "v1", "scr2", None))
+            .expect("moved");
+        let moved = revision(&store, "scr2");
+        store.dispatch(end(W1)).expect("ended");
+        assert_eq!(revision(&store, "scr2"), moved + 1);
+        let screen = store.get_screen(&ScreenId::from("scr2")).expect("screen");
+        assert_eq!(viewer_of(&screen, "v1").review_wait, None);
+        assert!(store.dispatch(end(W1)).is_err(), "ended once");
+
+        let error = store
+            .dispatch(start("scr2", "v1", "wait-1"))
+            .expect_err("a malformed wait");
+        assert!(matches!(error, MuxError::Internal(_)), "{error}");
+        store.dispatch(start("scr2", "v1", W2)).expect("a new wait");
+        store
+            .dispatch_screen(
+                &ScreenId::from("scr2"),
+                ScreenOp::ClosePane {
+                    pane_id: PaneId::from("v1"),
+                    resulting_sizes: None,
+                },
+            )
+            .expect("closed");
+        assert!(matches!(
+            store.dispatch(end(W2)),
+            Err(MuxError::ReviewWaitNotFound(_))
+        ));
+    }
+
+    /// viewer-panes, Viewer Panes and Opening A Viewer (A plan in Markdown):
+    /// a text carries its `format` into the record and into snapshots, which
+    /// leave out only the text; a revision brings its own format; a format
+    /// other than `markdown` is no op at all.
+    #[test]
+    fn a_text_keeps_the_format_it_was_opened_with() {
+        let store = store_with(two_pane_screen());
+        let screen_id = ScreenId::from("screen1");
+        let plan = |text: &str, format: Option<&str>| {
+            let mut source = serde_json::json!({"kind": "text", "title": "Plan", "text": text});
+            if let Some(format) = format {
+                source["format"] = serde_json::json!(format);
+            }
+            open_viewer(serde_json::json!({
+                "paneId": "p1", "placement": "tab", "replace": true, "source": source,
+            }))
+        };
+        store
+            .dispatch_screen(&screen_id, plan("# Plan", Some("markdown")))
+            .expect("a plan in Markdown");
+        let screen = store.get_screen(&screen_id).expect("screen");
+        let (id, pane) = screen
+            .panes
+            .iter()
+            .find(|(_, pane)| pane.viewer.is_some())
+            .expect("the viewer");
+        let id = id.clone();
+        assert_eq!(
+            pane.viewer.as_ref().expect("viewer").source,
+            ViewerSource::Text {
+                title: "Plan".into(),
+                text: "# Plan".into(),
+                format: Some(TextFormat::Markdown),
+            }
+        );
+        let snapshot =
+            serde_json::to_value(screen.clone().without_viewer_texts()).expect("snapshot");
+        assert_eq!(
+            snapshot["panes"][id.as_str()]["viewer"]["source"],
+            serde_json::json!({"kind": "text", "title": "Plan", "format": "markdown"})
+        );
+
+        store
+            .dispatch_screen(&screen_id, plan("plain words", None))
+            .expect("the next revision as plain text");
+        let screen = store.get_screen(&screen_id).expect("screen");
+        assert_eq!(
+            screen.panes[&id].viewer.as_ref().expect("viewer").source,
+            ViewerSource::Text {
+                title: "Plan".into(),
+                text: "plain words".into(),
+                format: None,
+            }
+        );
+
+        let wire = serde_json::json!({
+            "type": "open_viewer", "paneId": "p1",
+            "source": {"kind": "text", "title": "Plan", "text": "x", "format": "html"},
+        });
+        assert!(serde_json::from_value::<ScreenOp>(wire).is_err());
+    }
+
+    /// viewer-panes, Reopening A File (A revision while a review is pending):
+    /// while a process waits for the review of a text, `replace` for it is
+    /// refused and changes nothing; once the wait ends, it applies.
+    #[test]
+    fn a_text_under_review_is_not_replaced() {
+        let store = store_with(two_pane_screen());
+        let screen_id = ScreenId::from("screen1");
+        let plan = |text: &str| {
+            open_viewer(serde_json::json!({
+                "paneId": "p1", "placement": "tab", "replace": true,
+                "source": {"kind": "text", "title": "Plan", "text": text},
+            }))
+        };
+        store
+            .dispatch_screen(
+                &screen_id,
+                open_viewer(serde_json::json!({
+                    "paneId": "p1", "newPaneId": "v1", "placement": "tab",
+                    "source": {"kind": "text", "title": "Plan", "text": "1. Cache the list."},
+                })),
+            )
+            .expect("the first plan");
+        const WAIT: &str = "wait-0000000000000001";
+        let stale = store
+            .dispatch(Op::StartReviewWait {
+                screen_id: screen_id.clone(),
+                pane_id: PaneId::from("v1"),
+                wait: ReviewWait {
+                    id: WAIT.into(),
+                    pane_id: PaneId::from("p1"),
+                    title: "claude".into(),
+                },
+                revision: Some(2),
+            })
+            .expect_err("a wait on a revision the pane does not show");
+        assert!(
+            matches!(&stale, MuxError::ReviewRevisionChanged(pane) if pane == &PaneId::from("v1")),
+            "{stale}"
+        );
+        store
+            .dispatch(Op::StartReviewWait {
+                screen_id: screen_id.clone(),
+                pane_id: PaneId::from("v1"),
+                wait: ReviewWait {
+                    id: WAIT.into(),
+                    pane_id: PaneId::from("p1"),
+                    title: "claude".into(),
+                },
+                revision: Some(1),
+            })
+            .expect("waiting on the revision shown");
+        let before = serde_json::to_value(store.get_workspace_state()).expect("workspace");
+
+        let error = store
+            .dispatch_screen(&screen_id, plan("1. Compute the list on demand."))
+            .expect_err("refused while the review is pending");
+        assert!(
+            matches!(&error, MuxError::ReviewWaitBusy(pane) if pane == &PaneId::from("v1")),
+            "{error}"
+        );
+        assert_eq!(
+            serde_json::to_value(store.get_workspace_state()).expect("workspace"),
+            before
+        );
+
+        store
+            .dispatch(Op::EndReviewWait {
+                pane_id: PaneId::from("v1"),
+                wait_id: WAIT.into(),
+            })
+            .expect("answered");
+        store
+            .dispatch_screen(&screen_id, plan("1. Compute the list on demand."))
+            .expect("replaced after the answer");
+        let screen = store.get_screen(&screen_id).expect("screen");
+        assert_eq!(
+            viewer_of(&screen, "v1").source,
+            ViewerSource::Text {
+                title: "Plan".into(),
+                text: "1. Compute the list on demand.".into(),
+                format: None,
+            }
+        );
+    }
+
+    /// viewer-panes, Reopening A File (A revised plan, Another title): with
+    /// `replace`, the first viewer of the screen showing a text of the same
+    /// title and origin gets the new text, a raised revision and the focus of
+    /// its slot, and keeps its annotations; another title or origin opens a
+    /// new pane, and so does a text without `replace`.
+    #[test]
+    fn replace_gives_a_text_to_the_viewer_of_its_title_and_origin() {
+        let store = store_with(two_pane_screen());
+        let screen_id = ScreenId::from("screen1");
+        let text = |title: &str, text: &str, from: &str, replace: bool| {
+            let mut fields = serde_json::json!({
+                "paneId": from, "placement": "tab",
+                "source": {"kind": "text", "title": title, "text": text},
+            });
+            if replace {
+                fields["replace"] = serde_json::json!(true);
+            }
+            open_viewer(fields)
+        };
+        store
+            .dispatch_screen(
+                &screen_id,
+                open_viewer(serde_json::json!({
+                    "paneId": "p1", "newPaneId": "v1", "placement": "tab", "cwd": "/home/me/app",
+                    "source": {"kind": "text", "title": "Plan", "text": "1. Cache the list."},
+                })),
+            )
+            .expect("the first plan");
+        store
+            .dispatch_screen(&screen_id, put("v1", vec![comment(&ann(1), "Why cache?")]))
+            .expect("annotated");
+        store
+            .dispatch_screen(&screen_id, select_tab("p1"))
+            .expect("the terminal in front");
+        let before = store.get_screen(&screen_id).expect("screen");
+
+        store
+            .dispatch_screen(
+                &screen_id,
+                text("Plan", "1. Compute the list on demand.", "p1", true),
+            )
+            .expect("the revised plan");
+        let after = store.get_screen(&screen_id).expect("screen");
+        assert_eq!(after.panes.len(), before.panes.len(), "no new pane");
+        let viewer = viewer_of(&after, "v1");
+        assert_eq!(
+            viewer.source,
+            ViewerSource::Text {
+                title: "Plan".into(),
+                text: "1. Compute the list on demand.".into(),
+                format: None,
+            }
+        );
+        assert_eq!(viewer.revision, 2);
+        assert_eq!(viewer.annotations, viewer_of(&before, "v1").annotations);
+        assert_eq!(
+            shown_viewer(&before, &after),
+            Some((PaneId::from("v1"), true))
+        );
+        assert!(
+            after.root.find_slot(&PaneId::from("v1")).is_some_and(|slot| matches!(
+                slot,
+                LayoutNode::Slot { active_pane_id, .. } if active_pane_id.as_ref() == Some(&PaneId::from("v1"))
+            )),
+            "{:?}",
+            after.root
+        );
+
+        for (op, case) in [
+            (text("Notes", "x", "p1", true), "another title"),
+            (text("Plan", "x", "p2", true), "another origin"),
+            (text("Plan", "x", "p1", false), "without replace"),
+        ] {
+            let before = store.get_screen(&screen_id).expect("screen");
+            store.dispatch_screen(&screen_id, op).expect(case);
+            let after = store.get_screen(&screen_id).expect("screen");
+            assert_eq!(after.panes.len(), before.panes.len() + 1, "{case}");
+            assert_eq!(viewer_of(&after, "v1"), viewer_of(&before, "v1"), "{case}");
+        }
+
+        let before = serde_json::to_value(store.get_workspace_state()).expect("workspace");
+        for op in [
+            open_viewer(serde_json::json!({"paneId": "p1", "source": file(PLAN), "replace": true})),
+            open_viewer(serde_json::json!({
+                "paneId": "p1", "newPaneId": "v9", "replace": true,
+                "source": {"kind": "text", "title": "Plan", "text": "x"},
+            })),
+        ] {
+            let error = store.dispatch_screen(&screen_id, op).expect_err("refused");
+            assert!(matches!(error, MuxError::ViewerReplaceInvalid), "{error}");
+            assert_eq!(
+                serde_json::to_value(store.get_workspace_state()).expect("workspace"),
+                before
+            );
+        }
+
+        let wire = serde_json::json!({
+            "type": "open_viewer", "source": {"kind": "text", "title": "Plan", "text": "x"},
+            "replace": true,
+        });
+        let op: ScreenOp = serde_json::from_value(wire.clone()).expect("wire op");
+        assert_eq!(serde_json::to_value(&op).expect("op"), wire);
+        let op = open_viewer(serde_json::json!({"source": file(PLAN)}));
+        assert!(serde_json::to_value(&op)
+            .expect("op")
+            .get("replace")
+            .is_none());
     }
 
     /// viewer-annotations, Annotation Lifetime (Opened again from the CLI): the
