@@ -21,6 +21,8 @@ import { ViewerAnnotations } from "../viewer/annotations.ts";
 import { ViewerDocuments } from "../viewer/documents.ts";
 import { ReviewAnswers } from "../viewer/handover.ts";
 import { parseCommand } from "./routing.ts";
+import { applyServerSettings } from "../settings.ts";
+import { loadShellProfiles } from "../shell_profiles.ts";
 
 /** `local`, or `host:<target>` for a connection to another host. */
 export type ConnKey = "local" | `host:${string}`;
@@ -74,6 +76,11 @@ export class ServerConnection {
     this.unsubscribeFailures = this.mux.onOpFailed((failure) => this.annotations.failed(failure));
     this.reviews = new ReviewAnswers(socket);
     this.unsubscribe = socket.onMessage((msg) => {
+      if (msg.type === "settings.changed" && this.key === "local") {
+        applyServerSettings(msg.settings);
+        void loadShellProfiles();
+        return;
+      }
       if (msg.type !== "command") return;
       const command = parseCommand(msg.command);
       if (!command) return;

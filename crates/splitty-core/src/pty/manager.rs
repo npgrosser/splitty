@@ -214,7 +214,8 @@ impl Backend for Manager {
             tracing::warn!(
                 requested = requested_profile_id.as_deref().unwrap_or_default(),
                 fallback = resolved.id.as_deref().unwrap_or_default(),
-                "shell profile is missing; using configured default"
+                reason = resolved.fallback_reason.as_deref().unwrap_or_default(),
+                "shell profile unavailable; using configured default"
             );
         }
         opts.shell_profile_id = resolved.id.unwrap_or_default();
@@ -222,6 +223,9 @@ impl Backend for Manager {
         opts.shell_args = resolved.args;
 
         let session = Session::start(opts, None, self.terminals.as_ref())?;
+        if let Some(reason) = resolved.fallback_reason {
+            session.set_shell_profile_fallback_reason(reason);
+        }
         let id = session.session_id().to_string();
         let handle: Arc<dyn SessionHandle> = session;
         self.sessions
@@ -280,6 +284,44 @@ impl Backend for Manager {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn unavailable_profile_spawns_default_and_reports_reason() {
+        use crate::pty::testing::{pty_available, sh_opts};
+        use crate::shell_profiles::{ShellProfile, ShellProfileSource, ShellTarget};
+        if !pty_available() {
+            return;
+        }
+        let default = ShellProfile {
+            id: "default".into(),
+            name: "Default".into(),
+            command: "/bin/sh".into(),
+            args: vec!["-c".into(), "printf ready".into()],
+            enabled: true,
+            target: ShellTarget::Local,
+            source: ShellProfileSource::Custom,
+            available: true,
+            reason: None,
+            experimental: false,
+            detected_defaults: None,
+        };
+        let missing = ShellProfile {
+            id: "unavailable".into(),
+            available: false,
+            ..default.clone()
+        };
+        let profiles = ShellProfilesState {
+            default_profile_id: default.id.clone(),
+            profiles: vec![default, missing],
+        };
+        let manager = Manager::with_shell_profiles(Arc::new(RwLock::new(profiles)));
+        let mut opts = sh_opts("fallback-session", "");
+        opts.shell_profile_id = "unavailable".into();
+        let session = manager.create(opts).await.unwrap();
+        assert_eq!(session.shell_profile_id(), Some("default"));
+        assert_eq!(session.shell_profile_fallback_reason(), Some("unavailable"));
+        manager.close_all();
+    }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 3)]
     async fn service_shutdown_waits_for_an_admitted_spawn_and_refuses_late_creates() {

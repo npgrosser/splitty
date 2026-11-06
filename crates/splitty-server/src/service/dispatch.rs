@@ -81,6 +81,7 @@ impl State {
         }
         match request.operation {
             Operation::HomeGet => op::get_home_settings(self).await.into_reply(),
+            Operation::HomeMetadata => op::get_home_metadata().into_reply(),
             Operation::HomeUpdate => op::patch_home_settings(self, body).await,
             Operation::ThemeGet => op::get_resolved_theme(self, query()).await.into_reply(),
             Operation::ThemeList => op::list_available_themes(self).await.into_reply(),

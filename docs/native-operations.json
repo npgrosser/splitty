@@ -11,6 +11,16 @@
       "deadlineMs": 30000
     },
     {
+      "operation": "home.metadata",
+      "method": "GET",
+      "path": "/api/home/settings/metadata",
+      "scope": "backend",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
       "operation": "home.update",
       "method": "PATCH",
       "path": "/api/home/settings",

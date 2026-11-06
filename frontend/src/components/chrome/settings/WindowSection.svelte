@@ -1,7 +1,7 @@
 <script lang="ts">
   import { settings } from "../../../stores/settings.svelte.ts";
   import {
-    updateSetting, defaults, inputNumber, selectValue, type TitleBarColorMode,
+    updateSetting, defaults, numericLimit, isAllowed, inputNumber, selectValue, type TitleBarColorMode,
   } from "../../../lib/settings.ts";
   import { syncNativeTitleBarAppearance } from "../../../lib/theme.ts";
   import { getDesktopPlatform } from "../../../lib/platform.ts";
@@ -53,10 +53,10 @@
         value={s.window.titleBarColorMode}
         onchange={(e) => updateTitleBarColorMode(selectValue<TitleBarColorMode>(e))}
       >
-        <option value="tabBar">Follow Tab Bar Base</option>
-        <option value="native">Use Native Default</option>
-        <option value="terminal">Use Terminal Background</option>
-        <option value="activeTab">Use Active Tab</option>
+        {#if isAllowed("window.titleBarColorMode", "tabBar")}<option value="tabBar">Follow Tab Bar Base</option>{/if}
+        {#if isAllowed("window.titleBarColorMode", "native")}<option value="native">Use Native Default</option>{/if}
+        {#if isAllowed("window.titleBarColorMode", "terminal")}<option value="terminal">Use Terminal Background</option>{/if}
+        {#if isAllowed("window.titleBarColorMode", "activeTab")}<option value="activeTab">Use Active Tab</option>{/if}
       </select>
     </SettingRow>
   {/if}
@@ -68,7 +68,7 @@
     showReset={s.window.titleBarHeight !== defaults.window.titleBarHeight}
     onReset={() => updateSetting("window", "titleBarHeight", defaults.window.titleBarHeight)}
   >
-    <input type="range" min="0" max="60" step="1" value={s.window.titleBarHeight} onchange={(e) => updateSetting("window", "titleBarHeight", inputNumber(e))} />
+    <input type="range" min={numericLimit("window.titleBarHeight", {min: 0, max: 60, step: 1}).min} max={numericLimit("window.titleBarHeight", {min: 0, max: 60, step: 1}).max} step={numericLimit("window.titleBarHeight", {min: 0, max: 60, step: 1}).step} value={s.window.titleBarHeight} onchange={(e) => updateSetting("window", "titleBarHeight", inputNumber(e))} />
   </SettingRow>
 
   <!-- Title Bar Scroll -->

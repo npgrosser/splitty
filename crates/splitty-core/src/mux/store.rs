@@ -225,6 +225,23 @@ impl Store {
         None
     }
 
+    /// Record the profile actually chosen by the PTY backend after fallback.
+    /// Future splits inherit this value rather than a stale requested ID.
+    pub fn set_resolved_shell_profile(&self, session_id: &SessionId, profile_id: Option<&str>) {
+        let mut state = self.state.write().expect("workspace lock");
+        for screen in state.screens.values_mut() {
+            if let Some(session) = screen.sessions.get_mut(session_id) {
+                session.shell_profile_id = profile_id.map(str::to_owned);
+                if let Some(ref cb) = self.on_change {
+                    cb(&state);
+                }
+                self.changes
+                    .send_modify(|count| *count = count.wrapping_add(1));
+                break;
+            }
+        }
+    }
+
     /// The screen that holds `pane_id` in its pane table, where a pane that
     /// may have moved is looked for; none for a managed job's pane, which
     /// never moves (`move_pane_to_screen`), so a mismatch stays a conflict.

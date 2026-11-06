@@ -41,6 +41,7 @@ pub fn scrollback_size() -> usize {
 pub struct Session {
     id: String,
     shell_profile_id: Option<String>,
+    shell_profile_fallback_reason: std::sync::OnceLock<String>,
     terminal: Box<dyn Terminal>,
     managed: bool,
     exit_reported: AtomicBool,
@@ -182,6 +183,9 @@ impl Feed for Output {
 }
 
 impl Session {
+    pub(crate) fn set_shell_profile_fallback_reason(&self, reason: String) {
+        let _ = self.shell_profile_fallback_reason.set(reason);
+    }
     /// Create a new PTY session in this process with the given options.
     pub fn new(opts: CreateSessionOpts) -> Result<Arc<Session>, PtyError> {
         Self::start(opts, None, &LocalTerminals)
@@ -308,6 +312,7 @@ impl Session {
         Ok(Arc::new(Session {
             id,
             shell_profile_id,
+            shell_profile_fallback_reason: std::sync::OnceLock::new(),
             terminal,
             managed,
             exit_reported: AtomicBool::new(false),
@@ -509,6 +514,10 @@ impl SessionHandle for Session {
 
     fn shell_profile_id(&self) -> Option<&str> {
         self.shell_profile_id.as_deref()
+    }
+
+    fn shell_profile_fallback_reason(&self) -> Option<&str> {
+        self.shell_profile_fallback_reason.get().map(String::as_str)
     }
 
     fn shell_pid(&self) -> Option<u32> {

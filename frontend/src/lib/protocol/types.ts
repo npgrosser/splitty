@@ -121,7 +121,8 @@ export interface SessionEvent extends ServerEvent {
 
 // --- Server -> Client: Session Lifecycle ---
 
-export interface SessionCreated extends SessionEvent { type: "created"; shellProfileId?: string; homeDir?: string; semanticPhase?: string }
+export interface SessionCreated extends SessionEvent { type: "created"; shellProfileId?: string; shellProfileFallbackReason?: "missing" | "disabled" | "unavailable"; homeDir?: string; semanticPhase?: string }
+export interface SettingsChanged extends ServerEvent { type: "settings.changed"; settings: import("../settings.ts").SplittySettings }
 export interface SessionAttached extends SessionEvent { type: "attached"; homeDir?: string; semanticPhase?: string; semanticExitCode?: number; semanticCommandCount?: number }
 export interface SessionClosed extends SessionEvent { type: "closed"; exitCode?: number; signal?: string }
 export interface SessionError extends ServerEvent { type: "error"; sessionId?: string; error: string }
@@ -204,7 +205,7 @@ export interface NotificationMessage extends ServerEvent {
 export interface MuxWelcome extends ServerEvent { type: "mux.welcome"; clientId: string; screens: ScreenInfo[]; serverMode?: "embedded" | "daemon"; capabilities?: string[] }
 export interface MuxScreenSnapshot extends ServerEvent { type: "mux.screen_snapshot"; screen: ScreenState }
 export interface MuxNudge extends ServerEvent { type: "mux.nudge"; reason: string; screenId?: string }
-export interface MuxPaneSpawned extends ServerEvent { type: "mux.pane_spawned"; paneId: string; sessionId: string }
+export interface MuxPaneSpawned extends ServerEvent { type: "mux.pane_spawned"; paneId: string; sessionId: string; shellProfileId?: string; shellProfileFallbackReason?: "missing" | "disabled" | "unavailable" }
 export interface MuxOpFailed extends ServerEvent { type: "mux.op_failed"; op: string; screenId?: string; paneId?: string; error: string }
 
 // --- Server -> Client: Listening Ports ---
@@ -266,7 +267,8 @@ export type OutgoingMessage =
   // Listening ports
   | PortsChanged
   // Commands
-  | ServerCommand;
+  | ServerCommand
+  | SettingsChanged;
 
 // --- Mux Domain Model ---
 

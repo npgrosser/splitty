@@ -1,6 +1,6 @@
 <script lang="ts">
   import { settings } from "../../../stores/settings.svelte.ts";
-  import { updateSetting, defaults, selectValue, inputNumber, type CloseButtonMode } from "../../../lib/settings.ts";
+  import { updateSetting, defaults, numericLimit, isAllowed, selectValue, inputNumber, type CloseButtonMode } from "../../../lib/settings.ts";
   import SettingRow from "./SettingRow.svelte";
   import ToggleSwitch from "./ToggleSwitch.svelte";
   import SettingsSection from "./SettingsSection.svelte";
@@ -79,8 +79,8 @@
       value={s.tabs.closeButton}
       onchange={(e) => updateSetting("tabs", "closeButton", selectValue<CloseButtonMode>(e))}
     >
-      <option value="always">Always</option>
-      <option value="active">Active Only</option>
+      {#if isAllowed("tabs.closeButton", "always")}<option value="always">Always</option>{/if}
+      {#if isAllowed("tabs.closeButton", "active")}<option value="active">Active Only</option>{/if}
     </select>
   </SettingRow>
 
@@ -91,7 +91,7 @@
     showReset={s.tabs.minWidth !== defaults.tabs.minWidth}
     onReset={() => updateSetting("tabs", "minWidth", defaults.tabs.minWidth)}
   >
-    <input type="range" min="4" max="40" step="1" value={s.tabs.minWidth} onchange={(e) => updateSetting("tabs", "minWidth", inputNumber(e))} />
+    <input type="range" min={numericLimit("tabs.minWidth", {min: 4, max: 40, step: 1}).min} max={numericLimit("tabs.minWidth", {min: 4, max: 40, step: 1}).max} step={numericLimit("tabs.minWidth", {min: 4, max: 40, step: 1}).step} value={s.tabs.minWidth} onchange={(e) => updateSetting("tabs", "minWidth", inputNumber(e))} />
   </SettingRow>
 
   <!-- Show Split -->

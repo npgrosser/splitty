@@ -3,6 +3,8 @@
   import {
     updateXtermSetting,
     defaults,
+    numericLimit,
+    isAllowed,
     selectValue,
     inputNumber,
     type FontWeight,
@@ -84,7 +86,7 @@
     onReset={() => updateXtermSetting("scrollbarWidth", defaults.terminal.xterm.scrollbarWidth)}
     disabled={dis("scrollbarWidth")}
   >
-    <input type="range" min="0" max="30" step="1" value={s.terminal.xterm.scrollbarWidth} onchange={(e) => updateXtermSetting("scrollbarWidth", inputNumber(e))} disabled={dis("scrollbarWidth")} />
+    <input type="range" min={numericLimit("terminal.xterm.scrollbarWidth", {min: 0, max: 30, step: 1}).min} max={numericLimit("terminal.xterm.scrollbarWidth", {min: 0, max: 30, step: 1}).max} step={numericLimit("terminal.xterm.scrollbarWidth", {min: 0, max: 30, step: 1}).step} value={s.terminal.xterm.scrollbarWidth} onchange={(e) => updateXtermSetting("scrollbarWidth", inputNumber(e))} disabled={dis("scrollbarWidth")} />
   </SettingRow>
 
   <!-- Scrollbar Overlay -->
@@ -125,7 +127,7 @@
     onReset={() => updateXtermSetting("scrollSensitivity", defaults.terminal.xterm.scrollSensitivity)}
     disabled={dis("scrollSensitivity")}
   >
-    <input type="range" min="0.1" max="10" step="0.1" value={s.terminal.xterm.scrollSensitivity} onchange={(e) => updateXtermSetting("scrollSensitivity", inputNumber(e))} disabled={dis("scrollSensitivity")} />
+    <input type="range" min={numericLimit("terminal.xterm.scrollSensitivity", {min: 0.1, max: 10, step: 0.1}).min} max={numericLimit("terminal.xterm.scrollSensitivity", {min: 0.1, max: 10, step: 0.1}).max} step={numericLimit("terminal.xterm.scrollSensitivity", {min: 0.1, max: 10, step: 0.1}).step} value={s.terminal.xterm.scrollSensitivity} onchange={(e) => updateXtermSetting("scrollSensitivity", inputNumber(e))} disabled={dis("scrollSensitivity")} />
   </SettingRow>
 
   <!-- Fast Scroll Sensitivity -->
@@ -136,7 +138,7 @@
     onReset={() => updateXtermSetting("fastScrollSensitivity", defaults.terminal.xterm.fastScrollSensitivity)}
     disabled={dis("fastScrollSensitivity")}
   >
-    <input type="range" min="1" max="20" step="0.5" value={s.terminal.xterm.fastScrollSensitivity} onchange={(e) => updateXtermSetting("fastScrollSensitivity", inputNumber(e))} disabled={dis("fastScrollSensitivity")} />
+    <input type="range" min={numericLimit("terminal.xterm.fastScrollSensitivity", {min: 1, max: 20, step: 0.5}).min} max={numericLimit("terminal.xterm.fastScrollSensitivity", {min: 1, max: 20, step: 0.5}).max} step={numericLimit("terminal.xterm.fastScrollSensitivity", {min: 1, max: 20, step: 0.5}).step} value={s.terminal.xterm.fastScrollSensitivity} onchange={(e) => updateXtermSetting("fastScrollSensitivity", inputNumber(e))} disabled={dis("fastScrollSensitivity")} />
   </SettingRow>
 
   <!-- Line Height -->
@@ -147,7 +149,7 @@
     onReset={() => updateXtermSetting("lineHeight", defaults.terminal.xterm.lineHeight)}
     disabled={dis("lineHeight")}
   >
-    <input type="range" min="0.8" max="2.0" step="0.05" value={s.terminal.xterm.lineHeight} onchange={(e) => updateXtermSetting("lineHeight", inputNumber(e))} disabled={dis("lineHeight")} />
+    <input type="range" min={numericLimit("terminal.xterm.lineHeight", {min: 0.8, max: 2.0, step: 0.05}).min} max={numericLimit("terminal.xterm.lineHeight", {min: 0.8, max: 2.0, step: 0.05}).max} step={numericLimit("terminal.xterm.lineHeight", {min: 0.8, max: 2.0, step: 0.05}).step} value={s.terminal.xterm.lineHeight} onchange={(e) => updateXtermSetting("lineHeight", inputNumber(e))} disabled={dis("lineHeight")} />
   </SettingRow>
 
   <!-- Letter Spacing -->
@@ -158,7 +160,7 @@
     onReset={() => updateXtermSetting("letterSpacing", defaults.terminal.xterm.letterSpacing)}
     disabled={dis("letterSpacing")}
   >
-    <input type="range" min="-5" max="10" step="0.5" value={s.terminal.xterm.letterSpacing} onchange={(e) => updateXtermSetting("letterSpacing", inputNumber(e))} disabled={dis("letterSpacing")} />
+    <input type="range" min={numericLimit("terminal.xterm.letterSpacing", {min: -5, max: 10, step: 0.5}).min} max={numericLimit("terminal.xterm.letterSpacing", {min: -5, max: 10, step: 0.5}).max} step={numericLimit("terminal.xterm.letterSpacing", {min: -5, max: 10, step: 0.5}).step} value={s.terminal.xterm.letterSpacing} onchange={(e) => updateXtermSetting("letterSpacing", inputNumber(e))} disabled={dis("letterSpacing")} />
   </SettingRow>
 
   <!-- Font Weight -->
@@ -174,7 +176,7 @@
       onchange={(e) => updateXtermSetting("fontWeight", selectValue<FontWeight>(e))}
       disabled={dis("fontWeight")}
     >
-      {#each fontWeightOptions as opt}
+      {#each fontWeightOptions.filter((opt) => isAllowed("terminal.xterm.fontWeight", opt.value)) as opt}
         <option value={opt.value}>{opt.label}</option>
       {/each}
     </select>
@@ -193,7 +195,7 @@
       onchange={(e) => updateXtermSetting("fontWeightBold", selectValue<FontWeight>(e))}
       disabled={dis("fontWeightBold")}
     >
-      {#each fontWeightOptions as opt}
+      {#each fontWeightOptions.filter((opt) => isAllowed("terminal.xterm.fontWeightBold", opt.value)) as opt}
         <option value={opt.value}>{opt.label}</option>
       {/each}
     </select>
@@ -207,7 +209,7 @@
     onReset={() => updateXtermSetting("minimumContrastRatio", defaults.terminal.xterm.minimumContrastRatio)}
     disabled={dis("minimumContrastRatio")}
   >
-    <input type="range" min="1" max="21" step="0.5" value={s.terminal.xterm.minimumContrastRatio} onchange={(e) => updateXtermSetting("minimumContrastRatio", inputNumber(e))} disabled={dis("minimumContrastRatio")} />
+    <input type="range" min={numericLimit("terminal.xterm.minimumContrastRatio", {min: 1, max: 21, step: 0.5}).min} max={numericLimit("terminal.xterm.minimumContrastRatio", {min: 1, max: 21, step: 0.5}).max} step={numericLimit("terminal.xterm.minimumContrastRatio", {min: 1, max: 21, step: 0.5}).step} value={s.terminal.xterm.minimumContrastRatio} onchange={(e) => updateXtermSetting("minimumContrastRatio", inputNumber(e))} disabled={dis("minimumContrastRatio")} />
   </SettingRow>
 
   <!-- Bold in Bright Colors -->

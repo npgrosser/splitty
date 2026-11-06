@@ -274,6 +274,9 @@ pub trait SessionHandle: Send + Sync {
     fn shell_profile_id(&self) -> Option<&str> {
         None
     }
+    fn shell_profile_fallback_reason(&self) -> Option<&str> {
+        None
+    }
     /// The process id of the session's shell while it runs.
     fn shell_pid(&self) -> Option<u32> {
         None

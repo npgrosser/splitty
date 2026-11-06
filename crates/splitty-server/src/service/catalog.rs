@@ -106,6 +106,7 @@ macro_rules! operations {
 
 operations! {
     HomeGet, "home.get", "GET", "/api/home/settings", Backend, [], MAX_API_BODY, Read, Ordinary;
+    HomeMetadata, "home.metadata", "GET", "/api/home/settings/metadata", Backend, [], MAX_API_BODY, Read, Ordinary;
     HomeUpdate, "home.update", "PATCH", "/api/home/settings", Backend, ["body"], MAX_API_BODY, Mutation, Ordinary;
     ThemeGet, "theme.get", "GET", "/api/home/theme", Backend, ["name?"], MAX_API_BODY, Read, Ordinary;
     ThemeList, "theme.list", "GET", "/api/home/themes", Backend, [], MAX_API_BODY, Read, Ordinary;

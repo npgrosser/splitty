@@ -11,7 +11,6 @@
     type ShellProfilesState,
     type ShellTarget,
   } from "../../../lib/shell_profiles.ts";
-  import { validDefaultProfileId } from "../../../lib/shell_profile_model.ts";
 
   interface Props {
     collapsed: boolean;
@@ -45,11 +44,6 @@
   function markChanged(): void {
     dirty = true;
     error = "";
-    ensureDefault();
-  }
-
-  function ensureDefault(): void {
-    draft.defaultProfileId = validDefaultProfileId(draft);
   }
 
   function setDefault(event: Event): void {
@@ -127,7 +121,6 @@
     const profile = draft.profiles.find((candidate) => candidate.id === editingId);
     if (profile?.source === "custom" && profile.command === "") {
       draft = { ...draft, profiles: draft.profiles.filter((candidate) => candidate.id !== profile.id) };
-      ensureDefault();
     }
     editingId = null;
   }

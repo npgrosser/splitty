@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from "svelte";
   import { settings } from "../../stores/settings.svelte.ts";
+  import { getSettingsError } from "../../lib/settings.ts";
   import { apiFetch } from "../../lib/protocol/http.ts";
   import { getDesktopPlatform, isDesktop, shellKind } from "../../lib/platform.ts";
   import "./settings/settings.css";
@@ -45,9 +46,11 @@
 
   // -- Reactive settings reference (for conditional xterm section) --
   const s = $derived(settings());
+  const failure = $derived.by(() => { settings(); return getSettingsError(); });
 </script>
 
 <div class="settings-panel">
+  {#if failure}<div role="alert" class="settings-error">{failure.field ? `${failure.field}: ` : ""}{failure.error}</div>{/if}
   <TerminalSection collapsed={collapsed["terminal"] ?? false} onToggle={() => toggleSection("terminal")} {colorThemes} />
 
   <ShellsSection collapsed={collapsed["shells"] ?? false} onToggle={() => toggleSection("shells")} />

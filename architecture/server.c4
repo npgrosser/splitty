@@ -144,7 +144,7 @@ model {
     service -> splitty.core.mux 'Workspace store; agent replies and review waits as trusted operations'
     service -> splitty.core.daemon 'Persist workspace changes only in daemon mode'
     service -> splitty.core.effect_runner 'Runtime composition of PTY effects and owner-control environment'
-    service -> splitty.core.config 'Home and server settings'
+    service -> splitty.core.config 'Home and server settings, metadata and validation'
     service -> splitty.core.shell_profiles 'Shell profile state'
     service -> splitty.core.template 'Template store'
     service -> jobs 'Trusted-user and scoped job operations with serialization under authorization guards'

@@ -1,6 +1,6 @@
 <script lang="ts">
   import { settings } from "../../../stores/settings.svelte.ts";
-  import { updateSetting, defaults, inputNumber } from "../../../lib/settings.ts";
+  import { updateSetting, defaults, numericLimit, inputNumber } from "../../../lib/settings.ts";
   import SettingRow from "./SettingRow.svelte";
   import ToggleSwitch from "./ToggleSwitch.svelte";
   import SettingsSection from "./SettingsSection.svelte";
@@ -38,9 +38,9 @@
   >
     <input
       type="range"
-      min="0"
-      max="200"
-      step="5"
+      min={numericLimit("experimental.resizeDebounce", {min: 0, max: 200, step: 5}).min}
+      max={numericLimit("experimental.resizeDebounce", {min: 0, max: 200, step: 5}).max}
+      step={numericLimit("experimental.resizeDebounce", {min: 0, max: 200, step: 5}).step}
       value={s.experimental.resizeDebounce}
       onchange={(e) => updateSetting("experimental", "resizeDebounce", inputNumber(e))}
     />

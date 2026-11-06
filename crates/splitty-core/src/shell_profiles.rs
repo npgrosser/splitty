@@ -127,11 +127,25 @@ impl ShellProfilesState {
                 if profile.enabled && profile.available {
                     return Ok(ResolvedShellProfile::from_profile(profile));
                 }
+                if let Some(default) = self.default_profile() {
+                    let mut resolved = ResolvedShellProfile::from_profile(default);
+                    resolved.fallback_reason = Some(
+                        if profile.enabled {
+                            "unavailable"
+                        } else {
+                            "disabled"
+                        }
+                        .into(),
+                    );
+                    return Ok(resolved);
+                }
                 return Err(ShellProfilesError::Unavailable(id.to_string()));
             }
             // Stale snapshots and old templates must remain startable.
             if let Some(profile) = self.default_profile() {
-                return Ok(ResolvedShellProfile::from_profile(profile));
+                let mut resolved = ResolvedShellProfile::from_profile(profile);
+                resolved.fallback_reason = Some("missing".into());
+                return Ok(resolved);
             }
             return Err(ShellProfilesError::Unavailable(id.to_string()));
         }
@@ -142,6 +156,7 @@ impl ShellProfilesState {
                 command: shell.to_string(),
                 args: login_args(shell),
                 target: ShellTarget::Local,
+                fallback_reason: None,
             });
         }
 
@@ -164,6 +179,7 @@ pub struct ResolvedShellProfile {
     pub command: String,
     pub args: Vec<String>,
     pub target: ShellTarget,
+    pub fallback_reason: Option<String>,
 }
 
 impl ResolvedShellProfile {
@@ -173,6 +189,7 @@ impl ResolvedShellProfile {
             command: profile.command.clone(),
             args: profile.args.clone(),
             target: profile.target.clone(),
+            fallback_reason: None,
         }
     }
 }
@@ -830,5 +847,49 @@ mod tests {
         .unwrap();
         assert_eq!(state.default_profile_id, "shell-zsh");
         assert_eq!(state.profiles[0].id, "shell-zsh");
+    }
+    #[test]
+    fn unavailable_profiles_fall_back_with_reason() {
+        let usable = ShellProfile {
+            id: "default".into(),
+            name: "Default".into(),
+            command: "/bin/sh".into(),
+            args: vec![],
+            enabled: true,
+            target: ShellTarget::Local,
+            source: ShellProfileSource::Custom,
+            available: true,
+            reason: None,
+            experimental: false,
+            detected_defaults: None,
+        };
+        let mut unavailable = usable.clone();
+        unavailable.id = "unavailable".into();
+        unavailable.available = false;
+        let mut disabled = usable.clone();
+        disabled.id = "disabled".into();
+        disabled.enabled = false;
+        let state = ShellProfilesState {
+            default_profile_id: usable.id.clone(),
+            profiles: vec![usable, unavailable, disabled],
+        };
+        for (id, reason) in [
+            ("missing", "missing"),
+            ("disabled", "disabled"),
+            ("unavailable", "unavailable"),
+        ] {
+            let resolved = state.resolve(Some(id), None).unwrap();
+            assert_eq!(resolved.id.as_deref(), Some("default"));
+            assert_eq!(resolved.fallback_reason.as_deref(), Some(reason));
+        }
+        let none_available = ShellProfilesState {
+            default_profile_id: "unavailable".into(),
+            profiles: state
+                .profiles
+                .into_iter()
+                .filter(|p| p.id != "default")
+                .collect(),
+        };
+        assert!(none_available.resolve(Some("unavailable"), None).is_err());
     }
 }

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use crate::pty::{Backend, CreateSessionOpts, PtyError};
+use crate::pty::{Backend, CreateSessionOpts, PtyError, SessionHandle};
 
 use super::Effect;
 
@@ -72,6 +72,9 @@ impl EffectOutcome {
 }
 
 impl EffectRunner {
+    pub fn session(&self, id: &str) -> Option<Arc<dyn SessionHandle>> {
+        self.pty_backend.get(id)
+    }
     /// Create a new effect runner backed by the given PTY backend.
     pub fn new(pty_backend: Arc<dyn Backend>) -> Self {
         Self {

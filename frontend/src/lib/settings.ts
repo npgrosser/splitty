@@ -1,4 +1,4 @@
-import { editorDefaults, editorPreferences, type EditorPreferences } from "./editor_preferences.ts";
+import type { EditorPreferences } from "./editor_preferences.ts";
 import { apiFetch } from "./protocol/http.ts";
 
 /** Extract a typed value from a select element's change event. */
@@ -149,192 +149,127 @@ export interface SplittySettings {
   remote: RemoteSettings;
 }
 
-export const defaults: SplittySettings = {
-  editors: structuredClone(editorDefaults),
-  terminal: {
-    renderer: "xterm",
-    theme: "default",
-    closeOnExit: "always",
-    ligatures: false,
-    windowPaddingBalance: true,
-    scrollToBottom: true,
-    allowOsc52Write: true,
-    sizePolicy: "active",
-    sizeIdleSeconds: 120,
-    xterm: {
-      gpuAcceleration: "on",
-      scrollbarWidth: 14,
-      scrollbarOverlay: true,
-      scrollbarFade: true,
-      scrollSensitivity: 1,
-      fastScrollSensitivity: 5,
-      lineHeight: 1.0,
-      letterSpacing: 0,
-      fontWeight: "normal",
-      fontWeightBold: "bold",
-      drawBoldTextInBrightColors: true,
-      minimumContrastRatio: 1,
-      customGlyphs: true,
-      rescaleOverlappingGlyphs: false,
-      allowTransparency: false,
-      cursorBlink: false,
-    },
-  },
-  appearance: {
-    theme: "splitty-dark",
-    themeMode: "fixed",
-    themeDark: "splitty-dark",
-    themeLight: "splitty-light",
-    borderRadius: 1,
-    fontSize: 0,
-    zoom: 1,
-    zoomScope: "window",
-    fontFamily: "",
-  },
-  tabs: {
-    autoHide: false,
-    autoHideMulti: false,
-    syncRow: false,
-    locked: false,
-    closeButton: "active",
-    minWidth: 12,
-    showSplit: true,
-    showFloat: false,
-    showMaximize: false,
-    showPopout: false,
-  },
-  drawer: {
-    pinned: false,
-    edgeReveal: true,
-    showTips: true,
-    resizable: false,
-    sidebarWidth: 240,
-  },
-  window: {
-    nativeTitleBar: true,
-    titleBarColorMode: "tabBar",
-    titleBarHeight: 0,
-    titleBarScroll: true,
-  },
-  notifications: {
-    enabled: true,
-    toasts: false,
-    desktop: false,
-    processFinished: true,
-    processExited: false,
-    processCrashed: true,
-  },
-  experimental: {
-    linkedSashes: false,
-    resizeDebounce: 5,
-  },
-  remote: {
-    autoForwardPorts: false,
-  },
-};
+export interface NumericLimit { min: number; max: number; step: number; values?: number[] }
+export interface ChoiceLimit { values: (string | number)[] }
+type FieldLimit = NumericLimit | ChoiceLimit;
+let limits: Record<string, FieldLimit> = {};
+/** Server-provided defaults. On older hosts, the loaded settings are the reset baseline. */
+export let defaults = {} as SplittySettings;
+export function numericLimit(path: string, fallback: NumericLimit): NumericLimit {
+  const limit = limits[path];
+  return limit && "min" in limit ? limit : fallback;
+}
+export function allowedValues(path: string): (string | number)[] | undefined {
+  return limits[path]?.values;
+}
+export function isAllowed(path: string, value: string | number): boolean {
+  const values = allowedValues(path);
+  return !values || values.includes(value);
+}
 
 // --- Module State ---
 
-let current: SplittySettings = structuredClone(defaults);
+let current = {} as SplittySettings;
+let confirmed = current;
+let changeRevision = 0;
+let lastError: { field?: string; error: string } | null = null;
 const listeners = new Set<() => void>();
 
-function mergeFromServer(data: Record<string, unknown>): SplittySettings {
-  const d = data as Partial<Record<keyof SplittySettings, Record<string, unknown>>>;
-  return {
-    editors: editorPreferences(d.editors),
-    terminal: {
-      ...defaults.terminal,
-      ...(d.terminal as Partial<TerminalSettings>),
-      xterm: { ...defaults.terminal.xterm, ...(d.terminal as Record<string, unknown>)?.xterm as Partial<XtermSettings> },
-    },
-    appearance: { ...defaults.appearance, ...d.appearance } as AppearanceSettings,
-    tabs: { ...defaults.tabs, ...d.tabs } as TabSettings,
-    drawer: { ...defaults.drawer, ...d.drawer } as DrawerSettings,
-    window: { ...defaults.window, ...d.window } as WindowSettings,
-    notifications: { ...defaults.notifications, ...d.notifications } as NotificationSettings,
-    experimental: { ...defaults.experimental, ...d.experimental } as ExperimentalSettings,
-    remote: { ...defaults.remote, ...d.remote } as RemoteSettings,
-  };
-}
+function notify(): void { for (const cb of listeners) cb(); }
 
-function notify() {
-  for (const cb of listeners) cb();
-}
-
-// --- Public API ---
-
-export async function loadSettings(): Promise<SplittySettings> {
-  try {
-    const res = await apiFetch("/api/home/settings");
-    if (res.ok) {
-      current = mergeFromServer(await res.json());
-      notify();
-    }
-  } catch {
-    // Backend unavailable — use defaults
+function merge(base: unknown, patch: unknown): unknown {
+  if (base && patch && typeof base === "object" && typeof patch === "object" && !Array.isArray(base) && !Array.isArray(patch)) {
+    const result = { ...base } as Record<string, unknown>;
+    for (const [key, value] of Object.entries(patch)) result[key] = merge(result[key], value);
+    return result;
   }
+  return patch ?? base;
+}
+
+function syncTheme(previous: SplittySettings, next: SplittySettings): void {
+  const before = previous.appearance;
+  const after = next.appearance;
+  if (!before || !after) return;
+  if (before.theme !== after.theme || before.themeMode !== after.themeMode ||
+      before.themeDark !== after.themeDark || before.themeLight !== after.themeLight) {
+    void import("./theme.ts").then((theme) => theme.reloadTheme(theme.resolveActiveThemeName()));
+  }
+}
+
+export function applyServerSettings(data: SplittySettings): void {
+  const previous = current;
+  confirmed = merge(defaults, data) as SplittySettings;
+  current = confirmed;
+  changeRevision++;
+  lastError = null;
+  notify();
+  syncTheme(previous, current);
+}
+
+export function getSettingsError(): { field?: string; error: string } | null { return lastError; }
+
+/** Read current settings first; metadata is an optional newer-server capability. */
+export async function loadSettings(): Promise<SplittySettings> {
+  const res = await apiFetch("/api/home/settings");
+  if (!res.ok) throw new Error(`Failed to load settings (${res.status})`);
+  const data = await res.json() as SplittySettings;
+  try {
+    const metadata = await apiFetch("/api/home/settings/metadata");
+    if (metadata.ok) {
+      const body = await metadata.json() as { defaults: SplittySettings; limits: Record<string, FieldLimit> };
+      if (body.defaults && body.limits) { defaults = body.defaults; limits = body.limits; }
+      else defaults = structuredClone(data);
+    } else defaults = structuredClone(data);
+  } catch { defaults = structuredClone(data); }
+  applyServerSettings(data);
   return current;
 }
 
-export function getSettings(): SplittySettings {
-  return current;
-}
-
+export function getSettings(): SplittySettings { return current; }
 export function subscribe(cb: () => void): () => void {
   listeners.add(cb);
   return () => listeners.delete(cb);
+}
+
+async function savePatch(patch: object): Promise<void> {
+  const startRevision = changeRevision;
+  try {
+    const res = await apiFetch("/api/home/settings", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({})) as { field?: string; error?: string };
+      throw Object.assign(new Error(body.error ?? `Failed to save settings (${res.status})`), { field: body.field });
+    }
+    const saved = await res.json() as SplittySettings;
+    // Another window's event may have arrived during this request; fetch the newest state.
+    if (changeRevision !== startRevision) await loadSettings();
+    else applyServerSettings(saved);
+  } catch (error) {
+    const previous = current;
+    current = confirmed;
+    lastError = { field: error instanceof Error && "field" in error ? String(error.field) : undefined,
+      error: error instanceof Error ? error.message : String(error) };
+    notify();
+    syncTheme(previous, current);
+  }
 }
 
 export async function updateSetting<
   S extends keyof SplittySettings,
   K extends keyof SplittySettings[S],
 >(section: S, key: K, value: SplittySettings[S][K]): Promise<void> {
-  // Optimistic update
-  current = {
-    ...current,
-    [section]: { ...current[section], [key]: value },
-  };
+  current = { ...current, [section]: { ...current[section], [key]: value } };
+  lastError = null;
   notify();
-
-  try {
-    const res = await apiFetch("/api/home/settings", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ [section]: { [key]: value } }),
-    });
-    if (res.ok) {
-      current = mergeFromServer(await res.json());
-      notify();
-    }
-  } catch {
-    // Keep optimistic value
-  }
+  await savePatch({ [section]: { [key]: value } });
 }
 
-export async function updateXtermSetting<K extends keyof XtermSettings>(
-  key: K,
-  value: XtermSettings[K],
-): Promise<void> {
-  current = {
-    ...current,
-    terminal: {
-      ...current.terminal,
-      xterm: { ...current.terminal.xterm, [key]: value },
-    },
-  };
+export async function updateXtermSetting<K extends keyof XtermSettings>(key: K, value: XtermSettings[K]): Promise<void> {
+  current = { ...current, terminal: { ...current.terminal, xterm: { ...current.terminal.xterm, [key]: value } } };
+  lastError = null;
   notify();
-
-  try {
-    const res = await apiFetch("/api/home/settings", {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ terminal: { xterm: { [key]: value } } }),
-    });
-    if (res.ok) {
-      current = mergeFromServer(await res.json());
-      notify();
-    }
-  } catch {
-    // Keep optimistic value
-  }
+  await savePatch({ terminal: { xterm: { [key]: value } } });
 }

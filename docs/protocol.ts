@@ -678,6 +678,7 @@ interface SessionEvent extends ServerEvent {
 interface SessionCreated extends SessionEvent {
   type: "created";
   shellProfileId?: string;
+  shellProfileFallbackReason?: "missing" | "disabled" | "unavailable";
   homeDir?: string;
   /** Always "unknown" for newly created sessions. */
   semanticPhase?: string;
@@ -908,7 +909,13 @@ interface MuxNudge extends ServerEvent {
 }
 
 /** One successful PTY creation; failures never advertise an absent session. */
-interface MuxPaneSpawned extends ServerEvent { type: "mux.pane_spawned"; paneId: string; sessionId: string }
+interface MuxPaneSpawned extends ServerEvent {
+  type: "mux.pane_spawned";
+  paneId: string;
+  sessionId: string;
+  shellProfileId?: string;
+  shellProfileFallbackReason?: "missing" | "disabled" | "unavailable";
+}
 
 /**
  * A WebSocket op was rejected, sent to its client only: for an op that names a
@@ -974,9 +981,15 @@ interface ServerCommand extends ServerEvent {
   command: ClientCommand;
 }
 
+interface SettingsChanged extends ServerEvent {
+  type: "settings.changed";
+  settings: unknown;
+}
+
 // --- Union ---
 
 type ServerMessage =
+  | SettingsChanged
   // Session lifecycle
   | SessionCreated
   | SessionAttached
@@ -1006,6 +1019,7 @@ type ServerMessage =
   | MuxOpFailed
   | MuxScreenSnapshot
   | MuxNudge
+  | MuxPaneSpawned
   | MuxBusy
   // Listening ports
   | PortsChanged
@@ -2649,6 +2663,7 @@ export interface NativeDocumentAssignment {
 // body has the same domain schema/validation as the mapped browser endpoint.
 export type NativeCall =
   | { operation: "home.get"; args?: { } }
+  | { operation: "home.metadata"; args?: { } }
   | { operation: "home.update"; args: { body: unknown; } }
   | { operation: "theme.get"; args?: { name?: string; } }
   | { operation: "theme.list"; args?: { } }
@@ -2889,3 +2904,17 @@ interface HubCatalogObservation {
  * queries and clipboard operations. Live bytes and trailing incomplete sequences
  * retain normal behavior. Older-host client replay protection remains enabled.
  */
+// Settings authority: GET /api/home/settings/metadata and native home.metadata
+// return { defaults: HomeSettings, limits: Record<dottedFieldPath,
+// { min?: number; max?: number; step?: number; values?: (string | number)[] }> }.
+// PATCH /api/home/settings remains a partial settings request and returns the
+// complete effective settings. Validation failure is HTTP 400 with
+// { error: string, field: dottedFieldPath }; no change is persisted.
+// terminal.xterm.scrollSensitivity and fastScrollSensitivity accept fractions.
+export interface SettingsChangedEvent {
+  type: "settings.changed"; id: string; timestamp: number; settings: unknown;
+}
+// `created.shellProfileFallbackReason` is "missing", "disabled" or
+// "unavailable" when requested shellProfileId could not be used.
+// Mux-managed sessions report the same effective shellProfileId and
+// shellProfileFallbackReason on `mux.pane_spawned` before a client attaches.

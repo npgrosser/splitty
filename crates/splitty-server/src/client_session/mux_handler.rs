@@ -469,6 +469,30 @@ impl MuxHandler {
             .filter_map(|o| o.spawned())
             .map(|(_, p, s)| (p.to_string(), s.to_string()))
             .collect();
+        let spawn_events: Vec<_> = spawn_info
+            .iter()
+            .map(|(pane_id, session_id)| {
+                let session = self.effect_runner.session(session_id);
+                if let Some(ref session) = session {
+                    self.store.set_resolved_shell_profile(
+                        &SessionId::from(session_id.as_str()),
+                        session.shell_profile_id(),
+                    );
+                }
+                ServerEvent::mux_pane_spawned_with_profile(
+                    pane_id,
+                    session_id,
+                    session
+                        .as_ref()
+                        .and_then(|s| s.shell_profile_id())
+                        .map(str::to_owned),
+                    session
+                        .as_ref()
+                        .and_then(|s| s.shell_profile_fallback_reason())
+                        .map(str::to_owned),
+                )
+            })
+            .collect();
         for outcome in &errors {
             if let Err(error) = &outcome.result {
                 if let Effect::SpawnSession {
@@ -498,9 +522,8 @@ impl MuxHandler {
         // down panes whose terminal is still attaching (blank pane, lost stream).
         // It is served directly and awaited, so the events are enqueued on its
         // socket before this op is considered handled.
-        for (pane_id, session_id) in &spawn_info {
-            self.send_event(&ServerEvent::mux_pane_spawned(pane_id, session_id))
-                .await;
+        for event in &spawn_events {
+            self.send_event(event).await;
         }
 
         // Everyone else gets pane_spawned first, then the nudge that makes them
@@ -508,9 +531,7 @@ impl MuxHandler {
         // and tears down the pane still waiting to learn its session id, so this
         // order is load-bearing on every delivery path.
         let mut batch = Vec::with_capacity(spawn_info.len() + 1);
-        for (pane_id, session_id) in &spawn_info {
-            batch.push(ServerEvent::mux_pane_spawned(pane_id, session_id));
-        }
+        batch.extend(spawn_events);
         batch.push(ServerEvent::mux_nudge(
             "mux_op".to_string(),
             Some(actual_screen.to_string()),

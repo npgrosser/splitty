@@ -197,6 +197,7 @@ pub(crate) fn api_routes_with(hub: Arc<Hub>) -> Router<AppState> {
             "/api/home/settings",
             get(get_home_settings).patch(patch_home_settings),
         )
+        .route("/api/home/settings/metadata", get(get_home_metadata))
         .route("/api/home/theme", get(get_resolved_theme))
         .route("/api/home/themes", get(list_available_themes))
         .route(
@@ -474,6 +475,10 @@ async fn list_available_themes(State(state): State<AppState>) -> Json<Vec<String
 
 async fn get_home_settings(State(state): State<AppState>) -> Json<Value> {
     Json(operations::get_home_settings(&state.service).await.0)
+}
+
+async fn get_home_metadata() -> Json<Value> {
+    Json(operations::get_home_metadata().0)
 }
 
 async fn patch_home_settings(

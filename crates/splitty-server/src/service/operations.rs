@@ -363,12 +363,27 @@ pub(crate) async fn get_home_settings(state: &ServiceState) -> Payload<Value> {
     Payload(serde_json::to_value(&*cfg).unwrap_or(json!({})))
 }
 
+pub(crate) fn get_home_metadata() -> Payload<Value> {
+    Payload(splitty_core::config::settings_metadata())
+}
+
 pub(crate) async fn patch_home_settings(state: &ServiceState, partial: Value) -> Reply {
     match splitty_core::config::update(partial) {
         Ok(updated) => {
             apply_home_settings(state, updated.clone());
+            state.client_state.broadcast_events(
+                &[splitty_core::protocol::ServerEvent::settings_changed(
+                    serde_json::to_value(&updated).unwrap_or(json!({})),
+                )],
+                None,
+            );
             Payload(serde_json::to_value(&updated).unwrap_or(json!({}))).into_reply()
         }
+        Err(splitty_core::config::ConfigError::InvalidField { field, message }) => (
+            StatusCode::BAD_REQUEST,
+            Payload(json!({"error": message, "field": field})),
+        )
+            .into_reply(),
         Err(e) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Payload(json!({"error": e.to_string()})),
@@ -431,6 +446,12 @@ pub(crate) async fn put_shell_profiles(
 
     *state.config.write().unwrap() = candidate;
     *state.shell_profiles.write().unwrap() = shell_state.clone();
+    state.client_state.broadcast_events(
+        &[splitty_core::protocol::ServerEvent::settings_changed(
+            serde_json::to_value(&*state.config.read().unwrap()).unwrap_or(json!({})),
+        )],
+        None,
+    );
     Payload(serde_json::to_value(shell_state).unwrap_or(json!({}))).into_reply()
 }
 
@@ -845,10 +866,30 @@ pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Repl
             let spawned: Vec<_> = outcomes.iter().filter_map(|o| o.spawned()).collect();
             let mut batch = Vec::new();
             for (_, pane, session) in &spawned {
-                batch.push(splitty_core::protocol::ServerEvent::mux_pane_spawned(
-                    pane.to_string(),
-                    session.to_string(),
-                ));
+                let handle = state
+                    .client_state
+                    .dispatcher
+                    .backend()
+                    .get(session.as_str());
+                if let Some(ref handle) = handle {
+                    state
+                        .mux_store
+                        .set_resolved_shell_profile(session, handle.shell_profile_id());
+                }
+                batch.push(
+                    splitty_core::protocol::ServerEvent::mux_pane_spawned_with_profile(
+                        pane.to_string(),
+                        session.to_string(),
+                        handle
+                            .as_ref()
+                            .and_then(|h| h.shell_profile_id())
+                            .map(str::to_owned),
+                        handle
+                            .as_ref()
+                            .and_then(|h| h.shell_profile_fallback_reason())
+                            .map(str::to_owned),
+                    ),
+                );
             }
             if let Some(target) = &moved_to {
                 batch.push(splitty_core::protocol::ServerEvent::mux_nudge(

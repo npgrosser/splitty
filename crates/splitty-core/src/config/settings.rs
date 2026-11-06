@@ -30,6 +30,8 @@ pub enum ConfigError {
     TomlSerialize(#[from] toml::ser::Error),
     #[error("JSON error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("invalid setting {field}: {message}")]
+    InvalidField { field: String, message: String },
 }
 
 // ---------------------------------------------------------------------------
@@ -148,8 +150,6 @@ pub struct TerminalSettings {
     pub theme: String,
     pub close_on_exit: String,
     pub ligatures: bool,
-    pub link_target: String,
-    pub webview_mode: String,
     pub window_padding_balance: bool,
     pub scroll_to_bottom: Option<bool>,
     pub allow_osc52_write: bool,
@@ -168,8 +168,8 @@ pub struct XtermSettings {
     pub scrollbar_width: i32,
     pub scrollbar_overlay: bool,
     pub scrollbar_fade: bool,
-    pub scroll_sensitivity: i32,
-    pub fast_scroll_sensitivity: i32,
+    pub scroll_sensitivity: f64,
+    pub fast_scroll_sensitivity: f64,
     pub line_height: f64,
     pub letter_spacing: f64,
     pub font_weight: String,
@@ -316,8 +316,6 @@ impl Default for TerminalSettings {
             theme: "default".into(),
             close_on_exit: "always".into(),
             ligatures: false,
-            link_target: "browser".into(),
-            webview_mode: "auto".into(),
             window_padding_balance: true,
             scroll_to_bottom: Some(true),
             allow_osc52_write: true,
@@ -335,8 +333,8 @@ impl Default for XtermSettings {
             scrollbar_width: 14,
             scrollbar_overlay: true,
             scrollbar_fade: true,
-            scroll_sensitivity: 1,
-            fast_scroll_sensitivity: 5,
+            scroll_sensitivity: 1.0,
+            fast_scroll_sensitivity: 5.0,
             line_height: 1.0,
             letter_spacing: 0.0,
             font_weight: "normal".into(),
@@ -448,15 +446,6 @@ impl HomeConfig {
         ) {
             self.terminal.close_on_exit = "always".into();
         }
-        if self.terminal.link_target != "browser" && self.terminal.link_target != "webview" {
-            self.terminal.link_target = "browser".into();
-        }
-        if !matches!(
-            self.terminal.webview_mode.as_str(),
-            "auto" | "proxy" | "direct"
-        ) {
-            self.terminal.webview_mode = "auto".into();
-        }
         if !matches!(
             self.terminal.size_policy.as_str(),
             "active" | "latest" | "smallest"
@@ -475,11 +464,11 @@ impl HomeConfig {
         if !(1..=50).contains(&xterm.scrollbar_width) {
             xterm.scrollbar_width = 14;
         }
-        if !(1..=10).contains(&xterm.scroll_sensitivity) {
-            xterm.scroll_sensitivity = 1;
+        if !(0.1..=10.0).contains(&xterm.scroll_sensitivity) {
+            xterm.scroll_sensitivity = 1.0;
         }
-        if !(1..=20).contains(&xterm.fast_scroll_sensitivity) {
-            xterm.fast_scroll_sensitivity = 5;
+        if !(1.0..=20.0).contains(&xterm.fast_scroll_sensitivity) {
+            xterm.fast_scroll_sensitivity = 5.0;
         }
         if !(0.5..=3.0).contains(&xterm.line_height) {
             xterm.line_height = 1.0;
@@ -555,6 +544,207 @@ impl HomeConfig {
         let detection = detect_shell_profiles(&DetectionEnvironment::current());
         reconcile_shell_settings(&mut self.shells, &detection);
     }
+}
+
+/// Server-owned control metadata; paths use the JSON wire spelling.
+pub fn settings_metadata() -> Value {
+    let mut limits = serde_json::json!({
+            "terminal.renderer": {"values": ["xterm", "ghostty"]},
+            "terminal.closeOnExit": {"values": ["always", "never", "graceful"]},
+            "terminal.sizePolicy": {"values": ["active", "latest", "smallest"]},
+            "terminal.sizeIdleSeconds": {"min": 10, "max": 3600, "step": 10},
+            "terminal.xterm.gpuAcceleration": {"values": ["on", "off"]},
+            "terminal.xterm.scrollbarWidth": {"min": 1, "max": 50, "step": 1},
+            "terminal.xterm.scrollSensitivity": {"min": 0.1, "max": 10, "step": 0.1},
+            "terminal.xterm.fastScrollSensitivity": {"min": 1, "max": 20, "step": 0.5},
+            "terminal.xterm.lineHeight": {"min": 0.5, "max": 3, "step": 0.05},
+            "terminal.xterm.letterSpacing": {"min": -5, "max": 10, "step": 0.5},
+            "terminal.xterm.fontWeight": {"values": ["normal", "bold", "100", "200", "300", "400", "500", "600", "700", "800", "900"]},
+            "terminal.xterm.fontWeightBold": {"values": ["normal", "bold", "100", "200", "300", "400", "500", "600", "700", "800", "900"]},
+            "terminal.xterm.minimumContrastRatio": {"min": 1, "max": 21, "step": 0.1},
+    });
+    limits.as_object_mut().expect("limit map").extend(serde_json::json!({
+            "appearance.themeMode": {"values": ["fixed", "auto"]},
+            "appearance.borderRadius": {"min": 0, "max": 20, "step": 1},
+            "appearance.fontSize": {"min": 0, "max": 24, "step": 1, "values": [0, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]},
+            "appearance.zoom": {"min": 0.5, "max": 3, "step": 0.1},
+            "appearance.zoomScope": {"values": ["window", "terminals"]},
+            "tabs.closeButton": {"values": ["always", "active"]},
+            "tabs.minWidth": {"min": 0, "max": 40, "step": 1},
+            "drawer.sidebarWidth": {"min": 150, "max": 400, "step": 10},
+            "window.titleBarColorMode": {"values": ["tabBar", "native", "terminal", "activeTab"]},
+            "window.titleBarHeight": {"min": 0, "max": 60, "step": 1, "values": [0, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]},
+            "experimental.resizeDebounce": {"min": 0, "max": 200, "step": 5},
+            "editors.file": {"values": ["vscode", "zed"]},
+            "editors.folder": {"values": ["vscode", "zed"]}
+    }).as_object().expect("limit map").clone());
+    serde_json::json!({ "defaults": HomeConfig::default(), "limits": limits })
+}
+
+fn invalid(field: &str, message: &str) -> ConfigError {
+    ConfigError::InvalidField {
+        field: field.to_owned(),
+        message: message.to_owned(),
+    }
+}
+
+fn validate_patch(patch: &Value) -> Result<(), ConfigError> {
+    let defaults = serde_json::to_value(HomeConfig::default())?;
+    let metadata = settings_metadata();
+    let limits = &metadata["limits"];
+    fn walk(
+        value: &Value,
+        template: &Value,
+        limits: &Value,
+        path: &str,
+    ) -> Result<(), ConfigError> {
+        if let Some(object) = value.as_object() {
+            let Some(expected) = template.as_object() else {
+                return Err(invalid(path, "expected a value"));
+            };
+            for (key, child) in object {
+                if path == "terminal" && matches!(key.as_str(), "linkTarget" | "webviewMode") {
+                    continue;
+                }
+                let field = if path.is_empty() {
+                    key.to_owned()
+                } else {
+                    format!("{path}.{key}")
+                };
+                let Some(expected_child) = expected.get(key) else {
+                    return Err(invalid(&field, "unknown setting"));
+                };
+                if field == "editors.extensions" {
+                    validate_editor_extensions(child, &field)?;
+                } else if field == "editors.projects" {
+                    validate_editor_projects(child, &field)?;
+                } else if field == "shells" { /* Shell profiles have their own update validation. */
+                } else {
+                    walk(child, expected_child, limits, &field)?;
+                }
+            }
+            return Ok(());
+        }
+        if let Some(limit) = limits.get(path) {
+            if let Some(values) = limit.get("values").and_then(Value::as_array) {
+                if !values.contains(value) {
+                    return Err(invalid(path, "unsupported value"));
+                }
+            }
+            if let (Some(min), Some(max)) = (
+                limit.get("min").and_then(Value::as_f64),
+                limit.get("max").and_then(Value::as_f64),
+            ) {
+                let Some(n) = value.as_f64() else {
+                    return Err(invalid(path, "expected a number"));
+                };
+                if !n.is_finite() || n < min || n > max {
+                    return Err(invalid(path, "outside allowed range"));
+                }
+                if matches!(
+                    path,
+                    "terminal.xterm.scrollSensitivity" | "terminal.xterm.fastScrollSensitivity"
+                ) {
+                    let step = limit["step"].as_f64().unwrap_or(1.0);
+                    if ((n - min) / step - ((n - min) / step).round()).abs() > 1e-7 {
+                        return Err(invalid(path, "not on an allowed step"));
+                    }
+                }
+            }
+        }
+        let same_type = match template {
+            Value::Bool(_) => value.is_boolean(),
+            Value::String(_) => value.is_string(),
+            Value::Number(n) if n.is_i64() || n.is_u64() => {
+                value.as_i64().is_some() || value.as_u64().is_some()
+            }
+            Value::Number(_) => value.is_number(),
+            Value::Null => value.is_null() || value.is_boolean(),
+            Value::Array(_) => value.is_array(),
+            _ => false,
+        };
+        if !same_type {
+            return Err(invalid(path, "wrong value type"));
+        }
+        Ok(())
+    }
+    walk(patch, &defaults, limits, "")
+}
+
+fn valid_editor(value: &Value) -> bool {
+    matches!(value.as_str(), Some("vscode" | "zed"))
+}
+
+fn validate_editor_extensions(value: &Value, path: &str) -> Result<(), ConfigError> {
+    let Some(rules) = value.as_array() else {
+        return Err(invalid(path, "expected an array"));
+    };
+    if rules.len() > 100 {
+        return Err(invalid(path, "too many rules"));
+    }
+    for (i, rule) in rules.iter().enumerate() {
+        let field = format!("{path}.{i}");
+        let Some(ext) = rule.get("extension").and_then(Value::as_str) else {
+            return Err(invalid(
+                &format!("{field}.extension"),
+                "expected an extension",
+            ));
+        };
+        let normalized = ext.strip_prefix('.').unwrap_or(ext);
+        if normalized.is_empty()
+            || normalized.len() > 32
+            || !normalized
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        {
+            return Err(invalid(&format!("{field}.extension"), "invalid extension"));
+        }
+        if !valid_editor(&rule["editor"]) {
+            return Err(invalid(&format!("{field}.editor"), "unsupported editor"));
+        }
+    }
+    Ok(())
+}
+
+fn validate_editor_projects(value: &Value, path: &str) -> Result<(), ConfigError> {
+    let Some(rules) = value.as_array() else {
+        return Err(invalid(path, "expected an array"));
+    };
+    if rules.len() > 100 {
+        return Err(invalid(path, "too many rules"));
+    }
+    for (i, rule) in rules.iter().enumerate() {
+        let field = format!("{path}.{i}");
+        let Some(connection) = rule.get("connection").and_then(Value::as_str) else {
+            return Err(invalid(
+                &format!("{field}.connection"),
+                "expected a connection",
+            ));
+        };
+        if connection != "local"
+            && !(connection.starts_with("host:") && connection.len() > 5 && connection.len() <= 260)
+        {
+            return Err(invalid(
+                &format!("{field}.connection"),
+                "invalid connection",
+            ));
+        }
+        let Some(project_path) = rule.get("path").and_then(Value::as_str) else {
+            return Err(invalid(&format!("{field}.path"), "expected a path"));
+        };
+        if !project_path.starts_with('/')
+            || project_path.len() > 4096
+            || project_path
+                .split('/')
+                .any(|part| matches!(part, "." | ".."))
+        {
+            return Err(invalid(&format!("{field}.path"), "invalid path"));
+        }
+        if !valid_editor(&rule["editor"]) {
+            return Err(invalid(&format!("{field}.editor"), "unsupported editor"));
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -703,6 +893,7 @@ pub fn update(partial: Value) -> Result<HomeConfig, ConfigError> {
 /// Same as `update` but uses a specific file path (for testing).
 pub fn update_at(path: &Path, partial: Value) -> Result<HomeConfig, ConfigError> {
     let cfg = load_from(path);
+    validate_patch(&partial)?;
     let mut base = serde_json::to_value(&cfg)?;
     deep_merge(&mut base, partial);
     let mut cfg: HomeConfig = serde_json::from_value(base)?;
@@ -727,16 +918,14 @@ mod tests {
         assert_eq!(cfg.terminal.theme, "default");
         assert_eq!(cfg.terminal.close_on_exit, "always");
         assert!(!cfg.terminal.ligatures);
-        assert_eq!(cfg.terminal.link_target, "browser");
-        assert_eq!(cfg.terminal.webview_mode, "auto");
         assert!(cfg.terminal.window_padding_balance);
         assert_eq!(cfg.terminal.scroll_to_bottom, Some(true));
         assert_eq!(cfg.terminal.xterm.gpu_acceleration, "on");
         assert_eq!(cfg.terminal.xterm.scrollbar_width, 14);
         assert!(cfg.terminal.xterm.scrollbar_overlay);
         assert!(cfg.terminal.xterm.scrollbar_fade);
-        assert_eq!(cfg.terminal.xterm.scroll_sensitivity, 1);
-        assert_eq!(cfg.terminal.xterm.fast_scroll_sensitivity, 5);
+        assert_eq!(cfg.terminal.xterm.scroll_sensitivity, 1.0);
+        assert_eq!(cfg.terminal.xterm.fast_scroll_sensitivity, 5.0);
         assert!((cfg.terminal.xterm.line_height - 1.0).abs() < f64::EPSILON);
         assert!((cfg.terminal.xterm.letter_spacing - 0.0).abs() < f64::EPSILON);
         assert_eq!(cfg.terminal.xterm.font_weight, "normal");
@@ -1196,5 +1385,81 @@ mod tests {
         assert_eq!(restored.editors.extensions[0].extension, "my_ext");
         assert_eq!(restored.editors.projects[0].path, "/srv/My_Project");
         assert_eq!(restored.editors.projects[0].connection, "host:Me@vm1");
+    }
+    #[test]
+    fn metadata_and_fractional_scroll_are_server_owned() {
+        let metadata = settings_metadata();
+        assert_eq!(metadata["defaults"]["drawer"]["sidebarWidth"], 200);
+        assert_eq!(
+            metadata["limits"]["terminal.xterm.scrollSensitivity"]["step"],
+            0.1
+        );
+        let dir = TempDir::new().unwrap();
+        let cfg = update_at(
+            &dir.path().join("config.toml"),
+            serde_json::json!({
+                "terminal": { "xterm": { "scrollSensitivity": 1.3, "fastScrollSensitivity": 2.5 } }
+            }),
+        )
+        .unwrap();
+        assert_eq!(cfg.terminal.xterm.scroll_sensitivity, 1.3);
+        assert_eq!(cfg.terminal.xterm.fast_scroll_sensitivity, 2.5);
+        let restored = load_from(&dir.path().join("config.toml"));
+        assert_eq!(restored.terminal.xterm.scroll_sensitivity, 1.3);
+        assert_eq!(restored.terminal.xterm.fast_scroll_sensitivity, 2.5);
+    }
+
+    #[test]
+    fn rejected_patch_preserves_file_and_identifies_field() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        let before = update_at(&path, serde_json::json!({"drawer":{"sidebarWidth":280}})).unwrap();
+        for (patch, field) in [
+            (
+                serde_json::json!({"terminal":{"xterm":{"scrollSensitivity":0.15}}}),
+                "terminal.xterm.scrollSensitivity",
+            ),
+            (
+                serde_json::json!({"appearance":{"fontSize":7}}),
+                "appearance.fontSize",
+            ),
+            (
+                serde_json::json!({"editors":{"extensions":[{"extension":"../rs","editor":"zed"}]}}),
+                "editors.extensions.0.extension",
+            ),
+            (
+                serde_json::json!({"editors":{"projects":[{"connection":"local","path":"/a/../b","editor":"zed"}]}}),
+                "editors.projects.0.path",
+            ),
+        ] {
+            let err = update_at(&path, patch).unwrap_err();
+            assert!(
+                matches!(err, ConfigError::InvalidField { field: actual, .. } if actual == field)
+            );
+            assert_eq!(load_from(&path), before);
+        }
+    }
+
+    #[test]
+    fn removed_terminal_fields_do_not_survive_load() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(
+            &path,
+            "[terminal]\nlink_target = \"webview\"\nwebview_mode = \"proxy\"\n",
+        )
+        .unwrap();
+        let loaded = load_from(&path);
+        let json = serde_json::to_value(loaded).unwrap();
+        assert!(json["terminal"].get("linkTarget").is_none());
+        assert!(json["terminal"].get("webviewMode").is_none());
+        let updated = update_at(
+            &path,
+            serde_json::json!({"terminal":{"linkTarget":"webview","webviewMode":"direct"}}),
+        )
+        .unwrap();
+        assert!(serde_json::to_value(updated).unwrap()["terminal"]
+            .get("linkTarget")
+            .is_none());
     }
 }

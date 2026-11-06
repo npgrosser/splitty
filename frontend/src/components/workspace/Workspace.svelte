@@ -79,7 +79,6 @@
   import Drawer from "../chrome/Drawer.svelte";
   import Screen from "./Screen.svelte";
   import type { DockviewApi } from "dockview-core";
-  import { getDefaultShellProfileId } from "../../lib/shell_profiles.ts";
 
   // ── Props ──
 
@@ -307,11 +306,10 @@
     const api = views.api(key);
     const binding = views.binding(key);
     if (!api || !binding) return;
-    const shellProfileId = binding.conn.kind === "local" ? getDefaultShellProfileId() : undefined;
-    const paneId = addTerminalPane(api, { shellProfileId, skipMuxNotify: true });
+    const paneId = addTerminalPane(api, { skipMuxNotify: true });
     if (binding.conn.kind !== "local") avoidHostNames(binding.conn.key, key);
     const screen = getScreens().find((s) => s.id === key);
-    binding.sendOp(createScreenOp(binding.wireId, screen?.name, paneId, shellProfileId));
+    binding.sendOp(createScreenOp(binding.wireId, screen?.name, paneId));
   }
 
   function handleScreenEmpty(key: string) {

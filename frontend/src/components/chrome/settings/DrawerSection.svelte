@@ -1,6 +1,6 @@
 <script lang="ts">
   import { settings } from "../../../stores/settings.svelte.ts";
-  import { updateSetting, defaults, inputNumber } from "../../../lib/settings.ts";
+  import { updateSetting, defaults, numericLimit, inputNumber } from "../../../lib/settings.ts";
   import SettingRow from "./SettingRow.svelte";
   import ToggleSwitch from "./ToggleSwitch.svelte";
   import SettingsSection from "./SettingsSection.svelte";
@@ -50,7 +50,7 @@
       showReset={s.drawer.sidebarWidth !== defaults.drawer.sidebarWidth}
       onReset={() => updateSetting("drawer", "sidebarWidth", defaults.drawer.sidebarWidth)}
     >
-      <input type="range" min="150" max="400" step="10" value={s.drawer.sidebarWidth} onchange={(e) => updateSetting("drawer", "sidebarWidth", inputNumber(e))} />
+      <input type="range" min={numericLimit("drawer.sidebarWidth", {min: 150, max: 400, step: 10}).min} max={numericLimit("drawer.sidebarWidth", {min: 150, max: 400, step: 10}).max} step={numericLimit("drawer.sidebarWidth", {min: 150, max: 400, step: 10}).step} value={s.drawer.sidebarWidth} onchange={(e) => updateSetting("drawer", "sidebarWidth", inputNumber(e))} />
     </SettingRow>
   {/if}
 

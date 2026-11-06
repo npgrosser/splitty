@@ -218,6 +218,7 @@ mod tests {
         let batch = [
             ServerEvent::mux_pane_spawned("pane", "session"),
             ServerEvent::mux_nudge("mux_op".into(), None),
+            ServerEvent::settings_changed(serde_json::json!({"drawer":{"sidebarWidth":280}})),
         ];
         assert_eq!(state.broadcast_events(&batch, Some(&sender)), 0);
         assert!(input.try_recv().is_err());
@@ -247,7 +248,13 @@ mod tests {
         }
         assert_eq!(
             types,
-            ["mux.welcome", "mux.pane_spawned", "mux.nudge", "mux.nudge"]
+            [
+                "mux.welcome",
+                "mux.pane_spawned",
+                "mux.nudge",
+                "settings.changed",
+                "mux.nudge"
+            ]
         );
         assert_eq!(context.budget.used(), 0);
     }

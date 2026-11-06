@@ -1,6 +1,6 @@
 <script lang="ts">
   import { settings } from "../../../stores/settings.svelte.ts";
-  import { updateSetting, defaults, selectValue, inputNumber, type ThemeMode, type ZoomScope } from "../../../lib/settings.ts";
+  import { updateSetting, defaults, numericLimit, isAllowed, selectValue, inputNumber, type ThemeMode, type ZoomScope } from "../../../lib/settings.ts";
   import { ZOOM_STEPS, zoomLabel } from "../../../lib/zoom.ts";
   import { isMac } from "../../../lib/shortcuts.ts";
   import { reloadTheme, resolveActiveThemeName } from "../../../lib/theme.ts";
@@ -62,8 +62,8 @@
     }}
   >
     <select value={s.appearance.themeMode} onchange={onModeChange}>
-      <option value="fixed">Fixed</option>
-      <option value="auto">Auto (follow system)</option>
+      {#if isAllowed("appearance.themeMode", "fixed")}<option value="fixed">Fixed</option>{/if}
+      {#if isAllowed("appearance.themeMode", "auto")}<option value="auto">Auto (follow system)</option>{/if}
     </select>
   </SettingRow>
 
@@ -120,7 +120,7 @@
     showReset={s.appearance.fontSize !== defaults.appearance.fontSize}
     onReset={() => updateSetting("appearance", "fontSize", defaults.appearance.fontSize)}
   >
-    <input type="range" min="0" max="24" step="1" value={s.appearance.fontSize} onchange={(e) => updateSetting("appearance", "fontSize", inputNumber(e))} />
+    <input type="range" min={numericLimit("appearance.fontSize", {min: 0, max: 24, step: 1}).min} max={numericLimit("appearance.fontSize", {min: 0, max: 24, step: 1}).max} step={numericLimit("appearance.fontSize", {min: 0, max: 24, step: 1}).step} value={s.appearance.fontSize} onchange={(e) => updateSetting("appearance", "fontSize", inputNumber(e))} />
   </SettingRow>
 
   <SettingRow
@@ -145,8 +145,8 @@
     onReset={() => updateSetting("appearance", "zoomScope", defaults.appearance.zoomScope)}
   >
     <select value={s.appearance.zoomScope} onchange={(e) => updateSetting("appearance", "zoomScope", selectValue<ZoomScope>(e))}>
-      <option value="window">Whole window</option>
-      <option value="terminals">Terminals only</option>
+      {#if isAllowed("appearance.zoomScope", "window")}<option value="window">Whole window</option>{/if}
+      {#if isAllowed("appearance.zoomScope", "terminals")}<option value="terminals">Terminals only</option>{/if}
     </select>
   </SettingRow>
 
@@ -170,7 +170,7 @@
       showReset={s.appearance.borderRadius !== defaults.appearance.borderRadius}
       onReset={() => updateSetting("appearance", "borderRadius", defaults.appearance.borderRadius)}
     >
-      <input type="range" min="0" max="16" step="1" value={s.appearance.borderRadius} onchange={(e) => updateSetting("appearance", "borderRadius", inputNumber(e))} />
+      <input type="range" min={numericLimit("appearance.borderRadius", {min: 0, max: 16, step: 1}).min} max={numericLimit("appearance.borderRadius", {min: 0, max: 16, step: 1}).max} step={numericLimit("appearance.borderRadius", {min: 0, max: 16, step: 1}).step} value={s.appearance.borderRadius} onchange={(e) => updateSetting("appearance", "borderRadius", inputNumber(e))} />
     </SettingRow>
   {/if}
 </SettingsSection>

@@ -427,6 +427,13 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
     let template = json!({"name":"Remote template","panes":{"shell":{"command":"printf remote"}},"layout":{"slot":"shell"}});
     for (operation, args, method, path, body) in [
         ("home.get", json!({}), "GET", "/api/home/settings", None),
+        (
+            "home.metadata",
+            json!({}),
+            "GET",
+            "/api/home/settings/metadata",
+            None,
+        ),
         ("build.get", json!({}), "GET", "/api/build", None),
         (
             "template.save",
@@ -683,6 +690,49 @@ pub(super) async fn native(
             serde_json::from_slice(&response.body).expect("JSON")
         },
     )
+}
+
+#[tokio::test]
+async fn settings_metadata_and_rejection_match_http_and_native() {
+    let dir = tempfile::tempdir().expect("dir");
+    let state = state(ADDR, dir.path());
+    let browser = crate::http::build_router(state.clone());
+    let (status, metadata) =
+        exchange(&browser, api("GET", "/api/home/settings/metadata", None)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metadata["defaults"]["drawer"]["sidebarWidth"], 200);
+    assert_eq!(
+        metadata["limits"]["terminal.xterm.scrollSensitivity"]["step"],
+        0.1
+    );
+    assert_eq!(
+        native(&state, Operation::HomeMetadata, json!({})).await,
+        (status, metadata)
+    );
+    let unauthenticated = axum::http::Request::get("/api/home/settings/metadata")
+        .header("host", ADDR)
+        .body(axum::body::Body::empty())
+        .unwrap();
+    assert_eq!(
+        browser
+            .clone()
+            .oneshot(unauthenticated)
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::UNAUTHORIZED
+    );
+    let before = state.config.read().unwrap().clone();
+    let invalid = json!({"editors":{"extensions":[{"extension":"../bad","editor":"zed"}]}});
+    let (status, body) =
+        exchange(&browser, api("PATCH", "/api/home/settings", Some(&invalid))).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["field"], "editors.extensions.0.extension");
+    assert_eq!(
+        native(&state, Operation::HomeUpdate, json!({"body":invalid})).await,
+        (status, body)
+    );
+    assert_eq!(*state.config.read().unwrap(), before);
 }
 
 #[tokio::test]

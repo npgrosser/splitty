@@ -3,6 +3,7 @@
   import {
     updateSetting,
     defaults,
+    numericLimit, isAllowed,
     selectValue,
     inputNumber,
     type TerminalRenderer,
@@ -36,8 +37,8 @@
       value={s.terminal.renderer}
       onchange={(e) => updateSetting("terminal", "renderer", selectValue<TerminalRenderer>(e))}
     >
-      <option value="xterm">xterm.js</option>
-      <option value="ghostty">Ghostty</option>
+      {#if isAllowed("terminal.renderer", "xterm")}<option value="xterm">xterm.js</option>{/if}
+      {#if isAllowed("terminal.renderer", "ghostty")}<option value="ghostty">Ghostty</option>{/if}
     </select>
   </SettingRow>
 
@@ -104,9 +105,9 @@
       value={s.terminal.closeOnExit}
       onchange={(e) => updateSetting("terminal", "closeOnExit", selectValue<CloseOnExit>(e))}
     >
-      <option value="always">Always</option>
-      <option value="graceful">Graceful</option>
-      <option value="never">Never</option>
+      {#if isAllowed("terminal.closeOnExit", "always")}<option value="always">Always</option>{/if}
+      {#if isAllowed("terminal.closeOnExit", "graceful")}<option value="graceful">Graceful</option>{/if}
+      {#if isAllowed("terminal.closeOnExit", "never")}<option value="never">Never</option>{/if}
     </select>
   </SettingRow>
 
@@ -121,9 +122,9 @@
       value={s.terminal.sizePolicy}
       onchange={(e) => updateSetting("terminal", "sizePolicy", selectValue<SizePolicy>(e))}
     >
-      <option value="active">Smallest in use</option>
-      <option value="latest">Last used</option>
-      <option value="smallest">Smallest of all</option>
+      {#if isAllowed("terminal.sizePolicy", "active")}<option value="active">Smallest in use</option>{/if}
+      {#if isAllowed("terminal.sizePolicy", "latest")}<option value="latest">Last used</option>{/if}
+      {#if isAllowed("terminal.sizePolicy", "smallest")}<option value="smallest">Smallest of all</option>{/if}
     </select>
   </SettingRow>
 
@@ -136,9 +137,9 @@
     >
       <input
         type="range"
-        min="10"
-        max="600"
-        step="10"
+        min={numericLimit("terminal.sizeIdleSeconds", {min: 10, max: 600, step: 10}).min}
+        max={numericLimit("terminal.sizeIdleSeconds", {min: 10, max: 600, step: 10}).max}
+        step={numericLimit("terminal.sizeIdleSeconds", {min: 10, max: 600, step: 10}).step}
         value={s.terminal.sizeIdleSeconds}
         onchange={(e) => updateSetting("terminal", "sizeIdleSeconds", inputNumber(e))}
       />

@@ -146,6 +146,12 @@ pub fn generate_event_id() -> String {
 #[derive(Clone, Debug, Serialize)]
 #[serde(tag = "type")]
 pub enum ServerEvent {
+    #[serde(rename = "settings.changed", rename_all = "camelCase")]
+    SettingsChanged {
+        id: String,
+        timestamp: i64,
+        settings: serde_json::Value,
+    },
     // -- Session lifecycle --------------------------------------------------
     #[serde(rename = "created", rename_all = "camelCase")]
     SessionCreated {
@@ -154,6 +160,8 @@ pub enum ServerEvent {
         session_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         shell_profile_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shell_profile_fallback_reason: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         home_dir: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -333,6 +341,10 @@ pub enum ServerEvent {
         timestamp: i64,
         pane_id: String,
         session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shell_profile_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        shell_profile_fallback_reason: Option<String>,
     },
 
     /// Sent to the originating client when a mux op was rejected. Carries the
@@ -411,6 +423,13 @@ pub enum ServerEvent {
 
 /// Convenience constructors. Each generates a fresh `id` and `timestamp`.
 impl ServerEvent {
+    pub fn settings_changed(settings: serde_json::Value) -> Self {
+        Self::SettingsChanged {
+            id: generate_event_id(),
+            timestamp: now_millis(),
+            settings,
+        }
+    }
     pub fn session_created(
         session_id: impl Into<String>,
         home_dir: Option<String>,
@@ -425,11 +444,28 @@ impl ServerEvent {
         semantic_phase: Option<String>,
         shell_profile_id: Option<String>,
     ) -> Self {
+        Self::session_created_with_fallback(
+            session_id,
+            home_dir,
+            semantic_phase,
+            shell_profile_id,
+            None,
+        )
+    }
+
+    pub fn session_created_with_fallback(
+        session_id: impl Into<String>,
+        home_dir: Option<String>,
+        semantic_phase: Option<String>,
+        shell_profile_id: Option<String>,
+        shell_profile_fallback_reason: Option<String>,
+    ) -> Self {
         Self::SessionCreated {
             id: generate_event_id(),
             timestamp: now_millis(),
             session_id: session_id.into(),
             shell_profile_id,
+            shell_profile_fallback_reason,
             home_dir,
             semantic_phase,
         }
@@ -640,11 +676,22 @@ impl ServerEvent {
     }
 
     pub fn mux_pane_spawned(pane_id: impl Into<String>, session_id: impl Into<String>) -> Self {
+        Self::mux_pane_spawned_with_profile(pane_id, session_id, None, None)
+    }
+
+    pub fn mux_pane_spawned_with_profile(
+        pane_id: impl Into<String>,
+        session_id: impl Into<String>,
+        shell_profile_id: Option<String>,
+        shell_profile_fallback_reason: Option<String>,
+    ) -> Self {
         Self::MuxPaneSpawned {
             id: generate_event_id(),
             timestamp: now_millis(),
             pane_id: pane_id.into(),
             session_id: session_id.into(),
+            shell_profile_id,
+            shell_profile_fallback_reason,
         }
     }
 
@@ -1006,5 +1053,24 @@ mod tests {
         let id = generate_event_id();
         assert!(id.starts_with("e-"), "id should start with 'e-': {}", id);
         assert_eq!(id.len(), 18, "id should be 18 chars: {}", id);
+    }
+    #[test]
+    fn settings_and_fallback_events_use_stable_wire_fields() {
+        let changed = serde_json::to_value(ServerEvent::settings_changed(
+            serde_json::json!({"drawer":{"sidebarWidth":280}}),
+        ))
+        .unwrap();
+        assert_eq!(changed["type"], "settings.changed");
+        assert_eq!(changed["settings"]["drawer"]["sidebarWidth"], 280);
+        let created = serde_json::to_value(ServerEvent::session_created_with_fallback(
+            "session",
+            None,
+            None,
+            Some("default".into()),
+            Some("unavailable".into()),
+        ))
+        .unwrap();
+        assert_eq!(created["shellProfileId"], "default");
+        assert_eq!(created["shellProfileFallbackReason"], "unavailable");
     }
 }

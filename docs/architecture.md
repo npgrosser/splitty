@@ -533,6 +533,7 @@ a window supporting `hub-host-decisions-v1` refreshes passive reads on this
 message and reconnect, while older hubs retain polling. Refreshes never restore
 or create forwards. Host update and retry decisions arrive with hub setup
 metadata, using the remote supervisor's shared version comparison.
+
 ### Authoritative templates
 
 The `apply_template` workspace intent carries a complete saved template, client pane IDs, a root directory and whether to create a screen. `mux::templates` performs pure validation and projection: terminal references become registered panes, splits normalize their ratios, legacy web panes are pruned and floating slots keep their bounds. The replacement keeps the screen name and order and emits kills followed by spawns; each launch carries command, resolved cwd, profile ID and restore mode. The effect runner owns PTY creation, and `mux.pane_spawned` reports only successful spawns before the other clients' nudge. The generic control API refuses application: only a window session connection may send the intent after its command-consent choice.
@@ -540,3 +541,13 @@ The `apply_template` workspace intent carries a complete saved template, client 
 The frontend’s `lib/template_intent.ts` projects the same wire intent into an optimistic snapshot, rendered through `ScreenViews` and `screen_snapshot.ts`. A new screen queues that snapshot before mount, without a throwaway pane. Template panes wait for the mux spawn result, including results that arrived before mount, and never fall back to a direct create. Deterministic template node/floating IDs keep subsequent floating operations aligned before resync. Rejected intents resync the old screen; a rejected new screen is removed from the window. `server-templates-v1` gates both apply and extract and offers an older host's update.
 
 Extraction runs on the target server. The effect runner reads current process titles/directories and actual profile selection, then pure mux conversion prunes viewers, normalizes remaining splits and relativizes directories within an optional root. Empty or viewer-only tiled layouts return an error. Authenticated `POST /api/templates/extract/screen` and native `template.extract` share this operation; `mux.extract_template` / `mux.template_extracted` expose the same read on a screen's session connection, including browser hub connections. The template YAML store format is unchanged.
+## Settings authority
+
+Each server owns the effective home settings in `config.toml`. The same config layer
+provides defaults, field limits and atomic PATCH validation to HTTP and native UI
+operations. Clients read `/api/home/settings/metadata` when available and use its
+values for controls and reset actions. A successful settings or shell-profile write
+broadcasts the complete `settings.changed` object to every connected window on
+that server; a failed write leaves both persistent and running values alone. Shell
+profile selection and fallback run on the server, with the effective profile and
+fallback reason in the session's `created` event.

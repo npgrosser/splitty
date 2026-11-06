@@ -381,12 +381,15 @@ impl Connection {
         // Send created response
         let home_dir = dirs::home_dir().map(|p| p.to_string_lossy().into_owned());
 
-        let _ = self.sender.send(&ServerEvent::session_created_with_profile(
-            sid.clone(),
-            home_dir,
-            Some("unknown".to_string()),
-            session.shell_profile_id().map(str::to_string),
-        ));
+        let _ = self
+            .sender
+            .send(&ServerEvent::session_created_with_fallback(
+                sid.clone(),
+                home_dir,
+                Some("unknown".to_string()),
+                session.shell_profile_id().map(str::to_string),
+                session.shell_profile_fallback_reason().map(str::to_string),
+            ));
         if let Some(size) = size {
             let _ = self.sender.send(&size_event(&sid, size));
         }
