@@ -16,8 +16,8 @@ Viewer panes show Markdown, HTML, images and text. Agents also write diagrams (M
 - **Renderer lookup**: one table that maps formats to renderers, so that a renderer from outside the bundle can register later by declaring its formats.
 
 Out of scope:
-- Rendering URLs, web applications or development servers in a pane. Web-app panes and the proxy route were removed for security (SR-01, SR-02) and stay removed; links open in the system browser.
-- Renderers that run a document's code (JSX, MDX, notebooks with outputs that execute). They need an opaque-origin sandbox, which the frame policy forbids today (`frame-src 'none'`, SR-27 in the desktop shells); a change of its own decides that.
+- Rendering URLs, web applications or development servers in a pane: `viewer-webview`, which loads them from their own origin. The proxy route on Splitty's origin was removed for security (SR-01, SR-02) and stays removed.
+- Renderers that run a document's code (JSX, MDX, notebooks with outputs that execute). They need an opaque-origin sandbox, which the frame policy forbids today (`frame-src 'none'`, SR-27 in the desktop shells); `viewer-sandboxed-html` introduces it for HTML documents, and such renderers can build on it.
 - The plugin tiers sketched as an outlook (interactive web plugins with a message API, system plugins with a backend process, a plugin API package and a permission manifest). They become a change when a renderer from outside the bundle needs them.
 
 ## Capabilities
