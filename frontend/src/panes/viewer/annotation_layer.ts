@@ -15,8 +15,17 @@
  *
  * A passage that changed is anchored where it most likely is now and marked
  * in its own style; resolved annotations are marked only while the user
- * shows them, and the user can hide every mark of the pane. Both choices are
- * the window's own and stay with the pane's views (`viewer_view_state.ts`).
+ * shows them, and the user can hide every mark of the pane with the eye in
+ * the pane's bar; then only the passage of the annotation chosen since is
+ * marked. Both choices are the window's own and stay with the pane's views
+ * (`viewer_view_state.ts`).
+ *
+ * A mark leads to its thread (D1 of viewer-clickable-marks): a click on a
+ * marked passage or on its bar opens the list, chooses the annotation and
+ * gives its entry the keyboard, and the pointer over a mark shows which
+ * annotation it is. Where marks overlap, the shortest passage comes first and
+ * further clicks go through the others (`mark_hits.ts`). A click that ends a
+ * selection, a double click and a click on a link do what they did.
  *
  * Sending the review marks what it held as handed over and keeps it (D4 of
  * review-threads); a process waiting for the review is answered from the
@@ -35,6 +44,7 @@ import {
   pendingEntries, registerAnnotationList, reviewSelection, sameContent, type ViewerAnnotations,
 } from "../../lib/viewer/annotations.ts";
 import { utf8Length } from "../../lib/viewer/limits.ts";
+import { pickMark, type MarkHit, type MarkPick } from "../../lib/viewer/mark_hits.ts";
 import {
   REVIEW_ANSWER_LIMIT, scratchpadProblem, sendReview, type HandoverNotices, type Review, type ReviewAnswerRequest, type ReviewTarget,
   type SendForm,
@@ -176,6 +186,29 @@ interface Selected {
 
 const STALE: Anchoring = { state: "stale" };
 
+/** Where the pointer is over the document: the element it moved over, at a point of the window. */
+interface PointerAt {
+  readonly target: EventTarget | null;
+  readonly x: number;
+  readonly y: number;
+}
+
+/** How far the pointer may move between pressing and releasing for a click on a mark, in pixels. */
+const CLICK_SLOP = 4;
+
+/** At most this many annotations are named for the marks under the pointer. */
+const HOVER_NAMES = 3;
+
+const EYE_PATH = `<path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8z"/><circle cx="8" cy="8" r="2"/>`;
+const EYE_SVG = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${EYE_PATH}</svg>`;
+const EYE_OFF_SVG = `<svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${EYE_PATH}<line x1="2.5" y1="2.5" x2="13.5" y2="13.5"/></svg>`;
+
+/** How the pointer over a mark names its annotation: its number and kind. */
+function hoverName(annotation: ViewerAnnotation): string {
+  const kind = annotation.kind === "comment" ? "Comment" : isDeletion(annotation) ? "Deletion" : "Change";
+  return annotation.number !== undefined ? `#${annotation.number} · ${kind}` : kind;
+}
+
 function linesLabel(start: number, end: number): string {
   return start === end ? `Line ${start}` : `Lines ${start}-${end}`;
 }
@@ -241,12 +274,23 @@ export class AnnotationLayer {
   private readonly toolbar: SelectionToolbar;
   private readonly list: AnnotationList;
   private readonly listButton: HTMLButtonElement;
+  private readonly marksButton: HTMLButtonElement;
   private readonly banner: ReviewBanner;
   private placed: Placed[] = [];
   /** The store's list the annotations were placed from; the same array while it is unchanged. */
   private listed: readonly ViewerAnnotation[] | undefined;
   private anchorers: Anchorers | undefined;
   private active: string | undefined;
+  /** While the marks are hidden, the annotation chosen since, whose passage is marked. */
+  private revealed: string | undefined;
+  /** The annotation whose mark is under the pointer, and the last click on marks. */
+  private hovered: string | undefined;
+  private lastPick: MarkPick | undefined;
+  /** Where the pointer is over the document, and whether a look at it is due. */
+  private pointer: PointerAt | undefined;
+  private hoverDue = false;
+  /** Where the primary button went down in the document. */
+  private pressed: { readonly x: number; readonly y: number } | undefined;
   private choice: ListChoice | undefined;
   private marksHidden: boolean;
   private resolvedShown: boolean;
@@ -285,7 +329,6 @@ export class AnnotationLayer {
       send: (anchor) => this.sendToDefault(anchor),
       more: (anchor) => this.showMenuAt(anchor, this.handoverItems()),
       close: () => this.setChoice("closed"),
-      toggleMarks: () => this.toggleMarks(),
       toggleResolved: () => this.toggleResolved(),
     });
     host.body.append(this.list.element);
@@ -295,7 +338,12 @@ export class AnnotationLayer {
     this.listButton.type = "button";
     this.listButton.className = "viewer-bar-button viewer-bar-annotations";
     this.listButton.addEventListener("click", () => this.toggleList());
-    host.bar.append(this.listButton);
+    this.marksButton = doc.createElement("button");
+    this.marksButton.type = "button";
+    this.marksButton.className = "viewer-bar-button viewer-bar-marks";
+    this.marksButton.setAttribute("aria-label", "Hide marks");
+    this.marksButton.addEventListener("click", () => this.toggleMarks());
+    host.bar.append(this.marksButton, this.listButton);
 
     this.banner = new ReviewBanner(doc, {
       approve: () => void this.answerWait("approved"),
@@ -311,6 +359,17 @@ export class AnnotationLayer {
     this.listen(box, "pointerup", later);
     this.listen(box, "keyup", later);
     this.listen(box, "pointerdown", hide);
+    this.listen(box, "pointerdown", (event) => {
+      const pointer = event as PointerEvent;
+      this.pressed = pointer.button === 0 ? { x: pointer.clientX, y: pointer.clientY } : undefined;
+    });
+    this.listen(box, "click", (event) => this.markClicked(event as MouseEvent));
+    // Mouse events, which engines also send after the document scrolled under a resting pointer.
+    this.listen(box, "mousemove", (event) => this.pointerMoved(event as MouseEvent), { passive: true });
+    this.listen(box, "mouseleave", () => {
+      this.pointer = undefined;
+      this.showHover();
+    });
     this.listen(box, "scroll", () => this.hideToolbar(), { capture: true, passive: true });
     this.listen(doc, "selectionchange", () => this.selectionChanged());
 
@@ -416,6 +475,7 @@ export class AnnotationLayer {
     this.toolbar.element.remove();
     this.list.element.remove();
     this.listButton.remove();
+    this.marksButton.remove();
     this.banner.element.remove();
   }
 
@@ -482,10 +542,13 @@ export class AnnotationLayer {
     this.placed = placed;
   }
 
-  /** The passages to mark: none while the marks are hidden, a resolved one only while resolved ones are shown. */
+  /**
+   * The passages to mark: a resolved one only while resolved ones are shown,
+   * and while the marks are hidden, only the one chosen since.
+   */
   private marked(): Placed[] {
-    if (this.marksHidden) return [];
-    return this.placed.filter((placed) => placed.anchor && (this.resolvedShown || isOpen(placed.annotation)));
+    return this.placed.filter((placed) => placed.anchor && (this.resolvedShown || isOpen(placed.annotation))
+      && (!this.marksHidden || (placed.annotation.id === this.revealed && placed.annotation.id === this.active)));
   }
 
   private applyMarks(): void {
@@ -495,10 +558,8 @@ export class AnnotationLayer {
     if (content.shown === "source" && content.source) {
       const marks: SourceMark[] = [];
       for (const placed of this.marked()) {
-        const { annotation, view, anchor } = placed;
-        const active = annotation.id === this.active;
-        const kind = style(placed);
-        const extra = { active, ...(kind ? { style: kind } : {}) };
+        const { view, anchor } = placed;
+        const extra = this.markOf(placed, style(placed));
         if (view === "source") marks.push({ from: anchor!.start, to: anchor!.end, startLine: anchor!.startLine, endLine: anchor!.endLine, ...extra });
         else if (lineMarks) marks.push({ startLine: anchor!.startLine, endLine: anchor!.endLine, ...extra });
       }
@@ -507,10 +568,8 @@ export class AnnotationLayer {
       const marks: RenderedMark[] = [];
       const blocks: BlockMark[] = [];
       for (const placed of this.marked()) {
-        const { annotation, view, anchor } = placed;
-        const active = annotation.id === this.active;
-        const kind = style(placed);
-        const extra = { active, ...(kind ? { style: kind } : {}) };
+        const { view, anchor } = placed;
+        const extra = this.markOf(placed, style(placed));
         if (view === "rendered") marks.push({ start: anchor!.start, end: anchor!.end, ...extra });
         else if (lineMarks) blocks.push({ startLine: anchor!.startLine, endLine: anchor!.endLine, ...extra });
       }
@@ -518,10 +577,122 @@ export class AnnotationLayer {
     }
   }
 
+  /** What every mark of an annotation carries: its ID, and whether it is the chosen one or under the pointer. */
+  private markOf(placed: Placed, style: "changed" | "resolved" | undefined) {
+    const { id } = placed.annotation;
+    return { id, active: id === this.active, ...(id === this.hovered ? { hover: true } : {}), ...(style ? { style } : {}) };
+  }
+
   private toggleMarks(): void {
     this.marksHidden = !this.marksHidden;
+    this.revealed = undefined;
+    this.lastPick = undefined;
     this.applyMarks();
     this.renderList();
+  }
+
+  // ── From A Mark To Its Thread ──
+
+  /** The marks of the shown view at `target`, the element at the point `x`, `y`. */
+  private hitsAt(target: EventTarget | null, x: number, y: number): MarkHit[] {
+    const content = this.content();
+    const ids = content.shown === "source" && content.source ? content.source.marksAt(target, y)
+      : content.shown === "rendered" && content.rendered ? content.rendered.marksAt(target, x, y)
+      : [];
+    const hits: MarkHit[] = [];
+    for (const id of ids) {
+      const placed = this.placed.find((each) => each.annotation.id === id);
+      if (!placed?.anchor) continue;
+      const { anchor } = placed;
+      const own = placed.view === content.shown;
+      hits.push(own
+        ? { id, lines: false, length: anchor.end - anchor.start, start: anchor.start }
+        : { id, lines: true, length: anchor.endLine - anchor.startLine + 1, start: anchor.startLine });
+    }
+    return hits;
+  }
+
+  /** Whether a passage of the shown view is selected. */
+  private documentSelected(): boolean {
+    const content = this.content();
+    if (content.shown === "source") return !!content.source?.selection();
+    if (content.shown === "rendered") return !!content.rendered?.selectedPassage();
+    return false;
+  }
+
+  /** A click in the document: on a mark, its thread; anything else is the document's. */
+  private markClicked(event: MouseEvent): void {
+    const pressed = this.pressed;
+    this.pressed = undefined;
+    if (event.button !== 0 || event.detail > 1 || event.shiftKey || event.altKey || event.ctrlKey || event.metaKey) return;
+    if (pressed && Math.abs(event.clientX - pressed.x) + Math.abs(event.clientY - pressed.y) > CLICK_SLOP) return;
+    if (this.documentSelected()) return;
+    const pick = pickMark(this.hitsAt(event.composedPath()[0] ?? event.target, event.clientX, event.clientY), this.lastPick);
+    if (!pick) return;
+    this.lastPick = pick;
+    this.openThread(pick.chosen);
+    this.showHover();
+  }
+
+  /** Open the list on an annotation's thread, chosen and with the keyboard; its passage stays where it is. */
+  private openThread(id: string): void {
+    if (!this.listShown()) this.setChoice("open");
+    this.select(id, false);
+    this.list.focusEntry(id);
+  }
+
+  private pointerMoved(event: MouseEvent): void {
+    // While a button is down the pointer selects; it points at nothing.
+    this.pointer = event.buttons === 0 ? { target: event.composedPath()[0] ?? event.target, x: event.clientX, y: event.clientY } : undefined;
+    if (this.hoverDue) return;
+    this.hoverDue = true;
+    const view = this.doc.defaultView;
+    const look = () => {
+      this.hoverDue = false;
+      this.showHover();
+    };
+    if (view?.requestAnimationFrame) view.requestAnimationFrame(look);
+    else setTimeout(look, 16);
+  }
+
+  /**
+   * The element under the pointer: the one it last moved over, or, where a
+   * change of the marks replaced that one, the one at its place now.
+   */
+  private pointerTarget(at: PointerAt): EventTarget | null {
+    const node = at.target as Node | null;
+    if (!node || node.isConnected) return node;
+    let element = typeof this.doc.elementFromPoint === "function" ? this.doc.elementFromPoint(at.x, at.y) : null;
+    for (let inner = element?.shadowRoot?.elementFromPoint(at.x, at.y); inner && inner !== element; inner = inner.shadowRoot?.elementFromPoint(at.x, at.y)) {
+      element = inner;
+    }
+    return element;
+  }
+
+  /**
+   * Show which marks are under the pointer: the one a click chooses in its
+   * stronger style, and the numbers and kinds of all of them as the
+   * document's tooltip.
+   */
+  private showHover(): void {
+    if (this.destroyed) return;
+    const at = this.pointer;
+    const pick = at ? pickMark(this.hitsAt(this.pointerTarget(at), at.x, at.y), this.lastPick) : undefined;
+    const box = this.host.documentBox;
+    box.classList.toggle("viewer-mark-hover", !!pick);
+    if (pick) {
+      const names = pick.ids.slice(0, HOVER_NAMES).flatMap((id) => {
+        const annotation = this.placed.find((each) => each.annotation.id === id)?.annotation;
+        return annotation ? [hoverName(annotation)] : [];
+      });
+      box.title = pick.ids.length > HOVER_NAMES ? `${names.join(", ")}, …` : names.join(", ");
+    } else {
+      box.removeAttribute("title");
+    }
+    const hovered = pick?.chosen;
+    if (hovered === this.hovered) return;
+    this.hovered = hovered;
+    this.applyMarks();
   }
 
   private toggleResolved(): void {
@@ -610,6 +781,7 @@ export class AnnotationLayer {
     this.listButton.textContent = open === 0 ? "Annotations" : open === 1 ? "1 Annotation" : `${open} Annotations`;
     this.listButton.title = shown ? "Hide the annotations" : "Show the annotations";
     this.listButton.setAttribute("aria-pressed", String(shown));
+    this.renderMarksButton();
     if (!shown) return;
     const { again } = reviewSelection(this.placed.filter((placed) => isOpen(placed.annotation)).map((placed) => placed.annotation));
     const writable = this.writable();
@@ -620,21 +792,35 @@ export class AnnotationLayer {
       sendable: open > 0,
       writable,
       movable: writable && this.readSelection()?.state === "passage",
-      marksHidden: this.marksHidden,
       resolvedShown: this.resolvedShown,
     };
     this.list.render(header, this.placed.map((placed) => this.entryOf(placed)), this.active);
   }
 
-  private select(id: string): void {
+  /** The eye in the pane's bar, beside the list's button: whether the document shows its marks. */
+  private renderMarksButton(): void {
+    const button = this.marksButton;
+    button.hidden = this.listButton.hidden;
+    button.setAttribute("aria-pressed", String(this.marksHidden));
+    button.title = this.marksHidden ? "Show the marks in the document" : "Hide the marks in the document";
+    const icon = this.marksHidden ? "hidden" : "shown";
+    if (button.dataset.icon === icon) return;
+    button.dataset.icon = icon;
+    // A constant of this module, never text of a document.
+    button.innerHTML = this.marksHidden ? EYE_OFF_SVG : EYE_SVG;
+  }
+
+  /** Choose an annotation: mark its passage as the chosen one and, unless the user pointed at it, bring it into view. */
+  private select(id: string, scroll = true): void {
     const placed = this.placed.find((each) => each.annotation.id === id);
     if (!placed) return;
     this.active = id;
+    this.revealed = id;
     this.applyMarks();
     this.list.reveal(id);
     const content = this.content();
     const { view, anchor } = placed;
-    if (!anchor) return;
+    if (!anchor || !scroll) return;
     if (content.shown === "source" && content.source) {
       if (view === "source") content.source.scrollToPassage(anchor.start, anchor.end);
       else if (content.source) content.source.scrollToLine(anchor.startLine);
@@ -1069,6 +1255,7 @@ export class AnnotationLayer {
     const problem = this.options.store.put(this.options.screenId(), this.options.paneId, [annotation]);
     if (problem) return problem;
     this.active = annotation.id;
+    this.revealed = annotation.id;
     this.closeForm();
     this.refresh();
     this.list.reveal(annotation.id);

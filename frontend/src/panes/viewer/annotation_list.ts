@@ -1,7 +1,8 @@
 /**
  * The list of a viewer pane's annotations (`viewer-annotations`, Annotations
  * In The Pane): a column on the pane's right. Its header holds the counts,
- * the hand-over of the review and the choices for the document's marks; each
+ * the hand-over of the review and the choice to mark resolved annotations
+ * as well (the eye in the pane's bar hides every mark); each
  * entry is a thread: its number, kind and where its passage is, the start of
  * its quote, the remark, its replies and a box to reply in. Choosing an entry
  * brings its passage into view. The open threads come first, the resolved
@@ -67,7 +68,6 @@ export interface ListHeader {
   readonly writable: boolean;
   /** Whether a passage is selected that an annotation can move to. */
   readonly movable: boolean;
-  readonly marksHidden: boolean;
   readonly resolvedShown: boolean;
 }
 
@@ -86,7 +86,6 @@ export interface AnnotationListActions {
   /** The menu of every way to hand the review over. */
   more(anchor: HTMLElement): void;
   close(): void;
-  toggleMarks(): void;
   toggleResolved(): void;
 }
 
@@ -387,7 +386,6 @@ export class AnnotationList {
   private readonly countLabel: HTMLElement;
   private readonly sendButton: HTMLButtonElement;
   private readonly moreButton: HTMLButtonElement;
-  private readonly marksButton: HTMLButtonElement;
   private readonly resolvedMarksButton: HTMLButtonElement;
   private readonly addButton: HTMLButtonElement;
   private readonly openList: HTMLOListElement;
@@ -416,9 +414,8 @@ export class AnnotationList {
     send.append(this.sendButton, this.moreButton);
 
     const options = element(doc, "div", "viewer-annotations-options");
-    this.marksButton = button(doc, "viewer-annotations-toggle viewer-annotations-hide-marks", "Hide Marks", "Hide the marks in the document", () => this.actions.toggleMarks());
     this.resolvedMarksButton = button(doc, "viewer-annotations-toggle viewer-annotations-show-resolved", "Show Resolved", "Mark the passages of resolved annotations as well", () => this.actions.toggleResolved());
-    options.append(this.marksButton, this.resolvedMarksButton);
+    options.append(this.resolvedMarksButton);
 
     const scroll = element(doc, "div", "viewer-annotations-scroll");
     this.openList = element(doc, "ol", "viewer-annotations-list");
@@ -459,7 +456,6 @@ export class AnnotationList {
     this.sendButton.title = header.sendTitle;
     this.sendButton.disabled = !header.sendable;
     this.moreButton.disabled = header.open + header.resolved === 0;
-    this.marksButton.setAttribute("aria-pressed", String(header.marksHidden));
     this.resolvedMarksButton.setAttribute("aria-pressed", String(header.resolvedShown));
     this.resolvedMarksButton.disabled = header.resolved === 0;
     this.addButton.hidden = !header.writable;

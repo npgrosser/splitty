@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { SourceView, leavesToWindow } from "./source_view.ts";
 
 // The settings the shortcuts read query media features when they load;
-// jsdom has no matchMedia.
+// jsdom has no matchMedia, and lays out no ranges, which the editor measures.
 vi.hoisted(() => {
   Object.defineProperty(window, "matchMedia", {
     configurable: true,
@@ -13,6 +13,9 @@ vi.hoisted(() => {
       addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent: () => false,
     }),
   });
+  const empty = { x: 0, y: 0, width: 0, height: 0, top: 0, left: 0, right: 0, bottom: 0, toJSON: () => ({}) };
+  Range.prototype.getClientRects ??= () => [] as unknown as DOMRectList;
+  Range.prototype.getBoundingClientRect ??= () => empty as DOMRect;
 });
 
 function key(init: KeyboardEventInit): KeyboardEvent {
@@ -135,6 +138,40 @@ describe("SourceView", () => {
       "cm-viewer-mark cm-viewer-mark-changed",
       "cm-viewer-mark",
     ]);
+  });
+
+  // viewer-annotations, Annotations In The Pane (D4 of viewer-clickable-marks):
+  // the marks under the pointer are the decorations around its target, and on
+  // the bars, every mark of the line beside them.
+  it("names the marks under the pointer, in the passages and on the bars", () => {
+    const view = mount("one two three\nfour\nfive\n");
+    view.setMarks([
+      { id: "outer", from: 0, to: 13, startLine: 1, endLine: 1 },
+      { id: "inner", from: 4, to: 7, startLine: 1, endLine: 1, hover: true },
+      { id: "lines", startLine: 2, endLine: 3 },
+    ]);
+    const innermost = (text: string) => [...view.dom.querySelectorAll(".cm-viewer-marked")]
+      .filter((element) => element.textContent === text && !element.querySelector(".cm-viewer-marked"))[0];
+    expect(view.marksAt(innermost("two"), 0).sort()).toEqual(["inner", "outer"]);
+    expect(view.dom.querySelector(".cm-viewer-marked-hover")!.textContent).toBe("two");
+    const outerText = [...view.dom.querySelectorAll(".cm-viewer-marked")].find((element) => element.getAttribute("data-annotation-id") === "outer")!;
+    expect(view.marksAt(outerText.firstChild, 0)).toEqual(["outer"]);
+    // Text without a mark, and an element outside the view.
+    const line = [...view.dom.querySelectorAll(".cm-line")][1];
+    expect(view.marksAt(line, 0)).toEqual([]);
+    expect(view.marksAt(document.body, 0)).toEqual([]);
+
+    const editor = editorOf(view);
+    const gutter = view.dom.querySelector(".cm-viewer-marks")!;
+    const heightOf = (number: number) => editor.lineBlockAt(editor.state.doc.line(number).from).top + editor.documentTop + 1;
+    expect(view.marksAt(gutter, heightOf(1)).sort()).toEqual(["inner", "outer"]);
+    expect(view.marksAt(gutter, heightOf(3))).toEqual(["lines"]);
+    expect(view.marksAt(gutter, heightOf(4))).toEqual([]);
+    // The line numbers are no bars.
+    expect(view.marksAt(view.dom.querySelector(".cm-lineNumbers")!, heightOf(1))).toEqual([]);
+
+    view.setText("other\n");
+    expect(view.marksAt(view.dom.querySelector(".cm-viewer-marks")!, heightOf(1))).toEqual([]);
   });
 
   it("tells when the selection changes", () => {

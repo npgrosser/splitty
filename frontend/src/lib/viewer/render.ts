@@ -29,7 +29,10 @@
  * read across the shadow boundary (`shadowSelection`). Passages are marked
  * with the CSS Custom Highlight API, which leaves the sanitized DOM as it is;
  * where the API is missing, and for the passages of the other view, the
- * covering blocks are marked instead.
+ * covering blocks are marked instead. The marks under the pointer
+ * (`marksAt`) are the passages whose ranges lie under it, by their client
+ * rectangles or, where the engine lays nothing out, by the caret position,
+ * and the marks of the blocks that hold it (D4 of viewer-clickable-marks).
  */
 
 import { segmentLines, type LineRange, type LineSegment } from "./anchoring.ts";
@@ -65,40 +68,52 @@ export interface RenderedSelection {
 /** How a passage is marked: open, found as what its quote most likely became, or of a resolved annotation. */
 export type MarkStyle = "changed" | "resolved";
 
-/** A passage to mark in a rendered document's text; `active` is the one the user chose. */
+/**
+ * A passage to mark in a rendered document's text; `active` is the one the
+ * user chose, `hover` the one under the pointer, `id` its annotation's.
+ */
 export interface RenderedMark {
+  readonly id?: string;
   readonly start: number;
   readonly end: number;
   readonly active?: boolean;
+  readonly hover?: boolean;
   readonly style?: MarkStyle;
 }
 
 /** Source lines whose blocks to mark: the passages of the other view. */
 export interface BlockMark {
+  readonly id?: string;
   readonly startLine: number;
   readonly endLine: number;
   readonly active?: boolean;
+  readonly hover?: boolean;
   readonly style?: MarkStyle;
 }
 
 /** The names of the highlights in the CSS Custom Highlight API registry, shared by the panes of a window. */
 export const HIGHLIGHT = "splitty-annotation";
 export const ACTIVE_HIGHLIGHT = "splitty-annotation-active";
+export const HOVER_HIGHLIGHT = "splitty-annotation-hover";
 export const CHANGED_HIGHLIGHT = "splitty-annotation-changed";
 export const RESOLVED_HIGHLIGHT = "splitty-annotation-resolved";
 /**
  * The attribute that marks a block, with the mark's style: empty, `active`,
- * `changed` or `resolved`; a document cannot set `data-splitty-*` (`sanitize.ts`).
+ * `hover`, `changed` or `resolved`; a document cannot set `data-splitty-*` (`sanitize.ts`).
  */
 const BLOCK_MARK = "data-splitty-mark";
 
-/** Where marks overlap, the higher one shows: the chosen passage over an open one, over a changed one, over a resolved one. */
-type MarkRank = 0 | 1 | 2 | 3;
-const RANK_VALUES = ["resolved", "changed", "", "active"] as const;
-const RANK_HIGHLIGHTS = [RESOLVED_HIGHLIGHT, CHANGED_HIGHLIGHT, HIGHLIGHT, ACTIVE_HIGHLIGHT] as const;
+/**
+ * Where marks overlap, the higher one shows: the chosen passage over the one
+ * under the pointer, over an open one, over a changed one, over a resolved one.
+ */
+type MarkRank = 0 | 1 | 2 | 3 | 4;
+const RANK_VALUES = ["resolved", "changed", "", "hover", "active"] as const;
+const RANK_HIGHLIGHTS = [RESOLVED_HIGHLIGHT, CHANGED_HIGHLIGHT, HIGHLIGHT, HOVER_HIGHLIGHT, ACTIVE_HIGHLIGHT] as const;
 
-function rankOf(mark: { readonly active?: boolean; readonly style?: MarkStyle }): MarkRank {
-  if (mark.active) return 3;
+function rankOf(mark: { readonly active?: boolean; readonly hover?: boolean; readonly style?: MarkStyle }): MarkRank {
+  if (mark.active) return 4;
+  if (mark.hover) return 3;
   return mark.style === "resolved" ? 0 : mark.style === "changed" ? 1 : 2;
 }
 
@@ -140,10 +155,12 @@ const BASE_CSS = `
 ::highlight(${HIGHLIGHT}){background-color:var(--splitty-annotation-bg,rgba(99,160,255,.24))}
 ::highlight(${CHANGED_HIGHLIGHT}){background-color:var(--splitty-annotation-changed-bg,rgba(229,192,123,.24));text-decoration:underline dotted var(--splitty-warning,#e5c07b)}
 ::highlight(${RESOLVED_HIGHLIGHT}){background-color:var(--splitty-annotation-resolved-bg,rgba(138,138,138,.18))}
+::highlight(${HOVER_HIGHLIGHT}){background-color:var(--splitty-annotation-hover-bg,rgba(99,160,255,.36))}
 ::highlight(${ACTIVE_HIGHLIGHT}){background-color:var(--splitty-annotation-active-bg,rgba(99,160,255,.5))}
 [${BLOCK_MARK}]{background-color:var(--splitty-annotation-block-bg,rgba(99,160,255,.12));box-shadow:-6px 0 0 -3px var(--splitty-accent,#63a0ff);border-radius:2px}
 [${BLOCK_MARK}="changed"]{background-color:var(--splitty-annotation-changed-bg,rgba(229,192,123,.16));box-shadow:-6px 0 0 -3px var(--splitty-warning,#e5c07b)}
 [${BLOCK_MARK}="resolved"]{background-color:var(--splitty-annotation-resolved-bg,rgba(138,138,138,.12));box-shadow:-6px 0 0 -3px var(--splitty-text-muted,#6a6a6a)}
+[${BLOCK_MARK}="hover"]{background-color:var(--splitty-annotation-hover-bg,rgba(99,160,255,.22))}
 [${BLOCK_MARK}="active"]{background-color:var(--splitty-annotation-active-bg,rgba(99,160,255,.3))}
 ${SYNTAX_CSS}
 `;
@@ -400,6 +417,9 @@ export class RenderedDocument {
   /** The ranges this document added to the window's highlights, and the blocks it marked. */
   private highlighted: { readonly highlight: Set<AbstractRange>; readonly range: AbstractRange }[] = [];
   private markedBlocks: Element[] = [];
+  /** The ranges of the marked passages, and the annotations of each marked block, for `marksAt`. */
+  private passageRanges: { readonly mark: RenderedMark; readonly range: Range }[] = [];
+  private blockOwners = new Map<Element, string[]>();
 
   constructor(doc: Document, private readonly options: RenderOptions) {
     this.host = doc.createElement("div");
@@ -501,6 +521,55 @@ export class RenderedDocument {
     this.marks = marks;
     this.blockMarks = blocks;
     this.applyMarks();
+  }
+
+  /**
+   * The IDs of the marks at the point `x`, `y` of the window, where `target`
+   * is the element under it: the passages there and the marked blocks that
+   * hold it. A link is no mark's: a click on it follows the link.
+   */
+  marksAt(target: EventTarget | null, x: number, y: number): string[] {
+    const element = elementOf(target);
+    if (!element || !this.root.contains(element) || linkOf(element)) return [];
+    const ids = new Set<string>();
+    for (let at: Element | null = element; at && this.root.contains(at); at = at.parentElement) {
+      for (const id of this.blockOwners.get(at) ?? []) ids.add(id);
+    }
+    let caret: number | null | undefined = null;
+    for (const { mark, range } of this.passageRanges) {
+      if (!mark.id || ids.has(mark.id)) continue;
+      const rects = typeof range.getClientRects === "function"
+        ? [...range.getClientRects()].filter((rect) => rect.width > 0 || rect.height > 0)
+        : [];
+      if (rects.length === 0 && caret === null) caret = this.caretOffset(x, y);
+      const under = rects.length > 0
+        ? rects.some((rect) => x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom)
+        : typeof caret === "number" && mark.start <= caret && caret <= mark.end;
+      if (under) ids.add(mark.id);
+    }
+    return [...ids];
+  }
+
+  /** Where the engine's caret would go at the point `x`, `y`, as an offset into the text; undefined outside it. */
+  private caretOffset(x: number, y: number): number | undefined {
+    const doc = this.host.ownerDocument as Document & {
+      caretPositionFromPoint?: (x: number, y: number, options?: { shadowRoots?: ShadowRoot[] }) => { offsetNode: Node; offset: number } | null;
+      caretRangeFromPoint?: (x: number, y: number) => Range | null;
+    };
+    let node: Node | undefined;
+    let offset = 0;
+    try {
+      const position = doc.caretPositionFromPoint?.(x, y, { shadowRoots: [this.root] });
+      if (position) ({ offsetNode: node, offset } = position);
+      else {
+        const range = doc.caretRangeFromPoint?.(x, y);
+        if (range) ({ startContainer: node, startOffset: offset } = range);
+      }
+    } catch {
+      return undefined;
+    }
+    if (!node || !this.root.contains(node)) return undefined;
+    return this.textModel()?.offsetOf(node, offset);
   }
 
   /** Where the passage `[start, end)` is on the screen, or undefined where the engine cannot tell. */
@@ -686,10 +755,13 @@ export class RenderedDocument {
     if (!model) return;
     const api = highlightApi(this.host.ownerDocument);
     const blocks = new Map<Element, MarkRank>();
-    const markBlock = (block: Element, rank: MarkRank) => blocks.set(block, Math.max(blocks.get(block) ?? 0, rank) as MarkRank);
+    const markBlock = (block: Element, mark: RenderedMark | BlockMark) => {
+      blocks.set(block, Math.max(blocks.get(block) ?? 0, rankOf(mark)) as MarkRank);
+      if (mark.id) this.blockOwners.set(block, [...(this.blockOwners.get(block) ?? []), mark.id]);
+    };
     for (const mark of this.marks) {
       if (!api) {
-        for (const block of model.blocksOf(mark.start, mark.end)) markBlock(block, rankOf(mark));
+        for (const block of model.blocksOf(mark.start, mark.end)) markBlock(block, mark);
         continue;
       }
       const range = model.range(mark.start, mark.end);
@@ -697,9 +769,10 @@ export class RenderedDocument {
       const highlight = sharedHighlight(api, rankOf(mark));
       highlight.add(range);
       this.highlighted.push({ highlight, range });
+      this.passageRanges.push({ mark, range });
     }
     for (const mark of this.blockMarks) {
-      for (const block of this.blocksFor(mark.startLine, mark.endLine)) markBlock(block, rankOf(mark));
+      for (const block of this.blocksFor(mark.startLine, mark.endLine)) markBlock(block, mark);
     }
     for (const [block, rank] of blocks) {
       block.setAttribute(BLOCK_MARK, RANK_VALUES[rank]);
@@ -712,5 +785,7 @@ export class RenderedDocument {
     this.highlighted = [];
     for (const block of this.markedBlocks) block.removeAttribute(BLOCK_MARK);
     this.markedBlocks = [];
+    this.passageRanges = [];
+    this.blockOwners.clear();
   }
 }

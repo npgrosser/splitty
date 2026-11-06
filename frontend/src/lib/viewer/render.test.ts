@@ -2,7 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { lastLine } from "./anchoring.ts";
 import {
-  ACTIVE_HIGHLIGHT, CHANGED_HIGHLIGHT, HIGHLIGHT, HOST_STYLE, RESOLVED_HIGHLIGHT, RenderedDocument, renderedText, shadowSelection,
+  ACTIVE_HIGHLIGHT, CHANGED_HIGHLIGHT, HIGHLIGHT, HOST_STYLE, HOVER_HIGHLIGHT, RESOLVED_HIGHLIGHT, RenderedDocument, renderedText, shadowSelection,
   type BoundaryRange,
 } from "./render.ts";
 import { cssValueAllowed, documentSelector, sanitizeHtml } from "./sanitize.ts";
@@ -434,6 +434,13 @@ describe("annotations in a rendered document", () => {
       expect(priority(CHANGED_HIGHLIGHT)).toBeLessThan(priority(HIGHLIGHT));
       expect(priority(HIGHLIGHT)).toBeLessThan(priority(ACTIVE_HIGHLIGHT));
 
+      // The passage under the pointer in a stronger highlight of its own, below the chosen one.
+      rendered.setMarks([{ start, end: start + 5, hover: true }]);
+      expect([...highlights.get(HOVER_HIGHLIGHT)!].map(String)).toEqual(["retry"]);
+      expect(highlights.get(HIGHLIGHT)!.size).toBe(0);
+      expect(priority(HIGHLIGHT)).toBeLessThan(priority(HOVER_HIGHLIGHT));
+      expect(priority(HOVER_HIGHLIGHT)).toBeLessThan(priority(ACTIVE_HIGHLIGHT));
+
       rendered.setMarks([]);
       expect(highlights.get(HIGHLIGHT)!.size).toBe(0);
       rendered.setMarks([{ start, end: start + 5 }]);
@@ -441,6 +448,67 @@ describe("annotations in a rendered document", () => {
       expect(highlights.get(HIGHLIGHT)!.size).toBe(0);
     } finally {
       vi.unstubAllGlobals();
+    }
+  });
+
+  // viewer-annotations, Annotations In The Pane (D4 of viewer-clickable-marks).
+  it("names the marks of the blocks under the pointer where the engine has no highlights", () => {
+    const { rendered, root, model } = plan();
+    const start = model.text.indexOf("retry");
+    rendered.setMarks([{ id: "passage", start, end: start + 5 }], [{ id: "lines", startLine: 5, endLine: 6 }, { id: "first", startLine: 3, endLine: 3 }]);
+    const retry = textNode(root, "retry three times");
+    expect(rendered.marksAt(retry, 0, 0).sort()).toEqual(["lines", "passage"]);
+    expect(rendered.marksAt(textNode(root, "ship it"), 0, 0)).toEqual(["lines"]);
+    expect(rendered.marksAt(textNode(root, "The first step."), 0, 0)).toEqual(["first"]);
+    expect(rendered.marksAt(textNode(root, "Plan"), 0, 0)).toEqual([]);
+    expect(rendered.marksAt(document.body, 0, 0)).toEqual([]);
+    rendered.setMarks([]);
+    expect(rendered.marksAt(retry, 0, 0)).toEqual([]);
+  });
+
+  it("names the highlighted passages under the pointer by their rectangles, or by the caret where nothing is laid out", () => {
+    vi.stubGlobal("Highlight", class extends Set<AbstractRange> {});
+    vi.stubGlobal("CSS", { highlights: new Map() });
+    const caret = vi.fn<(x: number, y: number) => { offsetNode: Node; offset: number } | null>(() => null);
+    Object.assign(document, { caretPositionFromPoint: caret });
+    const rects = Object.getOwnPropertyDescriptor(Range.prototype, "getClientRects");
+    try {
+      const { rendered, root, model } = plan();
+      const start = model.text.indexOf("retry");
+      const three = model.text.indexOf("three");
+      rendered.setMarks([{ id: "retry", start, end: start + 17 }, { id: "three", start: three, end: three + 5 }]);
+      const retry = textNode(root, "retry three times");
+
+      // Nothing laid out: by the caret's position in the text.
+      caret.mockReturnValue({ offsetNode: retry, offset: 7 });
+      expect(rendered.marksAt(retry, 40, 10).sort()).toEqual(["retry", "three"]);
+      caret.mockReturnValue({ offsetNode: retry, offset: 2 });
+      expect(rendered.marksAt(retry, 40, 10)).toEqual(["retry"]);
+      // A caret outside the document, as an engine that stops at the shadow root gives it.
+      caret.mockReturnValue({ offsetNode: rendered.host, offset: 0 });
+      expect(rendered.marksAt(retry, 40, 10)).toEqual([]);
+
+      // Laid out: by the passages' rectangles.
+      const box = (left: number, right: number) => ({ left, right, top: 0, bottom: 16, width: right - left, height: 16 }) as DOMRect;
+      Object.assign(Range.prototype, {
+        getClientRects(this: Range) {
+          return (this.toString() === "three" ? [box(40, 70)] : [box(0, 120)]) as unknown as DOMRectList;
+        },
+      });
+      expect(rendered.marksAt(retry, 50, 8).sort()).toEqual(["retry", "three"]);
+      expect(rendered.marksAt(retry, 100, 8)).toEqual(["retry"]);
+      expect(rendered.marksAt(retry, 130, 8)).toEqual([]);
+
+      // A link inside a mark is the link's.
+      rendered.render("markdown", "- retry [three](#three) times\n", 1);
+      const linked = rendered.textModel()!;
+      rendered.setMarks([{ id: "retry", start: 0, end: linked.text.length }]);
+      expect(rendered.marksAt(root.querySelector("[data-splitty-href]")!, 50, 8)).toEqual([]);
+    } finally {
+      vi.unstubAllGlobals();
+      delete (document as { caretPositionFromPoint?: unknown }).caretPositionFromPoint;
+      if (rects) Object.defineProperty(Range.prototype, "getClientRects", rects);
+      else delete (Range.prototype as { getClientRects?: unknown }).getClientRects;
     }
   });
 

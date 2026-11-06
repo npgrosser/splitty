@@ -370,6 +370,30 @@ function bars(view: ViewerView): Element[] {
   return [...view.element.querySelectorAll(".cm-viewer-marks .cm-gutterElement")].filter((element) => element.querySelector(".cm-viewer-mark"));
 }
 
+/** The innermost marked span of the source view with `text`, which a pointer over that text is on. */
+function markOf(view: ViewerView, text: string): HTMLElement {
+  const found = [...view.element.querySelectorAll<HTMLElement>(".cm-viewer-marked")]
+    .find((element) => element.textContent === text && !element.querySelector(".cm-viewer-marked"));
+  expect(found).toBeDefined();
+  return found!;
+}
+
+/** Press and release the primary button on `target` without moving, or moved by `moved` pixels. */
+function clickOn(target: Element, init: MouseEventInit = {}, moved = 0): void {
+  const at = { clientX: 20, clientY: 10 };
+  target.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, composed: true, button: 0, ...at }));
+  target.dispatchEvent(new MouseEvent("click", { bubbles: true, composed: true, button: 0, detail: 1, ...at, clientX: at.clientX + moved, ...init }));
+}
+
+/** Leave the source view with an empty selection, as after a click into it. */
+function collapse(view: ViewerView): void {
+  editor(view).dispatch({ selection: { anchor: 0 } });
+}
+
+function listHidden(view: ViewerView): boolean {
+  return query(view, ".viewer-annotations")!.hidden;
+}
+
 describe("making annotations", () => {
   // viewer-annotations, Annotations On A Viewer Pane: A question on a passage.
   it("comments on a passage of the source from the selection's toolbar, and shows the server's number", async () => {
@@ -593,6 +617,7 @@ describe("making annotations", () => {
     const { shown } = setup({ text: PLAN, available: false });
     expect(shown.annotationMenu()).toBeUndefined();
     expect(query(shown, ".viewer-bar-annotations")!.hidden).toBe(true);
+    expect(query(shown, ".viewer-bar-marks")!.hidden).toBe(true);
     expect(query(shown, ".viewer-annotations")!.hidden).toBe(true);
     selectSource(shown, "retry three times");
     query(shown, ".viewer-document")!.dispatchEvent(new Event("pointerup", { bubbles: true }));
@@ -780,10 +805,15 @@ describe("marks", () => {
     server.broadcast();
     expect(marked(second.shown)).toEqual(["retry three times"]);
 
-    const hide = query<HTMLButtonElement>(first.shown, ".viewer-annotations-hide-marks")!;
+    // The eye in the pane's bar, beside the list's button.
+    const hide = query<HTMLButtonElement>(first.shown, ".viewer-bar .viewer-bar-marks")!;
+    expect(hide.nextElementSibling!.classList.contains("viewer-bar-annotations")).toBe(true);
     expect(hide.getAttribute("aria-pressed")).toBe("false");
+    expect(hide.title).toBe("Hide the marks in the document");
+    expect(query(first.shown, ".viewer-annotations-hide-marks")).toBeNull();
     hide.click();
     expect(hide.getAttribute("aria-pressed")).toBe("true");
+    expect(hide.title).toBe("Show the marks in the document");
     expect(marked(first.shown)).toEqual([]);
     expect(bars(first.shown)).toHaveLength(0);
     expect(entries(first.shown)).toHaveLength(1);
@@ -799,6 +829,27 @@ describe("marks", () => {
     next.annotationMenu()!.toggleMarks();
     expect(marked(next)).toEqual(["retry three times"]);
     expect(next.viewState()).not.toHaveProperty("hideMarks");
+  });
+
+  // viewer-annotations, Annotations In The Pane: An annotation chosen while the marks are hidden (D2 of viewer-clickable-marks).
+  it("An annotation chosen while the marks are hidden: marks only its passage, and every mark once they show again", async () => {
+    const { shown, store } = setup({ text: PLAN });
+    comment(shown, "retry three times", "Why three?");
+    comment(shown, "Step 12 of the plan.", "Which step?");
+    await numbered(store);
+    const eye = query<HTMLButtonElement>(shown, ".viewer-bar-marks")!;
+    eye.click();
+    // Hiding the marks hides the passage just annotated as well.
+    expect(marked(shown)).toEqual([]);
+    entry(shown, 1).click();
+    expect(marked(shown, ".cm-viewer-marked-active")).toEqual(["retry three times"]);
+    expect(bars(shown)).toHaveLength(1);
+    entry(shown, 2).click();
+    expect(marked(shown)).toEqual(["Step 12 of the plan."]);
+    eye.click();
+    expect(marked(shown).sort()).toEqual(["Step 12 of the plan.", "retry three times"]);
+    eye.click();
+    expect(marked(shown)).toEqual([]);
   });
 
   it("marks the passages of resolved annotations only while the user shows them", () => {
@@ -862,6 +913,133 @@ describe("marks", () => {
     shown.toggleMode();
     const root = query(shown, ".viewer-rendered")!.shadowRoot!;
     expect([...root.querySelectorAll("[data-splitty-mark]")].map((block) => block.textContent)).toEqual(["The first step."]);
+  });
+});
+
+// viewer-annotations, Annotations In The Pane: A mark chosen (D1 of viewer-clickable-marks).
+describe("from a mark to its thread", () => {
+  it("A mark chosen: a click on a marked passage opens the closed list on its thread and gives it the keyboard", async () => {
+    const { shown, store } = setup({ text: PLAN });
+    comment(shown, "retry three times", "Why three?");
+    comment(shown, "Step 12 of the plan.", "Which step?");
+    await numbered(store);
+    query<HTMLButtonElement>(shown, ".viewer-bar-annotations")!.click();
+    expect(listHidden(shown)).toBe(true);
+    collapse(shown);
+    const scrolled = vi.spyOn(EditorView, "scrollIntoView");
+
+    clickOn(markOf(shown, "retry three times"));
+    expect(listHidden(shown)).toBe(false);
+    expect(entry(shown, 1).classList.contains("active")).toBe(true);
+    expect(document.activeElement).toBe(entry(shown, 1));
+    expect(marked(shown, ".cm-viewer-marked-active")).toEqual(["retry three times"]);
+    // The passage is where the user pointed: the document stays where it is.
+    expect(scrolled).not.toHaveBeenCalled();
+    expect(shown.viewState()).toMatchObject({ annotations: "open" });
+  });
+
+  // viewer-annotations, Annotations In The Pane: Overlapping passages.
+  it("Overlapping passages: chooses the shortest first and the others on further clicks", async () => {
+    const { shown, store, server } = setup({ text: PLAN });
+    comment(shown, "retry three times before giving up", "Why retry?");
+    comment(shown, "three", "Why three?");
+    await numbered(store);
+    collapse(shown);
+    clickOn(markOf(shown, "three"));
+    expect(entry(shown, 2).classList.contains("active")).toBe(true);
+    clickOn(markOf(shown, "three"));
+    expect(entry(shown, 1).classList.contains("active")).toBe(true);
+    clickOn(markOf(shown, "three"));
+    expect(entry(shown, 2).classList.contains("active")).toBe(true);
+    // Elsewhere on the longer passage: only it.
+    const longer = shown.element.querySelector(`[data-annotation-id="${server.get(1).id}"]`)!;
+    clickOn(longer.lastChild as Element);
+    expect(entry(shown, 1).classList.contains("active")).toBe(true);
+    clickOn(longer.lastChild as Element);
+    expect(entry(shown, 1).classList.contains("active")).toBe(true);
+  });
+
+  it("leaves a click that ends a selection, a drag, a double click and a click with a modifier to the document", async () => {
+    const { shown, store } = setup({ text: PLAN });
+    comment(shown, "retry three times", "Why three?");
+    comment(shown, "Step 12 of the plan.", "Which step?");
+    await numbered(store);
+    query<HTMLButtonElement>(shown, ".viewer-bar-annotations")!.click();
+
+    selectSource(shown, "retry three");
+    clickOn(markOf(shown, "retry three times"));
+    expect(listHidden(shown)).toBe(true);
+    collapse(shown);
+    clickOn(markOf(shown, "retry three times"), {}, 12);
+    clickOn(markOf(shown, "retry three times"), { detail: 2 });
+    clickOn(markOf(shown, "retry three times"), { ctrlKey: true });
+    expect(listHidden(shown)).toBe(true);
+    // Text without a mark.
+    clickOn([...shown.element.querySelectorAll(".cm-line")][2]);
+    expect(listHidden(shown)).toBe(true);
+    clickOn(markOf(shown, "retry three times"));
+    expect(listHidden(shown)).toBe(false);
+  });
+
+  it("opens the thread from the bar beside a marked line", async () => {
+    const { shown, store } = setup({ text: PLAN });
+    comment(shown, "retry three times", "Why three?");
+    comment(shown, "Step 12 of the plan.", "Which step?");
+    await numbered(store);
+    collapse(shown);
+    const view = editor(shown);
+    const gutter = query(shown, ".cm-viewer-marks")!;
+    const clientY = view.lineBlockAt(view.state.doc.line(30).from).top + view.documentTop + 1;
+    gutter.dispatchEvent(new MouseEvent("pointerdown", { bubbles: true, button: 0, clientX: 2, clientY }));
+    gutter.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0, detail: 1, clientX: 2, clientY }));
+    expect(entry(shown, 1).classList.contains("active")).toBe(true);
+  });
+
+  it("opens the thread of a marked block of the rendered view", async () => {
+    const { shown, store } = setup({ text: RENDERED_PLAN, mode: "rendered" });
+    selectRendered(shown, "retry three times");
+    shown.annotationMenu()!.annotate("comment");
+    write(shown, "Comment", "Make it configurable.");
+    pressKey(shown, { key: "Enter", ctrlKey: true });
+    await numbered(store);
+    vi.restoreAllMocks();
+    query<HTMLButtonElement>(shown, ".viewer-bar-annotations")!.click();
+    const root = query(shown, ".viewer-rendered")!.shadowRoot!;
+    // Without the highlight API, the passage's block is marked.
+    const block = root.querySelector("[data-splitty-mark]")!;
+    clickOn(block.firstChild!.parentElement!);
+    expect(listHidden(shown)).toBe(false);
+    expect(document.activeElement).toBe(entry(shown, 1));
+    expect(root.querySelector("[data-splitty-mark]")!.getAttribute("data-splitty-mark")).toBe("active");
+  });
+
+  it("shows which annotation the mark under the pointer is, and what a click there chooses", async () => {
+    const { shown, store } = setup({ text: PLAN });
+    comment(shown, "retry three times before giving up", "Why retry?");
+    selectSource(shown, "three");
+    shown.annotationMenu()!.annotate("change");
+    write(shown, "Replacement", "five");
+    pressKey(shown, { key: "Enter", ctrlKey: true });
+    await numbered(store);
+    collapse(shown);
+    const box = query(shown, ".viewer-document")!;
+    const move = (target: Element) => target.dispatchEvent(new MouseEvent("mousemove", { bubbles: true, buttons: 0, clientX: 20, clientY: 10 }));
+
+    move(markOf(shown, "three"));
+    await vi.waitFor(() => expect(box.title).toBe("#2 · Change, #1 · Comment"));
+    expect(box.classList.contains("viewer-mark-hover")).toBe(true);
+    expect(marked(shown, ".cm-viewer-marked-hover")).toEqual(["three"]);
+
+    // After a click there, the pointer shows the one the next click chooses.
+    clickOn(markOf(shown, "three"));
+    move(markOf(shown, "three"));
+    await vi.waitFor(() => expect(marked(shown, ".cm-viewer-marked-hover").join("")).toContain("retry"));
+    expect(box.title).toBe("#2 · Change, #1 · Comment");
+
+    box.dispatchEvent(new MouseEvent("mouseleave"));
+    expect(box.hasAttribute("title")).toBe(false);
+    expect(box.classList.contains("viewer-mark-hover")).toBe(false);
+    expect(marked(shown, ".cm-viewer-marked-hover")).toEqual([]);
   });
 });
 

@@ -616,6 +616,7 @@ body,
    */
   --splitty-annotation-bg: color-mix(in srgb, var(--splitty-accent) 24%, transparent);
   --splitty-annotation-active-bg: color-mix(in srgb, var(--splitty-accent) 46%, transparent);
+  --splitty-annotation-hover-bg: color-mix(in srgb, var(--splitty-accent) 36%, transparent);
   --splitty-annotation-block-bg: color-mix(in srgb, var(--splitty-accent) 10%, transparent);
   --splitty-annotation-changed-bg: color-mix(in srgb, var(--splitty-warning) 20%, transparent);
   --splitty-annotation-resolved-bg: color-mix(in srgb, var(--splitty-text-muted) 16%, transparent);
@@ -748,6 +749,25 @@ body,
 .viewer-bar-annotations[aria-pressed="true"] {
   color: var(--splitty-text-primary);
   border-color: var(--splitty-accent-muted);
+}
+
+/* The eye that hides the document's marks, struck through while they are hidden. */
+.viewer-bar-marks {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 5px;
+}
+
+.viewer-bar-marks[aria-pressed="true"] {
+  color: var(--splitty-text-primary);
+  border-color: var(--splitty-accent-muted);
+}
+
+/* A mark under the pointer leads to its thread. */
+.viewer-document.viewer-mark-hover,
+.viewer-document.viewer-mark-hover .cm-content {
+  cursor: pointer;
 }
 
 /* ── Viewer Annotations ── */

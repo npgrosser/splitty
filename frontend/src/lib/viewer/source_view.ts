@@ -16,6 +16,10 @@
  * and one of a resolved annotation, has a style of its own (D7 of
  * review-threads); where marks share a line, its bar shows an open passage
  * before a changed one, and that before a resolved one.
+ *
+ * A passage's decoration names its annotation, so that the marks under the
+ * pointer are the decorations around its target (`marksAt`); on the bars,
+ * they are the marks of the line beside them (D4 of viewer-clickable-marks).
  */
 
 import {
@@ -45,6 +49,8 @@ export interface SourceSelection {
 
 /** An annotated passage: its text, where it has one in this view, and its lines. */
 export interface SourceMark {
+  /** The annotation's ID, which tells which marks are under the pointer. */
+  readonly id?: string;
   /** UTF-16 offsets of the passage, `to` exclusive; absent for a passage of the other view. */
   readonly from?: number;
   readonly to?: number;
@@ -52,6 +58,8 @@ export interface SourceMark {
   readonly endLine: number;
   /** The passage the user chose. */
   readonly active?: boolean;
+  /** The passage under the pointer. */
+  readonly hover?: boolean;
   /** A passage found as what its quote most likely became, or one of a resolved annotation. */
   readonly style?: "changed" | "resolved";
 }
@@ -129,6 +137,7 @@ const theme = EditorView.theme({
   ".cm-panel.cm-search label": { color: "var(--splitty-text-secondary)", marginRight: "6px" },
   ".cm-panel.cm-search [name=close]": { color: "var(--splitty-text-secondary)", backgroundColor: "transparent", border: "none" },
   ".cm-viewer-marks .cm-gutterElement": { padding: "0 2px" },
+  ".cm-viewer-marks .cm-gutterElement:has(.cm-viewer-mark)": { cursor: "pointer" },
   ".cm-viewer-mark": { width: "3px", height: "100%", borderRadius: "1px", backgroundColor: "var(--splitty-accent)" },
   ".cm-viewer-mark-changed": { backgroundColor: "var(--splitty-warning)" },
   ".cm-viewer-mark-resolved": { backgroundColor: "var(--splitty-text-muted)" },
@@ -138,6 +147,7 @@ const theme = EditorView.theme({
     textDecoration: "underline dotted var(--splitty-warning)",
   },
   ".cm-viewer-marked-resolved": { backgroundColor: "var(--splitty-annotation-resolved-bg, var(--splitty-hover-bg))" },
+  ".cm-viewer-marked-hover": { backgroundColor: "var(--splitty-annotation-hover-bg, var(--splitty-accent-muted))", cursor: "pointer" },
   ".cm-viewer-marked-active": { backgroundColor: "var(--splitty-annotation-active-bg, var(--splitty-accent-muted))" },
   ".sv-keyword": { color: "var(--sv-keyword)" },
   ".sv-string": { color: "var(--sv-string)" },
@@ -186,20 +196,22 @@ interface Marks {
 
 const setMarks = StateEffect.define<readonly SourceMark[]>();
 
-const passageMarks = new Map<string, Decoration>();
+/** The attribute of a passage's decoration that names its annotation. */
+const MARK_ID = "data-annotation-id";
 
-/** The decoration of a passage in `style`, the chosen one's as well. */
-function passageMark(style: MarkStyle, active: boolean): Decoration {
-  const key = `${style}:${active}`;
-  let mark = passageMarks.get(key);
-  if (!mark) {
-    const classes = ["cm-viewer-marked"];
-    if (style !== "open") classes.push(`cm-viewer-marked-${style}`);
-    if (active) classes.push("cm-viewer-marked-active");
-    mark = Decoration.mark({ class: classes.join(" ") });
-    passageMarks.set(key, mark);
-  }
-  return mark;
+/** The decoration of a passage in `style`, the chosen one's and the one under the pointer as well. */
+function passageMark(mark: SourceMark, style: MarkStyle): Decoration {
+  const classes = ["cm-viewer-marked"];
+  if (style !== "open") classes.push(`cm-viewer-marked-${style}`);
+  if (mark.hover) classes.push("cm-viewer-marked-hover");
+  if (mark.active) classes.push("cm-viewer-marked-active");
+  return Decoration.mark({ class: classes.join(" "), ...(mark.id ? { attributes: { [MARK_ID]: mark.id } } : {}) });
+}
+
+/** The lines a mark puts its bar beside. */
+function markedLines(mark: SourceMark, lines: number): { first: number; last: number } {
+  const first = Math.max(1, Math.min(lines, mark.startLine));
+  return { first, last: Math.min(lines, Math.max(first, mark.endLine), first + MAX_MARKED_LINES - 1) };
 }
 
 function buildMarks(marks: readonly SourceMark[], state: EditorState): Marks {
@@ -211,10 +223,9 @@ function buildMarks(marks: readonly SourceMark[], state: EditorState): Marks {
     if (mark.from !== undefined && mark.to !== undefined) {
       const from = Math.max(0, Math.min(doc.length, mark.from));
       const to = Math.max(from, Math.min(doc.length, mark.to));
-      if (to > from) decorations.push(passageMark(style, !!mark.active).range(from, to));
+      if (to > from) decorations.push(passageMark(mark, style).range(from, to));
     }
-    const first = Math.max(1, Math.min(doc.lines, mark.startLine));
-    const last = Math.min(doc.lines, Math.max(first, mark.endLine), first + MAX_MARKED_LINES - 1);
+    const { first, last } = markedLines(mark, doc.lines);
     for (let line = first; line <= last; line++) {
       const known = lines.get(line);
       if (known === undefined || STYLE_RANK[style] < STYLE_RANK[known]) lines.set(line, style);
@@ -251,6 +262,7 @@ export class SourceView {
   private readonly wrapping = new Compartment();
   private wrapped: boolean;
   private languageName: string | undefined;
+  private marks: readonly SourceMark[] = [];
   private destroyed = false;
 
   constructor(parent: HTMLElement, options: SourceViewOptions) {
@@ -289,6 +301,7 @@ export class SourceView {
   /** Replace the text; the first visible line stays in view as far as the new text has it. */
   setText(text: string, fileName?: string): void {
     const line = this.firstVisibleLine();
+    this.marks = [];
     this.view.dispatch({
       changes: { from: 0, to: this.view.state.doc.length, insert: text },
       effects: setMarks.of([]),
@@ -324,7 +337,36 @@ export class SourceView {
 
   /** Mark annotated passages and their lines; replaces earlier marks, and a later `setText` clears them. */
   setMarks(marks: readonly SourceMark[]): void {
+    this.marks = marks;
     this.view.dispatch({ effects: setMarks.of(marks) });
+  }
+
+  /**
+   * The IDs of the marks at `target`, an element under the pointer at the
+   * height `clientY`: the passages whose decorations hold it, or on the bars,
+   * every mark of the line beside them.
+   */
+  marksAt(target: EventTarget | null, clientY: number): string[] {
+    const node = target as Node | null;
+    const element = node ? (node.nodeType === 1 ? node as Element : node.parentElement) : null;
+    if (!element || !this.view.dom.contains(element)) return [];
+    const ids = new Set<string>();
+    if (this.view.contentDOM.contains(element)) {
+      for (let at: Element | null = element; at && at !== this.view.contentDOM; at = at.parentElement) {
+        const id = at.classList.contains("cm-viewer-marked") ? at.getAttribute(MARK_ID) : null;
+        if (id) ids.add(id);
+      }
+      return [...ids];
+    }
+    if (!element.closest(".cm-viewer-marks")) return [];
+    const doc = this.view.state.doc;
+    const block = this.view.lineBlockAtHeight(clientY - this.view.documentTop);
+    const line = doc.lineAt(Math.max(0, Math.min(doc.length, block.from))).number;
+    for (const mark of this.marks) {
+      const { first, last } = markedLines(mark, doc.lines);
+      if (mark.id && first <= line && line <= last) ids.add(mark.id);
+    }
+    return [...ids];
   }
 
   /** Where the selection's head is on the screen, or undefined without a selection or layout. */
