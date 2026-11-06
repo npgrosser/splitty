@@ -31,18 +31,6 @@ export function cellSize(terminal: Terminal): { width: number; height: number } 
   return width === 0 || height === 0 ? undefined : { width, height };
 }
 
-/** Fit the terminal to its container: {@link measure}, then resize the grid. */
-export function fit(terminal: Terminal): FitPadding | undefined {
-  const grid = measure(terminal);
-  if (!grid) return undefined;
-  if (terminal.rows !== grid.rows || terminal.cols !== grid.cols) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (terminal as any)._core._renderService.clear();
-    terminal.resize(grid.cols, grid.rows);
-  }
-  return grid.padding;
-}
-
 /**
  * The grid that fits the terminal's container. Applies the container padding
  * for that grid, but leaves the grid's size alone.

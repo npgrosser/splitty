@@ -16,10 +16,8 @@ import {
   writeClipboardText,
   wheelDeltaToLines,
   waitForLayout,
-  BSU,
-  ESU,
-  MAX_WRITE_BUF,
 } from "./terminal_shared.ts";
+import { OrderedOutput } from "./ordered_output.ts";
 
 // ── Pre-warm ──
 
@@ -86,14 +84,19 @@ export class GhosttyTerminalEmulator implements TerminalEmulator {
   private container: HTMLElement | null = null;
   private cleanups: (() => void)[] = [];
 
-  // Write batching state (rAF + DEC 2026 sync mode)
-  private writeBuf: Uint8Array[] = [];
-  private writeBufSize = 0;
-  private writeScheduled = false;
+  /** Output and size changes in arrival order (rAF batches, DEC 2026). */
+  private output: OrderedOutput;
 
   private constructor(terminal: Terminal, fitAddon: FitAddon, private readonly openLink?: (url: string) => void) {
     this.terminal = terminal;
     this.fitAddon = fitAddon;
+    // ghostty-web parses a write before it returns.
+    this.output = new OrderedOutput({
+      write: (data, parsed) => { terminal.write(data); parsed(); },
+      resize: (cols, rows) => terminal.resize(cols, rows),
+      get cols() { return terminal.cols; },
+      get rows() { return terminal.rows; },
+    });
   }
 
   /**
@@ -149,25 +152,18 @@ export class GhosttyTerminalEmulator implements TerminalEmulator {
   }
 
   write(data: Uint8Array): void {
-    this.writeBuf.push(data);
-    this.writeBufSize += data.length;
-    if (!this.writeScheduled) {
-      this.writeScheduled = true;
-      requestAnimationFrame(() => this.flushWrites());
-    }
-    if (this.writeBufSize > MAX_WRITE_BUF) {
-      this.flushWrites();
-    }
+    this.output.write(data);
   }
 
+  /** Takes effect after the output written before. */
   resize(cols: number, rows: number): void {
-    this.terminal.resize(cols, rows);
+    this.output.resize(cols, rows);
   }
 
   fit(): { cols: number; rows: number } | undefined {
     const dims = this.fitAddon.proposeDimensions();
     if (!dims) return undefined;
-    this.terminal.resize(dims.cols, dims.rows);
+    this.output.resize(dims.cols, dims.rows);
     return { cols: dims.cols, rows: dims.rows };
   }
 
@@ -200,6 +196,7 @@ export class GhosttyTerminalEmulator implements TerminalEmulator {
   }
 
   dispose(): void {
+    this.output.dispose();
     for (const cleanup of this.cleanups) cleanup();
     this.cleanups = [];
     this.terminal.dispose();
@@ -275,11 +272,11 @@ export class GhosttyTerminalEmulator implements TerminalEmulator {
   }
 
   get cols(): number {
-    return this.terminal.cols;
+    return this.output.cols;
   }
 
   get rows(): number {
-    return this.terminal.rows;
+    return this.output.rows;
   }
 
   get isAlternateScreen(): boolean {
@@ -300,28 +297,6 @@ export class GhosttyTerminalEmulator implements TerminalEmulator {
    */
   private send(data: string): void {
     this.terminal.input(data, true);
-  }
-
-  private flushWrites(): void {
-    if (this.writeBuf.length === 0) return;
-    const chunks = this.writeBuf;
-    this.writeBuf = [];
-    this.writeBufSize = 0;
-    this.writeScheduled = false;
-
-    let total = BSU.length;
-    for (const c of chunks) total += c.length;
-    total += ESU.length;
-
-    const merged = new Uint8Array(total);
-    merged.set(BSU, 0);
-    let offset = BSU.length;
-    for (const c of chunks) {
-      merged.set(c, offset);
-      offset += c.length;
-    }
-    merged.set(ESU, offset);
-    this.terminal.write(merged);
   }
 
   private attachKeyEventHandler(): void {

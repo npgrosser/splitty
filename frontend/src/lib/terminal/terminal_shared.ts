@@ -137,9 +137,3 @@ export function waitForLayout(el: HTMLElement): Promise<void> {
     ro.observe(el);
   });
 }
-
-// ── DEC 2026 Synchronized Update Constants ──
-
-export const BSU = new Uint8Array([0x1b, 0x5b, 0x3f, 0x32, 0x30, 0x32, 0x36, 0x68]); // ESC[?2026h
-export const ESU = new Uint8Array([0x1b, 0x5b, 0x3f, 0x32, 0x30, 0x32, 0x36, 0x6c]); // ESC[?2026l
-export const MAX_WRITE_BUF = 4 * 1024 * 1024; // 4 MB cap

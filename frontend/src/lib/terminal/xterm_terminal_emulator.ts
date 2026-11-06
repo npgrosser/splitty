@@ -1,7 +1,8 @@
 import { Terminal } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
 import type { SearchAddon, ISearchOptions } from "@xterm/addon-search";
-import { cellSize, fit as customFit, measure } from "./fit.ts";
+import { cellSize, measure } from "./fit.ts";
+import { OrderedOutput } from "./ordered_output.ts";
 import { getXtermTheme } from "../theme.ts";
 import { getConfig, type TerminalConfig } from "../terminal_config.ts";
 import { getSettings, type SplittySettings } from "../settings.ts";
@@ -19,9 +20,6 @@ import {
   wheelDeltaToLines,
   appReportsWheel,
   waitForLayout,
-  BSU,
-  ESU,
-  MAX_WRITE_BUF,
 } from "./terminal_shared.ts";
 
 // ── WebGL Addon Loader ──
@@ -130,10 +128,8 @@ export class XtermTerminalEmulator implements TerminalEmulator {
   private container: HTMLElement | null = null;
   private cleanups: (() => void)[] = [];
 
-  // Write batching state (rAF + DEC 2026 sync mode)
-  private writeBuf: Uint8Array[] = [];
-  private writeBufSize = 0;
-  private writeScheduled = false;
+  /** Output and size changes in arrival order (rAF batches, DEC 2026). */
+  private output: OrderedOutput;
 
   // Scrollbar fade state
   private scrollCleanup: (() => void) | undefined;
@@ -144,6 +140,17 @@ export class XtermTerminalEmulator implements TerminalEmulator {
   private constructor(terminal: Terminal, fitAddon: FitAddon, private readonly openLink?: (url: string) => void) {
     this.terminal = terminal;
     this.fitAddon = fitAddon;
+    this.output = new OrderedOutput({
+      write: (data, parsed) => terminal.write(data, parsed),
+      resize: (cols, rows) => {
+        // Drop the old frame, or its cells linger at the new size.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (terminal as any)._core._renderService.clear();
+        terminal.resize(cols, rows);
+      },
+      get cols() { return terminal.cols; },
+      get rows() { return terminal.rows; },
+    });
   }
 
   /**
@@ -219,29 +226,19 @@ export class XtermTerminalEmulator implements TerminalEmulator {
   }
 
   write(data: Uint8Array): void {
-    this.writeBuf.push(data);
-    this.writeBufSize += data.length;
-    if (!this.writeScheduled) {
-      this.writeScheduled = true;
-      requestAnimationFrame(() => this.flushWrites());
-    }
-    if (this.writeBufSize > MAX_WRITE_BUF) {
-      this.flushWrites();
-    }
+    this.output.write(data);
   }
 
+  /** Takes effect after the output written before; {@link cols} and {@link rows} have the new size at once. */
   resize(cols: number, rows: number): void {
-    if (cols === this.terminal.cols && rows === this.terminal.rows) return;
-    // As in fit(): drop the old frame, or its cells linger at the new size.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    (this.terminal as any)._core._renderService.clear();
-    this.terminal.resize(cols, rows);
+    this.output.resize(cols, rows);
   }
 
   fit(): { cols: number; rows: number } | undefined {
-    const padding = customFit(this.terminal);
-    if (!padding) return undefined;
-    return { cols: this.terminal.cols, rows: this.terminal.rows };
+    const grid = measure(this.terminal);
+    if (!grid) return undefined;
+    this.output.resize(grid.cols, grid.rows);
+    return { cols: this.cols, rows: this.rows };
   }
 
   measure(): { cols: number; rows: number } | undefined {
@@ -270,6 +267,7 @@ export class XtermTerminalEmulator implements TerminalEmulator {
   }
 
   dispose(): void {
+    this.output.dispose();
     this.scrollCleanup?.();
     for (const cleanup of this.cleanups) cleanup();
     this.cleanups = [];
@@ -405,11 +403,11 @@ export class XtermTerminalEmulator implements TerminalEmulator {
   }
 
   get cols(): number {
-    return this.terminal.cols;
+    return this.output.cols;
   }
 
   get rows(): number {
-    return this.terminal.rows;
+    return this.output.rows;
   }
 
   get isAlternateScreen(): boolean {
@@ -456,28 +454,6 @@ export class XtermTerminalEmulator implements TerminalEmulator {
   }
 
   // ── Internal ──
-
-  private flushWrites(): void {
-    if (this.writeBuf.length === 0) return;
-    const chunks = this.writeBuf;
-    this.writeBuf = [];
-    this.writeBufSize = 0;
-    this.writeScheduled = false;
-
-    let total = BSU.length;
-    for (const c of chunks) total += c.length;
-    total += ESU.length;
-
-    const merged = new Uint8Array(total);
-    merged.set(BSU, 0);
-    let offset = BSU.length;
-    for (const c of chunks) {
-      merged.set(c, offset);
-      offset += c.length;
-    }
-    merged.set(ESU, offset);
-    this.terminal.write(merged);
-  }
 
   private attachKeyEventHandler(): void {
     this.terminal.attachCustomKeyEventHandler((e: KeyboardEvent) => {
