@@ -141,6 +141,11 @@ threads, so review each revision of a plan under the same title. If your tool ca
 out, a timeout ends the wait: run the command in the background, or run it again with the
 same title and text to wait again.
 
+Where the user set up `splitty review --hook claude-code` as a hook of Claude Code,
+leaving plan mode opens your plan in a viewer pane by itself: do not review that plan
+again with `splitty review`. A request for changes reaches you as the refusal of
+`ExitPlanMode` with the review; revise the plan as it asks and leave plan mode again.
+
 ## Hand a file to the user
 
 From an ordinary pane (not under `SPLITTY_AGENT_SOCK`), offer a file on this server to

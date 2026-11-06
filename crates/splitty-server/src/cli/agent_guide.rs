@@ -53,6 +53,7 @@ mod tests {
             "splitty comments PLAN.md --all",
             "splitty comments reply PLAN.md 2",
             "Replied to #<number> in <document>",
+            "splitty review --hook claude-code",
             "name one by its ID",
             "splitty review PLAN.md",
             "splitty review --text --title Plan",

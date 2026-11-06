@@ -1652,8 +1652,9 @@ async fn finished(child: Child) -> std::process::Output {
 }
 
 /// cli, Comments Command (Nothing sent yet, Read a sent review, Reply, Two
-/// viewers of one file) and Review Command (A plan reviewed, The next
-/// revision of the plan, Approved, Outcome as JSON, The pane closed): the
+/// viewers of one file), Review Command (A plan reviewed, The next revision
+/// of the plan, Approved, Outcome as JSON, The pane closed) and Review Hook
+/// For Claude Code (Changes requested, Outside Splitty): the
 /// real `splitty` in a pane's environment against a real server, answered by
 /// a window over the WebSocket. Smoke: only here are the CLI's discovery of
 /// the server, its output and its exit status visible; the endpoints are
@@ -1841,6 +1842,57 @@ async fn an_agent_reads_and_answers_a_review_through_the_cli() {
         assert!(output.status.success(), "{output:?}");
         assert_eq!(String::from_utf8_lossy(&output.stdout), printed);
     }
+
+    // Claude Code's hook: the plan of its event goes to the same pane, and a
+    // request for changes is a denial with the review, with status 0.
+    let event = json!({
+        "hook_event_name": "PermissionRequest", "tool_name": "ExitPlanMode",
+        "cwd": dir, "tool_input": {"plan": revised},
+    })
+    .to_string();
+    let child = review(&server, &dir, &["--hook", "claude-code"], &event);
+    let (again, wait, record) = waiting_review(&mut window).await;
+    assert_eq!(again, plan_pane, "{record}");
+    send(
+        &mut window,
+        json!({"type": "viewer.review_answer", "screenId": "s-cli", "paneId": again,
+               "waitId": wait, "outcome": "changes_requested", "review": changes}),
+    )
+    .await;
+    assert_eq!(
+        message_of(&mut window, "viewer.review_answered").await["accepted"],
+        true
+    );
+    let output = finished(child).await;
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    let decision: serde_json::Value = serde_json::from_slice(&output.stdout).expect("decision");
+    assert_eq!(
+        decision,
+        json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest",
+               "decision": {"behavior": "deny", "message": changes}}})
+    );
+    // Outside a Splitty terminal the hook decides nothing, and only the
+    // binary's exit path shows that it still exits 0.
+    let mut outside = cli(&server, &dir);
+    outside.env_remove("SPLITTY_PANE_ID");
+    let mut child = outside
+        .args(["review", "--hook", "claude-code"])
+        .stdin(Stdio::piped())
+        .spawn()
+        .expect("splitty review");
+    child
+        .stdin
+        .take()
+        .expect("stdin")
+        .write_all(event.as_bytes())
+        .expect("event");
+    let output = finished(child).await;
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
+    assert!(output.stdout.is_empty(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Claude Code asks the user itself"),
+        "{output:?}"
+    );
 
     let child = review(&server, &dir, &["--text", "--title", "Plan"], revised);
     let (pane, _, _) = waiting_review(&mut window).await;

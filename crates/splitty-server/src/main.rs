@@ -227,7 +227,7 @@ enum Commands {
         #[command(flatten)]
         ctl: CtlOpts,
         /// The file to review, relative to this shell
-        #[arg(required_unless_present = "text", conflicts_with = "text")]
+        #[arg(required_unless_present_any = ["text", "hook"], conflicts_with = "text")]
         path: Option<std::path::PathBuf>,
         /// Review the text read from standard input (at most 256 KiB)
         #[arg(long)]
@@ -241,6 +241,10 @@ enum Commands {
         /// Print the outcome as JSON
         #[arg(long)]
         json: bool,
+        /// Serve as an agent's hook: review the plan of the hook event on
+        /// standard input and print the agent's decision; always exits 0
+        #[arg(long, value_parser = ["claude-code"], conflicts_with_all = ["path", "text", "title", "format", "json"])]
+        hook: Option<String>,
         /// Calling pane (defaults to $SPLITTY_PANE_ID)
         #[arg(long)]
         pane: Option<String>,
@@ -745,6 +749,12 @@ async fn async_main() {
         let allowed = grant_command_allowed(&cli.command);
         if !allowed {
             let error = "administrative commands are unavailable under an agent grant";
+            if matches!(cli.command, Commands::Review { hook: Some(_), .. }) {
+                // A hook that fails leaves the decision to the agent: status
+                // 2 would deny its plan.
+                eprintln!("Error: {error}; the agent asks the user itself");
+                std::process::exit(0);
+            }
             if std::env::args().any(|a| a == "--json") {
                 println!(
                     "{}",
@@ -1000,6 +1010,40 @@ async fn async_main() {
         }
         Commands::Review {
             ctl,
+            hook: Some(_),
+            pane,
+            screen,
+            ..
+        } => {
+            // Claude Code's hook (`cli`, Review Hook For Claude Code): a
+            // decision only for the user's verdict; on every failure nothing,
+            // status 0 and the reason on standard error, so that Claude Code
+            // asks the user itself.
+            let decided = async {
+                let request = cli::review::plan_request(std::io::stdin().lock())
+                    .map_err(cli::CliError::Failed)?;
+                let (screen, pane) = (resolve_screen(&screen), resolve_pane(&pane));
+                let review = request.review(&screen, &pane)?;
+                let server = discover_server(&ctl)?;
+                cli::review::run_hook(&server, &review, &request).await
+            }
+            .await;
+            match decided {
+                Ok(decision) => {
+                    use std::io::Write;
+                    let mut stdout = std::io::stdout().lock();
+                    if let Err(error) = stdout
+                        .write_all(decision.as_bytes())
+                        .and_then(|()| stdout.flush())
+                    {
+                        eprintln!("Error: Cannot print the decision: {error}");
+                    }
+                }
+                Err(error) => eprintln!("Error: {error}; Claude Code asks the user itself"),
+            }
+        }
+        Commands::Review {
+            ctl,
             path,
             text,
             title,
@@ -1007,6 +1051,7 @@ async fn async_main() {
             json,
             pane,
             screen,
+            hook: None,
         } => {
             handle_ctl(async {
                 let (screen, pane) = (resolve_screen(&screen), resolve_pane(&pane));
@@ -2931,6 +2976,12 @@ mod editor_cli_tests {
             cli.command,
             Commands::Review { text: true, format: Some(format), .. } if format == "text"
         ));
+        let cli =
+            Cli::try_parse_from(["splitty", "review", "--hook", "claude-code"]).expect("parse");
+        assert!(matches!(
+            cli.command,
+            Commands::Review { path: None, text: false, hook: Some(hook), .. } if hook == "claude-code"
+        ));
         for args in [
             vec!["review"],
             vec!["review", "PLAN.md", "--text"],
@@ -2938,6 +2989,11 @@ mod editor_cli_tests {
             vec!["review", "--title", "Plan"],
             vec!["review", "PLAN.md", "--format", "text"],
             vec!["review", "--text", "--format", "html"],
+            vec!["review", "--hook", "codex"],
+            vec!["review", "--hook", "claude-code", "PLAN.md"],
+            vec!["review", "--hook", "claude-code", "--text"],
+            vec!["review", "--hook", "claude-code", "--title", "Plan"],
+            vec!["review", "--hook", "claude-code", "--json"],
         ] {
             assert!(
                 Cli::try_parse_from(std::iter::once("splitty").chain(args.clone())).is_err(),

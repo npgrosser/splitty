@@ -83,7 +83,9 @@ More in [Files and editors](docs/files-and-editors.md).
   you its plan or report. A terminal selection opens the same way from the
   context menu. Comment on passages or suggest changes, send the review to
   the agent's terminal as Markdown, and follow the agent's replies in each
-  thread; `splitty review` lets an agent wait for your verdict.
+  thread; `splitty review` lets an agent wait for your verdict, and as a
+  hook of Claude Code it opens each plan for approval
+  ([setup](docs/files-and-editors.md#plans-of-claude-code)).
 
 To get started, add this to your `CLAUDE.md` or `AGENTS.md`:
 

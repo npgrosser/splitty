@@ -76,6 +76,32 @@ The pane then shows a banner, `<title> waits for a review`, with a field for an 
 
 Text in the overall comment field becomes a general comment, with its own number and thread, before the answer goes out. The review starts with its verdict (`Verdict: approved` or `Verdict: changes requested`) and lists the general comments before the comments on passages; it notes when the file changed while the command waited. The answered annotations are marked as sent. `--json` prints the outcome as JSON with the same status. Closing the pane first ends the command with status 1. While a command waits, the pane's tab shows an hourglass, so a waiting review in a background tab is not missed. A text piped in is rendered as Markdown, or shown as plain text with `--format text`. Piped in again from the same pane with the same title, it replaces the text of its viewer pane, which keeps its annotations; while a command still waits for that pane, a second one fails and changes nothing. Two commands started at once cannot take each other's answer: the one whose text the other replaced before it waited fails.
 
+### Plans of Claude Code
+
+As a hook of Claude Code, `splitty review` takes over the approval of a plan when Claude Code leaves plan mode. Add this to Claude Code's settings (`~/.claude/settings.json`, or `.claude/settings.json` of a project):
+
+```json
+{
+  "hooks": {
+    "PermissionRequest": [
+      {
+        "matcher": "ExitPlanMode",
+        "hooks": [
+          { "type": "command", "command": "splitty review --hook claude-code", "timeout": 86400 }
+        ]
+      }
+    ]
+  }
+}
+```
+
+When Claude Code in a Splitty terminal asks to approve its plan, the plan opens in a viewer pane next to it, titled `Plan`, instead of Claude Code's own dialog:
+
+- **Approve** leaves plan mode. Comments not yet sent go along as notes: Claude Code gets the plan followed by a rule and the review.
+- **Request Changes** keeps Claude Code in plan mode with the review as the reason; its next plan replaces the text of the same pane, which keeps the annotations and their threads.
+
+Wherever the hook cannot review, it decides nothing, and Claude Code shows its own dialog: outside a Splitty terminal, for another event or tool, when the server is too old, when the pane is closed before an answer or the connection ends. The hook never approves on its own. The `timeout`, in seconds, is how long Claude Code waits for your verdict before it falls back to its dialog. `PreToolUse` works as the event as well; it runs on every call of the tool, also where Claude Code's permission mode would not ask. The plan is taken from the tool's input, or from the plan file it names.
+
 Terminal selections opened in a viewer can be annotated the same way, for example to answer a long reply of an agent point by point.
 
 ## Open files in your editor: `splitty open --editor`
