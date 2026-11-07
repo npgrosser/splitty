@@ -1,13 +1,13 @@
 use super::*;
 use serde_json::json;
 
-fn model(ids: &[&str]) -> LocalWorkspace {
-    let mut model = LocalWorkspace::new(Uuid::new_v4());
+fn model(ids: &[&str]) -> SourceWorkspace {
+    let mut model = SourceWorkspace::new(Uuid::new_v4());
     model.set_catalog_supported(true);
     catalog(&mut model, ids, ids.first().copied());
     model
 }
-fn catalog(model: &mut LocalWorkspace, ids: &[&str], active: Option<&str>) -> WorkspaceDelta {
+fn catalog(model: &mut SourceWorkspace, ids: &[&str], active: Option<&str>) -> WorkspaceDelta {
     model.catalog_in_flight = Some(model.mutation);
     model
         .apply_catalog(model.connection_id, &catalog_event(ids, active))
@@ -22,7 +22,7 @@ fn snapshot(id: &str, panes: &[&str]) -> Value {
         "panes":panes.iter().map(|pane| (pane.to_string(),json!({"id":pane}))).collect::<serde_json::Map<_,_>>(),
         "sessions":{}}})
 }
-fn reserve(model: &mut LocalWorkspace, screen: &str, pane: &str, mutation: u64) {
+fn reserve(model: &mut SourceWorkspace, screen: &str, pane: &str, mutation: u64) {
     let screen_model = ScreenModel::new(
         ScreenIds {
             screen_id: screen.into(),
@@ -498,7 +498,7 @@ fn removed_screen_and_old_generation_cannot_reenter_routes() {
 
 #[test]
 fn unknown_active_hint_uses_first_catalog_entry() {
-    let mut model = LocalWorkspace::new(Uuid::new_v4());
+    let mut model = SourceWorkspace::new(Uuid::new_v4());
     model.set_catalog_supported(true);
     catalog(&mut model, &["a", "b"], Some("unlisted"));
     assert_eq!(model.shown_screen_id(), Some("a"));
@@ -538,7 +538,7 @@ mod service {
 
     struct Window {
         client: Client,
-        model: LocalWorkspace,
+        model: SourceWorkspace,
         output: HashMap<String, Vec<u8>>,
     }
     impl Window {
@@ -631,7 +631,7 @@ mod service {
                 break;
             }
         }
-        let mut model = LocalWorkspace::new(client.connection_id());
+        let mut model = SourceWorkspace::new(client.connection_id());
         model.set_catalog_supported(true);
         model.set_tab_selection_supported(true);
         model.mark_catalog_dirty();
@@ -860,7 +860,7 @@ mod service {
                 break;
             }
         }
-        let mut model = LocalWorkspace::new(client.connection_id());
+        let mut model = SourceWorkspace::new(client.connection_id());
         model.set_catalog_supported(true);
         model.mark_catalog_dirty();
         let mut window = Window {

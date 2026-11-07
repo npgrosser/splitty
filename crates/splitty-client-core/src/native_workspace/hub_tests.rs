@@ -1,4 +1,5 @@
 use super::*;
+use crate::workspace::SourceWorkspace;
 use serde_json::json;
 use std::time::Duration;
 use uuid::Uuid;
@@ -89,6 +90,7 @@ async fn passive_directory_refresh_keeps_local_worker_and_cleanup_independent() 
                 }
             }
             Update::Workspace(model) => {
+                let model = local_projection(&model);
                 established_owner = Some(model.connection_id());
                 if let Some(first) = model.routes().first() {
                     route = Some((first.pane_id.clone(), first.session_id.clone()));
@@ -100,7 +102,7 @@ async fn passive_directory_refresh_keeps_local_worker_and_cleanup_independent() 
     }
     let initial = initial.unwrap();
     let owner = initial.connection_id;
-    let scope = SourceToken::initial(owner);
+    let scope = SourceWorkspace::new(owner).source_token();
     let HostDirectoryState::Ready(snapshot) = initial.state else {
         unreachable!()
     };

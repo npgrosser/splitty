@@ -136,7 +136,12 @@ impl Workspace {
         {
             return;
         }
-        let Some(source) = self.model.as_ref().map(LocalWorkspace::source_token) else {
+        let Some(source) = self
+            .model
+            .as_ref()
+            .map(WindowWorkspace::local_source)
+            .map(SourceWorkspace::source_token)
+        else {
             self.status = "Templates are unavailable while the workspace starts".into();
             cx.notify();
             return;
@@ -209,6 +214,7 @@ impl Workspace {
         if !self
             .model
             .as_ref()
+            .map(WindowWorkspace::local_source)
             .is_some_and(|model| model.source_token() == dialog.source)
         {
             return;
@@ -240,9 +246,15 @@ impl Workspace {
         let Some(dialog) = self.template_dialog.as_mut() else {
             return;
         };
-        if !self.model.as_ref().is_some_and(|model| {
-            model.source_token() == dialog.source && model.connection_id() == result.connection_id
-        }) {
+        if !self
+            .model
+            .as_ref()
+            .map(WindowWorkspace::local_source)
+            .is_some_and(|model| {
+                model.source_token() == dialog.source
+                    && model.connection_id() == result.connection_id
+            })
+        {
             return;
         }
         let Some(request) = dialog.accept(result.connection_id, result.request_id) else {
@@ -345,7 +357,7 @@ impl Workspace {
     }
 
     fn template_extract(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.model.as_ref().map(WindowWorkspace::local_source) else {
             return;
         };
         let Some(screen) = model.shown_screen_id() else {
@@ -396,6 +408,7 @@ impl Workspace {
         if !self
             .model
             .as_ref()
+            .map(WindowWorkspace::local_source)
             .is_some_and(|model| model.shown_screen_id() == Some(screen_id.as_str()))
         {
             if let Some(dialog) = &mut self.template_dialog {
@@ -543,7 +556,7 @@ impl Workspace {
         else {
             return;
         };
-        let Some(model) = &self.model else {
+        let Some(model) = self.model.as_ref().map(WindowWorkspace::local_source) else {
             return;
         };
         let target = match target {
@@ -615,6 +628,7 @@ impl Workspace {
         if !self
             .model
             .as_ref()
+            .map(WindowWorkspace::local_source)
             .is_some_and(|model| model.source_token() == plan.source_token())
         {
             dialog.error = Some("Template review belongs to an earlier connection".into());
@@ -1363,7 +1377,7 @@ mod tests {
         let second = Uuid::new_v4();
         let mut dialog = TemplateDialog {
             owner,
-            source: splitty_client_core::workspace::LocalWorkspace::new(owner).source_token(),
+            source: splitty_client_core::workspace::SourceWorkspace::new(owner).source_token(),
             mode: TemplateMode::Library,
             catalog: None,
             pending: Some((second, TemplateApiRequest::List)),

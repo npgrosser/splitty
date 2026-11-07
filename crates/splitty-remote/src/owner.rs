@@ -456,6 +456,9 @@ impl Connection {
     pub async fn recv(&mut self) -> Option<Charged<Incoming>> {
         self.peer.as_mut()?.recv().await
     }
+    pub fn closed_reason(&self) -> Option<Arc<Charged<wire::Closed>>> {
+        self.peer.as_ref()?.closed_reason()
+    }
     /// API-only stream transaction. Domain authority is validated by the caller.
     pub async fn request(
         &mut self,
@@ -530,6 +533,72 @@ impl Drop for Connection {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn connection_closed_reason_survives_orderly_drain_and_cleanup() {
+        use splitty_transport::codec::{self, Frame};
+        let (physical, helper) = peers();
+        let context = queue::Context::default();
+        let ready = wire::Ready {
+            generation: 3,
+            instance: "a".repeat(32),
+            mux_protocol: 1,
+            purpose: wire::Purpose::Host {
+                target: "vm".into(),
+            },
+            limits: wire::Limits::default(),
+        };
+        let (io, mut raw) = tokio::io::duplex(4096);
+        let (read, write) = tokio::io::split(io);
+        let (_release, released) = watch::channel(true);
+        let mut connection = Connection {
+            requests: Default::default(),
+            peer: Some(Peer::start(read, write, &ready, context.clone())),
+            ready: None,
+            context: context.clone(),
+            relay: None,
+            released,
+            capacity: Arc::new(Mutex::new(Capacity {
+                opening: None,
+                stream: None,
+            })),
+            owner: physical.sender.clone(),
+            cleaning: false,
+        };
+        codec::write(
+            &mut raw,
+            &Frame::data(Kind::Text, wire::Delivery::new(3), b"last").unwrap(),
+        )
+        .await
+        .unwrap();
+        codec::write(
+            &mut raw,
+            &Frame::json(
+                Kind::Closed,
+                &wire::Closed {
+                    code: wire::CloseCode::BackendLost,
+                    message: "lost".into(),
+                    retryable: true,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let frame = connection.recv().await.unwrap();
+        assert_eq!(frame.frame.application().unwrap().1, b"last");
+        drop(frame);
+        assert!(connection.recv().await.is_none());
+        let reason = connection.closed_reason().unwrap();
+        assert_eq!(reason.code, wire::CloseCode::BackendLost);
+        assert!(reason.retryable);
+        connection.finish().await.unwrap();
+        assert!(context.budget.control.used() > 0);
+        drop(reason);
+        assert_eq!(context.budget.used(), 0);
+        physical.shutdown().await;
+        helper.shutdown().await;
+    }
     fn peers() -> (Peer, Peer) {
         let ready = wire::Ready {
             generation: 1,

@@ -9,7 +9,7 @@ use splitty_transport::{
     peer::{Incoming, Sender},
     wire::{self, Kind},
 };
-use std::{collections::HashMap, io};
+use std::{collections::HashMap, io, sync::Arc};
 use uuid::Uuid;
 
 pub(crate) const MAX_ATTACHMENTS: usize = 128;
@@ -139,6 +139,16 @@ impl Client {
             #[cfg(not(target_os = "windows"))]
             Backend::Service(client) => client.sender(),
             Backend::Owned(client) => client.sender(),
+        }
+    }
+
+    /// The actual transport closure, if received. Earlier accepted events
+    /// still need to be drained through `next_event` to EOF.
+    pub fn closed_reason(&self) -> Option<Arc<Charged<wire::Closed>>> {
+        match &self.backend {
+            #[cfg(not(target_os = "windows"))]
+            Backend::Service(client) => client.closed_reason(),
+            Backend::Owned(client) => client.closed_reason(),
         }
     }
 

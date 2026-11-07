@@ -1,6 +1,10 @@
 //! Bounded authoritative observations, owned by the worker, never UI model clones.
 use super::*;
-use splitty_transport::{codec, wire::MAX_FRAME_BYTES};
+use splitty_transport::{
+    budget::{Lease, Permit},
+    codec,
+    wire::MAX_FRAME_BYTES,
+};
 
 #[derive(Default)]
 pub(crate) struct WorkspaceRefresh {
@@ -11,12 +15,13 @@ struct Batch {
     generation: u64,
     opening: Option<Catalog>,
     requested: HashSet<String>,
-    snapshots: HashMap<String, (Arc<ScreenState>, usize)>,
+    snapshots: HashMap<String, (Arc<ScreenState>, usize, Permit)>,
     bytes: usize,
     closing: bool,
     repeated: bool,
 }
 struct Catalog {
+    _lease: Option<Lease>,
     entries: Vec<ScreenInfo>,
     active: Option<String>,
 }
@@ -27,13 +32,13 @@ impl Catalog {
 }
 impl WorkspaceRefresh {
     #[cfg(test)]
-    pub(super) fn test_trailing(&mut self, model: &mut LocalWorkspace) {
+    pub(super) fn test_trailing(&mut self, model: &mut SourceWorkspace) {
         let batch = self.batch.as_mut().expect("test active collection");
         batch.closing = true;
         model.catalog_in_flight = Some(batch.generation);
     }
 
-    pub fn begin(&mut self, model: &mut LocalWorkspace) -> io::Result<()> {
+    pub fn begin(&mut self, model: &mut SourceWorkspace) -> io::Result<()> {
         if self.batch.is_some() {
             return Ok(());
         }
@@ -56,11 +61,43 @@ impl WorkspaceRefresh {
         });
         Ok(())
     }
-    pub fn flush(&mut self, model: &mut LocalWorkspace, client: &Client) -> io::Result<()> {
+    pub(crate) fn needs_flush(&self, model: &SourceWorkspace) -> bool {
+        if self.draining.is_some() {
+            return false;
+        }
+        if self.batch.is_some() {
+            return model.catalog_in_flight.is_none();
+        }
+        (model.catalog_dirty && model.catalog_in_flight.is_none())
+            || model.models.values().any(|screen| screen.resync_pending)
+    }
+    pub(crate) fn observation_pending(&self, model: &SourceWorkspace) -> bool {
+        self.batch.is_some()
+            || self.draining.is_some()
+            || model.catalog_in_flight.is_some()
+            || self.needs_flush(model)
+    }
+    pub(crate) fn observation_active(&self) -> bool {
+        self.batch.is_some()
+    }
+    pub(crate) fn abort_observation(
+        &mut self,
+        model: &mut SourceWorkspace,
+        reason: String,
+    ) -> WorkspaceDelta {
+        // A timeout consumes this pass; a nudge or explicit Retry may start a
+        // fresh bounded pass, but must first drain any old ordered catalog fence.
+        model.catalog_dirty = false;
+        self.failed(model, reason)
+    }
+    pub fn flush(&mut self, model: &mut SourceWorkspace, client: &Client) -> io::Result<()> {
         if self.draining.is_some() {
             return Ok(());
         }
-        if self.batch.is_none() && model.reconciling && model.catalog_dirty {
+        if self.batch.is_none()
+            && ((model.reconciling && model.catalog_dirty)
+                || (model.kind() == SourceKind::Remote && self.needs_flush(model)))
+        {
             self.begin(model)?;
         }
         let Some(batch) = &mut self.batch else {
@@ -71,9 +108,18 @@ impl WorkspaceRefresh {
         }
         if let Some(opening) = &batch.opening {
             if !batch.closing {
-                for info in &opening.entries {
+                let all = model.kind() == SourceKind::Local;
+                let opened = &model.catalog;
+                for info in opening
+                    .entries
+                    .iter()
+                    .filter(|info| all || opened.iter().any(|entry| entry.id == info.id))
+                {
                     if !batch.requested.contains(info.id.as_str()) {
                         client.resync(info.id.as_str())?;
+                        if let Some(screen) = model.models.get_mut(info.id.as_str()) {
+                            screen.resync_pending = false;
+                        }
                         batch.requested.insert(info.id.to_string());
                     }
                 }
@@ -88,7 +134,7 @@ impl WorkspaceRefresh {
         }
         Ok(())
     }
-    fn failed(&mut self, model: &mut LocalWorkspace, reason: String) -> WorkspaceDelta {
+    fn failed(&mut self, model: &mut SourceWorkspace, reason: String) -> WorkspaceDelta {
         let previous = self.batch.take(); // release every staged allocation
         if model.catalog_dirty && previous.as_ref().is_some_and(|batch| !batch.repeated) {
             // One bounded recollection consumes a nudge that arrived during the
@@ -120,7 +166,7 @@ impl WorkspaceRefresh {
     }
     pub fn apply_catalog(
         &mut self,
-        model: &mut LocalWorkspace,
+        model: &mut SourceWorkspace,
         connection: Uuid,
         event: &Value,
     ) -> io::Result<WorkspaceDelta> {
@@ -132,7 +178,7 @@ impl WorkspaceRefresh {
             return Ok(WorkspaceDelta::default());
         }
         if self.batch.is_none() {
-            let entries = match catalog(event) {
+            let entries = match catalog(event, model) {
                 Ok(entries) => entries,
                 Err(error) => {
                     let watermark = model.catalog_in_flight.take();
@@ -162,7 +208,7 @@ impl WorkspaceRefresh {
         if watermark != Some(batch.generation) {
             return Ok(WorkspaceDelta::default());
         }
-        let entries = match catalog(event) {
+        let entries = match catalog(event, model) {
             Ok(entries) => entries,
             Err(error) => {
                 return Ok(self.failed(model, format!("Workspace refresh rejected: {error}")))
@@ -178,6 +224,10 @@ impl WorkspaceRefresh {
         if entries
             .entries
             .iter()
+            .filter(|info| {
+                model.kind() == SourceKind::Local
+                    || model.catalog.iter().any(|opened| opened.id == info.id)
+            })
             .any(|info| !batch.snapshots.contains_key(info.id.as_str()))
         {
             if !batch.repeated {
@@ -208,7 +258,7 @@ impl WorkspaceRefresh {
     }
     pub fn apply_snapshot(
         &mut self,
-        model: &mut LocalWorkspace,
+        model: &mut SourceWorkspace,
         connection: Uuid,
         event: &Value,
     ) -> io::Result<WorkspaceDelta> {
@@ -252,7 +302,7 @@ impl WorkspaceRefresh {
         }
         model.apply_snapshot(connection, event)
     }
-    fn collect(&mut self, model: &LocalWorkspace, event: &Value) -> io::Result<()> {
+    fn collect(&mut self, model: &SourceWorkspace, event: &Value) -> io::Result<()> {
         let batch = self.batch.as_mut().expect("collection exists");
         let Some(opening) = &batch.opening else {
             return Ok(());
@@ -260,7 +310,10 @@ impl WorkspaceRefresh {
         let id = event["screen"]["id"]
             .as_str()
             .ok_or_else(|| invalid("screen snapshot missing ID"))?;
-        if !opening.entries.iter().any(|info| info.id.as_str() == id) {
+        if !opening.entries.iter().any(|info| info.id.as_str() == id)
+            || (model.kind() == SourceKind::Remote
+                && !model.catalog.iter().any(|info| info.id.as_str() == id))
+        {
             return Ok(());
         }
         let screen = &event["screen"];
@@ -274,13 +327,13 @@ impl WorkspaceRefresh {
             .snapshots
             .iter()
             .filter(|(other, _)| other.as_str() != id)
-            .map(|(_, (state, _))| state.panes.len())
+            .map(|(_, (state, _, _))| state.panes.len())
             .sum();
         let other_sessions: usize = batch
             .snapshots
             .iter()
             .filter(|(other, _)| other.as_str() != id)
-            .map(|(_, (state, _))| state.sessions.len())
+            .map(|(_, (state, _, _))| state.sessions.len())
             .sum();
         let pending: HashSet<&str> = model
             .models
@@ -294,11 +347,11 @@ impl WorkspaceRefresh {
                     && !batch
                         .snapshots
                         .values()
-                        .any(|(s, _)| s.panes.contains_key(&PaneId::from(**pane)))
+                        .any(|(s, _, _)| s.panes.contains_key(&PaneId::from(**pane)))
             })
             .count();
-        if panes.len() + other_panes + unresolved > MAX_ATTACHMENTS
-            || sessions.len() + other_sessions > MAX_ATTACHMENTS
+        if panes.len() + other_panes + unresolved > model.limits.panes
+            || sessions.len() + other_sessions > model.limits.panes
         {
             return Err(capacity("workspace refresh attachment limit reached"));
         }
@@ -311,9 +364,14 @@ impl WorkspaceRefresh {
         // The ENTIRE staged generation is capped at one existing transport
         // MAX_FRAME_BYTES (16 MiB), not 16 MiB per Screen. Size before typed
         // allocation, and never retain delivery credits while awaiting others.
-        let old = batch.snapshots.get(id).map_or(0, |(_, bytes)| *bytes);
+        let old = batch.snapshots.get(id).map_or(0, |(_, bytes, _)| *bytes);
         let remaining = MAX_FRAME_BYTES - (batch.bytes - old);
         let bytes = codec::json_size(screen, remaining)?;
+        // Replace a staged observation within the shared window allowance. A
+        // failed replacement abandons the batch, so retaining its old copy is
+        // neither useful nor a reason to double-reserve the same slot.
+        batch.snapshots.remove(id);
+        let permit = model.staged.acquire(bytes).map_err(io::Error::other)?;
         let state = ScreenState::deserialize(screen).map_err(io::Error::other)?;
         if model
             .models
@@ -324,20 +382,39 @@ impl WorkspaceRefresh {
             return Err(invalid("older Screen snapshot cannot verify workspace"));
         }
         batch.bytes = batch.bytes - old + bytes;
-        batch.snapshots.insert(id.into(), (Arc::new(state), bytes));
+        batch
+            .snapshots
+            .insert(id.into(), (Arc::new(state), bytes, permit));
         Ok(())
     }
 }
-fn catalog(event: &Value) -> io::Result<Catalog> {
+fn catalog(event: &Value, model: &SourceWorkspace) -> io::Result<Catalog> {
+    let limit = if model.kind() == SourceKind::Local {
+        model.limits.screens
+    } else {
+        MAX_REMOTE_CATALOG
+    };
     if event["type"] != "mux.workspace_snapshot" {
         return Err(invalid("expected workspace catalog"));
     }
     let values = event["screens"]
         .as_array()
         .ok_or_else(|| invalid("invalid workspace catalog"))?;
-    if values.len() > MAX_LOCAL_SCREENS {
+    if values.len() > limit {
         return Err(capacity("native workspace Screen limit reached"));
     }
+    let lease = match &model.policy {
+        CatalogPolicy::Local => None,
+        CatalogPolicy::Remote { budget, .. } => {
+            let bytes =
+                codec::json_size(&event["screens"], splitty_core::native_api::MAX_API_BODY)?;
+            Some(
+                budget
+                    .reserve(bytes.saturating_mul(8), false)
+                    .map_err(io::Error::other)?,
+            )
+        }
+    };
     let mut ids = HashSet::new();
     let mut result = Vec::with_capacity(values.len());
     for value in values {
@@ -353,11 +430,16 @@ fn catalog(event: &Value) -> io::Result<Catalog> {
         .filter(|id| ids.iter().any(|known| known.as_str() == *id))
         .map(str::to_owned);
     Ok(Catalog {
+        _lease: lease,
         entries: result,
         active,
     })
 }
-fn commit(model: &mut LocalWorkspace, batch: &Batch, ending: &Value) -> io::Result<WorkspaceDelta> {
+fn commit(
+    model: &mut SourceWorkspace,
+    batch: &Batch,
+    ending: &Value,
+) -> io::Result<WorkspaceDelta> {
     let old_routes = model.route_map();
     let ready: HashSet<String> = model
         .models
@@ -367,18 +449,13 @@ fn commit(model: &mut LocalWorkspace, batch: &Batch, ending: &Value) -> io::Resu
     let mut next = model.clone();
     next.catalog_in_flight = Some(batch.generation);
     next.apply_catalog_inner(next.connection_id, ending)?;
-    for info in &next.catalog {
-        let screen = next
-            .models
-            .get_mut(info.id.as_str())
-            .expect("catalog model");
-        let state = batch
-            .snapshots
-            .get(info.id.as_str())
-            .expect("ending catalog collected")
-            .0
-            .clone();
-        screen.apply_screen(state)?;
+    for (id, screen) in &mut next.models {
+        // A newer local creation may be retained beyond this collection fence.
+        // Only members of the collected generation have an observation to apply.
+        let Some((state, _, _)) = batch.snapshots.get(id) else {
+            continue;
+        };
+        screen.apply_screen(state.clone())?;
         // apply_screen confirms a still-applicable local move. An unmatched
         // old move cannot remain a permanent admission lock after this fence.
         screen.pending_move = None;

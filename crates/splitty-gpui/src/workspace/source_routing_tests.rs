@@ -6,7 +6,7 @@ mod callbacks {
     use crate::terminal;
     use splitty_client_core::{
         native_workspace::{Command as WorkerCommand, CommandKind},
-        workspace::{LocalWorkspace, ScreenKey, TerminalToken},
+        workspace::{ScreenKey, SourceWorkspace, TerminalToken},
         EmbeddedService,
     };
     use std::sync::{Arc, Mutex};
@@ -15,9 +15,9 @@ mod callbacks {
         time::{timeout, Duration},
     };
 
-    async fn ready_model(client: &mut splitty_client_core::Client) -> LocalWorkspace {
+    async fn ready_model(client: &mut splitty_client_core::Client) -> SourceWorkspace {
         let owner = client.connection_id();
-        let mut model = LocalWorkspace::new(owner);
+        let mut model = SourceWorkspace::new(owner);
         model.set_catalog_supported(true);
         model.mark_catalog_dirty();
         model.flush_catalog(client).unwrap();

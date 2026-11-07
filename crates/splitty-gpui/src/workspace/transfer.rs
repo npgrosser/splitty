@@ -13,7 +13,7 @@ fn destination_ids(
 }
 
 fn tab_context_matches(
-    model: &LocalWorkspace,
+    model: &SourceWorkspace,
     source: SourceToken,
     screen: &ScreenKey,
     pane: &str,
@@ -33,9 +33,11 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_remote_selected() {
+            return;
+        }
         if !self
-            .model
-            .as_ref()
+            .selected_model()
             .is_some_and(|model| tab_context_matches(model, source, screen, pane))
         {
             return;
@@ -56,7 +58,7 @@ impl Workspace {
         {
             return;
         }
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.selected_model() else {
             return;
         };
         match model.capture_pane_action(pane) {
@@ -98,8 +100,7 @@ impl Workspace {
             return;
         };
         let count = self
-            .model
-            .as_ref()
+            .selected_model()
             .map(|model| destination_ids(model.screens(), &menu.source).len() + 1)
             .unwrap_or(1);
         match key.key.to_ascii_lowercase().as_str() {
@@ -124,7 +125,7 @@ impl Workspace {
             "enter" | "return" => {
                 let source = &menu.source;
                 let selected = menu.selected;
-                let destination = self.model.as_ref().and_then(|model| {
+                let destination = self.selected_model().and_then(|model| {
                     destination_ids(model.screens(), source)
                         .get(selected)
                         .cloned()
@@ -149,7 +150,7 @@ impl Workspace {
             self.transfer_menu = Some(menu);
             return;
         }
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.selected_model() else {
             return;
         };
         if let Err(error) = model.validate_pane_action(&menu.source) {
@@ -209,7 +210,7 @@ impl Workspace {
     }
 
     pub(super) fn render_transfer_menu(&self, pane: &str, cx: &mut Context<Self>) -> AnyElement {
-        if !self.model.as_ref().is_some_and(|model| {
+        if !self.selected_model().is_some_and(|model| {
             model
                 .capture_pane_action(pane)
                 .is_ok_and(|source| model.can_transfer_pane(&source))
@@ -231,8 +232,7 @@ impl Workspace {
             .filter(|menu| menu.source.pane_id == pane);
         let scroll = source.map(|menu| menu.scroll.clone()).unwrap_or_default();
         let destinations: Vec<_> = self
-            .model
-            .as_ref()
+            .selected_model()
             .zip(source)
             .map(|(model, menu)| {
                 model
@@ -252,25 +252,21 @@ impl Workspace {
         let content_weak = weak.clone();
         let changed_pane = pane.to_owned();
         let menu_pane = pane.to_owned();
-        let trigger_id = SharedString::from(format!("tab-transfer-{pane}"));
+        let anchor_id = SharedString::from(format!("tab-transfer-anchor-{pane}"));
         let colors = self.appearance.clone();
         let busy = self.pending_transfer.is_some()
             || self
-                .model
-                .as_ref()
+                .selected_model()
                 .is_some_and(|model| model.transfer_pending() || model.routes_reconciling());
         Popover::new(SharedString::from(format!("transfer-menu-{pane}")))
+            .absolute()
+            .bottom_0()
+            .left_0()
+            .w_0()
+            .h_0()
             .open(open)
             .mouse_button(MouseButton::Left)
-            .trigger_with(move |_, _, _| {
-                div()
-                    .id(trigger_id)
-                    .px_1()
-                    .cursor_pointer()
-                    .child("⋯")
-                    .on_click(|_, _, cx| cx.stop_propagation())
-                    .into_any_element()
-            })
+            .trigger_with(move |_, _, _| div().id(anchor_id).w_0().h_0().into_any_element())
             .on_open_change(move |open, window, cx| {
                 let _ = weak.update(cx, |this, cx| {
                     this.transfer_menu_change(&changed_pane, *open, window, cx)
@@ -351,14 +347,14 @@ impl Workspace {
 #[cfg(all(test, not(target_os = "windows")))]
 mod tests {
     use super::tab_context_matches;
-    use splitty_client_core::{workspace::LocalWorkspace, EmbeddedService};
+    use splitty_client_core::{workspace::SourceWorkspace, EmbeddedService};
 
     #[tokio::test]
     async fn nonselected_tab_context_stays_valid_only_on_its_captured_source_and_screen() {
         let service = EmbeddedService::start();
         let mut client = service.connect().await.unwrap();
         let connection = client.connection_id();
-        let mut model = LocalWorkspace::new(connection);
+        let mut model = SourceWorkspace::new(connection);
         model.set_catalog_supported(true);
         model.mark_catalog_dirty();
         model.flush_catalog(&client).unwrap();
@@ -412,7 +408,7 @@ mod tests {
         ));
         assert!(!tab_context_matches(
             &model,
-            LocalWorkspace::new(uuid::Uuid::new_v4()).source_token(),
+            SourceWorkspace::new(uuid::Uuid::new_v4()).source_token(),
             &screen,
             &inactive
         ));

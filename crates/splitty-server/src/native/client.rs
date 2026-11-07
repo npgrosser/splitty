@@ -71,6 +71,9 @@ impl Client {
     pub async fn recv(&mut self) -> Option<Charged<Incoming>> {
         self.peer.as_mut()?.recv().await
     }
+    pub fn closed_reason(&self) -> Option<Arc<Charged<wire::Closed>>> {
+        self.peer.as_ref()?.closed_reason()
+    }
     pub async fn finish(mut self) -> io::Result<()> {
         let peer = self.peer.take();
         let service = self.service.take();
@@ -624,6 +627,163 @@ impl futures::Sink<tokio_tungstenite::tungstenite::Message> for SessionSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn admitted_host_stream_uses_fixed_target_context_and_progress() {
+        use crate::hub::{testing::ScriptedHost, Hub};
+        let directory = tempfile::tempdir().unwrap();
+        let host = ScriptedHost::new(directory.path())
+            .with_keeping_daemon("0.0.0", splitty_core::protocol::PROTOCOL_VERSION);
+        let runtime = crate::service::runtime::build(
+            "embedded",
+            None,
+            Arc::new(splitty_core::pty::terminal::LocalTerminals),
+            &directory.path().join("control.sock"),
+        );
+        let mut state = runtime.state.as_ref().clone();
+        state.hub = Arc::new(Hub::new(
+            Box::new(host.clone()),
+            directory.path().join("config"),
+            None,
+        ));
+        let state = Arc::new(state);
+        let connector = Connector::default();
+        let revoked = queue::Context::default();
+        let pending = connector.admit_context(revoked.clone()).unwrap();
+        revoked.close();
+        let rejected = connector
+            .host_admitted(
+                state.clone(),
+                splitty_remote::ssh::SshTarget::parse("not-dialed").unwrap(),
+                false,
+                pending,
+                |_| panic!("revoked setup cannot publish progress"),
+            )
+            .await;
+        assert!(matches!(rejected, Err(error) if error.kind() == io::ErrorKind::BrokenPipe));
+        assert!(
+            host.asked().is_empty(),
+            "revoked admission cannot prepare a host"
+        );
+        let context = queue::Context::default();
+        let mut phases = Vec::new();
+        let first = connector
+            .host_admitted(
+                state.clone(),
+                splitty_remote::ssh::SshTarget::parse("vm1").unwrap(),
+                false,
+                connector.admit_context(context.clone()).unwrap(),
+                |progress| phases.push(progress.phase.clone()),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            first.ready.purpose,
+            wire::Purpose::Host {
+                target: "vm1".into()
+            }
+        );
+        assert!(!phases.is_empty());
+        assert!(Arc::ptr_eq(
+            &first.sender().context().budget.data,
+            &context.budget.data
+        ));
+        assert!(Arc::ptr_eq(
+            &first.sender().context().budget.control,
+            &context.budget.control
+        ));
+        assert!(host.asked().iter().any(|call| call == "prepare vm1"));
+        assert!(!host.asked().iter().any(|call| call == "prepare vm2"));
+        assert!(
+            !host
+                .asked()
+                .iter()
+                .any(|call| call == "stop" || call == "migrate"),
+            "opening a compatible older daemon must not force an update"
+        );
+
+        let mut second = connector
+            .host_admitted(
+                state,
+                splitty_remote::ssh::SshTarget::parse("vm2").unwrap(),
+                false,
+                connector.admit_context(queue::Context::default()).unwrap(),
+                |_| {},
+            )
+            .await
+            .unwrap();
+        first.finish().await.unwrap();
+        assert!(context.is_closed());
+        second
+            .sender()
+            .json(Kind::Text, &serde_json::json!({"type":"mux.resync"}))
+            .unwrap();
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_secs(3), second.recv())
+                .await
+                .unwrap()
+                .is_some()
+        );
+        second.finish().await.unwrap();
+        runtime.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_reason_passes_through_after_accepted_data_and_keeps_its_charge() {
+        use splitty_transport::{
+            codec::{self, Frame},
+            wire::Delivery,
+        };
+        let context = queue::Context::default();
+        let ready = wire::Ready {
+            generation: 3,
+            instance: "a".repeat(32),
+            mux_protocol: 1,
+            purpose: wire::Purpose::Direct,
+            limits: wire::Limits::default(),
+        };
+        let (io, mut raw) = tokio::io::duplex(4096);
+        let (read, write) = tokio::io::split(io);
+        let mut client = Client {
+            ready: context.budget.charge(0, true, || ready.clone()).unwrap(),
+            peer: Some(Peer::start(read, write, &ready, context.clone())),
+            resources: None,
+            service: None,
+            requests: Default::default(),
+        };
+        codec::write(
+            &mut raw,
+            &Frame::data(Kind::Text, Delivery::new(3), b"last").unwrap(),
+        )
+        .await
+        .unwrap();
+        codec::write(
+            &mut raw,
+            &Frame::json(
+                Kind::Closed,
+                &wire::Closed {
+                    code: wire::CloseCode::BackendLost,
+                    message: "lost".into(),
+                    retryable: true,
+                },
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+        let frame = client.recv().await.unwrap();
+        assert_eq!(frame.frame.application().unwrap().1, b"last");
+        drop(frame);
+        assert!(client.recv().await.is_none());
+        let reason = client.closed_reason().unwrap();
+        assert_eq!(reason.code, wire::CloseCode::BackendLost);
+        assert!(reason.retryable);
+        client.finish().await.unwrap();
+        assert!(context.budget.control.used() > 0);
+        drop(reason);
+        assert_eq!(context.budget.used(), 0);
+    }
 
     #[tokio::test]
     async fn abandoned_negotiation_retains_its_opening_until_service_cleanup() {

@@ -47,7 +47,7 @@ pub(super) struct PendingTransfer {
     pub follow: bool,
     pub failure: Option<String>,
 }
-impl LocalWorkspace {
+impl SourceWorkspace {
     pub fn route_generation(&self) -> u64 {
         self.route_generation
     }
@@ -63,6 +63,9 @@ impl LocalWorkspace {
         self.pending_transfer.is_some()
     }
     pub(super) fn require_routes_settled(&self) -> io::Result<()> {
+        if !self.ready {
+            return Err(invalid("source connection is not ready"));
+        }
         if self.reconciling || self.pending_floating.is_some() || self.pending_template.is_some() {
             Err(invalid("Screen ownership is being reconciled"))
         } else {
@@ -157,6 +160,7 @@ impl LocalWorkspace {
         target: ScreenTransferTarget,
         send: impl FnOnce(&str, &str, &str, bool) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.require_local()?;
         self.require_catalog()?;
         self.validate_transfer_source(&source)?;
         if self.pending_transfer.is_some()
@@ -186,7 +190,7 @@ impl LocalWorkspace {
             ScreenTransferTarget::New { screen_id } if self.models.contains_key(screen_id) => {
                 return Err(invalid("Target Screen already exists"))
             }
-            ScreenTransferTarget::New { .. } if self.models.len() >= MAX_LOCAL_SCREENS => {
+            ScreenTransferTarget::New { .. } if self.screen_count() >= self.limits.screens => {
                 return Err(capacity("native workspace Screen limit reached"))
             }
             _ => {}

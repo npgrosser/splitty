@@ -13,7 +13,7 @@ pub(super) struct ProfilePicker {
 }
 
 impl ProfilePicker {
-    pub(super) fn valid_for(&self, model: &LocalWorkspace) -> bool {
+    pub(super) fn valid_for(&self, model: &SourceWorkspace) -> bool {
         let source = &self.source;
         if model.source_token() != source.route.source_token()
             || model.shown_screen_id() != Some(source.slot.screen().screen_id())
@@ -59,8 +59,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if !self
-            .model
-            .as_ref()
+            .local_model()
             .is_some_and(|model| model.connection_id() == snapshot.connection_id())
             || snapshot.generation() <= self.profiles_generation
         {
@@ -95,8 +94,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if self
-            .model
-            .as_ref()
+            .local_model()
             .is_some_and(|model| model.connection_id().to_string() == connection)
         {
             self.profiles_error = Some(reason);
@@ -127,7 +125,7 @@ impl Workspace {
             self.close_profile_picker(window, cx);
             return;
         }
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.local_model() else {
             return;
         };
         let Some(screen) = model.shown_screen_id() else {
@@ -233,7 +231,7 @@ impl Workspace {
         let Some(picker) = self.profile_picker.as_ref() else {
             return;
         };
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.local_model() else {
             return;
         };
         if !picker.valid_for(model) {
@@ -399,7 +397,7 @@ mod tests {
     use super::{source_matches_slot, ProfileSource};
     use crate::workspace::presented_slot_in;
     use splitty_client_core::{
-        workspace::{LocalWorkspace, ScreenModel},
+        workspace::{ScreenModel, SourceWorkspace},
         EmbeddedService, ScreenIds,
     };
 
@@ -409,7 +407,7 @@ mod tests {
         let service = EmbeddedService::start();
         let mut client = service.connect().await.unwrap();
         let connection = client.connection_id();
-        let mut workspace = LocalWorkspace::new(connection);
+        let mut workspace = SourceWorkspace::new(connection);
         workspace.set_catalog_supported(true);
         workspace.mark_catalog_dirty();
         workspace.flush_catalog(&client).unwrap();

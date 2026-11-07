@@ -1,6 +1,8 @@
 //! App ownership of an isolated service, independently of its client streams.
 use crate::connection::Client;
+use splitty_remote::ssh::SshTarget;
 use splitty_server::{control, native::client::Connector, service};
+use splitty_transport::{budget::Charged, queue, wire};
 use std::{io, sync::Arc};
 use uuid::Uuid;
 
@@ -84,6 +86,29 @@ impl EmbeddedService {
             .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "service closed"))?;
         self.connector
             .embedded(runtime.state.clone(), service::catalog::Role::Main)
+            .await
+            .map(Client::from_service)
+    }
+
+    /// Open one explicit host stream through this service's existing hub.
+    pub async fn host_stream(
+        &self,
+        target: SshTarget,
+        context: queue::Context,
+        progress: impl FnMut(Charged<wire::Progress>),
+    ) -> io::Result<Client> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "service closed"))?;
+        self.connector
+            .host_admitted(
+                runtime.state.clone(),
+                target,
+                false,
+                self.connector.admit_context(context)?,
+                progress,
+            )
             .await
             .map(Client::from_service)
     }

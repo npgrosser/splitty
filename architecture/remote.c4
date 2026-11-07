@@ -63,6 +63,7 @@ model {
     owner -> splitty.transport.budget 'Retain chunk, envelope and diagnostic storage'
     owner -> splitty.transport.negotiation 'Negotiate each inner document connection'
     owner -> splitty.transport.peer 'Bounded carrier and independently credited inner peers'
+    owner -> splitty.transport.codec 'Verify charged close diagnostics after ordered fixture frame delivery'
     owner -> splitty.transport.queue 'App and document cancellation scopes'
     owner -> splitty.transport.wire 'Helper stream control and readiness'
     install -> ssh 'CommandLine, Executor, run_checked, allowlists'

@@ -128,13 +128,38 @@ response shape. The hub projects its persistence records into this contract;
 native clients do not depend on server storage types.
 
 The development-only `splitty-gpui` window uses `splitty-client-core` as a UI-free
-adapter over one native connection and isolated owned service. The explicit
+adapter over one native connection per source and an isolated owned service. The explicit
 `native_workspace` module owns the worker, command/update API and bounded retries
 for attachment, visibility and size controls; GPUI only submits intents and
 consumes updates. This runtime retries safe control admission, never user input
-or layout mutations. Its connection-wide
-`LocalWorkspace` holds the ordered Screen catalog, local shown-screen choice,
-pending lifecycle intents and shared session admission. Each `ScreenModel` keeps
+or layout mutations. Its `WindowWorkspace` owns the fixed local collection and
+bounds admitted host sources, global selection and aggregate resources.
+`SourceWorkspace` is the common connection collection: it holds ordered opened
+Screens, source-local tab/focus choices, pending lifecycle intents and canonical
+candidate admission. Local catalog policy opens every listed Screen and retains
+the existing initial Screen 1 behavior. Remote policy keeps charged live catalog
+metadata separate from explicit opened references, including removable missing
+references; neither catalog entries nor host active hints create or select work.
+The worker publishes the whole window after mutable source edits reconcile.
+A common `SourceRuntime` owns one actual Client's catalog collector, attachment,
+visibility and geometry controls, immutable connection token and close settlement.
+It returns bounded effects to the worker, which publishes the reconciled window
+before dependent Event/Attached/outcome deliveries. Binary output and immutable
+input/geometry admission do not enter a structural source edit. Each deliberate
+host has a retained setup context/future, optional common source driver, and
+retained close future. Cancellation revokes the context but joins a late Client
+and its cleanup before releasing the source reservation or enabling Retry.
+Progress coalesces as one charged value; only fenced worker publication changes
+the host presentation. Initial failure waits for explicit Retry. After previous
+application readiness, retryable loss permits waits of 1, 2, 4, 8 and then at
+most 10 seconds within one fixed 120-second interval, including preparation and
+cleanup. Typed nonretryable or malformed failures stop recovery. A replaced
+Client receives fresh execution tokens and reobserves only explicit references;
+input, layout mutations and uncertain close operations are never replayed.
+The normal window-close assessment includes only local work. Accepted shutdown
+revokes host demand and joins every retained host, local and API stream before
+closing the owned service; published cleanup failures remain final failures.
+Each `ScreenModel` keeps
 its canonical `Arc<ScreenState>`, local tab/focus choices, an optional maximized
 canonical slot ID and pane/session routes. Maximization borrows that slot, from
 either tiled or floating roots, as the sole presentation root; it sends no
@@ -152,12 +177,35 @@ terminals consume output and send protocol replies without claiming visibility
 or PTY size. Returning panes publish their measured sizes again.
 
 The native client distinguishes stable source identity from current connection
-authority. `SourceId` uses the source's initial connection UUID as its namespace;
-`SourceToken` combines that namespace with the current connection UUID. Screen
+authority. `SourceId` names one admitted source; `SourceToken` combines that
+namespace with the current connection UUID. Screen
 and pane keys carry their source, while layout keys also carry their Screen.
 Canonical IDs inside one owned model remain unchanged. These keys are client
-context rather than wire fields or authorization grants; production still owns
-one local source, without a remote registry.
+context rather than wire fields or authorization grants. A local source uses its
+initial connection UUID; a deliberately admitted remote source reserves a stable
+namespace before setup, without inventing a transport connection. The source only
+acquires an execution token after its actual transport and readiness prelude.
+
+The window owns one authoritative `Option<ScreenKey>`. A narrow mutable
+`SourceEdit` borrow reconciles the source's remembered choice with that selection
+before publishing a model update. Removed selected references choose a surviving
+neighbor in local-first grouped order. Terminal bytes, input and other read-only
+admission do not take this structural mutation guard. Exact retained bindings
+include early replay and offline views; execution additionally requires a ready
+source and completed attachment. Session delivery resolves the captured source
+and session even when its Screen is hidden.
+
+Admission limits are per window: eight remote sources, four pending opens, 128
+opened/model/pending Screen references, and 128 panes, sessions or pending pane
+reservations. Offline/closing models and accepted template/transfer reservations
+still count. A failed or cancelled opening retains its slot until owned cleanup
+is observed. Source mutation receives the remaining allowance after all other
+sources; candidate adoption is atomic. Simultaneous coherent refresh batches
+share the existing 16 MiB staging budget, while each remote catalog is bounded to
+200 rows and retains its connection-budget charge through view clones. A failed
+catalog keeps last-observed metadata but cannot admit another remote reference;
+only a current successful catalog enables Open. A new invalidation or explicit
+Retry starts another bounded observation without replacing a healthy connection.
 
 A native worker command envelope carries its captured source token. Admission
 rejects a foreign or replaced connection before target lookup or effects, then
@@ -187,10 +235,13 @@ store. Relative Screen commands resolve the latest local selection on the
 worker's ordered queue, so successive wheel steps do not depend on UI refresh
 timing. Hovered-group tab navigation captures connection, shown Screen and group;
 the existing focused-group keyboard guard remains separate. Navigation clamps
-at both ends. Wheel over the Drawer header/current-Screen control navigates,
-while the Screen list scrolls normally. Tab headers retain horizontal/Shift
-overflow scrolling and terminal content keeps its own wheel route. Editing,
-modal and drag ownership gates chrome gestures.
+at both ends. Ordinary vertical wheel input anywhere over the Drawer navigates
+Screens once; Shift-wheel input retains list-overflow browsing.
+Tab headers retain horizontal/Shift overflow scrolling and terminal content
+keeps its own wheel route. Editing, modal and drag ownership gates chrome
+gestures. Drawer pane rows derive from the canonical layout and capture their
+source execution token before dispatch; they cannot acquire replacement
+authority from a later connection.
 
 New chrome uses the pinned GPUI Kit styled controls where their controlled
 interfaces fit. The toolkit's complete DockArea owns its own PaneTree, so it is
@@ -291,11 +342,14 @@ dimensions need a new PTY size report. Applying zoom cancels gestures whose
 captured pixel geometry is obsolete without replacing sessions, search queries
 or the canonical workspace layout.
 
-Drawer visibility shares the local presentation read: one charged `home.get`
+Drawer pinning shares the local presentation read: one charged `home.get`
 projection retains appearance and Drawer settings before theme resolution. The
-view restores `drawer.pinned` and bounded saved width without a startup write.
-One identified visibility job patches only `drawer.pinned`, alternates fairly
-with zoom work and refreshes presentation after its outcome. The view disables
+view restores `drawer.pinned`, edge-reveal policy and bounded saved width without
+a startup write. Transient edge reveal belongs to the window: the unpinned
+Drawer overlays the workspace without changing terminal geometry or writing
+settings. Only the explicit pin command submits the identified visibility job,
+which patches `drawer.pinned`, alternates fairly with zoom work and refreshes
+presentation after its outcome. The view disables
 overlapping toggles and retains confirmed state on rejection or uncertainty;
 no ambiguous write is replayed. These preferences remain local-service-owned.
 
@@ -399,7 +453,7 @@ It retains pane/session records and surviving node identities. Legacy `move_pane
 keeps append/activate and directional split behavior; the browser retains its
 complete `arrange_panes` path.
 
-One pending exact placement lives in `LocalWorkspace`. Admission commits its
+One pending exact placement lives in its `SourceWorkspace`. Admission commits its
 mutation watermark; an older in-flight catalog cannot settle it. A same-owner
 catalog covering that watermark is the ordered fence for failures and Screen
 existence. After it, the first matching accepted Screen snapshot proves exact
@@ -955,11 +1009,16 @@ The experimental native Hosts destination consumes the charged client-core
 directory state described above. Targets and cached Screen IDs remain identities;
 display sanitization does not rewrite them. Cached Screen names, counts and
 observation timestamps describe the last observation, never current reachability.
-The view owns navigation, focus and bounded list rendering, and exposes only
-passive Refresh/Retry. It neither opens a remote workspace nor promotes cached
-Screens to local `LocalWorkspace` entries. Future remote work needs explicit
-opened-screen references and source-qualified view identities; the local policy
-of opening every catalog Screen is not a remote policy.
+The view owns navigation, focus and bounded list rendering. Visiting it remains
+passive; Connect captures a known exact target and fixed local owner. A deliberate
+host stream supplies readiness and a fresh catalog, and Open adds only the chosen
+existing Screen to the shared window. Cached entries never become live references.
+Browse demand is independent from opened references, so leaving Hosts preserves
+opened work while releasing unused host streams. Detach removes a reference;
+explicit Terminate uses the common assessed close and an ordered absence fence.
+The local all-catalog/bootstrap policy remains local-only. The native remote
+surface remains experimental while its broader lifecycle and interaction
+acceptance suite is completed.
 
 ### Authoritative templates
 

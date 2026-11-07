@@ -27,7 +27,7 @@ fn selected_slot_matches(
 }
 
 impl GroupTarget {
-    fn capture(model: &LocalWorkspace, slot: &str, pane: &str) -> Option<Self> {
+    fn capture(model: &SourceWorkspace, slot: &str, pane: &str) -> Option<Self> {
         let node = presented_slot_by_id(model, slot)?;
         if !selected_slot_matches(slot, pane, node, model.selected_pane(node)) {
             return None;
@@ -38,7 +38,7 @@ impl GroupTarget {
         })
     }
 
-    fn valid_for(&self, model: &LocalWorkspace) -> bool {
+    fn valid_for(&self, model: &SourceWorkspace) -> bool {
         model.validate_pane_action(&self.pane).is_ok()
             && presented_slot_by_id(model, &self.slot).is_some_and(|node| {
                 selected_slot_matches(
@@ -88,148 +88,6 @@ pub(super) enum GroupCommand {
 }
 
 impl Workspace {
-    fn cycle_screen_button(
-        &mut self,
-        source: SourceToken,
-        step: TabStep,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.rename.is_some()
-            || GlobalState::is_in_deferred_context(cx)
-            || self.template_dialog.is_some()
-            || self.profile_picker.is_some()
-            || self.transfer_menu.is_some()
-            || self.pending_template_apply.is_some()
-            || self.pending_close.is_some()
-            || self.drag.is_some()
-            || self.float_gesture.is_some()
-        {
-            return;
-        }
-        let Some(model) = self
-            .model
-            .as_ref()
-            .filter(|model| model.source_token() == source)
-        else {
-            return;
-        };
-        self.send_captured(
-            source,
-            Command::CycleScreen {
-                connection: model.connection_id(),
-                step,
-            },
-            cx,
-        );
-        self.focus_current(window, cx);
-    }
-
-    pub(super) fn render_screen_navigation(&self, cx: &mut Context<Self>) -> AnyElement {
-        let source = self.model.as_ref().map(LocalWorkspace::source_token);
-        let selection = self.model.as_ref().and_then(|model| {
-            let shown = model.shown_screen_id()?;
-            let index = model
-                .screens()
-                .iter()
-                .position(|screen| screen.id.as_str() == shown)?;
-            let name = model.screens()[index]
-                .name
-                .clone()
-                .unwrap_or_else(|| format!("Screen {}", index + 1));
-            Some((index, model.screens().len(), name))
-        });
-        let (index, count, name) = selection.unwrap_or((0, 0, "No Screen".into()));
-        let blocked = self.rename.is_some()
-            || self.template_dialog.is_some()
-            || self.profile_picker.is_some()
-            || self.transfer_menu.is_some()
-            || self.pending_template_apply.is_some()
-            || self.pending_close.is_some();
-        let previous = cx.entity().downgrade();
-        let next = cx.entity().downgrade();
-        div()
-            .id("screen-navigation")
-            .flex()
-            .flex_none()
-            .items_center()
-            .gap_1()
-            .on_scroll(cx.listener(move |this, event: &ScrollEvent, window, cx| {
-                if let Some(source) = source {
-                    this.chrome_wheel(source, WheelTarget::Screens, event, window, cx);
-                }
-            }))
-            .child(
-                Button::new("previous-screen")
-                    .accessibility_label("Previous Screen")
-                    .tooltip("Previous Screen")
-                    .icon(Icon::new(IconName::ChevronLeft))
-                    .ghost()
-                    .compact()
-                    .small()
-                    .disabled(blocked || count == 0 || index == 0)
-                    .on_click(move |_, window, cx| {
-                        let _ = previous.update(cx, |this, cx| {
-                            if let Some(source) = source {
-                                this.cycle_screen_button(source, TabStep::Previous, window, cx)
-                            }
-                        });
-                    }),
-            )
-            .child(
-                Button::new("current-screen")
-                    .accessibility_label(format!("Current Screen: {name}"))
-                    .tooltip(format!(
-                        "{name} · Scroll to switch Screens; click to toggle the Screen list"
-                    ))
-                    .label(if count == 0 {
-                        name
-                    } else {
-                        format!("{name}  ·  {} / {count}", index + 1)
-                    })
-                    .ghost()
-                    .compact()
-                    .small()
-                    .max_w(chrome_rems(230.))
-                    .overflow_hidden()
-                    .disabled(self.drawer_pending.is_some())
-                    .on_click({
-                        let weak = cx.entity().downgrade();
-                        move |_, window, cx| {
-                            let _ = weak.update(cx, |this, cx| {
-                                if !source.is_some_and(|source| {
-                                    this.model
-                                        .as_ref()
-                                        .is_some_and(|model| model.source_token() == source)
-                                }) {
-                                    return;
-                                }
-                                this.toggle_drawer(cx);
-                                this.focus_current(window, cx);
-                            });
-                        }
-                    }),
-            )
-            .child(
-                Button::new("next-screen")
-                    .accessibility_label("Next Screen")
-                    .tooltip("Next Screen")
-                    .icon(Icon::new(IconName::ChevronRight))
-                    .ghost()
-                    .compact()
-                    .small()
-                    .disabled(blocked || count == 0 || index + 1 >= count)
-                    .on_click(move |_, window, cx| {
-                        let _ = next.update(cx, |this, cx| {
-                            if let Some(source) = source {
-                                this.cycle_screen_button(source, TabStep::Next, window, cx)
-                            }
-                        });
-                    }),
-            )
-            .into_any_element()
-    }
-
     fn group_command(
         &mut self,
         target: &GroupTarget,
@@ -237,12 +95,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.selected_model() else {
             return;
         };
         if !target.valid_for(model) {
             self.status = "Group changed; action was not sent".into();
             cx.notify();
+            return;
+        }
+        if self.is_remote_selected()
+            && matches!(action, GroupCommand::Float | GroupCommand::Maximize)
+        {
             return;
         }
         match action {
@@ -340,36 +203,23 @@ impl Workspace {
             .into_any_element()
     }
 
-    pub(super) fn render_group_actions(
+    pub(super) fn render_group_new_tab_actions(
         &self,
         slot: &str,
         selected: Option<&str>,
-        surface: Surface,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let remote = self.is_remote_selected();
         let target = self
-            .model
-            .as_ref()
-            .and_then(|model| GroupTarget::capture(model, slot, selected?));
-        let can_float = target.as_ref().is_some_and(|target| {
-            self.model
-                .as_ref()
-                .is_some_and(|model| model.can_float_pane(&target.pane))
-        });
-        let maximized = self
-            .model
-            .as_ref()
-            .is_some_and(|model| model.maximized_slot_id() == Some(slot));
-        let tiled = surface == Surface::Tiled;
-        let compact = compact_group_actions(
-            self.current_layout_key(slot)
-                .and_then(|key| self.slot_bounds.get(&key))
-                .map(|bounds| bounds.size.width),
-            self.appearance.zoom.window_scale(),
-        );
+            .selected_model()
+            .and_then(|model| GroupTarget::capture(model, slot, selected?))
+            .filter(|target| {
+                self.execution_token(target.pane.source_token().source_id())
+                    == Some(target.pane.source_token())
+            });
         let weak = cx.entity().downgrade();
         let mut actions = div()
-            .id(SharedString::from(format!("group-actions-{slot}")))
+            .id(SharedString::from(format!("group-new-tab-actions-{slot}")))
             .flex()
             .flex_none()
             .items_center()
@@ -386,36 +236,76 @@ impl Workspace {
             ));
         let picker_slot = slot.to_owned();
         let picker_target = target.clone();
-        actions = actions.child(
-            Button::new(SharedString::from(format!("group-profile-{slot}")))
-                .accessibility_label("Choose shell profile for this group")
-                .tooltip("Choose shell profile")
-                .icon(Icon::new(IconName::ChevronDown))
-                .ghost()
-                .compact()
-                .small()
-                .disabled(target.is_none())
-                .on_click(move |_, window, cx| {
-                    if let Some(target) = &picker_target {
-                        let _ = weak.update(cx, |this, cx| {
-                            if this
-                                .model
-                                .as_ref()
-                                .is_some_and(|model| target.valid_for(model))
-                            {
-                                this.toggle_profile_picker(
-                                    &picker_slot,
-                                    &target.pane.pane_id,
-                                    window,
-                                    cx,
-                                );
-                            }
-                        });
-                    }
-                }),
+        if !remote {
+            actions = actions.child(
+                Button::new(SharedString::from(format!("group-profile-{slot}")))
+                    .accessibility_label("Choose shell profile for this group")
+                    .tooltip("Choose shell profile")
+                    .icon(Icon::new(IconName::ChevronDown))
+                    .ghost()
+                    .compact()
+                    .small()
+                    .disabled(target.is_none())
+                    .on_click(move |_, window, cx| {
+                        if let Some(target) = &picker_target {
+                            let _ = weak.update(cx, |this, cx| {
+                                if this
+                                    .selected_model()
+                                    .is_some_and(|model| target.valid_for(model))
+                                {
+                                    this.toggle_profile_picker(
+                                        &picker_slot,
+                                        &target.pane.pane_id,
+                                        window,
+                                        cx,
+                                    );
+                                }
+                            });
+                        }
+                    }),
+            );
+        }
+        actions.into_any_element()
+    }
+
+    pub(super) fn render_group_actions(
+        &self,
+        slot: &str,
+        selected: Option<&str>,
+        surface: Surface,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let remote = self.is_remote_selected();
+        let target = self
+            .selected_model()
+            .and_then(|model| GroupTarget::capture(model, slot, selected?))
+            .filter(|target| {
+                self.execution_token(target.pane.source_token().source_id())
+                    == Some(target.pane.source_token())
+            });
+        let can_float = target.as_ref().is_some_and(|target| {
+            self.selected_model()
+                .is_some_and(|model| model.can_float_pane(&target.pane))
+        });
+        let maximized = self
+            .selected_model()
+            .is_some_and(|model| model.maximized_slot_id() == Some(slot));
+        let tiled = surface == Surface::Tiled;
+        let compact = compact_group_actions(
+            self.current_layout_key(slot)
+                .and_then(|key| self.slot_bounds.get(&key))
+                .map(|bounds| bounds.size.width),
+            self.appearance.zoom.window_scale(),
         );
+        let mut actions = div()
+            .id(SharedString::from(format!("group-actions-{slot}")))
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap_1()
+            .px_1();
         if tiled {
-            if compact {
+            if compact && !remote {
                 let menu_target = target.clone();
                 let menu_weak = cx.entity().downgrade();
                 let focus_weak = cx.entity().downgrade();
@@ -523,32 +413,34 @@ impl Workspace {
                     action,
                 ));
             }
-            actions = actions.child(Self::group_button(
-                cx.entity().downgrade(),
-                format!("group-float-{slot}"),
-                "Float this tab",
-                IconName::PanelsTopLeft,
-                !can_float,
-                target.clone(),
-                GroupCommand::Float,
-            ));
-            actions = actions.child(Self::group_button(
-                cx.entity().downgrade(),
-                format!("group-maximize-{slot}"),
-                if maximized {
-                    "Restore this group"
-                } else {
-                    "Maximize this group"
-                },
-                if maximized {
-                    IconName::Minimize
-                } else {
-                    IconName::Maximize
-                },
-                target.is_none(),
-                target,
-                GroupCommand::Maximize,
-            ));
+            if !remote {
+                actions = actions.child(Self::group_button(
+                    cx.entity().downgrade(),
+                    format!("group-float-{slot}"),
+                    "Float this tab",
+                    IconName::PanelsTopLeft,
+                    !can_float,
+                    target.clone(),
+                    GroupCommand::Float,
+                ));
+                actions = actions.child(Self::group_button(
+                    cx.entity().downgrade(),
+                    format!("group-maximize-{slot}"),
+                    if maximized {
+                        "Restore this group"
+                    } else {
+                        "Maximize this group"
+                    },
+                    if maximized {
+                        IconName::Minimize
+                    } else {
+                        IconName::Maximize
+                    },
+                    target.is_none(),
+                    target,
+                    GroupCommand::Maximize,
+                ));
+            }
         }
         actions.into_any_element()
     }

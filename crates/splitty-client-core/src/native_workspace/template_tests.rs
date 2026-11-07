@@ -1,6 +1,7 @@
 //! Template effects, partial readiness and owned shutdown through the actual service.
 use super::*;
 use crate::templates::{TemplateApiOutcome, TemplateDraft};
+use crate::workspace::SourceWorkspace;
 use crate::workspace::{CloseTarget, TemplateApplyTarget};
 use serde_json::json;
 use splitty_core::pty::Backend as _;
@@ -16,7 +17,7 @@ async fn settled(
     rx: &mut mpsc::Receiver<Update>,
     id: Uuid,
 ) -> (
-    Box<LocalWorkspace>,
+    Box<SourceWorkspace>,
     Vec<crate::workspace::TemplateLaunchError>,
 ) {
     let mut latest = None;
@@ -24,6 +25,7 @@ async fn settled(
     loop {
         match next(rx).await {
             Update::Workspace(model) => {
+                let model = local_projection(&model);
                 if model.pending_template().is_some() {
                     preview = true;
                     assert!(model.displayed_panes().is_empty());
@@ -53,9 +55,10 @@ async fn settled(
         }
     }
 }
-async fn ready(rx: &mut mpsc::Receiver<Update>, pane: &str) -> Box<LocalWorkspace> {
+async fn ready(rx: &mut mpsc::Receiver<Update>, pane: &str) -> Box<SourceWorkspace> {
     loop {
         if let Update::Workspace(m) = next(rx).await {
+            let m = local_projection(&m);
             if m.session_for(pane).is_some_and(|s| m.session_ready(s)) {
                 return m;
             }
@@ -104,10 +107,13 @@ async fn templates_new_replace_partial_launch_keep_other_pty_and_join_cleanup() 
     loop {
         match next(&mut updates).await {
             Update::Workspace(m)
-                if m.routes().len() == 1
-                    && m.routes().iter().all(|r| m.session_ready(&r.session_id)) =>
+                if m.local_source().routes().len() == 1
+                    && m.local_source()
+                        .routes()
+                        .iter()
+                        .all(|r| m.local_source().session_ready(&r.session_id)) =>
             {
-                model = Some(m)
+                model = Some(local_projection(&m))
             }
             Update::ShellProfiles(_) => api_ready = true,
             _ => {}

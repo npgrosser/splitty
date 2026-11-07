@@ -22,7 +22,7 @@ pub use document::{Document, DocumentRead};
 #[cfg(not(target_os = "windows"))]
 pub use embedded::EmbeddedService;
 pub use local_service::LocalServiceClient;
-pub use workspace::{LocalWorkspace, SessionRoute, WorkspaceDelta};
+pub use workspace::{SessionRoute, SourceWorkspace, WindowWorkspace, WorkspaceDelta};
 
 mod api_stream;
 pub mod owned_service;

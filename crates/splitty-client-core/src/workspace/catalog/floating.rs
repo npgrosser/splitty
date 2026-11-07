@@ -68,7 +68,7 @@ pub(super) struct PendingFloating {
     failure: Option<String>,
     follow: Option<String>,
 }
-impl LocalWorkspace {
+impl SourceWorkspace {
     pub fn floating_action_pending(&self) -> bool {
         self.pending_floating.is_some()
     }

@@ -23,12 +23,19 @@ model {
     owned_service -> connection 'Return the common session client'
     owned_service -> client_root 'Create the existing Unix embedded backend'
     owned_service -> splitty.remote.owner 'Start, open and join the existing app-owned helper'
+    owned_service -> splitty.remote.ssh 'Accept an already validated host target for the existing owned adapter'
+    owned_service -> splitty.transport.budget 'Preserve charged host progress ownership'
+    owned_service -> splitty.transport.wire 'Return existing typed host progress envelopes'
     owned_service -> splitty.transport.queue 'Cancel startup while retaining its cleanup future'
     owned_service -> splitty.core.protocol 'Verify the helper mux version'
-    native_workspace -> owned_service 'Use one orchestration loop for explicit local backend ownership'
+    native_workspace -> owned_service 'Open and join local and deliberately requested host streams through existing service ownership'
     native_workspace -> hub 'Poll passive host directory updates independently of terminal and settings streams'
     native_workspace -> api_stream 'Retain local hub API setup through cancellation'
-    native_workspace -> splitty.transport.queue 'Revoke pending hub setup before joining it'
+    native_workspace -> splitty.transport.queue 'Revoke retained host and local API setup before joining owned cleanup'
+    native_workspace -> splitty.transport.budget 'Retain charged host progress and diagnostics across source publication'
+    native_workspace -> splitty.transport.negotiation 'Classify typed host preparation failures after retained setup completes'
+    native_workspace -> splitty.remote.ssh 'Validate exact known host targets before deliberate connection'
+    native_workspace -> splitty.transport.wire 'Validate host readiness and preserve charged transport close reasons'
     native_workspace -> splitty.core.theme 'Verify independent appearance delivery during a pending hub read'
     local_service -> api_stream 'Keep one auxiliary stream and retained jobs across cancellation'
     local_service -> splitty.core.native_api 'Use shared zoom and Drawer settings operation authority'
@@ -90,12 +97,12 @@ model {
     }
 
     client_workspace = component 'client_workspace' {
-      description 'Source-qualified view keys and immutable execution tokens; connection-wide local catalog and admission, canonical tiled/floating Screen projections, bounded coherent cross-Screen route collection, captured transfer, floating action and exact tab placement settlement, ordered relative Screen and captured group navigation, captured template replacement with separate pending presentation and full-scope close impact assessment.'
+      description 'Source-qualified view keys and immutable execution tokens; common local all-catalog or remote explicit-open SourceWorkspace collections, WindowWorkspace global selection and aggregate admission, canonical tiled/floating Screen projections, bounded coherent cross-Screen route collection, captured transfer, floating action and exact tab placement settlement, ordered relative Screen and captured group navigation, captured template replacement with separate pending presentation and full-scope close impact assessment.'
       metadata { module 'splitty_client_core::workspace' }
     }
 
     native_workspace = component 'native_workspace' {
-      description 'Native workspace runtime: one owned local service and ordered connection, immutable source command admission before effects, source-scoped charged events and attachment delivery, worker-owned workspace collection, identified transfer, floating and zoom outcomes, checked placement and close settlement including channel-owned startup consent, independent settings outcomes, verified shutdown and retained attachment and visibility controls.'
+      description 'Native workspace runtime: one owned local service and ordered connection, immutable source command admission before effects, source-scoped charged events and attachment delivery, worker-owned WindowWorkspace with one common SourceRuntime for session commands, observations and controls, ordered model-before-delivery effects, identified transfer, floating and zoom outcomes, checked placement and close settlement including channel-owned startup consent, independent settings outcomes, verified shutdown and retained attachment and visibility controls.'
       metadata { module 'splitty_client_core::native_workspace' }
     }
 
@@ -116,7 +123,9 @@ model {
     client_templates -> splitty.transport.wire 'Retain reply leases through typed decoding'
     local_service -> client_templates 'Schedule one fair bounded template library job'
     client_workspace -> client_templates 'Prepare immutable drafts without duplicating library ownership'
-    client_workspace -> splitty.transport.budget 'Retain derived template plan allocation leases'
+    client_workspace -> splitty.transport.budget 'Retain charged remote catalogs, derived template plans and shared window staging permits'
+    client_workspace -> splitty.remote.ssh 'Validate exact admitted host identities without rewriting them'
+    client_workspace -> splitty.core.native_api 'Bound remote catalog decoding before typed allocation'
     native_workspace -> client_templates 'Route identified library requests and results'
     native_workspace -> splitty.core.template 'Seed isolated saved-template fixtures in runtime tests'
     client_root -> connection 'Expose the native client API'
@@ -198,6 +207,8 @@ model {
     native_workspace -> splitty.core.mux 'Exercise external Screen transfers against the authoritative store in runtime tests'
     native_workspace -> splitty.core.pty 'Gate embedded worker terminal tests on PTY availability'
     native_workspace -> client_root 'Own an isolated service and ordered native client'
+    embedded -> splitty.remote.ssh 'Open the exact admitted target through the existing connector'
+    embedded -> splitty.transport.budget 'Preserve charged host progress ownership'
     embedded -> connection 'Return a connection scoped to the embedded service'
     embedded -> api_stream 'Open the independent local directory API stream'
     embedded -> splitty.transport.queue 'Pass retained cancellation context into API setup'

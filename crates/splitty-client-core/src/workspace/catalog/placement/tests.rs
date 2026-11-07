@@ -18,8 +18,8 @@ fn snapshot(revision: u64, left: &[&str], right: &[&str]) -> Value {
     }})
 }
 
-fn workspace() -> LocalWorkspace {
-    let mut model = LocalWorkspace::new(Uuid::new_v4());
+fn workspace() -> SourceWorkspace {
+    let mut model = SourceWorkspace::new(Uuid::new_v4());
     model.set_catalog_supported(true);
     model.set_tab_placement_supported(true);
     model.catalog_in_flight = Some(0);
@@ -35,7 +35,7 @@ fn workspace() -> LocalWorkspace {
     model
 }
 
-fn admit(model: &mut LocalWorkspace, pane: &str, target: &str, before: Option<&str>) {
+fn admit(model: &mut SourceWorkspace, pane: &str, target: &str, before: Option<&str>) {
     let drag = model.capture_drag(pane).unwrap();
     assert!(model
         .place_tab_with(
@@ -47,7 +47,7 @@ fn admit(model: &mut LocalWorkspace, pane: &str, target: &str, before: Option<&s
         .unwrap());
 }
 
-fn fence(model: &mut LocalWorkspace) -> WorkspaceDelta {
+fn fence(model: &mut SourceWorkspace) -> WorkspaceDelta {
     model.catalog_in_flight = Some(model.mutation);
     model
         .apply_catalog(model.connection_id, &catalog(&["screen", "other"]))
@@ -55,7 +55,7 @@ fn fence(model: &mut LocalWorkspace) -> WorkspaceDelta {
 }
 
 fn apply(
-    model: &mut LocalWorkspace,
+    model: &mut SourceWorkspace,
     revision: u64,
     left: &[&str],
     right: &[&str],

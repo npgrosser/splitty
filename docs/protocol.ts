@@ -2931,7 +2931,11 @@ export interface NativeReadyAccept { generation: number; instance: string }
 // streams, including cleanup, exist; each outgoing stream chunk waits for its
 // normal unpredictable native delivery receipt. Allocated duplex/scratch
 // buffers are charged as well as framed queued/in-flight bytes.
-export interface NativeOwnerOpen { type: "open"; id: number; target?: string; update?: boolean }
+// The owner always serializes both fields. A local/direct stream uses target:null
+// and update:false; a deliberate host stream carries its fixed target and
+// update:false. An explicit daemon update carries update:true instead. The
+// receiver also accepts omitted target/update as null/false for compatibility.
+export interface NativeOwnerOpen { type: "open"; id: number; target?: string | null; update?: boolean }
 export interface NativeOwnerClosed { type: "closed"; id: number; message: string; retryable: boolean }
 // Closing uses NativeCancel on RESERVED CONTROL capacity, with id identifying
 // the substream. Up to 32 cancellations may precede their queued Open; such an
@@ -2957,8 +2961,8 @@ export interface NativeCredit { generation: number; receipt: string } // 32 lowe
 export interface NativeProgress { phase: string; message: string }
 export interface NativeClosed {
   code: "incompatible" | "busy" | "timeout" | "protocol" | "backendLost" | "closed" | "internal";
-  message: string;
-  retryable: boolean;
+  message: string; // may contain serialized remote.error for a host preparation failure
+  retryable: boolean; // authoritative even when message contains remote.error.retryable
 }
 
 // GET /api/mux/status and native mux.status describe the terminal service.

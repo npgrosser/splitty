@@ -1,5 +1,6 @@
 //! Real-service profile launches retain captured terminal identity and service defaults.
 use super::*;
+use crate::workspace::SourceWorkspace;
 use serde_json::json;
 use splitty_core::{
     ids::{ScreenId, SessionId},
@@ -16,17 +17,17 @@ async fn next(updates: &mut mpsc::Receiver<Update>) -> Update {
 
 async fn initial(
     updates: &mut mpsc::Receiver<Update>,
-) -> (Box<LocalWorkspace>, Arc<ShellProfilesSnapshot>) {
+) -> (Box<SourceWorkspace>, Arc<ShellProfilesSnapshot>) {
     let (mut model, mut profiles) = (None, None);
     loop {
         match next(updates).await {
             Update::Workspace(workspace)
-                if workspace.catalog_initialized()
-                    && !workspace.has_pending_create()
-                    && workspace.snapshot().is_some()
-                    && workspace.routes().len() == 1 =>
+                if workspace.local_source().catalog_initialized()
+                    && !workspace.local_source().has_pending_create()
+                    && workspace.local_source().snapshot().is_some()
+                    && workspace.local_source().routes().len() == 1 =>
             {
-                model = Some(workspace);
+                model = Some(local_projection(&workspace));
             }
             Update::ShellProfiles(snapshot) => profiles = Some(snapshot),
             Update::ShellProfilesError { reason, .. } => panic!("profile read failed: {reason}"),
@@ -41,9 +42,10 @@ async fn initial(
     }
 }
 
-async fn routes(updates: &mut mpsc::Receiver<Update>, count: usize) -> Box<LocalWorkspace> {
+async fn routes(updates: &mut mpsc::Receiver<Update>, count: usize) -> Box<SourceWorkspace> {
     loop {
         if let Update::Workspace(model) = next(updates).await {
+            let model = local_projection(&model);
             if model.routes().len() == count {
                 return model;
             }
@@ -303,7 +305,9 @@ async fn captured_profile_launch_and_stale_choices_use_owned_service() {
             {
                 fallback = true
             }
-            Update::Workspace(model) if model.routes().len() == 3 => final_model = Some(model),
+            Update::Workspace(model) if model.local_source().routes().len() == 3 => {
+                final_model = Some(local_projection(&model))
+            }
             Update::Attached { session, .. } => {
                 attached.insert(session);
             }

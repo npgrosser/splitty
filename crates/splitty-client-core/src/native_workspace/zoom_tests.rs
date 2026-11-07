@@ -2,6 +2,7 @@
 //! service test in a child with a private path, never changing the parent's env.
 use super::*;
 use crate::appearance::DrawerVisibilityOutcome;
+use crate::workspace::SourceWorkspace;
 use crate::zoom::{Zoom, ZoomOutcome};
 use uuid::Uuid;
 
@@ -64,7 +65,7 @@ async fn real_service() {
     while ready.is_none()
         || !appearance
         || attached.as_ref().is_none_or(|session: &String| {
-            ready.as_deref().is_none_or(|model: &LocalWorkspace| {
+            ready.as_deref().is_none_or(|model: &SourceWorkspace| {
                 model
                     .routes()
                     .first()
@@ -73,8 +74,11 @@ async fn real_service() {
         })
     {
         match next(&mut updates).await {
-            Update::Workspace(model) if model.routes().len() == 1 && model.snapshot().is_some() => {
-                ready = Some(model)
+            Update::Workspace(model)
+                if model.local_source().routes().len() == 1
+                    && model.local_source().snapshot().is_some() =>
+            {
+                ready = Some(local_projection(&model))
             }
             Update::Appearance(_) => appearance = true,
             Update::Attached { session, .. } => attached = Some(session),
@@ -147,7 +151,7 @@ async fn real_service() {
                 }
             }
             Update::Workspace(current) => assert_eq!(
-                current.session_for(&route.pane_id),
+                current.local_source().session_for(&route.pane_id),
                 Some(route.session_id.as_str())
             ),
             _ => {}

@@ -1,7 +1,7 @@
 use super::*;
 use serde_json::json;
-fn model() -> LocalWorkspace {
-    let mut m = LocalWorkspace::new(Uuid::new_v4());
+fn model() -> SourceWorkspace {
+    let mut m = SourceWorkspace::new(Uuid::new_v4());
     m.set_catalog_supported(true);
     m.set_templates_supported(true);
     m.catalog_in_flight = Some(0);
@@ -13,7 +13,7 @@ fn model() -> LocalWorkspace {
     m.apply_snapshot(m.connection_id,&json!({"type":"mux.screen_snapshot","screen":{"id":"old","revision":4,"root":{"type":"slot","id":"slot","paneIds":["p"]},"panes":{"p":{"id":"p","sessionId":"s"}},"sessions":{"s":{"id":"s","status":"running"}}}})).unwrap();
     m
 }
-fn plan(m: &LocalWorkspace, new: bool) -> Arc<TemplateApplyPlan> {
+fn plan(m: &SourceWorkspace, new: bool) -> Arc<TemplateApplyPlan> {
     Arc::new(
         m.prepare_template_apply(
             Uuid::new_v4(),
@@ -133,6 +133,16 @@ fn pending_close_identity_navigation_and_authoritative_partial_outcome() {
     m.select_tab("p");
     assert!(m.pending_template().is_none());
     assert!(m.template_apply_pending());
+    assert_eq!(
+        m.screen_count(),
+        2,
+        "navigation cannot release a pending Screen reservation"
+    );
+    assert_eq!(
+        m.admission_count(),
+        3,
+        "pending template panes remain reserved behind the shown Screen"
+    );
     let (state, _) = mux::reduce_workspace(
         mux::WorkspaceState::default(),
         mux::Op::ApplyTemplate {

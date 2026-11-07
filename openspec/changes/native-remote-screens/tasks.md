@@ -6,15 +6,15 @@ Implementation split: the first tranche is tasks 1.1–1.3 under the unchanged l
 
 ## 1. Shared source and window model
 
-- [ ] 1.1 Evolve the existing local collection into the shared `SourceWorkspace` described by NR1, keeping the same `ScreenModel`, projection, candidate checks, route reconciliation and close impact code. Separate local all-catalog/bootstrap policy from remote metadata/explicit-open policy without parallel forwarding facades. Verify with the existing **unit and in-process** `workspace/catalog`, `refresh`, template/transfer/floating and local native-worker tests that local selection, initial Screen 1, pending creations, hidden output and advanced actions remain unchanged. Deliver a short before/after ownership comment at the real source collection seam.
-- [ ] 1.2 Add `WindowWorkspace` with fixed local owner, bounded real source membership, global `ScreenKey` selection and local-first grouped opened-reference order; retain source-local tab/focus state. Freeze read-only source/selected-Screen/host-state readers and command/update shapes for UI integration. Extend `source_tests` and catalog **unit tests** with local plus two host policies sharing all raw IDs, absolute/relative navigation, remote active hints that select nothing, first-open ordering, missing reference removal and stale window/local owner rejection. No test-only public SourceId/source-registration API is introduced.
-- [ ] 1.3 Move admission to the aggregate window boundary while retaining each connection's transport limits: source/pending-open/ref/model/attachment/pending-pane counts and simultaneous staged observation bytes, charged remote catalog/diagnostic retention and release ownership. Extend current catalog/refresh and queued Event **unit/in-process tests** for cross-source exhaustion, refusal before dial/create, no eviction or partial candidate adoption, lease hold/drop, and exact capacity recovery after failure/removal/observed cleanup. Document concrete limits and update affected client-core architecture relationships; verify `cargo test -p splitty-architecture` after the model changes.
+- [x] 1.1 Evolve the existing local collection into the shared `SourceWorkspace` described by NR1, keeping the same `ScreenModel`, projection, candidate checks, route reconciliation and close impact code. Separate local all-catalog/bootstrap policy from remote metadata/explicit-open policy without parallel forwarding facades. Verify with the existing **unit and in-process** `workspace/catalog`, `refresh`, template/transfer/floating and local native-worker tests that local selection, initial Screen 1, pending creations, hidden output and advanced actions remain unchanged. Deliver a short before/after ownership comment at the real source collection seam.
+- [x] 1.2 Add `WindowWorkspace` with fixed local owner, bounded real source membership, global `ScreenKey` selection and local-first grouped opened-reference order; retain source-local tab/focus state. Freeze read-only source/selected-Screen/host-state readers and command/update shapes for UI integration. Extend `source_tests` and catalog **unit tests** with local plus two host policies sharing all raw IDs, absolute/relative navigation, remote active hints that select nothing, first-open ordering, missing reference removal and stale window/local owner rejection. No test-only public SourceId/source-registration API is introduced.
+- [x] 1.3 Move admission to the aggregate window boundary while retaining each connection's transport limits: source/pending-open/ref/model/attachment/pending-pane counts and simultaneous staged observation bytes, charged remote catalog/diagnostic retention and release ownership. Extend current catalog/refresh and queued Event **unit/in-process tests** for cross-source exhaustion, refusal before dial/create, no eviction or partial candidate adoption, lease hold/drop, and exact capacity recovery after failure/removal/observed cleanup. Document concrete limits and update affected client-core architecture relationships; verify `cargo test -p splitty-architecture` after the model changes.
 
 ## 2. Existing transport adapters and structured diagnostics
 
-- [ ] 2.1 Add a typed borrowing accessor for charged preparation `Closed` diagnostics, retain a peer's terminal `Closed` reason through EOF, and expose it through the native and owned Client adapters without changing wire shapes. Extend existing transport negotiation/peer and owner **unit/in-process tests** for retryable/nonretryable reasons, malformed diagnostics, queued data before orderly EOF, retained byte charges and final release. Verify failed protocol parsing cannot become a retryable string-classified error; keep transport independent of host-domain types.
+- [x] 2.1 Add a typed borrowing accessor for charged preparation `Closed` diagnostics, retain a peer's terminal `Closed` reason through EOF, and expose it through the native and owned Client adapters without changing wire shapes. Extend existing transport negotiation/peer and owner **unit/in-process tests** for retryable/nonretryable reasons, malformed diagnostics, queued data before orderly EOF, retained byte charges and final release. Verify failed protocol parsing cannot become a retryable string-classified error; keep transport independent of host-domain types.
 - [ ] 2.2 Add only the real `OwnedService`/`EmbeddedService` host-open methods over shared `Connector::host_admitted` and `Owner::open_context(Some(target), false, ...)`, retaining caller cancellation context and bounded progress. Extend existing server-native/hub scripted-host and owner **in-process tests** to assert exact target/update=false, shared admission domain, no initial effects for invalid/stale target/owner, deliberate-only forward restoration, and independent stream closure. Reuse `hub/testing.rs::ScriptedHost` at its existing server test boundary and owned fake-peer fixtures; do not publish that fixture in normal builds.
-- [ ] 2.3 Add the client-domain bounded decoder for the structured `remote.error` carried by the typed diagnostic accessor; preserve plain bounded diagnostics when no such payload exists. Test at **unit level** that outer retryability wins, hints remain data, invalid/oversized fields fail safely and no formatted Display text is parsed. Update `architecture/transport.c4`, `architecture/server.c4`, `architecture/remote.c4` and client-core edges only where actual production/test imports change. Verify `docs/protocol.ts` documents the touched existing readiness/error/close envelopes accurately and correct discrepancies without changing the protocol.
+- [x] 2.3 Add the client-domain bounded decoder for the structured `remote.error` carried by the typed diagnostic accessor; preserve plain bounded diagnostics when no such payload exists. Test at **unit level** that outer retryability wins, hints remain data, invalid/oversized fields fail safely and no formatted Display text is parsed. Update `architecture/transport.c4`, `architecture/server.c4`, `architecture/remote.c4` and client-core edges only where actual production/test imports change. Verify `docs/protocol.ts` documents the touched existing readiness/error/close envelopes accurately and correct discrepancies without changing the protocol.
 
 ## 3. Deliberate host demand and retained runtime lifecycle
 
@@ -42,11 +42,50 @@ Implementation split: the first tranche is tasks 1.1–1.3 under the unchanged l
 
 ## 7. Integration checks
 
-- [ ] 7.1 Run targeted client-core source/catalog/refresh/runtime/close tests, touched transport/owner/server-native/hub fixtures, GPUI workspace/Hosts/terminal tests, changed-crate Clippy with warnings denied, `cargo fmt --all --check`, `cargo test -p splitty-architecture`, `openspec validate native-remote-screens --strict` and `openspec validate --specs`. Use existing architecture dependencies (`pnpm install --dir architecture` once if needed). Record exact results; distinguish unit/in-process and UI evidence. Do not run a Windows build or full workspace CI for this branch increment.
+- [ ] 7.1 Run targeted client-core source/catalog/refresh/runtime/close tests, touched transport/owner/server-native/hub fixtures, GPUI workspace/Hosts/terminal tests, changed-crate Clippy with warnings denied, `cargo fmt --all --check`, `cargo test -p splitty-architecture`, `openspec validate native-remote-screens --strict` and `openspec validate --specs`. Use existing architecture dependencies (`pnpm install --dir architecture` once if needed). Record exact results; distinguish unit/in-process and UI evidence. Full workspace CI remains deferred. A separately requested frozen Windows preview may be built and documented independently; it does not substitute for current Linux integration checks.
 - [ ] 7.2 Exercise the current-host native window against existing isolated local/scripted or explicitly selected test services: Connect known host, browse, Open existing Screen beside local, tab/split/input, switch with hidden output, drop/recover, detach/reopen, cancel/confirm termination and normal window close. Record actual-window evidence for states, keyboard/focus, theme/zoom/overflow and no remote termination on shutdown; do not count model predicates as UI integration. No new server-process smoke is required: existing in-process service, transport and owner fixtures can demonstrate the backend semantics without external SSH.
 - [ ] 7.3 Finish the branch increment by recording targeted evidence and the deferred main-merge obligation. Full merge checks remain deferred until main integration: run once `cargo fmt --all --check`, `cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings`, `cargo test --workspace --exclude splitty-gui` and `openspec validate --specs`; add Tauri Clippy/tests and frontend `pnpm check`/`pnpm test`/`pnpm build` only if those areas become touched. This task completes by recording the deferral, not by running full CI now. Confirm deferred creation, restart persistence, host edits, port UI and remote profile/template/transfer features have not leaked into the implementation.
 
 ## Scenario coverage index
+
+Implementation checkpoint (2026-11-07): the shared collection, source runtime,
+explicit remote lifecycle and bounded recovery pass all 171 client-core tests
+with two test threads. The source-qualified GPUI suite passes 93 tests and strict
+Clippy. All 17 architecture checks pass. The strengthened server-native adapter
+in-process test also passes: a revoked context has no host effect, a compatible
+older daemon is not force-updated, caller admission budgets are retained exactly,
+and independently opened streams close independently.
+
+The optimized baseline candidate with SHA-256
+`e1f81d471ccb7f6a0a64a9e420d171caec4f0643b34e2cf45ae16dff76545867`
+passes nine real-window remote checks using two isolated hosts sharing raw Screen
+and Pane IDs: passive Hosts inspection, deliberate Connect/Open, remote input and
+default Tab/Split inheritance, hidden output and grouped navigation, Detach/reopen
+with the same session, explicit Terminate cancel/confirm, and normal window close
+preserving host sessions. Its existing local Drawer suite passes nine checks.
+These are functional X11 observations, not hardware smoothness evidence.
+
+The subsequent recovery candidate with SHA-256
+`bf2f17b09c74e90fcd5bfb5d869d98cc89768661eb62462e8f8f2c8ecdc94c5c`
+reconnects automatically after an identity-verified bridge loss while local and
+other-host terminals stay usable. The real-window check nevertheless fails:
+restored focus moves from the previous right split to the left tab. It stops
+before the no-replay, retained-inventory and final normal-close assertions, so
+recovery acceptance is not complete. The correction retains navigation choices
+through the existing connection reset, while clearing old routes, snapshots and
+execution authority. All ten focused window-model tests and strict client-core
+Clippy pass after the correction (172 total core tests now); an actual-window
+rerun awaits the combined workspace presentation candidate.
+
+A separately frozen Windows preview starts on hardware graphics and exits
+normally with its owned WSL processes cleaned up. This establishes startup and
+shutdown for that snapshot only; it is neither the latest recovery candidate nor
+Windows remote/reconnect acceptance. Full workspace CI stays deferred.
+
+Remaining unchecked tasks retain their acceptance obligations, including broader
+remote failure/cleanup cases. The independent `native-workspace-fidelity` change
+now owns the requested Tab/Drawer presentation work; it does not waive remote
+runtime coverage or count unit predicates as real-window interaction.
 
 All new behavior scenarios in `specs/remote-screens/spec.md` map to the task-local evidence above; unchanged scenarios in the copied Native Host Management Surface retain the existing passive-directory regression suite.
 

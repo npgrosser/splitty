@@ -1,5 +1,6 @@
 //! Supported floating actions against the real owned local service.
 use super::*;
+use crate::workspace::SourceWorkspace;
 use splitty_core::pty::Backend as _;
 use uuid::Uuid;
 async fn next(updates: &mut mpsc::Receiver<Update>) -> Update {
@@ -10,10 +11,11 @@ async fn next(updates: &mut mpsc::Receiver<Update>) -> Update {
 }
 async fn model_where(
     updates: &mut mpsc::Receiver<Update>,
-    test: impl Fn(&LocalWorkspace) -> bool,
-) -> Box<LocalWorkspace> {
+    test: impl Fn(&SourceWorkspace) -> bool,
+) -> Box<SourceWorkspace> {
     loop {
         if let Update::Workspace(model) = next(updates).await {
+            let model = local_projection(&model);
             if test(&model) {
                 return model;
             }
@@ -24,11 +26,11 @@ async fn settled(
     updates: &mut mpsc::Receiver<Update>,
     request: Uuid,
     session: &str,
-) -> Box<LocalWorkspace> {
+) -> Box<SourceWorkspace> {
     let mut latest = None;
     loop {
         match next(updates).await {
-            Update::Workspace(model) => latest = Some(model),
+            Update::Workspace(model) => latest = Some(local_projection(&model)),
             Update::Attached { session: id, .. } if id == session => {
                 panic!("floating action reattached unchanged terminal")
             }
@@ -229,11 +231,12 @@ async fn floating_tabs_move_and_dock_into_empty_root_keep_live_sessions_and_prof
         match next(&mut updates).await {
             Update::Workspace(model)
                 if model
+                    .local_source()
                     .snapshot()
                     .is_some_and(|s| s.root.collect_pane_ids().is_empty())
-                    && !model.routes_reconciling() =>
+                    && !model.local_source().routes_reconciling() =>
             {
-                empty = Some(model)
+                empty = Some(local_projection(&model))
             }
             Update::CloseSettled { request_id: 10, .. } => close_settled = true,
             Update::CloseRejected { reason, .. } => panic!("close rejected: {reason}"),

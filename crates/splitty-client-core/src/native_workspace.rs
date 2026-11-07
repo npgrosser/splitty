@@ -1,4 +1,6 @@
 //! Own the local service and route workspace intents on one ordered connection.
+mod remote;
+mod source;
 use crate::{
     appearance::{AppearanceSnapshot, ColorScheme, DrawerVisibilityResult},
     hub::{HostDirectorySnapshot, HostDirectoryState, HubClient, HubUpdate},
@@ -6,10 +8,11 @@ use crate::{
     templates::{TemplateApiRequest, TemplateApiResult},
     workspace::{
         Axis, ClosePlan, CloseTarget, FloatBounds, FloatingActionOutcome, FloatingActionResult,
-        FloatingTarget, LocalWorkspace, MovePlacement, PaneActionTarget, PaneDrag,
+        FloatingTarget, HostActionTarget, MovePlacement, PaneActionTarget, PaneDrag,
         PlacementOutcome, ScreenKey, ScreenTransferOutcome, ScreenTransferResult,
-        ScreenTransferTarget, SourceToken, TabStep, TemplateApplyChoice, TemplateApplyOutcome,
-        TemplateApplyPlan, TemplateApplyResult, TerminalToken, WorkspaceRefresh,
+        ScreenTransferTarget, SourceToken, SourceWorkspace, TabStep, TemplateApplyChoice,
+        TemplateApplyOutcome, TemplateApplyPlan, TemplateApplyResult, TerminalToken,
+        WindowWorkspace, WorkspaceRefresh,
     },
     zoom::{ZoomAction, ZoomResult},
     Event,
@@ -88,6 +91,24 @@ impl Command {
 }
 
 pub enum CommandKind {
+    ConnectHost {
+        target: String,
+    },
+    RetryHost {
+        target: HostActionTarget,
+    },
+    CancelHost {
+        target: HostActionTarget,
+    },
+    ReleaseHostBrowse {
+        target: HostActionTarget,
+    },
+    OpenRemoteScreen {
+        screen: ScreenKey,
+    },
+    DetachRemoteScreen {
+        screen: ScreenKey,
+    },
     RefreshHostDirectory {
         connection: uuid::Uuid,
     },
@@ -134,9 +155,8 @@ pub enum CommandKind {
         pinned: bool,
     },
     CreateScreen(String),
-    SwitchScreen(String),
+    SwitchScreen(ScreenKey),
     CycleScreen {
-        connection: uuid::Uuid,
         step: TabStep,
     },
     RenameScreen {
@@ -245,7 +265,7 @@ pub enum Update {
         connection: uuid::Uuid,
         reason: String,
     },
-    Workspace(Box<LocalWorkspace>),
+    Workspace(Box<WindowWorkspace>),
     Event {
         source: SourceToken,
         event: Box<Event>,
@@ -274,7 +294,7 @@ pub enum Update {
     },
 }
 
-fn validate_command_target(model: &LocalWorkspace, command: &CommandKind) -> std::io::Result<()> {
+fn validate_command_target(model: &SourceWorkspace, command: &CommandKind) -> std::io::Result<()> {
     match command {
         CommandKind::Split { screen, pane, .. }
         | CommandKind::Tab { screen, pane }
@@ -386,7 +406,7 @@ impl Drop for Finished {
 }
 
 fn profile_fallback_status(
-    model: &LocalWorkspace,
+    model: &SourceWorkspace,
     connection: uuid::Uuid,
     pane: &str,
     session: &str,
@@ -994,993 +1014,316 @@ async fn run_service(
     cleanup_complete: Arc<AtomicBool>,
     scheme: ColorScheme,
 ) -> anyhow::Result<()> {
-    use crate::workspace::WorkspaceDelta;
     let service = service.into();
-    let mut client = match service.connect().await {
+    let client = match service.connect().await {
         Ok(client) => client,
         Err(error) => {
             return finish_owned_run(service, Err(error.into()), Ok(()), &cleanup_complete, &stop)
                 .await
         }
     };
-    let source = SourceToken::initial(client.connection_id());
-    let mut workspace_refresh = WorkspaceRefresh::default();
+    let mut window = WindowWorkspace::new(client.connection_id());
+    let mut local = source::SourceRuntime::new(client, window.lifecycle_token());
     let mut settings = None::<RuntimeLocalService<'_>>;
     let mut hub = None::<RuntimeHub<'_>>;
+    let mut remotes = remote::Remotes::new(&service);
+    let mut known = None::<Arc<HostDirectorySnapshot>>;
     let result = async {
-        let mut model = None::<LocalWorkspace>;
-        let mut attached = HashSet::<String>::new();
-        let mut visible = HashSet::<String>::new();
-        let mut desired_visible = HashSet::<String>::new();
-        let mut owned_sessions = HashSet::<String>::new();
-        let mut closed_sessions = HashSet::<String>::new();
-        let mut pending_hide = HashSet::<String>::new();
-        let mut pending_resize = HashSet::<String>::new();
-        let mut activity_pending = false;
-        let mut sizes = HashMap::<String, (u16, u16)>::new();
-        let mut refresh_error = None::<String>;
-        let mut control_error = None::<String>;
         let mut tick = tokio::time::interval(Duration::from_millis(16));
-        let mut last_close_request = 0_u64;
-        let mut pending_close = None::<PendingClose>;
         enum Next {
             Settings(std::io::Result<crate::local_service::LocalServiceUpdate>),
             Hub(HubUpdate),
-            Event(std::io::Result<Option<Box<Event>>>),
+            Event(std::io::Result<Option<Event>>),
+            Remote(remote::Step),
             Command(Option<Command>),
             Tick,
         }
         loop {
             let next = tokio::select! {
-                result = async {
-                    match &mut settings {
-                        Some(reader) => reader.next_update().await,
-                        None => std::future::pending().await,
-                    }
-                } => Next::Settings(result),
-                update = async {
-                    match &mut hub {
-                        Some(reader) => reader.next_update().await,
-                        None => std::future::pending().await,
-                    }
-                } => Next::Hub(update),
-                event = client.next_event() => Next::Event(event.map(|event| event.map(Box::new))),
+                result = async { match &mut settings { Some(reader)=>reader.next_update().await, None=>std::future::pending().await } } => Next::Settings(result),
+                update = async { match &mut hub { Some(reader)=>reader.next_update().await, None=>std::future::pending().await } } => Next::Hub(update),
+                event = local.client.next_event() => Next::Event(event),
+                remote = remotes.next() => Next::Remote(remote),
                 command = commands.recv() => Next::Command(command),
                 _ = tick.tick() => Next::Tick,
             };
-            if stop.load(Ordering::Acquire) {
-                break;
-            }
-            let mut close_window = false;
+            if stop.load(Ordering::Acquire) { break; }
+            let owner = window.lifecycle_token();
             match next {
                 Next::Hub(update) => {
-                    if update.connection_id == client.connection_id() {
+                    if update.connection_id == local.client.connection_id() {
+                        let snapshot=match &update.state {HostDirectoryState::Ready(snapshot)=>Some(snapshot.clone()),HostDirectoryState::Loading {previous}|HostDirectoryState::Failed {previous,..}=>previous.clone(),HostDirectoryState::Unavailable=>None};
+                        if let Some(snapshot)=snapshot.filter(|snapshot|known.as_ref().is_none_or(|old|snapshot.generation()>=old.generation())) {
+                            window.set_host_order(owner,&snapshot.directory().order)?;
+                            known=Some(snapshot);
+                            publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;
+                        }
                         publish(&updates, Update::HostDirectory(update), &stop).await?;
                     }
                 }
                 Next::Settings(result) => {
                     use crate::local_service::LocalServiceUpdate;
-                    let connection = client.connection_id();
+                    let connection = local.client.connection_id();
                     let update = match result {
                         Ok(LocalServiceUpdate::Zoom(result)) => Update::Zoom(result),
                         Ok(LocalServiceUpdate::DrawerVisibility(result)) => Update::DrawerVisibility(result),
-                        Ok(LocalServiceUpdate::Template(result))=>Update::TemplateApi(result),
+                        Ok(LocalServiceUpdate::Template(result)) => Update::TemplateApi(result),
                         Ok(LocalServiceUpdate::Appearance(Ok(snapshot))) => Update::Appearance(snapshot),
-                        Ok(LocalServiceUpdate::Appearance(Err(error))) => Update::AppearanceError { connection, reason: error.to_string() },
+                        Ok(LocalServiceUpdate::Appearance(Err(error))) => Update::AppearanceError { connection, reason:error.to_string() },
                         Ok(LocalServiceUpdate::ShellProfiles(Ok(snapshot))) => Update::ShellProfiles(snapshot),
-                        Ok(LocalServiceUpdate::ShellProfiles(Err(error))) => Update::ShellProfilesError { connection, reason: error.to_string() },
+                        Ok(LocalServiceUpdate::ShellProfiles(Err(error))) => Update::ShellProfilesError { connection, reason:error.to_string() },
                         Err(error) => {
-                            // Setup belongs to both reads; report each feature once.
-                            publish(&updates, Update::ShellProfilesError { connection, reason: error.to_string() }, &stop).await?;
-                            Update::AppearanceError { connection, reason: error.to_string() }
+                            publish(&updates, Update::ShellProfilesError { connection,reason:error.to_string() }, &stop).await?;
+                            Update::AppearanceError { connection,reason:error.to_string() }
                         }
                     };
                     publish(&updates, update, &stop).await?;
                 }
+                Next::Remote(step) => {
+                    let effects=remotes.handle(&mut window,step);
+                    publish_source_effects(&mut window,effects,&updates,&stop).await?;
+                }
                 Next::Tick => {}
                 Next::Command(None) => break,
                 Next::Command(Some(command)) => {
-                    if let Err(error) = command.validate_source(source) {
-                        publish(&updates, rejected_command(command.source, &command.kind, error.to_string()), &stop).await?;
+                    let expected=if local_command(&command.kind) {Some(owner)} else {command.source.and_then(|captured|window.execution_token(captured.source_id()))};
+                    let admission=expected.ok_or_else(||crate::connection::invalid("Command belongs to an unavailable source connection")).and_then(|expected|command.validate_source(expected));
+                    if let Err(error) = admission {
+                        publish(&updates,rejected_command(command.source,&command.kind,error.to_string()),&stop).await?;
                         continue;
                     }
-                    let command_source = command.source;
-                    let command = command.kind;
-                    if let CommandKind::RefreshHostDirectory { connection } = command {
-                        if let Some(reader) = &mut hub {
-                            if let Err(error) = reader.refresh(connection) {
-                                publish(&updates, Update::Status(error.to_string()), &stop).await?;
-                            }
-                        } else if connection == client.connection_id() {
-                            publish(&updates, Update::HostDirectory(HubUpdate::unavailable(connection)), &stop).await?;
-                        }
-                        continue;
-                    }
-                    if let CommandKind::TemplateApi{connection,request_id,request}=command {
-                        let result=if !model.as_ref().is_some_and(|m|m.connection_id()==connection&&m.templates_supported()){Err(std::io::Error::other("Template source or capability unavailable"))}else{settings.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Local service API is not ready")).and_then(|s|s.enqueue_template(connection,request_id,request))};
-                        if let Err(error)=result{if error.kind()!=std::io::ErrorKind::AlreadyExists {publish(&updates,Update::TemplateApi(TemplateApiResult::rejected(connection,request_id,error.to_string())),&stop).await?;}}
-                        continue;
-                    }
-                    if let CommandKind::ApplyTemplate{plan,choice,replace_confirmed}=command {
-                        let (connection_id,request_id)=(plan.connection_id(),plan.request_id());
-                        if model.as_ref().is_some_and(|m|m.template_request_pending(request_id)){continue;}
-                        let mut post_failure=None;
-                        let result=if pending_close.is_some(){Err(std::io::Error::other("A close operation is pending"))}else{model.as_mut().ok_or_else(||std::io::Error::other("Workspace is not ready")).and_then(|m|m.apply_template(&client,plan,choice,replace_confirmed).map(|()|{if let Err(error)=workspace_refresh.begin(m){post_failure=m.fail_template_observation(error.to_string());}}))};
-                        if let Some(model)=&model{publish(&updates,Update::Workspace(Box::new(model.clone())),&stop).await?;}
-                        if let Some(result)=post_failure{publish(&updates,Update::TemplateApply(result),&stop).await?;}
-                        if let Err(error)=result{publish(&updates,Update::TemplateApply(TemplateApplyResult{connection_id,request_id,outcome:TemplateApplyOutcome::Rejected{reason:error.to_string()}}),&stop).await?;}
-                        continue;
-                    }
-                    if let CommandKind::RequestClose { mut plan, confirmed } = command {
-                        let response_source = command_source;
-                        if plan.source_token().is_none() {
-                            // The channel-owned startup prompt may race publication.
-                            if let Err(error) = validate_pre_discovery_close(&plan, confirmed) {
-                                last_close_request = last_close_request.max(plan.request_id);
-                                publish(&updates, Update::CloseRejected { source: response_source, request_id: plan.request_id, reason: error.to_string() }, &stop).await?;
-                                continue;
-                            }
-                            if let Some(model) = &model {
-                                plan = model.assess_close(plan.request_id, CloseTarget::Window)?;
-                            }
-                        }
-                        let request_id = plan.request_id;
-                        if pending_close.as_ref().is_some_and(|close| close.is_duplicate(request_id)) {
-                            // The original is still awaiting authoritative settlement.
-                            // Rejecting this duplicate would clear the UI's matching pending request.
-                            continue;
-                        }
-                        let result = if pending_close.is_some() {
-                            Err(std::io::Error::new(
-                                std::io::ErrorKind::WouldBlock,
-                                "previous close still settling",
-                            ))
-                        } else if request_id <= last_close_request {
-                            Err(std::io::Error::new(
-                                std::io::ErrorKind::InvalidInput,
-                                "stale close request",
-                            ))
-                        } else if let Some(model) = &mut model {
-                            model.validate_close(&plan, confirmed).and_then(|()| {
-                                match &plan.target {
-                                    CloseTarget::Pane { screen, pane } => {
-                                        model.close_pane_on_screen(&client, screen, pane)
-                                    }
-                                    CloseTarget::Screen { screen } => {
-                                        model.close_screen(&client, screen)
-                                    }
-                                    CloseTarget::Window => Ok(()),
-                                }
-                            })
-                        } else {
-                            validate_pre_discovery_close(&plan, confirmed)
-                        };
-                        last_close_request = last_close_request.max(request_id);
-                        match result {
-                            Ok(()) => {
-                                if plan.target == CloseTarget::Window {
-                                    close_window = true;
-                                    publish(
-                                        &updates,
-                                        Update::WindowCloseApproved {
-                                            request_id,
-                                            source: response_source,
-                                        },
-                                        &stop,
-                                    )
-                                    .await?;
-                                } else {
-                                    let generation = model
-                                        .as_ref()
-                                        .map_or(0, LocalWorkspace::mutation_generation);
-                                    pending_close = Some(PendingClose {
-                                        source: response_source,
-                                        request_id,
-                                        target: plan.target,
-                                        barrier_generation: generation,
-                                        catalog_barrier_seen: false,
-                                        failure: None,
-                                    });
-                                    publish(
-                                        &updates,
-                                        Update::CloseSubmitted {
-                                            request_id,
-                                            source: response_source,
-                                        },
-                                        &stop,
-                                    )
-                                    .await?;
-                                }
-                            }
-                            Err(error) => {
-                                publish(
-                                    &updates,
-                                    Update::CloseRejected {
-                                        source: response_source,
-                                        request_id,
-                                        reason: error.to_string(),
-                                    },
-                                    &stop,
-                                )
-                                .await?;
-                            }
-                        }
-                        if close_window {
-                            break;
-                        }
-                        continue;
-                    }
-                    let floating_request=match &command {
-                        CommandKind::FloatPane{request_id,source}=>Some((*request_id,source.connection_id)),
-                        CommandKind::DockFloat{request_id,target}|CommandKind::MoveFloat{request_id,target,..}=>Some((*request_id,target.connection_id())),
+                    let lifecycle=match &command.kind {
+                        CommandKind::RetryHost {target}=>Some((target,remotes.retry(&mut window,target))),
+                        CommandKind::CancelHost {target}=>Some((target,remotes.cancel(&mut window,target))),
+                        CommandKind::ReleaseHostBrowse {target}=>Some((target,remotes.release_browse(&mut window,target))),
                         _=>None,
                     };
-                    if let Some((request_id,connection_id))=floating_request {
-                        if model.as_ref().is_some_and(|model|model.floating_request_pending(request_id)){continue;}
-                        let result=if pending_close.is_some(){Err(std::io::Error::other("A close operation is pending"))}
-                            else if let Some(model)=&mut model {match command {
-                                CommandKind::FloatPane{source,..}=>model.float_pane(&client,request_id,source),
-                                CommandKind::DockFloat{target,..}=>model.dock_float(&client,request_id,target),
-                                CommandKind::MoveFloat{target,bounds,..}=>model.move_float(&client,request_id,target,bounds),
-                                _=>unreachable!("floating command classified"),
-                            }} else {Err(std::io::Error::other("Workspace is not ready"))};
-                        match result {
-                            Err(error)=>publish(&updates,Update::FloatingAction(FloatingActionResult{connection_id,request_id,outcome:FloatingActionOutcome::Rejected(error.to_string())}),&stop).await?,
-                            Ok(false)=>publish(&updates,Update::FloatingAction(FloatingActionResult{connection_id,request_id,outcome:FloatingActionOutcome::Confirmed}),&stop).await?,
-                            Ok(true)=>if let Some(model)=&model {publish(&updates,Update::Workspace(Box::new(model.clone())),&stop).await?;},
-                        }
+                    if let Some((target,result))=lifecycle {
+                        let changed = match result { Ok(())=>true, Err(error)=>remotes.reject_action(&mut window,target,&error) };
+                        if changed { publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?; }
                         continue;
                     }
-                    if let CommandKind::TransferPane { request_id, source, target } = command {
-                        if model.as_ref().is_some_and(|model|model.transfer_request_pending(request_id)) {continue;}
-                        let connection_id=source.connection_id;
-                        let result=if pending_close.is_some() {Err(std::io::Error::other("A close operation is pending"))}
-                            else if let Some(model)=&mut model {
-                                model.transfer_pane(&client,request_id,source,target).and_then(|()|workspace_refresh.begin(model))
-                            } else {Err(std::io::Error::other("Workspace is not ready"))};
-                        if let Err(error)=result {
-                            publish(&updates,Update::ScreenTransfer(ScreenTransferResult{connection_id,request_id,outcome:ScreenTransferOutcome::Rejected(error.to_string())}),&stop).await?;
-                        } else if let Some(model)=&model {
-                            publish(&updates,Update::Workspace(Box::new(model.clone())),&stop).await?;
+                    let captured = command.source;
+                    match command.kind {
+                        CommandKind::RefreshHostDirectory { connection } => {
+                            if let Some(reader)=&mut hub {
+                                if let Err(error)=reader.refresh(connection) { publish(&updates,Update::Status(error.to_string()),&stop).await?; }
+                            } else if connection==owner.connection_id() { publish(&updates,Update::HostDirectory(HubUpdate::unavailable(connection)),&stop).await?; }
                         }
-                        continue;
-                    }
-                    if let CommandKind::Zoom { connection, request_id, action } = command {
-                        let result = settings.as_mut()
-                            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::WouldBlock, "local settings are not ready"))
-                            .and_then(|settings| settings.enqueue_zoom(connection, request_id, action));
-                        if let Err(error) = result {
-                            publish(&updates, Update::Zoom(ZoomResult::rejected(connection, request_id, error.to_string())), &stop).await?;
+                        CommandKind::TemplateApi { connection,request_id,request } => {
+                            let result = if window.local_source().connection_id()!=connection || !window.local_source().templates_supported() { Err(std::io::Error::other("Template source or capability unavailable")) }
+                            else { settings.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Local service API is not ready")).and_then(|settings|settings.enqueue_template(connection,request_id,request)) };
+                            if let Err(error)=result { if error.kind()!=std::io::ErrorKind::AlreadyExists { publish(&updates,Update::TemplateApi(TemplateApiResult::rejected(connection,request_id,error.to_string())),&stop).await?; } }
                         }
-                        continue;
-                    }
-                    if let CommandKind::SetDrawerVisibility { connection, request_id, pinned } = command {
-                        let result = settings.as_mut()
-                            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::WouldBlock, "local settings are not ready"))
-                            .and_then(|settings| settings.enqueue_drawer_visibility(connection, request_id, pinned));
-                        if let Err(error) = result {
-                            publish(&updates, Update::DrawerVisibility(DrawerVisibilityResult::rejected(connection, request_id, error.to_string())), &stop).await?;
+                        CommandKind::Zoom { connection,request_id,action } => {
+                            let result=settings.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"local settings are not ready")).and_then(|settings|settings.enqueue_zoom(connection,request_id,action));
+                            if let Err(error)=result { publish(&updates,Update::Zoom(ZoomResult::rejected(connection,request_id,error.to_string())),&stop).await?; }
                         }
-                        continue;
-                    }
-                    if let CommandKind::SetColorScheme { connection, scheme } = command {
-                        if let Some(reader) = &mut settings {
-                            // A delayed command from another owner cannot choose app settings.
-                            if let Err(error) = reader.set_scheme(connection, scheme) {
-                                publish(&updates, Update::AppearanceError { connection, reason: error.to_string() }, &stop).await?;
+                        CommandKind::SetDrawerVisibility { connection,request_id,pinned } => {
+                            let result=settings.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"local settings are not ready")).and_then(|settings|settings.enqueue_drawer_visibility(connection,request_id,pinned));
+                            if let Err(error)=result { publish(&updates,Update::DrawerVisibility(DrawerVisibilityResult::rejected(connection,request_id,error.to_string())),&stop).await?; }
+                        }
+                        CommandKind::SetColorScheme { connection,scheme } => {
+                            if let Some(reader)=&mut settings { if let Err(error)=reader.set_scheme(connection,scheme) { publish(&updates,Update::AppearanceError { connection,reason:error.to_string() },&stop).await?; } }
+                        }
+                        CommandKind::SwitchScreen(key) => {
+                            match select_window_screen(&mut window,&mut local,&mut remotes,&key) {
+                                Ok(())=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,
+                                Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?,
                             }
                         }
-                        continue;
-                    }
-                    let Some(model) = &mut model else {
-                        continue;
-                    };
-                    if let Err(error) = validate_command_target(model, &command) {
-                        publish(&updates, rejected_command(command_source, &command, error.to_string()), &stop).await?;
-                        continue;
-                    }
-                    let result: std::io::Result<()> = match command {
-                        CommandKind::RefreshHostDirectory { .. } | CommandKind::TemplateApi{..} | CommandKind::ApplyTemplate{..} | CommandKind::FloatPane{..} | CommandKind::DockFloat{..} | CommandKind::MoveFloat{..} | CommandKind::TransferPane { .. } | CommandKind::Zoom { .. } | CommandKind::SetDrawerVisibility { .. } | CommandKind::SetColorScheme { .. } | CommandKind::RequestClose { .. } => {
-                            unreachable!("close is handled before normal commands")
-                        }
-                        CommandKind::CreateScreen(name) => {
-                            let result = model.create_screen(&client, &name).map(|_| ());
-                            if result.is_ok() {
-                                publish(
-                                    &updates,
-                                    Update::Workspace(Box::new(model.clone())),
-                                    &stop,
-                                )
-                                .await?;
-                            }
-                            result
-                        }
-                        CommandKind::SwitchScreen(screen) => {
-                            match model.switch_screen(&client, &screen) {
-                                Ok(changed) => {
-                                    if changed {
-                                        // Reconcile withdraws old claims before processing the
-                                        // next event/command. Old UI reports carry their screen.
-                                        desired_visible.clear();
-                                        publish(
-                                            &updates,
-                                            Update::Workspace(Box::new(model.clone())),
-                                            &stop,
-                                        )
-                                        .await?;
-                                    }
-                                    Ok(())
+                        CommandKind::CycleScreen { step } => {
+                            if let Some(key)=adjacent_screen(&window,step) {
+                                match select_window_screen(&mut window,&mut local,&mut remotes,&key) {
+                                    Ok(())=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,
+                                    Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?,
                                 }
-                                Err(error) => Err(error),
                             }
                         }
-                        CommandKind::CycleScreen { connection, step } => {
-                            match model.cycle_screen(&client, connection, step) {
-                                Ok(true) => {
-                                    desired_visible.clear();
-                                    publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
-                                    Ok(())
-                                }
-                                Ok(false) => Ok(()),
-                                Err(error) => Err(error),
-                            }
+                        CommandKind::ConnectHost { target } => {
+                            let result=known.as_deref().ok_or_else(||crate::connection::invalid("Host directory has not been read")).and_then(|known|remotes.connect(&mut window,owner,&target,known));
+                            match result {Ok(())=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
                         }
-                        CommandKind::RenameScreen {
-                            screen,
-                            connection,
-                            name,
-                        } => {
-                            if model.connection_id() == connection {
-                                model.rename_screen(&client, &screen, &name)
-                            } else {
-                                Err(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidInput,
-                                    "Rename belongs to a previous connection",
-                                ))
-                            }
+                        CommandKind::RetryHost { .. } | CommandKind::CancelHost { .. } | CommandKind::ReleaseHostBrowse { .. } => unreachable!("host lifecycle is dispatched before moving command"),
+                        CommandKind::OpenRemoteScreen { screen } => {
+                            match remotes.open(&mut window,captured.expect("ready source capture"),&screen) {Ok(())=>{local.cancel_created_follow();remotes.cancel_created_follow();publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;},Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
                         }
-                        CommandKind::Split { pane, axis, .. } => {
-                            let result = model.split(&client, &pane, axis).map(|_| ());
-                            if result.is_ok() {
-                                publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
-                            }
-                            result
+                        CommandKind::DetachRemoteScreen { screen } => {
+                            match remotes.detach(&mut window,owner,&screen) {Ok(())=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
                         }
-                        CommandKind::Tab { pane, .. } => model.new_tab(&client, &pane).map(|_| ()),
-                        CommandKind::ProfileTab { connection, screen, pane, session, profile_id } => {
-                            if connection != model.connection_id()
-                                || model.shown_screen_id() != Some(screen.as_str())
-                                || model.screen_for(&pane) != Some(screen.as_str())
-                                || model.session_for(&pane) != Some(session.as_str())
-                                || !model.is_displayed_pane(&pane)
-                            {
-                                Err(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidInput,
-                                    "Shell profile choice belongs to a previous terminal",
-                                ))
-                            } else {
-                                model.new_tab_with_profile(&client, &pane, &profile_id).map(|_| ())
-                            }
+                        kind => {
+                            let command=Command {source:captured,kind};
+                            let effects=if captured.is_none_or(|scope|scope.source_id()==local.id()) {local.command(&mut window,command)?} else {remotes.command(&mut window,command)?};
+                            if publish_source_effects(&mut window,effects,&updates,&stop).await? {break;}
                         }
-                        CommandKind::PlaceTab { drag, target, before } => {
-                            let result = model.place_tab(&client, drag, target, before);
-                            if result.as_ref().is_ok_and(|moved| *moved) {
-                                publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
-                            }
-                            result.map(|_| ())
-                        }
-                        CommandKind::CycleTab { connection, screen, slot, step } => {
-                            match model.cycle_tab(connection, &screen, &slot, step) {
-                                Ok(true) => {
-                                    let result = model.sync_selected_tabs(&client);
-                                    publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
-                                    result
-                                }
-                                Ok(false) => Ok(()),
-                                Err(error) => Err(error),
-                            }
-                        }
-                        CommandKind::CycleTabInSlot { connection, screen, slot, step } => {
-                            match model.cycle_tab_in_slot(connection, &screen, &slot, step) {
-                                Ok(true) => {
-                                    let result = model.sync_selected_tabs(&client);
-                                    publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
-                                    result
-                                }
-                                Ok(false) => Ok(()),
-                                Err(error) => Err(error),
-                            }
-                        }
-                        CommandKind::MovePane {
-                            drag,
-                            target,
-                            placement,
-                        } => {
-                            let result = model.move_pane(&client, drag, target, placement);
-                            if result.as_ref().is_ok_and(|moved| *moved) {
-                                publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
-                            }
-                            result.map(|_| ())
-                        }
-                        CommandKind::SetMaximized { screen, connection, slot, pane } => {
-                            if model.connection_id() == connection
-                                && model.shown_screen_id() == Some(screen.as_str())
-                                && model.set_maximized_slot(slot.as_deref(), pane.as_deref())
-                            {
-                                publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
-                            }
-                            Ok(())
-                        }
-                        CommandKind::NewTerminal { screen, connection } => {
-                            if model.connection_id() == connection
-                                && model.shown_screen_id() == Some(screen.as_str())
-                            {
-                                model.new_terminal(&client).map(|_| ())
-                            } else {
-                                Ok(())
-                            }
-                        }
-                        CommandKind::ResizeSplit { node, sizes, .. } => {
-                            model.resize_split(&client, &node, sizes)
-                        }
-                        CommandKind::Select { pane, .. } => {
-                            model.select_tab(&pane);
-                            let result = model.sync_selected_tabs(&client);
-                            publish(&updates, Update::Workspace(Box::new(model.clone())), &stop)
-                                .await?;
-                            result
-                        }
-                        CommandKind::Focus { pane, .. } => {
-                            model.focus_pane(&pane);
-                            publish(&updates, Update::Workspace(Box::new(model.clone())), &stop)
-                                .await?;
-                            Ok(())
-                        }
-                        CommandKind::Input { route, bytes } => {
-                            if model.accepts_terminal(&route) && attached.contains(route.session_id()) {
-                                client.input_bytes(route.session_id(), &bytes)
-                            } else {
-                                Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "Terminal is not attached"))
-                            }
-                        }
-                        CommandKind::ResizePane { route, screen, route_generation, cols, rows } => {
-                            if model.route_generation() == route_generation
-                                && model.accepts_terminal(&route)
-                                && model.validate_shown_key(&screen).is_ok()
-                                && model.screen_for(route.pane_id()) == Some(screen.screen_id())
-                                && model.is_displayed_pane(route.pane_id())
-                            {
-                                sizes.insert(route.session_id().into(), (cols, rows));
-                                pending_resize.insert(route.session_id().into());
-                            }
-                            Ok(())
-                        }
-                        CommandKind::Visible { screen, route_generation, panes } => {
-                            let shown = model.shown_screen_id().map(|id| model.screen_key(id));
-                            if screen == shown && route_generation == model.route_generation() {
-                                desired_visible = panes.into_iter().filter(|pane| model.is_displayed_pane(pane)).collect();
-                            }
-                            Ok(())
-                        }
-                    };
-                    if let Err(error) = result {
-                        publish(&updates, Update::Status(error.to_string()), &stop).await?;
                     }
                 }
                 Next::Event(event) => {
-                    let event = event?.ok_or_else(|| anyhow::anyhow!("Local connection closed"))?;
-                    let mut delta = WorkspaceDelta::default();
-                    let mut accepted_close_snapshot = false;
-                    if let Some(json) = event.json() {
-                        match json["type"].as_str() {
-                            Some("settings.changed") => {
-                                if let Some(reader) = &mut settings {
-                                    if let Err(error) = reader.settings_changed(event.connection_id) {
-                                        publish(&updates, Update::AppearanceError { connection: event.connection_id, reason: error.to_string() }, &stop).await?;
-                                    }
-                                }
-                            }
-                            Some("hub.changed") => {
-                                if let Some(reader) = &mut hub {
-                                    if let Err(error) = reader.refresh(event.connection_id) {
-                                        publish(&updates, Update::Status(error.to_string()), &stop).await?;
-                                    }
-                                }
-                            }
-                            Some("mux.welcome") if model.is_none() => {
-                                let supports_hub = supports_host_directory(json);
-                                let mut workspace = LocalWorkspace::new(client.connection_id());
-                                let supports_tab_selection =
-                                    json["capabilities"].as_array().is_some_and(|capabilities| {
-                                        capabilities.iter().any(|capability| {
-                                            capability.as_str() == Some("tab-select-v1")
-                                        })
-                                    });
-                                workspace.set_templates_supported(json["capabilities"].as_array().is_some_and(|caps|caps.iter().any(|cap|cap=="server-templates-v1")));
-                                workspace.set_tab_selection_supported(supports_tab_selection);
-                                workspace.set_tab_placement_supported(json["capabilities"].as_array().is_some_and(|capabilities| {
-                                    capabilities.iter().any(|capability| capability.as_str() == Some("tab-placement-v1"))
-                                }));
-                                let supports_catalog =
-                                    json["capabilities"].as_array().is_some_and(|capabilities| {
-                                        capabilities.iter().any(|capability| {
-                                            capability.as_str() == Some("workspace-catalog-v1")
-                                        })
-                                    });
-                                workspace.set_catalog_supported(supports_catalog);
-                                if supports_catalog {
-                                    workspace.mark_catalog_dirty();
-                                } else {
-                                    publish(
-                                        &updates,
-                                        Update::Status(
-                                            "Local service does not support workspace-catalog-v1"
-                                                .into(),
-                                        ),
-                                        &stop,
-                                    )
-                                    .await?;
-                                }
-                                publish(
-                                    &updates,
-                                    Update::Workspace(Box::new(workspace.clone())),
-                                    &stop,
-                                )
-                                .await?;
-                                model = Some(workspace);
-                                // The UI must accept this owner before feature snapshots.
-                                if supports_hub {
-                                    hub = Some(RuntimeHub::new(&service, client.connection_id()));
-                                    publish(&updates, Update::HostDirectory(HubUpdate {
-                                        connection_id: client.connection_id(), generation: 1,
-                                        state: HostDirectoryState::Loading { previous: None },
-                                    }), &stop).await?;
-                                } else {
-                                    publish(&updates, Update::HostDirectory(HubUpdate::unavailable(client.connection_id())), &stop).await?;
-                                }
-                                settings = Some(RuntimeLocalService::new(
-                                    &service, client.connection_id(), scheme,
-                                ));
-                            }
-                            Some("mux.workspace_snapshot") => {
-                                if let Some(model) = &mut model {
-                                    let response_generation = model.catalog_request_generation();
-                                    let first = !model.catalog_initialized();
-                                    match workspace_refresh.apply_catalog(model, event.connection_id, json) {
-                                        Ok(applied) => {
-                                            delta = applied;
-                                            if let Some(close) = &mut pending_close {
-                                                if close.observe_catalog(response_generation) {
-                                                    if let CloseTarget::Pane { screen, .. } =
-                                                        &close.target
-                                                    {
-                                                        if model.screen(screen).is_some() {
-                                                            model.mark_screen_dirty(screen);
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                        Err(error) => {
-                                            if event.connection_id == model.connection_id() {
-                                                if let Some(close) = &mut pending_close {
-                                                    if close.observe_catalog(response_generation) {
-                                                        close.failure = Some(format!("Close could not be verified: {error}"));
-                                                    }
-                                                }
-                                            }
-                                            publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
-                                            publish(
-                                                &updates,
-                                                Update::Status(format!(
-                                                    "Workspace catalog rejected: {error}"
-                                                )),
-                                                &stop,
-                                            )
-                                            .await?;
-                                        }
-                                    }
-                                    if first
-                                        && model.catalog_initialized()
-                                        && model.screens().is_empty()
-                                    {
-                                        match model.create_screen(&client, "Screen 1") {
-                                            Ok(_) => delta.snapshot_changed = true,
-                                            Err(error) => {
-                                                publish(
-                                                    &updates,
-                                                    Update::Status(format!(
-                                                        "Initial screen not created: {error}"
-                                                    )),
-                                                    &stop,
-                                                )
-                                                .await?
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            Some("mux.screen_snapshot") => {
-                                if let Some(model) = &mut model {
-                                    match workspace_refresh.apply_snapshot(model, event.connection_id, json) {
-                                        Ok(applied) => {
-                                            delta = applied;
-                                            accepted_close_snapshot = delta.snapshot_changed && !model.routes_reconciling();
-                                        }
-                                        Err(error) => {
-                                            if event.connection_id == model.connection_id() {
-                                                if let Some(close) = &mut pending_close {
-                                                    if close.catalog_barrier_seen
-                                                        && matches!(&close.target, CloseTarget::Pane { screen, .. } if json["screen"]["id"] == *screen)
-                                                    {
-                                                        close.failure = Some(format!("Close could not be verified: {error}"));
-                                                    }
-                                                }
-                                            }
-                                            publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
-                                            publish(
-                                                &updates,
-                                                Update::Status(format!(
-                                                    "Screen snapshot rejected: {error}"
-                                                )),
-                                                &stop,
-                                            )
-                                            .await?
-                                        }
-                                    }
-                                }
-                            }
-                            Some("mux.pane_spawned") => {
-                                if let (Some(model), Some(pane), Some(session)) = (
-                                    &mut model,
-                                    json["paneId"].as_str(),
-                                    json["sessionId"].as_str(),
-                                ) {
-                                    model.observe_template_spawn(event.connection_id,pane,session,json);
-                                    delta = model.observe_spawn(event.connection_id, pane, session);
-                                    if let Some(message) = profile_fallback_status(model, event.connection_id, pane, session, json) {
-                                        publish(&updates, Update::Status(message), &stop).await?;
-                                    }
-                                }
-                            }
-                            Some("mux.nudge") => {
-                                if let Some(model) = &mut model {
-                                    let id = json["screenId"].as_str();
-                                    if matches!(json["reason"].as_str(), Some("mux_op" | "cli_op"))
-                                        || id.is_none_or(|id| model.screen(id).is_none())
-                                    {
-                                        model.mark_catalog_dirty();
-                                    }
-                                    if let Some(id) = id {
-                                        model.mark_screen_dirty(id);
-                                    }
-                                }
-                            }
-                            Some("attached") => {
-                                if let Some(session) = json["sessionId"].as_str() {
-                                    if model.as_mut().is_some_and(|model| {
-                                        model.observe_attached(event.connection_id, session)
-                                    }) {
-                                        attached.insert(session.to_owned());
-                                        activity_pending = true;
-                                        if model
-                                            .as_ref()
-                                            .and_then(|model| model.pane_for(session))
-                                            .is_some_and(|pane| desired_visible.contains(pane))
-                                        {
-                                            pending_resize.insert(session.to_owned());
-                                        } else {
-                                            pending_hide.insert(session.to_owned());
-                                        }
-                                        if let Some(model) = &model {
-                                            publish(
-                                                &updates,
-                                                Update::Workspace(Box::new(model.clone())),
-                                                &stop,
-                                            )
-                                            .await?;
-                                        }
-                                        publish(
-                                            &updates,
-                                            Update::Attached { source, session: session.to_owned() },
-                                            &stop,
-                                        )
-                                        .await?;
-                                    }
-                                }
-                            }
-                            Some("closed") => {
-                                if let Some(session) = json["sessionId"].as_str() {
-                                    attached.remove(session);
-                                    // Client already forgets this attachment on `closed`.
-                                    owned_sessions.remove(session);
-                                    closed_sessions.insert(session.to_owned());
-                                }
-                            }
-                            Some("mux.op_failed") | Some("error") => {
-                                if json["type"] == "mux.op_failed" {
-                                    if let Some(model) = &mut model {
-                                        model.observe_placement_failure(event.connection_id, json);
-                                        model.observe_transfer_failure(event.connection_id, json);
-                                        model.observe_floating_failure(event.connection_id, json);
-                                        model.observe_template_failure(event.connection_id,json);
-                                    }
-                                    if let Some(close) = &mut pending_close {
-                                        close.observe_failure(json);
-                                    }
-                                }
-                                if json["type"] == "error" {
-                                    if let Some(session) = json["sessionId"].as_str() {
-                                        if !attached.contains(session) {
-                                            // A server-rejected pending attach is removed by
-                                            // Client. Tombstone it until its route changes so
-                                            // an absent session does not hot-loop reattach.
-                                            owned_sessions.remove(session);
-                                            closed_sessions.insert(session.to_owned());
-                                            if let Some(model) = &mut model {
-                                                if let Some(screen) = model
-                                                    .pane_for(session)
-                                                    .and_then(|pane| model.screen_for(pane))
-                                                    .map(str::to_owned)
-                                                {
-                                                    model.mark_screen_dirty(&screen);
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                                if json["op"] == "move_pane" {
-                                    if let Some(model) = &mut model {
-                                        model.reject_move(event.connection_id);
-                                    }
-                                }
-                                if let (Some(model), Some(pane)) =
-                                    (&mut model, json["paneId"].as_str())
-                                {
-                                    delta = model.observe_spawn_failure(event.connection_id, pane);
-                                }
-                                publish(
-                                    &updates,
-                                    Update::Status(format!("Operation rejected: {json}")),
-                                    &stop,
-                                )
-                                .await?;
-                                if let Some(model) = &mut model {
-                                    // A rejected lifecycle or pane operation can change
-                                    // catalog membership as well as one screen's layout.
-                                    model.mark_catalog_dirty();
-                                    if let Some(id) = json["screenId"].as_str() {
-                                        model.mark_screen_dirty(id);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                        let settled = pending_close.as_ref().and_then(|close| {
-                            let model = model.as_ref()?;
-                            let (screen_exists, pane_exists, matching_snapshot) = match &close.target {
-                                CloseTarget::Pane { screen, pane } => (
-                                    model.screen(screen).is_some(),
-                                    model.screen(screen).and_then(|screen| screen.snapshot())
-                                        .is_some_and(|snapshot| snapshot.panes.contains_key(&splitty_core::ids::PaneId::from(pane.as_str()))),
-                                    (accepted_close_snapshot && json["screen"]["id"] == *screen) || delta.coherent_refresh,
-                                ),
-                                CloseTarget::Screen { screen } => (model.screen(screen).is_some(), false, false),
-                                CloseTarget::Window => (false, false, false),
-                            };
-                            close.settlement(screen_exists, matching_snapshot, pane_exists)
-                        });
-                        if let Some(settled) = settled {
-                            if let Some(close) = pending_close.take() {
-                                let update = match settled {
-                                    Ok(()) => Update::CloseSettled { source: close.source, request_id: close.request_id },
-                                    Err(reason) => Update::CloseRejected { source: close.source, request_id: close.request_id, reason },
-                                };
-                                publish(&updates, update, &stop).await?;
-                            }
-                        }
-                    }
-                    // Attachment changes are reconciled below. Queue pressure
-                    // must not discard a route or close the owned connection.
-                    if delta.snapshot_changed
-                        || delta.placement.is_some()
-                        || delta.transfer.is_some()
-                        || delta.floating.is_some()
-                        || delta.template.is_some()
-                        || !delta.added.is_empty()
-                        || !delta.removed.is_empty()
-                    {
-                        if let Some(model) = &model {
-                            publish(&updates, Update::Workspace(Box::new(model.clone())), &stop)
-                                .await?;
-                        }
-                    }
-                    if delta.coherent_refresh {
-                        // Geometry belongs to the new route generation. The UI
-                        // must measure/report again, even when its grid is equal.
-                        desired_visible.clear();
-                        sizes.clear();
-                        pending_resize.clear();
-                        pending_hide.extend(attached.iter().cloned());
-                    }
-                    if let Some(result)=delta.template {publish(&updates,Update::TemplateApply(result),&stop).await?;}
-                    if let Some(result)=delta.floating {publish(&updates,Update::FloatingAction(result),&stop).await?;}
-                    if let Some(result)=delta.transfer {publish(&updates,Update::ScreenTransfer(result),&stop).await?;}
-                    if let Some(reason)=delta.reconciliation_error {publish(&updates,Update::Status(reason),&stop).await?;}
-                    if let Some(PlacementOutcome::Rejected(reason)) = delta.placement {
-                        publish(&updates, Update::Status(reason), &stop).await?;
-                    }
-                    // The original native accounting stays alive until UI consumption.
-                    publish(&updates, Update::Event { source, event }, &stop).await?;
-                }
-            }
-            if let Some(model) = &mut model {
-                let desired_sessions: HashSet<String> = model
-                    .routes()
-                    .into_iter()
-                    .map(|route| route.session_id)
-                    .collect();
-                sizes.retain(|session, _| desired_sessions.contains(session));
-                pending_resize.retain(|session| desired_sessions.contains(session));
-                desired_visible.retain(|pane| {
-                    model.screen_for(pane) == model.shown_screen_id()
-                        && model.session_for(pane).is_some()
-                        && model.is_displayed_pane(pane)
-                });
-                closed_sessions.retain(|session| desired_sessions.contains(session));
-                closed_sessions.extend(model.failed_template_sessions().map(str::to_owned));
-                let mut pending_error = None::<String>;
-                for session in owned_sessions.clone() {
-                    if !desired_sessions.contains(&session) {
-                        match client.detach(&session) {
-                            Ok(()) => {
-                                owned_sessions.remove(&session);
-                                attached.remove(&session);
-                                pending_hide.remove(&session);
-                                pending_resize.remove(&session);
-                                sizes.remove(&session);
-                            }
-                            Err(error) => {
-                                pending_error
-                                    .get_or_insert_with(|| format!("Detach pending: {error}"));
-                            }
-                        }
-                    }
-                }
-                visible.retain(|pane| model.session_for(pane).is_some());
-                let missing: Vec<_> = desired_sessions
-                    .difference(&owned_sessions)
-                    .cloned()
-                    .collect();
-                for session in missing {
-                    if !closed_sessions.contains(&session) {
-                        match client.attach(&session) {
-                            Ok(()) => {
-                                owned_sessions.insert(session);
-                            }
-                            Err(error) => {
-                                pending_error
-                                    .get_or_insert_with(|| format!("Attach pending: {error}"));
-                            }
-                        }
-                    }
-                }
-                if activity_pending {
-                    match client.activity(true) {
-                        Ok(()) => activity_pending = false,
-                        Err(error) => {
-                            pending_error
-                                .get_or_insert_with(|| format!("Activity pending: {error}"));
-                        }
-                    }
-                }
-                for pane in visible.clone() {
-                    if !desired_visible.contains(&pane) {
-                        if let Some(session) = model.session_for(&pane) {
-                            match client.hide(session) {
-                                Ok(()) => {
-                                    visible.remove(&pane);
-                                }
-                                Err(error) => {
-                                    pending_error
-                                        .get_or_insert_with(|| format!("Hide pending: {error}"));
-                                }
-                            }
-                        } else {
-                            visible.remove(&pane);
-                        }
-                    }
-                }
-                for session in pending_hide.clone() {
-                    if !attached.contains(&session) || !desired_sessions.contains(&session) {
-                        pending_hide.remove(&session);
-                    } else if model
-                        .pane_for(&session)
-                        .is_some_and(|pane| desired_visible.contains(pane))
-                    {
-                        pending_hide.remove(&session);
-                        pending_resize.insert(session);
+                    let event=Box::new(event?.ok_or_else(||anyhow::anyhow!("Local connection closed"))?);
+                    if event.json().is_none() {
+                        // Binary delivery remains charged and never clones navigation state.
+                        publish(&updates,Update::Event { source:local.owner(),event },&stop).await?;
                     } else {
-                        match client.hide(&session) {
-                            Ok(()) => {
-                                pending_hide.remove(&session);
-                            }
-                            Err(error) => {
-                                pending_error
-                                    .get_or_insert_with(|| format!("Hide pending: {error}"));
-                            }
+                        let json=event.json().expect("JSON event");
+                        let welcome=!local.welcomed && json["type"]=="mux.welcome";
+                        let supports_hub=welcome && supports_host_directory(json);
+                        if json["type"]=="settings.changed" {
+                            if let Some(reader)=&mut settings { if let Err(error)=reader.settings_changed(event.connection_id) {publish(&updates,Update::AppearanceError {connection:event.connection_id,reason:error.to_string()},&stop).await?;} }
                         }
-                    }
-                }
-                for pane in &desired_visible {
-                    if let Some(session) = model.session_for(pane) {
-                        if attached.contains(session)
-                            && (!visible.contains(pane) || pending_resize.contains(session))
-                        {
-                            let (cols, rows) = sizes.get(session).copied().unwrap_or((80, 24));
-                            match client.resize(session, cols, rows, true) {
-                                Ok(()) => {
-                                    visible.insert(pane.clone());
-                                    pending_resize.remove(session);
-                                }
-                                Err(error) => {
-                                    pending_error
-                                        .get_or_insert_with(|| format!("Resize pending: {error}"));
-                                }
-                            }
+                        if json["type"]=="hub.changed" {
+                            if let Some(reader)=&mut hub {if let Err(error)=reader.refresh(event.connection_id) {publish(&updates,Update::Status(error.to_string()),&stop).await?;} }
                         }
-                    }
-                }
-                match pending_error {
-                    None => control_error = None,
-                    Some(status) if control_error.as_deref() == Some(status.as_str()) => {}
-                    Some(status) => {
-                        publish(&updates, Update::Status(status.clone()), &stop).await?;
-                        control_error = Some(status);
-                    }
-                }
-                match workspace_refresh.flush(model,&client) {
-                    Ok(()) => refresh_error = None,
-                    Err(error) => {
-                        // Refreshes are read-only and keep their dirty state on
-                        // admission failure. Retry them without ending the owned
-                        // service or replaying a mutation/input command.
-                        let status = format!("Workspace refresh pending: {error}");
-                        if refresh_error.as_deref() != Some(status.as_str()) {
-                            publish(&updates, Update::Status(status.clone()), &stop).await?;
-                            refresh_error = Some(status);
+                        let effects=local.event(&mut window,event)?;
+                        publish_source_effects(&mut window,effects,&updates,&stop).await?;
+                        if welcome {
+                            // Owner publication precedes any independently owned API result.
+                            if supports_hub {
+                                hub=Some(RuntimeHub::new(&service,local.client.connection_id()));
+                                publish(&updates,Update::HostDirectory(HubUpdate { connection_id:local.client.connection_id(),generation:1,state:HostDirectoryState::Loading {previous:None} }),&stop).await?;
+                            } else {publish(&updates,Update::HostDirectory(HubUpdate::unavailable(local.client.connection_id())),&stop).await?;}
+                            settings=Some(RuntimeLocalService::new(&service,local.client.connection_id(),scheme));
                         }
                     }
                 }
             }
+            let effects=local.reconcile(&mut window)?;
+            publish_source_effects(&mut window,effects,&updates,&stop).await?;
+            let effects=remotes.reconcile(&mut window)?;
+            publish_source_effects(&mut window,effects,&updates,&stop).await?;
         }
-        Ok::<(), anyhow::Error>(())
-    }
-    .await;
-    let settings_cleanup = match settings.take() {
-        Some(reader) => reader.finish().await.map_err(anyhow::Error::from),
-        None => Ok(()),
-    };
+        Ok::<(),anyhow::Error>(())
+    }.await;
+    let (settings_cleanup, hub_cleanup, client_cleanup, remote_cleanup) = tokio::join!(
+        async {
+            match settings.take() {
+                Some(reader) => reader.finish().await.map_err(anyhow::Error::from),
+                None => Ok(()),
+            }
+        },
+        async {
+            match hub.take() {
+                Some(reader) => reader.finish().await.map_err(anyhow::Error::from),
+                None => Ok(()),
+            }
+        },
+        async { local.client.finish().await.map_err(anyhow::Error::from) },
+        async {
+            remotes
+                .finish(&mut window)
+                .await
+                .map_err(anyhow::Error::from)
+        },
+    );
     drop(settings);
-    let hub_cleanup = match hub.take() {
-        Some(reader) => reader.finish().await.map_err(anyhow::Error::from),
-        None => Ok(()),
-    };
     drop(hub);
-    let client_cleanup = client.finish().await.map_err(anyhow::Error::from);
     finish_owned_run(
         service,
         result,
-        settings_cleanup.and(hub_cleanup).and(client_cleanup),
+        settings_cleanup
+            .and(hub_cleanup)
+            .and(client_cleanup)
+            .and(remote_cleanup),
         &cleanup_complete,
         &stop,
     )
     .await
 }
 
+fn local_command(kind: &CommandKind) -> bool {
+    matches!(
+        kind,
+        CommandKind::ConnectHost { .. }
+            | CommandKind::RetryHost { .. }
+            | CommandKind::CancelHost { .. }
+            | CommandKind::ReleaseHostBrowse { .. }
+            | CommandKind::DetachRemoteScreen { .. }
+            | CommandKind::SwitchScreen(_)
+            | CommandKind::CycleScreen { .. }
+            | CommandKind::RefreshHostDirectory { .. }
+            | CommandKind::TemplateApi { .. }
+            | CommandKind::ApplyTemplate { .. }
+            | CommandKind::Zoom { .. }
+            | CommandKind::SetColorScheme { .. }
+            | CommandKind::SetDrawerVisibility { .. }
+            | CommandKind::CreateScreen(_)
+            | CommandKind::RenameScreen { .. }
+            | CommandKind::ProfileTab { .. }
+            | CommandKind::NewTerminal { .. }
+            | CommandKind::TransferPane { .. }
+            | CommandKind::FloatPane { .. }
+            | CommandKind::DockFloat { .. }
+            | CommandKind::MoveFloat { .. }
+    ) || matches!(kind,CommandKind::RequestClose {plan,..} if plan.target==CloseTarget::Window)
+}
+fn select_window_screen(
+    window: &mut WindowWorkspace,
+    local: &mut source::SourceRuntime,
+    remotes: &mut remote::Remotes<'_>,
+    key: &ScreenKey,
+) -> std::io::Result<()> {
+    if key.source_id() == local.id() {
+        window
+            .source_mut(local.id())
+            .expect("local source")
+            .switch_screen(&local.client, key.screen_id())?;
+    }
+    window.select(window.lifecycle_token(), key)?;
+    local.cancel_created_follow();
+    remotes.cancel_created_follow();
+    local.withdraw_visibility();
+    Ok(())
+}
+
+fn adjacent_screen(window: &WindowWorkspace, step: TabStep) -> Option<ScreenKey> {
+    let current = window.shown_key()?;
+    let opened = window.opened();
+    let index = opened.iter().position(|entry| entry.key() == &current)?;
+    let next = match step {
+        TabStep::Previous => index.checked_sub(1)?,
+        TabStep::Next => index.checked_add(1)?,
+    };
+    opened.get(next).map(|entry| entry.key().clone())
+}
+
+async fn publish_source_effects(
+    window: &mut WindowWorkspace,
+    mut effects: source::SourceEffects,
+    updates: &mpsc::Sender<Update>,
+    stop: &AtomicBool,
+) -> anyhow::Result<bool> {
+    if let Some(key) = effects.select_created {
+        window.select(window.lifecycle_token(), &key)?;
+        effects.changed = true;
+    }
+    if effects.changed {
+        publish(updates, Update::Workspace(Box::new(window.clone())), stop).await?;
+    }
+    for update in effects.updates {
+        publish(updates, update, stop).await?;
+    }
+    Ok(effects.close_window)
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+fn local_projection(window: &WindowWorkspace) -> Box<crate::workspace::SourceWorkspace> {
+    let source = window.local_source();
+    assert_eq!(window.lifecycle_token(), source.source_token());
+    assert_eq!(
+        window.shown_key(),
+        source.shown_screen_id().map(|id| source.screen_key(id)),
+        "local-only worker publishes a coherent global selection"
+    );
+    assert!(window
+        .opened()
+        .iter()
+        .all(|entry| entry.key().source_id() == source.source_id()));
+    Box::new(source.clone())
+}
+
 #[cfg(all(test, not(target_os = "windows")))]
 mod close_tests {
     use super::*;
+    use crate::workspace::SourceWorkspace;
     use serde_json::json;
     use std::time::Duration;
 
@@ -1991,9 +1334,10 @@ mod close_tests {
             .expect("native close update channel")
     }
 
-    async fn stable_model(updates: &mut mpsc::Receiver<Update>) -> Box<LocalWorkspace> {
+    async fn stable_model(updates: &mut mpsc::Receiver<Update>) -> Box<SourceWorkspace> {
         loop {
             if let Update::Workspace(model) = next_update(updates).await {
+                let model = local_projection(&model);
                 if model.catalog_initialized()
                     && model.screens().len() == 1
                     && !model.has_pending_create()
@@ -2175,6 +1519,7 @@ mod close_tests {
         while ready.is_none() || !failed || profile_generation.is_none() {
             match next_update(&mut updates).await {
                 Update::Workspace(model) => {
+                    let model = local_projection(&model);
                     owner = Some(model.connection_id());
                     if model.snapshot().is_some() && !model.routes().is_empty() {
                         ready = Some(model);
@@ -2365,6 +1710,7 @@ mod close_tests {
         let split = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 if let Update::Workspace(model) = next_update(&mut updates).await {
+                    let model = local_projection(&model);
                     if model.routes().len() == 2
                         && model
                             .routes()
@@ -2477,6 +1823,7 @@ mod close_tests {
             .unwrap();
         loop {
             if let Update::Workspace(model) = next_update(&mut updates).await {
+                let model = local_projection(&model);
                 if model.maximized_slot_id() == Some(slot_a.as_str()) {
                     assert_eq!(model.displayed_panes(), vec![pane_a.clone()]);
                     assert_eq!(
@@ -2541,6 +1888,7 @@ mod close_tests {
             .unwrap();
         loop {
             if let Update::Workspace(model) = next_update(&mut updates).await {
+                let model = local_projection(&model);
                 if model.maximized_slot_id().is_none() && model.displayed_panes().len() == 2 {
                     break;
                 }
@@ -2717,6 +2065,7 @@ mod close_tests {
         let worker = Worker::start(receiver, sender);
         let model = loop {
             if let Update::Workspace(model) = next_update(&mut updates).await {
+                let model = local_projection(&model);
                 break model;
             }
         };
@@ -2790,6 +2139,7 @@ mod close_tests {
                 .expect("owned worker did not finish after approval")
             {
                 Some(Update::Workspace(model)) => {
+                    let model = local_projection(&model);
                     assert!(
                         model
                             .screens()

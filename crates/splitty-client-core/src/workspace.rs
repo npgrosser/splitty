@@ -1,6 +1,7 @@
 //! Service-owned local screens, projected without a second layout tree.
 mod catalog;
 mod identity;
+mod window;
 use crate::{
     connection::{invalid, MAX_ATTACHMENTS},
     Client, ScreenIds,
@@ -14,7 +15,7 @@ pub use catalog::templates::{
 pub use catalog::transfer::{
     PaneActionTarget, ScreenTransferOutcome, ScreenTransferResult, ScreenTransferTarget,
 };
-pub use catalog::LocalWorkspace;
+pub use catalog::{SourceKind, SourceWorkspace};
 pub use identity::{LayoutKey, PaneKey, ScreenKey, SourceId, SourceToken, TerminalToken};
 use serde::Deserialize;
 use serde_json::Value;
@@ -31,6 +32,10 @@ use std::{
     sync::Arc,
 };
 use uuid::Uuid;
+pub use window::{
+    CatalogState, HostActionTarget, HostDiagnostic, HostPresentation, OpenedScreen,
+    OpenedScreenState, SourceEdit, SourceStatus, WindowRoute, WindowWorkspace,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SessionRoute {

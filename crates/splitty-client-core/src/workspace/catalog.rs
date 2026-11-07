@@ -1,4 +1,4 @@
-//! Connection-wide catalog, admission and local Screen selection.
+//! Common source catalog policy, canonical Screen collection and admission.
 use super::*;
 use crate::connection::identifier;
 pub(super) mod floating;
@@ -8,21 +8,63 @@ use floating::PendingFloating;
 pub(crate) mod refresh;
 pub(super) mod transfer;
 use placement::PendingTabPlacement;
+use splitty_transport::budget::{Budget, Charged, ConnectionBudget};
 use transfer::PendingTransfer;
 
 /// Empty Screens consume model capacity independently of session attachments.
 pub const MAX_LOCAL_SCREENS: usize = 128;
+pub const MAX_REMOTE_CATALOG: usize = 200;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SourceKind {
+    Local,
+    Remote,
+}
+
+/// Catalog membership and opened membership coincide only on the local source.
+#[derive(Clone)]
+enum CatalogPolicy {
+    Local,
+    Remote {
+        target: String,
+        live: Option<Arc<Charged<Vec<ScreenInfo>>>>,
+        missing: HashSet<String>,
+        budget: ConnectionBudget,
+    },
+}
+
+#[derive(Clone, Copy)]
+pub(super) struct SourceLimits {
+    pub screens: usize,
+    pub panes: usize,
+}
+impl Default for SourceLimits {
+    fn default() -> Self {
+        Self {
+            screens: MAX_LOCAL_SCREENS,
+            panes: MAX_ATTACHMENTS,
+        }
+    }
+}
 
 #[derive(Clone)]
 struct PendingScreen {
     mutation: u64,
 }
 
-/// One connection owns every screen model and the shared pending-pane budget.
+/// Previously the local all-catalog collection; now one source owns the same
+/// canonical Screen models, projection and candidate admission. Only catalog
+/// policy differs: local opens all entries, remote opens explicit references.
+/// WindowWorkspace owns cross-source selection and supplies the aggregate
+/// allowance before each mutable collection borrow.
 #[derive(Clone)]
-pub struct LocalWorkspace {
+pub struct SourceWorkspace {
     pub(super) source_id: SourceId,
     connection_id: Uuid,
+    policy: CatalogPolicy,
+    pub(super) ready: bool,
+    pub(super) limits: SourceLimits,
+    pub(super) staged: Arc<Budget>,
     catalog: Vec<ScreenInfo>,
     models: HashMap<String, ScreenModel>,
     shown: Option<String>,
@@ -45,10 +87,13 @@ pub struct LocalWorkspace {
     mutation: u64,
 }
 
-impl LocalWorkspace {
-    /// Assess only local terminal impact, retaining pane and session identity
+impl SourceWorkspace {
+    /// Assess this source's terminal impact, retaining pane and session identity
     /// across a later prompt. The existing admission bounds limit this plan.
     pub fn assess_close(&self, request_id: u64, target: CloseTarget) -> io::Result<ClosePlan> {
+        if self.kind() == SourceKind::Remote && target == CloseTarget::Window {
+            return Err(invalid("remote Screens detach on window close"));
+        }
         if (self.reconciling || self.pending_floating.is_some() || self.pending_template.is_some())
             && target != CloseTarget::Window
         {
@@ -268,6 +313,10 @@ impl LocalWorkspace {
         Self {
             source_id: SourceId::initial(connection_id),
             connection_id,
+            policy: CatalogPolicy::Local,
+            ready: true,
+            limits: SourceLimits::default(),
+            staged: Budget::new(splitty_transport::wire::MAX_FRAME_BYTES),
             catalog: Vec::new(),
             models: HashMap::new(),
             shown: None,
@@ -289,6 +338,163 @@ impl LocalWorkspace {
             catalog_in_flight: None,
             mutation: 0,
         }
+    }
+
+    pub(super) fn remote(
+        source: SourceId,
+        connection: Uuid,
+        target: String,
+        budget: ConnectionBudget,
+    ) -> Self {
+        let mut workspace = Self::new(connection);
+        workspace.source_id = source;
+        workspace.policy = CatalogPolicy::Remote {
+            target,
+            live: None,
+            missing: HashSet::new(),
+            budget,
+        };
+        workspace
+    }
+
+    pub fn kind(&self) -> SourceKind {
+        match self.policy {
+            CatalogPolicy::Local => SourceKind::Local,
+            CatalogPolicy::Remote { .. } => SourceKind::Remote,
+        }
+    }
+    pub fn target(&self) -> Option<&str> {
+        match &self.policy {
+            CatalogPolicy::Local => None,
+            CatalogPolicy::Remote { target, .. } => Some(target),
+        }
+    }
+    pub fn is_ready(&self) -> bool {
+        self.ready
+    }
+    pub(super) fn replace_catalog_budget(&mut self, next: ConnectionBudget) {
+        if let CatalogPolicy::Remote { budget, .. } = &mut self.policy {
+            *budget = next;
+        }
+    }
+    /// Remote metadata does not imply an opened model or a session attachment.
+    pub fn live_catalog(&self) -> Option<&[ScreenInfo]> {
+        match &self.policy {
+            CatalogPolicy::Local => self.catalog_initialized.then_some(self.catalog.as_slice()),
+            CatalogPolicy::Remote { live, .. } => live.as_ref().map(|live| live.value.as_slice()),
+        }
+    }
+    pub fn is_missing(&self, id: &str) -> bool {
+        matches!(&self.policy, CatalogPolicy::Remote { missing, .. } if missing.contains(id))
+    }
+    fn require_local(&self) -> io::Result<()> {
+        if self.kind() != SourceKind::Local {
+            return Err(invalid("operation is only available on the local source"));
+        }
+        Ok(())
+    }
+    pub(super) fn open_existing(&mut self, id: &str) -> io::Result<()> {
+        if self.kind() != SourceKind::Remote || !self.ready {
+            return Err(invalid("remote source is not ready"));
+        }
+        self.require_catalog()?;
+        let info = self
+            .live_catalog()
+            .and_then(|entries| entries.iter().find(|entry| entry.id.as_str() == id))
+            .cloned()
+            .ok_or_else(|| invalid("Screen is not in the live remote catalog"))?;
+        if !self.catalog.iter().any(|entry| entry.id.as_str() == id) {
+            if self.catalog.len() >= self.limits.screens {
+                return Err(capacity("window Screen limit reached"));
+            }
+            self.catalog.push(info);
+        }
+        if let CatalogPolicy::Remote { missing, .. } = &mut self.policy {
+            missing.remove(id);
+        }
+        let source = self.source_id;
+        let connection = self.connection_id;
+        let tabs = self.tab_selection_supported;
+        self.models
+            .entry(id.to_owned())
+            .or_insert_with(|| Self::existing_screen(source, connection, id, tabs));
+        self.shown = Some(id.to_owned());
+        Ok(())
+    }
+    pub(super) fn detach_reference(&mut self, id: &str) -> io::Result<WorkspaceDelta> {
+        if self.kind() != SourceKind::Remote {
+            return Err(invalid("local Screens cannot be detached"));
+        }
+        let generation = self
+            .route_generation
+            .checked_add(1)
+            .ok_or_else(|| invalid("route generation exhausted"))?;
+        let previous = self.route_map();
+        self.catalog.retain(|entry| entry.id.as_str() != id);
+        self.models.remove(id);
+        if let CatalogPolicy::Remote { missing, .. } = &mut self.policy {
+            missing.remove(id);
+        }
+        if self.shown.as_deref() == Some(id) {
+            self.shown = self.catalog.first().map(|entry| entry.id.to_string());
+        }
+        let mut delta = route_delta(&previous, &self.route_map());
+        delta.snapshot_changed = true;
+        self.route_generation = generation;
+        Ok(delta)
+    }
+    fn existing_screen(source: SourceId, connection: Uuid, id: &str, tabs: bool) -> ScreenModel {
+        let mut screen = ScreenModel::new(
+            ScreenIds {
+                screen_id: id.to_owned(),
+                pane_id: String::new(),
+            },
+            connection,
+        );
+        screen.source_id = source;
+        screen.pending_panes.clear();
+        screen.focused_pane = None;
+        screen.set_tab_selection_supported(tabs);
+        screen.resync_pending = true;
+        screen
+    }
+    pub(super) fn select_opened(&mut self, id: &str) -> io::Result<()> {
+        if !self.catalog.iter().any(|entry| entry.id.as_str() == id) {
+            return Err(invalid("Screen reference is no longer open"));
+        }
+        self.cancel_navigation_follow();
+        self.shown = Some(id.to_owned());
+        Ok(())
+    }
+    pub(super) fn cancel_navigation_follow(&mut self) {
+        self.activate_created = None;
+        self.cancel_placement_focus();
+        if let Some(screen) = self.shown.as_ref().and_then(|id| self.models.get_mut(id)) {
+            screen.pending_move = None;
+        }
+    }
+    pub(super) fn selection_follow_target(&self) -> Option<&str> {
+        self.pending_transfer
+            .as_ref()
+            .filter(|pending| pending.follow)
+            .map(|pending| pending.target.screen_id())
+            .or_else(|| self.pending_template().map(|pending| pending.screen_id()))
+            .or(self.activate_created.as_deref())
+    }
+    pub(super) fn screen_count(&self) -> usize {
+        let mut ids: HashSet<&str> = self
+            .models
+            .keys()
+            .map(String::as_str)
+            .chain(self.catalog.iter().map(|info| info.id.as_str()))
+            .collect();
+        if let Some(pending) = &self.pending_transfer {
+            ids.insert(pending.target.screen_id());
+        }
+        if let Some(pending) = &self.pending_template {
+            ids.insert(pending.preview.screen_id());
+        }
+        ids.len()
     }
 
     pub fn connection_id(&self) -> Uuid {
@@ -449,7 +655,10 @@ impl LocalWorkspace {
         Ok(())
     }
 
-    fn flush_catalog_request(&mut self, send: impl FnOnce() -> io::Result<()>) -> io::Result<()> {
+    pub(super) fn flush_catalog_request(
+        &mut self,
+        send: impl FnOnce() -> io::Result<()>,
+    ) -> io::Result<()> {
         if self.catalog_dirty && self.catalog_in_flight.is_none() {
             self.require_catalog()?;
             send()?;
@@ -491,9 +700,28 @@ impl LocalWorkspace {
         let entries = event["screens"]
             .as_array()
             .ok_or_else(|| invalid("invalid workspace catalog"))?;
-        if entries.len() > MAX_LOCAL_SCREENS {
+        let catalog_limit = if self.kind() == SourceKind::Local {
+            self.limits.screens
+        } else {
+            MAX_REMOTE_CATALOG
+        };
+        if entries.len() > catalog_limit {
             return Err(capacity("native workspace screen limit reached"));
         }
+        let remote_lease = match &self.policy {
+            CatalogPolicy::Remote { budget, .. } => {
+                let bytes = splitty_transport::codec::json_size(
+                    &event["screens"],
+                    splitty_core::native_api::MAX_API_BODY,
+                )?;
+                Some(
+                    budget
+                        .reserve(bytes.saturating_mul(8), false)
+                        .map_err(io::Error::other)?,
+                )
+            }
+            CatalogPolicy::Local => None,
+        };
         let mut catalog = Vec::with_capacity(entries.len());
         let mut ids = HashSet::new();
         for value in entries {
@@ -507,12 +735,24 @@ impl LocalWorkspace {
             }
             catalog.push(info);
         }
-        let retained_pending = self
-            .pending_screens
-            .iter()
-            .filter(|(id, pending)| pending.mutation > watermark && !ids.contains(*id))
-            .count();
-        if catalog.len() + retained_pending > MAX_LOCAL_SCREENS {
+        if self.kind() == SourceKind::Remote {
+            return self
+                .apply_remote_catalog(remote_lease.expect("remote catalog lease").charge(catalog));
+        }
+        let mut reserved: HashSet<&str> = ids.iter().map(String::as_str).collect();
+        reserved.extend(
+            self.pending_screens
+                .iter()
+                .filter(|(_, pending)| pending.mutation > watermark)
+                .map(|(id, _)| id.as_str()),
+        );
+        if let Some(pending) = &self.pending_transfer {
+            reserved.insert(pending.target.screen_id());
+        }
+        if let Some(pending) = &self.pending_template {
+            reserved.insert(pending.preview.screen_id());
+        }
+        if reserved.len() > self.limits.screens {
             return Err(capacity("native workspace screen limit reached"));
         }
         let old_routes = self.route_map();
@@ -534,19 +774,12 @@ impl LocalWorkspace {
             .retain(|id, pending| !ids.contains(id) && pending.mutation > watermark);
         for info in &catalog {
             self.models.entry(info.id.to_string()).or_insert_with(|| {
-                let mut screen = ScreenModel::new(
-                    ScreenIds {
-                        screen_id: info.id.to_string(),
-                        pane_id: String::new(),
-                    },
+                Self::existing_screen(
+                    self.source_id,
                     self.connection_id,
-                );
-                screen.source_id = self.source_id;
-                screen.pending_panes.clear();
-                screen.focused_pane = None;
-                screen.set_tab_selection_supported(self.tab_selection_supported);
-                screen.resync_pending = true;
-                screen
+                    info.id.as_str(),
+                    self.tab_selection_supported,
+                )
             });
         }
         if !self.catalog_initialized {
@@ -574,6 +807,43 @@ impl LocalWorkspace {
             || changed_catalog
             || old_shown != self.shown
             || !delta.removed.is_empty();
+        Ok(delta)
+    }
+
+    fn apply_remote_catalog(
+        &mut self,
+        catalog: Charged<Vec<ScreenInfo>>,
+    ) -> io::Result<WorkspaceDelta> {
+        let previous = self.route_map();
+        let old_shown = self.shown.clone();
+        let CatalogPolicy::Remote { live, missing, .. } = &mut self.policy else {
+            unreachable!()
+        };
+        missing.clear();
+        for opened in &mut self.catalog {
+            let id = opened.id.as_str();
+            if let Some(current) = catalog.iter().find(|entry| entry.id == opened.id) {
+                opened.name.clone_from(&current.name);
+                self.models.entry(id.to_owned()).or_insert_with(|| {
+                    Self::existing_screen(
+                        self.source_id,
+                        self.connection_id,
+                        id,
+                        self.tab_selection_supported,
+                    )
+                });
+            } else {
+                missing.insert(id.to_owned());
+                self.models.remove(id);
+            }
+        }
+        *live = Some(Arc::new(catalog));
+        self.catalog_initialized = true;
+        let mut delta = route_delta(&previous, &self.route_map());
+        delta.snapshot_changed = true;
+        // No host activation hint, catalog insertion or disappearance changes
+        // the window's explicitly chosen reference, including a missing one.
+        debug_assert_eq!(self.shown, old_shown);
         Ok(delta)
     }
 
@@ -642,8 +912,34 @@ impl LocalWorkspace {
     pub fn reset_connection(&mut self, connection: Uuid) -> WorkspaceDelta {
         let removed = self.routes();
         let source = self.source_id;
-        *self = Self::new(connection);
+        let policy = self.policy.clone();
+        let opened = self.catalog.clone();
+        let shown = self.shown.clone();
+        let mut screens = std::mem::take(&mut self.models);
+        let limits = self.limits;
+        let staged = self.staged.clone();
+        *self = match policy {
+            CatalogPolicy::Local => Self::new(connection),
+            CatalogPolicy::Remote { target, budget, .. } => {
+                let mut next = Self::remote(source, connection, target, budget);
+                next.catalog = opened;
+                next.shown = shown;
+                // Reuse the canonical model's existing reset boundary: it
+                // revokes snapshots, routes and pending operations while
+                // retaining only per-window tab/focus choices. Fresh canonical
+                // snapshots revalidate those choices before they are visible.
+                for screen in screens.values_mut() {
+                    screen.reset_connection(connection);
+                    screen.set_tab_selection_supported(false);
+                    screen.resync_pending = false;
+                }
+                next.models = screens;
+                next
+            }
+        };
         self.source_id = source;
+        self.limits = limits;
+        self.staged = staged;
         WorkspaceDelta {
             snapshot_changed: true,
             removed,
@@ -652,6 +948,7 @@ impl LocalWorkspace {
     }
 
     pub fn create_screen(&mut self, client: &Client, name: &str) -> io::Result<ScreenIds> {
+        self.require_local()?;
         self.require_routes_settled()?;
         self.check_connection(client)?;
         self.require_catalog()?;
@@ -659,7 +956,7 @@ impl LocalWorkspace {
             return Err(capacity("workspace catalog is not loaded"));
         }
         self.admit_new_pane()?;
-        if self.models.len() >= MAX_LOCAL_SCREENS {
+        if self.screen_count() >= self.limits.screens {
             return Err(capacity("native workspace screen limit reached"));
         }
         let mutation = self.next_mutation()?;
@@ -692,7 +989,9 @@ impl LocalWorkspace {
             return Ok(false);
         }
         let mutation = self.next_mutation()?;
-        client.set_active_screen(id)?;
+        if self.kind() == SourceKind::Local {
+            client.set_active_screen(id)?;
+        }
         self.activate_created = None;
         if let Some(old) = self.shown.as_ref().and_then(|id| self.models.get_mut(id)) {
             old.pending_move = None;
@@ -796,6 +1095,7 @@ impl LocalWorkspace {
         pane: &str,
         profile_id: &str,
     ) -> io::Result<String> {
+        self.require_local()?;
         self.require_routes_settled()?;
         self.admit_new_pane()?;
         let result = self
@@ -807,6 +1107,7 @@ impl LocalWorkspace {
         result
     }
     pub fn new_terminal(&mut self, client: &Client) -> io::Result<String> {
+        self.require_local()?;
         self.require_routes_settled()?;
         self.admit_new_pane()?;
         let result = self.shown_mut()?.new_terminal(client);
@@ -885,7 +1186,7 @@ impl LocalWorkspace {
             .ok_or_else(|| invalid("no screen selected"))
     }
     fn check_connection(&self, client: &Client) -> io::Result<()> {
-        if self.connection_id != client.connection_id() {
+        if !self.ready || self.connection_id != client.connection_id() {
             return Err(invalid("workspace connection changed"));
         }
         Ok(())
@@ -923,11 +1224,21 @@ impl LocalWorkspace {
             })
             .collect()
     }
-    fn admission_count(&self) -> usize {
-        self.models.values().map(screen_admission).sum()
+    pub(super) fn admission_count(&self) -> usize {
+        let current = self.models.values().map(screen_admission).sum();
+        self.template_reserved_admission()
+            .map_or(current, |(screen, panes)| {
+                let other: usize = self
+                    .models
+                    .iter()
+                    .filter(|(id, _)| id.as_str() != screen)
+                    .map(|(_, model)| screen_admission(model))
+                    .sum();
+                current.max(other + panes)
+            })
     }
     fn admit_new_pane(&self) -> io::Result<()> {
-        if self.admission_count() >= MAX_ATTACHMENTS {
+        if self.admission_count() >= self.limits.panes {
             return Err(capacity("native workspace attachment limit reached"));
         }
         Ok(())
@@ -966,7 +1277,15 @@ impl LocalWorkspace {
                 }
             }
         }
-        if count > MAX_ATTACHMENTS {
+        if let Some((target, reserved)) = self.template_reserved_admission() {
+            let present = if target == id {
+                screen_admission(candidate)
+            } else {
+                self.models.get(target).map_or(0, screen_admission)
+            };
+            count = count.max(count - present + reserved);
+        }
+        if count > self.limits.panes {
             return Err(capacity("native workspace attachment limit reached"));
         }
         Ok(())
@@ -974,11 +1293,24 @@ impl LocalWorkspace {
 }
 
 fn screen_admission(screen: &ScreenModel) -> usize {
-    screen.session_panes.len()
+    screen
+        .snapshot()
+        .map_or(screen.session_panes.len(), |snapshot| {
+            snapshot
+                .panes
+                .len()
+                .max(snapshot.sessions.len())
+                .max(screen.session_panes.len())
+        })
         + screen
             .pending_panes
             .iter()
-            .filter(|pane| !screen.pane_sessions.contains_key(*pane))
+            .filter(|pane| {
+                !screen.pane_sessions.contains_key(*pane)
+                    && !screen.snapshot().is_some_and(|snapshot| {
+                        snapshot.panes.contains_key(&PaneId::from(pane.as_str()))
+                    })
+            })
             .count()
 }
 fn capacity(message: &str) -> io::Error {

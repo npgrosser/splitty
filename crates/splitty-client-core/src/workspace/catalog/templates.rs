@@ -149,7 +149,14 @@ pub(super) struct PendingTemplate {
     spawned: HashMap<String, String>,
     fallbacks: HashMap<String, (String, TemplateProfileFallback)>,
 }
-impl LocalWorkspace {
+impl SourceWorkspace {
+    pub(super) fn template_reserved_admission(&self) -> Option<(&str, usize)> {
+        let pending = self.pending_template.as_ref()?;
+        Some((
+            pending.preview.screen_id(),
+            pending.preview.plan.projection.pane_ids().count(),
+        ))
+    }
     pub fn templates_supported(&self) -> bool {
         self.templates_supported
     }
@@ -202,6 +209,7 @@ impl LocalWorkspace {
         target: TemplateApplyTarget,
         root: String,
     ) -> io::Result<TemplateApplyPlan> {
+        self.require_local()?;
         self.require_template_idle()?;
         if draft.connection_id() != self.connection_id || root.len() > 4096 {
             return Err(invalid("Template source changed or root exceeds limit"));
@@ -266,7 +274,7 @@ impl LocalWorkspace {
         Ok(plan)
     }
     fn check_template_capacity(&self, plan: &TemplateApplyPlan) -> io::Result<()> {
-        if plan.request.create_screen && self.models.len() >= MAX_LOCAL_SCREENS {
+        if plan.request.create_screen && self.screen_count() >= self.limits.screens {
             return Err(capacity("Native Screen limit reached"));
         }
         let other: usize = self
@@ -280,7 +288,7 @@ impl LocalWorkspace {
                     + model.pending_panes.len()
             })
             .sum();
-        if other + plan.projection.pane_ids().count() > MAX_ATTACHMENTS {
+        if other + plan.projection.pane_ids().count() > self.limits.panes {
             return Err(capacity("Template exceeds workspace terminal capacity"));
         }
         Ok(())
@@ -304,6 +312,7 @@ impl LocalWorkspace {
         replace_confirmed: bool,
         send: impl FnOnce(&str, &mux::ApplyTemplate) -> io::Result<()>,
     ) -> io::Result<()> {
+        self.require_local()?;
         self.require_template_idle()?;
         if plan.source_token() != self.source_token() || plan.consumed.load(Ordering::Acquire) {
             return Err(invalid(

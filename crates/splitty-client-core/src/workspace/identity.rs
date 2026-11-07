@@ -1,5 +1,5 @@
 //! Stable source namespaces and immutable authority captured by native views.
-use super::LocalWorkspace;
+use super::SourceWorkspace;
 use std::fmt;
 use uuid::Uuid;
 
@@ -25,9 +25,6 @@ pub struct SourceToken {
     connection: Uuid,
 }
 impl SourceToken {
-    pub(crate) fn initial(connection: Uuid) -> Self {
-        Self::new(SourceId::initial(connection), connection)
-    }
     pub(super) fn new(source: SourceId, connection: Uuid) -> Self {
         Self { source, connection }
     }
@@ -137,7 +134,7 @@ impl TerminalToken {
     }
 }
 
-impl LocalWorkspace {
+impl SourceWorkspace {
     pub(crate) fn validate_shown_key(&self, screen: &ScreenKey) -> std::io::Result<()> {
         if screen.source_id() != self.source_id
             || self.shown_screen_id() != Some(screen.screen_id())
@@ -172,6 +169,9 @@ impl LocalWorkspace {
         ))
     }
     pub fn accepts_terminal(&self, token: &TerminalToken) -> bool {
+        self.ready && self.contains_terminal_binding(token)
+    }
+    pub(super) fn contains_terminal_binding(&self, token: &TerminalToken) -> bool {
         token.source == self.source_token()
             && self.session_for(&token.pane) == Some(token.session.as_str())
             && self.pane_for(&token.session) == Some(token.pane.as_str())

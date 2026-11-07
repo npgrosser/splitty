@@ -3,7 +3,7 @@
 model {
   extend splitty.gpui {
     gpui_main = component 'gpui_main' {
-      description 'Application entry point for the local workspace and optional fixture probe.'
+      description 'Application entry point for the native multi-source window and optional fixture probe.'
       metadata { module 'splitty_gpui' }
     }
 
@@ -18,7 +18,7 @@ model {
     }
 
     terminal = component 'terminal' {
-      description 'Native terminal presentation with coherent zoom metrics, cached text shaping, local find editing and highlights, pointer geometry and admitted gesture lifetime, deliberate validated browser links, and byte-preserving input bound to an immutable source and terminal route. Geometry callbacks are rebound on route changes without replacing the retained emulator.'
+      description 'Native terminal presentation with coherent zoom metrics, cached text shaping, local find editing and highlights, pointer geometry and admitted gesture lifetime, source-aware deliberate links, and byte-preserving input bound to an immutable source and terminal route. A replacement connection receives fresh emulation before replay; same-connection hidden views remain retained.'
       metadata { module 'splitty_gpui::terminal' }
     }
 
@@ -28,7 +28,7 @@ model {
     }
 
     gpui_workspace = component 'gpui_workspace' {
-      description 'Canonical Screen Drawer with persisted visibility, group-targeted toolkit icon controls and native header wheel ownership, captured tab transfer menus, saved-template library and explicit command/replacement review, session-free pending tiled/floating placeholders, tab insertion geometry and scrolling, shortcuts, resolved appearance, canonical tiled/floating projection with local stacking and captured geometry previews, source-scoped pane and layout state, focused search ownership and one source-bound cancellable close prompt.'
+      description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references and global navigation, deliberate Hosts connection and live catalog actions, retained source-qualified terminal views, local-only appearance and library controls, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools.'
       metadata { module 'splitty_gpui::workspace' }
     }
 
@@ -50,7 +50,7 @@ model {
     gpui_main -> gpui_app 'Construct and close the probe window'
     gpui_main -> gpui_startup 'Validate process options before platform startup'
     gpui_startup -> splitty.client_core.owned_service 'Construct the explicit platform backend configuration'
-    gpui_main -> gpui_workspace 'Construct the local workspace window'
+    gpui_main -> gpui_workspace 'Construct the native multi-source workspace window'
     gpui_main -> splitty.client_core.native_workspace 'Join the native workspace runtime'
     gpui_main -> offscreen 'Run an engine child before opening the UI'
     gpui_app -> gpui_document 'Show Markdown and annotation marks'
@@ -62,15 +62,15 @@ model {
     gpui_workspace -> gpui_appearance 'Convert resolved theme values for native chrome and terminal colors'
     gpui_workspace -> splitty.client_core.appearance 'Match owner and generation before applying resolved appearance'
     gpui_workspace -> splitty.client_core.client_shell_profiles 'Retain owner-bound service choices for the new-tab picker'
-    gpui_workspace -> splitty.client_core.hub 'Present owner-bound passive host observations and request refreshes'
+    gpui_workspace -> splitty.client_core.hub 'Present fixed-local passive host observations and request refreshes'
     gpui_workspace -> splitty.client_core.client_templates 'Review charged template drafts and match identified library replies'
     gpui_appearance -> terminal 'Provide a plain terminal color configuration'
     gpui_appearance -> splitty.client_core.appearance 'Consume charged appearance snapshot values'
     gpui_appearance -> splitty.client_core.client_zoom 'Project confirmed display zoom and scope'
     gpui_workspace -> splitty.client_core.client_zoom 'Submit zoom intents and present confirmed scale'
-    gpui_workspace -> splitty.client_core.native_workspace 'Submit source-bound commands and captured transfer, assessed close and template intents; reject obsolete output and outcomes'
+    gpui_workspace -> splitty.client_core.native_workspace 'Submit fixed-local host and navigation intents, source-bound terminal commands and assessed close/template intents; reject obsolete output and outcomes'
     gpui_workspace -> splitty.client_core.owned_service 'Pass the selected backend into the shared workspace worker'
-    gpui_workspace -> splitty.client_core.client_workspace 'Render canonical roots and the separate session-free pending template projection'
+    gpui_workspace -> splitty.client_core.client_workspace 'Render the selected canonical source root and all-source terminal routes without a second layout tree'
     gpui_workspace -> splitty.client_core.client_root 'Construct workspace identities in native navigation tests'
     gpui_app -> splitty.client_core.client_root 'Use the public native client API'
     gpui_document -> splitty.client_core.client_root 'Form a source-scoped annotation draft'

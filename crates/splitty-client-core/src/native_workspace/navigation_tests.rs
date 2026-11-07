@@ -1,5 +1,6 @@
 //! Navigation intents cross the worker without relying on a fresh UI model.
 use super::*;
+use crate::workspace::SourceWorkspace;
 use splitty_core::ids::PaneId;
 use std::time::Duration;
 
@@ -12,10 +13,11 @@ async fn next(updates: &mut mpsc::Receiver<Update>) -> Update {
 
 async fn model_where(
     updates: &mut mpsc::Receiver<Update>,
-    test: impl Fn(&LocalWorkspace) -> bool,
-) -> Box<LocalWorkspace> {
+    test: impl Fn(&SourceWorkspace) -> bool,
+) -> Box<SourceWorkspace> {
     loop {
         if let Update::Workspace(model) = next(updates).await {
+            let model = local_projection(&model);
             if test(&model) {
                 return model;
             }
@@ -185,7 +187,6 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
             .send(Command::new(
                 scope,
                 CommandKind::CycleScreen {
-                    connection: owner,
                     step: TabStep::Previous,
                 },
             ))
@@ -202,15 +203,14 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
     }
     commands
         .send(Command::new(
-            scope,
+            SourceWorkspace::new(uuid::Uuid::new_v4()).source_token(),
             CommandKind::CycleScreen {
-                connection: uuid::Uuid::new_v4(),
                 step: TabStep::Next,
             },
         ))
         .await
         .unwrap();
-    rejected(&mut updates, "previous connection").await;
+    rejected(&mut updates, "source connection").await;
     commands
         .send(Command::new(
             scope,
@@ -228,7 +228,6 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
         .send(Command::new(
             scope,
             CommandKind::CycleScreen {
-                connection: owner,
                 step: TabStep::Next,
             },
         ))

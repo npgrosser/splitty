@@ -442,20 +442,24 @@ def fake_ssh(root, args):
                 raise ValueError("private payload marker changed")
             print("Linux\nx86_64\n" + str(host_root) + "\n" + marker.read_text().strip())
             accepted = True
-        elif words == [str(installed), "remote-bridge", "--transport", "native-v1"]:
+        elif words in ([str(installed), "remote-handshake", "--json", "--ensure-daemon"],
+                       [str(installed), "remote-bridge", "--transport", "native-v1"]):
             if sha256(installed) != (root / "binary.sha256").read_text().strip():
                 raise ValueError("private installed binary changed")
             env = os.environ.copy()
             for key in SCRUB:
                 env.pop(key, None)
             env["SPLITTY_CONFIG_DIR"] = str(host_root / "config")
+            kind = "handshake" if words[1] == "remote-handshake" else "bridge"
             accepted = True
             with log.open("a") as output:
-                output.write(json.dumps({"target": target, "kind": "bridge", "accepted": True,
-                                         "pid": os.getpid(), "start": process_start(os.getpid())}) + "\n")
-            os.execve(installed, [str(installed), "remote-bridge", "--transport", "native-v1"], env)
+                record = {"target": target, "kind": kind, "accepted": True}
+                if kind == "bridge":
+                    record.update({"pid": os.getpid(), "start": process_start(os.getpid())})
+                output.write(json.dumps(record) + "\n")
+            os.execve(installed, words, env)
         else:
-            raise ValueError("remote command is not probe or native bridge")
+            raise ValueError("remote command is not probe, daemon handshake or native bridge")
         kind = "probe"
     except Exception as error:
         accepted = False
@@ -490,6 +494,17 @@ def main():
                                      env=fixture.ui_env(), capture_output=True, timeout=5)
             assert install.returncode == 97
             bridge = fixture.hosts[target]["installed"]
+            handshake = subprocess.run([str(fixture.ssh), *SSH_OPTIONS, target, "--",
+                                        f"'{bridge}' remote-handshake --json --ensure-daemon"],
+                                       env=fixture.ui_env(), capture_output=True, timeout=8)
+            assert handshake.returncode == 0, handshake.stderr[-1000:]
+            answer = json.loads(handshake.stdout)
+            assert answer["handshake"] == 2 and answer["daemon"]["running"] is True
+            assert any(screen["id"] == SHARED_SCREEN_ID for screen in answer["screens"])
+            near_miss = subprocess.run([str(fixture.ssh), *SSH_OPTIONS, target, "--",
+                                        f"'{bridge}' remote-handshake --json"],
+                                       env=fixture.ui_env(), capture_output=True, timeout=5)
+            assert near_miss.returncode == 97
             ended = subprocess.run([str(fixture.ssh), *SSH_OPTIONS, target, "--",
                                     f"'{bridge}' remote-bridge --transport native-v1"],
                                    env=fixture.ui_env(), input=b"", capture_output=True, timeout=8)
@@ -503,7 +518,7 @@ def main():
             finally:
                 bridge.chmod(0o500)
             calls = [json.loads(line) for line in (fixture.root / "ssh-calls.jsonl").read_text().splitlines()]
-            assert [item["accepted"] for item in calls] == [True, False, False, True, True, False], calls
+            assert [item["accepted"] for item in calls] == [True, False, False, True, False, True, True, False], calls
             fixture.assert_sessions_alive()
             host = fixture.hosts[target]
             fixture._run([str(fixture.binary), "split", "--screen", host["screen"],

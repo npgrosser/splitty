@@ -1,5 +1,6 @@
 //! Exercise authoritative transfers through the owned worker and live PTYs.
 use super::*;
+use crate::workspace::SourceWorkspace;
 use crate::workspace::{CloseAffected, CloseIdentity};
 use splitty_core::{
     ids::{PaneId, ScreenId},
@@ -16,10 +17,11 @@ async fn next(updates: &mut mpsc::Receiver<Update>) -> Update {
 }
 async fn model_where(
     updates: &mut mpsc::Receiver<Update>,
-    test: impl Fn(&LocalWorkspace) -> bool,
-) -> Box<LocalWorkspace> {
+    test: impl Fn(&SourceWorkspace) -> bool,
+) -> Box<SourceWorkspace> {
     loop {
         if let Update::Workspace(model) = next(updates).await {
+            let model = local_projection(&model);
             if test(&model) {
                 return model;
             }
@@ -31,11 +33,12 @@ async fn confirmed(
     request: Uuid,
     pane: &str,
     session: &str,
-) -> Box<LocalWorkspace> {
+) -> Box<SourceWorkspace> {
     let mut latest = None;
     loop {
         match next(updates).await {
             Update::Workspace(model) => {
+                let model = local_projection(&model);
                 assert_eq!(
                     model.session_for(pane),
                     Some(session),
@@ -142,7 +145,7 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
     commands
         .send(Command::new(
             scope,
-            CommandKind::SwitchScreen(screen_a.clone()),
+            CommandKind::SwitchScreen(first.screen_key(&screen_a)),
         ))
         .await
         .unwrap();
@@ -203,6 +206,7 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
     let observed = loop {
         match next(&mut updates).await {
             Update::Workspace(model) => {
+                let model = local_projection(&model);
                 assert_eq!(
                     model.session_for(&moved.pane_id),
                     Some(moved.session_id.as_str())
@@ -225,7 +229,7 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
     commands
         .send(Command::new(
             scope,
-            CommandKind::SwitchScreen(external.clone()),
+            CommandKind::SwitchScreen(first.screen_key(&external)),
         ))
         .await
         .unwrap();
@@ -301,7 +305,7 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
     let mut close_id = 900;
     loop {
         match next(&mut updates).await {
-            Update::Workspace(model) => latest = model,
+            Update::Workspace(model) => latest = local_projection(&model),
             Update::CloseRejected { .. } => {
                 close_id += 1;
                 commands

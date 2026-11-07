@@ -12,7 +12,7 @@ pub(super) struct PendingTabPlacement {
     focus: bool,
 }
 
-impl LocalWorkspace {
+impl SourceWorkspace {
     pub fn set_tab_placement_supported(&mut self, supported: bool) {
         self.tab_placement_supported = supported;
     }

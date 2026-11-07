@@ -5,7 +5,8 @@ use crate::{
     local_service::LocalServiceClient,
 };
 use splitty_remote::owner::Owner;
-use splitty_transport::queue;
+use splitty_remote::ssh::SshTarget;
+use splitty_transport::{budget::Charged, queue, wire};
 use std::{
     io,
     sync::{
@@ -136,6 +137,21 @@ impl OwnedService {
             Self::Embedded(service) => service.connect().await,
             Self::Owned(owner) => owner
                 .open_context(None, false, queue::Context::default(), |_| {})
+                .await
+                .map(Client::from_owned),
+        }
+    }
+    pub async fn host_stream(
+        &self,
+        target: SshTarget,
+        context: queue::Context,
+        progress: impl FnMut(Charged<wire::Progress>),
+    ) -> io::Result<Client> {
+        match self {
+            #[cfg(not(target_os = "windows"))]
+            Self::Embedded(service) => service.host_stream(target, context, progress).await,
+            Self::Owned(owner) => owner
+                .open_context(Some(target), false, context, progress)
                 .await
                 .map(Client::from_owned),
         }

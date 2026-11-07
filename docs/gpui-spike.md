@@ -186,22 +186,30 @@ terminals on hidden Screens. If the affected sessions change while a decision is
 pending, request close again. Remote connections, saved workspace restoration, scratchpad and
 `splitty open` integration remain subsequent work.
 
-The Screens Drawer exposes the catalog, creation, rename, assessed close and
-Templates. Its toolbar toggle saves visibility through the local settings
-service; a new window restores that choice and the saved sidebar width.
-Vertical wheel input over the Drawer header or current Screen name moves through
-Screens. Over a tab header it selects a tab in that group, even when another
-group has keyboard focus. Both stop at the ends. The Drawer list scrolls normally;
-horizontal input and Shift+mouse-wheel browse overflowing tabs. Editing, close
-prompts and dragging take priority over this navigation. Terminal wheel handling
-stays inside the terminal view.
+The Screens Drawer exposes the catalog, canonical pane entries, creation,
+rename, assessed close, Hosts and Templates. Its pin command saves pinning through
+the local settings service; a new window restores that choice, edge-reveal policy
+and saved sidebar width. The unpinned Drawer slides over the workspace on an
+intentional left-edge dwell and retracts without resizing terminals or writing
+settings. Ctrl+B toggles its transient visibility. The redundant workspace
+toolbar has been removed.
 
-Each tab group has a **+** button for a new terminal and a profile picker beside
-it. Split right/below, float/dock and maximize/restore controls act on that group,
-including when a different terminal has keyboard focus. Narrow groups collect
-the secondary actions in an icon menu. Screen navigation also has previous/next
-buttons beside the current Screen name. The pinned GPUI Kit supplies the button
-styling and icon assets; the canonical mux tree remains the only layout model.
+Ordinary vertical wheel input anywhere over the Drawer moves through Screens.
+Over a tab header it selects a tab in that group, even when another group has
+keyboard focus. Both stop at the ends. Modified wheel input and the scrollbar
+retain Drawer overflow browsing; horizontal input and Shift+mouse-wheel browse
+overflowing tabs. Editing, close prompts and dragging take priority over this
+navigation. Terminal wheel handling stays inside the terminal view.
+
+Each tab group has a **+** button and profile picker directly after its tabs.
+Split right/below, float/dock and maximize/restore controls stay at the trailing
+edge and act on that group, including when another terminal has keyboard focus.
+Narrow groups collect secondary actions in an icon menu. Tab-specific menus open
+on right-click; middle-click uses the same assessed close as the tab's close
+button. Drag feedback retains the tab's title and appearance, and a valid center
+drop highlights the whole pane even when returning to the same group changes no
+layout. The pinned GPUI Kit supplies controls and icons; the canonical mux tree
+remains the only layout model.
 
 **Hosts** shows known targets and aliases with their cached Screen names, pane
 counts and last observation. It distinguishes an observed empty list from a host
@@ -1231,3 +1239,80 @@ authoritative state from isolated control sockets. These results are functional
 software-rendered X11 evidence, not Windows or hardware-smoothness measurements.
 Full workspace merge CI remains deferred until main integration, as does the next
 Windows test build.
+
+
+## Remote workspace integration checkpoint
+
+The shared source/window runtime passes 172 client-core tests, including
+connection-reset focus retention with lower replacement revisions and old-token
+rejection. The corresponding remote UI checkpoint passes 93 GPUI tests and
+strict Clippy; architecture checks pass. The native host adapter's in-process
+fixture verifies fixed target identity, caller budgets, revoked admission,
+independent closure, and no forced update of a compatible older daemon.
+
+The optimized baseline candidate has SHA-256
+`e1f81d471ccb7f6a0a64a9e420d171caec4f0643b34e2cf45ae16dff76545867`.
+Its isolated two-host real-window run passes nine stages: passive inspection,
+deliberate Connect/Open, remote input and default Tab/Split inheritance, hidden
+output and source-grouped navigation, Detach/reopen of the same session, explicit
+Terminate cancel/confirm, and normal close preserving host sessions. The host
+fixtures share raw Screen and Pane identifiers but use distinct actual sessions
+and processes. The existing local Drawer run passes nine checks on this binary.
+
+The later recovery candidate reconnects automatically after the test terminates
+only the identity-verified private bridge, and local/other-host terminals remain
+usable. That run exposes lost split focus after replacement and stops before its
+remaining assertions. A focused core correction passes its tests; full recovery
+window acceptance remains pending. This is recorded as a failure, not a passed
+reconnect milestone.
+
+A separately frozen Windows preview with executable SHA-256
+`0040161c87051c699f9394aeef61ae31e47395a2ecaed0f4dafb2f31659ffd11`
+passes native startup on hardware graphics and normal window shutdown, including
+cleanup of its owned WSL backend and shell processes. It contains the earlier
+remote baseline, not the subsequent recovery corrections or workspace-fidelity
+changes. Linux remote-window checks do not establish Windows remote acceptance.
+Full workspace CI remains deferred until main integration.
+
+## Native workspace fidelity acceptance
+
+The current workspace places new-tab/profile controls immediately after the tab
+strip, keeps group actions trailing, and exposes the tab menu through right-click.
+Middle-click closes the captured tab through the existing assessed-close flow.
+Drag feedback carries the grabbed tab's title and icon; a valid center target
+highlights the whole pane even when dropping there leaves the layout unchanged.
+
+The Drawer follows the existing web hierarchy: compact Screen headings, monospace
+pane entries, nested split/tab groups, hover actions, New screen below the list,
+and Hosts/Templates at the bottom. The extra workspace toolbar is removed.
+Settings, port management, host creation, unread indicators and Screen reordering
+remain separate increments; the Drawer does not present placeholder controls for
+them.
+
+The optimized Linux candidate has SHA-256
+`dfe2f2fdbfc1ee66776d82b52daeeda9aaad9505da0e8a572f9b6ed3e55ec968`.
+It passes all 95 native UI tests and all-target Clippy with warnings denied.
+The shared client-core's 172 tests, the strengthened native host adapter test,
+17 architecture checks and formatting also pass.
+
+`gpui-workspace-fidelity.py` passes nine private-window stages on this candidate:
+adjacent controls, inactive-tab right-click, assessed inactive-tab middle-close,
+same-group center feedback without a revision change, an edge split retaining
+session identities, canonical Drawer pane activation, whole-Drawer wheel
+navigation, and unpinned edge reveal/retraction. A terminal with mouse reporting
+enabled receives no leaked wheel bytes. Reveal and dismissal preserve saved pin
+settings byte-for-byte and leave terminal rows/columns unchanged. The run exits
+through normal window close with no surviving owned children.
+
+A separate 15-Screen run verifies that the last created Screen is revealed in
+the list and that clicking the visible final two rows selects their canonical
+Screens. Shift-wheel scrolls the overflowing list without changing the selected
+Screen. The run also closes normally with no surviving owned children.
+
+Visual review covers short and overflowing tab strips, the one-line tab-shaped
+drag preview, full-pane center marking, pane indentation and typography, and the
+overlay with no redundant toolbar. An earlier candidate exposed incorrect
+Drawer leave handling; the accepted candidate uses the Drawer hitbox's hover
+transition and passes both retractions. These are software-rendered Linux
+functional checks. The previously delivered Windows preview remains unchanged,
+and full workspace merge checks remain deferred.

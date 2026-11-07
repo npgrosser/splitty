@@ -16,7 +16,7 @@ use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::base::{GlobalState, Popover, Theme};
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
-    Icon, Sizable,
+    ActiveTheme as _, Disableable, Icon, Sizable,
 };
 use gpui_kit::{prelude::*, *};
 use splitty_client_core::appearance::{
@@ -27,14 +27,15 @@ use splitty_client_core::native_workspace::{
 };
 use splitty_client_core::shell_profiles::ShellProfilesSnapshot;
 use splitty_client_core::workspace::{
-    Axis, ClosePlan, CloseTarget, FloatingActionOutcome, LayoutKey, LayoutNode, LocalWorkspace,
-    MovePlacement, PaneActionTarget, PaneDrag, PaneKey, ScreenKey, ScreenModel,
-    ScreenTransferOutcome, ScreenTransferTarget, SourceToken, TabStep, TerminalToken,
+    Axis, ClosePlan, CloseTarget, FloatingActionOutcome, LayoutKey, LayoutNode, MovePlacement,
+    PaneActionTarget, PaneDrag, PaneKey, ScreenKey, ScreenModel, ScreenTransferOutcome,
+    ScreenTransferTarget, SourceId, SourceToken, SourceWorkspace, TabStep, TerminalToken,
+    WindowWorkspace,
 };
 use splitty_client_core::zoom::{Zoom, ZoomAction, ZoomOutcome, ZoomResult};
 use std::{
     cell::Cell,
-    collections::{HashMap, HashSet},
+    collections::{BTreeSet, HashMap, HashSet},
     rc::Rc,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -74,6 +75,7 @@ enum Direction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shortcut {
     Templates,
+    ToggleDrawer,
     NewTab,
     NewScreen,
     ScreenIndex(usize),
@@ -116,6 +118,15 @@ fn zoom_shortcut(key: &Keystroke, is_mac: bool) -> Option<ZoomAction> {
 
 fn shortcut(key: &Keystroke, is_mac: bool) -> Option<Shortcut> {
     let mods = key.modifiers;
+    if mods.control
+        && !mods.shift
+        && !mods.alt
+        && !mods.platform
+        && !mods.function
+        && key.key.eq_ignore_ascii_case("b")
+    {
+        return Some(Shortcut::ToggleDrawer);
+    }
     if mods.control
         && mods.shift
         && !mods.alt
@@ -309,16 +320,45 @@ fn body_drop_zone(
     );
     drop_zone(body, position)
 }
-struct DragPreview;
+struct DragPreview {
+    title: String,
+    active: bool,
+    appearance: NativeAppearance,
+}
 impl Render for DragPreview {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let colors = Theme::global(cx).tokens.colors;
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .px_3()
-            .py_1()
-            .bg(colors.secondary)
-            .text_color(colors.secondary_foreground)
-            .child("Move terminal")
+            .flex()
+            .items_center()
+            .gap_2()
+            .pl_3()
+            .pr_1()
+            .h(chrome_rems((self.appearance.font_size + 19.).max(32.)))
+            .font(font(self.appearance.font_family.clone()))
+            .text_size(chrome_rems(self.appearance.font_size))
+            .bg(rgb(if self.active {
+                self.appearance.active
+            } else {
+                self.appearance.raised
+            }))
+            .text_color(rgb(if self.active {
+                self.appearance.text
+            } else {
+                self.appearance.secondary
+            }))
+            .border_1()
+            .border_color(rgb(self.appearance.border))
+            .child(Icon::new(IconName::SquareTerminal).xsmall())
+            .child(
+                div()
+                    .max_w(chrome_rems(180.))
+                    .min_w_0()
+                    .overflow_hidden()
+                    .whitespace_nowrap()
+                    .text_ellipsis()
+                    .child(self.title.clone()),
+            )
+            .child(Icon::new(IconName::X).xsmall())
     }
 }
 
@@ -501,11 +541,12 @@ struct PaneView {
     marker: bool,
     tail: String,
 }
+#[cfg(test)]
 fn dispatch_owned_update<T>(
-    model: Option<&LocalWorkspace>,
+    model: Option<&SourceWorkspace>,
     source: SourceToken,
     connection: Option<Uuid>,
-    consume: impl FnOnce(&LocalWorkspace) -> T,
+    consume: impl FnOnce(&SourceWorkspace) -> T,
 ) -> Option<T> {
     let model = model.filter(|model| model.source_token() == source)?;
     if connection.is_some_and(|connection| connection != source.connection_id()) {
@@ -528,7 +569,7 @@ struct ResizeDrag {
     pending: Vec<f64>,
 }
 fn resize_split<'a>(
-    model: &'a LocalWorkspace,
+    model: &'a SourceWorkspace,
     node: &LayoutKey,
 ) -> Option<(u64, Axis, Vec<String>, &'a [f64])> {
     if model.screen_key(model.shown_screen_id()?) != *node.screen() {
@@ -554,7 +595,7 @@ fn resize_split<'a>(
         sizes,
     ))
 }
-fn refresh_resize_drag(drag: &mut ResizeDrag, model: &LocalWorkspace) -> bool {
+fn refresh_resize_drag(drag: &mut ResizeDrag, model: &SourceWorkspace) -> bool {
     if model.source_token() != drag.source {
         return false;
     }
@@ -605,7 +646,7 @@ impl PendingClose {
         &self,
         request_id: u64,
         source: Option<SourceToken>,
-        model: Option<&LocalWorkspace>,
+        model: Option<&SourceWorkspace>,
     ) -> bool {
         self.plan.request_id == request_id
             && self.plan.source_token() == source
@@ -616,7 +657,7 @@ impl PendingClose {
     }
     fn resolve_prompt(
         &self,
-        model: Option<&LocalWorkspace>,
+        model: Option<&SourceWorkspace>,
         confirmed: bool,
     ) -> Result<Option<ClosePlan>, String> {
         if !self.prompting {
@@ -636,7 +677,7 @@ impl PendingClose {
         }
         Ok(Some(self.plan.clone()))
     }
-    fn matches_window_approval(&self, update: &Update, model: Option<&LocalWorkspace>) -> bool {
+    fn matches_window_approval(&self, update: &Update, model: Option<&SourceWorkspace>) -> bool {
         matches!(update, Update::WindowCloseApproved { request_id, source }
             if !self.prompting
                 && self.matches_response(*request_id, *source, model)
@@ -657,7 +698,7 @@ fn admit_close(
     })
 }
 pub struct Workspace {
-    model: Option<LocalWorkspace>,
+    model: Option<WindowWorkspace>,
     focus: FocusHandle,
     hosts: HostsView,
     panes: HashMap<PaneKey, PaneView>,
@@ -683,6 +724,15 @@ pub struct Workspace {
     appearance_generation: u64,
     drawer_visible: bool,
     drawer_width: i32,
+    drawer_edge_reveal: bool,
+    drawer_overlay_open: bool,
+    drawer_slide: f32,
+    drawer_slide_generation: u64,
+    drawer_slide_task: Option<Task<()>>,
+    drawer_edge_last: Option<(Point<Pixels>, Instant)>,
+    drawer_edge_task: Option<Task<()>>,
+    drawer_collapsed: HashSet<ScreenKey>,
+    drawer_hovered: Option<ScreenKey>,
     drawer_pending: Option<(Uuid, Uuid)>,
     wheel_navigation: WheelNavigation,
     pending_zoom: HashSet<Uuid>,
@@ -731,20 +781,59 @@ pub struct Workspace {
     outcome: Arc<AtomicBool>,
 }
 impl Workspace {
+    fn selected_model(&self) -> Option<&SourceWorkspace> {
+        let window = self.model.as_ref()?;
+        window.source(window.shown_key()?.source_id())
+    }
+
+    fn local_model(&self) -> Option<&SourceWorkspace> {
+        Some(self.model.as_ref()?.local_source())
+    }
+
+    fn model_for_source(&self, id: SourceId) -> Option<&SourceWorkspace> {
+        self.model.as_ref()?.source(id)
+    }
+
+    fn is_remote_selected(&self) -> bool {
+        self.current_screen_key().is_some_and(|screen| {
+            self.model
+                .as_ref()
+                .is_some_and(|window| screen.source_id() != window.local_source().source_id())
+        })
+    }
+
+    fn lifecycle_token(&self) -> Option<SourceToken> {
+        Some(self.model.as_ref()?.lifecycle_token())
+    }
+
+    fn execution_token(&self, id: SourceId) -> Option<SourceToken> {
+        self.model.as_ref()?.execution_token(id)
+    }
+
+    fn close_model(&self, plan: &ClosePlan) -> Option<&SourceWorkspace> {
+        if plan.target == CloseTarget::Window {
+            self.local_model()
+        } else {
+            self.model_for_source(plan.source_token()?.source_id())
+        }
+    }
+
     fn current_screen_key(&self) -> Option<ScreenKey> {
-        let model = self.model.as_ref()?;
-        Some(model.screen_key(model.shown_screen_id()?))
+        self.model.as_ref()?.shown_key()
     }
 
     fn current_layout_key(&self, node: &str) -> Option<LayoutKey> {
         Some(self.current_screen_key()?.layout_key(node))
     }
     fn owns_surface(&self, source: SourceToken, screen: &ScreenKey) -> bool {
-        self.model.as_ref().is_some_and(|model| {
-            model.source_token() == source
-                && model.shown_screen_id() == Some(screen.screen_id())
-                && model.screen_key(screen.screen_id()) == *screen
-        })
+        self.model
+            .as_ref()
+            .is_some_and(|window| window.shown_key() == Some(screen.clone()))
+            && self.selected_model().is_some_and(|model| {
+                model.source_token() == source
+                    && model.shown_screen_id() == Some(screen.screen_id())
+                    && model.screen_key(screen.screen_id()) == *screen
+            })
     }
 
     pub fn new(
@@ -871,6 +960,15 @@ impl Workspace {
                 appearance_generation: 0,
                 drawer_visible: true,
                 drawer_width: 200,
+                drawer_edge_reveal: true,
+                drawer_overlay_open: false,
+                drawer_slide: 0.,
+                drawer_slide_generation: 0,
+                drawer_slide_task: None,
+                drawer_edge_last: None,
+                drawer_edge_task: None,
+                drawer_collapsed: HashSet::new(),
+                drawer_hovered: None,
                 drawer_pending: None,
                 wheel_navigation: WheelNavigation::default(),
                 pending_zoom: HashSet::new(),
@@ -934,7 +1032,7 @@ impl Workspace {
         if !self.scheme_pending {
             return;
         }
-        let Some(model) = &self.model else {
+        let Some(model) = self.local_model() else {
             return;
         };
         if self
@@ -959,8 +1057,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if !self
-            .model
-            .as_ref()
+            .local_model()
             .is_some_and(|model| model.connection_id() == snapshot.connection_id())
         {
             return;
@@ -981,6 +1078,13 @@ impl Workspace {
         }
         self.drawer_visible = snapshot.drawer().pinned;
         self.drawer_width = snapshot.drawer().sidebar_width.clamp(150, 400);
+        self.drawer_edge_reveal = snapshot.drawer().edge_reveal;
+        if self.drawer_visible {
+            self.drawer_overlay_open = false;
+            self.drawer_slide = 0.;
+            self.drawer_slide_generation = self.drawer_slide_generation.wrapping_add(1);
+            self.drawer_slide_task = None;
+        }
         gpui_kit::component::theme::Theme::change(
             if snapshot.scheme() == ColorScheme::Light {
                 gpui_kit::component::theme::ThemeMode::Light
@@ -1018,7 +1122,7 @@ impl Workspace {
     }
 
     fn toggle_drawer(&mut self, cx: &mut Context<Self>) {
-        let Some(model) = &self.model else {
+        let Some(model) = self.local_model() else {
             return;
         };
         if self.drawer_pending.is_some() {
@@ -1048,8 +1152,7 @@ impl Workspace {
     fn apply_drawer_visibility(&mut self, result: DrawerVisibilityResult, cx: &mut Context<Self>) {
         if self.drawer_pending != Some((result.connection_id, result.request_id))
             || !self
-                .model
-                .as_ref()
+                .local_model()
                 .is_some_and(|model| model.connection_id() == result.connection_id)
         {
             return;
@@ -1058,6 +1161,10 @@ impl Workspace {
         match result.outcome {
             DrawerVisibilityOutcome::Confirmed(pinned) => {
                 self.drawer_visible = pinned;
+                self.drawer_overlay_open = !pinned;
+                self.drawer_slide = if pinned { 0. } else { 1. };
+                self.drawer_slide_generation = self.drawer_slide_generation.wrapping_add(1);
+                self.drawer_slide_task = None;
                 self.wheel_navigation.reset();
             }
             DrawerVisibilityOutcome::Rejected { reason } => {
@@ -1095,7 +1202,7 @@ impl Workspace {
     }
 
     fn submit_zoom(&mut self, action: ZoomAction, cx: &mut Context<Self>) {
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.local_model() else {
             self.status = "Zoom is unavailable while the workspace starts".into();
             cx.notify();
             return;
@@ -1126,8 +1233,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if !self
-            .model
-            .as_ref()
+            .local_model()
             .is_some_and(|model| model.connection_id() == result.connection_id)
             || !self.pending_zoom.remove(&result.request_id)
         {
@@ -1149,9 +1255,15 @@ impl Workspace {
         cx.notify();
     }
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
-        let Some(source) = self.model.as_ref().map(LocalWorkspace::source_token) else {
+        let Some(source) = self.selected_model().map(SourceWorkspace::source_token) else {
             return;
         };
+        if self.execution_token(source.source_id()) != Some(source) {
+            self.status =
+                "Host is offline. Retry the connection before changing this Screen.".into();
+            cx.notify();
+            return;
+        }
         self.send_captured(source, command, cx);
     }
     fn send_captured(&mut self, source: SourceToken, command: Command, cx: &mut Context<Self>) {
@@ -1161,7 +1273,7 @@ impl Workspace {
         }
     }
     fn create_screen(&mut self, cx: &mut Context<Self>) {
-        let Some(model) = &self.model else {
+        let Some(model) = self.local_model() else {
             return;
         };
         if model.has_pending_create() {
@@ -1176,9 +1288,14 @@ impl Workspace {
             .map(|number| format!("Screen {number}"))
             .find(|name| !used.contains(name.as_str()))
             .unwrap_or_else(|| "Screen".into());
-        self.send(Command::CreateScreen(name), cx);
+        self.send_captured(model.source_token(), Command::CreateScreen(name), cx);
     }
-    fn switch_screen(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
+    fn switch_screen_key(
+        &mut self,
+        screen: ScreenKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         let was_hosts = self.hosts.open;
         self.hosts.open = false;
         if was_hosts {
@@ -1192,9 +1309,11 @@ impl Workspace {
         if self
             .model
             .as_ref()
-            .is_some_and(|model| model.screen(screen).is_some())
+            .is_some_and(|model| model.opened().iter().any(|entry| entry.key() == &screen))
         {
-            self.send(Command::SwitchScreen(screen.to_owned()), cx);
+            if let Some(owner) = self.lifecycle_token() {
+                self.send_captured(owner, Command::SwitchScreen(screen), cx);
+            }
         }
         if was_hosts {
             self.focus_current(window, cx);
@@ -1205,7 +1324,7 @@ impl Workspace {
         self.wheel_navigation.reset();
         self.transfer_menu = None;
         self.close_profile_picker(window, cx);
-        let Some((name, source, screen_key)) = self.model.as_ref().and_then(|model| {
+        let Some((name, source, screen_key)) = self.local_model().and_then(|model| {
             model
                 .screens()
                 .iter()
@@ -1250,7 +1369,7 @@ impl Workspace {
         if save {
             let name = editor.input.read(cx).value().trim().to_owned();
             if !name.is_empty()
-                && self.model.as_ref().is_some_and(|model| {
+                && self.local_model().is_some_and(|model| {
                     model.source_token() == editor.source
                         && model.screen_key(editor.screen.screen_id()) == editor.screen
                         && model.screen(editor.screen.screen_id()).is_some()
@@ -1271,6 +1390,20 @@ impl Workspace {
         cx.notify();
     }
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        let source = if target == CloseTarget::Window {
+            None
+        } else {
+            self.current_screen_key().map(|key| key.source_id())
+        };
+        self.request_close_from(target, source, window, cx);
+    }
+    fn request_close_from(
+        &mut self,
+        target: CloseTarget,
+        source: Option<SourceId>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         self.wheel_navigation.reset();
         self.float_gesture = None;
         self.transfer_menu = None;
@@ -1288,7 +1421,11 @@ impl Workspace {
             return;
         }
         let request_id = self.next_close_id.saturating_add(1);
-        let plan = match &self.model {
+        let plan = match if target == CloseTarget::Window {
+            self.local_model()
+        } else {
+            source.and_then(|source| self.model_for_source(source))
+        } {
             Some(model) => model.assess_close(request_id, target.clone()),
             None if target == CloseTarget::Window => Ok(ClosePlan::startup_window(request_id)),
             None => return,
@@ -1302,16 +1439,60 @@ impl Workspace {
             }
         };
         self.next_close_id = request_id;
-        if !plan.needs_confirmation() {
+        let remote_terminate = matches!(&target, CloseTarget::Screen { .. })
+            && source.is_some_and(|source| {
+                self.model
+                    .as_ref()
+                    .is_some_and(|model| source != model.local_source().source_id())
+            });
+        if !plan.needs_confirmation() && !remote_terminate {
             self.submit_close(plan, false, cx);
             return;
         }
         let title = match &target {
-            CloseTarget::Pane { .. } => "Close terminal pane?",
-            CloseTarget::Screen { .. } => "Close Screen?",
-            CloseTarget::Window => "End this local workspace?",
+            CloseTarget::Pane { .. } => "Close terminal pane?".to_owned(),
+            CloseTarget::Screen { screen } if remote_terminate => {
+                format!("Terminate Screen {}?", hosts::display(screen))
+            }
+            CloseTarget::Screen { .. } => "Close Screen?".to_owned(),
+            CloseTarget::Window => "End this local workspace?".to_owned(),
         };
-        let detail = if target == CloseTarget::Window {
+        let detail = if remote_terminate {
+            let host = source
+                .and_then(|source| self.model.as_ref()?.source_target(source))
+                .unwrap_or("host");
+            let sessions = plan
+                .affected
+                .iter()
+                .filter_map(|affected| match &affected.identity {
+                    splitty_client_core::workspace::CloseIdentity::Session { session, .. } => {
+                        Some(session.as_str())
+                    }
+                    splitty_client_core::workspace::CloseIdentity::Pane {
+                        session: Some(session),
+                        ..
+                    } => Some(session.as_str()),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>();
+            let examples = sessions
+                .iter()
+                .take(3)
+                .map(|session| hosts::display(session))
+                .collect::<Vec<_>>();
+            format!(
+                "Ends {} sessions on {}. Running: {}. Unresolved: {}. {}",
+                sessions.len(),
+                hosts::display(host),
+                plan.busy_count,
+                plan.unresolved_count,
+                if sessions.is_empty() {
+                    "No session IDs were reported.".to_owned()
+                } else {
+                    format!("Sessions: {}", examples.join(", "))
+                }
+            )
+        } else if target == CloseTarget::Window {
             "Ends all local terminal sessions.".to_owned()
         } else if plan.unresolved_count != 0 {
             "Session state is still loading.".to_owned()
@@ -1324,9 +1505,13 @@ impl Workspace {
         });
         let prompt = window.prompt(
             PromptLevel::Warning,
-            title,
+            &title,
             Some(&detail),
-            &["Keep open", "Close"],
+            if remote_terminate {
+                &["Cancel", "Terminate"]
+            } else {
+                &["Keep open", "Close"]
+            },
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -1336,7 +1521,9 @@ impl Workspace {
                     .pending_close
                     .as_ref()
                     .filter(|pending| pending.is_prompt_for(request_id))
-                    .map(|pending| pending.resolve_prompt(this.model.as_ref(), confirmed));
+                    .map(|pending| {
+                        pending.resolve_prompt(this.close_model(&pending.plan), confirmed)
+                    });
                 let Some(decision) = decision else {
                     return;
                 };
@@ -1361,10 +1548,26 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if !self
-            .model
-            .as_ref()
+            .model_for_source(source.source_id())
             .is_some_and(|model| model.source_token() == source)
         {
+            return;
+        }
+        let screen = match &target {
+            CloseTarget::Pane { screen, .. } | CloseTarget::Screen { screen } => {
+                Some(screen.as_str())
+            }
+            CloseTarget::Window => None,
+        };
+        if screen.is_some_and(|screen| {
+            !self.owns_surface(
+                source,
+                &self
+                    .model_for_source(source.source_id())
+                    .expect("checked source")
+                    .screen_key(screen),
+            )
+        }) {
             return;
         }
         self.request_close(target, window, cx);
@@ -1379,11 +1582,55 @@ impl Workspace {
         }
         cx.notify();
     }
-    fn request_close_screen(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.request_close(
+    fn request_close_screen(
+        &mut self,
+        screen: ScreenKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.opened().iter().any(|entry| entry.key() == &screen))
+        {
+            return;
+        }
+        let source = screen.source_id();
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|model| source != model.local_source().source_id())
+        {
+            if let Some(owner) = self.lifecycle_token() {
+                self.send_captured(owner, Command::DetachRemoteScreen { screen }, cx);
+            }
+        } else {
+            self.request_close_from(
+                CloseTarget::Screen {
+                    screen: screen.screen_id().to_owned(),
+                },
+                Some(source),
+                window,
+                cx,
+            );
+        }
+    }
+    fn request_terminate_screen(
+        &mut self,
+        captured: SourceToken,
+        screen: ScreenKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.execution_token(screen.source_id()) != Some(captured) {
+            return;
+        }
+        let source = screen.source_id();
+        self.request_close_from(
             CloseTarget::Screen {
-                screen: screen.to_owned(),
+                screen: screen.screen_id().to_owned(),
             },
+            Some(source),
             window,
             cx,
         );
@@ -1393,6 +1640,7 @@ impl Workspace {
         route: TerminalToken,
         screen: ScreenKey,
         generation: u64,
+        origin: terminal::LinkOrigin,
         cx: &mut Context<Self>,
     ) {
         let key = route.pane_key();
@@ -1436,7 +1684,7 @@ impl Workspace {
         let terminal_scale = self.appearance.zoom.terminal_scale();
         let selection_foreground = self.appearance.selection_foreground;
         let selection_background = self.appearance.selection_background;
-        let terminal = cx.new(|cx| Terminal::new(commands, terminal::LinkOrigin::Local, cx));
+        let terminal = cx.new(|cx| Terminal::new(commands, origin, cx));
         if let Err(error) = terminal.update(cx, |terminal, cx| {
             terminal.set_search_active(false, cx);
             terminal.set_zoom(terminal_scale, cx);
@@ -1456,22 +1704,53 @@ impl Workspace {
             },
         );
     }
-    fn reconcile(&mut self, model: LocalWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+    fn reconcile(
+        &mut self,
+        window_model: WindowWorkspace,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let model = window_model
+            .shown_key()
+            .and_then(|key| window_model.source(key.source_id()))
+            .unwrap_or_else(|| window_model.local_source());
         let old_preview = self
-            .model
-            .as_ref()
+            .local_model()
             .is_some_and(|old| old.pending_template().is_some());
-        let new_preview = model.pending_template().is_some();
+        let new_preview = window_model.local_source().pending_template().is_some();
+        let opened_keys: HashSet<_> = window_model
+            .opened()
+            .iter()
+            .map(|entry| entry.key().clone())
+            .collect();
+        self.drawer_collapsed
+            .retain(|key| opened_keys.contains(key));
         if self
-            .model
+            .drawer_hovered
             .as_ref()
-            .is_some_and(|old| old.source_token() != model.source_token())
+            .is_some_and(|key| !opened_keys.contains(key))
         {
-            self.hosts.set_owner(model.connection_id());
+            self.drawer_hovered = None;
+        }
+        if self
+            .local_model()
+            .is_some_and(|old| old.source_token() != window_model.local_source().source_token())
+        {
+            self.hosts
+                .set_owner(window_model.local_source().connection_id());
             self.apply_zoom(Zoom::from_values(1.0, "window"), window, cx);
             self.appearance_generation = 0;
             self.drawer_visible = true;
             self.drawer_width = 200;
+            self.drawer_edge_reveal = true;
+            self.drawer_overlay_open = false;
+            self.drawer_slide = 0.;
+            self.drawer_slide_generation = self.drawer_slide_generation.wrapping_add(1);
+            self.drawer_slide_task = None;
+            self.drawer_edge_last = None;
+            self.drawer_edge_task = None;
+            self.drawer_collapsed.clear();
+            self.drawer_hovered = None;
             self.drawer_pending = None;
             self.wheel_navigation.reset();
             self.appearance_error = None;
@@ -1496,37 +1775,33 @@ impl Workspace {
             self.drop_target = None;
         }
         if self.model.is_none() {
-            self.hosts.set_owner(model.connection_id());
+            self.hosts
+                .set_owner(window_model.local_source().connection_id());
         }
         if self.rename.is_some() {
             self.smoke_editor_reconciles += u64::from(self.smoke);
         }
-        let old_screen = self
-            .model
-            .as_ref()
-            .and_then(LocalWorkspace::shown_screen_id)
-            .map(str::to_owned);
+        let old_screen = self.current_screen_key();
+        let new_screen = window_model.shown_key();
         let catalog_changed = self.model.as_ref().is_none_or(|old| {
-            old.screens()
+            old.opened()
                 .iter()
-                .map(|info| info.id.as_str())
+                .map(|entry| entry.key().clone())
                 .collect::<Vec<_>>()
-                != model
-                    .screens()
+                != window_model
+                    .opened()
                     .iter()
-                    .map(|info| info.id.as_str())
+                    .map(|entry| entry.key().clone())
                     .collect::<Vec<_>>()
         });
         let old_focus = self
-            .model
-            .as_ref()
-            .and_then(LocalWorkspace::focused_pane)
+            .selected_model()
+            .and_then(SourceWorkspace::focused_pane)
             .map(str::to_owned);
         let old_entity = old_focus
             .as_deref()
             .and_then(|pane| {
-                self.model
-                    .as_ref()
+                self.selected_model()
                     .and_then(|old| self.panes.get(&old.pane_key(pane)))
             })
             .map(|view| view.terminal.entity_id());
@@ -1544,34 +1819,38 @@ impl Workspace {
             for slot in slots {
                 self.tab_scrolls.entry(slot).or_default();
             }
-            reveal_changed_tabs(self.model.as_ref(), &model, &self.tab_scrolls);
+            reveal_changed_tabs(self.selected_model(), model, &self.tab_scrolls);
         } else {
             self.split_bounds.clear();
             self.slot_bounds.clear();
             self.tab_scrolls.clear();
         }
         self.panes.retain(|pane, view| {
-            let retained = *pane == view.route.pane_key() && model.accepts_terminal(&view.route);
+            let retained = *pane == view.route.pane_key()
+                && window_model.contains_terminal_binding(&view.route);
             if !retained {
                 view.terminal
                     .update(cx, |terminal, _| terminal.cancel_pointer());
             }
             retained
         });
-        for route in model.routes() {
-            if let (Some(token), Some(screen)) = (
-                model.terminal_token(&route.pane_id),
-                model.screen_for(&route.pane_id),
-            ) {
-                self.ensure_pane(
-                    token,
-                    model.screen_key(screen),
-                    model.route_generation(),
-                    cx,
-                );
-            }
+        for route in window_model.routes() {
+            let origin = if route.terminal().source_token().source_id()
+                == window_model.local_source().source_id()
+            {
+                terminal::LinkOrigin::Local
+            } else {
+                terminal::LinkOrigin::Remote
+            };
+            self.ensure_pane(
+                route.terminal().clone(),
+                route.screen().clone(),
+                route.generation(),
+                origin,
+                cx,
+            );
         }
-        let routes_changed = self.model.as_ref().is_none_or(|previous| {
+        let routes_changed = self.selected_model().is_none_or(|previous| {
             previous.connection_id() != model.connection_id()
                 || previous.route_generation() != model.route_generation()
         });
@@ -1588,21 +1867,31 @@ impl Workspace {
         if model.snapshot().is_some() {
             self.status.clear();
         }
-        let new_screen = model.shown_screen_id().map(str::to_owned);
+        if self.pending_close.as_ref().is_some_and(|pending| {
+            pending.plan.target != CloseTarget::Window
+                && pending.plan.source_token().is_some_and(|source| {
+                    source.source_id() != window_model.local_source().source_id()
+                        && window_model.execution_token(source.source_id()) != Some(source)
+                })
+        }) {
+            self.pending_close = None;
+            self.status = "Remote close decision expired after the connection changed".into();
+        }
         let new_focus = model.focused_pane().map(str::to_owned);
         let new_entity = new_focus
             .as_deref()
             .and_then(|pane| self.panes.get(&model.pane_key(pane)))
             .map(|view| view.terminal.entity_id());
         let editor_cancelled = self.rename.as_ref().is_some_and(|editor| {
-            model.source_token() != editor.source
-                || model.screen_key(editor.screen.screen_id()) != editor.screen
-                || model.screen(editor.screen.screen_id()).is_none()
+            let local = window_model.local_source();
+            local.source_token() != editor.source
+                || local.screen_key(editor.screen.screen_id()) != editor.screen
+                || local.screen(editor.screen.screen_id()).is_none()
         });
         let picker_cancelled = self
             .profile_picker
             .as_ref()
-            .is_some_and(|picker| !picker.valid_for(&model));
+            .is_some_and(|picker| !picker.valid_for(model));
         let transfer_cancelled = self.transfer_menu.as_ref().is_some_and(|menu| {
             model.validate_pane_action(&menu.source).is_err()
                 || !model.can_transfer_pane(&menu.source)
@@ -1619,13 +1908,20 @@ impl Workspace {
         }
         if old_screen != new_screen || catalog_changed {
             self.wheel_navigation.reset();
-            if let Some(index) = new_screen.as_ref().and_then(|shown| {
-                model
-                    .screens()
-                    .iter()
-                    .position(|info| info.id.as_str() == shown.as_str())
-            }) {
-                self.drawer_scroll.scroll_to_item(index);
+            let mut group = None;
+            let mut row = 0;
+            for entry in window_model.opened() {
+                if group != Some(entry.key().source_id()) {
+                    group = Some(entry.key().source_id());
+                    if entry.key().source_id() != window_model.local_source().source_id() {
+                        row += 1;
+                    }
+                }
+                if new_screen.as_ref() == Some(entry.key()) {
+                    self.drawer_scroll.scroll_to_item(row);
+                    break;
+                }
+                row += 1;
             }
         }
         if old_screen != new_screen {
@@ -1636,11 +1932,11 @@ impl Workspace {
         if self
             .drag
             .as_mut()
-            .is_some_and(|drag| !refresh_resize_drag(drag, &model))
+            .is_some_and(|drag| !refresh_resize_drag(drag, model))
         {
             self.drag = None;
         }
-        self.reconcile_float_order(&model);
+        self.reconcile_float_order(&window_model, model);
         if self.float_gesture.as_ref().is_some_and(|gesture| {
             model.source_token() != gesture.source
                 || model.shown_screen_id() != Some(gesture.screen.screen_id())
@@ -1650,7 +1946,7 @@ impl Workspace {
             self.float_gesture = None;
         }
         self.drop_target = None;
-        self.model = Some(model);
+        self.model = Some(window_model);
         self.flush_scheme();
         self.sync_visible(cx);
         if !self.hosts.open
@@ -1672,7 +1968,7 @@ impl Workspace {
         cx.notify();
     }
     fn sync_visible(&mut self, cx: &mut Context<Self>) {
-        let mut visible = self.model.as_ref().map_or_else(Vec::new, |model| {
+        let mut visible = self.selected_model().map_or_else(Vec::new, |model| {
             model
                 .displayed_panes()
                 .into_iter()
@@ -1681,24 +1977,24 @@ impl Workspace {
         });
         if self.pending_template_apply.is_some()
             || self.hosts.open
+            || (!self.is_remote_selected()
+                && self
+                    .local_model()
+                    .is_some_and(|model| model.pending_template().is_some()))
             || self
-                .model
-                .as_ref()
-                .is_some_and(|model| model.pending_template().is_some())
+                .current_screen_key()
+                .is_some_and(|key| self.execution_token(key.source_id()).is_none())
         {
             visible.clear();
         }
         visible.sort_by(|a, b| a.pane_id().cmp(b.pane_id()));
-        let screen = self
-            .model
+        let screen = self.current_screen_key();
+        let owner = screen
             .as_ref()
-            .and_then(LocalWorkspace::shown_screen_id)
-            .and_then(|screen| self.model.as_ref().map(|model| model.screen_key(screen)));
-        let owner = self.model.as_ref().map(LocalWorkspace::source_token);
+            .and_then(|key| self.execution_token(key.source_id()));
         let generation = self
-            .model
-            .as_ref()
-            .map(LocalWorkspace::route_generation)
+            .selected_model()
+            .map(SourceWorkspace::route_generation)
             .unwrap_or(0);
         let route_changed =
             owner != self.visible_owner || generation != self.visible_route_generation;
@@ -1730,10 +2026,9 @@ impl Workspace {
     }
     fn sync_search_owner(&mut self, cx: &mut Context<Self>) {
         let next = self
-            .model
-            .as_ref()
-            .and_then(LocalWorkspace::focused_pane)
-            .and_then(|pane| self.model.as_ref().map(|model| model.pane_key(pane)))
+            .selected_model()
+            .and_then(SourceWorkspace::focused_pane)
+            .and_then(|pane| self.selected_model().map(|model| model.pane_key(pane)))
             .filter(|pane| self.visible.contains(pane))
             .and_then(|pane| {
                 self.panes
@@ -1816,20 +2111,17 @@ impl Workspace {
             return;
         }
         if self
-            .model
-            .as_ref()
+            .selected_model()
             .is_some_and(|model| model.pending_template().is_some())
         {
             self.focus.focus(window, cx);
             return;
         }
         if let Some(pane) = self
-            .model
-            .as_ref()
-            .and_then(LocalWorkspace::focused_pane)
+            .selected_model()
+            .and_then(SourceWorkspace::focused_pane)
             .and_then(|pane| {
-                self.model
-                    .as_ref()
+                self.selected_model()
                     .and_then(|model| self.panes.get(&model.pane_key(pane)))
             })
         {
@@ -1840,13 +2132,19 @@ impl Workspace {
         }
     }
     fn select(&mut self, pane: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let screen = self.model.as_ref().and_then(|model| {
+        let screen = self.selected_model().and_then(|model| {
             model
                 .shown_screen_id()
                 .map(|screen| model.screen_key(screen))
         });
-        if let Some(model) = &mut self.model {
-            model.select_tab(pane);
+        if let Some(source) = screen.as_ref().map(ScreenKey::source_id) {
+            if let Some(mut model) = self
+                .model
+                .as_mut()
+                .and_then(|window| window.source_mut(source))
+            {
+                model.select_tab(pane);
+            }
         }
         self.reveal_pane(pane);
         if let Some(screen) = screen {
@@ -1871,7 +2169,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self.model.as_ref().is_some_and(|model| {
+        if !self.selected_model().is_some_and(|model| {
             model.source_token() == source
                 && model.shown_screen_id() == Some(screen.screen_id())
                 && model.screen_key(screen.screen_id()) == *screen
@@ -1882,7 +2180,7 @@ impl Workspace {
         self.select(pane, window, cx);
     }
     fn reveal_pane(&self, pane: &str) {
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.selected_model() else {
             return;
         };
         let Some(slot) = model.focused_slot_id() else {
@@ -1900,7 +2198,7 @@ impl Workspace {
         }
     }
     fn reveal_selected_slot(&self, slot: &str) {
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.selected_model() else {
             return;
         };
         let Some(node @ LayoutNode::Slot { pane_ids, .. }) = presented_slot_by_id(model, slot)
@@ -1919,12 +2217,14 @@ impl Workspace {
         }
     }
     fn focus(&mut self, pane: &str, cx: &mut Context<Self>) {
-        if self
-            .model
-            .as_mut()
-            .is_some_and(|model| model.focus_pane(pane))
-        {
-            if let Some(screen) = self.model.as_ref().and_then(|model| {
+        let source = self.current_screen_key().map(|key| key.source_id());
+        if source.is_some_and(|source| {
+            self.model
+                .as_mut()
+                .and_then(|window| window.source_mut(source))
+                .is_some_and(|mut model| model.focus_pane(pane))
+        }) {
+            if let Some(screen) = self.selected_model().and_then(|model| {
                 model
                     .shown_screen_id()
                     .map(|screen| model.screen_key(screen))
@@ -1948,7 +2248,7 @@ impl Workspace {
         pane: &str,
         cx: &mut Context<Self>,
     ) {
-        if self.model.as_ref().is_some_and(|model| {
+        if self.selected_model().is_some_and(|model| {
             model.source_token() == source
                 && model.shown_screen_id() == Some(screen.screen_id())
                 && model.screen_key(screen.screen_id()) == *screen
@@ -1963,7 +2263,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.selected_model() else {
             return;
         };
         let Some(root) = model.presentation_root() else {
@@ -1993,7 +2293,7 @@ impl Workspace {
         }
     }
     fn cycle_tab(&mut self, step: TabStep, cx: &mut Context<Self>) {
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.selected_model() else {
             return;
         };
         let Some(screen) = model.shown_screen_id() else {
@@ -2026,25 +2326,9 @@ impl Workspace {
             self.template_key(&event.keystroke, window, cx);
             return;
         }
-        if self.hosts.open {
-            if let Some(action) = HostKey::from_keystroke(&event.keystroke) {
-                cx.stop_propagation();
-                match action {
-                    HostKey::Back => self.show_screens(window, cx),
-                    HostKey::Refresh => self.refresh_hosts(cx),
-                }
-                return;
-            }
-            if let Some(action) = zoom_shortcut(&event.keystroke, cx.platform_info().is_mac()) {
-                cx.stop_propagation();
-                self.submit_zoom(action, cx);
-            }
-            return;
-        }
         if self.pending_template_apply.is_some()
             || self
-                .model
-                .as_ref()
+                .selected_model()
                 .is_some_and(|model| model.pending_template().is_some())
         {
             // Placeholder panes have no admitted session routes. Screen
@@ -2055,13 +2339,12 @@ impl Workspace {
                 window.modifiers().shift,
                 cx.keyboard_layout().id(),
             ) {
-                if let Some(id) = self
+                if let Some(key) = self
                     .model
                     .as_ref()
-                    .and_then(|model| model.screens().get(index))
-                    .map(|info| info.id.to_string())
+                    .and_then(|model| model.opened().get(index).map(|entry| entry.key().clone()))
                 {
-                    self.switch_screen(&id, window, cx);
+                    self.switch_screen_key(key, window, cx);
                 }
             }
             cx.stop_propagation();
@@ -2107,6 +2390,38 @@ impl Workspace {
             self.wheel_navigation.reset();
             return;
         }
+        if GlobalState::is_in_deferred_context(cx) {
+            return;
+        }
+        if self.hosts.open {
+            if let Some(action) = HostKey::from_keystroke(&event.keystroke) {
+                cx.stop_propagation();
+                match action {
+                    HostKey::Back => self.show_screens(window, cx),
+                    HostKey::Refresh => self.refresh_hosts(cx),
+                }
+                return;
+            }
+            if let Some(action) = zoom_shortcut(&event.keystroke, cx.platform_info().is_mac()) {
+                cx.stop_propagation();
+                self.submit_zoom(action, cx);
+                return;
+            }
+        }
+        if shortcut(&event.keystroke, cx.platform_info().is_mac()) == Some(Shortcut::ToggleDrawer) {
+            cx.stop_propagation();
+            self.toggle_drawer_overlay(cx);
+            return;
+        }
+        if event.keystroke.key == "escape" && self.drawer_overlay_open && !self.hosts.open {
+            cx.stop_propagation();
+            self.close_drawer_overlay(cx);
+            self.focus_current(window, cx);
+            return;
+        }
+        if self.hosts.open {
+            return;
+        }
         let Some(action) = shortcut_with_layout(
             &event.keystroke,
             cx.platform_info().is_mac(),
@@ -2117,6 +2432,7 @@ impl Workspace {
         };
         cx.stop_propagation();
         match action {
+            Shortcut::ToggleDrawer => self.toggle_drawer_overlay(cx),
             Shortcut::Templates => {
                 self.wheel_navigation.reset();
                 self.toggle_templates(window, cx)
@@ -2124,31 +2440,31 @@ impl Workspace {
             Shortcut::NewTab => self.tab(cx),
             Shortcut::NewScreen => self.create_screen(cx),
             Shortcut::ScreenIndex(index) => {
-                if let Some(id) = self
+                if let Some(key) = self
                     .model
                     .as_ref()
-                    .and_then(|model| model.screens().get(index))
-                    .map(|info| info.id.to_string())
+                    .and_then(|model| model.opened().get(index).map(|entry| entry.key().clone()))
                 {
-                    self.switch_screen(&id, window, cx);
+                    self.switch_screen_key(key, window, cx);
                 }
             }
-            Shortcut::ToggleMaximize => self.toggle_maximize(window, cx),
+            Shortcut::ToggleMaximize if !self.is_remote_selected() => {
+                self.toggle_maximize(window, cx)
+            }
+            Shortcut::ToggleMaximize => {}
             Shortcut::PreviousTab => self.cycle_tab(TabStep::Previous, cx),
             Shortcut::NextTab => self.cycle_tab(TabStep::Next, cx),
             Shortcut::SplitRight => self.split(Axis::Horizontal, cx),
             Shortcut::SplitDown => self.split(Axis::Vertical, cx),
             Shortcut::ClosePane => {
                 if let Some(pane) = self
-                    .model
-                    .as_ref()
-                    .and_then(LocalWorkspace::focused_pane)
+                    .selected_model()
+                    .and_then(SourceWorkspace::focused_pane)
                     .map(str::to_owned)
                 {
                     if let Some(screen) = self
-                        .model
-                        .as_ref()
-                        .and_then(LocalWorkspace::shown_screen_id)
+                        .selected_model()
+                        .and_then(SourceWorkspace::shown_screen_id)
                     {
                         self.request_close(
                             CloseTarget::Pane {
@@ -2166,21 +2482,19 @@ impl Workspace {
     }
     fn split(&mut self, axis: Axis, cx: &mut Context<Self>) {
         if let Some(pane) = self
-            .model
-            .as_ref()
-            .and_then(LocalWorkspace::focused_pane)
+            .selected_model()
+            .and_then(SourceWorkspace::focused_pane)
             .map(str::to_owned)
         {
             if self
-                .model
-                .as_ref()
+                .selected_model()
                 .is_some_and(|model| !model.is_root_pane(&pane))
             {
                 self.status = "Split is available for tiled groups".into();
                 cx.notify();
                 return;
             }
-            if let Some(screen) = self.model.as_ref().and_then(|model| {
+            if let Some(screen) = self.selected_model().and_then(|model| {
                 model
                     .shown_screen_id()
                     .map(|screen| model.screen_key(screen))
@@ -2190,7 +2504,7 @@ impl Workspace {
         }
     }
     fn toggle_maximize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(model) = &self.model {
+        if let Some(model) = self.selected_model() {
             if let Some(screen) = model.shown_screen_id() {
                 let (slot, pane) = if model.maximized_slot_id().is_some() {
                     (None, None)
@@ -2223,12 +2537,17 @@ impl Workspace {
     }
     fn tab(&mut self, cx: &mut Context<Self>) {
         if self
-            .model
-            .as_ref()
-            .and_then(LocalWorkspace::snapshot)
+            .current_screen_key()
+            .is_some_and(|key| self.execution_token(key.source_id()).is_none())
+        {
+            return;
+        }
+        if self
+            .selected_model()
+            .and_then(SourceWorkspace::snapshot)
             .is_some_and(|screen| screen.panes.is_empty())
         {
-            if let Some(model) = &self.model {
+            if let Some(model) = self.selected_model().filter(|_| !self.is_remote_selected()) {
                 if let Some(screen) = model.shown_screen_id() {
                     self.send(
                         Command::NewTerminal {
@@ -2242,12 +2561,11 @@ impl Workspace {
             return;
         }
         if let Some(pane) = self
-            .model
-            .as_ref()
-            .and_then(LocalWorkspace::focused_pane)
+            .selected_model()
+            .and_then(SourceWorkspace::focused_pane)
             .map(str::to_owned)
         {
-            if let Some(screen) = self.model.as_ref().and_then(|model| {
+            if let Some(screen) = self.selected_model().and_then(|model| {
                 model
                     .shown_screen_id()
                     .map(|screen| model.screen_key(screen))
@@ -2293,8 +2611,7 @@ impl Workspace {
                 Update::Zoom(result) => self.apply_zoom_result(result, window, cx),
                 Update::ScreenTransfer(result) => {
                     if self.pending_transfer.is_some_and(|pending| {
-                        self.model
-                            .as_ref()
+                        self.selected_model()
                             .is_some_and(|model| model.source_token() == pending.source)
                             && pending.matches(result.connection_id, result.request_id)
                     }) {
@@ -2315,8 +2632,7 @@ impl Workspace {
                 }
                 Update::FloatingAction(result) => {
                     if self.pending_float.as_ref().is_some_and(|pending| {
-                        self.model
-                            .as_ref()
+                        self.selected_model()
                             .is_some_and(|model| model.source_token() == pending.source)
                             && pending.source.connection_id() == result.connection_id
                             && pending.request_id == result.request_id
@@ -2346,8 +2662,7 @@ impl Workspace {
                 }
                 Update::AppearanceError { connection, reason } => {
                     if self
-                        .model
-                        .as_ref()
+                        .local_model()
                         .is_some_and(|model| model.connection_id() == connection)
                     {
                         self.appearance_error = Some(reason);
@@ -2360,7 +2675,11 @@ impl Workspace {
                 }
                 Update::CloseSubmitted { request_id, source } => {
                     if !self.pending_close.as_ref().is_some_and(|pending| {
-                        pending.matches_response(request_id, source, self.model.as_ref())
+                        pending.matches_response(
+                            request_id,
+                            source,
+                            self.close_model(&pending.plan),
+                        )
                     }) {
                         self.status = "Close submission belonged to an earlier request".into();
                     }
@@ -2371,7 +2690,11 @@ impl Workspace {
                     reason,
                 } => {
                     if self.pending_close.as_ref().is_some_and(|pending| {
-                        pending.matches_response(request_id, source, self.model.as_ref())
+                        pending.matches_response(
+                            request_id,
+                            source,
+                            self.close_model(&pending.plan),
+                        )
                     }) {
                         self.pending_close = None;
                         self.status = reason;
@@ -2381,7 +2704,11 @@ impl Workspace {
                 }
                 Update::CloseSettled { source, request_id } => {
                     if self.pending_close.as_ref().is_some_and(|pending| {
-                        pending.matches_response(request_id, source, self.model.as_ref())
+                        pending.matches_response(
+                            request_id,
+                            source,
+                            self.close_model(&pending.plan),
+                        )
                     }) {
                         self.pending_close = None;
                         self.focus_current(window, cx);
@@ -2390,29 +2717,25 @@ impl Workspace {
                 }
                 update @ Update::WindowCloseApproved { .. } => {
                     if self.pending_close.as_ref().is_some_and(|pending| {
-                        pending.matches_window_approval(&update, self.model.as_ref())
+                        pending.matches_window_approval(&update, self.close_model(&pending.plan))
                     }) {
                         self.stop();
                         cx.quit();
                     }
                 }
                 Update::Attached { source, session } => {
-                    let Some(views) =
-                        dispatch_owned_update(self.model.as_ref(), source, None, |_| {
-                            self.panes
-                                .iter()
-                                .filter(|(_, view)| {
-                                    view.route.source_token() == source
-                                        && view.route.session_id() == session
-                                })
-                                .map(|(pane, view)| {
-                                    (view.terminal.clone(), self.visible.contains(pane))
-                                })
-                                .collect::<Vec<_>>()
-                        })
-                    else {
+                    if self.execution_token(source.source_id()) != Some(source) {
                         continue;
-                    };
+                    }
+                    let views = self
+                        .panes
+                        .iter()
+                        .filter(|(_, view)| {
+                            view.route.source_token() == source
+                                && view.route.session_id() == session
+                        })
+                        .map(|(pane, view)| (view.terminal.clone(), self.visible.contains(pane)))
+                        .collect::<Vec<_>>();
                     for (terminal_view, visible) in views {
                         terminal_view.update(cx, |terminal, cx| {
                             if terminal.engine_ready() {
@@ -2426,34 +2749,40 @@ impl Workspace {
                     }
                 }
                 Update::Event { source, event } => {
-                    let Some(output_route) = dispatch_owned_update(
-                        self.model.as_ref(),
-                        source,
-                        Some(event.connection_id),
-                        |model| {
-                            event.output().map(|output| {
-                                let route = model.pane_for(output.session_id).and_then(|pane| {
-                                    Some((
-                                        model.terminal_token(pane)?,
-                                        model.screen_key(model.screen_for(pane)?),
-                                        model.route_generation(),
-                                    ))
-                                });
-                                (output, route)
-                            })
-                        },
-                    ) else {
+                    if event.connection_id != source.connection_id()
+                        || self.execution_token(source.source_id()) != Some(source)
+                    {
                         continue;
-                    };
-                    if let Some((output, route)) = output_route {
+                    }
+                    if let Some(output) = event.output() {
+                        let route = self.model.as_ref().and_then(|model| {
+                            model
+                                .route_for_session(source, output.session_id)
+                                .map(|route| {
+                                    let origin = if route.terminal().source_token().source_id()
+                                        == model.local_source().source_id()
+                                    {
+                                        terminal::LinkOrigin::Local
+                                    } else {
+                                        terminal::LinkOrigin::Remote
+                                    };
+                                    (route, origin)
+                                })
+                        });
                         bytes += output.bytes.len();
-                        if let Some((route, screen, generation)) = route {
+                        if let Some((route, origin)) = route {
                             // A known pending spawn can stream before its layout snapshot.
                             // Retain its emulator immediately rather than discarding replay/prompt bytes.
-                            let pane = route.pane_key();
-                            self.ensure_pane(route.clone(), screen, generation, cx);
+                            let pane = route.terminal().pane_key();
+                            self.ensure_pane(
+                                route.terminal().clone(),
+                                route.screen().clone(),
+                                route.generation(),
+                                origin,
+                                cx,
+                            );
                             if let Some(view) = self.panes.get_mut(&pane) {
-                                if view.route != route {
+                                if view.route != *route.terminal() {
                                     continue;
                                 }
                                 view.terminal.update(cx, |terminal, cx| {
@@ -2566,7 +2895,7 @@ impl Workspace {
             self.finish_smoke(false, cx);
             return;
         }
-        let Some(model) = &self.model else {
+        let Some(model) = self.model.as_ref().map(WindowWorkspace::local_source) else {
             return;
         };
         if self.smoke_stage == 17 && model.catalog_initialized() && model.screens().is_empty() {
@@ -2771,7 +3100,11 @@ impl Workspace {
             {
                 self.smoke_hidden_output = true;
                 if let Some(old) = self.smoke_screen.clone() {
-                    self.send(Command::SwitchScreen(old), cx);
+                    self.send_captured(
+                        model.source_token(),
+                        Command::SwitchScreen(model.screen_key(&old)),
+                        cx,
+                    );
                     self.smoke_stage = 12;
                 }
             }
@@ -2833,7 +3166,11 @@ impl Workspace {
             }) =>
             {
                 if let Some(second) = self.smoke_second_screen.clone() {
-                    self.send(Command::SwitchScreen(second), cx);
+                    self.send_captured(
+                        model.source_token(),
+                        Command::SwitchScreen(model.screen_key(&second)),
+                        cx,
+                    );
                     self.smoke_stage = 15;
                 }
             }
@@ -2916,7 +3253,7 @@ impl Workspace {
     }
 
     fn drop_target_at(&self, drag: &PaneDrag, position: Point<Pixels>) -> Option<DropTarget> {
-        let model = self.model.as_ref()?;
+        let model = self.selected_model()?;
         let root = model.presentation_root()?;
         let screen = self.current_screen_key()?;
         if let Some(viewport) = self.float_viewport {
@@ -2972,7 +3309,8 @@ impl Workspace {
             } else {
                 let placement = body_drop_zone(*bounds, self.tab_header_height(), position)?;
                 model
-                    .can_move(drag, slot.node_id(), placement)
+                    .check_move(drag, slot.node_id(), placement)
+                    .is_ok()
                     .then(|| DropTarget::Body {
                         slot: slot.clone(),
                         placement,
@@ -2993,7 +3331,7 @@ impl Workspace {
             return;
         }
         let intent = self.drop_target_at(&drag.origin, window.mouse_position());
-        if let (Some(model), Some(intent)) = (&self.model, intent) {
+        if let (Some(model), Some(intent)) = (self.selected_model(), intent) {
             match intent {
                 DropTarget::Body { slot, placement } if slot.node_id() == target => {
                     match model.check_move(&drag.origin, slot.node_id(), placement) {
@@ -3040,7 +3378,7 @@ impl Workspace {
         position: Point<Pixels>,
     ) {
         let (axis, index, sizes) = split;
-        let Some(children) = self.model.as_ref().and_then(|model| {
+        let Some(children) = self.selected_model().and_then(|model| {
             (model.source_token() == source)
                 .then(|| resize_split(model, &node))
                 .flatten()
@@ -3076,12 +3414,25 @@ impl Workspace {
         let Some(drag) = &mut self.drag else {
             return;
         };
-        if !self.model.as_ref().is_some_and(|model| {
-            model.source_token() == drag.source
-                && resize_split(model, &drag.node).is_some_and(|(revision, axis, children, _)| {
-                    revision == drag.revision && axis == drag.axis && children == drag.children
-                })
-        }) {
+        if !self
+            .model
+            .as_ref()
+            .and_then(|window| {
+                window
+                    .shown_key()
+                    .and_then(|key| window.source(key.source_id()))
+            })
+            .is_some_and(|model| {
+                model.source_token() == drag.source
+                    && resize_split(model, &drag.node).is_some_and(
+                        |(revision, axis, children, _)| {
+                            revision == drag.revision
+                                && axis == drag.axis
+                                && children == drag.children
+                        },
+                    )
+            })
+        {
             self.drag = None;
             return;
         }
@@ -3109,11 +3460,11 @@ impl Workspace {
             self.send_captured(source, command, cx);
         }
     }
-    fn reconcile_float_order(&mut self, model: &LocalWorkspace) {
-        let known_screens: HashSet<_> = model
-            .screens()
+    fn reconcile_float_order(&mut self, window: &WindowWorkspace, model: &SourceWorkspace) {
+        let known_screens: HashSet<_> = window
+            .opened()
             .iter()
-            .map(|screen| model.screen_key(screen.id.as_str()))
+            .map(|entry| entry.key().clone())
             .collect();
         self.float_order
             .retain(|screen, _| known_screens.contains(screen));
@@ -3131,7 +3482,7 @@ impl Workspace {
         floating::reconcile_order(order, &ids);
     }
     fn raise_float(&mut self, id: &str, cx: &mut Context<Self>) {
-        let Some(screen) = self.model.as_ref().and_then(|model| {
+        let Some(screen) = self.selected_model().and_then(|model| {
             model
                 .shown_screen_id()
                 .map(|screen| model.screen_key(screen))
@@ -3148,7 +3499,7 @@ impl Workspace {
         }
     }
     fn float_at(&self, position: Point<Pixels>) -> Option<String> {
-        let model = self.model.as_ref()?;
+        let model = self.selected_model()?;
         let viewport = self.float_viewport?;
         let order = self
             .float_order
@@ -3202,8 +3553,7 @@ impl Workspace {
     }
     fn dock_float(&mut self, id: &str, cx: &mut Context<Self>) {
         let target = self
-            .model
-            .as_ref()
+            .selected_model()
             .and_then(|model| model.capture_float(id).ok());
         if let Some(target) = target {
             let request_id = Uuid::new_v4();
@@ -3220,7 +3570,7 @@ impl Workspace {
         }
     }
     fn maximize_float(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.selected_model() else {
             return;
         };
         let Some(entry) = model.floating(id) else {
@@ -3270,7 +3620,7 @@ impl Workspace {
         let Some(viewport) = self.float_viewport else {
             return;
         };
-        let Some(model) = self.model.as_ref() else {
+        let Some(model) = self.selected_model() else {
             return;
         };
         let Some(entry) = model.floating(id) else {
@@ -3301,8 +3651,7 @@ impl Workspace {
         let valid = self.float_viewport == Some(gesture.viewport)
             && self.appearance.zoom.window_scale() == gesture.zoom
             && self
-                .model
-                .as_ref()
+                .selected_model()
                 .is_some_and(|model| model.validate_float(&gesture.target).is_ok());
         if !valid {
             self.float_gesture = None;
@@ -3352,14 +3701,16 @@ impl Workspace {
                     return div().into_any_element();
                 };
                 let selected = self
-                    .model
-                    .as_ref()
+                    .selected_model()
                     .and_then(|model| model.selected_pane(node));
                 let scroll = self.tab_scrolls.get(&slot_key).cloned().unwrap_or_default();
                 let tracked = scroll.clone();
                 let weak = cx.entity().downgrade();
                 let slot_for_width = slot_key.clone();
-                let identity = self.model.as_ref().map(LocalWorkspace::source_token);
+                let identity = self.selected_model().map(SourceWorkspace::source_token);
+                let remote = self.is_remote_selected();
+                let ready = identity
+                    .is_some_and(|source| self.execution_token(source.source_id()) == Some(source));
                 let mut tabs = div()
                     .on_children_prepainted(move |_, window, _| {
                         let width = tracked.handle.bounds().size.width;
@@ -3382,7 +3733,7 @@ impl Workspace {
                                     this.tab_scrolls.get(&slot).is_some_and(|current| {
                                         Rc::ptr_eq(&current.last_width, &tracked.last_width)
                                     });
-                                let same_screen = this.model.as_ref().is_some_and(|model| {
+                                let same_screen = this.selected_model().is_some_and(|model| {
                                     model.source_token() == owner
                                         && model.shown_screen_id()
                                             == Some(slot.screen().screen_id())
@@ -3398,7 +3749,7 @@ impl Workspace {
                     })
                     .id(SharedString::from(format!("tab-strip-{slot_key}")))
                     .flex()
-                    .flex_1()
+                    .flex_initial()
                     .min_w_0()
                     .h(chrome_rems((self.appearance.font_size + 19.).max(32.)))
                     .gap_1()
@@ -3409,9 +3760,8 @@ impl Workspace {
                     .on_scroll({
                         let slot = id.to_string();
                         let screen = self
-                            .model
-                            .as_ref()
-                            .and_then(LocalWorkspace::shown_screen_id)
+                            .selected_model()
+                            .and_then(SourceWorkspace::shown_screen_id)
                             .unwrap_or_default()
                             .to_owned();
                         let source = identity;
@@ -3432,14 +3782,14 @@ impl Workspace {
                     });
                 for (index, pane) in pane_ids.iter().enumerate() {
                     let Some(pane_key) = self
-                        .model
-                        .as_ref()
+                        .selected_model()
                         .map(|model| model.pane_key(pane.as_str()))
                     else {
                         continue;
                     };
                     let key = pane.to_string();
                     let close = key.clone();
+                    let middle_close = key.clone();
                     let right_click = key.clone();
                     let close_weak = cx.entity().downgrade();
                     let tab_source = identity;
@@ -3447,18 +3797,22 @@ impl Workspace {
                     let right_screen = slot_key.screen().clone();
                     let close_source = identity;
                     let close_screen = slot_key.screen().clone();
+                    let middle_source = identity;
+                    let middle_screen = slot_key.screen().clone();
                     let active = selected == Some(pane.as_str());
                     let title = self
-                        .model
-                        .as_ref()
-                        .and_then(LocalWorkspace::snapshot)
+                        .selected_model()
+                        .and_then(SourceWorkspace::snapshot)
                         .and_then(|screen| screen.panes.get(pane))
                         .and_then(|pane| pane.title.clone())
                         .filter(|title| !title.is_empty())
                         .unwrap_or_else(|| format!("Terminal {}", index + 1));
+                    let drag_title = title.clone();
+                    let drag_appearance = self.appearance.clone();
                     tabs = tabs.child(
                         div()
                             .id(SharedString::from(format!("tab-{slot_key}-{pane_key}")))
+                            .relative()
                             .flex()
                             .flex_none()
                             .items_center()
@@ -3476,33 +3830,58 @@ impl Workspace {
                                 self.appearance.secondary
                             }))
                             .on_click(cx.listener(move |this, _, window, cx| {
-                                if !GlobalState::is_in_deferred_context(cx) {
+                                if ready && !GlobalState::is_in_deferred_context(cx) {
                                     if let Some(source) = tab_source {
                                         this.select_captured(source, &tab_screen, &key, window, cx);
                                     }
                                 }
                             }))
-                            .on_mouse_down(
-                                MouseButton::Right,
-                                cx.listener(move |this, _, window, cx| {
-                                    cx.stop_propagation();
-                                    if let Some(source) = tab_source {
-                                        this.open_transfer_menu_captured(
-                                            source,
-                                            &right_screen,
-                                            &right_click,
-                                            window,
-                                            cx,
-                                        );
+                            .on_aux_click(cx.listener(
+                                move |this, event: &ClickEvent, window, cx| {
+                                    if !matches!(event, ClickEvent::Mouse(click) if click.up.button == MouseButton::Middle)
+                                    {
+                                        return;
                                     }
-                                }),
-                            )
+                                    cx.stop_propagation();
+                                    if ready && !GlobalState::is_in_deferred_context(cx) {
+                                        if let Some(source) = middle_source {
+                                            this.request_close_captured(
+                                                source,
+                                                CloseTarget::Pane {
+                                                    screen: middle_screen.screen_id().to_owned(),
+                                                    pane: middle_close.clone(),
+                                                },
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    }
+                                },
+                            ))
+                            .when(!remote, |view| {
+                                view.on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        if let Some(source) = tab_source {
+                                            this.open_transfer_menu_captured(
+                                                source,
+                                                &right_screen,
+                                                &right_click,
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    }),
+                                )
+                            })
                             .when_some(
-                                (surface == Surface::Tiled
+                                (!remote
+                                    && ready
+                                    && surface == Surface::Tiled
                                     && !GlobalState::is_in_deferred_context(cx))
                                 .then(|| {
-                                    self.model
-                                        .as_ref()
+                                    self.selected_model()
                                         .and_then(|model| model.capture_drag(pane.as_str()))
                                 })
                                 .flatten(),
@@ -3512,7 +3891,13 @@ impl Workspace {
                                             origin,
                                             owner: cx.entity().entity_id(),
                                         },
-                                        |_, _, _, cx| cx.new(|_| DragPreview),
+                                        move |_, _, _, cx| {
+                                            cx.new(|_| DragPreview {
+                                                title: drag_title.clone(),
+                                                active,
+                                                appearance: drag_appearance.clone(),
+                                            })
+                                        },
                                     )
                                 },
                             )
@@ -3526,7 +3911,9 @@ impl Workspace {
                                     .overflow_hidden()
                                     .child(title.clone()),
                             )
-                            .child(self.render_transfer_menu(pane.as_str(), cx))
+                            .when(!remote, |view| {
+                                view.child(self.render_transfer_menu(pane.as_str(), cx))
+                            })
                             .child(
                                 Button::new(SharedString::from(format!(
                                     "close-{slot_key}-{pane_key}"
@@ -3537,6 +3924,7 @@ impl Workspace {
                                 .ghost()
                                 .compact()
                                 .xsmall()
+                                .disabled(!ready)
                                 .on_click(
                                     move |_, window, cx| {
                                         cx.stop_propagation();
@@ -3565,11 +3953,12 @@ impl Workspace {
                     .h(chrome_rems((self.appearance.font_size + 19.).max(32.)))
                     .bg(rgb(self.appearance.raised))
                     .child(tabs)
+                    .child(self.render_group_new_tab_actions(id.as_str(), selected, cx))
+                    .child(div().flex_1().min_w_0())
                     .child(self.render_group_actions(id.as_str(), selected, surface, cx));
                 let focused = self
-                    .model
-                    .as_ref()
-                    .and_then(LocalWorkspace::focused_pane)
+                    .selected_model()
+                    .and_then(SourceWorkspace::focused_pane)
                     .is_some_and(|pane| pane_ids.iter().any(|id| id.as_str() == pane));
                 let bounds_id = slot_key.clone();
                 let bounds_source = identity;
@@ -3599,7 +3988,7 @@ impl Workspace {
                         canvas(
                             move |bounds, _, cx| {
                                 entity.update(cx, |this, cx| {
-                                    if !this.model.as_ref().is_some_and(|model| {
+                                    if !this.selected_model().is_some_and(|model| {
                                         Some(model.source_token()) == bounds_source
                                             && model.shown_screen_id()
                                                 == Some(bounds_id.screen().screen_id())
@@ -3629,8 +4018,7 @@ impl Workspace {
                     .child(header);
                 if let Some(pane) = selected {
                     if let Some(view) = self
-                        .model
-                        .as_ref()
+                        .selected_model()
                         .and_then(|model| self.panes.get(&model.pane_key(pane)))
                     {
                         let focus = pane.to_owned();
@@ -3660,8 +4048,7 @@ impl Workspace {
                         );
                     } else {
                         let message = self
-                            .model
-                            .as_ref()
+                            .selected_model()
                             .and_then(|model| model.template_launch_error(pane))
                             .map(|reason| format!("Terminal failed to start: {reason}"))
                             .unwrap_or_else(|| "Starting terminal…".to_owned());
@@ -3722,7 +4109,7 @@ impl Workspace {
                 };
                 let horizontal = *axis == Axis::Horizontal;
                 let bounds_id = split_key.clone();
-                let bounds_source = self.model.as_ref().map(LocalWorkspace::source_token);
+                let bounds_source = self.selected_model().map(SourceWorkspace::source_token);
                 let entity = cx.entity();
                 let mut split = div()
                     .id(SharedString::from(format!("split-{split_key}")))
@@ -3736,7 +4123,7 @@ impl Workspace {
                         canvas(
                             move |bounds, _, cx| {
                                 entity.update(cx, |this, _| {
-                                    if !this.model.as_ref().is_some_and(|model| {
+                                    if !this.selected_model().is_some_and(|model| {
                                         Some(model.source_token()) == bounds_source
                                             && model.shown_screen_id()
                                                 == Some(bounds_id.screen().screen_id())
@@ -3770,11 +4157,10 @@ impl Workspace {
                     );
                     if index + 1 < children.len() {
                         let node = split_key.clone();
-                        let source = self.model.as_ref().map(LocalWorkspace::source_token);
+                        let source = self.selected_model().map(SourceWorkspace::source_token);
                         let revision = self
-                            .model
-                            .as_ref()
-                            .and_then(LocalWorkspace::snapshot)
+                            .selected_model()
+                            .and_then(SourceWorkspace::snapshot)
                             .map(|screen| screen.revision);
                         let axis = axis.clone();
                         let sizes = sizes.clone();
@@ -3847,7 +4233,7 @@ impl Workspace {
         let maximize_id = id.clone();
         let resize_id = id.clone();
         let raise_id = id.clone();
-        let float_owner = self.model.as_ref().and_then(|model| {
+        let float_owner = self.selected_model().and_then(|model| {
             Some((
                 model.source_token(),
                 model.screen_key(model.shown_screen_id()?),
@@ -4072,7 +4458,7 @@ impl Render for Workspace {
                 .max(25. + 16. * extra_lines as f32);
         let picker_overlay = self.profile_picker_overlay(window, cx);
         let template_overlay = self.template_overlay(window, cx);
-        let toolbar_source = self.model.as_ref().map(LocalWorkspace::source_token);
+        let toolbar_source = self.lifecycle_token();
         let view = div()
             .relative()
             .size_full()
@@ -4086,9 +4472,14 @@ impl Render for Workspace {
             .text_size(chrome_rems(self.appearance.font_size))
             .capture_key_down(cx.listener(Self::key))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                this.drawer_edge_hover(event, cx);
                 if this.drag.is_some() && event.dragging() {
                     this.drag_resize(event.position, false, cx);
                 }
+            }))
+            .on_mouse_exit(cx.listener(|this, _: &MouseExitEvent, _, _| {
+                this.drawer_edge_last = None;
+                this.drawer_edge_task = None;
             }))
             .on_mouse_up(
                 MouseButton::Left,
@@ -4109,92 +4500,86 @@ impl Render for Workspace {
                         cx.notify();
                     }
                 }),
-            )
-            .child(
-                div()
-                    .id("workspace-toolbar")
-                    .flex()
-                    .items_center()
-                    .gap_3()
-                    .h(chrome_rems((self.appearance.font_size + 29.).max(42.)))
-                    .px_3()
-                    .flex_none()
-                    .min_w_0()
-                    .overflow_x_scroll()
-                    .bg(rgb(self.appearance.raised))
-                    .child(
-                        div()
-                            .flex_none()
-                            .font_weight(FontWeight::BOLD)
-                            .child("splitty"),
-                    )
-                    .when(!self.hosts.open, |toolbar| {
-                        toolbar
-                            .child(self.render_drawer_toggle(cx))
-                            .child(self.render_screen_navigation(cx))
-                    })
-                    .child(self.render_hosts_navigation(cx))
-                    .child(div().flex_1())
-                    .when(!self.hosts.open, |toolbar| {
-                        toolbar.child(
-                            Button::new("templates-open")
-                                .accessibility_label("Open Templates")
-                                .tooltip("Open Templates")
-                                .icon(Icon::new(IconName::LayoutTemplate))
-                                .label("Templates")
-                                .ghost()
-                                .compact()
-                                .small()
-                                .on_click({
-                                    let weak = cx.entity().downgrade();
-                                    move |_, window, cx| {
-                                        let _ = weak.update(cx, |this, cx| {
-                                            if toolbar_source.is_some_and(|source| {
-                                                this.model.as_ref().is_some_and(|model| {
-                                                    model.source_token() == source
-                                                })
-                                            }) {
-                                                this.toggle_templates(window, cx)
-                                            }
-                                        });
-                                    }
-                                }),
-                        )
-                    }),
             );
         let mut content = div().flex().flex_1().min_h_0().min_w_0();
-        if self.drawer_visible && !self.hosts.open {
+        if self.drawer_visible {
             content = content.child(self.render_drawer(cx));
         }
         let mut main_content = div().flex().flex_col().flex_1().min_w_0().min_h_0();
         if self.hosts.open {
             main_content = main_content.child(self.render_hosts(cx));
-        } else if let Some(model) = &self.model {
-            if let Some(preview) = model.pending_template() {
+        } else if let Some(model) = self.selected_model() {
+            if self.is_remote_selected() {
+                if let Some(key) = self.current_screen_key() {
+                    if let Some(entry) = self.model.as_ref().and_then(|model| {
+                        model.opened().into_iter().find(|entry| entry.key() == &key)
+                    }) {
+                        let message = match entry.state() {
+                            splitty_client_core::workspace::OpenedScreenState::Ready => None,
+                            splitty_client_core::workspace::OpenedScreenState::Loading => {
+                                Some("Opening remote Screen…")
+                            }
+                            splitty_client_core::workspace::OpenedScreenState::Missing => {
+                                Some("This Screen is missing on its host. Detach it from Screens.")
+                            }
+                            splitty_client_core::workspace::OpenedScreenState::Offline => Some(
+                                "Host offline. Terminal input is unavailable until reconnection.",
+                            ),
+                        };
+                        if let Some(message) = message {
+                            main_content = main_content.child(
+                                div()
+                                    .px_4()
+                                    .py_2()
+                                    .bg(cx.theme().muted)
+                                    .text_color(cx.theme().foreground)
+                                    .child(message),
+                            );
+                        }
+                    }
+                }
+            }
+            if let Some(preview) = self
+                .selected_model()
+                .filter(|_| !self.is_remote_selected())
+                .and_then(SourceWorkspace::pending_template)
+            {
                 main_content = main_content.child(self.render_template_preview(preview, cx));
             } else if model.screens().is_empty() {
-                main_content = main_content.child(
-                    div().flex_1().flex().items_center().justify_center().child(
+                if self.is_remote_selected() {
+                    main_content = main_content.child(
                         div()
-                            .id("new-screen-empty")
-                            .px_4()
-                            .py_2()
-                            .cursor_pointer()
-                            .bg(rgb(self.appearance.overlay))
-                            .child("New screen")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if toolbar_source.is_some_and(|source| {
-                                    this.model.as_ref().is_some_and(|model| {
-                                        model.source_token() == source && model.screens().is_empty()
-                                    })
-                                }) {
-                                    this.create_screen(cx);
-                                }
-                            })),
-                    ),
-                );
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child("Remote Screen content unavailable"),
+                    );
+                } else {
+                    main_content = main_content.child(
+                        div().flex_1().flex().items_center().justify_center().child(
+                            div()
+                                .id("new-screen-empty")
+                                .px_4()
+                                .py_2()
+                                .cursor_pointer()
+                                .bg(rgb(self.appearance.overlay))
+                                .child("New screen")
+                                .on_click(cx.listener(move |this, _, _, cx| {
+                                    if toolbar_source.is_some_and(|source| {
+                                        this.lifecycle_token() == Some(source)
+                                            && this
+                                                .local_model()
+                                                .is_some_and(|model| model.screens().is_empty())
+                                    }) {
+                                        this.create_screen(cx);
+                                    }
+                                })),
+                        ),
+                    );
+                }
             } else if let Some(screen) = model.snapshot() {
-                if screen.panes.is_empty() {
+                if screen.panes.is_empty() && !self.is_remote_selected() {
                     main_content = main_content.child(
                         div().flex_1().flex().items_center().justify_center().child(
                             div()
@@ -4206,17 +4591,26 @@ impl Render for Workspace {
                                 .child("New terminal")
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if toolbar_source.is_some_and(|source| {
-                                        this.model.as_ref().is_some_and(|model| {
-                                            model.source_token() == source
-                                                && model
+                                        this.lifecycle_token() == Some(source)
+                                            && this.local_model().is_some_and(|model| {
+                                                model
                                                     .snapshot()
                                                     .is_some_and(|screen| screen.panes.is_empty())
-                                        })
+                                            })
                                     }) {
                                         this.tab(cx);
                                     }
                                 })),
                         ),
+                    );
+                } else if screen.panes.is_empty() {
+                    main_content = main_content.child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child("No terminals in this Screen"),
                     );
                 } else {
                     let entity = cx.entity();
@@ -4331,7 +4725,11 @@ impl Render for Workspace {
                 }
             } else {
                 main_content =
-                    main_content.child(div().flex_1().p_4().child("Loading local Screen…"));
+                    main_content.child(div().flex_1().p_4().child(if self.is_remote_selected() {
+                        "Loading remote Screen…"
+                    } else {
+                        "Loading local Screen…"
+                    }));
             }
         } else {
             main_content = main_content.child(div().flex_1().p_4().child("Connecting…"));
@@ -4379,11 +4777,43 @@ impl Render for Workspace {
                         )
                     }),
             )
+            .when(self.drawer_slide > 0. || self.drawer_overlay_open, |view| {
+                let owner = self.lifecycle_token();
+                let shade = (self.drawer_slide * 68.).round() as u32;
+                view.child(
+                    div()
+                        .id("drawer-backdrop")
+                        .absolute()
+                        .inset_0()
+                        .bg(rgba((self.appearance.overlay << 8) | shade))
+                        .occlude()
+                        .on_scroll(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            if this.lifecycle_token() == owner
+                                && !GlobalState::is_in_deferred_context(cx)
+                            {
+                                this.close_drawer_overlay(cx);
+                            }
+                        })),
+                )
+                .child(
+                    div()
+                        .id("drawer-slide")
+                        .absolute()
+                        .top_0()
+                        .left(chrome_rems(
+                            (self.drawer_slide - 1.) * self.drawer_width as f32,
+                        ))
+                        .h_full()
+                        .occlude()
+                        .child(self.render_drawer(cx)),
+                )
+            })
             .when_some(picker_overlay, |view, picker| view.child(picker))
             .when_some(template_overlay, |view, overlay| view.child(overlay))
     }
 }
-fn first_selected_slot(model: &LocalWorkspace, node: &LayoutNode) -> Option<(String, String)> {
+fn first_selected_slot(model: &SourceWorkspace, node: &LayoutNode) -> Option<(String, String)> {
     match node {
         LayoutNode::Slot { id, .. } => {
             Some((id.to_string(), model.selected_pane(node)?.to_owned()))
@@ -4393,7 +4823,7 @@ fn first_selected_slot(model: &LocalWorkspace, node: &LayoutNode) -> Option<(Str
             .find_map(|child| first_selected_slot(model, child)),
     }
 }
-fn presented_slot_by_id<'a>(model: &'a LocalWorkspace, id: &str) -> Option<&'a LayoutNode> {
+fn presented_slot_by_id<'a>(model: &'a SourceWorkspace, id: &str) -> Option<&'a LayoutNode> {
     presented_slot_in(model.presentation_root(), model.presented_floats(), id)
 }
 fn presented_slot_in<'a>(
@@ -4467,14 +4897,14 @@ fn prune_layout_bounds<'a>(
         .collect()
 }
 fn reveal_changed_tabs(
-    previous: Option<&LocalWorkspace>,
-    current: &LocalWorkspace,
+    previous: Option<&SourceWorkspace>,
+    current: &SourceWorkspace,
     handles: &HashMap<LayoutKey, TabScroll>,
 ) {
     fn visit(
         node: &LayoutNode,
-        previous: Option<&LocalWorkspace>,
-        current: &LocalWorkspace,
+        previous: Option<&SourceWorkspace>,
+        current: &SourceWorkspace,
         screen: &ScreenKey,
         handles: &HashMap<LayoutKey, TabScroll>,
     ) {
@@ -4549,7 +4979,7 @@ mod tests {
     };
     use gpui_kit::{point, px, size, Bounds, Keystroke, Modifiers, Pixels};
     use splitty_client_core::{
-        workspace::{ClosePlan, CloseTarget, LayoutNode, LocalWorkspace, ScreenModel},
+        workspace::{ClosePlan, CloseTarget, LayoutNode, ScreenModel, SourceWorkspace},
         zoom::ZoomAction,
         EmbeddedService, ScreenIds,
     };
@@ -4654,14 +5084,14 @@ mod tests {
     #[test]
     fn only_matching_submitted_window_close_can_approve_exit() {
         let connection = "00000000-0000-4000-8000-000000000001".parse().unwrap();
-        let model = LocalWorkspace::new(connection);
+        let model = SourceWorkspace::new(connection);
         let plan = model.assess_close(9, CloseTarget::Window).unwrap();
         let pending = PendingClose {
             plan: plan.clone(),
             prompting: false,
         };
         let approval = |request_id, source| Update::WindowCloseApproved { request_id, source };
-        let foreign = LocalWorkspace::new("00000000-0000-4000-8000-000000000002".parse().unwrap());
+        let foreign = SourceWorkspace::new("00000000-0000-4000-8000-000000000002".parse().unwrap());
         assert!(pending.matches_response(9, Some(model.source_token()), Some(&model)));
         assert!(!pending.matches_response(9, Some(foreign.source_token()), Some(&model)));
         assert!(
@@ -4692,12 +5122,12 @@ mod tests {
     fn stale_output_and_attach_callbacks_never_enter_the_view_consumer() {
         let old_connection = uuid::Uuid::new_v4();
         let new_connection = uuid::Uuid::new_v4();
-        let old = LocalWorkspace::new(old_connection);
-        let mut current = LocalWorkspace::new(new_connection);
+        let old = SourceWorkspace::new(old_connection);
+        let mut current = SourceWorkspace::new(new_connection);
         let old_source = old.source_token();
         let current_source = current.source_token();
         let delivered = Cell::new(0);
-        let consume = |model: &LocalWorkspace| {
+        let consume = |model: &SourceWorkspace| {
             // Identical raw IDs are deliberate; only source ownership may admit them.
             assert_eq!(model.pane_key("pane").pane_id(), "pane");
             delivered.set(delivered.get() + 1);
@@ -4760,7 +5190,7 @@ mod tests {
         let service = EmbeddedService::start();
         let mut client = service.connect().await.unwrap();
         let connection = client.connection_id();
-        let mut model = LocalWorkspace::new(connection);
+        let mut model = SourceWorkspace::new(connection);
         model.set_catalog_supported(true);
         model.mark_catalog_dirty();
         model.flush_catalog(&client).unwrap();
@@ -4835,7 +5265,7 @@ mod tests {
         );
         assert!(!refresh_resize_drag(
             &mut drag,
-            &LocalWorkspace::new(uuid::Uuid::new_v4())
+            &SourceWorkspace::new(uuid::Uuid::new_v4())
         ));
         model
             .apply_snapshot(connection, &snapshot(3, "replacement", [0.7, 0.3]))
@@ -4862,7 +5292,7 @@ mod tests {
         assert!(startup.resolve_prompt(None, false).unwrap().is_none());
         assert!(startup.resolve_prompt(None, true).unwrap().is_some());
         let connection = "00000000-0000-4000-8000-000000000001".parse().unwrap();
-        let model = LocalWorkspace::new(connection);
+        let model = SourceWorkspace::new(connection);
         assert_eq!(
             startup.resolve_prompt(Some(&model), true).unwrap(),
             Some(ClosePlan::startup_window(4)),
@@ -4873,7 +5303,7 @@ mod tests {
             prompting: true,
         };
         let replacement =
-            LocalWorkspace::new("00000000-0000-4000-8000-000000000002".parse().unwrap());
+            SourceWorkspace::new("00000000-0000-4000-8000-000000000002".parse().unwrap());
         assert!(removed.resolve_prompt(Some(&replacement), true).is_err());
         assert!(removed
             .resolve_prompt(Some(&replacement), false)
@@ -5122,7 +5552,7 @@ mod tests {
         model
             .apply_snapshot(connection, &snapshot)
             .expect("snapshot");
-        let screen_key = LocalWorkspace::new(connection).screen_key("screen");
+        let screen_key = SourceWorkspace::new(connection).screen_key("screen");
         assert!(model.select_tab("b"));
         let bounds = HashMap::from([
             (screen_key.layout_key("left"), rectangle(0., 0., 100., 200.)),
@@ -5200,7 +5630,7 @@ mod tests {
             ]
         }))
         .expect("valid authoritative layout");
-        let screen = LocalWorkspace::new(uuid::Uuid::new_v4()).screen_key("screen");
+        let screen = SourceWorkspace::new(uuid::Uuid::new_v4()).screen_key("screen");
         let mut splits = HashMap::from([
             (
                 screen.layout_key("old-split"),

@@ -11,8 +11,8 @@ fn snapshot(root: &[&str], floats: &[&str]) -> Value {
         "panes":panes.iter().map(|p|(p.to_string(),json!({"id":p,"sessionId":format!("s-{p}")}))).collect::<serde_json::Map<_,_>>(),
         "sessions":panes.iter().map(|p|(format!("s-{p}"),json!({"id":format!("s-{p}"),"status":"running"}))).collect::<serde_json::Map<_,_>>()}})
 }
-fn workspace(root: &[&str], floats: &[&str]) -> LocalWorkspace {
-    let mut model = LocalWorkspace::new(Uuid::new_v4());
+fn workspace(root: &[&str], floats: &[&str]) -> SourceWorkspace {
+    let mut model = SourceWorkspace::new(Uuid::new_v4());
     model.set_catalog_supported(true);
     model.set_tab_selection_supported(true);
     model.catalog_in_flight = Some(0);
@@ -22,7 +22,7 @@ fn workspace(root: &[&str], floats: &[&str]) -> LocalWorkspace {
         .unwrap();
     model
 }
-fn fence(model: &mut LocalWorkspace) -> WorkspaceDelta {
+fn fence(model: &mut SourceWorkspace) -> WorkspaceDelta {
     model.catalog_in_flight = Some(model.mutation);
     model.apply_catalog(model.connection_id, &cat()).unwrap()
 }

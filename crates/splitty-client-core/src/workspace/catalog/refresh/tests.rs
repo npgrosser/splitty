@@ -9,8 +9,8 @@ fn snap(id: &str, panes: &[&str]) -> Value {
     "panes":panes.iter().map(|p|(p.to_string(),json!({"id":p,"sessionId":format!("s-{p}")}))).collect::<serde_json::Map<_,_>>(),
     "sessions":panes.iter().map(|p|(format!("s-{p}"),json!({"id":format!("s-{p}"),"status":"running"}))).collect::<serde_json::Map<_,_>>()}})
 }
-fn model() -> LocalWorkspace {
-    let mut model = LocalWorkspace::new(Uuid::new_v4());
+fn model() -> SourceWorkspace {
+    let mut model = SourceWorkspace::new(Uuid::new_v4());
     model.set_catalog_supported(true);
     model.catalog_in_flight = Some(0);
     model
@@ -25,7 +25,7 @@ fn model() -> LocalWorkspace {
     model.observe_attached(model.connection_id, "s-q");
     model
 }
-fn admit(model: &mut LocalWorkspace, new: bool) -> Uuid {
+fn admit(model: &mut SourceWorkspace, new: bool) -> Uuid {
     let id = Uuid::new_v4();
     let source = model.capture_pane_action("q").unwrap();
     let target = if new {
@@ -45,7 +45,7 @@ fn admit(model: &mut LocalWorkspace, new: bool) -> Uuid {
         .unwrap();
     id
 }
-fn opening(refresh: &mut WorkspaceRefresh, model: &mut LocalWorkspace, ids: &[&str]) {
+fn opening(refresh: &mut WorkspaceRefresh, model: &mut SourceWorkspace, ids: &[&str]) {
     refresh.begin(model).unwrap();
     model.catalog_in_flight = Some(refresh.batch.as_ref().unwrap().generation);
     refresh
@@ -54,7 +54,7 @@ fn opening(refresh: &mut WorkspaceRefresh, model: &mut LocalWorkspace, ids: &[&s
 }
 fn stage(
     refresh: &mut WorkspaceRefresh,
-    model: &mut LocalWorkspace,
+    model: &mut SourceWorkspace,
     id: &str,
     panes: &[&str],
 ) -> WorkspaceDelta {
@@ -64,7 +64,7 @@ fn stage(
 }
 fn ending(
     refresh: &mut WorkspaceRefresh,
-    model: &mut LocalWorkspace,
+    model: &mut SourceWorkspace,
     ids: &[&str],
 ) -> WorkspaceDelta {
     let batch = refresh.batch.as_mut().unwrap();
@@ -330,4 +330,201 @@ fn aggregate_staged_counts_and_text_are_admitted_before_retaining_next_snapshot(
     assert!(delta.reconciliation_error.is_some());
     assert!(refresh.batch.is_none());
     assert_eq!(model.routes().len(), 3);
+}
+
+#[test]
+fn simultaneous_sources_share_staging_lease_until_commit_failure_or_drop() {
+    let mut first = model();
+    let mut second = model();
+    let bytes = codec::json_size(&snap("a", &["p", "q"])["screen"], MAX_FRAME_BYTES).unwrap();
+    let shared = Budget::new(bytes);
+    first.staged = shared.clone();
+    second.staged = shared.clone();
+    let mut first_refresh = WorkspaceRefresh::default();
+    let mut second_refresh = WorkspaceRefresh::default();
+    opening(&mut first_refresh, &mut first, &["a"]);
+    opening(&mut second_refresh, &mut second, &["a"]);
+    stage(&mut first_refresh, &mut first, "a", &["p", "q"]);
+    assert_eq!(shared.used(), bytes);
+    let failed = stage(&mut second_refresh, &mut second, "a", &["p", "q"]);
+    assert!(failed.reconciliation_error.is_some());
+    assert_eq!(shared.used(), bytes);
+    assert_eq!(second.routes().len(), 3);
+    ending(&mut first_refresh, &mut first, &["a"]);
+    assert_eq!(shared.used(), 0);
+    opening(&mut second_refresh, &mut second, &["a"]);
+    stage(&mut second_refresh, &mut second, "a", &["p", "q"]);
+    assert_eq!(shared.used(), bytes);
+    drop(second_refresh);
+    assert_eq!(shared.used(), 0);
+    assert_eq!(second.routes().len(), 3);
+}
+
+#[test]
+fn pending_new_transfer_reserves_a_screen_without_duplicating_its_panes() {
+    let mut model = model();
+    assert_eq!(model.screen_count(), 2);
+    assert_eq!(model.admission_count(), 3);
+    admit(&mut model, true);
+    assert_eq!(model.screen_count(), 3);
+    assert_eq!(model.admission_count(), 3);
+    model.finish_transfer(Some("rejected".into()));
+    assert_eq!(model.screen_count(), 2);
+}
+
+#[test]
+fn refresh_preserves_newer_pending_local_creation_without_requiring_an_old_snapshot() {
+    let mut model = model();
+    let mut refresh = WorkspaceRefresh::default();
+    opening(&mut refresh, &mut model, &["a", "b"]);
+    let generation = model.mutation + 1;
+    let screen = ScreenModel::new(
+        ScreenIds {
+            screen_id: "new".into(),
+            pane_id: "new-pane".into(),
+        },
+        model.connection_id,
+    );
+    model.models.insert("new".into(), screen);
+    model.pending_screens.insert(
+        "new".into(),
+        PendingScreen {
+            mutation: generation,
+        },
+    );
+    model.mutation = generation;
+    stage(&mut refresh, &mut model, "a", &["p", "q"]);
+    stage(&mut refresh, &mut model, "b", &["r"]);
+    let delta = ending(&mut refresh, &mut model, &["a", "b"]);
+    assert!(delta.coherent_refresh);
+    assert!(model.models.contains_key("new"));
+    assert_eq!(model.admission_count(), 4);
+}
+
+#[test]
+fn remote_opening_catalog_holds_its_decoding_charge_until_collection_drops() {
+    let budget = ConnectionBudget::default();
+    let mut model = SourceWorkspace::remote(
+        SourceId::initial(Uuid::new_v4()),
+        Uuid::new_v4(),
+        "host.test".into(),
+        budget.clone(),
+    );
+    model.set_catalog_supported(true);
+    model.catalog_in_flight = Some(0);
+    model
+        .apply_catalog(model.connection_id, &cat(&["a"]))
+        .unwrap();
+    model.open_existing("a").unwrap();
+    let accepted_charge = budget.used();
+    assert!(accepted_charge > 0);
+    let mut refresh = WorkspaceRefresh::default();
+    opening(&mut refresh, &mut model, &["a"]);
+    assert!(budget.used() > accepted_charge);
+    drop(refresh);
+    assert_eq!(budget.used(), accepted_charge);
+    drop(model);
+    assert_eq!(budget.used(), 0);
+}
+
+#[test]
+fn failed_collection_is_quiet_until_a_new_explicit_pass_is_active() {
+    let mut model = model();
+    let mut refresh = WorkspaceRefresh::default();
+    refresh.begin(&mut model).unwrap();
+    assert!(refresh.observation_active());
+    // The runtime must distinguish an active new pass from an old ordered
+    // response still being drained after timeout.
+    model.catalog_in_flight = Some(model.mutation);
+    refresh.abort_observation(&mut model, "timed out".into());
+    assert!(!refresh.observation_active());
+    assert!(refresh.observation_pending(&model));
+    let connection = model.connection_id();
+    refresh
+        .apply_catalog(&mut model, connection, &cat(&["a", "b"]))
+        .unwrap();
+    assert!(!refresh.observation_active());
+    refresh.begin(&mut model).unwrap();
+    assert!(refresh.observation_active());
+}
+
+fn remote_model(ids: &[&str]) -> SourceWorkspace {
+    let mut model = SourceWorkspace::remote(
+        SourceId::initial(Uuid::new_v4()),
+        Uuid::new_v4(),
+        "host.test".into(),
+        ConnectionBudget::default(),
+    );
+    model.set_catalog_supported(true);
+    model.catalog_in_flight = Some(0);
+    model.apply_catalog(model.connection_id, &cat(ids)).unwrap();
+    model
+}
+
+#[test]
+fn remote_absence_is_missing_but_present_silent_resync_exhausts_one_recollection() {
+    let mut model = remote_model(&["a", "unopened"]);
+    model.open_existing("a").unwrap();
+    model
+        .apply_snapshot(model.connection_id, &snap("a", &["p"]))
+        .unwrap();
+    let mut refresh = WorkspaceRefresh::default();
+    opening(&mut refresh, &mut model, &["a", "unopened"]);
+    let first = ending(&mut refresh, &mut model, &["a", "unopened"]);
+    assert!(first.reconciliation_error.is_none());
+    assert!(refresh.batch.as_ref().unwrap().repeated);
+    let failed = ending(&mut refresh, &mut model, &["a", "unopened"]);
+    assert!(failed.reconciliation_error.is_some());
+    assert!(!refresh.observation_active());
+    assert!(
+        !refresh.needs_flush(&model),
+        "failed present resync does not loop"
+    );
+    assert_eq!(model.session_for("p"), Some("s-p"));
+    assert!(model.screen("unopened").is_none());
+    opening(&mut refresh, &mut model, &["unopened"]);
+    let absent = ending(&mut refresh, &mut model, &["unopened"]);
+    assert!(absent.coherent_refresh);
+    assert!(model.is_missing("a"));
+    assert!(model.screen("a").is_none());
+    assert!(model.screen("unopened").is_none());
+    assert_eq!(
+        model.screens().len(),
+        1,
+        "missing reference is retained for Detach"
+    );
+}
+
+#[test]
+fn remote_external_move_to_unopened_screen_never_adopts_destination_or_late_routes() {
+    let mut model = remote_model(&["a", "b", "unopened"]);
+    model.open_existing("a").unwrap();
+    model.open_existing("b").unwrap();
+    model
+        .apply_snapshot(model.connection_id, &snap("a", &["p"]))
+        .unwrap();
+    model
+        .apply_snapshot(model.connection_id, &snap("b", &["q", "r"]))
+        .unwrap();
+    let mut refresh = WorkspaceRefresh::default();
+    opening(&mut refresh, &mut model, &["a", "b", "unopened"]);
+    stage(&mut refresh, &mut model, "a", &["p"]);
+    stage(&mut refresh, &mut model, "b", &["r"]);
+    stage(&mut refresh, &mut model, "unopened", &["q"]);
+    let committed = ending(&mut refresh, &mut model, &["a", "b", "unopened"]);
+    assert!(committed.coherent_refresh);
+    assert_eq!(model.session_for("p"), Some("s-p"));
+    assert_eq!(model.session_for("r"), Some("s-r"));
+    assert!(model.session_for("q").is_none());
+    assert!(model.screen("unopened").is_none());
+    opening(&mut refresh, &mut model, &["a", "b", "unopened"]);
+    model.detach_reference("a").unwrap();
+    stage(&mut refresh, &mut model, "a", &["p"]);
+    stage(&mut refresh, &mut model, "b", &["r"]);
+    let committed = ending(&mut refresh, &mut model, &["a", "b", "unopened"]);
+    assert!(committed.coherent_refresh);
+    assert!(model.session_for("p").is_none());
+    assert!(model.screen("a").is_none());
+    assert_eq!(model.screens().len(), 1);
+    assert_eq!(model.session_for("r"), Some("s-r"));
 }

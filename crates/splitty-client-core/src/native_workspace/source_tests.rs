@@ -1,5 +1,6 @@
 //! Source admission through the real local worker; no remote transport fixture.
 use super::*;
+use crate::workspace::SourceWorkspace;
 use uuid::Uuid;
 
 async fn next(updates: &mut mpsc::Receiver<Update>) -> Update {
@@ -30,6 +31,7 @@ async fn foreign_source_envelopes_cannot_create_split_select_input_or_enqueue_se
     ));
     let model = loop {
         if let Update::Workspace(model) = next(&mut updates).await {
+            let model = local_projection(&model);
             if model.routes().len() == 1 && model.session_ready(&model.routes()[0].session_id) {
                 break model;
             }
@@ -49,6 +51,7 @@ async fn foreign_source_envelopes_cannot_create_split_select_input_or_enqueue_se
         .unwrap();
     let model = loop {
         if let Update::Workspace(model) = next(&mut updates).await {
+            let model = local_projection(&model);
             if model.routes().len() == 2
                 && model
                     .routes()
@@ -64,7 +67,7 @@ async fn foreign_source_envelopes_cannot_create_split_select_input_or_enqueue_se
     };
     let screen = model.shown_screen_id().unwrap();
     let route = model.terminal_token(model.focused_pane().unwrap()).unwrap();
-    let mut foreign = LocalWorkspace::new(Uuid::new_v4());
+    let mut foreign = SourceWorkspace::new(Uuid::new_v4());
     foreign.reset_connection(owner.connection_id());
     let foreign_owner = foreign.source_token();
     assert_eq!(foreign_owner.connection_id(), owner.connection_id());
@@ -98,7 +101,7 @@ async fn foreign_source_envelopes_cannot_create_split_select_input_or_enqueue_se
     }
     // A valid envelope cannot upgrade an old nested terminal target either.
     let old = TerminalToken::new(
-        SourceToken::initial(Uuid::new_v4()),
+        SourceWorkspace::new(Uuid::new_v4()).source_token(),
         route.pane_id(),
         route.session_id(),
     );
@@ -177,7 +180,7 @@ async fn queued_event_envelope_retains_charge_until_consumer_drops_it() {
     let service = crate::EmbeddedService::from_runtime(runtime);
     let mut client = service.connect().await.unwrap();
     let budget = client.sender().context().budget;
-    let source = SourceToken::initial(client.connection_id());
+    let source = SourceWorkspace::new(client.connection_id()).source_token();
     let event = client.next_event().await.unwrap().unwrap();
     assert_eq!(event.json().unwrap()["type"], "mux.welcome");
     let (sender, mut updates) = mpsc::channel(1);
@@ -275,13 +278,13 @@ async fn startup_close_consent_survives_workspace_publication_without_ui_consump
 
 #[test]
 fn absent_or_rewrapped_authority_never_admits_a_non_lifecycle_intent() {
-    let current = LocalWorkspace::new(Uuid::new_v4());
+    let current = SourceWorkspace::new(Uuid::new_v4());
     let missing = Command {
         source: None,
         kind: CommandKind::CreateScreen("x".into()),
     };
     assert!(missing.validate_source(current.source_token()).is_err());
-    let foreign = LocalWorkspace::new(Uuid::new_v4());
+    let foreign = SourceWorkspace::new(Uuid::new_v4());
     let old_plan = foreign.assess_close(1, CloseTarget::Window).unwrap();
     let rewrapped = Command::new(
         current.source_token(),
