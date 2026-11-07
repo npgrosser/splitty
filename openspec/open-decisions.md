@@ -8,6 +8,10 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`native-tab-management` NT-1** (2026-11-07, provisional, tbd): additive root-only `move_tab` with before-anchor and `tab-placement-v1`; retain legacy moves and derive source proportions from current server state.
+- **`native-tab-management` NT-2** (2026-11-07, provisional, tbd): clamped focused-group Mod+PageUp/PageDown, scrollable tabs with selected-tab reveal and header insertion; same-group reorder retains selection/maximization.
+- **`native-tab-management` NT-3** (2026-11-07, provisional, tbd): one pending exact placement, ordered catalog watermark and accepted post-fence Screen snapshot for settlement, without a new acknowledgment protocol.
+
 - **`native-appearance` NA-1 font semantics** (2026-11-07, provisional, tbd): appearance font size/family apply to chrome, with resolved UI theme defaults for unset overrides and working native UI defaults for unsupported values. Terminal typography remains native monospace at 15 px text / 21 px rows; terminal-font configuration and display zoom are separate.
 - **`native-appearance` NA-2 presentation subset** (2026-11-07, provisional, tbd): consume existing local settings for chrome typography and resolved terminal/semantic chrome colors without writes, CSS layout/effects, activation of dormant `terminal.theme` behavior or cross-service live synchronization.
 
