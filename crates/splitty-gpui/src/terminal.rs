@@ -7,6 +7,38 @@ use std::{collections::HashMap, ops::Range, time::Instant};
 const FONT_SIZE: f32 = 15.;
 const LINE_HEIGHT: f32 = 21.;
 const SELECTION_BACKGROUND: u32 = 0x345778;
+const MAX_ALTERNATE_WHEEL_KEYS: i32 = 5;
+
+/// GPUI reports positive Y for upward wheel motion. Keep only the fractional
+/// part across events; a large gesture must not become a long key backlog.
+fn wheel_lines(remainder: &mut f32, delta: f32, alternate: bool) -> i32 {
+    let total = *remainder + delta;
+    if !total.is_finite() {
+        *remainder = 0.;
+        return 0;
+    }
+    let whole = total.trunc();
+    *remainder = total - whole;
+    let lines = whole as i32;
+    if alternate {
+        lines.clamp(-MAX_ALTERNATE_WHEEL_KEYS, MAX_ALTERNATE_WHEEL_KEYS)
+    } else {
+        lines
+    }
+}
+
+fn alternate_wheel_input(engine: &mut Engine, lines: i32) -> Result<Vec<u8>> {
+    let key = if lines > 0 { "up" } else { "down" };
+    let mut input = Vec::new();
+    for _ in 0..lines.unsigned_abs().min(MAX_ALTERNATE_WHEEL_KEYS as u32) {
+        input.extend(
+            engine.key(key, false, false, false)?.ok_or_else(|| {
+                anyhow!("Ghostty did not encode {key} for alternate-screen wheel")
+            })?,
+        );
+    }
+    Ok(input)
+}
 
 #[derive(Debug)]
 pub enum Command {
@@ -70,6 +102,7 @@ pub struct Terminal {
     composition: String,
     selecting: bool,
     scroll_remainder: f32,
+    scroll_alternate: Option<bool>,
     row_cache: HashMap<[u64; 2], CachedRow>,
     pub status: String,
     pub bytes: usize,
@@ -109,6 +142,7 @@ impl Terminal {
             composition: String::new(),
             selecting: false,
             scroll_remainder: 0.,
+            scroll_alternate: None,
             row_cache: HashMap::new(),
             status,
             bytes: 0,
@@ -177,6 +211,8 @@ impl Terminal {
         self.saw_smoke = false;
         self.smoke_tail.clear();
         self.selecting = false;
+        self.scroll_remainder = 0.;
+        self.scroll_alternate = None;
         let result = if let Some(engine) = self.engine.as_mut() {
             engine.reset()
         } else {
@@ -723,15 +759,41 @@ impl Render for Terminal {
                 }),
             )
             .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
-                this.scroll_remainder += match event.delta {
+                let alternate = match this.engine.as_ref().map(Engine::is_alternate_screen) {
+                    Some(Ok(alternate)) => alternate,
+                    Some(Err(error)) => {
+                        this.operation(Some(Err(error)));
+                        cx.notify();
+                        cx.stop_propagation();
+                        return;
+                    }
+                    None => {
+                        cx.stop_propagation();
+                        return;
+                    }
+                };
+                if this.scroll_alternate != Some(alternate) {
+                    this.scroll_remainder = 0.;
+                    this.scroll_alternate = Some(alternate);
+                }
+                let delta = match event.delta {
                     ScrollDelta::Pixels(delta) => f32::from(delta.y) / LINE_HEIGHT,
                     ScrollDelta::Lines(delta) => delta.y,
                 };
-                let lines = this.scroll_remainder.trunc() as i32;
-                this.scroll_remainder -= lines as f32;
+                let lines = wheel_lines(&mut this.scroll_remainder, delta, alternate);
                 if lines != 0 {
-                    let result = this.engine.as_mut().map(|engine| engine.scroll(lines));
-                    this.operation(result);
+                    if alternate {
+                        let result = this
+                            .engine
+                            .as_mut()
+                            .map(|engine| alternate_wheel_input(engine, lines));
+                        if let Some(bytes) = result.and_then(|result| this.output(result)) {
+                            this.send_bytes(bytes);
+                        }
+                    } else {
+                        let result = this.engine.as_mut().map(|engine| engine.scroll(lines));
+                        this.operation(result);
+                    }
                     cx.notify();
                 }
                 cx.stop_propagation();
@@ -876,8 +938,51 @@ impl EntityInputHandler for Terminal {
 
 #[cfg(test)]
 mod tests {
-    use super::{needs_shape, CachedRow};
+    use super::{alternate_wheel_input, needs_shape, wheel_lines, CachedRow};
     use crate::terminal_engine::Engine;
+
+    #[test]
+    fn alternate_wheel_accumulates_fraction_without_replaying_large_gestures() {
+        let mut remainder = 0.;
+        assert_eq!(wheel_lines(&mut remainder, 0.4, true), 0);
+        assert_eq!(wheel_lines(&mut remainder, 0.7, true), 1);
+        assert!((remainder - 0.1).abs() < 0.0001);
+        assert_eq!(wheel_lines(&mut remainder, -0.7, true), 0);
+        assert_eq!(wheel_lines(&mut remainder, -0.6, true), -1);
+        assert_eq!(wheel_lines(&mut remainder, 100., true), 5);
+        assert_eq!(
+            wheel_lines(&mut remainder, 0., true),
+            0,
+            "excess lines are dropped"
+        );
+        remainder = 0.; // The view resets it when the active screen changes.
+        assert_eq!(
+            wheel_lines(&mut remainder, -9., false),
+            -9,
+            "normal scrollback retains its line count"
+        );
+        assert_eq!(wheel_lines(&mut remainder, f32::INFINITY, true), 0);
+        assert_eq!(remainder, 0.);
+    }
+
+    #[test]
+    fn alternate_wheel_uses_ghostty_key_mode_for_bounded_pty_input() {
+        let mut engine = Engine::new(40, 8).expect("Ghostty engine");
+        engine
+            .feed(b"\x1b[?1049h", false)
+            .expect("alternate screen");
+        assert_eq!(
+            alternate_wheel_input(&mut engine, 3).unwrap(),
+            b"\x1b[A\x1b[A\x1b[A"
+        );
+        engine
+            .feed(b"\x1b[?1h", false)
+            .expect("application cursor keys");
+        assert_eq!(
+            alternate_wheel_input(&mut engine, -2).unwrap(),
+            b"\x1bOB\x1bOB"
+        );
+    }
 
     #[test]
     fn row_cache_reuses_clean_snapshot_and_rebuilds_mutated_row() {
