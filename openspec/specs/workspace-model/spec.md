@@ -229,6 +229,11 @@ On `close_pane` the server SHALL require that the pane exists in the root layout
 - **WHEN** `close_pane` is applied to a viewer pane
 - **THEN** the pane is removed and no session is ended
 
+#### Scenario: Close within a nested floating entry
+- **WHEN** the last tab in one slot of a floating split is closed
+- **THEN** only that pane's session ends, its empty slot is removed and surviving sibling slots and sessions remain in the floating entry
+- **AND** a parent left with one child collapses without removing the remaining floating content
+
 ### Requirement: Resizing a Split
 On `resize_split` the server SHALL require that the node exists in the screen's root layout and is a split, and that `sizes` has exactly one non-negative entry per child summing to 1 within 0.01; it SHALL then replace the split's sizes.
 
@@ -273,7 +278,7 @@ On `move_pane` the server SHALL require an existing pane in the root layout and 
 - **THEN** the op is rejected, and the root is still that split with both panes
 
 ### Requirement: Floating Panes
-On `float_pane` the server SHALL require a pane in the root layout and SHALL reject the op when that pane is the last pane of the root layout. The pane SHALL be removed from the root layout (a parent split's sizes become equal fractions and a single-child split collapses) and placed in a new floating entry with a server-generated ID, its own single slot, and the given bounds or the default bounds `x=0.25, y=0.25, w=0.5, h=0.5`, all relative to the screen viewport. On `move_float` the server SHALL replace a floating entry's bounds. Floating and moving a floating entry SHALL NOT affect the pane's session.
+On `float_pane` the server SHALL require a pane in the root layout and SHALL reject the op when that pane is the last pane of the root layout. The pane SHALL be removed from the root layout (a parent split's sizes become equal fractions and a single-child split collapses) and placed in a new floating entry with a server-generated ID, its own single slot, and the given bounds or the default bounds `x=0.25, y=0.25, w=0.5, h=0.5`, all relative to the screen viewport. On `move_float` the server SHALL replace a floating entry's bounds. Both operations SHALL reject any non-finite bounds component or non-positive width or height before changing the workspace. Finite offscreen coordinates and positive dimensions larger than the viewport SHALL remain valid. Floating and moving a floating entry SHALL NOT affect the pane's session.
 
 #### Scenario: Float one of two panes
 - **WHEN** `float_pane` is applied without bounds to one pane of a two-slot split
@@ -287,6 +292,14 @@ On `float_pane` the server SHALL require a pane in the root layout and SHALL rej
 #### Scenario: Move an unknown floating entry
 - **WHEN** `move_float` names a floating ID that does not exist
 - **THEN** the op is rejected
+
+#### Scenario: Invalid float bounds
+- **WHEN** `float_pane` or `move_float` supplies any non-finite bounds component or a zero or negative width or height
+- **THEN** the operation is rejected and layout, sessions and effects remain unchanged
+
+#### Scenario: Valid offscreen or oversized bounds
+- **WHEN** `float_pane` or `move_float` supplies finite negative coordinates or positive dimensions greater than one
+- **THEN** the supplied bounds remain authoritative without a forced viewport clamp
 
 ### Requirement: Docking Floating Panes
 On `dock_pane` the server SHALL require an existing floating entry, SHALL remove it, and SHALL append all of its panes to the root-layout slot that holds the pane named in the op, or to the first slot of the root layout when that pane is not found there. The first docked pane SHALL become the slot's active pane.
@@ -534,6 +547,10 @@ The native client SHALL bind a Screen-transfer action to its captured connection
 - **WHEN** the captured connection, Screen, pane or session changed, the pane is managed by a job, the destination is invalid, or an incompatible operation is pending
 - **THEN** the client rejects the action without submitting a transfer or retargeting it to the focused tab
 
+#### Scenario: Transfer a floating tab
+- **WHEN** a captured floating terminal tab is moved to an existing or new Screen
+- **THEN** the same source identity checks apply and the unchanged pane/session pair moves to the target's tiled root
+
 ### Requirement: Native Cross-Screen Session Retention
 The native client SHALL reconcile cross-Screen ownership changes without detaching an unchanged pane/session pair or replacing its retained terminal state merely because catalog and Screen observations arrive separately. This SHALL apply to local transfers and transfers initiated by other clients. Invalid or inconsistent observations SHALL NOT replace the last coherent workspace or authorize duplicate routes.
 
@@ -565,3 +582,44 @@ While Screen ownership is unsettled, the native client SHALL reject pane and Scr
 - **WHEN** a transfer or cross-Screen observation is still being reconciled
 - **THEN** pane and Screen close submit no destructive operation
 - **AND** a confirmed whole-window close still joins shutdown of the owned service
+
+### Requirement: Native Floating Layout Projection
+The native client SHALL display canonical floating groups alongside the tiled layout and retain their pane/session identity through float, dock and geometry changes. Selection, new tabs, close, search and Screen transfer SHALL use their existing semantics on floating tabs. Operations defined only for the tiled root SHALL remain unavailable on floating surfaces. External floating changes SHALL use the same projection.
+
+#### Scenario: Observe and manipulate floating terminals
+- **WHEN** a terminal is floated locally or by another client, receives another tab, moves, resizes or docks
+- **THEN** its authoritative group is displayed and its session, retained terminal content and supported tab actions continue without detach or replay
+
+#### Scenario: Dock a floating group
+- **WHEN** the native Dock action is confirmed for a floating group
+- **THEN** all of its panes move to the first tiled slot without restarting their sessions, including when the tiled root is empty
+
+### Requirement: Native Floating Focus and Visibility
+The native client's focus, tab cycling and visible-size reporting SHALL include floating groups. Maximizing any canonical slot SHALL show only that slot without changing the server layout; restoring SHALL reveal the other groups. Hidden groups SHALL retain terminal output without claiming a visible PTY size. Local stacking changes SHALL NOT mutate the workspace.
+
+#### Scenario: Floating tabs and maximization
+- **WHEN** a floating tab is selected or cycled, its slot is maximized, and the view is later restored or its Screen is revisited
+- **THEN** focus and selection stay consistent with the displayed canonical slots and each displayed terminal reports its measured size
+- **AND** hidden terminals continue processing output without visible-size claims
+
+### Requirement: Native Floating Gesture Admission
+The native client SHALL bind float, dock and bounds gestures to their captured owner and layout identities. Move/resize release SHALL submit at most one changed operation. Stale or cancelled gestures SHALL submit none. Metadata-only updates SHALL preserve a valid gesture; incompatible layout, viewport or zoom changes SHALL cancel it. Outcomes SHALL be verified against authoritative state without replaying a mutation.
+
+#### Scenario: Valid gesture and metadata update
+- **WHEN** a floating group is moved or resized while only its process metadata changes
+- **THEN** release submits one changed bounds operation and the authoritative result retains the same terminal sessions
+
+#### Scenario: Cancelled or stale gesture
+- **WHEN** Escape, window deactivation, owner/Screen/viewport/zoom change or an incompatible authoritative layout update invalidates a floating gesture
+- **THEN** the gesture submits no operation and does not overwrite the later state
+
+#### Scenario: Uncertain floating result
+- **WHEN** a floating action is rejected or cannot be verified after submission
+- **THEN** the client reports its identified outcome, keeps the authoritative projection and does not automatically submit the mutation again
+
+### Requirement: Native Floating Pointer Isolation
+Native floating surfaces SHALL route pointer and wheel input to the topmost hit surface without also delivering it to terminals behind that surface. Header and resize gestures SHALL NOT become terminal input. Reachability adjustments for offscreen or oversized stored bounds SHALL remain local presentation changes until an explicit layout gesture is submitted.
+
+#### Scenario: Overlapping groups and reachable bounds
+- **WHEN** floating groups overlap tiled or floating terminals, including after viewport resizing with offscreen or oversized stored bounds
+- **THEN** only the topmost hit terminal receives application pointer input, controls remain reachable, and viewport adjustment alone sends no bounds operation
