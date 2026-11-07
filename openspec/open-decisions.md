@@ -8,6 +8,10 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`native-floating-groups` NFG-1** (2026-11-07, provisional, tbd): Dock returns the complete group to the first tiled slot; a destination picker remains a later option over the same operation.
+- **`native-floating-groups` NFG-2** (2026-11-07, provisional, tbd): native floats keep local stacking and a reachable clamped display rectangle; viewport changes do not automatically write canonical bounds.
+- **`native-floating-groups` NFG-3** (2026-11-07, provisional, tbd): create/manipulate supported floating tab groups, keeping split/divider/tab placement root-only while defensively displaying existing nested floating roots.
+
 - **`native-screen-transfer` NST-1** (2026-11-07, provisional, tbd): bounded coherent cross-Screen reconciliation uses existing ordered catalog/snapshot reads; an atomic workspace snapshot protocol remains an alternative if measured churn or cost warrants it.
 - **`native-screen-transfer` NST-2** (2026-11-07, provisional, tbd): follow a local transfer only after verification and unless later navigation intervenes; initially limit the tab menu to Screen transfer.
 
