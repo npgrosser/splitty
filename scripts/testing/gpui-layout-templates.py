@@ -18,7 +18,7 @@ import stat
 import subprocess
 import sys
 import time
-import urllib.parse
+import yaml
 
 
 HERE = Path(__file__).resolve().parent
@@ -245,7 +245,10 @@ def main():
         return {pid: entry for pid, entry in shells().items() if alive(pid)}
 
     def loaded_template(slug):
-        return api_read("/api/templates/" + urllib.parse.quote(slug, safe=""))
+        # The owner control socket intentionally omits template CRUD. Inspect
+        # only this run's private saved file; reload/apply still use the UI.
+        path = config / "templates" / f"{slug}.yaml"
+        return yaml.safe_load(path.read_text()) if path.exists() else None
 
     with (args.output / "xvfb.log").open("w") as xvfb_log, (args.output / "app.log").open("w") as app_log:
         try:
@@ -253,14 +256,18 @@ def main():
             if Path(f"/tmp/.X11-unix/X{number}").exists() or Path(f"/tmp/.X{number}-lock").exists():
                 raise RuntimeError(f"DISPLAY {args.display} is already in use")
             xvfb = subprocess.Popen([str(args.xvfb), args.display, "-screen", "0", "1280x900x24",
-                                     "-nolisten", "tcp", "-noreset", "-ac", "-xkbdir", "/usr/share/X11/xkb"],
+                                     "-nolisten", "unix", "-nolisten", "tcp", "-listen", "local",
+                                     "-noreset", "-ac", "-xkbdir", "/usr/share/X11/xkb"],
                                     env=xvfb_env, stdout=xvfb_log, stderr=xvfb_log, start_new_session=True)
 
             def ready():
                 if xvfb.poll() is not None:
                     raise RuntimeError(f"Xvfb exited early: {xvfb.returncode}")
-                return subprocess.run([str(args.xdotool), "getdisplaygeometry"], env=env,
-                                      capture_output=True, timeout=2).returncode == 0
+                try:
+                    return subprocess.run([str(args.xdotool), "getdisplaygeometry"], env=env,
+                                          capture_output=True, timeout=2).returncode == 0
+                except subprocess.TimeoutExpired:
+                    return False
 
             wait_until(ready, "private Xvfb did not become ready", seconds=20)
             old_display = os.environ.get("DISPLAY")
@@ -310,7 +317,7 @@ def main():
                 result["checks"].append("modal-keystrokes-do-not-execute-in-real-shell")
 
                 open_templates()
-                control("library.load_command")
+                control("library.load_command_initial")
                 press("Escape")
                 post_dismiss = owned / "post-dismiss.marker"
                 type_text(f"touch {shlex.quote(str(post_dismiss))}")
@@ -368,8 +375,7 @@ def main():
                 set_field("save.name", "Reviewed layout")
                 set_field("save.slug", "reviewed-layout")
                 control("save.submit")
-                saved = wait_until(lambda: loaded_template("reviewed-layout")
-                                   if (config / "templates" / "reviewed-layout.yaml").exists() else None,
+                saved = wait_until(lambda: loaded_template("reviewed-layout"),
                                    "UI save did not persist reviewed layout")
                 assert len(saved.get("floating", [])) == 1, saved
                 assert len([pane for pane in saved["panes"].values() if pane.get("command")]) == 1, saved
@@ -384,7 +390,7 @@ def main():
                 control("library.load_reviewed")
                 control("apply.prepare")
                 capture("saved-template-review")
-                control("review.run_commands")
+                control("review.run_saved")
                 saved_screen = wait_until(lambda: next((sid for sid in owned_state()["screenOrder"]
                                                         if sid != origin_id), None),
                                           "saved template did not create a Screen")
@@ -407,10 +413,10 @@ def main():
 
                 # Command-bearing seed: layout-only never writes the marker.
                 open_templates()
-                control("library.load_command")
+                control("library.load_command_after_save")
                 control("apply.prepare")
                 capture("seed-command-review-layout-only")
-                control("review.layout_only")
+                control("review.layout_seed")
                 layout_screen = wait_until(lambda: next((sid for sid in owned_state()["screenOrder"]
                                                          if sid not in {origin_id, saved_screen}), None),
                                            "layout-only Screen did not appear")
@@ -423,11 +429,11 @@ def main():
 
                 # A second application must run exactly the displayed command.
                 open_templates()
-                control("library.load_command")
+                control("library.load_command_after_save")
                 control("apply.prepare")
                 capture("seed-command-review-run")
                 before_screens = set(owned_state()["screenOrder"])
-                control("review.run_commands")
+                control("review.run_seed")
                 capture("immediate-after-submit")
                 run_screen = wait_until(lambda: next((sid for sid in owned_state()["screenOrder"]
                                                       if sid not in before_screens), None),
@@ -447,7 +453,7 @@ def main():
                 assert_shell_identity(shell, before_replace)
                 assert_shell_identity(second, before_replace)
                 open_templates()
-                control("library.load_command")
+                control("library.load_command_after_save")
                 control("apply.current")
                 control("apply.prepare")
                 capture("replacement-review-busy-hidden-float")
@@ -461,6 +467,8 @@ def main():
                 capture("review-keys-isolated")
                 result["checks"].append("review-keys-do-not-run-command-or-change-target")
                 press("Escape")
+                wait_until(lambda: max(display.pixels(window, (251, 300, 1, 1))[:3]) < 20,
+                           "Escape did not dismiss template Review modal")
                 assert_shell_identity(shell, owned_state())
                 assert_shell_identity(second, owned_state())
                 assert alive(sleep_a) and alive(sleep_b)
@@ -469,10 +477,10 @@ def main():
                 # Reconfirm and replace with layout only. Exactly one apply op
                 # ends both old sessions, including the hidden floating one.
                 open_templates()
-                control("library.load_command")
+                control("library.load_command_after_save")
                 control("apply.current")
                 control("apply.prepare")
-                control("review.layout_only")
+                control("review.layout_replace")
                 wait_until(lambda: not alive(shell["pid"]) and not alive(second["pid"]),
                            "confirmed replacement did not end both old sessions")
                 wait_until(lambda: len([entry for entry in snapshot_shells().values()
@@ -505,6 +513,29 @@ def main():
                 assert all(not alive(pid) for pid in shells()), "owned shell survived confirmed close"
                 assert all(not alive(pid) for pid in known_children), "owned process survived confirmed close"
                 result["checks"].append("normal-confirmed-window-close-joins-owned-shells")
+            else:
+                open_templates()
+                capture("initial-template-library")
+                click(390, 381)
+                capture("calibration-extract-form")
+                click(300, 426)
+                type_text(str(owned.resolve()))
+                click(390, 468)
+                time.sleep(.3)
+                capture("calibration-save-form")
+                press("Escape")
+                open_templates()
+                click(390, 421)
+                capture("calibration-apply-form")
+                click(390, 482)
+                capture("calibration-apply-review")
+                press("Escape")
+                capture("calibration-after-review-escape")
+                click(905, 281)  # Visible Cancel; keep calibration independent of Escape.
+                click(100, 120)
+                type_text("exit")
+                press("Return")
+                wait_until(lambda: not alive(shell["pid"]), "setup shell did not exit normally")
 
             result["passed"] = True
         except Exception as error:
@@ -518,7 +549,13 @@ def main():
             descendants = (set(performance.process_stats(app.pid)) - {app.pid} if app else set()) | known_children
             if app and app.poll() is None and display and window:
                 try:
+                    prompt_rect = (455, 300, 289, 160)
+                    before_prompt = display.pixels(window, prompt_rect)
                     display.close_window(window)
+                    time.sleep(.5)
+                    if app.poll() is None and display.pixels(window, prompt_rect) != before_prompt:
+                        capture("cleanup-close-prompt")
+                        click(600, 422)
                     app.wait(timeout=8)
                 except Exception as close_error:
                     result["closeError"] = repr(close_error)
