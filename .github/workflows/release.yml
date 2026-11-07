@@ -53,7 +53,7 @@ jobs:
     # Waits for the Windows workflow, whose first job builds the static
     # servers that every desktop app carries for remote hosts.
     needs: windows
-    # The oldest supported runner, so the AppImage works on older glibc too.
+    # The oldest supported runner, so the packages work on older glibc too.
     runs-on: ubuntu-22.04
     timeout-minutes: 45
     env:
@@ -103,10 +103,15 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile && pnpm build
 
-      # The AppImage runs the static x86_64 server: a fine local backend, and
+      # electron-builder builds the rpm with rpmbuild.
+      - name: Install rpm tooling
+        timeout-minutes: 10
+        run: sudo apt-get -o Acquire::Retries=3 update && sudo apt-get -o Acquire::Retries=3 install --yes rpm
+
+      # The packages run the static x86_64 server: a fine local backend, and
       # as a client it installs itself on x86_64 hosts and the servers it
       # carries on aarch64 and macOS hosts.
-      - name: Build Electron AppImage
+      - name: Build Electron AppImage, deb and rpm
         run: |
           mkdir -p target/release payloads/x86_64
           tar -xzf payloads/splitty-wsl-x86_64.tar.gz -C payloads/x86_64
@@ -123,6 +128,7 @@ jobs:
           for image in frontend-electron/dist/*.AppImage; do
             cp "$image" "out/$(basename "$image" .AppImage | sed 's/^Splitty-/Splitty-Electron-/')-x86_64.AppImage"
           done
+          cp frontend-electron/dist/*.deb frontend-electron/dist/*.rpm out/
           ls -l out
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2

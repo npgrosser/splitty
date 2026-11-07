@@ -1,7 +1,11 @@
 {
   "name": "splitty-electron",
   "version": "0.2.3",
+  "description": "Multi-session terminal manager",
+  "homepage": "https://github.com/npgrosser/splitty",
+  "author": "Splitty contributors",
   "license": "MIT",
+  "desktopName": "splitty.desktop",
   "private": true,
   "main": "compiled/main.js",
   "scripts": {
@@ -28,9 +32,16 @@
     "appId": "com.splitty.electron",
     "productName": "Splitty",
     "linux": {
-      "target": "AppImage",
+      "target": [
+        "AppImage",
+        "deb",
+        "rpm"
+      ],
       "icon": "../packaging/electron/icon.png",
-      "category": "Development"
+      "category": "Development",
+      "syncDesktopName": true,
+      "maintainer": "Splitty contributors <https://github.com/npgrosser/splitty>",
+      "synopsis": "Multi-session terminal manager"
     },
     "extraResources": [
       {
