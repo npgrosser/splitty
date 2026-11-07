@@ -108,7 +108,7 @@ To be decided when the change is next. Likely candidates:
 
 Open questions for the design:
 
-- Terminal integration: Ghostty 1.0.0 and Zig 0.17.0 are selected; the safe Rust binding, reproducible dependency packaging and cross-platform build evidence are implementation work. Image-protocol compatibility and native presentation remain explicit acceptance items.
+- Terminal integration: Ghostty 1.0.0 and Zig 0.17.0 are integrated through an owned safe boundary and explicit reproducible setup; native Windows/macOS runtime evidence remains pending. Image-protocol compatibility and native presentation remain explicit acceptance items.
 - Web engine for scripted HTML and dev-server pages: CEF rendered offscreen (uniform on every platform; size and updates), Servo (MPL-2.0, experimental embedding), or none, with those pages opened in the system browser. System WebViews as child windows are not an option for panes: nothing can be drawn over them (menus, notices, the dock's drop targets), they are not clipped, and on Linux they embed only under X11.
 - Static HTML documents: a native HTML and CSS renderer without scripts (Blitz, in beta and not yet integrated with GPUI) or the web engine.
 - PDF without pdf.js: a native PDF renderer.
@@ -122,6 +122,8 @@ Open questions for the design:
 - The development loop without hot reload: rebuild time of the desktop crate, and keeping the client core's tests free of UI so they stay fast.
 
 ## Carried-over design notes
+
+- 2026-11-07, completed `native-terminal-ghostty` and `native-local-workspace`: Ghostty owns emulation behind a UI-independent boundary; GPUI caches shaped rows and no longer repaints an idle window unconditionally. The default development app now renders one service-owned local Screen with splits, tabs, close and divider resizing. Real-window Wayland/X11 smokes and X11 control/typing tests passed, including same-screen refill and stable terminal identity. One shared bounded input queue avoids per-pane forwarding queues. The full check passed 1,247 Rust tests, workspace/CEF Clippy and 19 specifications. Matched software-renderer measurements show an idle CPU improvement without a demonstrated latency gain. A per-process Mesa D3D12 selection also enabled actual hardware rendering on WSLg and passed functional smokes; this does not replace native Windows acceptance. See [the runbook and evidence](../../../docs/gpui-spike.md) for scope and limitations.
 
 - 2026-11-07, `native-terminal-ghostty` and `native-local-workspace`: the implementation is split into an owned Ghostty engine/presentation increment and a service-driven local-screen increment. The first usable screen requires splits, tab groups, selection, close and divider resizing. GPUI Kit supplies native UI primitives; direct projection of the shared mux tree replaces the browser docking tree, without another layout authority. Initial layout edits wait for authoritative snapshots. Drag-and-drop, scratchpad and `splitty open` follow after this acceptance milestone. WSLg software graphics are a test-environment limit; graphics-driver investigation must not block feature work. A native Windows UI with a WSL service remains the target Windows topology.
 

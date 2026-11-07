@@ -160,6 +160,12 @@ Windows topology, with server and shells in WSL.
 
 ## Local workspace acceptance
 
+Repository checks passed: 1,247 workspace Rust tests (including the architecture
+model), formatting, workspace Clippy with warnings denied, optional CEF Clippy
+and all 19 main specifications. The 20 GPUI tests include actual Ghostty engine
+behavior, render-cache invalidation, divider math and shared command admission
+with complete paste framing and stale-generation rejection.
+
 The local-workspace runtime smoke passed on Wayland and X11 with four distinct
 session markers, both split axes, tab selection, authoritative resize ratios,
 pane closure, retained original terminal identity, current visible paints and
