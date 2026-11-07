@@ -86,8 +86,12 @@ its four edges to move it without restarting its shell; Escape cancels the drag.
 
 Screen controls create, select, rename and close local Screens. Hidden Screens
 keep their terminal output and scrollback. Closing the last Screen leaves
-**New screen**; closing a Screen ends its sessions. Hosts, saved workspace
-restoration, scratchpad and `splitty open` integration remain subsequent work.
+**New screen**; closing a Screen ends its sessions. Pane, Screen and normal window
+close share one confirmation flow: busy sessions or incomplete session state
+require confirmation, and cancelling preserves the work. Closing the owned window includes
+terminals on hidden Screens. If the affected sessions change while a decision is
+pending, request close again. Hosts, saved workspace restoration, scratchpad and
+`splitty open` integration remain subsequent work.
 
 Workspace shortcuts use **Cmd** on macOS and **Alt** on other hosts as `Mod`:
 
@@ -239,6 +243,36 @@ input delivered both up and down application-mode cursor sequences. The optimize
 integrated binary also passed the Wayland/X11 hardware workspace smoke and exited
 cleanly. This verifies the cursor-key fallback; native application mouse reporting
 remains unimplemented.
+
+## Local terminal close acceptance
+
+The shared close flow is checked through model/runtime tests, a native approval
+matching test and the existing real-window driver. On isolated X11,
+`gpui-screens.py --close-confirmation` passed ten checks: busy pane button and
+shortcut cancellation preserve shell identity and focus; repeated gestures keep
+one prompt; confirmed pane closure preserves another tab; Screen confirmation
+works; and normal window close detects busy hidden terminals, preserves their
+output on cancellation and ends owned sessions on confirmation. The final prompt
+capture explicitly describes ending the local workspace. Normal exit returned
+zero with no surviving children. The previous twelve Screen checks also passed.
+
+Focused checks passed: 32 client-core tests, 31 GPUI tests, 55 transport unit
+tests and five transport integration tests. A deterministic transport regression
+closes the owner while a valid frame finishes reading: the frame releases its
+lease and shutdown succeeds. Malformed frames, foreign-budget transfers and
+queue exhaustion remain errors. Targeted Clippy and the architecture check passed.
+
+The optimized native-only build retains passing workspace smokes on Wayland and
+X11 with hardware D3D12-backed OpenGL. The closure guard covers the existing owned
+local terminal workspace. Forced termination and non-cancellable platform quit
+callbacks are outside its confirmation guarantee. Remote detach, scratchpad and
+viewer-loss policies remain separate work; the current implementation does not
+claim full web-client close-policy parity.
+
+```sh
+python3 scripts/testing/gpui-screens.py target/release/splitty-gpui \
+  --output /tmp/splitty-close-evidence --close-confirmation
+```
 
 ## Ghostty integration measurements
 

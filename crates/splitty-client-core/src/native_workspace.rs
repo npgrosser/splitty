@@ -1,6 +1,6 @@
 //! Own the local service and route workspace intents on one ordered connection.
 use crate::{
-    workspace::{Axis, LocalWorkspace, MovePlacement, PaneDrag},
+    workspace::{Axis, ClosePlan, CloseTarget, LocalWorkspace, MovePlacement, PaneDrag},
     Event,
 };
 #[cfg(not(target_os = "windows"))]
@@ -25,10 +25,6 @@ pub enum Command {
         connection: String,
         name: String,
     },
-    CloseScreen {
-        screen: String,
-        connection: String,
-    },
     Split {
         pane: String,
         axis: Axis,
@@ -43,7 +39,10 @@ pub enum Command {
         target: String,
         placement: MovePlacement,
     },
-    Close(String),
+    RequestClose {
+        plan: ClosePlan,
+        confirmed: bool,
+    },
     ResizeSplit {
         node: String,
         sizes: Vec<f64>,
@@ -71,22 +70,141 @@ pub enum Update {
     Event(Box<Event>),
     Attached(String),
     Status(String),
+    CloseSubmitted {
+        request_id: u64,
+        connection_id: Option<uuid::Uuid>,
+    },
+    CloseRejected {
+        request_id: u64,
+        reason: String,
+    },
+    CloseSettled {
+        request_id: u64,
+    },
+    WindowCloseApproved {
+        request_id: u64,
+        connection_id: Option<uuid::Uuid>,
+    },
 }
 pub struct Worker {
     pub stop: Arc<AtomicBool>,
+    pub cleanup_complete: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<anyhow::Result<()>>>,
+}
+#[cfg(not(target_os = "windows"))]
+struct PendingClose {
+    request_id: u64,
+    target: CloseTarget,
+    barrier_generation: u64,
+    catalog_barrier_seen: bool,
+    failure: Option<String>,
+}
+#[cfg(not(target_os = "windows"))]
+impl PendingClose {
+    fn is_duplicate(&self, request_id: u64) -> bool {
+        self.request_id == request_id
+    }
+    fn observe_catalog(&mut self, generation: Option<u64>) -> bool {
+        if generation.is_some_and(|generation| generation >= self.barrier_generation) {
+            self.catalog_barrier_seen = true;
+            true
+        } else {
+            false
+        }
+    }
+    fn observe_failure(&mut self, json: &serde_json::Value) {
+        let matching = match &self.target {
+            CloseTarget::Pane { screen, .. } => {
+                json["op"] == "close_pane" && json["screenId"] == *screen
+            }
+            CloseTarget::Screen { screen } => {
+                json["op"] == "close_screen" && json["screenId"] == *screen
+            }
+            CloseTarget::Window => false,
+        };
+        if matching {
+            self.failure = Some(format!("Close rejected: {json}"));
+        }
+    }
+    fn settlement(
+        &self,
+        screen_exists: bool,
+        accepted_pane_snapshot: bool,
+        pane_exists: bool,
+    ) -> Option<Result<(), String>> {
+        if !self.catalog_barrier_seen {
+            return None;
+        }
+        if let Some(reason) = &self.failure {
+            return Some(Err(reason.clone()));
+        }
+        match self.target {
+            CloseTarget::Screen { .. } => Some(if screen_exists {
+                Err("Screen close was not confirmed".into())
+            } else {
+                Ok(())
+            }),
+            CloseTarget::Pane { .. } if !screen_exists => Some(Ok(())),
+            CloseTarget::Pane { .. } if accepted_pane_snapshot => Some(if pane_exists {
+                Err("Pane close was not confirmed".into())
+            } else {
+                Ok(())
+            }),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn validate_pre_discovery_close(plan: &ClosePlan, confirmed: bool) -> std::io::Result<()> {
+    if confirmed && *plan == ClosePlan::startup_window(plan.request_id) {
+        Ok(())
+    } else {
+        Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "workspace changed while confirming close",
+        ))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn finish_owned_run(
+    service: crate::EmbeddedService,
+    result: anyhow::Result<()>,
+    cleanup_complete: &AtomicBool,
+    stop: &AtomicBool,
+) -> anyhow::Result<()> {
+    let cleanup = service.close().await;
+    if cleanup.is_ok() {
+        cleanup_complete.store(true, Ordering::Release);
+    }
+    cleanup?;
+    if stop.load(Ordering::Acquire) {
+        Ok(())
+    } else {
+        result
+    }
 }
 impl Worker {
     pub fn start(commands: mpsc::Receiver<Command>, updates: mpsc::Sender<Update>) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
+        let cleanup_complete = Arc::new(AtomicBool::new(false));
+        let completed = cleanup_complete.clone();
         let thread = thread::spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
-                .build()?;
+                .build();
+            let runtime = match runtime {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    completed.store(true, Ordering::Release); // no owned service existed
+                    return Err(error.into());
+                }
+            };
             runtime.block_on(async {
-                let result = run(commands, updates.clone(), stopping).await;
+                let result = run(commands, updates.clone(), stopping, completed).await;
                 if let Err(error) = &result {
                     let _ = updates.try_send(Update::Status(format!("Local service: {error:#}")));
                 }
@@ -95,6 +213,7 @@ impl Worker {
         });
         Self {
             stop,
+            cleanup_complete,
             thread: Some(thread),
         }
     }
@@ -131,6 +250,7 @@ async fn run(
     mut commands: mpsc::Receiver<Command>,
     updates: mpsc::Sender<Update>,
     stop: Arc<AtomicBool>,
+    cleanup_complete: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
     use crate::{workspace::WorkspaceDelta, EmbeddedService};
     let service = EmbeddedService::start();
@@ -149,6 +269,8 @@ async fn run(
         let mut refresh_error = None::<String>;
         let mut control_error = None::<String>;
         let mut tick = tokio::time::interval(Duration::from_millis(16));
+        let mut last_close_request = 0_u64;
+        let mut pending_close = None::<PendingClose>;
         enum Next {
             Event(std::io::Result<Option<Box<Event>>>),
             Command(Option<Command>),
@@ -163,14 +285,103 @@ async fn run(
             if stop.load(Ordering::Acquire) {
                 break;
             }
+            let mut close_window = false;
             match next {
                 Next::Tick => {}
                 Next::Command(None) => break,
                 Next::Command(Some(command)) => {
+                    if let Command::RequestClose { plan, confirmed } = command {
+                        let request_id = plan.request_id;
+                        if pending_close.as_ref().is_some_and(|close| close.is_duplicate(request_id)) {
+                            // The original is still awaiting authoritative settlement.
+                            // Rejecting this duplicate would clear the UI's matching pending request.
+                            continue;
+                        }
+                        let result = if pending_close.is_some() {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::WouldBlock,
+                                "previous close still settling",
+                            ))
+                        } else if request_id <= last_close_request {
+                            Err(std::io::Error::new(
+                                std::io::ErrorKind::InvalidInput,
+                                "stale close request",
+                            ))
+                        } else if let Some(model) = &mut model {
+                            model.validate_close(&plan, confirmed).and_then(|()| {
+                                match &plan.target {
+                                    CloseTarget::Pane { screen, pane } => {
+                                        model.close_pane_on_screen(&client, screen, pane)
+                                    }
+                                    CloseTarget::Screen { screen } => {
+                                        model.close_screen(&client, screen)
+                                    }
+                                    CloseTarget::Window => Ok(()),
+                                }
+                            })
+                        } else {
+                            validate_pre_discovery_close(&plan, confirmed)
+                        };
+                        last_close_request = last_close_request.max(request_id);
+                        match result {
+                            Ok(()) => {
+                                if plan.target == CloseTarget::Window {
+                                    close_window = true;
+                                    publish(
+                                        &updates,
+                                        Update::WindowCloseApproved {
+                                            request_id,
+                                            connection_id: plan.connection_id,
+                                        },
+                                        &stop,
+                                    )
+                                    .await?;
+                                } else {
+                                    let generation = model
+                                        .as_ref()
+                                        .map_or(0, LocalWorkspace::mutation_generation);
+                                    pending_close = Some(PendingClose {
+                                        request_id,
+                                        target: plan.target,
+                                        barrier_generation: generation,
+                                        catalog_barrier_seen: false,
+                                        failure: None,
+                                    });
+                                    publish(
+                                        &updates,
+                                        Update::CloseSubmitted {
+                                            request_id,
+                                            connection_id: plan.connection_id,
+                                        },
+                                        &stop,
+                                    )
+                                    .await?;
+                                }
+                            }
+                            Err(error) => {
+                                publish(
+                                    &updates,
+                                    Update::CloseRejected {
+                                        request_id,
+                                        reason: error.to_string(),
+                                    },
+                                    &stop,
+                                )
+                                .await?;
+                            }
+                        }
+                        if close_window {
+                            break;
+                        }
+                        continue;
+                    }
                     let Some(model) = &mut model else {
                         continue;
                     };
                     let result: std::io::Result<()> = match command {
+                        Command::RequestClose { .. } => {
+                            unreachable!("close is handled before normal commands")
+                        }
                         Command::CreateScreen(name) => {
                             let result = model.create_screen(&client, &name).map(|_| ());
                             if result.is_ok() {
@@ -216,16 +427,6 @@ async fn run(
                                 ))
                             }
                         }
-                        Command::CloseScreen { screen, connection } => {
-                            if model.connection_id().to_string() == connection {
-                                model.close_screen(&client, &screen)
-                            } else {
-                                Err(std::io::Error::new(
-                                    std::io::ErrorKind::InvalidInput,
-                                    "Close belongs to a previous connection",
-                                ))
-                            }
-                        }
                         Command::Split { pane, axis } => {
                             model.split(&client, &pane, axis).map(|_| ())
                         }
@@ -246,7 +447,6 @@ async fn run(
                                 Ok(())
                             }
                         }
-                        Command::Close(pane) => model.close_pane(&client, &pane),
                         Command::ResizeSplit { node, sizes } => {
                             model.resize_split(&client, &node, sizes)
                         }
@@ -314,6 +514,7 @@ async fn run(
                 Next::Event(event) => {
                     let event = event?.ok_or_else(|| anyhow::anyhow!("Local connection closed"))?;
                     let mut delta = WorkspaceDelta::default();
+                    let mut accepted_close_snapshot = false;
                     if let Some(json) = event.json() {
                         match json["type"].as_str() {
                             Some("mux.welcome") if model.is_none() => {
@@ -355,10 +556,31 @@ async fn run(
                             }
                             Some("mux.workspace_snapshot") => {
                                 if let Some(model) = &mut model {
+                                    let response_generation = model.catalog_request_generation();
                                     let first = !model.catalog_initialized();
                                     match model.apply_catalog(event.connection_id, json) {
-                                        Ok(applied) => delta = applied,
+                                        Ok(applied) => {
+                                            delta = applied;
+                                            if let Some(close) = &mut pending_close {
+                                                if close.observe_catalog(response_generation) {
+                                                    if let CloseTarget::Pane { screen, .. } =
+                                                        &close.target
+                                                    {
+                                                        if model.screen(screen).is_some() {
+                                                            model.mark_screen_dirty(screen);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
                                         Err(error) => {
+                                            if event.connection_id == model.connection_id() {
+                                                if let Some(close) = &mut pending_close {
+                                                    if close.observe_catalog(response_generation) {
+                                                        close.failure = Some(format!("Close could not be verified: {error}"));
+                                                    }
+                                                }
+                                            }
                                             publish(
                                                 &updates,
                                                 Update::Status(format!(
@@ -392,8 +614,20 @@ async fn run(
                             Some("mux.screen_snapshot") => {
                                 if let Some(model) = &mut model {
                                     match model.apply_snapshot(event.connection_id, json) {
-                                        Ok(applied) => delta = applied,
+                                        Ok(applied) => {
+                                            delta = applied;
+                                            accepted_close_snapshot = true;
+                                        }
                                         Err(error) => {
+                                            if event.connection_id == model.connection_id() {
+                                                if let Some(close) = &mut pending_close {
+                                                    if close.catalog_barrier_seen
+                                                        && matches!(&close.target, CloseTarget::Pane { screen, .. } if json["screen"]["id"] == *screen)
+                                                    {
+                                                        close.failure = Some(format!("Close could not be verified: {error}"));
+                                                    }
+                                                }
+                                            }
                                             publish(
                                                 &updates,
                                                 Update::Status(format!(
@@ -470,6 +704,11 @@ async fn run(
                                 }
                             }
                             Some("mux.op_failed") | Some("error") => {
+                                if json["type"] == "mux.op_failed" {
+                                    if let Some(close) = &mut pending_close {
+                                        close.observe_failure(json);
+                                    }
+                                }
                                 if json["type"] == "error" {
                                     if let Some(session) = json["sessionId"].as_str() {
                                         if !attached.contains(session) {
@@ -516,6 +755,29 @@ async fn run(
                                 }
                             }
                             _ => {}
+                        }
+                        let settled = pending_close.as_ref().and_then(|close| {
+                            let model = model.as_ref()?;
+                            let (screen_exists, pane_exists, matching_snapshot) = match &close.target {
+                                CloseTarget::Pane { screen, pane } => (
+                                    model.screen(screen).is_some(),
+                                    model.screen(screen).and_then(|screen| screen.snapshot())
+                                        .is_some_and(|snapshot| snapshot.panes.contains_key(&splitty_core::ids::PaneId::from(pane.as_str()))),
+                                    accepted_close_snapshot && json["screen"]["id"] == *screen,
+                                ),
+                                CloseTarget::Screen { screen } => (model.screen(screen).is_some(), false, false),
+                                CloseTarget::Window => (false, false, false),
+                            };
+                            close.settlement(screen_exists, matching_snapshot, pane_exists)
+                        });
+                        if let Some(settled) = settled {
+                            if let Some(close) = pending_close.take() {
+                                let update = match settled {
+                                    Ok(()) => Update::CloseSettled { request_id: close.request_id },
+                                    Err(reason) => Update::CloseRejected { request_id: close.request_id, reason },
+                                };
+                                publish(&updates, update, &stop).await?;
+                            }
                         }
                     }
                     // Attachment changes are reconciled below. Queue pressure
@@ -675,12 +937,249 @@ async fn run(
         Ok::<(), anyhow::Error>(())
     }
     .await;
-    let cleanup = service.close().await;
-    cleanup?;
-    if stop.load(Ordering::Acquire) {
-        Ok(())
-    } else {
-        result
+    finish_owned_run(service, result, &cleanup_complete, &stop).await
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod close_tests {
+    use super::*;
+    use serde_json::json;
+    use std::time::Duration;
+
+    async fn next_update(updates: &mut mpsc::Receiver<Update>) -> Update {
+        tokio::time::timeout(Duration::from_secs(10), updates.recv())
+            .await
+            .expect("native close update timeout")
+            .expect("native close update channel")
+    }
+
+    async fn stable_model(updates: &mut mpsc::Receiver<Update>) -> Box<LocalWorkspace> {
+        loop {
+            if let Update::Workspace(model) = next_update(updates).await {
+                if model.catalog_initialized()
+                    && model.screens().len() == 1
+                    && !model.has_pending_create()
+                    && model.snapshot().is_some()
+                    && !model.routes().is_empty()
+                {
+                    return model;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn pre_discovery_close_requires_exact_confirmed_unknown_window_scope() {
+        let plan = ClosePlan::startup_window(3);
+        assert!(validate_pre_discovery_close(&plan, true).is_ok());
+        assert!(validate_pre_discovery_close(&plan, false).is_err());
+        let changed = ClosePlan {
+            target: CloseTarget::Screen {
+                screen: "other".into(),
+            },
+            ..plan
+        };
+        assert!(validate_pre_discovery_close(&changed, true).is_err());
+    }
+
+    #[tokio::test]
+    async fn early_run_failure_still_awaits_real_owned_service_cleanup() {
+        let service = crate::EmbeddedService::start();
+        let completed = AtomicBool::new(false);
+        let stop = AtomicBool::new(false);
+        let error = finish_owned_run(
+            service,
+            Err(anyhow::anyhow!("connection failed before client admission")),
+            &completed,
+            &stop,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("connection failed"));
+        assert!(
+            completed.load(Ordering::Acquire),
+            "actual service.close completed before failure returned"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_close_keeps_worker_available_for_new_approved_close() {
+        let (commands, receiver) = mpsc::channel(16);
+        let (sender, mut updates) = mpsc::channel(64);
+        let worker = Worker::start(receiver, sender);
+        let model = stable_model(&mut updates).await;
+        commands
+            .send(Command::RequestClose {
+                plan: ClosePlan::startup_window(1),
+                confirmed: true,
+            })
+            .await
+            .unwrap();
+        loop {
+            if let Update::CloseRejected { request_id, .. } = next_update(&mut updates).await {
+                assert_eq!(request_id, 1);
+                break;
+            }
+        }
+        let plan = model.assess_close(2, CloseTarget::Window).unwrap();
+        commands
+            .send(Command::RequestClose {
+                plan,
+                confirmed: true,
+            })
+            .await
+            .unwrap();
+        loop {
+            match next_update(&mut updates).await {
+                Update::WindowCloseApproved { request_id, .. } => {
+                    assert_eq!(request_id, 2);
+                    break;
+                }
+                Update::CloseRejected { reason, .. } => {
+                    panic!("healthy worker rejected fresh close: {reason}")
+                }
+                _ => {}
+            }
+        }
+        worker.shutdown().unwrap();
+    }
+
+    #[test]
+    fn old_snapshot_and_unscoped_late_failure_wait_for_ordered_close_barrier() {
+        let target = CloseTarget::Pane {
+            screen: "screen".into(),
+            pane: "pane".into(),
+        };
+        let mut close = PendingClose {
+            request_id: 7,
+            target: target.clone(),
+            barrier_generation: 4,
+            catalog_barrier_seen: false,
+            failure: None,
+        };
+        assert!(close.is_duplicate(7));
+        assert!(!close.is_duplicate(8));
+        assert!(
+            close.settlement(true, true, false).is_none(),
+            "old removed-pane snapshot cannot settle"
+        );
+        close.observe_failure(&json!({"op":"close_pane","screenId":"screen"}));
+        assert!(
+            close.failure.is_some(),
+            "paneId is not required in server failure"
+        );
+        assert!(!close.observe_catalog(Some(3)));
+        assert!(
+            close.settlement(true, true, false).is_none(),
+            "old catalog cannot release failure"
+        );
+        assert!(close.observe_catalog(Some(4)));
+        assert!(close.settlement(true, false, true).unwrap().is_err());
+        let mut next = PendingClose {
+            request_id: 8,
+            target,
+            barrier_generation: 5,
+            catalog_barrier_seen: false,
+            failure: None,
+        };
+        assert!(!next.observe_catalog(Some(4)));
+        assert!(next.settlement(true, true, false).is_none());
+        assert!(next.observe_catalog(Some(5)));
+        assert!(
+            next.settlement(true, false, false).is_none(),
+            "rejected or absent snapshot cannot prove pane removal"
+        );
+        assert!(next.settlement(true, true, false).unwrap().is_ok());
+    }
+
+    #[tokio::test]
+    async fn stale_close_request_cannot_lower_worker_high_water() {
+        let (commands, receiver) = mpsc::channel(16);
+        let (sender, mut updates) = mpsc::channel(64);
+        let worker = Worker::start(receiver, sender);
+        let model = loop {
+            if let Update::Workspace(model) = next_update(&mut updates).await {
+                break model;
+            }
+        };
+        let invalid = |request_id| Command::RequestClose {
+            plan: ClosePlan::startup_window(request_id),
+            confirmed: true,
+        };
+        commands.send(invalid(10)).await.unwrap();
+        let mut rejections = Vec::new();
+        for request in [2, 5, 10] {
+            commands.send(invalid(request)).await.unwrap();
+        }
+        while rejections.len() < 4 {
+            if let Update::CloseRejected { request_id, reason } = next_update(&mut updates).await {
+                rejections.push((request_id, reason));
+            }
+        }
+        assert_eq!(
+            rejections.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![10, 2, 5, 10]
+        );
+        assert!(rejections[1..]
+            .iter()
+            .all(|(_, reason)| reason.contains("stale")));
+        assert!(model.connection_id().to_string().len() > 10);
+        worker.shutdown().unwrap();
+    }
+
+    #[tokio::test]
+    async fn approved_window_close_completes_owned_service_cleanup() {
+        let (commands, receiver) = mpsc::channel(16);
+        let (sender, mut updates) = mpsc::channel(64);
+        let worker = Worker::start(receiver, sender);
+        let model = stable_model(&mut updates).await;
+        let plan = model.assess_close(1, CloseTarget::Window).unwrap();
+        commands
+            .send(Command::RequestClose {
+                plan: plan.clone(),
+                confirmed: true,
+            })
+            .await
+            .unwrap();
+        commands
+            .send(Command::CreateScreen("must not run".into()))
+            .await
+            .unwrap();
+        loop {
+            if let Update::WindowCloseApproved {
+                request_id,
+                connection_id,
+            } = next_update(&mut updates).await
+            {
+                assert_eq!(request_id, 1);
+                assert_eq!(connection_id, plan.connection_id);
+                break;
+            }
+        }
+        let completed = worker.cleanup_complete.clone();
+        loop {
+            match tokio::time::timeout(Duration::from_secs(10), updates.recv())
+                .await
+                .expect("owned worker did not finish after approval")
+            {
+                Some(Update::Workspace(model)) => {
+                    assert!(
+                        model
+                            .screens()
+                            .iter()
+                            .all(|screen| screen.name.as_deref() != Some("must not run")),
+                        "a mutation queued after approved close must not execute"
+                    );
+                }
+                Some(_) => {}
+                None => break,
+            }
+        }
+        assert!(
+            completed.load(Ordering::Acquire),
+            "owned cleanup completed before update channel closure"
+        );
+        worker.shutdown().unwrap();
     }
 }
 
@@ -689,7 +1188,9 @@ async fn run(
     _: mpsc::Receiver<Command>,
     _: mpsc::Sender<Update>,
     _: Arc<AtomicBool>,
+    cleanup_complete: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
+    cleanup_complete.store(true, Ordering::Release); // no owned service was started
     anyhow::bail!(
         "The native Windows workspace needs its owned WSL launcher; this development launcher is not wired yet"
     )

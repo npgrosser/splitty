@@ -18,12 +18,12 @@ model {
     }
 
     client_workspace = component 'client_workspace' {
-      description 'Connection-wide catalog and admission, per-screen snapshots, local choices and generation-scoped session routes.'
+      description 'Connection-wide catalog and admission, per-screen snapshots, local choices, session routes and identity-scoped close impact assessment.'
       metadata { module 'splitty_client_core::workspace' }
     }
 
     native_workspace = component 'native_workspace' {
-      description 'Native workspace runtime: one owned service, ordered connection, typed intents, attachment and visibility control retries.'
+      description 'Native workspace runtime: one owned service, ordered connection, checked close admission and settlement, verified shutdown, attachment and visibility retries.'
       metadata { module 'splitty_client_core::native_workspace' }
     }
 
@@ -50,7 +50,8 @@ model {
     client_workspace -> splitty.core.ids 'Identify panes and split nodes'
     client_workspace -> splitty.core.mux 'Use canonical screen layout, operations and validation'
     client_workspace -> splitty.core.pty 'Gate real-service tests on PTY availability'
-    native_workspace -> client_workspace 'Reconcile catalogs, screen snapshots and pane routes'
+    native_workspace -> client_workspace 'Reconcile catalogs and routes; revalidate captured close impact before submission'
+    native_workspace -> splitty.core.ids 'Confirm captured pane identity after the ordered close barrier'
     native_workspace -> client_root 'Own an isolated service and ordered native client'
     embedded -> connection 'Return a connection scoped to the embedded service'
     embedded -> client_root 'Use public event and screen types in embedded probe tests'

@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::Value;
 pub use splitty_core::mux::{Axis, Direction, LayoutNode, ScreenInfo, ScreenState};
 use splitty_core::{
-    ids::{NodeId, PaneId},
+    ids::{NodeId, PaneId, SessionId},
     mux::{self, ScreenOp},
 };
 use std::{
@@ -30,6 +30,71 @@ pub struct WorkspaceDelta {
     pub snapshot_changed: bool,
     pub added: Vec<SessionRoute>,
     pub removed: Vec<SessionRoute>,
+}
+
+/// A native close request names the exact scope the user chose.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum CloseTarget {
+    Pane { screen: String, pane: String },
+    Screen { screen: String },
+    Window,
+}
+
+/// Canonical membership captured when a close decision was shown.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum CloseIdentity {
+    Catalog,
+    Screen(String),
+    Pane {
+        screen: String,
+        pane: String,
+        session: Option<String>,
+    },
+    Session {
+        screen: String,
+        session: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CloseAffected {
+    pub identity: CloseIdentity,
+    pub busy: bool,
+    pub unresolved: bool,
+}
+
+/// A bounded, UI-free assessment. Busy and unresolved counts describe the
+/// prompt; identities and connection generation bind its eventual approval.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ClosePlan {
+    pub request_id: u64,
+    pub connection_id: Option<Uuid>,
+    pub target: CloseTarget,
+    pub affected: Vec<CloseAffected>,
+    pub busy_count: usize,
+    pub unresolved_count: usize,
+}
+
+impl ClosePlan {
+    pub fn needs_confirmation(&self) -> bool {
+        self.busy_count != 0 || self.unresolved_count != 0
+    }
+
+    /// Before discovery, the only meaningful target is the owned window.
+    pub fn startup_window(request_id: u64) -> Self {
+        Self {
+            request_id,
+            connection_id: None,
+            target: CloseTarget::Window,
+            affected: vec![CloseAffected {
+                identity: CloseIdentity::Catalog,
+                busy: false,
+                unresolved: true,
+            }],
+            busy_count: 0,
+            unresolved_count: 1,
+        }
+    }
 }
 
 /// A drag capability is meaningful only within its captured connection and snapshot.

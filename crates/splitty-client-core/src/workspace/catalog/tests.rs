@@ -39,6 +39,113 @@ fn reserve(model: &mut LocalWorkspace, screen: &str, pane: &str, mutation: u64) 
     model.mark_catalog_dirty();
 }
 
+fn terminal_snapshot(screen: &str, pane: &str, session: &str, busy: bool) -> Value {
+    let mut event = snapshot(screen, &[pane]);
+    event["screen"]["panes"][pane]["sessionId"] = json!(session);
+    event["screen"]["sessions"][session] = json!({
+        "id":session, "status":"running", "busy":busy
+    });
+    event
+}
+
+#[test]
+fn close_plan_counts_unique_sessions_across_hidden_screens_and_rejects_identity_changes() {
+    let mut workspace = model(&["a", "b"]);
+    let connection = workspace.connection_id;
+    workspace
+        .apply_snapshot(connection, &terminal_snapshot("a", "pa", "sa", false))
+        .unwrap();
+    workspace
+        .apply_snapshot(connection, &terminal_snapshot("b", "pb", "sb", true))
+        .unwrap();
+    let plan = workspace.assess_close(7, CloseTarget::Window).unwrap();
+    assert_eq!(plan.busy_count, 1, "hidden busy session is included once");
+    assert_eq!(plan.unresolved_count, 0);
+    assert!(workspace.validate_close(&plan, true).is_ok());
+    let mut titled = terminal_snapshot("b", "pb", "sb", true);
+    titled["screen"]["panes"]["pb"]["title"] = json!("new title");
+    workspace.apply_snapshot(connection, &titled).unwrap();
+    assert!(
+        workspace.validate_close(&plan, true).is_ok(),
+        "title alone is harmless"
+    );
+    workspace
+        .apply_snapshot(
+            connection,
+            &terminal_snapshot("b", "pb", "replacement", true),
+        )
+        .unwrap();
+    assert!(
+        workspace.validate_close(&plan, true).is_err(),
+        "same count cannot hide session replacement"
+    );
+}
+
+#[test]
+fn close_plan_requires_consent_for_new_busy_or_unresolved_work() {
+    let mut workspace = model(&["a"]);
+    let connection = workspace.connection_id;
+    workspace
+        .apply_snapshot(connection, &terminal_snapshot("a", "pa", "sa", false))
+        .unwrap();
+    let idle = workspace
+        .assess_close(
+            1,
+            CloseTarget::Pane {
+                screen: "a".into(),
+                pane: "pa".into(),
+            },
+        )
+        .unwrap();
+    assert!(!idle.needs_confirmation());
+    workspace
+        .apply_snapshot(connection, &terminal_snapshot("a", "pa", "sa", true))
+        .unwrap();
+    assert!(workspace.validate_close(&idle, false).is_err());
+    let busy = workspace
+        .assess_close(2, CloseTarget::Screen { screen: "a".into() })
+        .unwrap();
+    assert!(busy.needs_confirmation());
+    assert!(workspace.validate_close(&busy, false).is_err());
+    assert!(workspace.validate_close(&busy, true).is_ok());
+    workspace
+        .models
+        .get_mut("a")
+        .unwrap()
+        .pending_panes
+        .insert("new".into());
+    assert!(
+        workspace.validate_close(&busy, true).is_err(),
+        "pending work broadens the close"
+    );
+}
+
+#[test]
+fn pending_screen_and_connection_replacement_invalidate_window_close() {
+    let mut workspace = model(&["a"]);
+    workspace
+        .apply_snapshot(
+            workspace.connection_id,
+            &terminal_snapshot("a", "pa", "sa", false),
+        )
+        .unwrap();
+    let idle = workspace.assess_close(3, CloseTarget::Window).unwrap();
+    assert!(!idle.needs_confirmation());
+    reserve(&mut workspace, "pending", "new-pane", 1);
+    assert!(
+        workspace.validate_close(&idle, false).is_err(),
+        "pending Screen adds unresolved work"
+    );
+    let pending = workspace.assess_close(4, CloseTarget::Window).unwrap();
+    assert!(pending.needs_confirmation());
+    assert!(pending.unresolved_count > 0);
+    workspace.reset_connection(Uuid::new_v4());
+    assert!(
+        workspace.validate_close(&pending, true).is_err(),
+        "old connection approval is never reusable"
+    );
+}
+
 #[test]
 fn catalog_preserves_screen_local_selection_and_ignores_later_host_activation() {
     let mut model = model(&["a", "b"]);

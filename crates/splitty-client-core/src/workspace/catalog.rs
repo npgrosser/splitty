@@ -28,6 +28,202 @@ pub struct LocalWorkspace {
 }
 
 impl LocalWorkspace {
+    /// Assess only local terminal impact, retaining pane and session identity
+    /// across a later prompt. The existing admission bounds limit this plan.
+    pub fn assess_close(&self, request_id: u64, target: CloseTarget) -> io::Result<ClosePlan> {
+        let mut plan = ClosePlan {
+            request_id,
+            connection_id: Some(self.connection_id),
+            target: target.clone(),
+            affected: Vec::new(),
+            busy_count: 0,
+            unresolved_count: 0,
+        };
+        match target {
+            CloseTarget::Pane { screen, pane } => {
+                if self.shown.as_deref() != Some(screen.as_str()) {
+                    return Err(invalid("pane Screen is no longer shown"));
+                }
+                let model = self
+                    .models
+                    .get(&screen)
+                    .ok_or_else(|| invalid("close target Screen is gone"))?;
+                if !Self::add_pane_impact(model, &screen, &pane, &mut plan) {
+                    return Err(invalid("close target pane is gone"));
+                }
+            }
+            CloseTarget::Screen { screen } => {
+                if !self.catalog.iter().any(|info| info.id.as_str() == screen)
+                    && !self.pending_screens.contains_key(&screen)
+                {
+                    return Err(invalid("close target Screen is gone"));
+                }
+                self.add_screen_impact(&screen, &mut plan);
+            }
+            CloseTarget::Window => {
+                if !self.catalog_initialized {
+                    plan.affected.push(CloseAffected {
+                        identity: CloseIdentity::Catalog,
+                        busy: false,
+                        unresolved: true,
+                    });
+                }
+                let mut screens: Vec<String> = self
+                    .catalog
+                    .iter()
+                    .map(|info| info.id.to_string())
+                    .chain(self.pending_screens.keys().cloned())
+                    .collect();
+                screens.sort();
+                screens.dedup();
+                for screen in screens {
+                    self.add_screen_impact(&screen, &mut plan);
+                }
+            }
+        }
+        plan.affected.sort_by(|a, b| a.identity.cmp(&b.identity));
+        let mut busy_sessions = HashSet::new();
+        for part in &plan.affected {
+            if !part.busy {
+                continue;
+            }
+            match &part.identity {
+                CloseIdentity::Pane {
+                    session: Some(session),
+                    ..
+                }
+                | CloseIdentity::Session { session, .. } => {
+                    busy_sessions.insert(session);
+                }
+                _ => {}
+            }
+        }
+        plan.busy_count = busy_sessions.len();
+        plan.unresolved_count = plan.affected.iter().filter(|part| part.unresolved).count();
+        Ok(plan)
+    }
+
+    /// A fresh observation must cover the same identities and must not gain
+    /// impact that the user's earlier decision did not include.
+    pub fn validate_close(&self, plan: &ClosePlan, confirmed: bool) -> io::Result<()> {
+        if plan.connection_id != Some(self.connection_id) {
+            return Err(invalid("close belongs to a previous connection"));
+        }
+        let current = self.assess_close(plan.request_id, plan.target.clone())?;
+        if plan.affected.len() != current.affected.len()
+            || plan
+                .affected
+                .iter()
+                .zip(&current.affected)
+                .any(|(before, now)| {
+                    before.identity != now.identity
+                        || (now.busy && !before.busy && !before.unresolved)
+                        || (now.unresolved && !before.unresolved)
+                })
+        {
+            return Err(invalid("close impact changed; request close again"));
+        }
+        if current.needs_confirmation() && !confirmed {
+            return Err(invalid("close now requires confirmation"));
+        }
+        Ok(())
+    }
+
+    fn add_screen_impact(&self, id: &str, plan: &mut ClosePlan) {
+        let model = self.models.get(id);
+        let snapshot = model.and_then(ScreenModel::snapshot);
+        plan.affected.push(CloseAffected {
+            identity: CloseIdentity::Screen(id.to_owned()),
+            busy: false,
+            unresolved: self.pending_screens.contains_key(id) || snapshot.is_none(),
+        });
+        let Some(model) = model else {
+            return;
+        };
+        let mut panes: Vec<String> = model
+            .pending_panes
+            .iter()
+            .cloned()
+            .chain(model.pane_sessions.keys().cloned())
+            .chain(
+                snapshot
+                    .into_iter()
+                    .flat_map(|screen| screen.panes.keys().map(ToString::to_string)),
+            )
+            .collect();
+        panes.sort();
+        panes.dedup();
+        let mut linked_sessions = HashSet::new();
+        for pane in panes {
+            Self::add_pane_impact(model, id, &pane, plan);
+            if let Some(session) = model
+                .snapshot()
+                .and_then(|screen| screen.panes.get(&PaneId::from(pane.as_str())))
+                .and_then(|pane| pane.session_id.as_ref())
+            {
+                linked_sessions.insert(session.to_string());
+            }
+            if let Some(session) = model.pane_sessions.get(&pane) {
+                linked_sessions.insert(session.clone());
+            }
+        }
+        if let Some(snapshot) = snapshot {
+            for (session_id, session) in &snapshot.sessions {
+                if !linked_sessions.contains(session_id.as_str()) {
+                    plan.affected.push(CloseAffected {
+                        identity: CloseIdentity::Session {
+                            screen: id.to_owned(),
+                            session: session_id.to_string(),
+                        },
+                        busy: session.busy && session.status == mux::SessionStatus::Running,
+                        unresolved: session.status == mux::SessionStatus::Starting,
+                    });
+                }
+            }
+        }
+    }
+
+    fn add_pane_impact(
+        model: &ScreenModel,
+        screen: &str,
+        pane: &str,
+        plan: &mut ClosePlan,
+    ) -> bool {
+        let snapshot = model.snapshot();
+        let state = snapshot.and_then(|snapshot| snapshot.panes.get(&PaneId::from(pane)));
+        let pending = model.pending_panes.contains(pane);
+        if state.is_none() && !pending && !model.pane_sessions.contains_key(pane) {
+            return false;
+        }
+        let session = state
+            .and_then(|pane| pane.session_id.as_ref().map(ToString::to_string))
+            .or_else(|| model.pane_sessions.get(pane).cloned());
+        let terminal = pending
+            || state.is_none_or(|pane| {
+                pane.role
+                    .as_ref()
+                    .is_none_or(|role| *role == mux::PaneRole::Terminal)
+            });
+        let metadata = session.as_ref().and_then(|session| {
+            snapshot.and_then(|snapshot| snapshot.sessions.get(&SessionId::from(session.as_str())))
+        });
+        plan.affected.push(CloseAffected {
+            identity: CloseIdentity::Pane {
+                screen: screen.to_owned(),
+                pane: pane.to_owned(),
+                session,
+            },
+            busy: terminal
+                && metadata
+                    .is_some_and(|entry| entry.busy && entry.status == mux::SessionStatus::Running),
+            unresolved: terminal
+                && (pending
+                    || state.is_none()
+                    || metadata.is_none_or(|entry| entry.status == mux::SessionStatus::Starting)),
+        });
+        true
+    }
+
     pub fn new(connection_id: Uuid) -> Self {
         Self {
             connection_id,
@@ -47,6 +243,12 @@ impl LocalWorkspace {
 
     pub fn connection_id(&self) -> Uuid {
         self.connection_id
+    }
+    pub fn mutation_generation(&self) -> u64 {
+        self.mutation
+    }
+    pub fn catalog_request_generation(&self) -> Option<u64> {
+        self.catalog_in_flight
     }
     pub fn screens(&self) -> &[ScreenInfo] {
         &self.catalog
@@ -408,6 +610,22 @@ impl LocalWorkspace {
     }
     pub fn close_pane(&mut self, client: &Client, pane: &str) -> io::Result<()> {
         self.shown_mut()?.close_pane(client, pane)
+    }
+    /// Execute a captured close against its original Screen.
+    pub fn close_pane_on_screen(
+        &mut self,
+        client: &Client,
+        screen: &str,
+        pane: &str,
+    ) -> io::Result<()> {
+        let mutation = self.next_mutation()?;
+        self.models
+            .get_mut(screen)
+            .ok_or_else(|| invalid("close target Screen is gone"))?
+            .close_pane(client, pane)?;
+        self.mutation = mutation;
+        self.mark_catalog_dirty();
+        Ok(())
     }
     pub fn resize_split(&mut self, client: &Client, node: &str, sizes: Vec<f64>) -> io::Result<()> {
         self.shown_mut()?.resize_split(client, node, sizes)

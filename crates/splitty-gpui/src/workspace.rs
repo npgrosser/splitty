@@ -4,7 +4,7 @@ use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{prelude::*, *};
 use splitty_client_core::native_workspace::{Command, Update, Worker};
 use splitty_client_core::workspace::{
-    Axis, LayoutNode, LocalWorkspace, MovePlacement, PaneDrag, ScreenModel,
+    Axis, ClosePlan, CloseTarget, LayoutNode, LocalWorkspace, MovePlacement, PaneDrag, ScreenModel,
 };
 use std::{
     collections::{HashMap, HashSet},
@@ -246,12 +246,65 @@ struct RenameEditor {
     connection: String,
     input: Entity<InputState>,
 }
+struct PendingClose {
+    plan: ClosePlan,
+    prompting: bool,
+}
+impl PendingClose {
+    fn is_prompt_for(&self, request_id: u64) -> bool {
+        self.prompting && self.plan.request_id == request_id
+    }
+    fn resolve_prompt(
+        &self,
+        model: Option<&LocalWorkspace>,
+        confirmed: bool,
+    ) -> Result<Option<ClosePlan>, String> {
+        if !self.prompting {
+            return Err("Close prompt is no longer pending".into());
+        }
+        if !confirmed {
+            return Ok(None);
+        }
+        match model {
+            Some(model) => model
+                .validate_close(&self.plan, true)
+                .map_err(|error| error.to_string())?,
+            None if self.plan == ClosePlan::startup_window(self.plan.request_id) => {}
+            None => return Err("Close target is gone".into()),
+        }
+        Ok(Some(self.plan.clone()))
+    }
+    fn matches_window_approval(&self, update: &Update) -> bool {
+        matches!(update, Update::WindowCloseApproved { request_id, connection_id }
+            if !self.prompting
+                && self.plan.request_id == *request_id
+                && self.plan.connection_id == *connection_id
+                && self.plan.target == CloseTarget::Window)
+    }
+}
+fn admit_close(
+    commands: &mpsc::Sender<Command>,
+    plan: ClosePlan,
+    confirmed: bool,
+) -> Result<PendingClose, String> {
+    commands
+        .try_send(Command::RequestClose {
+            plan: plan.clone(),
+            confirmed,
+        })
+        .map_err(|error| format!("Close not sent: {error}"))?;
+    Ok(PendingClose {
+        plan,
+        prompting: false,
+    })
+}
 pub struct Workspace {
     model: Option<LocalWorkspace>,
     panes: HashMap<String, PaneView>,
     updates: mpsc::Receiver<Update>,
     commands: mpsc::Sender<Command>,
     stopping: Arc<AtomicBool>,
+    cleanup_complete: Arc<AtomicBool>,
     split_bounds: HashMap<String, Bounds<Pixels>>,
     slot_bounds: HashMap<String, Bounds<Pixels>>,
     drop_target: Option<(String, MovePlacement)>,
@@ -262,7 +315,8 @@ pub struct Workspace {
     status: String,
     rename: Option<RenameEditor>,
     rename_subscription: Option<Subscription>,
-    close_prompts: HashSet<String>,
+    pending_close: Option<PendingClose>,
+    next_close_id: u64,
     _poll: Task<()>,
     started: Instant,
     smoke: bool,
@@ -305,12 +359,11 @@ impl Workspace {
             }
         });
         let entity = cx.entity().downgrade();
-        window.on_window_should_close(cx, move |_, cx| {
+        window.on_window_should_close(cx, move |window, cx| {
             let _ = entity.update(cx, |this, cx| {
-                this.stop();
-                cx.quit();
+                this.request_close(CloseTarget::Window, window, cx);
             });
-            true
+            false
         });
         (
             Self {
@@ -319,6 +372,7 @@ impl Workspace {
                 updates,
                 commands,
                 stopping: worker.stop.clone(),
+                cleanup_complete: worker.cleanup_complete.clone(),
                 split_bounds: HashMap::new(),
                 slot_bounds: HashMap::new(),
                 drop_target: None,
@@ -329,7 +383,8 @@ impl Workspace {
                 status: "Starting local workspace…".into(),
                 rename: None,
                 rename_subscription: None,
-                close_prompts: HashSet::new(),
+                pending_close: None,
+                next_close_id: 0,
                 _poll: poll,
                 started: Instant::now(),
                 smoke,
@@ -457,69 +512,98 @@ impl Workspace {
         self.focus_current(window, cx);
         cx.notify();
     }
-    fn request_close_screen(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some((name, connection, busy)) = self.model.as_ref().and_then(|model| {
-            let info = model
-                .screens()
-                .iter()
-                .find(|info| info.id.as_str() == screen)?;
-            let busy = model
-                .screen(screen)
-                .and_then(|screen| screen.snapshot())
-                .is_none_or(|snapshot| snapshot.sessions.values().any(|session| session.busy));
-            Some((
-                info.name.as_deref().unwrap_or("Screen").to_owned(),
-                model.connection_id().to_string(),
-                busy,
-            ))
-        }) else {
+    fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        if target == CloseTarget::Window && self.cleanup_complete.load(Ordering::Acquire) {
+            self.stop();
+            cx.quit();
             return;
+        }
+        if self.pending_close.is_some() {
+            return;
+        }
+        let request_id = self.next_close_id.saturating_add(1);
+        let plan = match &self.model {
+            Some(model) => model.assess_close(request_id, target.clone()),
+            None if target == CloseTarget::Window => Ok(ClosePlan::startup_window(request_id)),
+            None => return,
         };
-        if self.close_prompts.contains(screen) {
+        let plan = match plan {
+            Ok(plan) => plan,
+            Err(error) => {
+                self.status = error.to_string();
+                cx.notify();
+                return;
+            }
+        };
+        self.next_close_id = request_id;
+        if !plan.needs_confirmation() {
+            self.submit_close(plan, false, cx);
             return;
         }
-        if !busy {
-            self.send(
-                Command::CloseScreen {
-                    screen: screen.to_owned(),
-                    connection,
-                },
-                cx,
-            );
-            return;
-        }
-        let screen = screen.to_owned();
-        self.close_prompts.insert(screen.clone());
+        let title = match &target {
+            CloseTarget::Pane { .. } => "Close terminal pane?",
+            CloseTarget::Screen { .. } => "Close Screen?",
+            CloseTarget::Window => "End this local workspace?",
+        };
+        let detail = if target == CloseTarget::Window {
+            "Ends all local terminal sessions.".to_owned()
+        } else if plan.unresolved_count != 0 {
+            "Session state is still loading.".to_owned()
+        } else {
+            format!("Running sessions: {}", plan.busy_count)
+        };
+        self.pending_close = Some(PendingClose {
+            plan: plan.clone(),
+            prompting: true,
+        });
         let prompt = window.prompt(
             PromptLevel::Warning,
-            &format!("Close {name} and end its running processes?"),
-            Some("Ends this Screen's sessions."),
-            &["Keep screen", "Close screen"],
+            title,
+            Some(&detail),
+            &["Keep open", "Close"],
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
             let confirmed = prompt.await.ok() == Some(1);
             let _ = this.update_in(cx, |this, window, cx| {
-                this.close_prompts.remove(&screen);
-                if confirmed
-                    && this.model.as_ref().is_some_and(|model| {
-                        model.connection_id().to_string() == connection
-                            && model.screen(&screen).is_some()
-                    })
-                {
-                    this.send(
-                        Command::CloseScreen {
-                            screen: screen.clone(),
-                            connection,
-                        },
-                        cx,
-                    );
+                let decision = this
+                    .pending_close
+                    .as_ref()
+                    .filter(|pending| pending.is_prompt_for(request_id))
+                    .map(|pending| pending.resolve_prompt(this.model.as_ref(), confirmed));
+                let Some(decision) = decision else {
+                    return;
+                };
+                this.pending_close = None;
+                match decision {
+                    Ok(Some(plan)) => this.submit_close(plan, true, cx),
+                    Ok(None) => {}
+                    Err(error) => this.status = error,
                 }
                 this.focus_current(window, cx);
                 cx.notify();
             });
         })
         .detach();
+    }
+    fn submit_close(&mut self, plan: ClosePlan, confirmed: bool, cx: &mut Context<Self>) {
+        match admit_close(&self.commands, plan, confirmed) {
+            Ok(pending) => self.pending_close = Some(pending),
+            Err(error) => {
+                self.pending_close = None;
+                self.status = error;
+            }
+        }
+        cx.notify();
+    }
+    fn request_close_screen(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_close(
+            CloseTarget::Screen {
+                screen: screen.to_owned(),
+            },
+            window,
+            cx,
+        );
     }
     fn ensure_pane(&mut self, pane: &str, session: &str, cx: &mut Context<Self>) {
         if self
@@ -617,7 +701,10 @@ impl Workspace {
         self.model = Some(model);
         self.sync_visible(cx);
         if self.rename.is_none()
-            && self.close_prompts.is_empty()
+            && !self
+                .pending_close
+                .as_ref()
+                .is_some_and(|pending| pending.prompting)
             && (editor_cancelled
                 || old_screen != new_screen
                 || old_focus != new_focus
@@ -686,7 +773,12 @@ impl Workspace {
         }
     }
     fn focus_current(&self, window: &mut Window, cx: &mut App) {
-        if self.rename.is_some() || !self.close_prompts.is_empty() {
+        if self.rename.is_some()
+            || self
+                .pending_close
+                .as_ref()
+                .is_some_and(|pending| pending.prompting)
+        {
             return;
         }
         if let Some(pane) = self
@@ -755,7 +847,11 @@ impl Workspace {
             }
             return;
         }
-        if !self.close_prompts.is_empty() {
+        if self
+            .pending_close
+            .as_ref()
+            .is_some_and(|pending| pending.prompting)
+        {
             // A native confirmation owns keyboard input until it settles.
             cx.stop_propagation();
             return;
@@ -782,7 +878,20 @@ impl Workspace {
                     .and_then(LocalWorkspace::focused_pane)
                     .map(str::to_owned)
                 {
-                    self.send(Command::Close(pane), cx);
+                    if let Some(screen) = self
+                        .model
+                        .as_ref()
+                        .and_then(LocalWorkspace::shown_screen_id)
+                    {
+                        self.request_close(
+                            CloseTarget::Pane {
+                                screen: screen.to_owned(),
+                                pane,
+                            },
+                            window,
+                            cx,
+                        );
+                    }
                 }
             }
             Shortcut::Focus(direction) => self.focus_neighbor(direction, window, cx),
@@ -841,6 +950,50 @@ impl Workspace {
                 Update::Status(status) => {
                     self.status = status;
                     cx.notify();
+                }
+                Update::CloseSubmitted {
+                    request_id,
+                    connection_id,
+                } => {
+                    if !self.pending_close.as_ref().is_some_and(|pending| {
+                        pending.plan.request_id == request_id
+                            && pending.plan.connection_id == connection_id
+                    }) {
+                        self.status = "Close submission belonged to an earlier request".into();
+                    }
+                }
+                Update::CloseRejected { request_id, reason } => {
+                    if self
+                        .pending_close
+                        .as_ref()
+                        .is_some_and(|pending| pending.plan.request_id == request_id)
+                    {
+                        self.pending_close = None;
+                        self.status = reason;
+                        self.focus_current(window, cx);
+                        cx.notify();
+                    }
+                }
+                Update::CloseSettled { request_id } => {
+                    if self
+                        .pending_close
+                        .as_ref()
+                        .is_some_and(|pending| pending.plan.request_id == request_id)
+                    {
+                        self.pending_close = None;
+                        self.focus_current(window, cx);
+                        cx.notify();
+                    }
+                }
+                update @ Update::WindowCloseApproved { .. } => {
+                    if self
+                        .pending_close
+                        .as_ref()
+                        .is_some_and(|pending| pending.matches_window_approval(&update))
+                    {
+                        self.stop();
+                        cx.quit();
+                    }
                 }
                 Update::Attached(session) => {
                     for (pane, view) in self
@@ -905,6 +1058,18 @@ impl Workspace {
         }
         self.flush_visible(cx);
         self.flush_resizes(cx);
+        if self.updates.is_closed() && self.cleanup_complete.load(Ordering::Acquire) {
+            if let Some(pending) = self.pending_close.take() {
+                if pending.plan.target == CloseTarget::Window {
+                    self.stop();
+                    cx.quit();
+                } else {
+                    self.status = "Local service ended after close cleanup".into();
+                    self.focus_current(window, cx);
+                    cx.notify();
+                }
+            }
+        }
     }
     fn smoke_key(
         &self,
@@ -1191,13 +1356,13 @@ impl Workspace {
             }
             15 if model.shown_screen_id() == self.smoke_second_screen.as_deref() => {
                 if let Some(second) = self.smoke_second_screen.clone() {
-                    self.send(
-                        Command::CloseScreen {
-                            screen: second,
-                            connection: model.connection_id().to_string(),
-                        },
-                        cx,
-                    );
+                    let request_id = self.next_close_id.saturating_add(1);
+                    if let Ok(plan) =
+                        model.assess_close(request_id, CloseTarget::Screen { screen: second })
+                    {
+                        self.next_close_id = request_id;
+                        self.submit_close(plan, true, cx);
+                    }
                     self.smoke_stage = 16;
                 }
             }
@@ -1205,13 +1370,13 @@ impl Workspace {
                 && model.shown_screen_id() == self.smoke_screen.as_deref() =>
             {
                 if let Some(old) = self.smoke_screen.clone() {
-                    self.send(
-                        Command::CloseScreen {
-                            screen: old,
-                            connection: model.connection_id().to_string(),
-                        },
-                        cx,
-                    );
+                    let request_id = self.next_close_id.saturating_add(1);
+                    if let Ok(plan) =
+                        model.assess_close(request_id, CloseTarget::Screen { screen: old })
+                    {
+                        self.next_close_id = request_id;
+                        self.submit_close(plan, true, cx);
+                    }
                     self.smoke_stage = 17;
                 }
             }
@@ -1513,9 +1678,22 @@ impl Workspace {
                                         .id(SharedString::from(format!("close-{pane}")))
                                         .px_1()
                                         .child("×")
-                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                        .on_click(cx.listener(move |this, _, window, cx| {
                                             cx.stop_propagation();
-                                            this.send(Command::Close(close.clone()), cx);
+                                            if let Some(screen) = this
+                                                .model
+                                                .as_ref()
+                                                .and_then(LocalWorkspace::shown_screen_id)
+                                            {
+                                                this.request_close(
+                                                    CloseTarget::Pane {
+                                                        screen: screen.to_owned(),
+                                                        pane: close.clone(),
+                                                    },
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
                                         })),
                                 ),
                         );
@@ -1929,13 +2107,14 @@ fn resized_pair(sizes: &[f64], index: usize, delta: f64) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        nearest_slot, prune_layout_bounds, resized_pair, retry_pending_resize, shortcut,
-        terminal_commands, visible_slots, Command, Direction, Shortcut, VisibleSlot,
+        admit_close, nearest_slot, prune_layout_bounds, resized_pair, retry_pending_resize,
+        shortcut, terminal_commands, visible_slots, Command, Direction, PendingClose, Shortcut,
+        Update, VisibleSlot,
     };
     use crate::terminal;
     use gpui_kit::{point, px, size, Bounds, Keystroke, Modifiers, Pixels};
     use splitty_client_core::{
-        workspace::{LayoutNode, ScreenModel},
+        workspace::{ClosePlan, CloseTarget, LayoutNode, LocalWorkspace, ScreenModel},
         ScreenIds,
     };
     use std::{
@@ -1949,6 +2128,94 @@ mod tests {
             modifiers,
             key_char: None,
         }
+    }
+
+    #[test]
+    fn only_matching_submitted_window_close_can_approve_exit() {
+        let connection = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+        let mut plan = ClosePlan::startup_window(9);
+        plan.connection_id = Some(connection);
+        let pending = PendingClose {
+            plan: plan.clone(),
+            prompting: false,
+        };
+        let approval = |request_id, connection_id| Update::WindowCloseApproved {
+            request_id,
+            connection_id,
+        };
+        assert!(pending.matches_window_approval(&approval(9, Some(connection))));
+        assert!(!pending.matches_window_approval(&approval(8, Some(connection))));
+        assert!(!pending.matches_window_approval(&approval(
+            9,
+            Some("00000000-0000-4000-8000-000000000002".parse().unwrap())
+        )));
+        assert!(!PendingClose {
+            plan,
+            prompting: true
+        }
+        .matches_window_approval(&approval(9, Some(connection))));
+        let pane = PendingClose {
+            plan: ClosePlan {
+                target: CloseTarget::Pane {
+                    screen: "s".into(),
+                    pane: "p".into(),
+                },
+                ..ClosePlan::startup_window(9)
+            },
+            prompting: false,
+        };
+        assert!(!pane.matches_window_approval(&approval(9, None)));
+    }
+
+    #[test]
+    fn cancelled_and_removed_prompt_targets_do_not_submit_close() {
+        let startup = PendingClose {
+            plan: ClosePlan::startup_window(4),
+            prompting: true,
+        };
+        assert!(startup.is_prompt_for(4));
+        assert!(
+            !startup.is_prompt_for(3),
+            "an old prompt cannot act on a new request"
+        );
+        assert!(startup.resolve_prompt(None, false).unwrap().is_none());
+        assert!(startup.resolve_prompt(None, true).unwrap().is_some());
+        let connection = "00000000-0000-4000-8000-000000000001".parse().unwrap();
+        let model = LocalWorkspace::new(connection);
+        assert!(
+            startup.resolve_prompt(Some(&model), true).is_err(),
+            "discovery requires a fresh decision"
+        );
+        let removed = PendingClose {
+            plan: ClosePlan {
+                connection_id: Some(connection),
+                target: CloseTarget::Screen {
+                    screen: "removed".into(),
+                },
+                ..ClosePlan::startup_window(5)
+            },
+            prompting: true,
+        };
+        assert!(removed.resolve_prompt(Some(&model), true).is_err());
+        assert!(removed
+            .resolve_prompt(Some(&model), false)
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn full_close_command_queue_leaves_no_pending_close_and_recovers() {
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        sender.try_send(Command::Focus("existing".into())).unwrap();
+        let plan = ClosePlan::startup_window(2);
+        assert!(admit_close(&sender, plan.clone(), true).is_err());
+        assert!(matches!(receiver.try_recv(), Ok(Command::Focus(_))));
+        let pending = admit_close(&sender, plan, true).unwrap();
+        assert_eq!(pending.plan.request_id, 2);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Command::RequestClose { .. })
+        ));
     }
 
     #[test]

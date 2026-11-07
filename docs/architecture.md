@@ -109,6 +109,18 @@ tree. Switching Screens preserves terminal emulation and attachments; hidden
 terminals consume output and send protocol replies without claiming visibility
 or PTY size. Returning panes publish their measured sizes again.
 
+Native pane, Screen and window close gestures share a client-core close plan.
+It captures the connection, affected pane/session identities and known busy or
+unresolved work, including hidden Screens and pending creations. GPUI owns one
+cancellable prompt; the worker reassesses the plan before submitting an existing
+close operation. A submitted operation stays pending until an ordered catalog
+refresh and, for a surviving Screen's pane, a subsequent Screen snapshot prove
+removal or report rejection. A normal window-close request is vetoed until the
+worker approves the matching plan. The worker enters closing before publishing
+approval and then awaits its owned service cleanup; the application joins the
+worker after the UI event loop exits. This is a native client decision over
+existing mux messages; it adds no backend close policy or protocol message.
+
 The capability-gated `mux.workspace_resync` request runs in the serial session
 loop and returns an ordered catalog plus an initial active-screen hint from one
 store read. It therefore follows earlier lifecycle operations on that connection;
