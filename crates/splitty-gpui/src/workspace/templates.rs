@@ -288,6 +288,7 @@ impl Workspace {
                 self.status = format!("Template saved: {slug}");
                 dialog.mode = TemplateMode::Library;
                 dialog.catalog = None;
+                self.focus.focus(window, cx);
                 self.template_api(TemplateApiRequest::List, cx);
             }
             TemplateApiOutcome::Deleted { slug } => {
@@ -299,6 +300,7 @@ impl Workspace {
                 self.status = format!("Template deleted: {slug}");
                 dialog.mode = TemplateMode::Library;
                 dialog.catalog = None;
+                self.focus.focus(window, cx);
                 self.template_api(TemplateApiRequest::List, cx);
             }
             TemplateApiOutcome::OverwriteRequired { slug } => {
@@ -307,6 +309,7 @@ impl Workspace {
                 }) {
                     dialog.mode = TemplateMode::Overwrite { request, slug };
                     dialog.error = None;
+                    self.focus.focus(window, cx);
                 } else {
                     dialog.error = Some("Overwrite target changed; save again".into());
                 }
@@ -318,11 +321,12 @@ impl Workspace {
         cx.notify();
     }
 
-    fn template_library(&mut self, cx: &mut Context<Self>) {
+    fn template_library(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(dialog) = &mut self.template_dialog {
             dialog.mode = TemplateMode::Library;
             dialog.error = None;
         }
+        self.focus.focus(window, cx);
         self.template_api(TemplateApiRequest::List, cx);
     }
 
@@ -572,6 +576,12 @@ impl Workspace {
         }
         if direct_layout {
             self.template_apply(TemplateApplyChoice::LayoutOnly, window, cx);
+        } else if self
+            .template_dialog
+            .as_ref()
+            .is_some_and(|dialog| matches!(&dialog.mode, TemplateMode::Review { .. }))
+        {
+            self.focus.focus(window, cx);
         }
         cx.notify();
     }
@@ -1107,9 +1117,9 @@ impl Workspace {
                                         .py_1()
                                         .cursor_pointer()
                                         .child("Back to library")
-                                        .on_click(
-                                            cx.listener(|this, _, _, cx| this.template_library(cx)),
-                                        ),
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            this.template_library(window, cx)
+                                        })),
                                 )
                             })
                             .child(
