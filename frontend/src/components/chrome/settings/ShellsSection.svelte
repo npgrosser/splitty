@@ -149,7 +149,7 @@
     saving = true;
     error = "";
     try {
-      resetDraft(await saveShellProfiles(structuredClone(draft)));
+      resetDraft(await saveShellProfiles($state.snapshot(draft)));
     } catch (reason) {
       error = reason instanceof Error ? reason.message : String(reason);
     } finally {
