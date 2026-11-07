@@ -94,6 +94,19 @@ No mux-level attach/detach — the client gets screen state via `mux.resync` on 
 
 ### Client connections
 
+The development-only `splitty-gpui` probe uses `splitty-client-core` as a small
+UI-free adapter over those same native connections. Received frames and decoded
+messages retain their delivery charges through the bounded UI queue; versioned
+document assembly stays with its connection generation. The GPUI view owns the
+terminal emulator and native Markdown layout, while the service owns PTYs, mux
+state and annotations. Its isolated embedded composition exists only on Unix;
+the Windows adapter accepts an owned native stream without linking the Unix
+server. Reattach clears the emulator before replay and discards input from the
+previous generation. App shutdown joins the worker after closing its streams
+and service. The optional CEF fixture owns only offscreen pixels and has no
+client-core dependency or service bridge. See [the spike report](gpui-spike.md)
+for implemented scope and platform evidence; released clients remain unchanged.
+
 The client holds one `ServerConnection` (`lib/connection/`) per server it shows screens of: the local server, the connection `local`, and one `host:<target>` per host with screens in the window, once one of them was shown (see Remote Screens). A connection owns everything that speaks to its server: the socket, the mux client, the attach registry, the session client (`create` queue, sessions, which pane shows which session, the server's home directory) and the handlers of its server commands. Only a browser socket treats an authentication failure as an expired login and queues eligible messages while disconnected. Native connections never open a browser login or queue disconnected input; a host's socket has rules of its own. A lost connection fails the attaches in flight on it, so the views rebuilt after the reconnect send their own.
 
 Every screen of the window is bound to its connection by a `ScreenBinding`. A local screen's key is its id on the local server; a screen of another connection gets a random key of its own and keeps its id on that server (its wire id) apart, so nothing a server sends becomes a local identifier. Panes, tabs, context menus, the close guard and the templates find their binding from dockview's layout API (by the layout's id, since dockview hands group headers and the watermark API wrappers of their own) and reach sessions and ops only through it; a pane whose layout has no binding is not mounted. The binding also holds what is per screen: the flag that holds back layout ops during a snapshot rebuild, the floating-entry ids, and the teardown, which says whether removing the screen's layout closes its sessions (local screens) or only detaches them.

@@ -76,6 +76,9 @@ Electron build also requires the frontend dependencies to package shared assets.
 
 ## Running from source
 
+The experimental GPUI phase-0 app has its own isolated service and runbook in
+[`gpui-spike.md`](gpui-spike.md). It is separate from the released desktop apps.
+
 ```bash
 # Backend with the embedded frontend on 127.0.0.1:9800, rebuilt on changes
 make dev

@@ -1,0 +1,38 @@
+// The GPUI phase-0 native desktop probe.
+
+model {
+  extend splitty.gpui {
+    gpui_main = component 'gpui_main' {
+      description 'Application entry point and probe window composition.'
+      metadata { module 'splitty_gpui' }
+    }
+
+    gpui_app = component 'gpui_app' {
+      description 'Native probe window, embedded session wiring and pane layout.'
+      metadata { module 'splitty_gpui::app' }
+    }
+
+    terminal = component 'terminal' {
+      description 'Native terminal emulator view with text painting, scrollback and input.'
+      metadata { module 'splitty_gpui::terminal' }
+    }
+
+    gpui_document = component 'gpui_document' {
+      description 'Markdown text view with quote-anchored annotation marks.'
+      metadata { module 'splitty_gpui::document' }
+    }
+
+    offscreen = component 'offscreen' {
+      description 'Optional offscreen web-engine proof, composited as a native pane.'
+      metadata { module 'splitty_gpui::offscreen' }
+    }
+
+    gpui_main -> gpui_app 'Construct and close the probe window'
+    gpui_main -> offscreen 'Run an engine child before opening the UI'
+    gpui_app -> gpui_document 'Show Markdown and annotation marks'
+    gpui_app -> offscreen 'Composite the offscreen engine frame under an overlay'
+    gpui_app -> terminal 'Show terminal output and forward native input'
+    gpui_app -> splitty.client_core.client_root 'Use the public native client API'
+    gpui_document -> splitty.client_core.client_root 'Form a source-scoped annotation draft'
+  }
+}

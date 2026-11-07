@@ -6,6 +6,8 @@ members = [
     "crates/splitty-tauri",
     "crates/splitty-remote",
     "crates/splitty-transport",
+    "crates/splitty-client-core",
+    "crates/splitty-gpui",
     "architecture/check",
 ]
 
