@@ -369,3 +369,7 @@ Each point names what holds now, the alternative, and where it is recorded.
 - **`native-settings`, NS-3** (2026-11-07, provisional, tbd): the first editor uses service-resolved appearance and Kit semantic fallbacks; independent native Kit presets and loadable ThemeSets remain open for a later increment.
 
 - **`native-settings`, NS-4** (2026-11-07, provisional, tbd): resolved theme replies add optional source `id`; a separately named terminal palette requires a matching identifier, while ordinary UI appearance remains compatible with older replies.
+
+- **`native-host-management`, NHM-1** (2026-11-08, provisional, tbd): target entry means Connect, with optional display name; no offline unnamed bookmark format is added.
+- **`native-host-management`, NHM-2** (2026-11-08, provisional, tbd): typed host mutations share the existing hub API stream and a bounded 16-action queue; directory reads and mutation outcomes remain distinct.
+- **`native-host-management`, NHM-3** (2026-11-08, provisional, tbd): leaving Hosts withdraws pending connection continuations in the worker; current unsaved/forgotten connection work remains distinguishable from saved directory metadata.

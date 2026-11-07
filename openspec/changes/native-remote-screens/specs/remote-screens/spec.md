@@ -7,7 +7,9 @@ An authorized native main client SHALL have equivalents of the existing host, pr
 
 The experimental native workspace SHALL provide passive inspection of the assigned local service's merged host directory. Cached Screens SHALL remain observations rather than open-screen references or evidence of current host reachability. Inspection and refresh SHALL neither contact a remote host nor mutate local or remote state. A failed refresh SHALL preserve the last valid directory from the same local connection and report its failure, distinguishing it from a successfully empty directory. Results superseded by a refresh or local connection replacement SHALL not replace the current directory. Directory reads SHALL not interrupt terminal event delivery, and closing their owner SHALL cancel pending reads and complete owned cleanup.
 
-Beyond passive inspection, the experimental native workspace SHALL support deliberate connection of a known directory target and explicit opening of existing Screens as specified below. Passive reads, cached observations and remote active-Screen hints SHALL NOT acquire that connection or open-reference demand. Its native subset does not yet create remote Screens, persist open references, edit hosts or expose forwarding controls.
+The experimental native workspace SHALL also provide explicit target entry, display-name editing and removal from its saved host list through its assigned local service. A display name SHALL NOT change the SSH target. Removing host metadata SHALL preserve open Screens, sessions and independently owned forwards. Current connection work MAY remain visible separately from the saved directory.
+
+Beyond passive inspection, the experimental native workspace SHALL support deliberate connection of a known directory target and explicit opening of existing Screens as specified below. Passive reads, cached observations and remote active-Screen hints SHALL NOT acquire that connection or open-reference demand. Its native subset does not yet create remote Screens, persist open references or expose forwarding controls. Explicit target entry and metadata editing follow the separate native host-management requirements.
 
 #### Scenario: Native host metadata
 - **WHEN** a native main window reads or edits its saved host metadata without requesting a connection
@@ -59,7 +61,7 @@ The experimental native workspace SHALL connect a known host only through explic
 #### Scenario: Duplicate or obsolete host actions
 - **WHEN** Connect repeats for an already demanded target or an older Cancel or Retry arrives after the attempt was replaced
 - **THEN** no duplicate stream is opened and the obsolete action does not cancel or restart the replacement
-- **AND** a stale local-owner command or a target absent from its accepted known directory starts no host connection
+- **AND** a stale local-owner command or a directory-row Connect for a target absent from its accepted known directory starts no host connection
 
 ### Requirement: Native Live Host Catalog
 The experimental native workspace SHALL distinguish cached/handshake observations from a live catalog obtained through `workspace-catalog-v1`. Catalog refresh SHALL not open, create, attach or select Screens. Missing capability or failed/incomplete observations SHALL be reported without claiming an empty live catalog. Counts not supplied by a current observation SHALL remain unknown or explicitly last-observed.
