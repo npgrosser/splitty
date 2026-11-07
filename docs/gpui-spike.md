@@ -1320,6 +1320,19 @@ transition and passes both retractions. These are software-rendered Linux
 functional checks. The previously delivered Windows preview remains unchanged,
 and full workspace merge checks remain deferred.
 
+The 2026-11-08 follow-up aligns the host caption's weight and spacing, nested tab
+indentation, and Templates/Settings icons with the web Drawer. The Linux binary
+`3ef4bafe76b04a3c5f8ff08a8b01ffde4b26201e29bd9cd24022f1fa5bb57d5d`
+passes the nine interaction stages again, strict native all-target Clippy and
+formatting. The wheel-routing fixture now launches an owned script through a
+short terminal command, avoiding dependence on a long synthetic keystroke stream.
+The matching Windows binary
+`c68a2d3cee284ea2e197acc406bdae23256c6a8dc481c9b686000deaaeeb19e8`
+passes the integrated 18-stage workspace smoke on a hardware GPU and a separate
+startup/WM_CLOSE check with an idle shell. Both exit with code 0 and no surviving
+owned WSL processes. Pointer interaction evidence remains Linux-only; these
+checks do not measure hardware smoothness.
+
 ## Native Settings
 
 Open Settings from the Drawer footer. The editor replaces the workspace content
