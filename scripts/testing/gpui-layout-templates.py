@@ -108,6 +108,9 @@ def main():
     owned = args.output / "owned"
     owned.mkdir(mode=0o700)
     config = args.output / "config"
+    socket_name = config / "run" / ("spike-" + "0" * 32 + ".sock")
+    if len(os.fsencode(socket_name)) > 107:
+        parser.error("output path is too long for the owned Linux Unix socket; use a short /tmp path")
     config.mkdir(mode=0o700)
     wrapper = args.output / "sh"
     wrapper_text = shell_wrapper(wrapper, owned.resolve())
@@ -155,12 +158,18 @@ def main():
         result["screenshots"].append(str(path))
 
     def api_read(path):
-        sockets = list((config / "run").glob("spike-*.sock"))
-        if len(sockets) != 1 or not stat.S_ISSOCK(sockets[0].lstat().st_mode):
-            raise RuntimeError("expected exactly one owned service socket")
+        def owned_socket():
+            sockets = list((config / "run").glob("spike-*.sock"))
+            if len(sockets) > 1:
+                raise RuntimeError("more than one owned service socket")
+            if len(sockets) == 1 and stat.S_ISSOCK(sockets[0].lstat().st_mode):
+                return sockets[0]
+            return None
+        # The PTY can start just before the read-only control socket is bound.
+        socket = wait_until(owned_socket, "owned service socket did not bind", seconds=5)
         response = subprocess.check_output(
             ["curl", "--fail", "--silent", "--show-error", "--max-time", "5",
-             "--unix-socket", str(sockets[0]), f"http://localhost{path}"],
+             "--unix-socket", str(socket), f"http://localhost{path}"],
             text=True, timeout=7)
         return json.loads(response)
 
