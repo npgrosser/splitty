@@ -4,7 +4,7 @@ use crate::{
     workspace_session::{Command, Update, Worker},
 };
 use gpui_kit::{prelude::*, *};
-use splitty_client_core::workspace::{Axis, LayoutNode, LocalWorkspace};
+use splitty_client_core::workspace::{Axis, LayoutNode, LocalWorkspace, MovePlacement, PaneDrag};
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -87,6 +87,64 @@ fn nearest_slot<'a>(
     best.map(|(_, slot)| slot)
 }
 
+#[derive(Clone)]
+struct TabDrag {
+    origin: PaneDrag,
+    owner: EntityId,
+}
+struct DragPreview;
+impl Render for DragPreview {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px_3()
+            .py_1()
+            .bg(rgb(0x293b4d))
+            .text_color(rgb(0xe8eff6))
+            .child("Move terminal")
+    }
+}
+
+fn drop_zone(bounds: Bounds<Pixels>, point: Point<Pixels>) -> Option<MovePlacement> {
+    if !bounds.contains(&point) || bounds.size.width <= px(0.) || bounds.size.height <= px(0.) {
+        return None;
+    }
+    let x = (point.x - bounds.left()) / bounds.size.width;
+    let y = (point.y - bounds.top()) / bounds.size.height;
+    let edges = [
+        (x, MovePlacement::Left),
+        (1. - x, MovePlacement::Right),
+        (y, MovePlacement::Above),
+        (1. - y, MovePlacement::Below),
+    ];
+    edges
+        .into_iter()
+        .filter(|(distance, _)| *distance < 0.22)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, placement)| placement)
+        .or(Some(MovePlacement::Tab))
+}
+
+fn drop_highlight(bounds: Bounds<Pixels>, placement: MovePlacement) -> Bounds<Pixels> {
+    let mut result = Bounds {
+        origin: point(px(0.), px(0.)),
+        size: bounds.size,
+    };
+    match placement {
+        MovePlacement::Left => result.size.width /= 2.,
+        MovePlacement::Right => {
+            result.size.width /= 2.;
+            result.origin.x = result.size.width;
+        }
+        MovePlacement::Above => result.size.height /= 2.,
+        MovePlacement::Below => {
+            result.size.height /= 2.;
+            result.origin.y = result.size.height;
+        }
+        MovePlacement::Tab => {}
+    }
+    result
+}
+
 // The worker queue is the only admission boundary. A successful terminal send
 // already owns one of its bounded slots, with the pane/session route captured.
 fn terminal_commands(
@@ -142,6 +200,7 @@ pub struct Workspace {
     stopping: Arc<AtomicBool>,
     split_bounds: HashMap<String, Bounds<Pixels>>,
     slot_bounds: HashMap<String, Bounds<Pixels>>,
+    drop_target: Option<(String, MovePlacement)>,
     drag: Option<ResizeDrag>,
     visible: Vec<String>,
     status: String,
@@ -198,6 +257,7 @@ impl Workspace {
                 stopping: worker.stop.clone(),
                 split_bounds: HashMap::new(),
                 slot_bounds: HashMap::new(),
+                drop_target: None,
                 drag: None,
                 visible: Vec::new(),
                 status: "Starting local workspace…".into(),
@@ -279,6 +339,7 @@ impl Workspace {
             }
             self.status.clear();
         }
+        self.drop_target = None;
         self.model = Some(model);
         self.sync_visible(cx);
         self.focus_current(window, cx);
@@ -360,6 +421,13 @@ impl Workspace {
         }
     }
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if event.keystroke.key == "escape" && cx.has_active_drag() {
+            cx.stop_active_drag(window);
+            self.drop_target = None;
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         let Some(action) = shortcut(&event.keystroke, cx.platform_info().is_mac()) else {
             return;
         };
@@ -661,6 +729,63 @@ impl Workspace {
         self.stop();
         cx.quit();
     }
+    fn drag_hover(
+        &mut self,
+        event: &DragMoveEvent<TabDrag>,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let drag = event.drag(cx);
+        let target = if drag.owner == cx.entity().entity_id() {
+            self.model.as_ref().and_then(|model| {
+                self.slot_bounds.iter().find_map(|(slot, bounds)| {
+                    let placement = drop_zone(*bounds, event.event.position)?;
+                    model
+                        .can_move(&drag.origin, slot, placement)
+                        .then(|| (slot.clone(), placement))
+                })
+            })
+        } else {
+            None
+        };
+        if self.drop_target != target {
+            self.drop_target = target;
+            cx.notify();
+        }
+    }
+
+    fn drop_pane(
+        &mut self,
+        drag: &TabDrag,
+        target: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.drop_target = None;
+        if drag.owner != cx.entity().entity_id() {
+            return;
+        }
+        let placement = self
+            .slot_bounds
+            .get(target)
+            .and_then(|bounds| drop_zone(*bounds, window.mouse_position()));
+        if let (Some(model), Some(placement)) = (&self.model, placement) {
+            match model.check_move(&drag.origin, target, placement) {
+                Ok(true) => self.send(
+                    Command::MovePane {
+                        drag: drag.origin.clone(),
+                        target: target.to_owned(),
+                        placement,
+                    },
+                    cx,
+                ),
+                Ok(false) => {}
+                Err(error) => self.status = error.to_string(),
+            }
+        }
+        cx.notify();
+    }
+
     fn begin_resize(
         &mut self,
         node: String,
@@ -709,8 +834,6 @@ impl Workspace {
     fn render_node(&self, node: &LayoutNode, cx: &mut Context<Self>) -> AnyElement {
         match node {
             LayoutNode::Slot { id, pane_ids, .. } => {
-                let bounds_id = id.to_string();
-                let entity = cx.entity();
                 let selected = self
                     .model
                     .as_ref()
@@ -748,7 +871,27 @@ impl Workspace {
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.select(&key, window, cx)
                                 }))
-                                .child(div().max_w(px(180.)).overflow_hidden().child(title))
+                                .child(
+                                    div()
+                                        .id(SharedString::from(format!("drag-tab-{pane}")))
+                                        .max_w(px(180.))
+                                        .overflow_hidden()
+                                        .child(title)
+                                        .when_some(
+                                            self.model.as_ref().and_then(|model| {
+                                                model.capture_drag(pane.as_str())
+                                            }),
+                                            |view, origin| {
+                                                view.on_drag(
+                                                    TabDrag {
+                                                        origin,
+                                                        owner: cx.entity().entity_id(),
+                                                    },
+                                                    |_, _, _, cx| cx.new(|_| DragPreview),
+                                                )
+                                            },
+                                        ),
+                                )
                                 .child(
                                     div()
                                         .id(SharedString::from(format!("close-{pane}")))
@@ -779,9 +922,15 @@ impl Workspace {
                     .as_ref()
                     .and_then(LocalWorkspace::focused_pane)
                     .is_some_and(|pane| pane_ids.iter().any(|id| id.as_str() == pane));
+                let bounds_id = id.to_string();
+                let target = id.to_string();
+                let entity = cx.entity();
                 let mut slot = div()
                     .id(SharedString::from(format!("slot-{id}")))
                     .relative()
+                    .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
+                        this.drop_pane(drag, &target, window, cx)
+                    }))
                     .size_full()
                     .flex()
                     .flex_col()
@@ -819,6 +968,24 @@ impl Workspace {
                         );
                     } else {
                         slot = slot.child(div().p_3().child("Starting terminal…"));
+                    }
+                }
+                if let Some((target, placement)) = &self.drop_target {
+                    if target == id.as_str() {
+                        if let Some(bounds) = self.slot_bounds.get(target) {
+                            let highlight = drop_highlight(*bounds, *placement);
+                            slot = slot.child(
+                                div()
+                                    .absolute()
+                                    .left(highlight.origin.x)
+                                    .top(highlight.origin.y)
+                                    .w(highlight.size.width)
+                                    .h(highlight.size.height)
+                                    .border_2()
+                                    .border_color(rgb(0x76b8e8))
+                                    .bg(rgba(0x4094cc44)),
+                            );
+                        }
                     }
                 }
                 slot.into_any_element()
@@ -921,6 +1088,7 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .bg(rgb(0x10151c))
+            .on_drag_move(cx.listener(Self::drag_hover))
             .text_color(rgb(0xd9e2ef))
             .text_size(px(13.))
             .capture_key_down(cx.listener(Self::key))
@@ -934,6 +1102,9 @@ impl Render for Workspace {
                 cx.listener(|this, event: &MouseUpEvent, _, cx| {
                     this.drag_resize(event.position, true, cx);
                     this.drag = None;
+                    if this.drop_target.take().is_some() {
+                        cx.notify();
+                    }
                 }),
             )
             .on_mouse_up_out(
@@ -941,6 +1112,9 @@ impl Render for Workspace {
                 cx.listener(|this, event: &MouseUpEvent, _, cx| {
                     this.drag_resize(event.position, true, cx);
                     this.drag = None;
+                    if this.drop_target.take().is_some() {
+                        cx.notify();
+                    }
                 }),
             )
             .child(
@@ -1352,6 +1526,37 @@ mod tests {
         assert_eq!(slots.len(), 2);
         assert!(slots.contains_key("left") && slots.contains_key("right"));
         assert!(!slots.contains_key("closed-slot"));
+    }
+
+    #[test]
+    fn drop_zones_are_bounded_and_cover_center_and_four_edges() {
+        use gpui_kit::{point, px, size, Bounds};
+        use splitty_client_core::workspace::MovePlacement::*;
+        let bounds = Bounds {
+            origin: point(px(10.), px(20.)),
+            size: size(px(100.), px(200.)),
+        };
+        for (x, y, expected) in [
+            (60., 120., Tab),
+            (12., 120., Left),
+            (108., 120., Right),
+            (60., 22., Above),
+            (60., 218., Below),
+            (11., 21., Above),
+        ] {
+            assert_eq!(
+                super::drop_zone(bounds, point(px(x), px(y))),
+                Some(expected)
+            );
+        }
+        assert_eq!(super::drop_zone(bounds, point(px(0.), px(120.))), None);
+        assert_eq!(
+            super::drop_zone(Bounds::default(), point(px(0.), px(0.))),
+            None
+        );
+        let right = super::drop_highlight(bounds, Right);
+        assert_eq!(right.origin.x, px(50.));
+        assert_eq!(right.size.width, px(50.));
     }
 
     #[test]

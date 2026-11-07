@@ -122,6 +122,15 @@ including its bracketed framing, occupies one queue slot. All panes therefore
 share the same 64-command bound rather than accumulating a separate input budget
 per pane.
 
+Native tab dragging captures its connection, screen, pane/session and immutable
+layout snapshot. Metadata-only revisions remain admissible; changed slot
+membership, node IDs, axes or sizes cancel the gesture. A drop submits one
+`move_pane` through the same bounded worker queue, preserving surviving source
+proportions. The preview changes decoration only. A newer authoritative snapshot
+must confirm the destination before the client selects and focuses the moved
+pane; earlier snapshots and rejection cannot install a speculative layout.
+Terminal entities and attachments remain keyed by their existing identities.
+
 The terminal view owns a thread-confined Ghostty VT engine behind an owned Rust
 wrapper; the wrapper contains the C interface and hands the view bounded render
 snapshots. Cached glyph shaping and change-driven GPUI notifications avoid

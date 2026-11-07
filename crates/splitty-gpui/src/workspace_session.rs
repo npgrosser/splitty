@@ -1,6 +1,6 @@
 //! Own the local service and route workspace intents on one ordered connection.
 use splitty_client_core::{
-    workspace::{Axis, LocalWorkspace},
+    workspace::{Axis, LocalWorkspace, MovePlacement, PaneDrag},
     Event,
 };
 #[cfg(not(target_os = "windows"))]
@@ -24,6 +24,11 @@ pub enum Command {
     },
     Tab(String),
     NewTerminal,
+    MovePane {
+        drag: PaneDrag,
+        target: String,
+        placement: MovePlacement,
+    },
     Close(String),
     ResizeSplit {
         node: String,
@@ -145,6 +150,13 @@ async fn run(
                             model.split(&client, &pane, axis).map(|_| ())
                         }
                         Command::Tab(pane) => model.new_tab(&client, &pane).map(|_| ()),
+                        Command::MovePane {
+                            drag,
+                            target,
+                            placement,
+                        } => model
+                            .move_pane(&client, drag, target, placement)
+                            .map(|_| ()),
                         Command::NewTerminal => model.new_terminal(&client).map(|_| ()),
                         Command::Close(pane) => model.close_pane(&client, &pane),
                         Command::ResizeSplit { node, sizes } => {
@@ -298,6 +310,11 @@ async fn run(
                                 }
                             }
                             Some("mux.op_failed") | Some("error") => {
+                                if json["op"] == "move_pane" {
+                                    if let Some(model) = &mut model {
+                                        model.reject_move(event.connection_id);
+                                    }
+                                }
                                 if let (Some(model), Some(pane)) =
                                     (&mut model, json["paneId"].as_str())
                                 {
@@ -357,5 +374,7 @@ async fn run(
     _: mpsc::Sender<Update>,
     _: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
-    anyhow::bail!("The native Windows workspace needs its owned WSL launcher; this development launcher is not wired yet")
+    anyhow::bail!(
+        "The native Windows workspace needs its owned WSL launcher; this development launcher is not wired yet"
+    )
 }

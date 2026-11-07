@@ -348,3 +348,15 @@ its filesystem and loopback listener remain isolated. CLI calls and the outer
 supervisor have deadlines. Without an explicitly pinned artifact, the optional
 test reports `UNRUN`; strict mode makes that omission a failure. A normal
 workspace test pass alone is not historical interoperability evidence.
+
+The native local workspace also moves existing terminals: drag a tab label into
+another pane to append it as a tab, or onto a pane edge to split there. Escape
+cancels a drag. The operation preserves its terminal session; whole-group moves,
+tab reordering and moves across windows/screens are outside this increment.
+
+For a mouse-driven native smoke, provide an isolated X11 display (for example
+Xvfb), the native library/font environment, and xdotool, then run
+`python3 scripts/testing/gpui-pane-drag.py target/debug/splitty-gpui --output /tmp/splitty-pane-drag`.
+It exercises tab drops, four split edges and Escape cancellation, verifies the
+same shell continues receiving input, saves screenshots, and closes its owned
+window/service. It does not measure latency or exercise physical IME input.

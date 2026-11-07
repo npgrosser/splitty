@@ -18,7 +18,7 @@ model {
     }
 
     client_workspace = component 'client_workspace' {
-      description 'Authoritative local screen snapshots, window-local tabs and generation-scoped pane/session routes.'
+      description 'Authoritative screen snapshots, generation-scoped routes and snapshot-confirmed pane placement.'
       metadata { module 'splitty_client_core::workspace' }
     }
 
