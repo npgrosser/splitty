@@ -1,7 +1,9 @@
 //! Connection-wide catalog, admission and local Screen selection.
 use super::*;
 use crate::connection::identifier;
+pub(super) mod floating;
 mod placement;
+use floating::PendingFloating;
 pub(crate) mod refresh;
 pub(super) mod transfer;
 use placement::PendingTabPlacement;
@@ -29,6 +31,7 @@ pub struct LocalWorkspace {
     tab_placement_supported: bool,
     pending_placement: Option<PendingTabPlacement>,
     pending_transfer: Option<PendingTransfer>,
+    pending_floating: Option<PendingFloating>,
     reconciling: bool,
     route_generation: u64,
     catalog_initialized: bool,
@@ -41,7 +44,7 @@ impl LocalWorkspace {
     /// Assess only local terminal impact, retaining pane and session identity
     /// across a later prompt. The existing admission bounds limit this plan.
     pub fn assess_close(&self, request_id: u64, target: CloseTarget) -> io::Result<ClosePlan> {
-        if self.reconciling && target != CloseTarget::Window {
+        if (self.reconciling || self.pending_floating.is_some()) && target != CloseTarget::Window {
             return Err(invalid(
                 "Screen ownership is being reconciled; close again after refresh",
             ));
@@ -259,6 +262,7 @@ impl LocalWorkspace {
             tab_placement_supported: false,
             pending_placement: None,
             pending_transfer: None,
+            pending_floating: None,
             reconciling: false,
             route_generation: 0,
             catalog_initialized: false,
@@ -294,6 +298,19 @@ impl LocalWorkspace {
     }
     pub fn presentation_root(&self) -> Option<&LayoutNode> {
         self.shown().and_then(ScreenModel::presentation_root)
+    }
+    pub fn presented_floats(&self) -> &[FloatingEntry] {
+        self.shown().map_or(&[], ScreenModel::presented_floats)
+    }
+    pub fn floating(&self, id: &str) -> Option<&FloatingEntry> {
+        self.shown()?.floating(id)
+    }
+    pub fn floating_for_pane(&self, pane: &str) -> Option<&FloatingEntry> {
+        self.shown()?.floating_for_pane(pane)
+    }
+    pub fn is_root_pane(&self, pane: &str) -> bool {
+        self.snapshot()
+            .is_some_and(|screen| screen.root.find_slot(&PaneId::from(pane)).is_some())
     }
     pub fn maximized_slot_id(&self) -> Option<&str> {
         self.shown().and_then(ScreenModel::maximized_slot_id)
@@ -427,10 +444,8 @@ impl LocalWorkspace {
         let watermark = self.catalog_in_flight;
         let result = self.apply_catalog_inner(connection, event);
         let outcome = self.placement_catalog(connection, watermark, result.as_ref().err());
-        result.map(|mut delta| {
-            delta.placement = outcome;
-            delta
-        })
+        let floating = self.floating_catalog(connection, watermark, result.as_ref().err());
+        attach_floating_result(result, outcome, floating)
     }
 
     fn apply_catalog_inner(
@@ -543,10 +558,8 @@ impl LocalWorkspace {
     ) -> io::Result<WorkspaceDelta> {
         let result = self.apply_snapshot_inner(connection, event);
         let outcome = self.placement_snapshot(connection, event, result.as_ref());
-        result.map(|mut delta| {
-            delta.placement = outcome;
-            delta
-        })
+        let floating = self.floating_snapshot(connection, event, result.as_ref());
+        attach_floating_result(result, outcome, floating)
     }
 
     fn apply_snapshot_inner(
@@ -644,7 +657,7 @@ impl LocalWorkspace {
     }
     pub fn switch_screen(&mut self, client: &Client, id: &str) -> io::Result<bool> {
         self.check_known(client, id)?;
-        self.cancel_transfer_focus();
+        self.cancel_placement_focus();
         if self.shown.as_deref() == Some(id) {
             self.activate_created = None;
             return Ok(false);
@@ -770,6 +783,7 @@ impl LocalWorkspace {
     }
     pub fn can_move(&self, drag: &PaneDrag, target: &str, placement: MovePlacement) -> bool {
         !self.reconciling
+            && self.pending_floating.is_none()
             && self.pending_placement.is_none()
             && self
                 .shown()
@@ -911,3 +925,24 @@ fn capacity(message: &str) -> io::Error {
 
 #[cfg(test)]
 mod tests;
+
+fn attach_floating_result(
+    result: io::Result<WorkspaceDelta>,
+    placement: Option<PlacementOutcome>,
+    floating: Option<FloatingActionResult>,
+) -> io::Result<WorkspaceDelta> {
+    match result {
+        Ok(mut delta) => {
+            delta.placement = placement;
+            delta.floating = floating;
+            Ok(delta)
+        }
+        Err(error) if floating.is_some() => Ok(WorkspaceDelta {
+            snapshot_changed: true,
+            floating,
+            reconciliation_error: Some(error.to_string()),
+            ..WorkspaceDelta::default()
+        }),
+        Err(error) => Err(error),
+    }
+}

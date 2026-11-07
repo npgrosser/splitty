@@ -112,6 +112,7 @@ impl WorkspaceRefresh {
         WorkspaceDelta {
             snapshot_changed: true,
             transfer: model.finish_transfer(Some(reason.clone())),
+            floating: model.finish_floating(Some(reason.clone())),
             reconciliation_error: Some(reason),
             ..WorkspaceDelta::default()
         }
@@ -133,8 +134,10 @@ impl WorkspaceRefresh {
             let entries = match catalog(event) {
                 Ok(entries) => entries,
                 Err(error) => {
-                    model.catalog_in_flight = None;
-                    return Err(error);
+                    let watermark = model.catalog_in_flight.take();
+                    let placement = model.placement_catalog(connection, watermark, Some(&error));
+                    let floating = model.floating_catalog(connection, watermark, Some(&error));
+                    return attach_floating_result(Err(error), placement, floating);
                 }
             };
             let removes_routes = model.models.iter().any(|(id, screen)| {
@@ -222,13 +225,16 @@ impl WorkspaceRefresh {
             return Ok(WorkspaceDelta::default());
         }
         let Some(id) = event["screen"]["id"].as_str() else {
-            return Err(invalid("screen snapshot missing ID"));
+            return model.apply_snapshot(connection, event);
         };
         let Some(existing) = model.models.get(id) else {
             return Ok(WorkspaceDelta::default());
         };
         let mut next = existing.clone();
-        let delta = next.apply_snapshot(connection, event)?;
+        let delta = match next.apply_snapshot(connection, event) {
+            Ok(delta) => delta,
+            Err(_) => return model.apply_snapshot(connection, event),
+        };
         let cross_owner = next.snapshot().is_some_and(|screen| {
             screen.panes.keys().any(|pane| {
                 model
@@ -393,6 +399,7 @@ fn commit(model: &mut LocalWorkspace, batch: &Batch, ending: &Value) -> io::Resu
         .ok_or_else(|| invalid("route generation exhausted"))?;
     let mut delta = route_delta(&old_routes, &next.route_map());
     delta.placement = next.settle_placement_after_refresh(batch.generation);
+    delta.floating = next.settle_floating_after_refresh(batch.generation);
     delta.transfer = next.finish_transfer(None);
     delta.snapshot_changed = true;
     delta.coherent_refresh = true;

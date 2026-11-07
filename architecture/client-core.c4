@@ -43,12 +43,12 @@ model {
     }
 
     client_workspace = component 'client_workspace' {
-      description 'Connection-wide catalog and admission, canonical Screen projections, bounded coherent cross-Screen route collection, captured transfer and exact tab placement settlement, local navigation and full-scope close impact assessment.'
+      description 'Connection-wide catalog and admission, canonical tiled/floating Screen projections, bounded coherent cross-Screen route collection, captured transfer, floating action and exact tab placement settlement, local navigation and full-scope close impact assessment.'
       metadata { module 'splitty_client_core::workspace' }
     }
 
     native_workspace = component 'native_workspace' {
-      description 'Native workspace runtime: one owned service and ordered connection, worker-owned workspace collection, identified transfer and zoom outcomes, checked placement and close settlement, independent settings outcomes, verified shutdown and retained attachment and visibility controls.'
+      description 'Native workspace runtime: one owned service and ordered connection, worker-owned workspace collection, identified transfer, floating and zoom outcomes, checked placement and close settlement, independent settings outcomes, verified shutdown and retained attachment and visibility controls.'
       metadata { module 'splitty_client_core::native_workspace' }
     }
 

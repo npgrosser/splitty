@@ -56,7 +56,7 @@ impl LocalWorkspace {
         self.pending_transfer.is_some()
     }
     pub(super) fn require_routes_settled(&self) -> io::Result<()> {
-        if self.reconciling {
+        if self.reconciling || self.pending_floating.is_some() {
             Err(invalid("Screen ownership is being reconciled"))
         } else {
             Ok(())
@@ -100,18 +100,27 @@ impl LocalWorkspace {
             .panes
             .get(&PaneId::from(source.pane_id.as_str()))
             .ok_or_else(|| invalid("terminal pane is gone"))?;
-        if screen
-            .root
-            .find_slot(&PaneId::from(source.pane_id.as_str()))
-            .is_none()
+        if find_slot(screen, &source.pane_id).is_none()
             || pane
                 .role
                 .as_ref()
                 .is_some_and(|role| *role != mux::PaneRole::Terminal)
-            || pane.job_id.is_some()
         {
+            return Err(invalid("Tab action requires a canonical terminal pane"));
+        }
+        Ok(())
+    }
+    /// Transfer policy is stricter than same-Screen terminal identity admission.
+    pub fn can_transfer_pane(&self, source: &PaneActionTarget) -> bool {
+        self.validate_transfer_source(source).is_ok()
+    }
+    fn validate_transfer_source(&self, source: &PaneActionTarget) -> io::Result<()> {
+        self.validate_pane_action(source)?;
+        let pane = &self.shown().and_then(ScreenModel::snapshot).unwrap().panes
+            [&PaneId::from(source.pane_id.as_str())];
+        if pane.job_id.is_some() {
             return Err(invalid(
-                "Only unmanaged terminal tabs can move to another Screen",
+                "Managed job terminals cannot move to another Screen",
             ));
         }
         Ok(())
@@ -141,7 +150,7 @@ impl LocalWorkspace {
         send: impl FnOnce(&str, &str, &str, bool) -> io::Result<()>,
     ) -> io::Result<()> {
         self.require_catalog()?;
-        self.validate_pane_action(&source)?;
+        self.validate_transfer_source(&source)?;
         if self.pending_transfer.is_some()
             || self.pending_placement.is_some()
             || self

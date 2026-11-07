@@ -31,7 +31,7 @@ impl Workspace {
             return;
         };
         match model.capture_pane_action(pane) {
-            Ok(source) => {
+            Ok(source) if model.can_transfer_pane(&source) => {
                 self.profile_picker = None;
                 self.transfer_menu = Some(TransferMenu {
                     source,
@@ -39,6 +39,7 @@ impl Workspace {
                     scroll: ScrollHandle::new(),
                 });
             }
+            Ok(_) => self.status = "Move unavailable for this terminal".into(),
             Err(error) => self.status = format!("Move unavailable: {error}"),
         }
         cx.notify();
@@ -127,6 +128,11 @@ impl Workspace {
             cx.notify();
             return;
         }
+        if !model.can_transfer_pane(&menu.source) {
+            self.status = "Move unavailable for this terminal".into();
+            cx.notify();
+            return;
+        }
         if model.transfer_pending() || model.routes_reconciling() || self.pending_transfer.is_some()
         {
             self.status = "Screen move is still being verified".into();
@@ -171,6 +177,13 @@ impl Workspace {
     }
 
     pub(super) fn render_transfer_menu(&self, pane: &str, cx: &mut Context<Self>) -> AnyElement {
+        if !self.model.as_ref().is_some_and(|model| {
+            model
+                .capture_pane_action(pane)
+                .is_ok_and(|source| model.can_transfer_pane(&source))
+        }) {
+            return div().into_any_element();
+        }
         let open = self
             .transfer_menu
             .as_ref()

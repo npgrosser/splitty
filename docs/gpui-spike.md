@@ -77,6 +77,17 @@ cargo run --release -p splitty-gpui -- --smoke
 
 The default window offers **Split right**, **Split below**, **New tab** and
 **Maximize/Restore** for the focused tab group.
+**Float Tab** moves the focused tiled terminal into a floating tab group, leaving
+at least one tiled pane. Drag the float header to move it or its lower-right grip
+to resize it. **Dock** returns the whole group to the first tiled group, including
+an empty root. Floats retain their terminals, history, search and selection;
+new tabs and profile choices work within them. **Maximize/Restore** also works
+for floating groups. Split controls and tab drag placement are tiled-only.
+Clicking a float raises it locally without a layout operation. Geometry previews
+commit once on release; Escape, window deactivation and viewport/zoom changes
+cancel them. Out-of-viewport stored bounds are displayed within reach without
+automatically rewriting their saved values.
+
 The arrow beside a tab group's **+** opens the local shell-profile picker.
 Use Up/Down and Enter to choose an enabled, available profile; Escape or an outside
 click dismisses it. A regular **+** or new-tab shortcut inherits the source shell
@@ -927,3 +938,49 @@ The runner accepts private Xvfb, library and xdotool overrides. The visible
 trigger coordinate is calibrated for the fixture font and its second tab;
 `--setup-only` captures the initial layout when another environment needs a
 different coordinate.
+
+## Native floating-group acceptance
+
+The optimized binary with SHA-256
+`013ec798baa3a0ee853071cbdecaf76adcd56c2474940408fdb09af51e2594ca`
+passes 21 private-window checks. Float Tab, new tabs and cycling within a float,
+header movement, grip resizing, maximize/restore, overlapping groups and whole-group
+Dock into an empty tiled root retain the original pane/session identities and
+processes. A floating tab also transfers to a new Screen; moving the last tiled
+pane out leaves the source Screen alive while its floats remain.
+
+Copy and find work immediately after Float and Dock without another terminal
+click. Clipboard assertions replace the previous contents before copying, and
+the retained history query still has one result. The floating profile picker
+opens and dismisses with Escape without PTY input or layout changes. Its explicit
+program-launch choices retain the earlier profile acceptance scope; this run
+checks the floating picker and ordinary new-tab inheritance.
+
+Move/resize headers send no terminal bytes. Escape, zoom, viewport changes and
+window deactivation cancel captured gestures without committing stale bounds.
+SGR clicks and wheel reports reach only the topmost terminal; raising an exposed
+group changes no canonical layout. Hidden root output continues during float
+maximization without a visible size claim, and paints after restore. Four output
+checks wait for changed pixels in bounded terminal-content regions, with the
+fixture cursor hidden. Screenshots verify the picker, retained search, stacking
+and post-Dock output. The owned window exits normally with no surviving children.
+
+The affected checks pass: 153 shared mux tests, 88 client tests, 74 GPUI tests,
+strict all-target Clippy for all three crates, formatting and 17 architecture
+checks. The same frozen binary reaches workspace smoke stage 18 on both Wayland
+and X11 with hardware D3D12 rendering and complete cleanup. Interactive acceptance
+is limited to private Linux X11 at 1200×760; Windows/macOS interaction and new
+latency measurements remain unverified. No web UI code changed; valid existing
+float operations retain their wire format, but browser interactions were not
+rerun. Full merge CI remains deferred on the evaluation branch.
+
+```sh
+python3 scripts/testing/gpui-floating-groups.py target/release/splitty-gpui \
+  --output /tmp/splitty-floating-evidence --xclip /path/to/xclip \
+  --float-tab-x 884
+```
+
+The runner reuses the Screen-transfer PTY fixture and accepts private Xvfb,
+library and xdotool overrides. `--setup-only` captures the initial layout for
+coordinate calibration. The generated evidence records binary, harness and
+fixture hashes alongside authoritative states, PTY input and screenshots.

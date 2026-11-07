@@ -92,7 +92,8 @@ interface SlotNode {
 interface FloatingEntry {
   id: string;
   root: LayoutNode;
-  /** Relative position/size within the screen viewport (0-1). */
+  /** Viewport units: all components finite, w/h positive. Negative origins
+   * and sizes above 1 are valid; clients may clamp only their presentation. */
   bounds: { x: number; y: number; w: number; h: number };
 }
 
@@ -1135,6 +1136,31 @@ interface SelectTabOp {
   paneId: string;
 }
 
+/** Float one root pane, leaving at least one pane in the tiled layout.
+ * No session is recreated. Omitted bounds use {x:.25,y:.25,w:.5,h:.5}. */
+interface FloatPaneOp {
+  type: "float_pane";
+  paneId: string;
+  bounds?: FloatingEntry["bounds"];
+}
+
+/** Dock all panes of the identified float into the root slot containing
+ * paneId, falling back to the first root slot (including an empty one).
+ * The first floated pane becomes active; there are no process effects. */
+interface DockPaneOp {
+  type: "dock_pane";
+  floatingId: string;
+  paneId: string;
+}
+
+/** Replace bounds of an existing float, subject to the shared finite/positive
+ * rule. Invalid float/move bounds reject atomically with mux.op_failed. */
+interface MoveFloatOp {
+  type: "move_float";
+  floatingId: string;
+  bounds: FloatingEntry["bounds"];
+}
+
 /**
  * Move a pane within the root layout: into the slot `targetSlotId`, or beside
  * the node or pane `targetSplitId` in `direction`. Rejected when the target is
@@ -1432,6 +1458,9 @@ type Operation =
   | ClosePaneOp
   | ResizeSplitOp
   | SelectTabOp
+  | FloatPaneOp
+  | DockPaneOp
+  | MoveFloatOp
   | MovePaneOp
   | MoveTabOp
   | ArrangePanesOp

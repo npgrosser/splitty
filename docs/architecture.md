@@ -21,6 +21,16 @@ Op → Validate → Reduce (pure) → new State + Effects
 
 The Reducer is a pure function: `(ScreenState, Op) → (ScreenState, []Effect)`. Effects (`SpawnSession`, `KillSession`) are executed separately by the EffectRunner (`mux::effect_runner`) — no I/O inside the Reducer.
 
+Floating geometry uses viewport units. `mux::FloatBounds::is_valid` is the shared
+domain rule for direct float/move operations and template projection: every
+component must be finite and width/height positive. Negative origins and sizes
+above one remain valid. Reachability clamping belongs to each client's display
+and does not rewrite the canonical bounds. Closing or transferring a pane uses
+the same subtree removal for tiled and floating layouts, retaining sibling
+panes, sessions and layout identities; a floating entry disappears only when
+its last pane leaves. Existing float/new-tab operations create tab groups, and
+split/resize/tab-placement operations still target only the tiled root.
+
 An op is always "I want this to happen." Whether the client applies it optimistically or the server applies it authoritatively doesn't change the wire format. This makes the protocol multiplayer-ready without structural changes — only the delivery semantics change (fire-and-forget → ACK/REJECT).
 
 ## Client Autonomy (Shadow Mode)
@@ -103,8 +113,11 @@ or layout mutations. Its connection-wide
 `LocalWorkspace` holds the ordered Screen catalog, local shown-screen choice,
 pending lifecycle intents and shared session admission. Each `ScreenModel` keeps
 its canonical `Arc<ScreenState>`, local tab/focus choices, an optional maximized
-canonical slot ID and pane/session routes. Maximization borrows that slot as a
-presentation root; it sends no layout operation and maintains no second tree.
+canonical slot ID and pane/session routes. Maximization borrows that slot, from
+either tiled or floating roots, as the sole presentation root; it sends no
+layout operation and maintains no second tree. Otherwise the projection borrows
+the tiled root and all canonical floating entries. Selection, focus, cycling
+and visible-size admission share that traversal.
 An admitted split or cross-group pane move restores the full root, while a new tab
 or reorder in the same group and a Screen switch preserve the local choice. Snapshot reconciliation
 clears a removed slot and focuses a visible survivor. The close plan still reads
@@ -140,6 +153,25 @@ pane/session pairs retain readiness, attachments and terminal entities across
 Screen changes; obsolete size and visibility claims are withdrawn until the
 next actual layout. Unsettled ownership blocks scoped destructive actions but
 keeps terminal output and assessed whole-window shutdown available.
+
+Floating actions reuse `float_pane`, `dock_pane` and `move_float`. The client
+captures the owner, Screen, floating ID, original bounds, structural layout and
+pane/session identities. Metadata and local active-tab changes do not invalidate
+a gesture; changed membership, geometry or ownership does. One identified
+action is admitted at a time, excluding conflicting placement, transfer and
+close actions. An ordered catalog fence and subsequent accepted Screen snapshot
+settle its result; rejected or uncertain mutations are never replayed. Coherent
+workspace refresh also settles pending floating actions. Later local navigation
+cancels deferred float/dock focus, and moving bounds never changes focus.
+
+GPUI owns overlay paint/hit order, display-only reachability clamping and
+captured move/resize previews. Raising a float is local to the Screen. A changed
+release sends one bounded geometry intent; Escape, loss of window activity or
+changed owner/Screen/viewport/zoom cancels the preview. Terminal entities remain
+keyed by pane/session identity through float, dock and transfer. Native Dock
+uses the first tiled slot, including an empty one; it docks the whole group.
+Nested floating trees received in snapshots are rendered defensively, while
+native split, divider resize and tab drag placement remain tiled-only.
 
 The native window retains one async receive task for the worker update channel.
 New output wakes that task directly; a separate maintenance deadline still retries

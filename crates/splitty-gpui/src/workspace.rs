@@ -1,4 +1,5 @@
 //! Native projection of one authoritative local screen; no independent dock tree.
+mod floating;
 mod shell_profiles;
 mod transfer;
 
@@ -11,8 +12,8 @@ use splitty_client_core::appearance::{AppearanceSnapshot, ColorScheme};
 use splitty_client_core::native_workspace::{Command, Update, Worker};
 use splitty_client_core::shell_profiles::ShellProfilesSnapshot;
 use splitty_client_core::workspace::{
-    Axis, ClosePlan, CloseTarget, LayoutNode, LocalWorkspace, MovePlacement, PaneActionTarget,
-    PaneDrag, ScreenModel, ScreenTransferOutcome, ScreenTransferTarget, TabStep,
+    Axis, ClosePlan, CloseTarget, FloatingActionOutcome, LayoutNode, LocalWorkspace, MovePlacement,
+    PaneActionTarget, PaneDrag, ScreenModel, ScreenTransferOutcome, ScreenTransferTarget, TabStep,
 };
 use splitty_client_core::zoom::{Zoom, ZoomAction, ZoomOutcome, ZoomResult};
 use std::{
@@ -28,7 +29,20 @@ use std::{
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use self::floating::{FloatGesture, FloatGestureKind};
 use self::shell_profiles::ProfilePicker;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Surface {
+    Tiled,
+    Floating,
+}
+
+struct PendingFloat {
+    connection_id: Uuid,
+    request_id: Uuid,
+    restore_focus: bool,
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Direction {
@@ -523,10 +537,15 @@ pub struct Workspace {
     profile_picker: Option<ProfilePicker>,
     transfer_menu: Option<TransferMenu>,
     pending_transfer: Option<PendingTransfer>,
+    float_order: HashMap<String, Vec<String>>,
+    float_viewport: Option<Bounds<Pixels>>,
+    float_gesture: Option<FloatGesture>,
+    pending_float: Option<PendingFloat>,
     desired_scheme: ColorScheme,
     sent_scheme: ColorScheme,
     scheme_pending: bool,
     _appearance_subscription: Subscription,
+    _activation_subscription: Subscription,
     ui_family: String,
     mono_family: String,
     rename: Option<RenameEditor>,
@@ -642,6 +661,11 @@ impl Workspace {
             this.scheme_pending = this.desired_scheme != this.sent_scheme;
             this.flush_scheme();
         });
+        let activation_subscription = cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() && this.float_gesture.take().is_some() {
+                cx.notify();
+            }
+        });
         let typography = Theme::global(cx).tokens.typography;
         let ui_family = typography.sans.to_string();
         let mono_family = typography.mono.to_string();
@@ -677,10 +701,15 @@ impl Workspace {
                 profile_picker: None,
                 transfer_menu: None,
                 pending_transfer: None,
+                float_order: HashMap::new(),
+                float_viewport: None,
+                float_gesture: None,
+                pending_float: None,
                 desired_scheme: initial_scheme,
                 sent_scheme: initial_scheme,
                 scheme_pending: false,
                 _appearance_subscription: appearance_subscription,
+                _activation_subscription: activation_subscription,
                 ui_family,
                 mono_family,
                 rename: None,
@@ -802,6 +831,7 @@ impl Workspace {
             cx.stop_active_drag(window);
         }
         self.drag = None;
+        self.float_gesture = None;
         self.drop_target = None;
         self.split_bounds.clear();
         self.slot_bounds.clear();
@@ -891,6 +921,7 @@ impl Workspace {
         self.send(Command::CreateScreen(name), cx);
     }
     fn switch_screen(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.float_gesture = None;
         self.transfer_menu = None;
         if self.rename.is_some() {
             self.finish_rename(true, window, cx);
@@ -969,6 +1000,7 @@ impl Workspace {
         cx.notify();
     }
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.float_gesture = None;
         self.transfer_menu = None;
         self.close_profile_picker(window, cx);
         if target == CloseTarget::Window && self.cleanup_complete.load(Ordering::Acquire) {
@@ -1142,6 +1174,10 @@ impl Workspace {
             self.profile_picker = None;
             self.transfer_menu = None;
             self.pending_transfer = None;
+            self.pending_float = None;
+            self.float_order.clear();
+            self.float_gesture = None;
+            self.float_viewport = None;
         }
         if self.rename.is_some() {
             self.smoke_editor_reconciles += u64::from(self.smoke);
@@ -1161,7 +1197,9 @@ impl Workspace {
             .and_then(|pane| self.panes.get(pane))
             .map(|view| view.terminal.entity_id());
         if let Some(root) = model.presentation_root() {
-            let slots = prune_layout_bounds(root, &mut self.split_bounds, &mut self.slot_bounds);
+            let roots = std::iter::once(root)
+                .chain(model.presented_floats().iter().map(|entry| &entry.root));
+            let slots = prune_layout_bounds(roots, &mut self.split_bounds, &mut self.slot_bounds);
             self.tab_scrolls.retain(|id, _| slots.contains(id.as_str()));
             for slot in slots {
                 self.tab_scrolls.entry(slot.to_owned()).or_default();
@@ -1214,10 +1252,10 @@ impl Workspace {
             .profile_picker
             .as_ref()
             .is_some_and(|picker| !picker.valid_for(&model));
-        let transfer_cancelled = self
-            .transfer_menu
-            .as_ref()
-            .is_some_and(|menu| model.validate_pane_action(&menu.source).is_err());
+        let transfer_cancelled = self.transfer_menu.as_ref().is_some_and(|menu| {
+            model.validate_pane_action(&menu.source).is_err()
+                || !model.can_transfer_pane(&menu.source)
+        });
         if picker_cancelled {
             self.profile_picker = None;
         }
@@ -1230,6 +1268,16 @@ impl Workspace {
         }
         if old_screen != new_screen {
             self.drag = None;
+            self.float_gesture = None;
+            self.float_viewport = None;
+        }
+        self.reconcile_float_order(&model);
+        if self.float_gesture.as_ref().is_some_and(|gesture| {
+            model.connection_id() != gesture.connection
+                || model.shown_screen_id() != Some(gesture.screen.as_str())
+                || model.validate_float(&gesture.target).is_err()
+        }) {
+            self.float_gesture = None;
         }
         self.drop_target = None;
         self.route_generation
@@ -1254,14 +1302,10 @@ impl Workspace {
         cx.notify();
     }
     fn sync_visible(&mut self, cx: &mut Context<Self>) {
-        let mut visible = Vec::new();
-        if let Some(model) = &self.model {
-            if let Some(root) = model.presentation_root() {
-                if let Some(shown) = model.shown() {
-                    visible_panes(shown, root, &mut visible);
-                }
-            }
-        }
+        let mut visible = self
+            .model
+            .as_ref()
+            .map_or_else(Vec::new, LocalWorkspace::displayed_panes);
         visible.sort();
         let screen = self
             .model
@@ -1398,10 +1442,7 @@ impl Workspace {
         let Some(slot) = model.focused_slot_id() else {
             return;
         };
-        let Some(LayoutNode::Slot { pane_ids, .. }) = model
-            .presentation_root()
-            .and_then(|root| slot_by_id(root, slot))
-        else {
+        let Some(LayoutNode::Slot { pane_ids, .. }) = presented_slot_by_id(model, slot) else {
             return;
         };
         if let (Some(handle), Some(index)) = (
@@ -1415,9 +1456,7 @@ impl Workspace {
         let Some(model) = self.model.as_ref() else {
             return;
         };
-        let Some(node @ LayoutNode::Slot { pane_ids, .. }) = model
-            .presentation_root()
-            .and_then(|root| slot_by_id(root, slot))
+        let Some(node @ LayoutNode::Slot { pane_ids, .. }) = presented_slot_by_id(model, slot)
         else {
             return;
         };
@@ -1462,6 +1501,9 @@ impl Workspace {
             return;
         };
         visible_slots(shown, root, &self.slot_bounds, &mut slots);
+        for entry in model.presented_floats() {
+            visible_slots(shown, &entry.root, &self.slot_bounds, &mut slots);
+        }
         let Some(current) = slots.iter().find(|slot| slot.pane == focused) else {
             return;
         };
@@ -1521,6 +1563,11 @@ impl Workspace {
             self.profile_key(&event.keystroke, window, cx);
             return;
         }
+        if event.keystroke.key == "escape" && self.float_gesture.take().is_some() {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         if event.keystroke.key == "escape" && cx.has_active_drag() {
             cx.stop_active_drag(window);
             self.drop_target = None;
@@ -1557,7 +1604,7 @@ impl Workspace {
                     self.switch_screen(&id, window, cx);
                 }
             }
-            Shortcut::ToggleMaximize => self.toggle_maximize(cx),
+            Shortcut::ToggleMaximize => self.toggle_maximize(window, cx),
             Shortcut::PreviousTab => self.cycle_tab(TabStep::Previous, cx),
             Shortcut::NextTab => self.cycle_tab(TabStep::Next, cx),
             Shortcut::SplitRight => self.split(Axis::Horizontal, cx),
@@ -1595,10 +1642,19 @@ impl Workspace {
             .and_then(LocalWorkspace::focused_pane)
             .map(str::to_owned)
         {
+            if self
+                .model
+                .as_ref()
+                .is_some_and(|model| !model.is_root_pane(&pane))
+            {
+                self.status = "Split is available for tiled groups".into();
+                cx.notify();
+                return;
+            }
             self.send(Command::Split { pane, axis }, cx);
         }
     }
-    fn toggle_maximize(&mut self, cx: &mut Context<Self>) {
+    fn toggle_maximize(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(model) = &self.model {
             if let Some(screen) = model.shown_screen_id() {
                 let (slot, pane) = if model.maximized_slot_id().is_some() {
@@ -1609,15 +1665,21 @@ impl Workspace {
                         model.focused_pane().map(str::to_owned),
                     )
                 };
-                self.send(
-                    Command::SetMaximized {
-                        screen: screen.to_owned(),
-                        connection: model.connection_id(),
-                        slot,
-                        pane,
-                    },
-                    cx,
-                );
+                if slot.is_none() && model.maximized_slot_id().is_none() {
+                    return;
+                }
+                match self.commands.try_send(Command::SetMaximized {
+                    screen: screen.to_owned(),
+                    connection: model.connection_id(),
+                    slot,
+                    pane,
+                }) {
+                    Ok(()) => self.focus_current(window, cx),
+                    Err(error) => {
+                        self.status = format!("Action not sent: {error}");
+                        cx.notify();
+                    }
+                }
             }
         }
     }
@@ -1692,6 +1754,30 @@ impl Workspace {
                             ScreenTransferOutcome::Unverified(reason) => {
                                 self.status = format!("Move unverified: {reason}");
                             }
+                        }
+                        cx.notify();
+                    }
+                }
+                Update::FloatingAction(result) => {
+                    if self.pending_float.as_ref().is_some_and(|pending| {
+                        pending.connection_id == result.connection_id
+                            && pending.request_id == result.request_id
+                    }) {
+                        let restore_focus = self
+                            .pending_float
+                            .take()
+                            .is_some_and(|pending| pending.restore_focus);
+                        self.status = match result.outcome {
+                            FloatingActionOutcome::Confirmed => "Floating group updated".into(),
+                            FloatingActionOutcome::Rejected(reason) => {
+                                format!("Floating action rejected: {reason}")
+                            }
+                            FloatingActionOutcome::Unverified(reason) => {
+                                format!("Floating action unverified: {reason}")
+                            }
+                        };
+                        if restore_focus {
+                            self.focus_current(window, cx);
                         }
                         cx.notify();
                     }
@@ -2223,7 +2309,29 @@ impl Workspace {
     fn drop_target_at(&self, drag: &PaneDrag, position: Point<Pixels>) -> Option<DropTarget> {
         let model = self.model.as_ref()?;
         let root = model.presentation_root()?;
+        if let Some(viewport) = self.float_viewport {
+            if model.presented_floats().iter().any(|entry| {
+                let projected = self
+                    .float_gesture
+                    .as_ref()
+                    .filter(|gesture| gesture.target.floating_id() == entry.id.as_str())
+                    .map_or_else(
+                        || {
+                            floating::project(
+                                &entry.bounds,
+                                viewport,
+                                self.appearance.zoom.window_scale(),
+                            )
+                        },
+                        |gesture| gesture.preview,
+                    );
+                projected.contains(&position)
+            }) {
+                return None;
+            }
+        }
         self.slot_bounds.iter().find_map(|(slot, bounds)| {
+            slot_by_id(root, slot)?;
             if !bounds.contains(&position) {
                 return None;
             }
@@ -2353,6 +2461,253 @@ impl Workspace {
             self.send(command, cx);
         }
     }
+    fn reconcile_float_order(&mut self, model: &LocalWorkspace) {
+        let known_screens: HashSet<_> = model
+            .screens()
+            .iter()
+            .map(|screen| screen.id.as_str())
+            .collect();
+        self.float_order
+            .retain(|screen, _| known_screens.contains(screen.as_str()));
+        let Some(screen) = model.shown_screen_id() else {
+            return;
+        };
+        let canonical = model
+            .snapshot()
+            .map_or(&[][..], |snapshot| snapshot.floating.as_slice());
+        let order = self.float_order.entry(screen.to_owned()).or_default();
+        let ids: Vec<_> = canonical.iter().map(|entry| entry.id.to_string()).collect();
+        floating::reconcile_order(order, &ids);
+    }
+    fn raise_float(&mut self, id: &str, cx: &mut Context<Self>) {
+        let Some(screen) = self
+            .model
+            .as_ref()
+            .and_then(LocalWorkspace::shown_screen_id)
+        else {
+            return;
+        };
+        let order = self.float_order.entry(screen.to_owned()).or_default();
+        if let Some(index) = order.iter().position(|item| item == id) {
+            if index + 1 != order.len() {
+                let id = order.remove(index);
+                order.push(id);
+                cx.notify();
+            }
+        }
+    }
+    fn float_at(&self, position: Point<Pixels>) -> Option<String> {
+        let model = self.model.as_ref()?;
+        let viewport = self.float_viewport?;
+        let order = self.float_order.get(model.shown_screen_id()?)?;
+        order.iter().rev().find_map(|id| {
+            let entry = model
+                .presented_floats()
+                .iter()
+                .find(|entry| entry.id.as_str() == id)?;
+            let bounds = self
+                .float_gesture
+                .as_ref()
+                .filter(|gesture| gesture.target.floating_id() == id)
+                .map_or_else(
+                    || {
+                        floating::project(
+                            &entry.bounds,
+                            viewport,
+                            self.appearance.zoom.window_scale(),
+                        )
+                    },
+                    |gesture| gesture.preview,
+                );
+            bounds.contains(&position).then(|| id.clone())
+        })
+    }
+    fn submit_float_action(
+        &mut self,
+        request_id: Uuid,
+        command: Command,
+        restore_focus: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(connection) = self.model.as_ref().map(LocalWorkspace::connection_id) else {
+            return;
+        };
+        if self.pending_float.is_some() {
+            return;
+        }
+        match self.commands.try_send(command) {
+            Ok(()) => {
+                self.pending_float = Some(PendingFloat {
+                    connection_id: connection,
+                    request_id,
+                    restore_focus,
+                })
+            }
+            Err(error) => {
+                self.status = format!("Floating action not sent: {error}");
+                cx.notify();
+            }
+        }
+    }
+    fn float_tab(&mut self, cx: &mut Context<Self>) {
+        let Some(model) = self.model.as_ref() else {
+            return;
+        };
+        let Some(pane) = model.focused_pane() else {
+            return;
+        };
+        match model.capture_pane_action(pane) {
+            Ok(source) if model.can_float_pane(&source) => {
+                let request_id = Uuid::new_v4();
+                self.submit_float_action(
+                    request_id,
+                    Command::FloatPane { request_id, source },
+                    true,
+                    cx,
+                );
+            }
+            Ok(_) => {
+                self.status = "Float Tab needs another tiled terminal".into();
+                cx.notify();
+            }
+            Err(error) => {
+                self.status = format!("Float Tab: {error}");
+                cx.notify();
+            }
+        }
+    }
+    fn dock_float(&mut self, id: &str, cx: &mut Context<Self>) {
+        let target = self
+            .model
+            .as_ref()
+            .and_then(|model| model.capture_float(id).ok());
+        if let Some(target) = target {
+            let request_id = Uuid::new_v4();
+            self.submit_float_action(
+                request_id,
+                Command::DockFloat { request_id, target },
+                true,
+                cx,
+            );
+        } else {
+            self.status = "Floating group changed; Dock was not sent".into();
+            cx.notify();
+        }
+    }
+    fn maximize_float(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(model) = self.model.as_ref() else {
+            return;
+        };
+        let Some(entry) = model.floating(id) else {
+            return;
+        };
+        let selected = model
+            .focused_slot_id()
+            .and_then(|slot| slot_by_id(&entry.root, slot))
+            .and_then(|node| {
+                model
+                    .selected_pane(node)
+                    .map(|pane| (node.id().to_string(), pane.to_owned()))
+            })
+            .or_else(|| first_selected_slot(model, &entry.root));
+        let Some((slot, pane)) = selected else {
+            return;
+        };
+        let Some(screen) = model.shown_screen_id() else {
+            return;
+        };
+        match self.commands.try_send(Command::SetMaximized {
+            screen: screen.to_owned(),
+            connection: model.connection_id(),
+            slot: Some(slot),
+            pane: Some(pane),
+        }) {
+            Ok(()) => self.focus_current(window, cx),
+            Err(error) => {
+                self.status = format!("Action not sent: {error}");
+                cx.notify();
+            }
+        }
+    }
+    fn begin_float_gesture(
+        &mut self,
+        id: &str,
+        kind: FloatGestureKind,
+        position: Point<Pixels>,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(viewport) = self.float_viewport else {
+            return;
+        };
+        let Some(model) = self.model.as_ref() else {
+            return;
+        };
+        let Some(entry) = model.floating(id) else {
+            return;
+        };
+        let Ok(target) = model.capture_float(id) else {
+            return;
+        };
+        let zoom = self.appearance.zoom.window_scale();
+        let initial = floating::project(&entry.bounds, viewport, zoom);
+        self.float_gesture = Some(FloatGesture {
+            target,
+            connection: model.connection_id(),
+            screen: model.shown_screen_id().unwrap_or_default().to_owned(),
+            kind,
+            origin: position,
+            viewport,
+            zoom,
+            initial,
+            preview: initial,
+        });
+        self.raise_float(id, cx);
+    }
+    fn move_float_gesture(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        let Some(gesture) = self.float_gesture.as_ref() else {
+            return;
+        };
+        let valid = self.float_viewport == Some(gesture.viewport)
+            && self.appearance.zoom.window_scale() == gesture.zoom
+            && self
+                .model
+                .as_ref()
+                .is_some_and(|model| model.validate_float(&gesture.target).is_ok());
+        if !valid {
+            self.float_gesture = None;
+            cx.notify();
+            return;
+        }
+        let next = floating::moved(gesture, position);
+        if let Some(gesture) = self.float_gesture.as_mut() {
+            if gesture.preview != next {
+                gesture.preview = next;
+                cx.notify();
+            }
+        }
+    }
+    fn finish_float_gesture(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.move_float_gesture(position, cx);
+        let Some(gesture) = self.float_gesture.take() else {
+            return;
+        };
+        if !floating::changed(gesture.initial, gesture.preview) {
+            return;
+        }
+        let request_id = Uuid::new_v4();
+        let bounds = floating::normalized(gesture.preview, gesture.viewport);
+        self.submit_float_action(
+            request_id,
+            Command::MoveFloat {
+                request_id,
+                target: gesture.target,
+                bounds,
+            },
+            false,
+            cx,
+        );
+        cx.notify();
+    }
     fn render_screen_controls(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut screens = div()
             .id("screen-strip")
@@ -2475,7 +2830,12 @@ impl Workspace {
             )
             .into_any_element()
     }
-    fn render_node(&self, node: &LayoutNode, cx: &mut Context<Self>) -> AnyElement {
+    fn render_node(
+        &self,
+        node: &LayoutNode,
+        surface: Surface,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         match node {
             LayoutNode::Slot { id, pane_ids, .. } => {
                 let selected = self
@@ -2579,9 +2939,13 @@ impl Workspace {
                                     }),
                                 )
                                 .when_some(
-                                    self.model
-                                        .as_ref()
-                                        .and_then(|model| model.capture_drag(pane.as_str())),
+                                    (surface == Surface::Tiled)
+                                        .then(|| {
+                                            self.model
+                                                .as_ref()
+                                                .and_then(|model| model.capture_drag(pane.as_str()))
+                                        })
+                                        .flatten(),
                                     |view, origin| {
                                         view.on_drag(
                                             TabDrag {
@@ -2673,9 +3037,11 @@ impl Workspace {
                 let mut slot = div()
                     .id(SharedString::from(format!("slot-{id}")))
                     .relative()
-                    .on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
-                        this.drop_pane(drag, &target, window, cx)
-                    }))
+                    .when(surface == Surface::Tiled, |slot| {
+                        slot.on_drop(cx.listener(move |this, drag: &TabDrag, window, cx| {
+                            this.drop_pane(drag, &target, window, cx)
+                        }))
+                    })
                     .size_full()
                     .flex()
                     .flex_col()
@@ -2722,7 +3088,11 @@ impl Workspace {
                         slot = slot.child(div().p_3().child("Starting terminal…"));
                     }
                 }
-                match &self.drop_target {
+                match if surface == Surface::Tiled {
+                    self.drop_target.as_ref()
+                } else {
+                    None
+                } {
                     Some(DropTarget::Body {
                         slot: target,
                         placement,
@@ -2803,7 +3173,7 @@ impl Workspace {
                             .min_w_0()
                             .min_h_0()
                             .overflow_hidden()
-                            .child(self.render_node(child, cx)),
+                            .child(self.render_node(child, surface, cx)),
                     );
                     if index + 1 < children.len() {
                         let node = id.to_string();
@@ -2824,25 +3194,164 @@ impl Workspace {
                                         .w_full()
                                         .cursor(CursorStyle::ResizeRow)
                                 })
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                        this.begin_resize(
-                                            node.clone(),
-                                            axis.clone(),
-                                            index,
-                                            sizes.clone(),
-                                            event.position,
-                                        );
-                                        cx.stop_propagation();
-                                    }),
-                                ),
+                                .when(surface == Surface::Tiled, |divider| {
+                                    divider.on_mouse_down(
+                                        MouseButton::Left,
+                                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                            this.begin_resize(
+                                                node.clone(),
+                                                axis.clone(),
+                                                index,
+                                                sizes.clone(),
+                                                event.position,
+                                            );
+                                            cx.stop_propagation();
+                                        }),
+                                    )
+                                }),
                         );
                     }
                 }
                 split.into_any_element()
             }
         }
+    }
+    fn render_float(
+        &self,
+        entry: &splitty_client_core::workspace::FloatingEntry,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(viewport) = self.float_viewport else {
+            return div().into_any_element();
+        };
+        let id = entry.id.to_string();
+        let projected = self
+            .float_gesture
+            .as_ref()
+            .filter(|gesture| gesture.target.floating_id() == id)
+            .map_or_else(
+                || floating::project(&entry.bounds, viewport, self.appearance.zoom.window_scale()),
+                |gesture| gesture.preview,
+            );
+        let left = projected.left() - viewport.left();
+        let top = projected.top() - viewport.top();
+        let header_height = chrome_rems((self.appearance.font_size + 19.).max(32.));
+        let move_id = id.clone();
+        let dock_id = id.clone();
+        let maximize_id = id.clone();
+        let resize_id = id.clone();
+        let raise_id = id.clone();
+        let mut group = div()
+            .id(SharedString::from(format!("float-{id}")))
+            .absolute()
+            .left(left)
+            .top(top)
+            .w(projected.size.width)
+            .h(projected.size.height)
+            .flex()
+            .flex_col()
+            .overflow_hidden()
+            .occlude()
+            .border_2()
+            .border_color(rgb(self.appearance.accent))
+            .bg(rgb(self.appearance.surface))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(move |this, _, _, cx| this.raise_float(&raise_id, cx)),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("float-drag-{id}")))
+                    .flex_none()
+                    .h(header_height)
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .px_2()
+                    .cursor(CursorStyle::OpenHand)
+                    .bg(rgb(self.appearance.raised))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                            this.begin_float_gesture(
+                                &move_id,
+                                FloatGestureKind::Move,
+                                event.position,
+                                cx,
+                            );
+                            cx.stop_propagation();
+                        }),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .child("Floating group"),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("float-dock-{id}")))
+                            .flex_none()
+                            .px_2()
+                            .cursor_pointer()
+                            .child("Dock")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                            )
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                cx.stop_propagation();
+                                this.dock_float(&dock_id, cx);
+                            })),
+                    )
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("float-maximize-{id}")))
+                            .flex_none()
+                            .px_2()
+                            .cursor_pointer()
+                            .child("Maximize")
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|_, _, _, cx| cx.stop_propagation()),
+                            )
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.maximize_float(&maximize_id, window, cx);
+                            })),
+                    ),
+            )
+            .child(div().flex_1().min_h_0().min_w_0().child(self.render_node(
+                &entry.root,
+                Surface::Floating,
+                cx,
+            )));
+        group = group.child(
+            div()
+                .id(SharedString::from(format!("float-resize-{id}")))
+                .absolute()
+                .right_0()
+                .bottom_0()
+                .w(chrome_rems(18.))
+                .h(chrome_rems(18.))
+                .bg(rgb(self.appearance.accent))
+                .cursor(CursorStyle::ResizeUpLeftDownRight)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                        this.begin_float_gesture(
+                            &resize_id,
+                            FloatGestureKind::Resize,
+                            event.position,
+                            cx,
+                        );
+                        cx.stop_propagation();
+                    }),
+                ),
+        );
+        group.into_any_element()
     }
 }
 
@@ -2858,6 +3367,27 @@ impl Render for Workspace {
             .as_ref()
             .and_then(LocalWorkspace::snapshot)
             .is_some_and(|screen| screen.panes.is_empty());
+        let floating_focus = self
+            .model
+            .as_ref()
+            .and_then(LocalWorkspace::focused_pane)
+            .is_some_and(|pane| {
+                self.model
+                    .as_ref()
+                    .is_some_and(|model| !model.is_root_pane(pane))
+            });
+        let can_float = self
+            .model
+            .as_ref()
+            .and_then(|model| {
+                model.focused_pane().and_then(|pane| {
+                    model
+                        .capture_pane_action(pane)
+                        .ok()
+                        .map(|source| model.can_float_pane(&source))
+                })
+            })
+            .unwrap_or(false);
         let appearance_message = self
             .appearance_error
             .as_ref()
@@ -2967,7 +3497,29 @@ impl Render for Workspace {
                                     "Maximize"
                                 },
                             )
-                            .on_click(cx.listener(|this, _, _, cx| this.toggle_maximize(cx))),
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.toggle_maximize(window, cx)),
+                            ),
+                    )
+                    .child(
+                        div()
+                            .id("float-tab")
+                            .flex_none()
+                            .px_3()
+                            .py_1()
+                            .cursor(if can_float {
+                                CursorStyle::PointingHand
+                            } else {
+                                CursorStyle::OperationNotAllowed
+                            })
+                            .text_color(rgb(if can_float {
+                                self.appearance.text
+                            } else {
+                                self.appearance.muted
+                            }))
+                            .bg(rgb(self.appearance.overlay))
+                            .child("Float Tab")
+                            .on_click(cx.listener(|this, _, _, cx| this.float_tab(cx))),
                     )
                     .child(
                         div()
@@ -2975,7 +3527,16 @@ impl Render for Workspace {
                             .flex_none()
                             .px_3()
                             .py_1()
-                            .cursor_pointer()
+                            .cursor(if floating_focus {
+                                CursorStyle::OperationNotAllowed
+                            } else {
+                                CursorStyle::PointingHand
+                            })
+                            .text_color(rgb(if floating_focus {
+                                self.appearance.muted
+                            } else {
+                                self.appearance.text
+                            }))
                             .bg(rgb(self.appearance.overlay))
                             .child("Split right")
                             .on_click(
@@ -2988,7 +3549,16 @@ impl Render for Workspace {
                             .flex_none()
                             .px_3()
                             .py_1()
-                            .cursor_pointer()
+                            .cursor(if floating_focus {
+                                CursorStyle::OperationNotAllowed
+                            } else {
+                                CursorStyle::PointingHand
+                            })
+                            .text_color(rgb(if floating_focus {
+                                self.appearance.muted
+                            } else {
+                                self.appearance.text
+                            }))
                             .bg(rgb(self.appearance.overlay))
                             .child("Split below")
                             .on_click(cx.listener(|this, _, _, cx| this.split(Axis::Vertical, cx))),
@@ -3038,9 +3608,115 @@ impl Render for Workspace {
                         ),
                     );
                 } else {
-                    view = view.child(div().flex_1().min_h_0().min_w_0().p_1().child(
-                        self.render_node(model.presentation_root().unwrap_or(&screen.root), cx),
-                    ));
+                    let entity = cx.entity();
+                    let weak_move = entity.downgrade();
+                    let weak_up = entity.downgrade();
+                    let weak_down = entity.downgrade();
+                    let mut viewport = div()
+                        .id("workspace-viewport")
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .p_1()
+                        .child(
+                            canvas(
+                                move |bounds, _, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        if this.float_viewport != Some(bounds) {
+                                            this.float_viewport = Some(bounds);
+                                            if this.float_gesture.take().is_some() {
+                                                cx.notify();
+                                            }
+                                            cx.notify();
+                                        }
+                                    })
+                                },
+                                move |_, (), window, _| {
+                                    let weak = weak_down.clone();
+                                    window.on_mouse_event(
+                                        move |event: &MouseDownEvent, phase, _, cx| {
+                                            if phase == DispatchPhase::Capture {
+                                                let _ = weak.update(cx, |this, cx| {
+                                                    if let Some(id) = this.float_at(event.position)
+                                                    {
+                                                        this.raise_float(&id, cx);
+                                                    }
+                                                });
+                                            }
+                                        },
+                                    );
+                                    let weak = weak_move.clone();
+                                    window.on_mouse_event(
+                                        move |event: &MouseMoveEvent, phase, _, cx| {
+                                            if phase == DispatchPhase::Capture {
+                                                let active = weak
+                                                    .update(cx, |this, cx| {
+                                                        let active = this.float_gesture.is_some();
+                                                        this.move_float_gesture(event.position, cx);
+                                                        active
+                                                    })
+                                                    .unwrap_or(false);
+                                                if active {
+                                                    cx.stop_propagation();
+                                                }
+                                            }
+                                        },
+                                    );
+                                    let weak = weak_up.clone();
+                                    window.on_mouse_event(
+                                        move |event: &MouseUpEvent, phase, _, cx| {
+                                            if phase == DispatchPhase::Capture
+                                                && event.button == MouseButton::Left
+                                            {
+                                                let active = weak
+                                                    .update(cx, |this, cx| {
+                                                        let active = this.float_gesture.is_some();
+                                                        this.finish_float_gesture(
+                                                            event.position,
+                                                            cx,
+                                                        );
+                                                        active
+                                                    })
+                                                    .unwrap_or(false);
+                                                if active {
+                                                    cx.stop_propagation();
+                                                }
+                                            }
+                                        },
+                                    );
+                                },
+                            )
+                            .absolute()
+                            .size_full(),
+                        );
+                    let root = model.presentation_root().unwrap_or(&screen.root);
+                    let root_surface = if model.maximized_slot_id().is_some()
+                        && slot_by_id(&screen.root, model.maximized_slot_id().unwrap_or_default())
+                            .is_none()
+                    {
+                        Surface::Floating
+                    } else {
+                        Surface::Tiled
+                    };
+                    viewport = viewport.child(self.render_node(root, root_surface, cx));
+                    let mut floats: Vec<_> = model.presented_floats().iter().collect();
+                    if let Some(order) = model
+                        .shown_screen_id()
+                        .and_then(|screen| self.float_order.get(screen))
+                    {
+                        floats.sort_by_key(|entry| {
+                            order
+                                .iter()
+                                .position(|id| id == entry.id.as_str())
+                                .unwrap_or(usize::MAX)
+                        });
+                    }
+                    for entry in floats {
+                        viewport = viewport.child(self.render_float(entry, cx));
+                    }
+                    view = view.child(viewport);
                 }
             } else {
                 view = view.child(div().flex_1().p_4().child("Loading local Screen…"));
@@ -3092,19 +3768,26 @@ impl Render for Workspace {
         .when_some(picker_overlay, |view, picker| view.child(picker))
     }
 }
-fn visible_panes(model: &ScreenModel, node: &LayoutNode, out: &mut Vec<String>) {
+fn first_selected_slot(model: &LocalWorkspace, node: &LayoutNode) -> Option<(String, String)> {
     match node {
-        LayoutNode::Slot { .. } => {
-            if let Some(pane) = model.selected_pane(node) {
-                out.push(pane.to_owned());
-            }
+        LayoutNode::Slot { id, .. } => {
+            Some((id.to_string(), model.selected_pane(node)?.to_owned()))
         }
-        LayoutNode::Split { children, .. } => {
-            for child in children {
-                visible_panes(model, child, out);
-            }
-        }
+        LayoutNode::Split { children, .. } => children
+            .iter()
+            .find_map(|child| first_selected_slot(model, child)),
     }
+}
+fn presented_slot_by_id<'a>(model: &'a LocalWorkspace, id: &str) -> Option<&'a LayoutNode> {
+    presented_slot_in(model.presentation_root(), model.presented_floats(), id)
+}
+fn presented_slot_in<'a>(
+    root: Option<&'a LayoutNode>,
+    floats: &'a [splitty_client_core::workspace::FloatingEntry],
+    id: &str,
+) -> Option<&'a LayoutNode> {
+    root.and_then(|root| slot_by_id(root, id))
+        .or_else(|| floats.iter().find_map(|entry| slot_by_id(&entry.root, id)))
 }
 fn visible_slots(
     model: &ScreenModel,
@@ -3132,7 +3815,7 @@ fn visible_slots(
     }
 }
 fn prune_layout_bounds<'a>(
-    root: &'a LayoutNode,
+    roots: impl IntoIterator<Item = &'a LayoutNode>,
     split_bounds: &mut HashMap<String, Bounds<Pixels>>,
     slot_bounds: &mut HashMap<String, Bounds<Pixels>>,
 ) -> HashSet<&'a str> {
@@ -3155,7 +3838,9 @@ fn prune_layout_bounds<'a>(
     }
     let mut splits = HashSet::new();
     let mut slots = HashSet::new();
-    collect(root, &mut splits, &mut slots);
+    for root in roots {
+        collect(root, &mut splits, &mut slots);
+    }
     split_bounds.retain(|id, _| splits.contains(id.as_str()));
     slot_bounds.retain(|id, _| slots.contains(id.as_str()));
     slots
@@ -3173,9 +3858,7 @@ fn reveal_changed_tabs(
     ) {
         match node {
             LayoutNode::Slot { id, pane_ids, .. } => {
-                let old_slot = previous
-                    .and_then(LocalWorkspace::presentation_root)
-                    .and_then(|root| slot_by_id(root, id.as_str()));
+                let old_slot = previous.and_then(|model| presented_slot_by_id(model, id.as_str()));
                 let changed = match old_slot {
                     Some(
                         old_slot @ LayoutNode::Slot {
@@ -3207,6 +3890,9 @@ fn reveal_changed_tabs(
     }
     if let Some(root) = current.presentation_root() {
         visit(root, previous, current, handles);
+    }
+    for entry in current.presented_floats() {
+        visit(&entry.root, previous, current, handles);
     }
 }
 fn resized_pair(sizes: &[f64], index: usize, delta: f64) -> Option<Vec<f64>> {
@@ -3715,7 +4401,7 @@ mod tests {
             ("left".into(), rectangle(0., 0., 100., 100.)),
             ("right".into(), rectangle(100., 0., 100., 100.)),
         ]);
-        prune_layout_bounds(&root, &mut splits, &mut slots);
+        prune_layout_bounds(std::iter::once(&root), &mut splits, &mut slots);
         assert_eq!(
             splits.keys().map(String::as_str).collect::<Vec<_>>(),
             ["current-split"]

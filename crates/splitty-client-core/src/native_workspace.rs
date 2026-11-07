@@ -3,7 +3,8 @@ use crate::{
     appearance::{AppearanceSnapshot, ColorScheme},
     shell_profiles::ShellProfilesSnapshot,
     workspace::{
-        Axis, ClosePlan, CloseTarget, LocalWorkspace, MovePlacement, PaneActionTarget, PaneDrag,
+        Axis, ClosePlan, CloseTarget, FloatBounds, FloatingActionOutcome, FloatingActionResult,
+        FloatingTarget, LocalWorkspace, MovePlacement, PaneActionTarget, PaneDrag,
         PlacementOutcome, ScreenTransferOutcome, ScreenTransferResult, ScreenTransferTarget,
         TabStep, WorkspaceRefresh,
     },
@@ -25,6 +26,19 @@ use std::{
 use tokio::sync::mpsc;
 
 pub enum Command {
+    FloatPane {
+        request_id: uuid::Uuid,
+        source: PaneActionTarget,
+    },
+    DockFloat {
+        request_id: uuid::Uuid,
+        target: FloatingTarget,
+    },
+    MoveFloat {
+        request_id: uuid::Uuid,
+        target: FloatingTarget,
+        bounds: FloatBounds,
+    },
     TransferPane {
         request_id: uuid::Uuid,
         source: PaneActionTarget,
@@ -112,6 +126,7 @@ pub enum Command {
     },
 }
 pub enum Update {
+    FloatingAction(FloatingActionResult),
     ScreenTransfer(ScreenTransferResult),
     Zoom(ZoomResult),
     ShellProfiles(Arc<ShellProfilesSnapshot>),
@@ -667,6 +682,27 @@ async fn run_service(
                         }
                         continue;
                     }
+                    let floating_request=match &command {
+                        Command::FloatPane{request_id,source}=>Some((*request_id,source.connection_id)),
+                        Command::DockFloat{request_id,target}|Command::MoveFloat{request_id,target,..}=>Some((*request_id,target.connection_id())),
+                        _=>None,
+                    };
+                    if let Some((request_id,connection_id))=floating_request {
+                        if model.as_ref().is_some_and(|model|model.floating_request_pending(request_id)){continue;}
+                        let result=if pending_close.is_some(){Err(std::io::Error::other("A close operation is pending"))}
+                            else if let Some(model)=&mut model {match command {
+                                Command::FloatPane{source,..}=>model.float_pane(&client,request_id,source),
+                                Command::DockFloat{target,..}=>model.dock_float(&client,request_id,target),
+                                Command::MoveFloat{target,bounds,..}=>model.move_float(&client,request_id,target,bounds),
+                                _=>unreachable!("floating command classified"),
+                            }} else {Err(std::io::Error::other("Workspace is not ready"))};
+                        match result {
+                            Err(error)=>publish(&updates,Update::FloatingAction(FloatingActionResult{connection_id,request_id,outcome:FloatingActionOutcome::Rejected(error.to_string())}),&stop).await?,
+                            Ok(false)=>publish(&updates,Update::FloatingAction(FloatingActionResult{connection_id,request_id,outcome:FloatingActionOutcome::Confirmed}),&stop).await?,
+                            Ok(true)=>if let Some(model)=&model {publish(&updates,Update::Workspace(Box::new(model.clone())),&stop).await?;},
+                        }
+                        continue;
+                    }
                     if let Command::TransferPane { request_id, source, target } = command {
                         if model.as_ref().is_some_and(|model|model.transfer_request_pending(request_id)) {continue;}
                         let connection_id=source.connection_id;
@@ -703,7 +739,7 @@ async fn run_service(
                         continue;
                     };
                     let result: std::io::Result<()> = match command {
-                        Command::TransferPane { .. } | Command::Zoom { .. } | Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
+                        Command::FloatPane{..} | Command::DockFloat{..} | Command::MoveFloat{..} | Command::TransferPane { .. } | Command::Zoom { .. } | Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
                             unreachable!("close is handled before normal commands")
                         }
                         Command::CreateScreen(name) => {
@@ -1005,7 +1041,7 @@ async fn run_service(
                                     match workspace_refresh.apply_snapshot(model, event.connection_id, json) {
                                         Ok(applied) => {
                                             delta = applied;
-                                            accepted_close_snapshot = delta.snapshot_changed;
+                                            accepted_close_snapshot = delta.snapshot_changed && !model.routes_reconciling();
                                         }
                                         Err(error) => {
                                             if event.connection_id == model.connection_id() {
@@ -1101,6 +1137,7 @@ async fn run_service(
                                     if let Some(model) = &mut model {
                                         model.observe_placement_failure(event.connection_id, json);
                                         model.observe_transfer_failure(event.connection_id, json);
+                                        model.observe_floating_failure(event.connection_id, json);
                                     }
                                     if let Some(close) = &mut pending_close {
                                         close.observe_failure(json);
@@ -1182,6 +1219,7 @@ async fn run_service(
                     if delta.snapshot_changed
                         || delta.placement.is_some()
                         || delta.transfer.is_some()
+                        || delta.floating.is_some()
                         || !delta.added.is_empty()
                         || !delta.removed.is_empty()
                     {
@@ -1198,6 +1236,7 @@ async fn run_service(
                         pending_resize.clear();
                         pending_hide.extend(attached.iter().cloned());
                     }
+                    if let Some(result)=delta.floating {publish(&updates,Update::FloatingAction(result),&stop).await?;}
                     if let Some(result)=delta.transfer {publish(&updates,Update::ScreenTransfer(result),&stop).await?;}
                     if let Some(reason)=delta.reconciliation_error {publish(&updates,Update::Status(reason),&stop).await?;}
                     if let Some(PlacementOutcome::Rejected(reason)) = delta.placement {
@@ -2147,3 +2186,6 @@ mod zoom_tests;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod transfer_tests;
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod floating_tests;

@@ -79,6 +79,9 @@ pub enum MuxError {
     #[error("floating entry {0} not found")]
     FloatingNotFound(FloatingId),
 
+    #[error("floating bounds must be finite with positive width and height")]
+    InvalidFloatBounds,
+
     #[error("cannot float the last pane in the grid")]
     LastPane,
 

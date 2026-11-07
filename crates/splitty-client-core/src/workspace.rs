@@ -4,6 +4,7 @@ use crate::{
     connection::{invalid, MAX_ATTACHMENTS},
     Client, ScreenIds,
 };
+pub use catalog::floating::{FloatingActionOutcome, FloatingActionResult, FloatingTarget};
 pub(crate) use catalog::refresh::WorkspaceRefresh;
 pub use catalog::transfer::{
     PaneActionTarget, ScreenTransferOutcome, ScreenTransferResult, ScreenTransferTarget,
@@ -11,7 +12,9 @@ pub use catalog::transfer::{
 pub use catalog::LocalWorkspace;
 use serde::Deserialize;
 use serde_json::Value;
-pub use splitty_core::mux::{Axis, Direction, LayoutNode, ScreenInfo, ScreenState};
+pub use splitty_core::mux::{
+    Axis, Direction, FloatBounds, FloatingEntry, LayoutNode, ScreenInfo, ScreenState,
+};
 use splitty_core::{
     ids::{NodeId, PaneId, SessionId},
     mux::{self, ScreenOp},
@@ -36,6 +39,7 @@ pub struct WorkspaceDelta {
     pub removed: Vec<SessionRoute>,
     pub placement: Option<PlacementOutcome>,
     pub transfer: Option<ScreenTransferResult>,
+    pub floating: Option<FloatingActionResult>,
     pub reconciliation_error: Option<String>,
     pub coherent_refresh: bool,
 }
@@ -236,7 +240,7 @@ impl ScreenModel {
         Some(
             self.maximized_slot
                 .as_ref()
-                .and_then(|id| screen.root.find_node(&NodeId::from(id.as_str())))
+                .and_then(|id| find_node(screen,id))
                 .filter(|node| matches!(node, LayoutNode::Slot { pane_ids, .. } if !pane_ids.is_empty()))
                 .unwrap_or(&screen.root),
         )
@@ -247,24 +251,44 @@ impl ScreenModel {
     }
 
     pub fn focused_slot_id(&self) -> Option<&str> {
-        self.snapshot()?
-            .root
-            .find_slot(&PaneId::from(self.focused_pane()?))
-            .map(|slot| slot.id().as_str())
+        find_slot(self.snapshot()?, self.focused_pane()?).map(|slot| slot.id().as_str())
     }
-
+    pub fn presented_floats(&self) -> &[FloatingEntry] {
+        if self.maximized_slot.is_some() {
+            &[]
+        } else {
+            self.snapshot()
+                .map_or(&[], |screen| screen.floating.as_slice())
+        }
+    }
+    pub fn floating(&self, id: &str) -> Option<&FloatingEntry> {
+        self.snapshot()?
+            .floating
+            .iter()
+            .find(|entry| entry.id.as_str() == id)
+    }
+    pub fn floating_for_pane(&self, pane: &str) -> Option<&FloatingEntry> {
+        self.snapshot()?
+            .floating
+            .iter()
+            .find(|entry| entry.root.find_slot(&PaneId::from(pane)).is_some())
+    }
     pub fn displayed_panes(&self) -> Vec<String> {
         let mut panes = Vec::new();
         if let Some(root) = self.presentation_root() {
             collect_visible(root, &self.selected_tabs, &mut panes);
         }
+        for entry in self.presented_floats() {
+            collect_visible(&entry.root, &self.selected_tabs, &mut panes);
+        }
         panes
     }
-
     pub fn is_displayed_pane(&self, pane: &str) -> bool {
         self.presentation_root()
-            .and_then(|root| root.find_slot(&PaneId::from(pane)))
-            .is_some_and(|slot| self.selected_pane(slot) == Some(pane))
+            .into_iter()
+            .chain(self.presented_floats().iter().map(|entry| &entry.root))
+            .filter_map(|root| root.find_slot(&PaneId::from(pane)))
+            .any(|slot| self.selected_pane(slot) == Some(pane))
     }
 
     pub fn toggle_maximize_focused(&mut self) -> bool {
@@ -283,7 +307,7 @@ impl ScreenModel {
             (None, None) => self.maximized_slot.take().is_some(),
             (Some(slot), Some(pane)) => {
                 let valid = self.snapshot().is_some_and(|screen| {
-                    matches!(screen.root.find_node(&NodeId::from(slot)),
+                    matches!(find_node(screen,slot),
                         Some(LayoutNode::Slot { pane_ids, .. })
                             if pane_ids.iter().any(|id| id.as_str() == pane))
                 });
@@ -506,12 +530,9 @@ impl ScreenModel {
             .pending_focus
             .as_ref()
             .filter(|pane_id| {
-                self.snapshot.as_ref().is_some_and(|screen| {
-                    screen
-                        .root
-                        .find_slot(&PaneId::from(pane_id.as_str()))
-                        .is_some()
-                })
+                self.snapshot
+                    .as_ref()
+                    .is_some_and(|screen| find_slot(screen, pane_id).is_some())
             })
             .cloned()
         {
@@ -757,6 +778,12 @@ impl ScreenModel {
     }
 
     pub fn split(&mut self, client: &Client, pane_id: &str, axis: Axis) -> io::Result<String> {
+        if !self
+            .snapshot()
+            .is_some_and(|screen| screen.root.find_slot(&PaneId::from(pane_id)).is_some())
+        {
+            return Err(invalid("Splitting floating groups is not supported"));
+        }
         self.admit_new_pane()?;
         let new_pane_id = Uuid::new_v4().to_string();
         let op = ScreenOp::SplitPane {
@@ -967,7 +994,7 @@ impl ScreenModel {
             .retain(|slot_id, _| valid_slots.contains(slot_id));
         if self.maximized_slot.as_ref().is_some_and(|slot| {
             !matches!(
-                screen.root.find_node(&NodeId::from(slot.as_str())),
+                find_node(screen,slot),
                 Some(LayoutNode::Slot { pane_ids, .. }) if !pane_ids.is_empty()
             )
         }) {
@@ -977,7 +1004,7 @@ impl ScreenModel {
         let root = self
             .maximized_slot
             .as_ref()
-            .and_then(|id| screen.root.find_node(&NodeId::from(id.as_str())))
+            .and_then(|id| find_node(screen, id))
             .unwrap_or(&screen.root);
         collect_visible(root, &self.selected_tabs, &mut visible);
         if self.maximized_slot.is_none() {
@@ -1035,6 +1062,11 @@ fn same_layout(a: &LayoutNode, b: &LayoutNode) -> bool {
     }
 }
 
+fn find_node<'a>(screen: &'a ScreenState, id: &str) -> Option<&'a LayoutNode> {
+    std::iter::once(&screen.root)
+        .chain(screen.floating.iter().map(|entry| &entry.root))
+        .find_map(|root| root.find_node(&NodeId::from(id)))
+}
 fn find_slot<'a>(screen: &'a ScreenState, pane_id: &str) -> Option<&'a LayoutNode> {
     let pane_id = PaneId::from(pane_id);
     std::iter::once(&screen.root)

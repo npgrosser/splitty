@@ -120,7 +120,8 @@ fn captured_hidden_tab_admission_rejects_stale_conflicts_and_queue_failure_atomi
     let mut job = snap("a", &["p", "q"]);
     job["screen"]["panes"]["q"]["jobId"] = json!("job");
     model.apply_snapshot(model.connection_id, &job).unwrap();
-    assert!(model.validate_pane_action(&source).is_err());
+    assert!(model.validate_pane_action(&source).is_ok());
+    assert!(!model.can_transfer_pane(&source));
     model
         .apply_snapshot(model.connection_id, &snap("a", &["p", "q"]))
         .unwrap();

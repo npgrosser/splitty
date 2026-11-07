@@ -26,15 +26,16 @@ impl ProfilePicker {
         let Some(screen) = model.shown() else {
             return false;
         };
-        let Some(slot @ LayoutNode::Slot { .. }) = model
-            .presentation_root()
-            .and_then(|root| slot_by_id(root, &source.slot))
-        else {
+        let Some(slot @ LayoutNode::Slot { .. }) = presented_slot_by_id(model, &source.slot) else {
             return false;
         };
-        screen.selected_pane(slot) == Some(source.pane.as_str())
-            && screen.session_for(&source.pane) == Some(source.session.as_str())
+        source_matches_slot(screen, source, slot)
     }
+}
+
+fn source_matches_slot(screen: &ScreenModel, source: &ProfileSource, slot: &LayoutNode) -> bool {
+    screen.selected_pane(slot) == Some(source.pane.as_str())
+        && screen.session_for(&source.pane) == Some(source.session.as_str())
 }
 
 fn next_id<'a>(ids: &[&'a str], current: Option<&str>, down: bool) -> Option<&'a str> {
@@ -132,10 +133,7 @@ impl Workspace {
         let Some(screen) = model.shown_screen_id() else {
             return;
         };
-        let Some(source_slot @ LayoutNode::Slot { .. }) = model
-            .presentation_root()
-            .and_then(|root| slot_by_id(root, slot))
-        else {
+        let Some(source_slot @ LayoutNode::Slot { .. }) = presented_slot_by_id(model, slot) else {
             return;
         };
         if model
@@ -396,5 +394,65 @@ impl Workspace {
                 .child(menu)
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{source_matches_slot, ProfileSource};
+    use crate::workspace::presented_slot_in;
+    use splitty_client_core::{workspace::ScreenModel, ScreenIds};
+    use uuid::Uuid;
+
+    #[test]
+    fn captured_profile_source_resolves_visible_float_and_rejects_hidden_or_replaced_session() {
+        let connection = Uuid::new_v4();
+        let mut screen = ScreenModel::new(
+            ScreenIds {
+                screen_id: "screen".into(),
+                pane_id: "tiled".into(),
+            },
+            connection,
+        );
+        let snapshot = serde_json::json!({
+            "type":"mux.screen_snapshot",
+            "screen":{"id":"screen","revision":1,
+                "root":{"type":"slot","id":"tile-slot","paneIds":["tiled"]},
+                "floating":[{"id":"float","root":{"type":"slot","id":"float-slot","paneIds":["floating"]},
+                    "bounds":{"x":0.25,"y":0.25,"w":0.5,"h":0.5}}],
+                "panes":{"tiled":{"id":"tiled","sessionId":"st"},
+                    "floating":{"id":"floating","sessionId":"sf"}},
+                "sessions":{"st":{"id":"st","status":"running"},"sf":{"id":"sf","status":"running"}}}
+        });
+        screen.apply_snapshot(connection, &snapshot).unwrap();
+        let source = ProfileSource {
+            connection: connection.to_string(),
+            screen: "screen".into(),
+            slot: "float-slot".into(),
+            pane: "floating".into(),
+            session: "sf".into(),
+        };
+        let slot = presented_slot_in(
+            screen.presentation_root(),
+            screen.presented_floats(),
+            &source.slot,
+        )
+        .unwrap();
+        assert!(source_matches_slot(&screen, &source, slot));
+        let stale = ProfileSource {
+            session: "replaced".into(),
+            ..source
+        };
+        assert!(!source_matches_slot(&screen, &stale, slot));
+        assert!(
+            screen.toggle_maximize_focused(),
+            "the tiled slot becomes the only presented surface"
+        );
+        assert!(presented_slot_in(
+            screen.presentation_root(),
+            screen.presented_floats(),
+            &stale.slot
+        )
+        .is_none());
     }
 }

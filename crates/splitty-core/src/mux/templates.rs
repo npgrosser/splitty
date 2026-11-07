@@ -67,20 +67,20 @@ pub(super) fn apply_template(
         if entry.layout.slot.is_none() {
             return Err(invalid("floating layouts must be slots"));
         }
-        let b = &entry.bounds;
-        if ![b.x, b.y, b.w, b.h].iter().all(|v| v.is_finite()) || b.w <= 0.0 || b.h <= 0.0 {
+        let bounds = FloatBounds {
+            x: entry.bounds.x,
+            y: entry.bounds.y,
+            w: entry.bounds.w,
+            h: entry.bounds.h,
+        };
+        if !bounds.is_valid() {
             return Err(invalid("invalid floating bounds"));
         }
         if let Some(root) = project_node(&entry.layout, &request, &mut names, 0, &mut next_node)? {
             floating.push(FloatingEntry {
                 id: FloatingId::from(format!("template-floating-{index}")),
                 root,
-                bounds: FloatBounds {
-                    x: b.x,
-                    y: b.y,
-                    w: b.w,
-                    h: b.h,
-                },
+                bounds,
             });
         }
     }
@@ -560,6 +560,70 @@ mod tests {
                 before
             );
         }
+    }
+
+    #[test]
+    fn template_floating_bounds_share_domain_validation_and_reject_atomically() {
+        let store = Store::new();
+        store
+            .dispatch(Op::ApplyTemplate {
+                screen_id: "screen".into(),
+                request: Box::new(request()),
+            })
+            .unwrap();
+        let before = serde_json::to_value(store.get_workspace_state()).unwrap();
+        for component in 0..4 {
+            let mut values = vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+            if component >= 2 {
+                values.extend([0.0, -1.0]);
+            }
+            for value in values {
+                let mut r = request();
+                r.create_screen = false;
+                r.pane_ids.clear();
+                let bounds = &mut r.template.floating[0].bounds;
+                *match component {
+                    0 => &mut bounds.x,
+                    1 => &mut bounds.y,
+                    2 => &mut bounds.w,
+                    _ => &mut bounds.h,
+                } = value;
+                assert!(matches!(
+                    store.dispatch(Op::ApplyTemplate {
+                        screen_id: "screen".into(),
+                        request: Box::new(r),
+                    }),
+                    Err(MuxError::InvalidTemplate(_))
+                ));
+                assert_eq!(
+                    serde_json::to_value(store.get_workspace_state()).unwrap(),
+                    before
+                );
+            }
+        }
+        let mut r = request();
+        r.create_screen = false;
+        r.pane_ids.clear();
+        let bounds = &mut r.template.floating[0].bounds;
+        bounds.x = -2.0;
+        bounds.y = 3.0;
+        bounds.w = 4.0;
+        bounds.h = 5.0;
+        store
+            .dispatch(Op::ApplyTemplate {
+                screen_id: "screen".into(),
+                request: Box::new(r),
+            })
+            .unwrap();
+        assert_eq!(
+            store.get_screen(&"screen".into()).unwrap().floating[0].bounds,
+            FloatBounds {
+                x: -2.0,
+                y: 3.0,
+                w: 4.0,
+                h: 5.0
+            }
+        );
     }
 
     #[test]

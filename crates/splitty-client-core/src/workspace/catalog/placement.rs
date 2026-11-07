@@ -33,6 +33,7 @@ impl LocalWorkspace {
     }
     pub(super) fn cancel_placement_focus(&mut self) {
         self.cancel_transfer_focus();
+        self.cancel_floating_focus();
         if let Some(pending) = &mut self.pending_placement {
             pending.focus = false;
         }
@@ -276,9 +277,7 @@ impl LocalWorkspace {
         let snapshot = model
             .snapshot()
             .ok_or_else(|| invalid("screen snapshot not loaded"))?;
-        let Some(node @ LayoutNode::Slot { pane_ids, .. }) =
-            snapshot.root.find_node(&NodeId::from(slot))
-        else {
+        let Some(node @ LayoutNode::Slot { pane_ids, .. }) = find_node(snapshot, slot) else {
             return Err(invalid("focused group is gone"));
         };
         let selected = model

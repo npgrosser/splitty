@@ -44,13 +44,24 @@ pub enum PaneRole {
     Viewer,
 }
 
-/// Relative position/size within the viewport (0.0–1.0).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// Position/size in viewport units; offscreen origins and sizes above 1 are valid.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FloatBounds {
     pub x: f64,
     pub y: f64,
     pub w: f64,
     pub h: f64,
+}
+
+impl FloatBounds {
+    /// Domain validity, independent of a client's viewport or display clamping.
+    pub fn is_valid(&self) -> bool {
+        [self.x, self.y, self.w, self.h]
+            .iter()
+            .all(|value| value.is_finite())
+            && self.w > 0.0
+            && self.h > 0.0
+    }
 }
 
 impl Default for FloatBounds {

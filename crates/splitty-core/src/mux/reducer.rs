@@ -413,7 +413,7 @@ fn reduce_move_pane_to_screen(
         .as_ref()
         .and_then(|id| source.sessions.remove(id));
     match location {
-        SlotLocation::Floating(index) => close_pane_in_floating(&mut source, &pane_id, index),
+        SlotLocation::Floating(index) => close_pane_in_floating(&mut source, &pane_id, index, None),
         SlotLocation::Root => close_pane_in_root(&mut source, &pane_id, None),
     }
     source.revision += 1;
@@ -1281,7 +1281,7 @@ fn reduce_close_pane(
 
     match location {
         SlotLocation::Floating(idx) => {
-            close_pane_in_floating(&mut state, &pane_id, idx);
+            close_pane_in_floating(&mut state, &pane_id, idx, resulting_sizes);
         }
         SlotLocation::Root => {
             close_pane_in_root(&mut state, &pane_id, resulting_sizes);
@@ -1291,28 +1291,16 @@ fn reduce_close_pane(
     Ok((state, effects))
 }
 
-fn close_pane_in_floating(state: &mut ScreenState, pane_id: &PaneId, floating_idx: usize) {
-    // First, gather info with an immutable borrow
-    let slot_info = state.floating[floating_idx]
-        .root
-        .find_slot(pane_id)
-        .map(|s| {
-            let id = s.id().clone();
-            let multi = matches!(s, LayoutNode::Slot { pane_ids, .. } if pane_ids.len() > 1);
-            (id, multi)
-        });
-
-    match slot_info {
-        Some((slot_id, true)) => {
-            // Remove from stack within floating
-            if let Some(slot) = state.floating[floating_idx].root.find_node_mut(&slot_id) {
-                remove_pane_from_slot(slot, pane_id);
-            }
-        }
-        _ => {
-            // Remove entire floating entry
-            state.floating.remove(floating_idx);
-        }
+fn close_pane_in_floating(
+    state: &mut ScreenState,
+    pane_id: &PaneId,
+    floating_idx: usize,
+    resulting_sizes: Option<Vec<f64>>,
+) {
+    let root = &mut state.floating[floating_idx].root;
+    close_pane_in_tree(root, pane_id, resulting_sizes);
+    if root.count_panes() == 0 {
+        state.floating.remove(floating_idx);
     }
 }
 
@@ -1321,23 +1309,28 @@ fn close_pane_in_root(
     pane_id: &PaneId,
     resulting_sizes: Option<Vec<f64>>,
 ) {
-    let slot_id = state.root.find_slot(pane_id).unwrap().id().clone();
-    let slot_pane_count = match state.root.find_node(&slot_id).unwrap() {
+    close_pane_in_tree(&mut state.root, pane_id, resulting_sizes);
+}
+
+/// Remove a located pane while preserving sibling subtrees, for either root kind.
+fn close_pane_in_tree(root: &mut LayoutNode, pane_id: &PaneId, resulting_sizes: Option<Vec<f64>>) {
+    let slot_id = root.find_slot(pane_id).unwrap().id().clone();
+    let slot_pane_count = match root.find_node(&slot_id).unwrap() {
         LayoutNode::Slot { pane_ids, .. } => pane_ids.len(),
         _ => 0,
     };
 
     if slot_pane_count > 1 {
         // Multi-pane slot — just remove from stack
-        if let Some(slot) = state.root.find_node_mut(&slot_id) {
+        if let Some(slot) = root.find_node_mut(&slot_id) {
             remove_pane_from_slot(slot, pane_id);
         }
     } else {
         // Single-pane slot — remove from tree
-        let parent_info = state.root.find_parent_info(&slot_id);
+        let parent_info = root.find_parent_info(&slot_id);
         if let Some(info) = parent_info {
             let parent_id = info.id.clone();
-            if let Some(parent) = state.root.find_node_mut(&parent_id) {
+            if let Some(parent) = root.find_node_mut(&parent_id) {
                 if let LayoutNode::Split {
                     children, sizes, ..
                 } = parent
@@ -1348,13 +1341,13 @@ fn close_pane_in_root(
                     if children.len() == 1 {
                         // Collapse: replace parent split with its single child
                         let child = children.remove(0);
-                        replace_node(&mut state.root, &parent_id, child);
+                        replace_node(root, &parent_id, child);
                     }
                 }
             }
         } else {
             // Root slot — keep a bare empty slot
-            state.root = LayoutNode::new_slot(slot_id, vec![]);
+            *root = LayoutNode::new_slot(slot_id, vec![]);
         }
     }
 }
@@ -2828,6 +2821,204 @@ mod tests {
         assert_eq!(
             store.screen_of_movable_pane(&PaneId::from("p3")),
             Some(ScreenId::from("scr2"))
+        );
+    }
+
+    #[test]
+    fn invalid_floating_bounds_reject_atomically_for_float_and_move() {
+        let tiled = two_pane_screen();
+        let (floated, _) = reduce_screen(
+            tiled.clone(),
+            ScreenOp::FloatPane {
+                pane_id: "p2".into(),
+                bounds: None,
+            },
+        )
+        .unwrap();
+        for component in 0..4 {
+            let mut invalid = vec![f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+            if component >= 2 {
+                invalid.extend([0.0, -0.0, -1.0]);
+            }
+            for value in invalid {
+                let mut bounds = FloatBounds::default();
+                *match component {
+                    0 => &mut bounds.x,
+                    1 => &mut bounds.y,
+                    2 => &mut bounds.w,
+                    _ => &mut bounds.h,
+                } = value;
+                let float = ScreenOp::FloatPane {
+                    pane_id: "p2".into(),
+                    bounds: Some(bounds.clone()),
+                };
+                let movement = ScreenOp::MoveFloat {
+                    floating_id: floated.floating[0].id.clone(),
+                    bounds,
+                };
+                for (state, op) in [(&tiled, float), (&floated, movement)] {
+                    let store = store_with(state.clone());
+                    let changes = store.changes();
+                    let before = serde_json::to_value(store.get_workspace_state()).unwrap();
+                    assert!(matches!(
+                        store.dispatch(Op::ModifyScreen {
+                            screen_id: state.id.clone(),
+                            op
+                        }),
+                        Err(MuxError::InvalidFloatBounds)
+                    ));
+                    assert_eq!(
+                        serde_json::to_value(store.get_workspace_state()).unwrap(),
+                        before
+                    );
+                    assert_eq!(*changes.borrow(), 0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn floating_bounds_preserve_finite_offscreen_and_oversized_values() {
+        let initial = FloatBounds {
+            x: -2.0,
+            y: 3.0,
+            w: 4.0,
+            h: 0.01,
+        };
+        let (state, effects) = reduce_screen(
+            two_pane_screen(),
+            ScreenOp::FloatPane {
+                pane_id: "p2".into(),
+                bounds: Some(initial.clone()),
+            },
+        )
+        .unwrap();
+        assert!(effects.is_empty());
+        assert_eq!(state.floating[0].bounds, initial);
+        let moved = FloatBounds {
+            x: f64::MAX,
+            y: -f64::MAX,
+            w: f64::MIN_POSITIVE,
+            h: 2.0,
+        };
+        let op = ScreenOp::MoveFloat {
+            floating_id: state.floating[0].id.clone(),
+            bounds: moved.clone(),
+        };
+        let (state, effects) = reduce_screen(state, op).unwrap();
+        assert!(effects.is_empty());
+        assert_eq!(state.floating[0].bounds, moved);
+    }
+
+    fn nested_float_screen() -> ScreenState {
+        let mut state = two_pane_screen();
+        for number in 3..=6 {
+            let mut pane = state.panes[&PaneId::from("p1")].clone();
+            let mut session = state.sessions[&SessionId::from("s1")].clone();
+            pane.id = format!("p{number}").into();
+            session.id = format!("s{number}").into();
+            pane.session_id = Some(session.id.clone());
+            state.panes.insert(pane.id.clone(), pane);
+            state.sessions.insert(session.id.clone(), session);
+        }
+        state.root = LayoutNode::new_slot("root".into(), vec!["p1".into()]);
+        state.floating = vec![FloatingEntry {
+            id: "float".into(),
+            bounds: FloatBounds::default(),
+            root: serde_json::from_value(serde_json::json!({
+                "type":"split", "id":"outer", "axis":"horizontal", "sizes":[0.2,0.5,0.3],
+                "children":[
+                    {"type":"slot", "id":"stack", "paneIds":["p2","p3"], "activePaneId":"p3"},
+                    {"type":"split", "id":"inner", "axis":"vertical", "sizes":[0.4,0.6], "children":[
+                        {"type":"slot", "id":"four", "paneIds":["p4"]},
+                        {"type":"slot", "id":"five", "paneIds":["p5"]}
+                    ]},
+                    {"type":"slot", "id":"six", "paneIds":["p6"]}
+                ]
+            })).unwrap(),
+        }];
+        state
+    }
+
+    #[test]
+    fn closing_nested_float_preserves_siblings_and_kills_only_the_requested_session() {
+        let mut state = nested_float_screen();
+        let root_before = serde_json::to_value(&state.root).unwrap();
+        for (index, pane) in ["p3", "p6", "p4", "p2", "p5"].into_iter().enumerate() {
+            let pane_id = PaneId::from(pane);
+            let session = state.panes[&pane_id].session_id.clone().unwrap();
+            let (next, effects) = reduce_screen(
+                state,
+                ScreenOp::ClosePane {
+                    pane_id: pane_id.clone(),
+                    resulting_sizes: None,
+                },
+            )
+            .unwrap();
+            state = next;
+            assert!(
+                matches!(effects.as_slice(), [Effect::KillSession { session_id }] if session_id == &session)
+            );
+            assert!(!state.panes.contains_key(&pane_id));
+            assert!(!state.sessions.contains_key(&session));
+            assert_eq!(state.panes.len(), 5 - index);
+            assert_eq!(state.sessions.len(), 5 - index);
+            let located: std::collections::HashSet<_> = state.panes_in_layout_order().collect();
+            assert_eq!(located, state.panes.keys().cloned().collect());
+            assert_eq!(serde_json::to_value(&state.root).unwrap(), root_before);
+            if index == 4 {
+                assert!(state.floating.is_empty());
+                continue;
+            }
+            assert_eq!(state.floating.len(), 1);
+            assert_eq!(state.floating[0].id, FloatingId::from("float"));
+            assert_eq!(state.floating[0].bounds, FloatBounds::default());
+            let tree = &state.floating[0].root;
+            match index {
+                0 => assert!(
+                    matches!(tree.find_node(&"stack".into()), Some(LayoutNode::Slot { pane_ids, active_pane_id, .. }) if pane_ids == &[PaneId::from("p2")] && active_pane_id.as_ref() == Some(&PaneId::from("p2")))
+                ),
+                1 => assert!(
+                    matches!(tree, LayoutNode::Split { children, sizes, .. } if children.len() == 2 && sizes == &[0.5, 0.5])
+                ),
+                2 => {
+                    assert!(tree.find_node(&"inner".into()).is_none());
+                    assert!(tree.find_node(&"five".into()).is_some());
+                }
+                3 => assert_eq!(tree.id(), &NodeId::from("five")),
+                _ => unreachable!(),
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_from_nested_float_keeps_siblings_and_session_without_effects() {
+        let source = nested_float_screen();
+        let session_before =
+            serde_json::to_value(&source.sessions[&SessionId::from("s4")]).unwrap();
+        let store = store_with(source);
+        let effects = store
+            .dispatch(move_op("screen1", "p4", "target", Some("Target")))
+            .unwrap();
+        assert!(effects.is_empty());
+        let state = store.get_workspace_state();
+        let source = &state.screens[&ScreenId::from("screen1")];
+        assert_eq!(
+            source.floating[0].root.collect_pane_ids(),
+            vec![PaneId::from("p2"), "p3".into(), "p5".into(), "p6".into()]
+        );
+        assert!(source.floating[0].root.find_node(&"inner".into()).is_none());
+        assert_eq!(source.panes.len(), 5);
+        assert_eq!(source.sessions.len(), 5);
+        let target = &state.screens[&ScreenId::from("target")];
+        assert_eq!(target.root.collect_pane_ids(), vec![PaneId::from("p4")]);
+        assert_eq!(
+            target.panes[&PaneId::from("p4")].session_id,
+            Some("s4".into())
+        );
+        assert_eq!(
+            serde_json::to_value(&target.sessions[&SessionId::from("s4")]).unwrap(),
+            session_before
         );
     }
 

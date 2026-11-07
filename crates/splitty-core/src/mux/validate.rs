@@ -7,9 +7,9 @@ use std::collections::HashSet;
 
 use super::ops::{Arrangement, ScreenOp, ViewerPlacement};
 use super::state::{
-    equal_sizes, AnnotationKind, AnnotationReply, Axis, LayoutNode, PaneRole, ReplyAuthor,
-    ReviewWait, ScreenState, SentEntry, SlotLocation, ViewerAnnotation, ViewerSource, ViewerState,
-    ANNOTATION_CONTEXT_LIMIT, ANNOTATION_COUNT_LIMIT, ANNOTATION_LINE_LIMIT,
+    equal_sizes, AnnotationKind, AnnotationReply, Axis, FloatBounds, LayoutNode, PaneRole,
+    ReplyAuthor, ReviewWait, ScreenState, SentEntry, SlotLocation, ViewerAnnotation, ViewerSource,
+    ViewerState, ANNOTATION_CONTEXT_LIMIT, ANNOTATION_COUNT_LIMIT, ANNOTATION_LINE_LIMIT,
     ANNOTATION_PANE_TEXT_LIMIT, ANNOTATION_TEXT_LIMIT, MARK_SENT_LIMIT, REPLY_COUNT_LIMIT,
     REPLY_TITLE_LIMIT, SCRATCHPAD_LIMIT, VIEWER_PATH_LIMIT, VIEWER_TEXT_LIMIT, VIEWER_TITLE_LIMIT,
 };
@@ -55,9 +55,18 @@ pub fn validate_screen_op(state: &ScreenState, op: &ScreenOp) -> Result<(), MuxE
             before_pane_id.as_ref(),
         ),
         ScreenOp::ArrangePanes { root } => arranged_root(state, root).map(|_| ()),
-        ScreenOp::FloatPane { pane_id, .. } => validate_float_pane(state, pane_id),
+        ScreenOp::FloatPane { pane_id, bounds } => {
+            validate_float_pane(state, pane_id)?;
+            bounds.as_ref().map_or(Ok(()), validate_float_bounds)
+        }
         ScreenOp::DockPane { floating_id, .. } => validate_dock_pane(state, floating_id),
-        ScreenOp::MoveFloat { floating_id, .. } => validate_move_float(state, floating_id),
+        ScreenOp::MoveFloat {
+            floating_id,
+            bounds,
+        } => {
+            validate_move_float(state, floating_id)?;
+            validate_float_bounds(bounds)
+        }
         ScreenOp::SetScratchpad { session_id, text } => {
             validate_set_scratchpad(state, session_id, text)
         }
@@ -880,6 +889,14 @@ fn arranged_node(state: &ScreenState, node: &Arrangement) -> Result<Option<Layou
                 sizes,
             )))
         }
+    }
+}
+
+fn validate_float_bounds(bounds: &FloatBounds) -> Result<(), MuxError> {
+    if bounds.is_valid() {
+        Ok(())
+    } else {
+        Err(MuxError::InvalidFloatBounds)
     }
 }
 
