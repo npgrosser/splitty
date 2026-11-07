@@ -13,12 +13,12 @@ model {
     }
 
     terminal = component 'terminal' {
-      description 'Native terminal presentation, cached text shaping, local find editing and highlights, pointer geometry and admitted gesture lifetime, and byte-preserving session input routing.'
+      description 'Native terminal presentation, cached text shaping, local find editing and highlights, pointer geometry and admitted gesture lifetime, deliberate validated browser links, and byte-preserving session input routing.'
       metadata { module 'splitty_gpui::terminal' }
     }
 
     terminal_engine = component 'terminal_engine' {
-      description 'Thread-confined Ghostty ownership, bounded local search and owned match spans, terminal protocol state, requested mouse encoding and borrowed render snapshots.'
+      description 'Thread-confined Ghostty ownership, bounded local search and owned match spans, bounded owned hyperlink hits, terminal protocol state, requested mouse encoding and borrowed render snapshots.'
       metadata { module 'splitty_gpui::terminal_engine' }
     }
 
@@ -50,6 +50,7 @@ model {
     gpui_app -> offscreen 'Composite the offscreen engine frame under an overlay'
     gpui_app -> terminal 'Show terminal output and forward native input'
     terminal -> terminal_engine 'Borrow native terminal state and encode checked input'
+    terminal -> splitty.client_core.external_links 'Validate bounded HTTP(S) targets before explicit platform dispatch'
     gpui_workspace -> terminal 'Keep one terminal view per pane identity'
     gpui_workspace -> gpui_appearance 'Convert resolved theme values for native chrome and terminal colors'
     gpui_workspace -> splitty.client_core.appearance 'Match owner and generation before applying resolved appearance'

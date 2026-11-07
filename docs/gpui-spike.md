@@ -133,6 +133,18 @@ case-insensitive; other characters match exactly. It covers the retained screen
 and history, including soft-wrapped text. Search highlights do not replace text
 selection or change what Copy copies.
 
+Hold Ctrl (Cmd on macOS) and click a terminal link to request the system browser.
+Explicit OSC 8 links use their actual target, which can differ from the printed
+label. Ordinary absolute HTTP(S) URLs are detected across soft wraps, including
+retained output. Ctrl/Cmd-hover feedback shows the allowed target. Shift keeps local
+selection; ordinary application mouse input is unchanged. Dragging, scrolling,
+changing the target or leaving its cell before release cancels activation.
+Only absolute HTTP(S) targets are accepted; editor and file schemes are not
+generic terminal links. This local preview does not establish remote forwards.
+The pinned terminal parser discards oversized OSC 8 commands (a 2,048-byte
+fixed capture buffer). Their labels can still be ordinary detected URLs; no
+shortened explicit target is opened.
+
 Each terminal remembers its query and whether find is open. Only the focused
 visible pane keeps an active index; changing tabs or Screens rebuilds it when
 that pane returns. The query is limited to 1,024 UTF-8 bytes, native search
@@ -347,6 +359,45 @@ input delivered both up and down application-mode cursor sequences. The optimize
 integrated binary also passed the Wayland/X11 hardware workspace smoke and exited
 cleanly. This verifies the cursor-key fallback. Application mouse reporting is
 covered separately below.
+
+## Native terminal-link acceptance
+
+Link interpretation stays in the terminal adapter, parsed HTTP(S) admission in
+the UI-free client layer, and pointer gestures/platform opening in the view.
+The adapter returns owned targets, including soft-wrapped text and wide-cell
+hits, and retains no native grid references. It bounds complete logical-line
+inspection to 16 KiB, 128 rows and 80,000 cells; exceeding a bound yields no
+detected target. Explicit metadata retained by the terminal takes precedence.
+The pinned parser's oversized OSC 8 behavior is described above.
+
+The isolated X11 driver records exact PTY bytes and substitutes successful
+process-local opener spies, including the WSL browser launcher. It never sends
+test URLs to a real browser. The driver exercises actual pointer dispatch and
+the platform handoff, rather than invoking a product test entry point:
+
+```sh
+python3 scripts/testing/gpui-terminal-links.py target/release/splitty-gpui \
+  --output /tmp/splitty-link-evidence --display :95 \
+  --xvfb /path/to/Xvfb --xdotool /path/to/xdotool
+```
+
+The frozen binary SHA-256
+`52be3461770d5d52deb8defb8bdc4ab057a78848dc7ad858760623e01a9cc3dc`
+passed all 12 window checks: no automatic opening, actual-target preview,
+OSC 8/plain/wrapped activation, rejected schemes, changed-target and pointer
+cancellation, modifier-release handling, application mouse reports and exact
+Shift-selection copy/paste. The same binary passed the Wayland/X11 hardware
+workspace smoke with joined cleanup. Screenshots confirm the actual-target
+preview and selection. An initial candidate exposed a header exit/reentry bug;
+the fixed view observes captured movement at window scope, including outside
+the terminal element, while leaving its gesture local until completion.
+
+The 64 client-core, 63 native and 17 architecture tests passed, as did affected
+crates' all-target Clippy, formatting and the C ABI assertions. Link input
+acceptance is X11-only; Wayland evidence covers the workspace/GPU workflow.
+No macOS/Windows native interaction or new whole-window latency measurement is
+claimed. The opener spy establishes the submitted target, not successful startup
+of a particular installed browser. These checks do not establish remote forwarding.
 
 ## Native shell-profile acceptance
 

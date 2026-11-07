@@ -32,6 +32,11 @@ model {
       metadata { module 'splitty_client_core::document' }
     }
 
+    external_links = component 'external_links' {
+      description 'Pure bounded absolute HTTP(S) target admission and normalization; no gesture or platform effects.'
+      metadata { module 'splitty_client_core::external_links' }
+    }
+
     client_workspace = component 'client_workspace' {
       description 'Connection-wide catalog and admission, per-screen canonical snapshots with local tab, focus and maximized-slot projection, session routes, exact tab placement with ordered settlement, clamped captured group navigation and full-scope close impact assessment.'
       metadata { module 'splitty_client_core::workspace' }

@@ -7,6 +7,7 @@ use std::ffi::{c_int, c_void};
 pub type Handle = *mut c_void;
 pub type Status = c_int;
 pub const SUCCESS: Status = 0;
+pub const INVALID_VALUE: Status = -2;
 pub const OUT_OF_SPACE: Status = -3;
 pub const NO_VALUE: Status = -4;
 pub const UNSUPPORTED: Status = -8;
@@ -257,6 +258,20 @@ unsafe extern "C" {
         out: *mut Coordinate,
     ) -> Status;
     pub fn ghostty_grid_ref_cell(reference: *const GridRef, out: *mut u64) -> Status;
+    pub fn ghostty_grid_ref_row(reference: *const GridRef, out: *mut u64) -> Status;
+    pub fn ghostty_row_get(row: u64, data: c_int, out: *mut c_void) -> Status;
+    pub fn ghostty_grid_ref_graphemes(
+        reference: *const GridRef,
+        buf: *mut u32,
+        cap: usize,
+        written: *mut usize,
+    ) -> Status;
+    pub fn ghostty_grid_ref_hyperlink_uri(
+        reference: *const GridRef,
+        buf: *mut u8,
+        cap: usize,
+        written: *mut usize,
+    ) -> Status;
 
     pub fn ghostty_terminal_new(
         allocator: *const c_void,

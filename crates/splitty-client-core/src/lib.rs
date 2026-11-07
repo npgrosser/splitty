@@ -7,6 +7,7 @@ pub mod connection;
 pub mod document;
 #[cfg(not(target_os = "windows"))]
 pub mod embedded;
+pub mod external_links;
 #[cfg(not(target_os = "windows"))]
 pub mod local_settings;
 pub mod native_workspace;

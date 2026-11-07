@@ -1,4 +1,5 @@
 //! Native terminal presentation. The service owns the PTY; Ghostty owns VT state.
+mod links;
 mod search;
 
 pub use crate::terminal_engine::ColorConfig as TerminalColors;
@@ -20,6 +21,7 @@ const MAX_ALTERNATE_WHEEL_KEYS: i32 = 5;
 enum PointerRoute {
     Selection,
     Local,
+    Link,
     Application,
 }
 
@@ -75,6 +77,10 @@ impl PointerGestures {
         route
     }
 
+    fn capture_link(&mut self) {
+        self.buttons[0] = Some(PointerRoute::Link);
+    }
+
     fn take(&mut self, button: MouseButton) -> Option<PointerRoute> {
         Self::index(button).and_then(|index| self.buttons[index].take())
     }
@@ -102,9 +108,16 @@ impl PointerGestures {
     }
 
     fn any_local_pressed(&self) -> bool {
-        self.buttons
-            .iter()
-            .any(|route| matches!(route, Some(PointerRoute::Selection | PointerRoute::Local)))
+        self.buttons.iter().any(|route| {
+            matches!(
+                route,
+                Some(PointerRoute::Selection | PointerRoute::Local | PointerRoute::Link)
+            )
+        })
+    }
+
+    fn unadmitted_button_pressed(&self, button: Option<MouseButton>) -> bool {
+        button.is_some_and(|button| self.route(button).is_none())
     }
 }
 
@@ -164,6 +177,15 @@ fn wheel_button(lines: i32, horizontal: bool) -> EngineMouseButton {
         (true, true) => EngineMouseButton::WheelLeft,
         (true, false) => EngineMouseButton::WheelRight,
     }
+}
+
+fn link_modifier(modifiers: Modifiers, mac: bool) -> bool {
+    !modifiers.shift
+        && if mac {
+            modifiers.platform
+        } else {
+            modifiers.control
+        }
 }
 
 fn append_wheel_reports(
@@ -273,6 +295,7 @@ pub struct Terminal {
     generation: u64,
     composition: String,
     pointer: PointerGestures,
+    links: links::State,
     scroll_remainder: f32,
     scroll_remainder_x: f32,
     scroll_route: Option<WheelRoute>,
@@ -321,6 +344,7 @@ impl Terminal {
             generation: 0,
             composition: String::new(),
             pointer: PointerGestures::default(),
+            links: links::State::default(),
             scroll_remainder: 0.,
             scroll_remainder_x: 0.,
             scroll_route: None,
@@ -417,6 +441,7 @@ impl Terminal {
         if self.engine.is_none() {
             return;
         }
+        self.links.output_changed();
         self.content_revision += 1;
         self.smoke_tail.push_str(&String::from_utf8_lossy(bytes));
         self.saw_smoke |= self.smoke_tail.contains("SPLITTY_GPUI_SMOKE_OK");
@@ -585,6 +610,7 @@ impl Terminal {
             Some(Ok(Some(bytes))) => {
                 let result = self.engine.as_mut().map(Engine::scroll_bottom);
                 self.operation(result);
+                self.links.cancel();
                 self.search_wake(cx);
                 self.send_bytes(bytes);
                 window.notify_text_input_changed(&self.focus);
@@ -605,6 +631,51 @@ impl Terminal {
             .floor()
             .clamp(0., f32::from(self.size.rows - 1)) as u16;
         (col, row)
+    }
+
+    fn link_cell_at(&self, position: Point<Pixels>) -> Option<links::Cell> {
+        let x = f32::from(position.x - self.bounds.left());
+        let y = f32::from(position.y - self.bounds.top());
+        if !x.is_finite()
+            || !y.is_finite()
+            || x < 0.
+            || y < 0.
+            || x >= f32::from(self.bounds.size.width)
+            || y >= f32::from(self.bounds.size.height)
+            || x >= f32::from(self.cell_width) * f32::from(self.size.cols)
+            || y >= LINE_HEIGHT * f32::from(self.size.rows)
+        {
+            return None;
+        }
+        Some(links::Cell {
+            col: (x / f32::from(self.cell_width)).floor() as u16,
+            row: (y / LINE_HEIGHT).floor() as u16,
+        })
+    }
+
+    fn link_at(&mut self, cell: links::Cell) -> Option<links::Target> {
+        match self.engine.as_mut()?.link_at(cell.col, cell.row) {
+            Ok(Some(hit)) => links::Target::allowed(hit),
+            Ok(None) => None,
+            Err(error) => {
+                self.status = format!("Terminal link: {error:#}");
+                None
+            }
+        }
+    }
+
+    fn hover_link(&mut self, position: Point<Pixels>, modifiers: Modifiers, mac: bool) -> bool {
+        if !link_modifier(modifiers, mac) {
+            return self.links.cancel_hover();
+        }
+        let Some(cell) = self.link_cell_at(position) else {
+            return self.links.cancel_hover();
+        };
+        if self.links.cached_hover(cell).is_some() {
+            return false;
+        }
+        let target = self.link_at(cell);
+        self.links.set_hover(cell, target)
     }
 
     fn pointer_position(&self, position: Point<Pixels>, window: &Window) -> (f32, f32) {
@@ -646,12 +717,25 @@ impl Terminal {
             .is_some_and(|bytes| self.send_bytes(bytes))
     }
 
-    fn pointer_down(&mut self, event: &MouseDownEvent, window: &Window) {
+    fn pointer_down(&mut self, event: &MouseDownEvent, window: &Window, mac: bool) {
+        let position = self.pointer_position(event.position, window);
+        self.pointer.last_position = Some(position);
+        if event.button == MouseButton::Left
+            && link_modifier(event.modifiers, mac)
+            && !self.pointer.any_application_pressed()
+            && !self.pointer.any_local_pressed()
+        {
+            if let Some(cell) = self.link_cell_at(event.position) {
+                if let Some(target) = self.link_at(cell) {
+                    self.pointer.capture_link();
+                    self.links.press(cell, target, position, self.generation);
+                    return;
+                }
+            }
+        }
         let Some(policy) = self.pointer_policy() else {
             return;
         };
-        let position = self.pointer_position(event.position, window);
-        self.pointer.last_position = Some(position);
         match self.pointer.begin(
             event.button,
             event.modifiers.shift,
@@ -678,13 +762,25 @@ impl Terminal {
                     self.operation(result);
                 }
             }
+            PointerRoute::Link => {}
             PointerRoute::Local => {}
         }
     }
 
-    fn pointer_move(&mut self, event: &MouseMoveEvent, window: &Window) -> bool {
+    fn pointer_move(&mut self, event: &MouseMoveEvent, window: &Window, mac: bool) -> bool {
         let position = self.pointer_position(event.position, window);
         self.pointer.last_position = Some(position);
+        self.links.moving(position);
+        if self.pointer.route(MouseButton::Left) == Some(PointerRoute::Link) {
+            return false;
+        }
+        // MouseExit/focus loss may revoke a captured link while the physical
+        // button remains held. Reentry cannot turn that same gesture into an
+        // application hover or motion report.
+        if self.pointer.unadmitted_button_pressed(event.pressed_button) {
+            return self.links.cancel_hover();
+        }
+        let hover_changed = self.hover_link(event.position, event.modifiers, mac);
         if self.pointer.route(MouseButton::Left) == Some(PointerRoute::Selection) {
             if event.dragging() {
                 let (col, row) = self.cell_at(event.position);
@@ -696,10 +792,10 @@ impl Terminal {
                 self.row_cache.clear();
                 return true;
             }
-            return false;
+            return hover_changed;
         }
         if self.pointer.any_local_pressed() {
-            return false;
+            return hover_changed;
         }
         let button = event
             .pressed_button
@@ -710,17 +806,20 @@ impl Terminal {
                 .pointer_policy()
                 .is_none_or(|policy| policy.tracking != MouseTracking::Any)
         {
-            return false;
+            return hover_changed;
         }
         let before = self.status.clone();
         self.mouse_report(MouseAction::Motion, button, position, event.modifiers);
-        self.status != before
+        hover_changed || self.status != before
     }
 
-    fn pointer_up(&mut self, event: &MouseUpEvent, window: &Window, outside: bool) {
-        let Some(route) = self.pointer.take(event.button) else {
-            return;
-        };
+    fn pointer_up(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &Window,
+        outside: bool,
+    ) -> Option<splitty_client_core::external_links::WebUrl> {
+        let route = self.pointer.take(event.button)?;
         match route {
             PointerRoute::Selection => {
                 let result = self.engine.as_mut().map(Engine::select_end);
@@ -739,13 +838,27 @@ impl Terminal {
                     event.modifiers,
                 );
             }
+            PointerRoute::Link => {
+                let cell = (!outside)
+                    .then(|| self.link_cell_at(event.position))
+                    .flatten();
+                let target = cell.and_then(|cell| self.link_at(cell));
+                return self.links.finish(
+                    cell,
+                    self.pointer_position(event.position, window),
+                    self.generation,
+                    target,
+                );
+            }
             PointerRoute::Local => {}
         }
+        None
     }
 
     /// End gestures before hiding or replacing this terminal's captured session.
     /// A rejected release is visible but never replayed into another session.
     pub fn cancel_pointer(&mut self) {
+        self.links.cancel();
         let position = self.pointer.last_position.unwrap_or((0., 0.));
         for button in pointer_buttons() {
             match self.pointer.take(button) {
@@ -776,7 +889,7 @@ impl Terminal {
         cx: &mut Context<Self>,
     ) {
         self.focus_pty(window, cx);
-        self.pointer_down(event, window);
+        self.pointer_down(event, window, cx.platform_info().is_mac());
         cx.notify();
     }
 
@@ -786,13 +899,15 @@ impl Terminal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pointer_move(event, window) {
+        if self.pointer_move(event, window, cx.platform_info().is_mac()) {
             cx.notify();
         }
     }
 
     fn on_pointer_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.pointer_up(event, window, false);
+        if let Some(url) = self.pointer_up(event, window, false) {
+            cx.open_url(url.as_str());
+        }
         cx.notify();
     }
 
@@ -809,6 +924,18 @@ impl Terminal {
     fn on_pointer_exit(&mut self, _: &MouseExitEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.cancel_pointer();
         cx.notify();
+    }
+
+    fn on_link_modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !link_modifier(event.modifiers, cx.platform_info().is_mac()) && self.links.cancel_hover()
+        {
+            cx.notify();
+        }
     }
 
     fn on_scroll_event(
@@ -860,6 +987,7 @@ impl Terminal {
             0
         };
         if lines != 0 || horizontal != 0 {
+            self.links.cancel();
             match route {
                 WheelRoute::Scrollback => {
                     let result = self.engine.as_mut().map(|engine| engine.scroll(lines));
@@ -921,6 +1049,13 @@ impl Terminal {
                 .clamp(1., 200.) as u16,
         };
         let scale = window.scale_factor();
+        self.links.geometry(links::Geometry {
+            origin: (f32::from(bounds.origin.x), f32::from(bounds.origin.y)),
+            extent: (f32::from(bounds.size.width), f32::from(bounds.size.height)),
+            cell_width: f32::from(self.cell_width),
+            scale,
+            size: (size.cols, size.rows),
+        });
         let mouse_width = f32::from(bounds.size.width)
             .min(f32::from(self.cell_width) * f32::from(size.cols))
             .max(1.)
@@ -960,6 +1095,28 @@ impl Terminal {
     }
 
     fn paint(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Element move/exit handlers can miss a held pointer while it crosses
+        // another view. Observe window capture moves for the admitted link
+        // gesture; a later return to the original cell must not reopen it.
+        let terminal = cx.entity().downgrade();
+        window.on_mouse_event(move |event: &MouseMoveEvent, phase, window, cx| {
+            if phase != DispatchPhase::Capture {
+                return;
+            }
+            let _ = terminal.update(cx, |this, cx| {
+                if this.pointer.route(MouseButton::Left) != Some(PointerRoute::Link) {
+                    return;
+                }
+                if this.link_cell_at(event.position).is_none() {
+                    if this.links.cancel() {
+                        cx.notify();
+                    }
+                } else {
+                    this.links
+                        .moving(this.pointer_position(event.position, window));
+                }
+            });
+        });
         let started = Instant::now();
         self.frames += 1;
         self.last_paint = Some(started);
@@ -1416,6 +1573,14 @@ impl Render for Terminal {
                 }));
         }
         let search_bar = self.search_bar(cx);
+        let link_preview = self.links.preview().map(|target| {
+            let modifier = if cx.platform_info().is_mac() {
+                "Cmd"
+            } else {
+                "Ctrl"
+            };
+            format!("{}  ·  {modifier}-click to open", target.url.as_str())
+        });
         let layout = cx.entity();
         let paint = layout.clone();
         div()
@@ -1426,6 +1591,7 @@ impl Render for Terminal {
             .bg(rgb(self.colors.background))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
+            .on_modifiers_changed(cx.listener(Self::on_link_modifiers_changed))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_pointer_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_pointer_down))
             .on_mouse_down(MouseButton::Right, cx.listener(Self::on_pointer_down))
@@ -1471,6 +1637,23 @@ impl Render for Terminal {
                 )
                 .size_full(),
             )
+            .when_some(link_preview, |view, preview| {
+                view.child(
+                    div()
+                        .absolute()
+                        .bottom_0()
+                        .left_0()
+                        .max_w_full()
+                        .px_2()
+                        .py_1()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .text_size(px(12.))
+                        .bg(rgb(self.colors.background))
+                        .text_color(rgb(self.colors.foreground))
+                        .child(preview),
+                )
+            })
             .when_some(search_bar, |view, bar| view.child(bar))
             .when_some(self.command_error.clone(), |view, error| {
                 view.child(
@@ -1541,6 +1724,7 @@ impl EntityInputHandler for Terminal {
         self.composition.clear();
         let result = self.engine.as_mut().map(Engine::scroll_bottom);
         self.operation(result);
+        self.links.cancel();
         self.search_wake(cx);
         self.send(Command::Input {
             generation: self.generation,
@@ -1605,14 +1789,37 @@ impl EntityInputHandler for Terminal {
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_wheel_input, each_unselected_segment, engine_mouse_button, mouse_modifiers,
-        needs_shape, wheel_button, wheel_lines, wheel_route, CachedRow, PointerGestures,
-        PointerRoute, WheelRoute,
+        alternate_wheel_input, each_unselected_segment, engine_mouse_button, link_modifier,
+        mouse_modifiers, needs_shape, wheel_button, wheel_lines, wheel_route, CachedRow,
+        PointerGestures, PointerRoute, WheelRoute,
     };
     use crate::terminal_engine::{
         Engine, MouseButton as EngineMouseButton, MouseModifiers, MousePolicy, MouseTracking,
     };
     use gpui_kit::{Modifiers, MouseButton, NavigationDirection};
+
+    #[test]
+    fn link_modifier_matches_host_shortcut_without_claiming_shift_selection() {
+        let ctrl = Modifiers {
+            control: true,
+            ..Modifiers::default()
+        };
+        let command = Modifiers {
+            platform: true,
+            ..Modifiers::default()
+        };
+        assert!(link_modifier(ctrl, false));
+        assert!(!link_modifier(command, false));
+        assert!(link_modifier(command, true));
+        assert!(!link_modifier(ctrl, true));
+        assert!(!link_modifier(
+            Modifiers {
+                shift: true,
+                ..ctrl
+            },
+            false
+        ));
+    }
 
     #[test]
     fn search_highlights_skip_clipboard_selection_without_changing_glyph_runs() {
@@ -1642,6 +1849,17 @@ mod tests {
             Some(PointerRoute::Selection)
         );
         assert_eq!(gestures.take(MouseButton::Left), None);
+
+        // Link admission consumes the whole left gesture locally, including a
+        // release after the modifier changes; application motion stays silent.
+        gestures.capture_link();
+        assert_eq!(gestures.route(MouseButton::Left), Some(PointerRoute::Link));
+        assert!(gestures.any_local_pressed());
+        assert!(!gestures.any_application_pressed());
+        assert_eq!(gestures.take(MouseButton::Left), Some(PointerRoute::Link));
+        assert_eq!(gestures.take(MouseButton::Left), None);
+        assert!(gestures.unadmitted_button_pressed(Some(MouseButton::Left)));
+        assert!(!gestures.unadmitted_button_pressed(None));
 
         assert_eq!(
             gestures.begin(MouseButton::Right, false, true),

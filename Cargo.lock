@@ -4470,6 +4470,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39c29a617ce3df32c08497bdc1ab6e2376e0b17948ac166a2fbe5977c5954cd9"
 
 [[package]]
+name = "linkify"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92f9ae2f3d31697697311f016320fe984127e636b45cf5eb5c175b7eb103dadb"
+dependencies = [
+ "memchr",
+]
+
+[[package]]
 name = "linktime-proc-macro"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7609,6 +7618,7 @@ dependencies = [
  "splitty-server",
  "splitty-transport",
  "tokio",
+ "url",
  "uuid",
 ]
 
@@ -7648,6 +7658,7 @@ dependencies = [
  "gpui-kit",
  "gpui-pre-platform",
  "image",
+ "linkify",
  "percent-encoding",
  "serde_json",
  "splitty-client-core",

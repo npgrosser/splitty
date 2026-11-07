@@ -151,3 +151,29 @@ VALUE(GHOSTTY_SEARCH_DATA_SELECTED_INDEX, 4);
 VALUE(GHOSTTY_SEARCH_DATA_SELECTED_MATCH, 5);
 VALUE(GHOSTTY_SEARCH_DATA_VIEWPORT_MATCHES, 7);
 VALUE(GHOSTTY_POINT_TAG_SCREEN, 2);
+
+/* Hyperlink introspection consumes untracked references synchronously. */
+LAYOUT(GhosttyCell, 8, 8);
+LAYOUT(GhosttyRow, 8, 8);
+VALUE(GHOSTTY_INVALID_VALUE, -2);
+VALUE(GHOSTTY_POINT_TAG_VIEWPORT, 1);
+VALUE(GHOSTTY_POINT_TAG_SCREEN, 2);
+VALUE(GHOSTTY_CELL_DATA_HAS_HYPERLINK, 7);
+VALUE(GHOSTTY_ROW_DATA_WRAP, 1);
+VALUE(GHOSTTY_ROW_DATA_WRAP_CONTINUATION, 2);
+VALUE(GHOSTTY_CELL_WIDE_NARROW, 0);
+VALUE(GHOSTTY_CELL_WIDE_WIDE, 1);
+VALUE(GHOSTTY_CELL_WIDE_SPACER_TAIL, 2);
+VALUE(GHOSTTY_CELL_WIDE_SPACER_HEAD, 3);
+_Static_assert(_Generic(&ghostty_grid_ref_hyperlink_uri,
+    GhosttyResult (*)(const GhosttyGridRef *, uint8_t *, size_t, size_t *): 1,
+    default: 0), "hyperlink getter signature");
+_Static_assert(_Generic(&ghostty_grid_ref_graphemes,
+    GhosttyResult (*)(const GhosttyGridRef *, uint32_t *, size_t, size_t *): 1,
+    default: 0), "grapheme getter signature");
+_Static_assert(_Generic(&ghostty_grid_ref_row,
+    GhosttyResult (*)(const GhosttyGridRef *, GhosttyRow *): 1,
+    default: 0), "row getter signature");
+_Static_assert(_Generic(&ghostty_row_get,
+    GhosttyResult (*)(GhosttyRow, GhosttyRowData, void *): 1,
+    default: 0), "row data getter signature");

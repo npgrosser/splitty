@@ -251,6 +251,26 @@ index on activation. Output and viewport changes wake search work; completed
 or failed searches do not poll while idle. Search has no session protocol or
 service authority, and its input controls cannot send bytes to the PTY.
 
+Native terminal links cross three separate boundaries. The terminal adapter
+resolves an owned target from OSC 8 metadata or a complete soft-wrapped logical
+line, without retaining native grid references. Retained explicit metadata takes
+precedence even when rejected. The pinned VT parser discards OSC 8 commands
+that exceed its 2,048-byte fixed capture buffer before storing cell metadata;
+it exposes no shortened URI. Their visible labels are ordinary text and can
+still contain detected URLs. The adapter does not duplicate the OSC parser. Plain detection uses byte ranges mapped back to
+grapheme cells, including wide tails; extraction stops without a target when
+16 KiB, 128 rows or 80,000 inspected cells cannot contain the complete line.
+`client-core::external_links` admits and normalizes bounded absolute HTTP(S)
+URLs without I/O. The view previews that actual target, owns the deliberate
+Ctrl/Cmd-click and dispatches only its validated result to the platform browser
+opener. Gesture completion resolves the target again; cached hover cannot
+authorize a launch. Selection and application mouse reporting retain their
+routes, while an admitted link gesture remains local through cancellation.
+The view observes captured movement at window scope so leaving and returning
+to a terminal element cannot rearm a click that the element did not receive.
+There is no terminal-adapter dependency on client policy, no server-side browser
+effect and no generic editor/file scheme dispatch.
+
 The terminal view owns a thread-confined Ghostty VT engine behind an owned Rust
 wrapper; the wrapper contains the C interface and hands the view bounded render
 snapshots. Cached glyph shaping and change-driven GPUI notifications avoid

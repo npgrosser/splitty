@@ -252,6 +252,7 @@ impl Terminal {
             .map(|engine| engine.search_navigate(older))
         {
             Some(Ok(snapshot)) => {
+                self.links.cancel();
                 if let Some(search) = self.search.as_mut() {
                     search.snapshot = Some(snapshot);
                 }

@@ -4,6 +4,7 @@
 //! and untracked grid references never escape this module. A frame exclusively
 //! borrows the engine; its lending row/cell API prevents snapshot invalidation.
 mod ffi;
+mod links;
 mod search;
 pub use search::{SearchHighlight, SearchProgress, SearchSnapshot};
 
@@ -18,6 +19,17 @@ const DEFAULT_ANSI: [u32; 16] = [
     0x18212d, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf, 0x5c6370,
     0xff7a85, 0xb5e890, 0xffd891, 0x82c7ff, 0xe8a0ff, 0x7adbea, 0xffffff,
 ];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkKind {
+    Osc8,
+    Detected,
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LinkHit {
+    pub uri: String,
+    pub kind: LinkKind,
+}
 
 /// Concrete RGB colors only. The service and settings resolver stay outside
 /// Ghostty; indices 16–255 retain the standard xterm palette.
