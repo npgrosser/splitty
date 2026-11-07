@@ -1,4 +1,5 @@
 use super::*;
+use crate::appearance::DrawerVisibilityOutcome;
 use crate::zoom::{Zoom, ZoomAction, ZoomOutcome};
 use splitty_server::{native::client::Connector, service::catalog::Role};
 use splitty_transport::{negotiation, peer::Peer, queue, wire};
@@ -80,10 +81,15 @@ async fn scripted_tail(
             if request.operation == "home.update" {
                 // No unrelated appearance or home fields are echoed back.
                 assert_eq!(request.args.len(), 1);
-                let appearance = request.args["body"]["appearance"].as_object().unwrap();
                 assert_eq!(request.args["body"].as_object().unwrap().len(), 1);
-                assert_eq!(appearance.len(), 1);
-                assert!(appearance["zoom"].is_number());
+                if let Some(appearance) = request.args["body"]["appearance"].as_object() {
+                    assert_eq!(appearance.len(), 1);
+                    assert!(appearance["zoom"].is_number());
+                } else {
+                    let drawer = request.args["body"]["drawer"].as_object().unwrap();
+                    assert_eq!(drawer.len(), 1);
+                    assert!(drawer["pinned"].is_boolean());
+                }
             }
             peer.sender
                 .json(
@@ -444,6 +450,167 @@ async fn lost_mutation_reply_is_uncertain_and_pending_write_cancellation_joins()
         assert_eq!(budget.used(), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+#[tokio::test]
+async fn drawer_visibility_confirms_only_service_value_and_refreshes_without_replay() {
+    let mut saved = splitty_core::config::HomeConfig::default();
+    saved.drawer.pinned = false;
+    saved.drawer.sidebar_width = 280;
+    saved.appearance.font_size = 19;
+    let mut after = saved.clone();
+    after.drawer.pinned = true;
+    let (api, task, dir) = scripted(vec![
+        Exchange {
+            operation: "home.update",
+            status: 200,
+            uncertain: false,
+            body: serde_json::to_string(&after).unwrap(),
+        },
+        Exchange {
+            operation: "home.get",
+            status: 200,
+            uncertain: false,
+            body: serde_json::to_string(&after).unwrap(),
+        },
+        Exchange {
+            operation: "theme.get",
+            status: 200,
+            uncertain: false,
+            body: theme(),
+        },
+    ])
+    .await;
+    let owner = Uuid::new_v4();
+    let request = Uuid::new_v4();
+    let budget = api.sender().context().budget.clone();
+    let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+    client.dirty = [false; 2];
+    client
+        .enqueue_drawer_visibility(owner, request, true)
+        .unwrap();
+    let LocalServiceUpdate::DrawerVisibility(result) = next(&mut client).await else {
+        panic!("visibility outcome")
+    };
+    assert_eq!(result.connection_id, owner);
+    assert_eq!(result.request_id, request);
+    assert_eq!(result.outcome, DrawerVisibilityOutcome::Confirmed(true));
+    let LocalServiceUpdate::Appearance(Ok(snapshot)) = next(&mut client).await else {
+        panic!("refreshed presentation")
+    };
+    assert!(snapshot.drawer().pinned);
+    assert_eq!(snapshot.drawer().sidebar_width, 280);
+    assert_eq!(snapshot.settings().font_size, 19);
+    assert_eq!(snapshot.generation(), 2);
+    drop(snapshot);
+    client.finish().await.unwrap();
+    task.await.unwrap();
+    assert_eq!(budget.used(), 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn drawer_visibility_admits_one_and_distinguishes_failure_from_uncertainty() {
+    for (status, uncertain, body, rejected) in [
+        (403, false, "{}", true),
+        (200, true, "{}", false),
+        (200, false, "{", false),
+    ] {
+        let (api, task, dir) = scripted(vec![
+            Exchange {
+                operation: "home.update",
+                status,
+                uncertain,
+                body: body.into(),
+            },
+            Exchange {
+                operation: "home.get",
+                status: 200,
+                uncertain: false,
+                body: home(1.0),
+            },
+            Exchange {
+                operation: "theme.get",
+                status: 200,
+                uncertain: false,
+                body: theme(),
+            },
+        ])
+        .await;
+        let owner = Uuid::new_v4();
+        let request = Uuid::new_v4();
+        let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+        client.dirty = [false; 2];
+        assert!(client
+            .enqueue_drawer_visibility(Uuid::new_v4(), request, true)
+            .is_err());
+        client
+            .enqueue_drawer_visibility(owner, request, true)
+            .unwrap();
+        assert_eq!(
+            client
+                .enqueue_drawer_visibility(owner, request, false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            client
+                .enqueue_drawer_visibility(owner, Uuid::new_v4(), false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        super::tests::begin(&mut client).await;
+        assert_eq!(
+            client
+                .enqueue_drawer_visibility(owner, Uuid::new_v4(), false)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::WouldBlock
+        );
+        let LocalServiceUpdate::DrawerVisibility(result) = next(&mut client).await else {
+            panic!("visibility outcome")
+        };
+        assert_eq!(result.request_id, request);
+        assert_eq!(
+            matches!(result.outcome, DrawerVisibilityOutcome::Rejected { .. }),
+            rejected
+        );
+        assert!(matches!(
+            next(&mut client).await,
+            LocalServiceUpdate::Appearance(Ok(_))
+        ));
+        client.finish().await.unwrap();
+        task.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn drawer_visibility_shutdown_joins_pending_write() {
+    let (sent, received) = tokio::sync::oneshot::channel();
+    let (api, task, dir) = scripted_tail(vec![], Tail::Hold(sent)).await;
+    let budget = api.sender().context().budget.clone();
+    let owner = Uuid::new_v4();
+    let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+    client.dirty = [false; 2];
+    client
+        .enqueue_drawer_visibility(owner, Uuid::new_v4(), false)
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        tokio::select! {
+            result = received => result.unwrap(),
+            _ = client.next_update() => panic!("held write completed"),
+        }
+    })
+    .await
+    .unwrap();
+    assert!(client.pending.is_some());
+    client.finish().await.unwrap();
+    task.await.unwrap();
+    assert_eq!(budget.used(), 0);
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]

@@ -1,4 +1,5 @@
 //! Native projection of one authoritative local screen; no independent dock tree.
+mod drawer;
 mod floating;
 mod shell_profiles;
 mod templates;
@@ -7,9 +8,11 @@ mod transfer;
 use crate::appearance::NativeAppearance;
 use crate::terminal::{self, Terminal};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
-use gpui_kit::base::{ColorTokens, Popover, Theme, ThemeAppearance};
+use gpui_kit::base::{Popover, Theme};
 use gpui_kit::{prelude::*, *};
-use splitty_client_core::appearance::{AppearanceSnapshot, ColorScheme};
+use splitty_client_core::appearance::{
+    AppearanceSnapshot, ColorScheme, DrawerVisibilityOutcome, DrawerVisibilityResult,
+};
 use splitty_client_core::native_workspace::{Command, Update, Worker};
 use splitty_client_core::shell_profiles::ShellProfilesSnapshot;
 use splitty_client_core::workspace::{
@@ -30,6 +33,7 @@ use std::{
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
+use self::drawer::{WheelNavigation, WheelTarget};
 use self::floating::{FloatGesture, FloatGestureKind};
 use self::shell_profiles::ProfilePicker;
 use self::templates::TemplateDialog;
@@ -521,6 +525,7 @@ pub struct Workspace {
     split_bounds: HashMap<String, Bounds<Pixels>>,
     slot_bounds: HashMap<String, Bounds<Pixels>>,
     tab_scrolls: HashMap<String, TabScroll>,
+    drawer_scroll: ScrollHandle,
     drop_target: Option<DropTarget>,
     drag: Option<ResizeDrag>,
     visible: Vec<String>,
@@ -534,6 +539,10 @@ pub struct Workspace {
     appearance: NativeAppearance,
     appearance_error: Option<String>,
     appearance_generation: u64,
+    drawer_visible: bool,
+    drawer_width: i32,
+    drawer_pending: Option<(Uuid, Uuid)>,
+    wheel_navigation: WheelNavigation,
     pending_zoom: HashSet<Uuid>,
     zoom_feedback: Option<(String, Instant)>,
     profiles: Option<Arc<ShellProfilesSnapshot>>,
@@ -587,7 +596,6 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Self, Worker) {
-        window.set_rem_size(px(16.));
         let (commands, receiver) = mpsc::channel(64);
         let (sender, mut updates) = mpsc::channel(64);
         let initial_scheme = Self::window_scheme(window);
@@ -689,6 +697,7 @@ impl Workspace {
                 split_bounds: HashMap::new(),
                 slot_bounds: HashMap::new(),
                 tab_scrolls: HashMap::new(),
+                drawer_scroll: ScrollHandle::new(),
                 drop_target: None,
                 drag: None,
                 visible: Vec::new(),
@@ -702,6 +711,10 @@ impl Workspace {
                 appearance: NativeAppearance::fallback(&ui_family),
                 appearance_error: None,
                 appearance_generation: 0,
+                drawer_visible: true,
+                drawer_width: 200,
+                drawer_pending: None,
+                wheel_navigation: WheelNavigation::default(),
                 pending_zoom: HashSet::new(),
                 zoom_feedback: None,
                 profiles: None,
@@ -802,18 +815,27 @@ impl Workspace {
             &self.mono_family,
         );
         self.apply_zoom(next.zoom, window, cx);
-        let theme = Theme::global_mut(cx);
-        theme.tokens.typography.sans = next.font_family.clone().into();
-        match snapshot.scheme() {
-            ColorScheme::Light => {
-                theme.appearance = ThemeAppearance::Light;
-                theme.tokens.colors = ColorTokens::light();
-            }
-            ColorScheme::Dark => {
-                theme.appearance = ThemeAppearance::Dark;
-                theme.tokens.colors = ColorTokens::dark();
-            }
+        if self.drawer_visible != snapshot.drawer().pinned {
+            self.wheel_navigation.reset();
         }
+        self.drawer_visible = snapshot.drawer().pinned;
+        self.drawer_width = snapshot.drawer().sidebar_width.clamp(150, 400);
+        gpui_kit::component::theme::Theme::change(
+            if snapshot.scheme() == ColorScheme::Light {
+                gpui_kit::component::theme::ThemeMode::Light
+            } else {
+                gpui_kit::component::theme::ThemeMode::Dark
+            },
+            None,
+            cx,
+        );
+        // RootPlugin applies the component theme's font size to the window on
+        // every frame. Keep chrome zoom and font ownership there, after a mode
+        // change has loaded that mode's registered defaults.
+        gpui_kit::component::theme::Theme::update(cx, |theme| {
+            theme.font_family = next.font_family.clone().into();
+            theme.font_size = px(16. * next.zoom.window_scale());
+        });
         let mut failure = None;
         for view in self.panes.values() {
             let applied = view.terminal.update(cx, |terminal, cx| {
@@ -834,6 +856,56 @@ impl Workspace {
         cx.notify();
     }
 
+    fn toggle_drawer(&mut self, cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        if self.drawer_pending.is_some() {
+            return;
+        }
+        let connection = model.connection_id();
+        let request_id = Uuid::new_v4();
+        if self
+            .commands
+            .try_send(Command::SetDrawerVisibility {
+                connection,
+                request_id,
+                pinned: !self.drawer_visible,
+            })
+            .is_ok()
+        {
+            self.drawer_pending = Some((connection, request_id));
+        } else {
+            self.status = "Could not send Drawer visibility change".into();
+        }
+        cx.notify();
+    }
+
+    fn apply_drawer_visibility(&mut self, result: DrawerVisibilityResult, cx: &mut Context<Self>) {
+        if self.drawer_pending != Some((result.connection_id, result.request_id))
+            || !self
+                .model
+                .as_ref()
+                .is_some_and(|model| model.connection_id() == result.connection_id)
+        {
+            return;
+        }
+        self.drawer_pending = None;
+        match result.outcome {
+            DrawerVisibilityOutcome::Confirmed(pinned) => {
+                self.drawer_visible = pinned;
+                self.wheel_navigation.reset();
+            }
+            DrawerVisibilityOutcome::Rejected { reason } => {
+                self.status = format!("Drawer update rejected: {reason}")
+            }
+            DrawerVisibilityOutcome::Uncertain { reason } => {
+                self.status = format!("Drawer update uncertain: {reason}")
+            }
+        }
+        cx.notify();
+    }
+
     fn apply_zoom(&mut self, zoom: Zoom, window: &mut Window, cx: &mut Context<Self>) {
         if self.appearance.zoom == zoom {
             return;
@@ -846,7 +918,9 @@ impl Workspace {
         self.drop_target = None;
         self.split_bounds.clear();
         self.slot_bounds.clear();
-        window.set_rem_size(px(16. * zoom.window_scale()));
+        gpui_kit::component::theme::Theme::update(cx, |theme| {
+            theme.font_size = px(16. * zoom.window_scale());
+        });
         for view in self.panes.values() {
             view.terminal.update(cx, |terminal, cx| {
                 terminal.set_zoom(zoom.terminal_scale(), cx)
@@ -946,6 +1020,7 @@ impl Workspace {
         }
     }
     fn start_rename(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.wheel_navigation.reset();
         self.transfer_menu = None;
         self.close_profile_picker(window, cx);
         let Some((name, connection)) = self.model.as_ref().and_then(|model| {
@@ -1011,6 +1086,7 @@ impl Workspace {
         cx.notify();
     }
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.wheel_navigation.reset();
         self.float_gesture = None;
         self.transfer_menu = None;
         self.close_profile_picker(window, cx);
@@ -1183,6 +1259,10 @@ impl Workspace {
         {
             self.apply_zoom(Zoom::from_values(1.0, "window"), window, cx);
             self.appearance_generation = 0;
+            self.drawer_visible = true;
+            self.drawer_width = 200;
+            self.drawer_pending = None;
+            self.wheel_navigation.reset();
             self.appearance_error = None;
             self.appearance = NativeAppearance::fallback(&self.ui_family);
             self.pending_zoom.clear();
@@ -1209,6 +1289,17 @@ impl Workspace {
             .as_ref()
             .and_then(LocalWorkspace::shown_screen_id)
             .map(str::to_owned);
+        let catalog_changed = self.model.as_ref().is_none_or(|old| {
+            old.screens()
+                .iter()
+                .map(|info| info.id.as_str())
+                .collect::<Vec<_>>()
+                != model
+                    .screens()
+                    .iter()
+                    .map(|info| info.id.as_str())
+                    .collect::<Vec<_>>()
+        });
         let old_focus = self
             .model
             .as_ref()
@@ -1287,6 +1378,17 @@ impl Workspace {
         if editor_cancelled {
             self.rename = None;
             self.rename_subscription = None;
+        }
+        if old_screen != new_screen || catalog_changed {
+            self.wheel_navigation.reset();
+            if let Some(index) = new_screen.as_ref().and_then(|shown| {
+                model
+                    .screens()
+                    .iter()
+                    .position(|info| info.id.as_str() == shown.as_str())
+            }) {
+                self.drawer_scroll.scroll_to_item(index);
+            }
         }
         if old_screen != new_screen {
             self.drag = None;
@@ -1650,6 +1752,7 @@ impl Workspace {
             .as_ref()
             .is_some_and(|terminal| terminal.read(cx).search_input_focused(window, cx))
         {
+            self.wheel_navigation.reset();
             return;
         }
         let Some(action) = shortcut_with_layout(
@@ -1662,7 +1765,10 @@ impl Workspace {
         };
         cx.stop_propagation();
         match action {
-            Shortcut::Templates => self.toggle_templates(window, cx),
+            Shortcut::Templates => {
+                self.wheel_navigation.reset();
+                self.toggle_templates(window, cx)
+            }
             Shortcut::NewTab => self.tab(cx),
             Shortcut::NewScreen => self.create_screen(cx),
             Shortcut::ScreenIndex(index) => {
@@ -1811,6 +1917,7 @@ impl Workspace {
                 Update::TemplateApi(result) => self.template_result(result, window, cx),
                 Update::TemplateApply(result) => self.template_apply_result(result, window, cx),
                 Update::Appearance(snapshot) => self.apply_appearance(&snapshot, window, cx),
+                Update::DrawerVisibility(result) => self.apply_drawer_visibility(result, cx),
                 Update::Zoom(result) => self.apply_zoom_result(result, window, cx),
                 Update::ScreenTransfer(result) => {
                     if self.pending_transfer.is_some_and(|pending| {
@@ -2798,150 +2905,6 @@ impl Workspace {
         );
         cx.notify();
     }
-    fn render_screen_controls(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut screens = div()
-            .id("screen-strip")
-            .flex()
-            .items_center()
-            .gap_1()
-            .flex_shrink_0()
-            .min_w(chrome_rems(200.))
-            .max_w(chrome_rems(390.))
-            .overflow_x_scroll();
-        if let Some(model) = &self.model {
-            for (index, info) in model.screens().iter().enumerate() {
-                let id = info.id.to_string();
-                let selected = model.shown_screen_id() == Some(id.as_str());
-                let mut label = info
-                    .name
-                    .as_deref()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| format!("Screen {}", index + 1));
-                if model
-                    .pending_template()
-                    .is_some_and(|preview| preview.screen_id() == id)
-                {
-                    label.push_str(" · Applying…");
-                }
-                let mut chip = div()
-                    .id(SharedString::from(format!("screen-{id}")))
-                    .flex()
-                    .items_center()
-                    .flex_none()
-                    .h(chrome_rems((self.appearance.font_size + 15.).max(28.)))
-                    .bg(rgb(if selected {
-                        self.appearance.active
-                    } else {
-                        self.appearance.raised
-                    }));
-                if let Some(editor) = self.rename.as_ref().filter(|editor| editor.screen == id) {
-                    chip = chip.child(
-                        div()
-                            .w(chrome_rems(145.))
-                            .h(chrome_rems((self.appearance.font_size + 14.).max(27.)))
-                            .px_1()
-                            .overflow_hidden()
-                            .child(Input::new(&editor.input)),
-                    );
-                    chip = chip.child(
-                        div()
-                            .id(SharedString::from(format!("screen-rename-save-{id}")))
-                            .px_1()
-                            .cursor_pointer()
-                            .child("✓")
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.finish_rename(true, window, cx)
-                            })),
-                    );
-                } else {
-                    let switch = id.clone();
-                    let rename = id.clone();
-                    chip = chip
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("screen-select-{id}")))
-                                .max_w(chrome_rems(120.))
-                                .overflow_hidden()
-                                .px_2()
-                                .cursor_pointer()
-                                .child(label)
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.switch_screen(&switch, window, cx)
-                                })),
-                        )
-                        .child(
-                            div()
-                                .id(SharedString::from(format!("screen-rename-{id}")))
-                                .px_1()
-                                .cursor_pointer()
-                                .child("✎")
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.start_rename(&rename, window, cx)
-                                })),
-                        );
-                }
-                let close = id.clone();
-                screens = screens.child(
-                    chip.child(
-                        div()
-                            .id(SharedString::from(format!("screen-close-{id}")))
-                            .px_1()
-                            .cursor_pointer()
-                            .child("×")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                this.request_close_screen(&close, window, cx)
-                            })),
-                    ),
-                );
-            }
-            if let Some(preview) = model.pending_template().filter(|preview| {
-                !model
-                    .screens()
-                    .iter()
-                    .any(|info| info.id.as_str() == preview.screen_id())
-            }) {
-                screens = screens.child(
-                    div()
-                        .id("template-pending-screen")
-                        .flex_none()
-                        .px_2()
-                        .py_1()
-                        .bg(rgb(self.appearance.active))
-                        .child(format!("{} · Applying…", preview.display_name())),
-                );
-            }
-            if model.pending_template().is_none() && model.screens().is_empty() {
-                screens = screens.child(
-                    div()
-                        .text_color(rgb(self.appearance.secondary))
-                        .child("No screens"),
-                );
-            }
-        }
-        let pending = self
-            .model
-            .as_ref()
-            .is_some_and(LocalWorkspace::has_pending_create);
-        screens
-            .child(
-                div()
-                    .id("new-screen")
-                    .flex_none()
-                    .px_2()
-                    .h(chrome_rems((self.appearance.font_size + 15.).max(28.)))
-                    .flex()
-                    .items_center()
-                    .cursor_pointer()
-                    .bg(rgb(if pending {
-                        self.appearance.raised
-                    } else {
-                        self.appearance.active
-                    }))
-                    .child("+ Screen")
-                    .on_click(cx.listener(|this, _, _, cx| this.create_screen(cx))),
-            )
-            .into_any_element()
-    }
     fn render_node(
         &self,
         node: &LayoutNode,
@@ -3006,7 +2969,28 @@ impl Workspace {
                     .gap_1()
                     .bg(rgb(self.appearance.raised))
                     .overflow_x_scroll()
-                    .track_scroll(&scroll.handle);
+                    .restrict_scroll_to_axis()
+                    .track_scroll(&scroll.handle)
+                    .on_scroll({
+                        let slot = id.to_string();
+                        let screen = self
+                            .model
+                            .as_ref()
+                            .and_then(LocalWorkspace::shown_screen_id)
+                            .unwrap_or_default()
+                            .to_owned();
+                        cx.listener(move |this, event: &ScrollEvent, window, cx| {
+                            this.chrome_wheel(
+                                WheelTarget::Slot {
+                                    screen: screen.clone(),
+                                    slot: slot.clone(),
+                                },
+                                event,
+                                window,
+                                cx,
+                            );
+                        })
+                    });
                 for (index, pane) in pane_ids.iter().enumerate() {
                     let key = pane.to_string();
                     let close = key.clone();
@@ -3539,7 +3523,7 @@ impl Render for Workspace {
                 .max(25. + 16. * extra_lines as f32);
         let picker_overlay = self.profile_picker_overlay(window, cx);
         let template_overlay = self.template_overlay(window, cx);
-        let mut view = div()
+        let view = div()
             .relative()
             .size_full()
             .flex()
@@ -3594,7 +3578,34 @@ impl Render for Workspace {
                             .font_weight(FontWeight::BOLD)
                             .child("SPLITTY"),
                     )
-                    .child(self.render_screen_controls(cx))
+                    .child(self.render_drawer_toggle(cx))
+                    .child(
+                        div()
+                            .id("current-screen-wheel")
+                            .flex_none()
+                            .px_2()
+                            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
+                                this.chrome_wheel(WheelTarget::Screens, event, window, cx);
+                            }))
+                            .child(
+                                self.model
+                                    .as_ref()
+                                    .and_then(|model| {
+                                        let shown = model.shown_screen_id()?;
+                                        model
+                                            .screens()
+                                            .iter()
+                                            .enumerate()
+                                            .find(|(_, info)| info.id.as_str() == shown)
+                                            .map(|(index, info)| {
+                                                info.name.clone().unwrap_or_else(|| {
+                                                    format!("Screen {}", index + 1)
+                                                })
+                                            })
+                                    })
+                                    .unwrap_or_else(|| "No Screen".into()),
+                            ),
+                    )
                     .child(
                         div()
                             .id("templates-open")
@@ -3713,11 +3724,16 @@ impl Render for Workspace {
                             .on_click(cx.listener(|this, _, _, cx| this.tab(cx))),
                     ),
             );
+        let mut content = div().flex().flex_1().min_h_0().min_w_0();
+        if self.drawer_visible {
+            content = content.child(self.render_drawer(cx));
+        }
+        let mut main_content = div().flex().flex_col().flex_1().min_w_0().min_h_0();
         if let Some(model) = &self.model {
             if let Some(preview) = model.pending_template() {
-                view = view.child(self.render_template_preview(preview, cx));
+                main_content = main_content.child(self.render_template_preview(preview, cx));
             } else if model.screens().is_empty() {
-                view = view.child(
+                main_content = main_content.child(
                     div().flex_1().flex().items_center().justify_center().child(
                         div()
                             .id("new-screen-empty")
@@ -3731,7 +3747,7 @@ impl Render for Workspace {
                 );
             } else if let Some(screen) = model.snapshot() {
                 if screen.panes.is_empty() {
-                    view = view.child(
+                    main_content = main_content.child(
                         div().flex_1().flex().items_center().justify_center().child(
                             div()
                                 .id("new-terminal-empty")
@@ -3852,57 +3868,60 @@ impl Render for Workspace {
                     for entry in floats {
                         viewport = viewport.child(self.render_float(entry, cx));
                     }
-                    view = view.child(viewport);
+                    main_content = main_content.child(viewport);
                 }
             } else {
-                view = view.child(div().flex_1().p_4().child("Loading local Screen…"));
+                main_content =
+                    main_content.child(div().flex_1().p_4().child("Loading local Screen…"));
             }
         } else {
-            view = view.child(div().flex_1().p_4().child("Connecting…"));
+            main_content = main_content.child(div().flex_1().p_4().child("Connecting…"));
         }
-        view.child(
-            div()
-                .h(chrome_rems(footer_height))
-                .px_3()
-                .flex_none()
-                .flex()
-                .flex_col()
-                .justify_center()
-                .text_size(chrome_rems((self.appearance.font_size - 2.).max(11.)))
-                .text_color(rgb(self.appearance.muted))
-                .child(
-                    div()
-                        .min_w_0()
-                        .whitespace_nowrap()
-                        .overflow_hidden()
-                        .text_ellipsis()
-                        .child(primary_status),
-                )
-                .when_some(appearance_message, |view, message| {
-                    view.child(
+        content = content.child(main_content);
+        view.child(content)
+            .child(
+                div()
+                    .h(chrome_rems(footer_height))
+                    .px_3()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .text_size(chrome_rems((self.appearance.font_size - 2.).max(11.)))
+                    .text_color(rgb(self.appearance.muted))
+                    .child(
                         div()
                             .min_w_0()
                             .whitespace_nowrap()
                             .overflow_hidden()
                             .text_ellipsis()
-                            .text_color(rgb(self.appearance.secondary))
-                            .child(message),
+                            .child(primary_status),
                     )
-                })
-                .when_some(profile_message, |view, message| {
-                    view.child(
-                        div()
-                            .min_w_0()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .text_color(rgb(self.appearance.secondary))
-                            .child(message),
-                    )
-                }),
-        )
-        .when_some(picker_overlay, |view, picker| view.child(picker))
-        .when_some(template_overlay, |view, overlay| view.child(overlay))
+                    .when_some(appearance_message, |view, message| {
+                        view.child(
+                            div()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_color(rgb(self.appearance.secondary))
+                                .child(message),
+                        )
+                    })
+                    .when_some(profile_message, |view, message| {
+                        view.child(
+                            div()
+                                .min_w_0()
+                                .whitespace_nowrap()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .text_color(rgb(self.appearance.secondary))
+                                .child(message),
+                        )
+                    }),
+            )
+            .when_some(picker_overlay, |view, picker| view.child(picker))
+            .when_some(template_overlay, |view, overlay| view.child(overlay))
     }
 }
 fn first_selected_slot(model: &LocalWorkspace, node: &LayoutNode) -> Option<(String, String)> {

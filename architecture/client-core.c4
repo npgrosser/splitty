@@ -26,7 +26,7 @@ model {
     owned_service -> splitty.core.protocol 'Verify the helper mux version'
     native_workspace -> owned_service 'Use one orchestration loop for explicit local backend ownership'
     local_service -> api_stream 'Keep one auxiliary stream and retained jobs across cancellation'
-    local_service -> splitty.core.native_api 'Use shared zoom operation authority'
+    local_service -> splitty.core.native_api 'Use shared zoom and Drawer settings operation authority'
     appearance -> api_stream 'Read existing appearance and theme contracts on either platform'
     appearance -> splitty.core.native_api 'Use fixed typed home and theme operations'
     client_shell_profiles -> api_stream 'Read bounded profile snapshots on either platform'
@@ -45,12 +45,12 @@ model {
     }
 
     appearance = component 'appearance' {
-      description 'Read-only local appearance/theme requests and charged snapshots; service fixtures for settings tests.'
+      description 'Local appearance/theme and Drawer preference requests and charged presentation snapshots; identified visibility outcomes and service fixtures for settings tests.'
       metadata { module 'splitty_client_core::appearance' }
     }
 
     local_service = component 'local_service' {
-      description 'One owned auxiliary API stream with fair appearance/profile reads, bounded zoom intents and one identified template job, charged replies, mutation uncertainty and cancellation-safe cleanup.'
+      description 'One owned auxiliary API stream with fair appearance/profile reads, bounded zoom intents, one Drawer visibility update and one identified template job, charged replies, mutation uncertainty and cancellation-safe cleanup.'
       metadata { module 'splitty_client_core::local_service' }
     }
 
@@ -80,7 +80,7 @@ model {
     }
 
     client_workspace = component 'client_workspace' {
-      description 'Connection-wide catalog and admission, canonical tiled/floating Screen projections, bounded coherent cross-Screen route collection, captured transfer, floating action and exact tab placement settlement, local navigation, captured template replacement with separate pending presentation and full-scope close impact assessment.'
+      description 'Connection-wide catalog and admission, canonical tiled/floating Screen projections, bounded coherent cross-Screen route collection, captured transfer, floating action and exact tab placement settlement, ordered relative Screen and captured group navigation, captured template replacement with separate pending presentation and full-scope close impact assessment.'
       metadata { module 'splitty_client_core::workspace' }
     }
 
@@ -133,7 +133,7 @@ model {
     client_shell_profiles -> splitty.core.shell_profiles 'Present the existing service profile contract'
     client_shell_profiles -> splitty.transport.budget 'Keep profile data charged through presentation'
     appearance -> local_service 'Reuse bounded typed response decoding'
-    appearance -> splitty.core.config 'Project existing appearance settings without persistence'
+    appearance -> splitty.core.config 'Project existing appearance and Drawer preferences without write-on-load'
     appearance -> splitty.core.theme 'Decode the service-resolved theme'
     appearance -> splitty.server.native 'Own one API-only stream and await its cleanup'
     appearance -> splitty.server.service 'Use fixed read-only operations and in-memory service fixtures'

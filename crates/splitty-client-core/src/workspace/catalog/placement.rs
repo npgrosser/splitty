@@ -274,16 +274,30 @@ impl LocalWorkspace {
             ));
         }
         self.cancel_placement_focus();
+        self.cycle_tab_in_slot(connection, screen, slot, step)
+    }
+
+    /// A hovered header captures its group, independently of keyboard focus.
+    pub fn cycle_tab_in_slot(
+        &mut self,
+        connection: Uuid,
+        screen: &str,
+        slot: &str,
+        step: TabStep,
+    ) -> io::Result<bool> {
+        if connection != self.connection_id || self.shown_screen_id() != Some(screen) {
+            return Err(invalid("Tab navigation belongs to a previous Screen"));
+        }
         let model = self.shown().ok_or_else(|| invalid("no screen selected"))?;
         let snapshot = model
             .snapshot()
             .ok_or_else(|| invalid("screen snapshot not loaded"))?;
         let Some(node @ LayoutNode::Slot { pane_ids, .. }) = find_node(snapshot, slot) else {
-            return Err(invalid("focused group is gone"));
+            return Err(invalid("tab group is gone"));
         };
         let selected = model
             .selected_pane(node)
-            .ok_or_else(|| invalid("focused group is empty"))?;
+            .ok_or_else(|| invalid("tab group is empty"))?;
         let index = pane_ids
             .iter()
             .position(|pane| pane.as_str() == selected)

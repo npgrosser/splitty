@@ -696,6 +696,39 @@ impl LocalWorkspace {
         self.mark_catalog_dirty();
         Ok(true)
     }
+    /// Resolve each relative intent against the latest local selection. The
+    /// connection capture prevents queued input from navigating a replacement.
+    pub fn cycle_screen(
+        &mut self,
+        client: &Client,
+        connection: Uuid,
+        step: TabStep,
+    ) -> io::Result<bool> {
+        if connection != self.connection_id {
+            return Err(invalid(
+                "Screen navigation belongs to a previous connection",
+            ));
+        }
+        self.check_connection(client)?;
+        self.require_catalog()?;
+        let Some(shown) = self.shown_screen_id() else {
+            return Ok(false);
+        };
+        let index = self
+            .catalog
+            .iter()
+            .position(|screen| screen.id.as_str() == shown)
+            .ok_or_else(|| invalid("selected Screen is no longer in the workspace"))?;
+        let next = match step {
+            TabStep::Previous => index.saturating_sub(1),
+            TabStep::Next => (index + 1).min(self.catalog.len() - 1),
+        };
+        if next == index {
+            return Ok(false);
+        }
+        let target = self.catalog[next].id.to_string();
+        self.switch_screen(client, &target)
+    }
     pub fn rename_screen(&mut self, client: &Client, id: &str, name: &str) -> io::Result<()> {
         self.require_routes_settled()?;
         self.check_known(client, id)?;

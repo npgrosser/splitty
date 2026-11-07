@@ -1,6 +1,6 @@
 //! Own the local service and route workspace intents on one ordered connection.
 use crate::{
-    appearance::{AppearanceSnapshot, ColorScheme},
+    appearance::{AppearanceSnapshot, ColorScheme, DrawerVisibilityResult},
     shell_profiles::ShellProfilesSnapshot,
     templates::{TemplateApiRequest, TemplateApiResult},
     workspace::{
@@ -64,8 +64,17 @@ pub enum Command {
         connection: uuid::Uuid,
         scheme: ColorScheme,
     },
+    SetDrawerVisibility {
+        connection: uuid::Uuid,
+        request_id: uuid::Uuid,
+        pinned: bool,
+    },
     CreateScreen(String),
     SwitchScreen(String),
+    CycleScreen {
+        connection: uuid::Uuid,
+        step: TabStep,
+    },
     RenameScreen {
         screen: String,
         connection: String,
@@ -99,6 +108,12 @@ pub enum Command {
         before: Option<String>,
     },
     CycleTab {
+        connection: uuid::Uuid,
+        screen: String,
+        slot: String,
+        step: TabStep,
+    },
+    CycleTabInSlot {
         connection: uuid::Uuid,
         screen: String,
         slot: String,
@@ -142,6 +157,7 @@ pub enum Update {
     FloatingAction(FloatingActionResult),
     ScreenTransfer(ScreenTransferResult),
     Zoom(ZoomResult),
+    DrawerVisibility(DrawerVisibilityResult),
     ShellProfiles(Arc<ShellProfilesSnapshot>),
     ShellProfilesError {
         connection: uuid::Uuid,
@@ -293,6 +309,29 @@ impl<'a> RuntimeLocalService<'a> {
                 )
             })?
             .enqueue_zoom(connection, request_id, action)
+    }
+
+    fn enqueue_drawer_visibility(
+        &mut self,
+        connection: uuid::Uuid,
+        request_id: uuid::Uuid,
+        pinned: bool,
+    ) -> std::io::Result<()> {
+        if connection != self.connection {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "local settings source changed",
+            ));
+        }
+        self.reader
+            .as_mut()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "local settings are not ready",
+                )
+            })?
+            .enqueue_drawer_visibility(connection, request_id, pinned)
     }
 
     fn set_scheme(&mut self, connection: uuid::Uuid, scheme: ColorScheme) -> std::io::Result<()> {
@@ -635,6 +674,7 @@ async fn run_service(
                     let connection = client.connection_id();
                     let update = match result {
                         Ok(LocalServiceUpdate::Zoom(result)) => Update::Zoom(result),
+                        Ok(LocalServiceUpdate::DrawerVisibility(result)) => Update::DrawerVisibility(result),
                         Ok(LocalServiceUpdate::Template(result))=>Update::TemplateApi(result),
                         Ok(LocalServiceUpdate::Appearance(Ok(snapshot))) => Update::Appearance(snapshot),
                         Ok(LocalServiceUpdate::Appearance(Err(error))) => Update::AppearanceError { connection, reason: error.to_string() },
@@ -795,6 +835,15 @@ async fn run_service(
                         }
                         continue;
                     }
+                    if let Command::SetDrawerVisibility { connection, request_id, pinned } = command {
+                        let result = settings.as_mut()
+                            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::WouldBlock, "local settings are not ready"))
+                            .and_then(|settings| settings.enqueue_drawer_visibility(connection, request_id, pinned));
+                        if let Err(error) = result {
+                            publish(&updates, Update::DrawerVisibility(DrawerVisibilityResult::rejected(connection, request_id, error.to_string())), &stop).await?;
+                        }
+                        continue;
+                    }
                     if let Command::SetColorScheme { connection, scheme } = command {
                         if let Some(reader) = &mut settings {
                             // A delayed command from another owner cannot choose app settings.
@@ -808,7 +857,7 @@ async fn run_service(
                         continue;
                     };
                     let result: std::io::Result<()> = match command {
-                        Command::TemplateApi{..} | Command::ApplyTemplate{..} | Command::FloatPane{..} | Command::DockFloat{..} | Command::MoveFloat{..} | Command::TransferPane { .. } | Command::Zoom { .. } | Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
+                        Command::TemplateApi{..} | Command::ApplyTemplate{..} | Command::FloatPane{..} | Command::DockFloat{..} | Command::MoveFloat{..} | Command::TransferPane { .. } | Command::Zoom { .. } | Command::SetDrawerVisibility { .. } | Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
                             unreachable!("close is handled before normal commands")
                         }
                         Command::CreateScreen(name) => {
@@ -839,6 +888,17 @@ async fn run_service(
                                     }
                                     Ok(())
                                 }
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Command::CycleScreen { connection, step } => {
+                            match model.cycle_screen(&client, connection, step) {
+                                Ok(true) => {
+                                    desired_visible.clear();
+                                    publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
+                                    Ok(())
+                                }
+                                Ok(false) => Ok(()),
                                 Err(error) => Err(error),
                             }
                         }
@@ -888,6 +948,17 @@ async fn run_service(
                         }
                         Command::CycleTab { connection, screen, slot, step } => {
                             match model.cycle_tab(connection, &screen, &slot, step) {
+                                Ok(true) => {
+                                    let result = model.sync_selected_tabs(&client);
+                                    publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
+                                    result
+                                }
+                                Ok(false) => Ok(()),
+                                Err(error) => Err(error),
+                            }
+                        }
+                        Command::CycleTabInSlot { connection, screen, slot, step } => {
+                            match model.cycle_tab_in_slot(connection, &screen, &slot, step) {
                                 Ok(true) => {
                                     let result = model.sync_selected_tabs(&client);
                                     publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
@@ -2253,6 +2324,9 @@ mod zoom_tests;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod transfer_tests;
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod navigation_tests;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod floating_tests;

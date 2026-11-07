@@ -186,6 +186,16 @@ terminals on hidden Screens. If the affected sessions change while a decision is
 pending, request close again. Hosts, saved workspace restoration, scratchpad and
 `splitty open` integration remain subsequent work.
 
+The Screens Drawer exposes the catalog, creation, rename, assessed close and
+Templates. Its toolbar toggle saves visibility through the local settings
+service; a new window restores that choice and the saved sidebar width.
+Vertical wheel input over the Drawer header or current Screen name moves through
+Screens. Over a tab header it selects a tab in that group, even when another
+group has keyboard focus. Both stop at the ends. The Drawer list scrolls normally;
+horizontal input and Shift+mouse-wheel browse overflowing tabs. Editing, close
+prompts and dragging take priority over this navigation. Terminal wheel handling
+stays inside the terminal view.
+
 Workspace shortcuts use **Cmd** on macOS and **Alt** on other hosts as `Mod`:
 
 | Shortcut | Action |
@@ -336,6 +346,8 @@ handled before terminal and editor input. Window scope scales terminal content
 and application controls together; terminal scope leaves chrome at its usual
 size. System dialogs keep platform scaling. Zoom preserves running processes,
 history and per-pane search text, including hidden panes.
+The styled GPUI Kit Root applies chrome scaling from the component theme's base
+font size. UI controls and terminal cells retain separate scaling paths.
 
 Each shortcut requests one ordered settings action from the local client core.
 The view shows the confirmed result; failures and uncertain saves are reported
@@ -1087,3 +1099,33 @@ unrelated work and complete owned cleanup. Review/library transitions explicitly
 restore workspace focus so Escape does not remain assigned to an old root editor.
 These template and workspace checks use this exact binary; earlier feature and
 latency evidence retain their original recorded binaries.
+
+## Native Screens Drawer acceptance
+
+The Drawer increment passes 108 client-core tests, 83 native UI tests and 17
+architecture checks, touched-crate Clippy with warnings denied, formatting and
+OpenSpec validation. The pinned Kit component feature adds styled controls; its
+Root theme font now owns chrome zoom.
+
+A private X11 window passed eight acceptance stages: create/rename/select,
+hovered-group tab navigation, actual horizontal and Shift-wheel overflow,
+Screen-header navigation, terminal input tied to live pane/session identities,
+assessed busy-Screen closure, saved visibility with keyboard focus restored, and
+a new window restoring the hidden Drawer without rewriting settings. The run
+used five tabs in one split group and isolated owned shells; normal shutdown
+left no owned children. Screenshots confirm the shown and restored layouts.
+
+The zoom matrix also passes all eight cases: both scopes at 50, 125 and 300
+percent plus persisted restarts. It checks real glyph/row geometry, pointer and
+link targets, search focus, retained sessions, and high-zoom toolbar overflow.
+The Windows release build and matching WSL-backend startup preflight pass.
+Drawer interaction evidence is from private X11 windows; precision-touchpad
+behavior and hardware smoothness need platform testing. In particular, Windows
+precision Shift+vertical input is not covered by the ordinary Shift-wheel check.
+Full merge CI remains separate from this experimental branch increment.
+
+`gpui-screen-drawer.py` uses read-only mux queries and the isolated settings file;
+all workspace and visibility mutations are actual window input. Its geometry
+JSON must be calibrated from the candidate's screenshots, including a cropped
+overflowing tab strip. `--setup-only` captures the initial window; supply
+`window.confirm_close` coordinates when its normal shutdown needs confirmation.

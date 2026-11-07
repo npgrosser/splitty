@@ -148,6 +148,23 @@ tree. Switching Screens preserves terminal emulation and attachments; hidden
 terminals consume output and send protocol replies without claiming visibility
 or PTY size. Returning panes publish their measured sizes again.
 
+The native Drawer is a view of that ordered catalog, not a second workspace
+store. Relative Screen commands resolve the latest local selection on the
+worker's ordered queue, so successive wheel steps do not depend on UI refresh
+timing. Hovered-group tab navigation captures connection, shown Screen and group;
+the existing focused-group keyboard guard remains separate. Navigation clamps
+at both ends. Wheel over the Drawer header/current-Screen control navigates,
+while the Screen list scrolls normally. Tab headers retain horizontal/Shift
+overflow scrolling and terminal content keeps its own wheel route. Editing,
+modal and drag ownership gates chrome gestures.
+
+New chrome uses the pinned GPUI Kit styled controls where their controlled
+interfaces fit. The toolkit's complete DockArea owns its own PaneTree, so it is
+not used for the canonical mux projection. Existing web interactions are evidence
+of user intent; browser or terminal-library timing and scrolling workarounds are
+not native feature contracts. Native event normalization stays in the view and
+is tested for platform differences in line/pixel deltas and gesture phases.
+
 Cross-Screen transfers use the existing server `move_pane_to_screen` operation.
 The client captures connection, source Screen, pane and session identity from
 the actual tab, submits once and verifies the authoritative destination. A
@@ -220,7 +237,10 @@ awaited on every worker exit before owned service shutdown, including update
 receiver failure. The API stream never consumes terminal delivery. Appearance
 font overrides remain chrome settings. Display zoom scales the native terminal's
 15 px text and 21 px row baseline in both scopes; window scope also scales native
-chrome through rem units without changing OS DPI. The terminal view owns one
+chrome through rem units without changing OS DPI. The styled toolkit Root owns
+the rem baseline, so window scale updates its theme base font rather than relying
+on a direct window rem assignment that the next Root render would overwrite.
+The terminal view owns one
 set of measured metrics for shaping, paint, pointer mapping and IME bounds, and
 passes only grid and pixel geometry into the replaceable emulator. Hidden panes
 retain desired zoom until measured on return. Changed cell pixels refresh the
@@ -228,6 +248,14 @@ emulator even when rounded grid dimensions stay the same; only changed visible
 dimensions need a new PTY size report. Applying zoom cancels gestures whose
 captured pixel geometry is obsolete without replacing sessions, search queries
 or the canonical workspace layout.
+
+Drawer visibility shares the local presentation read: one charged `home.get`
+projection retains appearance and Drawer settings before theme resolution. The
+view restores `drawer.pinned` and bounded saved width without a startup write.
+One identified visibility job patches only `drawer.pinned`, alternates fairly
+with zoom work and refreshes presentation after its outcome. The view disables
+overlapping toggles and retains confirmed state on rejection or uncertainty;
+no ambiguous write is replayed. These preferences remain local-service-owned.
 
 The same `LocalServiceClient` admits one identified template-library job alongside
 settings and zoom work, with a fair turn between library requests. The template

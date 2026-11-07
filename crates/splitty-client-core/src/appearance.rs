@@ -3,11 +3,50 @@
 //! A snapshot owns its decoded allocation leases through presentation. The local
 //! reader uses a separate API stream: its request helper must never consume the
 //! session stream, where unrelated frames carry terminal output and credits.
-use splitty_core::{config::AppearanceSettings, theme::ResolvedTheme};
+use splitty_core::{
+    config::{AppearanceSettings, DrawerSettings},
+    theme::ResolvedTheme,
+};
 use splitty_transport::budget::Charged;
 use uuid::Uuid;
 
 pub(crate) mod local;
+
+#[derive(Debug)]
+pub(crate) struct HomePresentation {
+    pub appearance: AppearanceSettings,
+    pub drawer: DrawerSettings,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DrawerVisibilityResult {
+    pub connection_id: Uuid,
+    pub request_id: Uuid,
+    pub outcome: DrawerVisibilityOutcome,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum DrawerVisibilityOutcome {
+    Confirmed(bool),
+    Rejected { reason: String },
+    Uncertain { reason: String },
+}
+
+impl DrawerVisibilityResult {
+    pub(crate) fn rejected(
+        connection_id: Uuid,
+        request_id: Uuid,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self {
+            connection_id,
+            request_id,
+            outcome: DrawerVisibilityOutcome::Rejected {
+                reason: reason.into(),
+            },
+        }
+    }
+}
 
 /// The UI supplies the operating system's preference; no platform calls belong here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,7 +60,7 @@ pub enum ColorScheme {
 pub struct AppearanceSnapshot {
     connection_id: Uuid,
     generation: u64,
-    settings: Charged<AppearanceSettings>,
+    settings: Charged<HomePresentation>,
     theme: Charged<ResolvedTheme>,
 }
 
@@ -33,7 +72,10 @@ impl AppearanceSnapshot {
         self.generation
     }
     pub fn settings(&self) -> &AppearanceSettings {
-        &self.settings
+        &self.settings.appearance
+    }
+    pub fn drawer(&self) -> &DrawerSettings {
+        &self.settings.drawer
     }
     /// The resolved theme variant, which can differ from the OS preference.
     pub fn scheme(&self) -> ColorScheme {

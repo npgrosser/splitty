@@ -105,6 +105,7 @@ def terminal_geometry(data, level, width=1200, height=760):
 def config_text(python, fixture, owned, scope, level):
     return (f'[appearance]\ntheme_mode = "fixed"\ntheme = "splitty-dark"\n'
             f'zoom = {level}\nzoom_scope = "{scope}"\n\n'
+            '[drawer]\npinned = false\n\n'
             f'[shells]\ndefault_profile_id = "zoom-fixture"\n\n'
             f'[[shells.profiles]]\nid = "zoom-fixture"\nname = "Zoom fixture"\n'
             f'command = {json.dumps(str(python))}\n'
@@ -204,6 +205,7 @@ def main():
         saved = tomllib.loads(config_file.read_text())
         assert saved["appearance"]["zoom_scope"] == args.scope
         assert abs(saved["appearance"]["zoom"] - args.level) < .001
+        assert saved["drawer"]["pinned"] is False, "zoom fixture needs full-width terminal geometry"
         owned = Path(saved["shells"]["profiles"][0]["args"][-1]).resolve()
         if not owned.is_relative_to(args.output.parent.resolve()):
             raise ValueError("fixture directory must belong to this output matrix")
@@ -443,7 +445,7 @@ def main():
                     toolbar_after = capture("high-zoom-toolbar-after-scroll")
                     assert changed_pixels(toolbar_before, toolbar_after, 200, 0, 1195, 125) > 500, (
                         "wide toolbar did not reveal its clipped controls")
-                    result["checks"].append("high-zoom-screen-strip-and-toolbar-remain-scrollable")
+                    result["checks"].append("high-zoom-compact-toolbar-remains-scrollable")
 
                     no_input("high-zoom-split", lambda: chord("Alt_L", "d"))
                     split_pid = wait_until(lambda: next((pid for pid in

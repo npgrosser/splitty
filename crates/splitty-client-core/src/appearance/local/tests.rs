@@ -146,6 +146,8 @@ async fn reads_keep_allocations_charged_and_session_events_separate() {
     let snapshot = snapshot(&mut reader).await;
     assert_eq!(snapshot.settings().font_size, 18);
     assert_eq!(snapshot.settings().font_family, "test monospace");
+    assert!(snapshot.drawer().pinned);
+    assert_eq!(snapshot.drawer().sidebar_width, 200);
     assert_eq!(
         snapshot.theme().variant,
         splitty_core::theme::Variant::Light
@@ -184,6 +186,7 @@ async fn reads_keep_allocations_charged_and_session_events_separate() {
 #[tokio::test]
 async fn cancelled_poll_retains_read_and_refresh_discards_superseded_generation() {
     let (service, path) = fixture();
+    service.state.config.write().unwrap().drawer.sidebar_width = 260;
     let api = Connector::default()
         .embedded(service.state.clone(), Role::Main)
         .await
@@ -196,8 +199,10 @@ async fn cancelled_poll_retains_read_and_refresh_discards_superseded_generation(
         .is_err());
     reader.refresh_settings(owner).unwrap();
     reader.set_scheme(owner, ColorScheme::Light).unwrap();
+    service.state.config.write().unwrap().drawer.sidebar_width = 340;
     let result = snapshot(&mut reader).await;
     assert_eq!(result.generation(), 3);
+    assert_eq!(result.drawer().sidebar_width, 340);
     assert_eq!(result.theme().variant, splitty_core::theme::Variant::Light);
     drop(result);
     reader.finish().await.unwrap();
@@ -258,7 +263,7 @@ fn malformed_or_oversized_reply_is_rejected_without_losing_budget() {
         id: 1,
         status: 200,
         content_type: wire::ContentType::Json,
-        body: serde_json::to_string(&json!({"appearance": AppearanceSettings::default()})).unwrap(),
+        body: serde_json::to_string(&json!({"appearance": AppearanceSettings::default(), "drawer": splitty_core::config::DrawerSettings::default()})).unwrap(),
         uncertain: false,
     };
     let available = wire::CONNECTION_BYTES - wire::CONNECTION_CONTROL_BYTES - budget.data.used();
@@ -272,6 +277,42 @@ fn malformed_or_oversized_reply_is_rejected_without_losing_budget() {
     );
     drop(held);
     assert_eq!(budget.used(), 0);
+}
+
+#[tokio::test]
+async fn drawer_snapshot_restores_service_values_without_writing() {
+    let (service, path) = fixture();
+    {
+        let mut config = service.state.config.write().unwrap();
+        config.drawer.pinned = false;
+        config.drawer.sidebar_width = 280;
+        config.appearance.font_size = 19;
+    }
+    let api = Connector::default()
+        .embedded(service.state.clone(), Role::Main)
+        .await
+        .unwrap();
+    let owner = Uuid::new_v4();
+    let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+    let first = snapshot(&mut reader).await;
+    assert!(!first.drawer().pinned);
+    assert_eq!(first.drawer().sidebar_width, 280);
+    assert_eq!(first.settings().font_size, 19);
+    let first_generation = first.generation();
+    drop(first);
+    service.state.config.write().unwrap().drawer.sidebar_width = 320;
+    reader.refresh_settings(owner).unwrap();
+    let later = snapshot(&mut reader).await;
+    assert!(later.generation() > first_generation);
+    assert_eq!(later.drawer().sidebar_width, 320);
+    assert_eq!(later.settings().font_size, 19);
+    assert!(
+        !path.exists(),
+        "reading presentation must not save settings"
+    );
+    drop(later);
+    reader.finish().await.unwrap();
+    service.close().await.unwrap();
 }
 
 #[tokio::test]

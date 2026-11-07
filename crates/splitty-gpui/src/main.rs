@@ -72,9 +72,11 @@ fn main() -> anyhow::Result<()> {
     let reported_outcome = outcome.clone();
     gpui_kit::application().run(move |cx| {
         gpui_kit::init(cx);
-        let theme = gpui_kit::base::Theme::global_mut(cx);
-        theme.appearance = gpui_kit::base::ThemeAppearance::Dark;
-        theme.tokens.colors = gpui_kit::base::ColorTokens::dark();
+        gpui_kit::component::theme::Theme::change(
+            gpui_kit::component::theme::ThemeMode::Dark,
+            None,
+            cx,
+        );
         let result = gpui_kit::open_window(
             WindowOptions {
                 window_bounds: Some(WindowBounds::centered(size(px(1200.), px(760.)), cx)),

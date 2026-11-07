@@ -1,6 +1,7 @@
 //! HomeUpdate persists through a process-global config path. Run this real
 //! service test in a child with a private path, never changing the parent's env.
 use super::*;
+use crate::appearance::DrawerVisibilityOutcome;
 use crate::zoom::{Zoom, ZoomOutcome};
 use uuid::Uuid;
 
@@ -139,7 +140,51 @@ async fn real_service() {
             ZoomOutcome::Confirmed(Zoom::from_values(level, "terminals"))
         );
     }
+    // Drawer visibility shares the API scheduler but has its own identified
+    // outcome. An invalid owner cannot change local presentation preferences.
+    let foreign_drawer = Uuid::new_v4();
+    let drawer_request = Uuid::new_v4();
+    for (connection, request_id, pinned) in [
+        (foreign, foreign_drawer, true),
+        (owner, drawer_request, false),
+    ] {
+        commands
+            .send(Command::SetDrawerVisibility {
+                connection,
+                request_id,
+                pinned,
+            })
+            .await
+            .unwrap();
+    }
+    let mut drawer_confirmed = false;
+    let mut drawer_rejected = false;
+    let mut drawer_refreshed = false;
+    while !drawer_confirmed || !drawer_rejected || !drawer_refreshed {
+        match next(&mut updates).await {
+            Update::DrawerVisibility(result) if result.request_id == foreign_drawer => {
+                assert_eq!(result.connection_id, foreign);
+                assert!(matches!(
+                    result.outcome,
+                    DrawerVisibilityOutcome::Rejected { .. }
+                ));
+                drawer_rejected = true;
+            }
+            Update::DrawerVisibility(result) if result.request_id == drawer_request => {
+                assert_eq!(result.connection_id, owner);
+                assert_eq!(result.outcome, DrawerVisibilityOutcome::Confirmed(false));
+                drawer_confirmed = true;
+            }
+            Update::Appearance(snapshot) if !snapshot.drawer().pinned => {
+                assert_eq!(snapshot.connection_id(), owner);
+                drawer_refreshed = true;
+            }
+            _ => {}
+        }
+    }
     let saved = splitty_core::config::load_from(&splitty_core::config::config_path());
+    assert!(!saved.drawer.pinned);
+    assert_eq!(saved.drawer.sidebar_width, config.drawer.sidebar_width);
     assert_eq!(saved.appearance.zoom, 0.9);
     assert_eq!(saved.appearance.zoom_scope, "terminals");
     assert_eq!(saved.appearance.font_family, config.appearance.font_family);
@@ -180,6 +225,7 @@ async fn real_service() {
         }
     };
     assert_eq!(snapshot.settings().zoom, persisted.appearance.zoom);
+    assert!(!snapshot.drawer().pinned);
     drop(snapshot);
     settings.finish().await.unwrap();
     restarted.close().await.unwrap();
@@ -192,6 +238,20 @@ async fn zoom_before_settings_setup_is_rejected_without_a_forwarding_queue() {
         crate::owned_service::OwnedService::from(crate::EmbeddedService::from_runtime(runtime));
     let owner = Uuid::new_v4();
     let mut settings = RuntimeLocalService::new(&service, owner, ColorScheme::Dark);
+    assert_eq!(
+        settings
+            .enqueue_drawer_visibility(owner, Uuid::new_v4(), false)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::WouldBlock
+    );
+    assert_eq!(
+        settings
+            .enqueue_drawer_visibility(Uuid::new_v4(), Uuid::new_v4(), false)
+            .unwrap_err()
+            .kind(),
+        std::io::ErrorKind::InvalidInput
+    );
     assert_eq!(
         settings
             .enqueue_zoom(owner, Uuid::new_v4(), ZoomAction::In)

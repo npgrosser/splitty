@@ -1,7 +1,7 @@
-//! One owned API stream for local settings reads and ordered zoom intents, separate from PTY events.
+//! One owned API stream for local settings reads and bounded mutations, separate from PTY events.
 use crate::api_stream::ApiStream as Client;
 use crate::{
-    appearance::{AppearanceSnapshot, ColorScheme},
+    appearance::{AppearanceSnapshot, ColorScheme, DrawerVisibilityResult},
     shell_profiles::ShellProfilesSnapshot,
     zoom::{ZoomAction, ZoomResult},
 };
@@ -14,6 +14,7 @@ use uuid::Uuid;
 pub enum LocalServiceUpdate {
     Template(crate::templates::TemplateApiResult),
     Zoom(ZoomResult),
+    DrawerVisibility(DrawerVisibilityResult),
     Appearance(io::Result<Arc<AppearanceSnapshot>>),
     ShellProfiles(io::Result<Arc<ShellProfilesSnapshot>>),
 }
@@ -42,6 +43,7 @@ const MAX_QUEUED_ZOOM: usize = 32;
 enum Job {
     Read(Feature, u64),
     Zoom(Uuid, ZoomAction),
+    DrawerVisibility(Uuid, bool),
     Template(Uuid, crate::templates::TemplateApiRequest),
 }
 type Read = Pin<Box<dyn Future<Output = (Client, Job, LocalServiceUpdate)> + Send>>;
@@ -54,6 +56,9 @@ pub struct LocalServiceClient {
     client: Option<Client>,
     pending: Option<Read>,
     active_zoom: Option<Uuid>,
+    drawer_visibility: Option<(Uuid, bool)>,
+    active_drawer_visibility: Option<Uuid>,
+    prefer_drawer_visibility: bool,
     template: Option<(Uuid, crate::templates::TemplateApiRequest)>,
     active_template: Option<Uuid>,
     last_template: bool,
@@ -72,6 +77,9 @@ impl LocalServiceClient {
             client: Some(client.into()),
             pending: None,
             active_zoom: None,
+            drawer_visibility: None,
+            active_drawer_visibility: None,
+            prefer_drawer_visibility: false,
             template: None,
             active_template: None,
             last_template: false,
@@ -136,6 +144,31 @@ impl LocalServiceClient {
         self.zoom.push_back((request, action));
         Ok(())
     }
+    /// Admit one visibility change. A second intent waits for the first outcome.
+    pub fn enqueue_drawer_visibility(
+        &mut self,
+        owner: Uuid,
+        request: Uuid,
+        pinned: bool,
+    ) -> io::Result<()> {
+        self.check_owner(owner)?;
+        if self.active_drawer_visibility == Some(request)
+            || self.drawer_visibility.is_some_and(|(id, _)| id == request)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "drawer visibility request is already pending",
+            ));
+        }
+        if self.drawer_visibility.is_some() || self.active_drawer_visibility.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "a drawer visibility update is pending",
+            ));
+        }
+        self.drawer_visibility = Some((request, pinned));
+        Ok(())
+    }
     pub fn enqueue_template(
         &mut self,
         owner: Uuid,
@@ -180,6 +213,33 @@ impl LocalServiceClient {
                     let (id, request) = self.template.take().expect("queued template");
                     self.active_template = Some(id);
                     Job::Template(id, request)
+                } else if self.drawer_visibility.is_some()
+                    && (self.prefer_write || feature.is_none())
+                    && (self.prefer_drawer_visibility || self.zoom.is_empty())
+                {
+                    let generation = match increment(self.generations[0]) {
+                        Ok(generation) => generation,
+                        Err(error) => {
+                            let (id, _) = self
+                                .drawer_visibility
+                                .take()
+                                .expect("queued drawer visibility");
+                            return LocalServiceUpdate::DrawerVisibility(
+                                DrawerVisibilityResult::rejected(
+                                    self.connection_id,
+                                    id,
+                                    error.to_string(),
+                                ),
+                            );
+                        }
+                    };
+                    self.generations[0] = generation;
+                    let (id, pinned) = self
+                        .drawer_visibility
+                        .take()
+                        .expect("queued drawer visibility");
+                    self.active_drawer_visibility = Some(id);
+                    Job::DrawerVisibility(id, pinned)
                 } else if !self.zoom.is_empty() && (self.prefer_write || feature.is_none()) {
                     let (id, action) = self.zoom.pop_front().expect("queued zoom");
                     // Reserve a generation before starting this indivisible job.
@@ -240,6 +300,16 @@ impl LocalServiceClient {
                         Job::Zoom(id, action) => LocalServiceUpdate::Zoom(
                             zoom::execute(&mut client, connection, id, action, &cancel).await,
                         ),
+                        Job::DrawerVisibility(id, pinned) => LocalServiceUpdate::DrawerVisibility(
+                            drawer_visibility::execute(
+                                &mut client,
+                                connection,
+                                id,
+                                pinned,
+                                &cancel,
+                            )
+                            .await,
+                        ),
                     };
                     (client, job, result)
                 }));
@@ -262,8 +332,15 @@ impl LocalServiceClient {
                 Job::Zoom(..) => {
                     self.active_zoom = None;
                     self.prefer_write = false;
+                    self.prefer_drawer_visibility = true;
                     // There is no concurrent read: every later appearance starts
                     // after this outcome, even when a settings event raced it.
+                    self.dirty[0] = true;
+                }
+                Job::DrawerVisibility(..) => {
+                    self.active_drawer_visibility = None;
+                    self.prefer_write = false;
+                    self.prefer_drawer_visibility = false;
                     self.dirty[0] = true;
                 }
             }
@@ -327,6 +404,7 @@ pub(crate) fn decode_with_budget<T: DeserializeOwned>(
 #[cfg(all(test, not(target_os = "windows")))]
 mod tests;
 
+mod drawer_visibility;
 mod zoom;
 
 #[cfg(all(test, unix))]

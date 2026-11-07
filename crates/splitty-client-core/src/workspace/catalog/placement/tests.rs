@@ -265,6 +265,78 @@ fn cycle_tabs_uses_latest_selection_clamps_and_rejects_stale_captures() {
 }
 
 #[test]
+fn hovered_group_navigation_uses_its_own_selection_and_rejects_stale_targets() {
+    let mut model = workspace();
+    let owner = model.connection_id;
+    assert_eq!(model.focused_slot_id(), Some("left"));
+    assert!(model
+        .cycle_tab_in_slot(owner, "screen", "right", TabStep::Next)
+        .unwrap());
+    assert_eq!(model.focused_pane(), Some("e"));
+    assert_eq!(model.focused_slot_id(), Some("right"));
+    assert!(!model
+        .cycle_tab_in_slot(owner, "screen", "right", TabStep::Next)
+        .unwrap());
+    assert!(model
+        .cycle_tab_in_slot(owner, "screen", "left", TabStep::Next)
+        .unwrap());
+    assert_eq!(model.focused_pane(), Some("b"));
+    assert!(model
+        .cycle_tab(owner, "screen", "right", TabStep::Previous)
+        .is_err());
+    assert_eq!(model.focused_pane(), Some("b"));
+    assert!(model
+        .cycle_tab_in_slot(Uuid::new_v4(), "screen", "left", TabStep::Next)
+        .is_err());
+    assert!(model
+        .cycle_tab_in_slot(owner, "other", "left", TabStep::Next)
+        .is_err());
+    assert!(model
+        .cycle_tab_in_slot(owner, "screen", "gone", TabStep::Next)
+        .is_err());
+    assert_eq!(model.focused_pane(), Some("b"));
+    assert_eq!(
+        model.selected_pane(
+            model
+                .snapshot()
+                .unwrap()
+                .root
+                .find_node(&NodeId::from("right"))
+                .unwrap()
+        ),
+        Some("e")
+    );
+    model
+        .apply_snapshot(
+            owner,
+            &json!({"type":"mux.screen_snapshot", "screen":{
+                "id":"screen", "revision":2,
+                "root":{"type":"slot","id":"left","paneIds":["a","b","c"],"activePaneId":"a"},
+                "panes":{
+                    "a":{"id":"a"},"b":{"id":"b"},"c":{"id":"c"}
+                },
+                "sessions":{}
+            }}),
+        )
+        .unwrap();
+    assert!(model
+        .cycle_tab_in_slot(owner, "screen", "right", TabStep::Previous)
+        .is_err());
+}
+
+#[test]
+fn stale_hovered_group_does_not_cancel_pending_placement_focus() {
+    let mut model = workspace();
+    let owner = model.connection_id;
+    admit(&mut model, "a", "right", None);
+    assert!(model.pending_placement.as_ref().unwrap().focus);
+    assert!(model
+        .cycle_tab_in_slot(owner, "screen", "gone", TabStep::Next)
+        .is_err());
+    assert!(model.pending_placement.as_ref().unwrap().focus);
+}
+
+#[test]
 fn post_fence_equal_revision_confirms_but_lower_revision_rejects_without_losing_state() {
     let mut model = workspace();
     admit(&mut model, "a", "left", None);
