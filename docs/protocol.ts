@@ -1251,8 +1251,14 @@ interface ShellProfile {
 }
 
 interface ShellProfilesState {
+  /** The effective default profile. */
   defaultProfileId: string;
   profiles: ShellProfile[];
+  /** True while the default follows the system default (empty stored default).
+   *  On update, true stores the empty value; absent means false. */
+  followSystemDefault?: boolean;
+  /** The profile detected for the login shell (`$SHELL`); ignored on update. */
+  systemDefaultProfileId?: string;
 }
 
 interface CloseScreenOp {

@@ -50,7 +50,7 @@ export SOURCE_DATE_EPOCH=0
 export SPLITTY_BUILD_TIME=1970-01-01T00:00:00Z
 ```
 
-On Linux, build and check the local frontend with `pnpm install --frozen-lockfile`, `pnpm check` and `pnpm build` in `frontend/` (the macOS script does this itself). The CI payloads provide the server binaries; build the desktop package on the current machine.
+On Linux, install `frontend-electron/` dependencies first (the frontend check imports the Electron adapters), then build and check the local frontend with `pnpm install --frozen-lockfile`, `pnpm check` and `pnpm build` in `frontend/` (the macOS script does this itself). The CI payloads provide the server binaries; build the desktop package on the current machine.
 
 If payload artifacts are unavailable, build them locally from the release commit with `packaging/windows/build-wsl-payload.sh`: `aarch64`, `darwin-aarch64`, `darwin-x86_64` first, then `x86_64` with the other three payload environment variables set. On macOS, `packaging/macos/build.sh` does this by itself (below). Report which source the payloads came from; never ship missing or older backends.
 
@@ -76,7 +76,10 @@ mkdir -p target/release payloads/x86_64
 tar -xzf "$SPLITTY_REMOTE_PAYLOAD_X86_64" -C payloads/x86_64
 install -m 0755 payloads/x86_64/splitty target/release/splitty
 pnpm install --frozen-lockfile --dir frontend-electron
-pnpm --dir frontend-electron run dist --publish never
+# fpm rejects an epoch of 0 for deb and rpm; the release commit's time stays reproducible.
+SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)" pnpm --dir frontend-electron run dist --publish never
 ```
 
-Collect the versioned AppImage from `frontend-electron/dist/`. For the release filename, rename `Splitty-<version>.AppImage` to `Splitty-Electron-<version>-x86_64.AppImage` before copying it to the actual XDG Downloads folder with the helper. Do not use `make install` for delivery to Downloads.
+The deb and rpm need `rpmbuild` (Fedora: `rpm-build`; Debian/Ubuntu: `rpm`) and, on distributions without it, the `libcrypt.so.1` compatibility library for electron-builder's bundled fpm (Fedora: `libxcrypt-compat`).
+
+Collect the versioned AppImage, deb and rpm from `frontend-electron/dist/`. For the release filename, rename `Splitty-<version>.AppImage` to `Splitty-Electron-<version>-x86_64.AppImage`; the deb and rpm keep their names. Copy them to the actual XDG Downloads folder with the helper. Do not use `make install` for delivery to Downloads.

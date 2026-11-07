@@ -105,7 +105,7 @@ the GitHub CLI, for example
 |---|---|---|
 | Windows 10/11 (x64) | `Splitty_<version>_x64-setup.exe` | Local terminals run in WSL 2 (Ubuntu or Debian); the app's setup page shows how to get it. Without WSL, the app opens remote hosts only. To update, run the newer installer. |
 | macOS (Apple silicon and Intel) | `Splitty_<version>_universal.dmg` | Clear the quarantine flag after installing (below). |
-| Linux (x86_64) | `Splitty-Electron-<version>-x86_64.AppImage` | Run the AppImage directly. |
+| Linux (x86_64) | `splitty-electron_<version>_amd64.deb`, `splitty-electron-<version>.x86_64.rpm` or `Splitty-Electron-<version>-x86_64.AppImage` | Install the deb (Debian, Ubuntu) or rpm (Fedora, openSUSE) with the system's package manager, or run the AppImage directly. |
 
 The Linux release uses Electron's bundled Chromium for a consistent runtime
 across distributions and to avoid WebKitGTK compatibility and rendering trouble.

@@ -487,3 +487,9 @@ that area touches them.
   workflow): the test process sometimes dies with SIGSEGV while the `keeper::process` and `pty::session` tests
   spawn processes, in about 1 of 15 runs, already at v0.1.29. The v0.1.30 release run needed a rerun of that job.
   Not seen with the glibc target.
+- Seen on 2026-11-07 in CI on `main`, each passing on the next commit without a related change:
+  `daemon_lifecycle::remote_bridge_relays_native_bytes_and_detaches_without_ending_host_sessions` in the
+  "Tauri native runtime (macOS)" job (`status.success()` at its bridge process), and
+  `http::tests::a_forward_whose_ssh_ends_is_rebuilt_on_its_port` in "Rust tests". Locally,
+  `remote_connect::the_hub_forwards_a_port_a_host_pane_listens_on` failed once in a full workspace run and passed
+  alone. Not yet investigated.

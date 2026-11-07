@@ -22,6 +22,7 @@ fn profiles() -> ShellProfilesState {
             experimental: false,
             detected_defaults: None,
         }],
+        ..ShellProfilesState::default()
     }
 }
 async fn next(reader: &mut LocalServiceClient) -> LocalServiceUpdate {
@@ -106,7 +107,7 @@ async fn profile_limits_are_atomic_and_failure_does_not_poison_appearance() {
     let owner = Uuid::new_v4();
     let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
     let first = profile(&mut reader).await.unwrap();
-    for case in 0..5 {
+    for case in 0..6 {
         let mut invalid = profiles();
         match case {
             0 => invalid.profiles = vec![invalid.profiles[0].clone(); 129],
@@ -114,6 +115,7 @@ async fn profile_limits_are_atomic_and_failure_does_not_poison_appearance() {
             2 => invalid.profiles[0].name = "x".repeat(513),
             3 => invalid.profiles[0].reason = Some("x".repeat(513)),
             4 => invalid.default_profile_id = "x".repeat(257),
+            5 => invalid.system_default_profile_id = "x".repeat(257),
             _ => unreachable!(),
         }
         *service.state.shell_profiles.write().unwrap() = invalid;

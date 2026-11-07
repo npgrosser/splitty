@@ -13,7 +13,7 @@ listed in [`CLAUDE.md`](../CLAUDE.md#checks).
 | Frontend | Svelte 5, TypeScript, Vite, Tailwind CSS |
 | Terminal | xterm.js with WebGL, ligatures, search, image support; ghostty-web |
 | Layout | dockview-core |
-| Desktop | Tauri v2 (macOS and Windows releases; Linux source build); Electron (Linux release AppImage) |
+| Desktop | Tauri v2 (macOS and Windows releases; Linux source build); Electron (Linux release: AppImage, deb, rpm) |
 | Backend | Rust (Tokio, Axum) |
 | PTY | portable-pty |
 | Config | TOML (`~/.config/splitty/config.toml`) |
@@ -178,7 +178,7 @@ which revisions and platform cases have actually passed.
 
 ```bash
 make build/splitty        # server and CLI binary (embeds the frontend)
-make electron             # Linux release format: Electron AppImage
+make electron             # Linux release formats: Electron AppImage, deb, rpm (needs rpmbuild and libcrypt.so.1; Fedora: rpm-build, libxcrypt-compat)
 make build/splitty-gui    # Tauri desktop binary (Linux source build)
 make build/Splitty.app    # macOS app bundle
 make dmg                  # macOS disk image

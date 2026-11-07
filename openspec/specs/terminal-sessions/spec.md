@@ -34,7 +34,7 @@ If a session cannot be started, the server SHALL send an `error` event without a
 - **THEN** the server sends an `error` event with no `sessionId` describing the spawn failure
 
 ### Requirement: Shell Program Selection
-The server SHALL choose the program to run in this order: (1) the requested `shellProfileId`, if it names a known profile that is enabled and available; (2) the legacy `shell` path, when no `shellProfileId` is given; (3) the default profile, which is the configured default if enabled and available, otherwise the first enabled and available profile. A requested profile that is missing, disabled or unavailable SHALL fall back to the default profile. The `created` or `mux.pane_spawned` event SHALL report the effective `shellProfileId` and, when fallback occurred, a `shellProfileFallbackReason`. Profile arguments MUST be passed to the program as literal, individual arguments in their configured order without shell interpolation.
+The server SHALL choose the program to run in this order: (1) the requested `shellProfileId`, if it names a known profile that is enabled and available; (2) the legacy `shell` path, when no `shellProfileId` is given; (3) the default profile, which is the configured default if enabled and available, otherwise the system default profile if enabled and available, otherwise the first enabled and available profile. A requested profile that is missing, disabled or unavailable SHALL fall back to the default profile. The `created` or `mux.pane_spawned` event SHALL report the effective `shellProfileId` and, when fallback occurred, a `shellProfileFallbackReason`. Profile arguments MUST be passed to the program as literal, individual arguments in their configured order without shell interpolation.
 
 #### Scenario: Profile id takes precedence over legacy shell
 - **WHEN** a client sends `create` with both a valid `shellProfileId` and a `shell` path
@@ -693,3 +693,25 @@ Native link resolution SHALL bound inspected output and target storage, reject m
 - **WHEN** a hyperlink control sequence exceeds the terminal parser's capture limit and is discarded before creating cell metadata
 - **THEN** no shortened explicit target is exposed
 - **AND** subsequent visible text follows ordinary URL detection, including a complete URL printed as its label
+
+### Requirement: Default Shell Profile
+The system default profile SHALL be the detected profile for the server's login shell (`$SHELL`), or the first detected profile when `$SHELL` names no executable. An empty `[shells] default_profile_id` in `config.toml` SHALL mean that the default follows the system default, resolved again whenever the profiles are reconciled; a non-empty value is an explicit choice. Reconciling profiles with detection MUST NOT write a resolved id into an empty value. `GET /api/shell-profiles` SHALL report the effective `defaultProfileId`, `followSystemDefault` (true exactly when the stored value is empty) and `systemDefaultProfileId`. `PUT /api/shell-profiles` with `followSystemDefault` true SHALL store the empty value; otherwise `defaultProfileId` SHALL be stored as an explicit choice, replaced by the first enabled and available profile when it names none.
+
+#### Scenario: New configuration follows the login shell
+- **WHEN** the server starts without a stored default and `$SHELL` is `/usr/bin/zsh`
+- **THEN** `GET /api/shell-profiles` reports the zsh profile as `defaultProfileId` and `systemDefaultProfileId` and `followSystemDefault` true
+- **AND** `config.toml` keeps `default_profile_id` empty
+
+#### Scenario: Login shell changes
+- **WHEN** the default follows the system default and the server starts again with `$SHELL` set to `/bin/bash`
+- **THEN** the default profile is the bash profile
+
+#### Scenario: Explicit choice survives a login shell change
+- **WHEN** a client saves the shell profiles with `defaultProfileId` naming the bash profile and no `followSystemDefault`
+- **AND** the server starts again with `$SHELL` set to `/usr/bin/zsh`
+- **THEN** the default profile is still the bash profile and `followSystemDefault` is false
+
+#### Scenario: Switching back to the system default
+- **WHEN** a client saves the shell profiles with `followSystemDefault` true
+- **THEN** `config.toml` stores an empty `default_profile_id`
+- **AND** the response reports the system default profile as `defaultProfileId`

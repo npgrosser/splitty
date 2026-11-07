@@ -39,6 +39,7 @@ pub(crate) async fn read(
     let state = crate::local_service::decode::<ShellProfilesState>(client, &reply)?;
     if state.profiles.len() > 128
         || state.default_profile_id.len() > MAX_PROFILE_ID_BYTES
+        || state.system_default_profile_id.len() > MAX_PROFILE_ID_BYTES
         || state.profiles.iter().any(|profile| {
             profile.id.len() > MAX_PROFILE_ID_BYTES
                 || profile.name.len() > 512
