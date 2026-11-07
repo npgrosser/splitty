@@ -187,11 +187,15 @@ mod tests {
             client.input(session, "early").unwrap_err().kind(),
             io::ErrorKind::WouldBlock
         );
+        assert_eq!(
+            client.input_bytes(session, b"\x80").unwrap_err().kind(),
+            io::ErrorKind::WouldBlock
+        );
         kind(client, "attached").await;
         client.resize(session, 80, 24, true).unwrap();
     }
 
-    async fn output(client: &mut Client, needle: &[u8]) {
+    async fn output(client: &mut Client, needle: &[u8]) -> Vec<u8> {
         let mut received = Vec::new();
         tokio::time::timeout(Duration::from_secs(10), async {
             loop {
@@ -210,6 +214,7 @@ mod tests {
         })
         .await
         .expect("terminal output");
+        received
     }
 
     /// Real PTYs through the real native service, within this process: the
@@ -240,6 +245,49 @@ mod tests {
             .input(&session, "printf 'CORE_'; printf 'MARKER\\n'\n")
             .unwrap();
         output(&mut client, b"CORE_MARKER").await;
+        // The raw reader makes corruption by UTF-8 conversion observable. A
+        // whole bracketed paste follows the binary report on the same stream.
+        client.input(&session, "stty raw -echo; printf 'RAW_'; printf READY; dd bs=1 count=19 2>/dev/null | od -An -tx1; stty sane; printf 'RAW_DONE\\n'\n").unwrap();
+        output(&mut client, b"RAW_READY").await;
+        client.input_bytes(&session, b"\x00\x80\xff\x1b").unwrap();
+        client
+            .input_bytes(&session, b"\x1b[200~abc\x1b[201~")
+            .unwrap();
+        let raw = output(&mut client, b"RAW_DONE").await;
+        let raw = std::str::from_utf8(&raw)
+            .unwrap()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            raw.contains("00 80 ff 1b 1b 5b 32 30 30 7e 61 62 63 1b 5b 32 30 31 7e"),
+            "{raw:?}"
+        );
+        // A welcome without the extension must revoke it, including after
+        // this connection has previously used binary input successfully.
+        service
+            .runtime
+            .as_ref()
+            .unwrap()
+            .state
+            .client_state
+            .broadcast_events(
+                &[splitty_core::protocol::ServerEvent::mux_welcome(
+                    "legacy-peer".into(),
+                    vec![],
+                    None,
+                )],
+                None,
+            );
+        kind(&mut client, "mux.welcome").await;
+        assert_eq!(
+            client.input_bytes(&session, b"\x80").unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
+        client
+            .input_bytes(&session, b"printf 'LEGACY_'; printf 'TEXT_OK\\n'\n")
+            .unwrap();
+        output(&mut client, b"LEGACY_TEXT_OK").await;
         client.resize(&session, 111, 37, false).unwrap();
         event(&mut client, |event| {
             event.json().is_some_and(|value| {

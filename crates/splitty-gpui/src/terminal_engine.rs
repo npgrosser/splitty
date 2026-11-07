@@ -55,6 +55,92 @@ pub struct Cursor {
     pub color: u32,
 }
 
+/// Tracking policy derived from the native encoder, not independently parsed modes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseTracking {
+    None,
+    X10,
+    Normal,
+    Button,
+    Any,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct MousePolicy {
+    pub tracking: MouseTracking,
+}
+impl MousePolicy {
+    pub fn reports_buttons(self) -> bool {
+        self.tracking != MouseTracking::None
+    }
+    pub fn reports_wheel(self) -> bool {
+        matches!(
+            self.tracking,
+            MouseTracking::Normal | MouseTracking::Button | MouseTracking::Any
+        )
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseAction {
+    Press,
+    Release,
+    Motion,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
+    WheelUp,
+    WheelDown,
+    WheelLeft,
+    WheelRight,
+    Back,
+    Forward,
+}
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MouseModifiers {
+    pub shift: bool,
+    pub control: bool,
+    pub alt: bool,
+    pub super_key: bool,
+}
+impl MouseModifiers {
+    fn native_bits(self) -> u16 {
+        u16::from(self.shift)
+            | (u16::from(self.control) << 1)
+            | (u16::from(self.alt) << 2)
+            | (u16::from(self.super_key) << 3)
+    }
+}
+#[derive(Clone, Copy, Debug)]
+pub struct MouseInput {
+    pub action: MouseAction,
+    pub button: Option<MouseButton>,
+    /// Physical pixels relative to the terminal content. Outside positions are valid.
+    pub x: f32,
+    pub y: f32,
+    pub modifiers: MouseModifiers,
+    /// Only buttons whose press was admitted by the UI's command sink count.
+    pub any_button_pressed: bool,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct MouseGeometry {
+    width: f32,
+    height: f32,
+    cell_width: f32,
+    cell_height: f32,
+}
+impl Default for MouseGeometry {
+    fn default() -> Self {
+        Self {
+            width: 1.0,
+            height: 1.0,
+            cell_width: 1.0,
+            cell_height: 1.0,
+        }
+    }
+}
+
 #[derive(Default)]
 struct Replies {
     bytes: Vec<u8>,
@@ -71,6 +157,13 @@ pub struct Engine {
     cells: ffi::Handle,
     encoder: ffi::Handle,
     gesture: ffi::Handle,
+    mouse_encoder: ffi::Handle,
+    mouse_event: ffi::Handle,
+    mouse_probe: ffi::Handle,
+    mouse_dirty: bool,
+    mouse_policy: MousePolicy,
+    mouse_pixels: bool,
+    mouse_geometry: MouseGeometry,
     replies: Box<RefCell<Replies>>,
     cols: u16,
     height: u16,
@@ -91,6 +184,15 @@ impl Engine {
             cells: ptr::null_mut(),
             encoder: ptr::null_mut(),
             gesture: ptr::null_mut(),
+            mouse_encoder: ptr::null_mut(),
+            mouse_event: ptr::null_mut(),
+            mouse_probe: ptr::null_mut(),
+            mouse_dirty: true,
+            mouse_policy: MousePolicy {
+                tracking: MouseTracking::None,
+            },
+            mouse_pixels: false,
+            mouse_geometry: MouseGeometry::default(),
             replies: Box::default(),
             cols,
             height: rows,
@@ -126,6 +228,18 @@ impl Engine {
                 ptr::null(),
                 &mut engine.encoder,
             ))?;
+            check(ffi::ghostty_mouse_encoder_new(
+                ptr::null(),
+                &mut engine.mouse_encoder,
+            ))?;
+            check(ffi::ghostty_mouse_encoder_new(
+                ptr::null(),
+                &mut engine.mouse_probe,
+            ))?;
+            check(ffi::ghostty_mouse_event_new(
+                ptr::null(),
+                &mut engine.mouse_event,
+            ))?;
             check(ffi::ghostty_selection_gesture_new(
                 ptr::null(),
                 &mut engine.gesture,
@@ -145,6 +259,7 @@ impl Engine {
         engine.option(ffi::OPT_SCROLLBACK_BYTES, &SCROLLBACK_BYTES)?;
         engine.option(ffi::OPT_SCROLLBACK_LINES, &SCROLLBACK_LINES)?;
         engine.install_colors(ColorConfig::default())?;
+        engine.install_mouse_geometry(engine.mouse_geometry)?;
         // Image presentation is outside this probe. No file/shared-memory or
         // clipboard callbacks are installed, and image storage stays disabled.
         let disabled: u64 = 0;
@@ -206,6 +321,7 @@ impl Engine {
     }
 
     pub fn feed(&mut self, bytes: &[u8], replay: bool) -> Result<Vec<u8>> {
+        self.mouse_dirty |= !bytes.is_empty();
         self.begin_effects(replay);
         // SAFETY: exclusive terminal access, live input slice for this synchronous
         // call, and no RefCell borrow held while the callback accesses its box.
@@ -219,6 +335,13 @@ impl Engine {
         let mut replacement = Self::new(self.cols, self.height)?;
         replacement.apply_colors(self.colors)?;
         replacement.resize(self.cols, self.height, self.cell_width, self.cell_height)?;
+        let geometry = self.mouse_geometry;
+        replacement.set_mouse_geometry(
+            geometry.width,
+            geometry.height,
+            geometry.cell_width,
+            geometry.cell_height,
+        )?;
         *self = replacement;
         Ok(())
     }
@@ -285,6 +408,302 @@ impl Engine {
             0 => Ok(false),
             1 => Ok(true),
             other => bail!("Unknown Ghostty active screen: {other}"),
+        }
+    }
+
+    /// No native pointer escapes. GPUI retains gesture routing and admitted presses.
+    pub fn mouse_policy(&mut self) -> Result<MousePolicy> {
+        self.sync_mouse()?;
+        Ok(self.mouse_policy)
+    }
+
+    pub fn set_mouse_geometry(
+        &mut self,
+        width: f32,
+        height: f32,
+        cell_width: f32,
+        cell_height: f32,
+    ) -> Result<()> {
+        let geometry = MouseGeometry {
+            width,
+            height,
+            cell_width,
+            cell_height,
+        };
+        for value in [width, height, cell_width, cell_height] {
+            ensure!(
+                value.is_finite() && value > 0.0 && value <= 1_000_000.0,
+                "Invalid mouse geometry"
+            );
+        }
+        // The native renderer uses u16 grid coordinates. Refuse geometry that
+        // could overflow those coordinates before it crosses the C boundary.
+        ensure!(
+            width / cell_width < 65_535.0 && height / cell_height < 65_535.0,
+            "Mouse grid exceeds native coordinate range"
+        );
+        if geometry != self.mouse_geometry {
+            self.install_mouse_geometry(geometry)?;
+            self.mouse_geometry = geometry;
+        }
+        Ok(())
+    }
+
+    /// Clear motion suppression after capture/admission changes. This never
+    /// invents a release: only the UI knows whether a press reached its sink.
+    pub fn reset_mouse(&mut self) -> Result<()> {
+        // SAFETY: uniquely owned live encoder; resetting has no terminal effect.
+        check(unsafe { ffi::ghostty_mouse_encoder_reset(self.mouse_encoder) })
+    }
+
+    pub fn mouse(&mut self, mut event: MouseInput) -> Result<Vec<u8>> {
+        ensure!(
+            event.x.is_finite() && event.y.is_finite(),
+            "Invalid mouse position"
+        );
+        self.sync_mouse()?;
+        if !self.mouse_pixels {
+            // Native cell sizes are integers. Normalize against the actual
+            // fractional font advance instead of rounding it and drifting
+            // into the wrong column near the right edge of a wide terminal.
+            event.x = event.x / self.mouse_geometry.cell_width * 256.0;
+            event.y = event.y / self.mouse_geometry.cell_height * 256.0;
+        }
+        // SGR pixels converts floats to i32 internally. Leave ample headroom
+        // for rounding; outside-view drags remain valid without undefined casts.
+        ensure!(
+            event.x.abs() <= 1_000_000_000.0 && event.y.abs() <= 1_000_000_000.0,
+            "Mouse position exceeds native coordinate range"
+        );
+        // Native conversion casts to u16 before clamping to the viewport,
+        // including for pixel reports. Refuse extreme outside positions before
+        // that cast; ordinary outside drags/releases retain their coordinates.
+        let (cell_width, cell_height) = if self.mouse_pixels {
+            (
+                self.mouse_geometry.cell_width.ceil().max(1.0),
+                self.mouse_geometry.cell_height.ceil().max(1.0),
+            )
+        } else {
+            (256.0, 256.0)
+        };
+        ensure!(
+            event.x / cell_width < 65_535.0 && event.y / cell_height < 65_535.0,
+            "Mouse position exceeds native cell range"
+        );
+        self.encode_mouse(event)
+    }
+
+    fn mouse_option<T>(&mut self, option: i32, value: &T) -> Result<()> {
+        // SAFETY: private call sites pair options with their exact C input type;
+        // native setters copy values synchronously, retaining no Rust borrow.
+        Self::mouse_option_for(self.mouse_encoder, option, value)
+    }
+
+    fn mouse_option_for<T>(encoder: ffi::Handle, option: i32, value: &T) -> Result<()> {
+        // SAFETY: all callers use a live owned encoder and the documented scalar
+        // or sized-struct type. The native setter copies the value.
+        check(unsafe {
+            ffi::ghostty_mouse_encoder_set(encoder, option, ptr::from_ref(value).cast())
+        })
+    }
+
+    fn install_mouse_geometry(&mut self, geometry: MouseGeometry) -> Result<()> {
+        let (width, height, cell_width, cell_height) = if self.mouse_pixels {
+            (
+                geometry.width,
+                geometry.height,
+                geometry.cell_width,
+                geometry.cell_height,
+            )
+        } else {
+            (
+                geometry.width / geometry.cell_width * 256.0,
+                geometry.height / geometry.cell_height * 256.0,
+                256.0,
+                256.0,
+            )
+        };
+        // Inputs were checked finite/positive/bounded by set_mouse_geometry;
+        // conversion here deliberately rounds physical surface dimensions.
+        let size = ffi::MouseSize {
+            size: mem::size_of::<ffi::MouseSize>(),
+            screen_width: width.round().max(1.0) as u32,
+            screen_height: height.round().max(1.0) as u32,
+            cell_width: cell_width.ceil().max(1.0) as u32,
+            cell_height: cell_height.ceil().max(1.0) as u32,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        self.mouse_option(3, &size)
+    }
+
+    fn sync_mouse(&mut self) -> Result<()> {
+        if !self.mouse_dirty {
+            return Ok(());
+        }
+        // DATA_MODE/MOUSE_TRACKING expose mode bits, while the encoder uses
+        // terminal flags. Overlapping DEC sets/resets can make them disagree.
+        // Probe canonical native behavior in constant work after feed. A
+        // separate encoder is necessary: set_from_terminal clears dedup even
+        // when only ordinary text arrived. The real encoder's setters preserve
+        // dedup when tracking/format did not change, preventing repaint loops.
+        // SAFETY: both handles are live and exclusively borrowed.
+        check(unsafe {
+            ffi::ghostty_mouse_encoder_set_from_terminal(self.mouse_probe, self.terminal)
+        })?;
+        let size = ffi::MouseSize {
+            size: mem::size_of::<ffi::MouseSize>(),
+            screen_width: 2000,
+            screen_height: 100,
+            cell_width: 10,
+            cell_height: 10,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        };
+        Self::mouse_option_for(self.mouse_probe, 3, &size)?;
+        let press = MouseInput {
+            action: MouseAction::Press,
+            button: Some(MouseButton::Left),
+            x: 1003.0,
+            y: 3.0,
+            modifiers: MouseModifiers::default(),
+            any_button_pressed: true,
+        };
+        let bytes = self.encode_mouse_with(self.mouse_probe, press)?;
+        // A high cell distinguishes legacy raw bytes from UTF-8; the subcell
+        // position distinguishes SGR cells from SGR pixels. These are native
+        // outputs, not a second implementation of terminal mode precedence.
+        let format: i32 = match bytes.as_slice() {
+            b"\x1b[M \x85!" => 0,
+            b"\x1b[M \xc2\x85!" => 1,
+            b"\x1b[<0;101;1M" => 2,
+            b"\x1b[32;101;1M" => 3,
+            b"\x1b[<0;1003;3M" => 4,
+            b"" => 0, // Disabled tracking: format is immaterial until enabled.
+            _ => bail!("Unknown native mouse format"),
+        };
+        let tracking = if bytes.is_empty() {
+            MouseTracking::None
+        } else if self
+            .encode_mouse_with(
+                self.mouse_probe,
+                MouseInput {
+                    action: MouseAction::Release,
+                    ..press
+                },
+            )?
+            .is_empty()
+        {
+            MouseTracking::X10
+        } else if !self
+            .encode_mouse_with(
+                self.mouse_probe,
+                MouseInput {
+                    action: MouseAction::Motion,
+                    button: None,
+                    any_button_pressed: false,
+                    ..press
+                },
+            )?
+            .is_empty()
+        {
+            MouseTracking::Any
+        } else if !self
+            .encode_mouse_with(
+                self.mouse_probe,
+                MouseInput {
+                    action: MouseAction::Motion,
+                    ..press
+                },
+            )?
+            .is_empty()
+        {
+            MouseTracking::Button
+        } else {
+            MouseTracking::Normal
+        };
+        let tracking_code: i32 = match tracking {
+            MouseTracking::None => 0,
+            MouseTracking::X10 => 1,
+            MouseTracking::Normal => 2,
+            MouseTracking::Button => 3,
+            MouseTracking::Any => 4,
+        };
+        self.mouse_option(1, &tracking_code)?;
+        self.mouse_option(2, &format)?;
+        if self.mouse_pixels != (format == 4) {
+            self.mouse_pixels = format == 4;
+            self.install_mouse_geometry(self.mouse_geometry)?;
+        }
+        self.mouse_option(5, &true)?;
+        self.mouse_policy = MousePolicy { tracking };
+        self.mouse_dirty = false;
+        Ok(())
+    }
+
+    fn encode_mouse(&mut self, event: MouseInput) -> Result<Vec<u8>> {
+        self.encode_mouse_with(self.mouse_encoder, event)
+    }
+
+    fn encode_mouse_with(&mut self, encoder: ffi::Handle, event: MouseInput) -> Result<Vec<u8>> {
+        let action = match event.action {
+            MouseAction::Press => 0,
+            MouseAction::Release => 1,
+            MouseAction::Motion => 2,
+        };
+        Self::mouse_option_for(encoder, 4, &event.any_button_pressed)?;
+        // SAFETY: handles are uniquely owned. All setters copy scalars, and the
+        // fixed output buffer lives through encoding. No borrowed C data escapes.
+        unsafe {
+            check(ffi::ghostty_mouse_event_set_action(
+                self.mouse_event,
+                action,
+            ))?;
+            if let Some(button) = event.button {
+                let button = match button {
+                    MouseButton::Left => 1,
+                    MouseButton::Right => 2,
+                    MouseButton::Middle => 3,
+                    MouseButton::WheelUp => 4,
+                    MouseButton::WheelDown => 5,
+                    MouseButton::WheelLeft => 6,
+                    MouseButton::WheelRight => 7,
+                    MouseButton::Back => 8,
+                    MouseButton::Forward => 9,
+                };
+                check(ffi::ghostty_mouse_event_set_button(
+                    self.mouse_event,
+                    button,
+                ))?;
+            } else {
+                check(ffi::ghostty_mouse_event_clear_button(self.mouse_event))?;
+            }
+            check(ffi::ghostty_mouse_event_set_mods(
+                self.mouse_event,
+                event.modifiers.native_bits(),
+            ))?;
+            check(ffi::ghostty_mouse_event_set_position(
+                self.mouse_event,
+                ffi::MousePosition {
+                    x: event.x,
+                    y: event.y,
+                },
+            ))?;
+            let mut bytes = [0_u8; 128];
+            let mut written = 0;
+            check(ffi::ghostty_mouse_encoder_encode(
+                encoder,
+                self.mouse_event,
+                bytes.as_mut_ptr(),
+                bytes.len(),
+                &mut written,
+            ))?;
+            ensure!(written <= bytes.len(), "Invalid native mouse output length");
+            Ok(bytes[..written].to_vec())
         }
     }
 
@@ -665,6 +1084,9 @@ impl Drop for Engine {
         // Callback storage is dropped only after this function returns.
         unsafe {
             ffi::ghostty_selection_gesture_free(self.gesture, self.terminal);
+            ffi::ghostty_mouse_event_free(self.mouse_event);
+            ffi::ghostty_mouse_encoder_free(self.mouse_encoder);
+            ffi::ghostty_mouse_encoder_free(self.mouse_probe);
             ffi::ghostty_key_encoder_free(self.encoder);
             ffi::ghostty_render_state_row_cells_free(self.cells);
             ffi::ghostty_render_state_row_iterator_free(self.rows);

@@ -1,6 +1,9 @@
 //! Native terminal presentation. The service owns the PTY; Ghostty owns VT state.
 pub use crate::terminal_engine::ColorConfig as TerminalColors;
-use crate::terminal_engine::{Cursor, CursorShape, Engine, Row, MAX_INPUT};
+use crate::terminal_engine::{
+    Cursor, CursorShape, Engine, MouseAction, MouseButton as EngineMouseButton, MouseInput,
+    MouseModifiers, MousePolicy, MouseTracking, Row, MAX_INPUT,
+};
 use anyhow::{anyhow, Result};
 use gpui_kit::{prelude::*, *};
 use std::{collections::HashMap, ops::Range, time::Instant};
@@ -10,6 +13,98 @@ const LINE_HEIGHT: f32 = 21.;
 const DEFAULT_SELECTION_FOREGROUND: u32 = 0xffffff;
 const DEFAULT_SELECTION_BACKGROUND: u32 = 0x345778;
 const MAX_ALTERNATE_WHEEL_KEYS: i32 = 5;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PointerRoute {
+    Selection,
+    Local,
+    Application,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WheelRoute {
+    Application,
+    Scrollback,
+    AlternateKeys,
+}
+
+fn wheel_route(policy: MousePolicy, alternate: bool, shift: bool) -> WheelRoute {
+    if shift {
+        WheelRoute::Scrollback
+    } else if policy.reports_wheel() {
+        WheelRoute::Application
+    } else if alternate {
+        WheelRoute::AlternateKeys
+    } else {
+        WheelRoute::Scrollback
+    }
+}
+
+#[derive(Default)]
+struct PointerGestures {
+    buttons: [Option<PointerRoute>; 5],
+    last_position: Option<(f32, f32)>,
+}
+
+impl PointerGestures {
+    fn index(button: MouseButton) -> Option<usize> {
+        match button {
+            MouseButton::Left => Some(0),
+            MouseButton::Middle => Some(1),
+            MouseButton::Right => Some(2),
+            MouseButton::Navigate(NavigationDirection::Back) => Some(3),
+            MouseButton::Navigate(NavigationDirection::Forward) => Some(4),
+        }
+    }
+
+    fn begin(&mut self, button: MouseButton, shift: bool, reports_buttons: bool) -> PointerRoute {
+        let route = if shift || !reports_buttons {
+            if button == MouseButton::Left {
+                PointerRoute::Selection
+            } else {
+                PointerRoute::Local
+            }
+        } else {
+            PointerRoute::Application
+        };
+        if let Some(index) = Self::index(button) {
+            self.buttons[index] = Some(route);
+        }
+        route
+    }
+
+    fn take(&mut self, button: MouseButton) -> Option<PointerRoute> {
+        Self::index(button).and_then(|index| self.buttons[index].take())
+    }
+
+    fn reject_application(&mut self, button: MouseButton) {
+        if let Some(index) = Self::index(button) {
+            if self.buttons[index] == Some(PointerRoute::Application) {
+                self.buttons[index] = Some(PointerRoute::Local);
+            }
+        }
+    }
+
+    fn route(&self, button: MouseButton) -> Option<PointerRoute> {
+        Self::index(button).and_then(|index| self.buttons[index])
+    }
+
+    fn first_application_button(&self) -> Option<MouseButton> {
+        pointer_buttons()
+            .into_iter()
+            .find(|button| self.route(*button) == Some(PointerRoute::Application))
+    }
+
+    fn any_application_pressed(&self) -> bool {
+        self.buttons.contains(&Some(PointerRoute::Application))
+    }
+
+    fn any_local_pressed(&self) -> bool {
+        self.buttons
+            .iter()
+            .any(|route| matches!(route, Some(PointerRoute::Selection | PointerRoute::Local)))
+    }
+}
 
 #[derive(Clone, Copy)]
 struct SelectionColors {
@@ -54,9 +149,63 @@ fn alternate_wheel_input(engine: &mut Engine, lines: i32) -> Result<Vec<u8>> {
     Ok(input)
 }
 
+fn wheel_button(lines: i32, horizontal: bool) -> EngineMouseButton {
+    match (horizontal, lines > 0) {
+        (false, true) => EngineMouseButton::WheelUp,
+        (false, false) => EngineMouseButton::WheelDown,
+        (true, true) => EngineMouseButton::WheelLeft,
+        (true, false) => EngineMouseButton::WheelRight,
+    }
+}
+
+fn append_wheel_reports(
+    engine: &mut Engine,
+    mut input: MouseInput,
+    lines: i32,
+    horizontal: bool,
+    bytes: &mut Vec<u8>,
+) -> Result<()> {
+    if lines != 0 {
+        input.button = Some(wheel_button(lines, horizontal));
+        for _ in 0..lines.unsigned_abs() {
+            bytes.extend(engine.mouse(input)?);
+        }
+    }
+    Ok(())
+}
+
+fn engine_mouse_button(button: MouseButton) -> EngineMouseButton {
+    match button {
+        MouseButton::Left => EngineMouseButton::Left,
+        MouseButton::Middle => EngineMouseButton::Middle,
+        MouseButton::Right => EngineMouseButton::Right,
+        MouseButton::Navigate(NavigationDirection::Back) => EngineMouseButton::Back,
+        MouseButton::Navigate(NavigationDirection::Forward) => EngineMouseButton::Forward,
+    }
+}
+
+fn pointer_buttons() -> [MouseButton; 5] {
+    [
+        MouseButton::Left,
+        MouseButton::Middle,
+        MouseButton::Right,
+        MouseButton::Navigate(NavigationDirection::Back),
+        MouseButton::Navigate(NavigationDirection::Forward),
+    ]
+}
+
+fn mouse_modifiers(modifiers: Modifiers) -> MouseModifiers {
+    MouseModifiers {
+        shift: modifiers.shift,
+        control: modifiers.control,
+        alt: modifiers.alt,
+        super_key: modifiers.platform,
+    }
+}
+
 #[derive(Debug)]
 pub enum Command {
-    Input { generation: u64, text: String },
+    Input { generation: u64, bytes: Vec<u8> },
     Resize(u16, u16),
 }
 
@@ -114,9 +263,12 @@ pub struct Terminal {
     size: Size,
     generation: u64,
     composition: String,
-    selecting: bool,
+    pointer: PointerGestures,
     scroll_remainder: f32,
-    scroll_alternate: Option<bool>,
+    scroll_remainder_x: f32,
+    scroll_route: Option<WheelRoute>,
+    focus_out_subscription: Option<Subscription>,
+    activation_subscription: Option<Subscription>,
     row_cache: HashMap<[u64; 2], CachedRow>,
     colors: TerminalColors,
     selection_foreground: u32,
@@ -157,9 +309,12 @@ impl Terminal {
             size,
             generation: 0,
             composition: String::new(),
-            selecting: false,
+            pointer: PointerGestures::default(),
             scroll_remainder: 0.,
-            scroll_alternate: None,
+            scroll_remainder_x: 0.,
+            scroll_route: None,
+            focus_out_subscription: None,
+            activation_subscription: None,
             row_cache: HashMap::new(),
             colors: TerminalColors::default(),
             selection_foreground: DEFAULT_SELECTION_FOREGROUND,
@@ -250,6 +405,7 @@ impl Terminal {
     }
 
     pub fn reset(&mut self, generation: u64, cx: &mut Context<Self>) {
+        self.cancel_pointer();
         self.generation = generation;
         self.frames = 0;
         self.content_revision += 1;
@@ -258,9 +414,9 @@ impl Terminal {
         self.composition.clear();
         self.saw_smoke = false;
         self.smoke_tail.clear();
-        self.selecting = false;
         self.scroll_remainder = 0.;
-        self.scroll_alternate = None;
+        self.scroll_remainder_x = 0.;
+        self.scroll_route = None;
         let result = if let Some(engine) = self.engine.as_mut() {
             engine.reset()
         } else {
@@ -281,20 +437,24 @@ impl Terminal {
         self.send(Command::Resize(self.size.cols, self.size.rows));
     }
 
-    fn send(&mut self, command: Command) {
+    fn send(&mut self, command: Command) -> bool {
         let is_input = matches!(&command, Command::Input { .. });
-        if let Command::Input { text, .. } = &command {
-            if text.len() > MAX_INPUT {
+        if let Command::Input { bytes, .. } = &command {
+            if bytes.len() > MAX_INPUT {
                 self.reject_command("Input exceeds the 64 KiB limit".into());
-                return;
+                return false;
             }
         }
         match (self.commands)(command) {
-            Ok(()) if is_input => self.command_error = None,
-            Ok(()) => {}
+            Ok(()) if is_input => {
+                self.command_error = None;
+                true
+            }
+            Ok(()) => true,
             Err(error) => {
                 let action = if is_input { "Input" } else { "Resize" };
                 self.reject_command(format!("{action} not sent: {error}"));
+                false
             }
         }
     }
@@ -304,17 +464,14 @@ impl Terminal {
         self.command_error = Some(error);
     }
 
-    fn send_bytes(&mut self, bytes: Vec<u8>) {
+    fn send_bytes(&mut self, bytes: Vec<u8>) -> bool {
         if bytes.is_empty() {
-            return;
+            return false;
         }
-        match String::from_utf8(bytes) {
-            Ok(text) => self.send(Command::Input {
-                generation: self.generation,
-                text,
-            }),
-            Err(error) => self.status = format!("Terminal output is not UTF-8: {error}"),
-        }
+        self.send(Command::Input {
+            generation: self.generation,
+            bytes,
+        })
     }
 
     fn output(&mut self, result: Result<Vec<u8>>) -> Option<Vec<u8>> {
@@ -400,6 +557,299 @@ impl Terminal {
         (col, row)
     }
 
+    fn pointer_position(&self, position: Point<Pixels>, window: &Window) -> (f32, f32) {
+        let scale = window.scale_factor();
+        (
+            f32::from(position.x - self.bounds.left()) * scale,
+            f32::from(position.y - self.bounds.top()) * scale,
+        )
+    }
+
+    fn pointer_policy(&mut self) -> Option<MousePolicy> {
+        match self.engine.as_mut()?.mouse_policy() {
+            Ok(policy) => Some(policy),
+            Err(error) => {
+                self.status = format!("Terminal mouse policy: {error:#}");
+                None
+            }
+        }
+    }
+
+    fn mouse_report(
+        &mut self,
+        action: MouseAction,
+        button: Option<MouseButton>,
+        position: (f32, f32),
+        modifiers: Modifiers,
+    ) -> bool {
+        let input = MouseInput {
+            action,
+            button: button.map(engine_mouse_button),
+            x: position.0,
+            y: position.1,
+            modifiers: mouse_modifiers(modifiers),
+            any_button_pressed: self.pointer.any_application_pressed(),
+        };
+        let result = self.engine.as_mut().map(|engine| engine.mouse(input));
+        result
+            .and_then(|result| self.output(result))
+            .is_some_and(|bytes| self.send_bytes(bytes))
+    }
+
+    fn pointer_down(&mut self, event: &MouseDownEvent, window: &Window) {
+        let Some(policy) = self.pointer_policy() else {
+            return;
+        };
+        let position = self.pointer_position(event.position, window);
+        self.pointer.last_position = Some(position);
+        match self.pointer.begin(
+            event.button,
+            event.modifiers.shift,
+            policy.reports_buttons(),
+        ) {
+            PointerRoute::Selection => {
+                let (col, row) = self.cell_at(event.position);
+                let result = self
+                    .engine
+                    .as_mut()
+                    .map(|engine| engine.select_start(col, row, event.click_count >= 2));
+                self.operation(result);
+                self.row_cache.clear();
+            }
+            PointerRoute::Application => {
+                if !self.mouse_report(
+                    MouseAction::Press,
+                    Some(event.button),
+                    position,
+                    event.modifiers,
+                ) {
+                    self.pointer.reject_application(event.button);
+                    let result = self.engine.as_mut().map(Engine::reset_mouse);
+                    self.operation(result);
+                }
+            }
+            PointerRoute::Local => {}
+        }
+    }
+
+    fn pointer_move(&mut self, event: &MouseMoveEvent, window: &Window) -> bool {
+        let position = self.pointer_position(event.position, window);
+        self.pointer.last_position = Some(position);
+        if self.pointer.route(MouseButton::Left) == Some(PointerRoute::Selection) {
+            if event.dragging() {
+                let (col, row) = self.cell_at(event.position);
+                let result = self
+                    .engine
+                    .as_mut()
+                    .map(|engine| engine.select_update(col, row));
+                self.operation(result);
+                self.row_cache.clear();
+                return true;
+            }
+            return false;
+        }
+        if self.pointer.any_local_pressed() {
+            return false;
+        }
+        let button = event
+            .pressed_button
+            .filter(|button| self.pointer.route(*button) == Some(PointerRoute::Application))
+            .or_else(|| self.pointer.first_application_button());
+        if button.is_none()
+            && self
+                .pointer_policy()
+                .is_none_or(|policy| policy.tracking != MouseTracking::Any)
+        {
+            return false;
+        }
+        let before = self.status.clone();
+        self.mouse_report(MouseAction::Motion, button, position, event.modifiers);
+        self.status != before
+    }
+
+    fn pointer_up(&mut self, event: &MouseUpEvent, window: &Window, outside: bool) {
+        let Some(route) = self.pointer.take(event.button) else {
+            return;
+        };
+        match route {
+            PointerRoute::Selection => {
+                let result = self.engine.as_mut().map(Engine::select_end);
+                self.operation(result);
+            }
+            PointerRoute::Application => {
+                let position = if outside {
+                    self.pointer.last_position.unwrap_or((0., 0.))
+                } else {
+                    self.pointer_position(event.position, window)
+                };
+                self.mouse_report(
+                    MouseAction::Release,
+                    Some(event.button),
+                    position,
+                    event.modifiers,
+                );
+            }
+            PointerRoute::Local => {}
+        }
+    }
+
+    /// End gestures before hiding or replacing this terminal's captured session.
+    /// A rejected release is visible but never replayed into another session.
+    pub fn cancel_pointer(&mut self) {
+        let position = self.pointer.last_position.unwrap_or((0., 0.));
+        for button in pointer_buttons() {
+            match self.pointer.take(button) {
+                Some(PointerRoute::Selection) => {
+                    let result = self.engine.as_mut().map(Engine::select_end);
+                    self.operation(result);
+                }
+                Some(PointerRoute::Application) => {
+                    self.mouse_report(
+                        MouseAction::Release,
+                        Some(button),
+                        position,
+                        Modifiers::default(),
+                    );
+                }
+                _ => {}
+            }
+        }
+        self.pointer.last_position = None;
+        let result = self.engine.as_mut().map(Engine::reset_mouse);
+        self.operation(result);
+    }
+
+    fn on_pointer_down(
+        &mut self,
+        event: &MouseDownEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.focus(window, cx);
+        self.pointer_down(event, window);
+        cx.notify();
+    }
+
+    fn on_pointer_move(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.pointer_move(event, window) {
+            cx.notify();
+        }
+    }
+
+    fn on_pointer_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
+        self.pointer_up(event, window, false);
+        cx.notify();
+    }
+
+    fn on_pointer_up_out(
+        &mut self,
+        event: &MouseUpEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.pointer_up(event, window, true);
+        cx.notify();
+    }
+
+    fn on_pointer_exit(&mut self, _: &MouseExitEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.cancel_pointer();
+        cx.notify();
+    }
+
+    fn on_scroll_event(
+        &mut self,
+        event: &ScrollEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let alternate = match self.engine.as_ref().map(Engine::is_alternate_screen) {
+            Some(Ok(alternate)) => alternate,
+            Some(Err(error)) => {
+                self.operation(Some(Err(error)));
+                cx.notify();
+                cx.stop_propagation();
+                return;
+            }
+            None => {
+                cx.stop_propagation();
+                return;
+            }
+        };
+        let Some(policy) = self.pointer_policy() else {
+            cx.notify();
+            cx.stop_propagation();
+            return;
+        };
+        let route = wheel_route(policy, alternate, event.modifiers.shift);
+        if self.scroll_route != Some(route) {
+            self.scroll_remainder = 0.;
+            self.scroll_remainder_x = 0.;
+            self.scroll_route = Some(route);
+        }
+        let (delta_x, delta_y) = match event.delta {
+            ScrollDelta::Pixels(delta) => (
+                f32::from(delta.x) / LINE_HEIGHT,
+                f32::from(delta.y) / LINE_HEIGHT,
+            ),
+            ScrollDelta::Lines(delta) => (delta.x, delta.y),
+        };
+        let lines = wheel_lines(
+            &mut self.scroll_remainder,
+            delta_y,
+            route != WheelRoute::Scrollback,
+        );
+        let horizontal = if route == WheelRoute::Application {
+            wheel_lines(&mut self.scroll_remainder_x, delta_x, true)
+        } else {
+            self.scroll_remainder_x = 0.;
+            0
+        };
+        if lines != 0 || horizontal != 0 {
+            match route {
+                WheelRoute::Scrollback => {
+                    let result = self.engine.as_mut().map(|engine| engine.scroll(lines));
+                    self.operation(result);
+                }
+                WheelRoute::AlternateKeys => {
+                    let result = self
+                        .engine
+                        .as_mut()
+                        .map(|engine| alternate_wheel_input(engine, lines));
+                    if let Some(bytes) = result.and_then(|result| self.output(result)) {
+                        self.send_bytes(bytes);
+                    }
+                }
+                WheelRoute::Application => {
+                    let position = self.pointer_position(event.position, window);
+                    let input = MouseInput {
+                        action: MouseAction::Press,
+                        button: None,
+                        x: position.0,
+                        y: position.1,
+                        modifiers: mouse_modifiers(event.modifiers),
+                        any_button_pressed: self.pointer.any_application_pressed(),
+                    };
+                    let result = self.engine.as_mut().map(|engine| {
+                        let mut bytes = Vec::new();
+                        append_wheel_reports(engine, input, lines, false, &mut bytes)?;
+                        append_wheel_reports(engine, input, horizontal, true, &mut bytes)?;
+                        Ok(bytes)
+                    });
+                    if let Some(bytes) = result.and_then(|result| self.output(result)) {
+                        self.send_bytes(bytes);
+                    }
+                }
+            }
+            cx.notify();
+        }
+        cx.stop_propagation();
+    }
+
     fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.bounds = bounds;
         let font_id = window.text_system().resolve_font(&self.face);
@@ -419,6 +869,26 @@ impl Terminal {
                 .floor()
                 .clamp(1., 200.) as u16,
         };
+        let scale = window.scale_factor();
+        let mouse_width = f32::from(bounds.size.width)
+            .min(f32::from(self.cell_width) * f32::from(size.cols))
+            .max(1.)
+            * scale;
+        let mouse_height = f32::from(bounds.size.height)
+            .min(LINE_HEIGHT * f32::from(size.rows))
+            .max(1.)
+            * scale;
+        let mouse_cell_width = f32::from(self.cell_width) * scale;
+        let mouse_cell_height = LINE_HEIGHT * scale;
+        let result = self.engine.as_mut().map(|engine| {
+            engine.set_mouse_geometry(
+                mouse_width,
+                mouse_height,
+                mouse_cell_width,
+                mouse_cell_height,
+            )
+        });
+        self.operation(result);
         if self.size != size {
             self.size = size;
             self.row_cache.clear();
@@ -784,7 +1254,19 @@ fn paint_cursor(
 }
 
 impl Render for Terminal {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.focus_out_subscription.is_none() {
+            self.focus_out_subscription =
+                Some(cx.on_focus_out(&self.focus, window, |this, _, _, _| this.cancel_pointer()));
+        }
+        if self.activation_subscription.is_none() {
+            self.activation_subscription =
+                Some(cx.observe_window_activation(window, |this, window, _| {
+                    if !window.is_window_active() {
+                        this.cancel_pointer();
+                    }
+                }));
+        }
         let layout = cx.entity();
         let paint = layout.clone();
         div()
@@ -795,81 +1277,42 @@ impl Render for Terminal {
             .bg(rgb(self.colors.background))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
+            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_pointer_down))
+            .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_pointer_down))
+            .on_mouse_down(MouseButton::Right, cx.listener(Self::on_pointer_down))
             .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.focus(window, cx);
-                    this.selecting = true;
-                    let (col, row) = this.cell_at(event.position);
-                    let result = this
-                        .engine
-                        .as_mut()
-                        .map(|engine| engine.select_start(col, row, event.click_count >= 2));
-                    this.operation(result);
-                    this.row_cache.clear();
-                    cx.notify();
-                }),
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(Self::on_pointer_down),
             )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                if this.selecting && event.dragging() {
-                    let (col, row) = this.cell_at(event.position);
-                    let result = this
-                        .engine
-                        .as_mut()
-                        .map(|engine| engine.select_update(col, row));
-                    this.operation(result);
-                    this.row_cache.clear();
-                    cx.notify();
-                }
-            }))
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(Self::on_pointer_down),
+            )
+            .on_mouse_move(cx.listener(Self::on_pointer_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_pointer_up))
+            .on_mouse_up(MouseButton::Middle, cx.listener(Self::on_pointer_up))
+            .on_mouse_up(MouseButton::Right, cx.listener(Self::on_pointer_up))
             .on_mouse_up(
-                MouseButton::Left,
-                cx.listener(|this, _, _, _| {
-                    this.selecting = false;
-                    let result = this.engine.as_mut().map(Engine::select_end);
-                    this.operation(result);
-                }),
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(Self::on_pointer_up),
             )
-            .on_scroll(cx.listener(|this, event: &ScrollEvent, _, cx| {
-                let alternate = match this.engine.as_ref().map(Engine::is_alternate_screen) {
-                    Some(Ok(alternate)) => alternate,
-                    Some(Err(error)) => {
-                        this.operation(Some(Err(error)));
-                        cx.notify();
-                        cx.stop_propagation();
-                        return;
-                    }
-                    None => {
-                        cx.stop_propagation();
-                        return;
-                    }
-                };
-                if this.scroll_alternate != Some(alternate) {
-                    this.scroll_remainder = 0.;
-                    this.scroll_alternate = Some(alternate);
-                }
-                let delta = match event.delta {
-                    ScrollDelta::Pixels(delta) => f32::from(delta.y) / LINE_HEIGHT,
-                    ScrollDelta::Lines(delta) => delta.y,
-                };
-                let lines = wheel_lines(&mut this.scroll_remainder, delta, alternate);
-                if lines != 0 {
-                    if alternate {
-                        let result = this
-                            .engine
-                            .as_mut()
-                            .map(|engine| alternate_wheel_input(engine, lines));
-                        if let Some(bytes) = result.and_then(|result| this.output(result)) {
-                            this.send_bytes(bytes);
-                        }
-                    } else {
-                        let result = this.engine.as_mut().map(|engine| engine.scroll(lines));
-                        this.operation(result);
-                    }
-                    cx.notify();
-                }
-                cx.stop_propagation();
-            }))
+            .on_mouse_up(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(Self::on_pointer_up),
+            )
+            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_pointer_up_out))
+            .on_mouse_up_out(MouseButton::Middle, cx.listener(Self::on_pointer_up_out))
+            .on_mouse_up_out(MouseButton::Right, cx.listener(Self::on_pointer_up_out))
+            .on_mouse_up_out(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(Self::on_pointer_up_out),
+            )
+            .on_mouse_up_out(
+                MouseButton::Navigate(NavigationDirection::Forward),
+                cx.listener(Self::on_pointer_up_out),
+            )
+            .on_mouse_exit(cx.listener(Self::on_pointer_exit))
+            .on_scroll(cx.listener(Self::on_scroll_event))
             .child(
                 canvas(
                     move |bounds, window, cx| {
@@ -950,7 +1393,7 @@ impl EntityInputHandler for Terminal {
         self.operation(result);
         self.send(Command::Input {
             generation: self.generation,
-            text: text.to_owned(),
+            bytes: text.as_bytes().to_vec(),
         });
         window.notify_text_input_changed(&self.focus);
         cx.notify();
@@ -1010,8 +1453,147 @@ impl EntityInputHandler for Terminal {
 
 #[cfg(test)]
 mod tests {
-    use super::{alternate_wheel_input, needs_shape, wheel_lines, CachedRow};
-    use crate::terminal_engine::Engine;
+    use super::{
+        alternate_wheel_input, engine_mouse_button, mouse_modifiers, needs_shape, wheel_button,
+        wheel_lines, wheel_route, CachedRow, PointerGestures, PointerRoute, WheelRoute,
+    };
+    use crate::terminal_engine::{
+        Engine, MouseButton as EngineMouseButton, MouseModifiers, MousePolicy, MouseTracking,
+    };
+    use gpui_kit::{Modifiers, MouseButton, NavigationDirection};
+
+    #[test]
+    fn pointer_gesture_keeps_its_press_route_and_suppresses_rejected_presses() {
+        let mut gestures = PointerGestures::default();
+        assert_eq!(
+            gestures.begin(MouseButton::Left, true, true),
+            PointerRoute::Selection
+        );
+        assert!(!gestures.any_application_pressed());
+        assert_eq!(
+            gestures.route(MouseButton::Left),
+            Some(PointerRoute::Selection)
+        );
+        // Releasing Shift does not change the captured selection route.
+        assert_eq!(
+            gestures.take(MouseButton::Left),
+            Some(PointerRoute::Selection)
+        );
+        assert_eq!(gestures.take(MouseButton::Left), None);
+
+        assert_eq!(
+            gestures.begin(MouseButton::Right, false, true),
+            PointerRoute::Application
+        );
+        assert!(gestures.any_application_pressed());
+        // An empty encoding or rejected command keeps a local-only latch so
+        // any-motion tracking cannot leak hover reports during the held press.
+        gestures.reject_application(MouseButton::Right);
+        assert!(!gestures.any_application_pressed());
+        assert!(gestures.any_local_pressed());
+        assert_eq!(gestures.take(MouseButton::Right), Some(PointerRoute::Local));
+        assert_eq!(gestures.take(MouseButton::Right), None);
+
+        assert_eq!(
+            gestures.begin(MouseButton::Middle, true, true),
+            PointerRoute::Local
+        );
+        assert!(gestures.any_local_pressed());
+        assert!(!gestures.any_application_pressed());
+
+        // A captured application route remains distinct from local gestures,
+        // then clearing the terminal drains each button only once.
+        assert_eq!(
+            gestures.begin(
+                MouseButton::Navigate(NavigationDirection::Back),
+                false,
+                true
+            ),
+            PointerRoute::Application
+        );
+        assert_eq!(
+            gestures.route(MouseButton::Navigate(NavigationDirection::Back)),
+            Some(PointerRoute::Application)
+        );
+        assert_eq!(
+            gestures.take(MouseButton::Middle),
+            Some(PointerRoute::Local)
+        );
+        assert_eq!(
+            gestures.take(MouseButton::Navigate(NavigationDirection::Back)),
+            Some(PointerRoute::Application)
+        );
+        assert!(!gestures.any_application_pressed());
+    }
+
+    #[test]
+    fn mouse_buttons_and_modifiers_keep_native_protocol_meaning() {
+        assert_eq!(
+            engine_mouse_button(MouseButton::Middle),
+            EngineMouseButton::Middle
+        );
+        assert_eq!(
+            engine_mouse_button(MouseButton::Right),
+            EngineMouseButton::Right
+        );
+        assert_eq!(
+            engine_mouse_button(MouseButton::Navigate(NavigationDirection::Back)),
+            EngineMouseButton::Back
+        );
+        assert_eq!(
+            engine_mouse_button(MouseButton::Navigate(NavigationDirection::Forward)),
+            EngineMouseButton::Forward
+        );
+        assert_eq!(wheel_button(1, false), EngineMouseButton::WheelUp);
+        assert_eq!(wheel_button(-1, false), EngineMouseButton::WheelDown);
+        assert_eq!(wheel_button(1, true), EngineMouseButton::WheelLeft);
+        assert_eq!(wheel_button(-1, true), EngineMouseButton::WheelRight);
+        let mut horizontal_remainder = 0.;
+        let mut vertical_remainder = 0.;
+        assert_eq!(wheel_lines(&mut horizontal_remainder, 0.6, true), 0);
+        assert_eq!(wheel_lines(&mut vertical_remainder, -1.2, true), -1);
+        assert_eq!(wheel_lines(&mut horizontal_remainder, 0.6, true), 1);
+        assert_eq!(wheel_lines(&mut vertical_remainder, 0., true), 0);
+        let modifiers = Modifiers {
+            shift: true,
+            control: true,
+            alt: true,
+            platform: true,
+            ..Modifiers::default()
+        };
+        assert_eq!(
+            mouse_modifiers(modifiers),
+            MouseModifiers {
+                shift: true,
+                control: true,
+                alt: true,
+                super_key: true,
+            }
+        );
+        assert_eq!(
+            mouse_modifiers(Modifiers::default()),
+            MouseModifiers::default()
+        );
+    }
+
+    #[test]
+    fn wheel_policy_leaves_x10_and_shift_on_local_paths() {
+        for tracking in [MouseTracking::None, MouseTracking::X10] {
+            let policy = MousePolicy { tracking };
+            assert_eq!(wheel_route(policy, false, false), WheelRoute::Scrollback);
+            assert_eq!(wheel_route(policy, true, false), WheelRoute::AlternateKeys);
+        }
+        for tracking in [
+            MouseTracking::Normal,
+            MouseTracking::Button,
+            MouseTracking::Any,
+        ] {
+            let policy = MousePolicy { tracking };
+            assert_eq!(wheel_route(policy, true, false), WheelRoute::Application);
+            assert_eq!(wheel_route(policy, false, false), WheelRoute::Application);
+            assert_eq!(wheel_route(policy, true, true), WheelRoute::Scrollback);
+        }
+    }
 
     #[test]
     fn alternate_wheel_accumulates_fraction_without_replaying_large_gestures() {

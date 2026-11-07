@@ -270,6 +270,7 @@ pub const SESSION_OPERATIONS: &[&str] = &[
     "attach",
     "detach",
     "input",
+    "input_bytes",
     "resize",
     "close",
     "save_image",

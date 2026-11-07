@@ -322,8 +322,46 @@ Clippy. An isolated X11 run used raw PTY fixtures: normal-history wheel input
 changed viewport pixels and delivered no PTY bytes, while alternate-screen wheel
 input delivered both up and down application-mode cursor sequences. The optimized
 integrated binary also passed the Wayland/X11 hardware workspace smoke and exited
-cleanly. This verifies the cursor-key fallback; native application mouse reporting
-remains unimplemented.
+cleanly. This verifies the cursor-key fallback. Application mouse reporting is
+covered separately below.
+
+## Native terminal pointer input acceptance
+
+`gpui-pointer-input.py` drives a normal native window on a private Xvfb display.
+Its companion raw-mode PTY fixture records the exact bytes sent to a terminal
+application. The driver checks SGR press/release for left, middle, right and
+navigation buttons, button and all-motion tracking, vertical/horizontal wheel
+reports, high-coordinate legacy bytes, release outside the terminal,
+Shift's local selection override during both kinds of gesture, private-display
+copy/paste and tracking-off behavior. It saves per-stage byte traces and
+screenshots, then requires a normal app exit with no surviving children.
+The optional `--focus-loss` stage moves X focus to the private display's root
+while an application press is held. It requires a release before physical
+mouse-up, no duplicate release afterward, and a working gesture on return.
+
+```sh
+python3 scripts/testing/gpui-pointer-input.py target/release/splitty-gpui \
+  --output /tmp/splitty-pointer-evidence --display :95 \
+  --xvfb /path/to/Xvfb --xdotool /path/to/xdotool --focus-loss
+```
+
+The runner requires Xvfb, xdotool, libX11 and libXtst. `--xvfb-lib` can point
+to a private Xvfb library directory. It creates an isolated app configuration,
+server socket, PTY fixture and X11 clipboard; it never uses the desktop session.
+`--setup-only` checks fixture startup before pointer support is available.
+Linux X11 is the real-window acceptance target here. Wayland, macOS and Windows
+pointer behavior, desktop-wide clipboard interaction and accessibility remain
+separate checks.
+
+On the pointer candidate with SHA-256
+`1d983c7fc1cb89c49efbad8a8aacd501fa50df35dbedea479773df37f2c5be57`,
+the isolated X11 run passed 15 check groups. Its legacy click carried coordinate
+byte `0x98` and matched the SGR cell coordinate at the same pixel. Shift selection
+produced no application mouse bytes and copied `POINTERMARK4826` back into the
+fixture exactly. Focus loss settled the original press before physical mouse-up.
+The app exited with status zero and no surviving child processes. These checks
+establish X11 pointer routing for the tested modes; the engine's targeted tests
+cover the remaining encoding formats and geometry cases.
 
 ## Local terminal close acceptance
 

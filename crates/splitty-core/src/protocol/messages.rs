@@ -17,6 +17,11 @@ pub const MSG_CREATE: &str = "create";
 pub const MSG_ATTACH: &str = "attach";
 pub const MSG_DETACH: &str = "detach";
 pub const MSG_INPUT: &str = "input";
+/// Standard base64 carrying terminal bytes that need not be UTF-8.
+pub const MSG_INPUT_BYTES: &str = "input_bytes";
+pub const INPUT_BYTES_CAPABILITY: &str = "terminal-input-bytes-v1";
+pub const MAX_INPUT_BYTES: usize = 64 * 1024;
+pub const MAX_INPUT_ENCODED_BYTES: usize = MAX_INPUT_BYTES.div_ceil(3) * 4;
 pub const MSG_RESIZE: &str = "resize";
 pub const MSG_CLOSE: &str = "close";
 /// Store a pasted image on this server and answer with its path.

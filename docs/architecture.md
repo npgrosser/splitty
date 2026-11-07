@@ -205,6 +205,20 @@ must confirm the destination before the client selects and focuses the moved
 pane; earlier snapshots and rejection cannot install a speculative layout.
 Terminal entities and attachments remain keyed by their existing identities.
 
+Terminal input remains bytes from the native view through the generation-checked
+workspace command queue. `Client::input_bytes` preserves UTF-8 via legacy `input`
+and uses capability-gated `input_bytes` for other bytes. The shared dispatcher
+bounds standard base64 before decoding, charges its decoded allocation through
+the PTY write, and retains existing session authority and ordered writes. No
+mouse-specific backend writer or automatic input retry exists.
+
+The terminal adapter derives pointer encoding and tracking from the native VT
+encoder. GPUI supplies fractional physical geometry and retains the gesture's
+local/application choice and actually admitted presses beside view lifetime and
+queue admission. Shift starts local selection; lifecycle cancellation settles
+only the captured live terminal. Wheel uses application reports when requested,
+otherwise the existing local history or alternate-screen cursor-key path.
+
 The terminal view owns a thread-confined Ghostty VT engine behind an owned Rust
 wrapper; the wrapper contains the C interface and hands the view bounded render
 snapshots. Cached glyph shaping and change-driven GPUI notifications avoid

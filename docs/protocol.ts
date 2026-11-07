@@ -431,9 +431,21 @@ interface SessionDetach {
   id: string;
 }
 
-/** Send keyboard input to a PTY session. */
+/** Send the UTF-8 bytes of data unchanged to a PTY session. */
 interface SessionInput {
   type: "input";
+  id: string;
+  data: string;
+}
+
+/**
+ * Byte-preserving input, available with terminal-input-bytes-v1. Standard padded
+ * base64, at most 64 KiB decoded (87,384 encoded bytes). Malformed/oversized
+ * data produces a session-scoped error and no write. Session authority, ordering
+ * and write errors match SessionInput; a streaming attachment is not required.
+ */
+interface SessionInputBytes {
+  type: "input_bytes";
   id: string;
   data: string;
 }
@@ -636,6 +648,7 @@ type ClientMessage =
   | SessionAttach
   | SessionDetach
   | SessionInput
+  | SessionInputBytes
   | SessionResize
   | SessionActivity
   | SessionIdle

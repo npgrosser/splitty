@@ -103,6 +103,24 @@ pub struct Selection {
     pub rectangle: bool,
 }
 #[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MousePosition {
+    pub x: f32,
+    pub y: f32,
+}
+#[repr(C)]
+pub struct MouseSize {
+    pub size: usize,
+    pub screen_width: u32,
+    pub screen_height: u32,
+    pub cell_width: u32,
+    pub cell_height: u32,
+    pub padding_top: u32,
+    pub padding_bottom: u32,
+    pub padding_right: u32,
+    pub padding_left: u32,
+}
+#[repr(C)]
 pub struct Position {
     pub x: f64,
     pub y: f64,
@@ -244,6 +262,29 @@ unsafe extern "C" {
         out: *mut c_void,
     ) -> Status;
     pub fn ghostty_cell_get(cell: u64, data: c_int, out: *mut c_void) -> Status;
+    pub fn ghostty_mouse_encoder_new(allocator: *const c_void, out: *mut Handle) -> Status;
+    pub fn ghostty_mouse_encoder_free(encoder: Handle);
+    pub fn ghostty_mouse_encoder_set(
+        encoder: Handle,
+        option: c_int,
+        value: *const c_void,
+    ) -> Status;
+    pub fn ghostty_mouse_encoder_set_from_terminal(encoder: Handle, terminal: Handle) -> Status;
+    pub fn ghostty_mouse_encoder_reset(encoder: Handle) -> Status;
+    pub fn ghostty_mouse_encoder_encode(
+        encoder: Handle,
+        event: Handle,
+        buf: *mut u8,
+        cap: usize,
+        written: *mut usize,
+    ) -> Status;
+    pub fn ghostty_mouse_event_new(allocator: *const c_void, out: *mut Handle) -> Status;
+    pub fn ghostty_mouse_event_free(event: Handle);
+    pub fn ghostty_mouse_event_set_action(event: Handle, action: c_int) -> Status;
+    pub fn ghostty_mouse_event_set_button(event: Handle, button: c_int) -> Status;
+    pub fn ghostty_mouse_event_clear_button(event: Handle) -> Status;
+    pub fn ghostty_mouse_event_set_mods(event: Handle, mods: u16) -> Status;
+    pub fn ghostty_mouse_event_set_position(event: Handle, position: MousePosition) -> Status;
     pub fn ghostty_key_encoder_new(allocator: *const c_void, out: *mut Handle) -> Status;
     pub fn ghostty_key_encoder_free(encoder: Handle);
     pub fn ghostty_key_encoder_set_from_terminal(encoder: Handle, terminal: Handle) -> Status;

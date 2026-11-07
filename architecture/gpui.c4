@@ -13,12 +13,12 @@ model {
     }
 
     terminal = component 'terminal' {
-      description 'Native terminal presentation, cached text shaping and session input routing.'
+      description 'Native terminal presentation, cached text shaping, pointer geometry and admitted gesture lifetime, and byte-preserving session input routing.'
       metadata { module 'splitty_gpui::terminal' }
     }
 
     terminal_engine = component 'terminal_engine' {
-      description 'Thread-confined Ghostty ownership, terminal protocol state and borrowed render snapshots.'
+      description 'Thread-confined Ghostty ownership, terminal protocol state, requested mouse encoding and borrowed render snapshots.'
       metadata { module 'splitty_gpui::terminal_engine' }
     }
 

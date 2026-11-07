@@ -203,7 +203,8 @@ impl Connection {
             MSG_CREATE => self.handle_create(req).await,
             MSG_ATTACH => self.handle_attach(req).await,
             MSG_DETACH => self.handle_detach(req).await,
-            MSG_INPUT => self.handle_input(req).await,
+            MSG_INPUT => self.write_input(&req.id, &req.data).await,
+            MSG_INPUT_BYTES => self.handle_input_bytes(req).await,
             MSG_RESIZE => self.handle_resize(req),
             MSG_CLOSE => self.handle_close(req).await,
             MSG_SAVE_IMAGE => self.handle_save_image(req).await,
@@ -547,20 +548,60 @@ impl Connection {
         }
     }
 
-    async fn handle_input(&self, req: &Request) {
-        let session = match self.dispatcher.backend.get(&req.id) {
+    async fn handle_input_bytes(&self, req: &Request) {
+        use base64::Engine as _;
+        let error = |message: &str| {
+            let _ = self
+                .sender
+                .send(&ServerEvent::error(Some(req.id.clone()), message));
+        };
+        if req.data.len() > MAX_INPUT_ENCODED_BYTES {
+            error("input exceeds the 64 KiB limit");
+            return;
+        }
+        // Base64's decoder allocates at most this estimate. Reserve before the
+        // allocation and retain the charge while the PTY write is suspended.
+        let decoded_bound = req.data.len().div_ceil(4) * 3;
+        let _decoded = match self
+            .sender
+            .delivery_context()
+            .budget
+            .reserve(decoded_bound, false)
+        {
+            Ok(lease) => lease,
+            Err(_) => {
+                error("terminal input budget exhausted");
+                return;
+            }
+        };
+        let bytes = match base64::engine::general_purpose::STANDARD.decode(&req.data) {
+            Ok(bytes) if bytes.len() <= MAX_INPUT_BYTES => bytes,
+            Ok(_) => {
+                error("input exceeds the 64 KiB limit");
+                return;
+            }
+            Err(_) => {
+                error("invalid terminal input base64");
+                return;
+            }
+        };
+        self.write_input(&req.id, &bytes).await;
+    }
+
+    async fn write_input(&self, id: &str, data: &[u8]) {
+        let session = match self.dispatcher.backend.get(id) {
             Some(s) => s,
             None => {
                 let _ = self.sender.send(&ServerEvent::error(
-                    Some(req.id.clone()),
+                    Some(id.to_owned()),
                     "session not found",
                 ));
                 return;
             }
         };
-        if let Err(e) = session.write(&req.data).await {
+        if let Err(e) = session.write(data).await {
             let _ = self.sender.send(&ServerEvent::error(
-                Some(req.id.clone()),
+                Some(id.to_owned()),
                 format!("write failed: {e}"),
             ));
         }
@@ -1134,6 +1175,7 @@ mod tests {
     struct MockSession {
         id: String,
         written: Mutex<Vec<Vec<u8>>>,
+        write_gate: Option<Arc<tokio::sync::Notify>>,
         /// Everything the session has "printed"; doubles as its scrollback.
         output: Mutex<MockOutput>,
         /// Printed by `subscribe` itself, after registering the subscriber,
@@ -1163,6 +1205,7 @@ mod tests {
             Self {
                 id: id.to_string(),
                 written: Mutex::new(Vec::new()),
+                write_gate: None,
                 output: Mutex::new(MockOutput::default()),
                 print_on_subscribe: Vec::new(),
                 resizes: Mutex::new(Vec::new()),
@@ -1218,6 +1261,15 @@ mod tests {
         }
 
         async fn write(&self, data: &[u8]) -> std::io::Result<()> {
+            if let Some(gate) = &self.write_gate {
+                gate.notified().await;
+            }
+            if self.closed.load(Ordering::SeqCst) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "fixture closed",
+                ));
+            }
             self.written.lock().unwrap().push(data.to_vec());
             Ok(())
         }
@@ -1592,6 +1644,131 @@ mod tests {
         let written = session.written.lock().unwrap();
         assert_eq!(written.len(), 1);
         assert_eq!(written[0], b"hello\n");
+    }
+
+    #[tokio::test]
+    async fn byte_input_preserves_order_authority_limits_and_write_errors() {
+        use base64::Engine as _;
+        let session = Arc::new(MockSession::new("bytes"));
+        let dispatcher = Arc::new(Dispatcher::new(Arc::new(
+            MockBackend::new().with_session(session.clone()),
+        )));
+        let sender = Arc::new(MockSender::new());
+        let conn = dispatcher.new_connection(sender.clone());
+        let encoded = |id: &str, bytes: &[u8]| Request {
+            msg_type: MSG_INPUT_BYTES.into(),
+            id: id.into(),
+            data: base64::engine::general_purpose::STANDARD
+                .encode(bytes)
+                .into_bytes(),
+            ..Default::default()
+        };
+        conn.handle(&input("bytes", b"before")).await;
+        conn.handle(&encoded("bytes", b"\x00\x80\xff\x1b[M")).await;
+        conn.handle(&input("bytes", b"\x1b[200~one\ntwo\x1b[201~"))
+            .await;
+        assert!(conn.attached_sessions().is_empty());
+        assert_eq!(
+            *session.written.lock().unwrap(),
+            [
+                b"before".to_vec(),
+                b"\x00\x80\xff\x1b[M".to_vec(),
+                b"\x1b[200~one\ntwo\x1b[201~".to_vec()
+            ]
+        );
+        conn.handle(&encoded("bytes", &vec![0xff; MAX_INPUT_BYTES]))
+            .await;
+        assert_eq!(session.written.lock().unwrap()[3].len(), MAX_INPUT_BYTES);
+        for data in [
+            b"%%%=".to_vec(),
+            b"YQ".to_vec(),
+            b"YR==".to_vec(),
+            vec![b'A'; MAX_INPUT_ENCODED_BYTES + 1],
+            encoded("bytes", &vec![0xff; MAX_INPUT_BYTES + 1]).data,
+        ] {
+            conn.handle(&Request {
+                msg_type: MSG_INPUT_BYTES.into(),
+                id: "bytes".into(),
+                data,
+                ..Default::default()
+            })
+            .await;
+        }
+        assert_eq!(
+            session.written.lock().unwrap().len(),
+            4,
+            "invalid input must never partially write"
+        );
+        assert_eq!(sender.events().len(), 5);
+        conn.handle(&encoded("absent", b"\xff")).await;
+        let last = serde_json::to_value(sender.events().last().unwrap()).unwrap();
+        assert_eq!(last["sessionId"], "absent");
+        assert_eq!(last["error"], "session not found");
+        session.closed.store(true, Ordering::SeqCst);
+        conn.handle(&encoded("bytes", b"\xff")).await;
+        let last = serde_json::to_value(sender.events().last().unwrap()).unwrap();
+        assert_eq!(last["sessionId"], "bytes");
+        assert!(last["error"].as_str().unwrap().starts_with("write failed:"));
+        assert_eq!(
+            sender.context.budget.used(),
+            0,
+            "decode leases return on every outcome"
+        );
+    }
+
+    #[tokio::test]
+    async fn byte_input_keeps_decoded_storage_charged_through_write_and_cancellation() {
+        use base64::Engine as _;
+        let gate = Arc::new(tokio::sync::Notify::new());
+        let mut fixture = MockSession::new("held");
+        fixture.write_gate = Some(gate.clone());
+        let session = Arc::new(fixture);
+        let dispatcher = Arc::new(Dispatcher::new(Arc::new(
+            MockBackend::new().with_session(session.clone()),
+        )));
+        let sender = Arc::new(MockSender::new());
+        let req = Request {
+            msg_type: MSG_INPUT_BYTES.into(),
+            id: "held".into(),
+            data: base64::engine::general_purpose::STANDARD
+                .encode([0xff; 48])
+                .into_bytes(),
+            ..Default::default()
+        };
+        for cancel in [false, true] {
+            let conn = dispatcher.new_connection(sender.clone());
+            let req = req.clone();
+            let write = tokio::spawn(async move { conn.handle(&req).await });
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while sender.context.budget.used() == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            assert_eq!(sender.context.budget.used(), 48);
+            if cancel {
+                write.abort();
+                assert!(write.await.unwrap_err().is_cancelled());
+            } else {
+                gate.notify_one();
+                write.await.unwrap();
+            }
+            assert_eq!(sender.context.budget.used(), 0);
+        }
+        assert_eq!(session.written.lock().unwrap().len(), 1);
+        let mut sender = MockSender::new();
+        sender.context.budget = splitty_transport::budget::ConnectionBudget::new(
+            splitty_transport::budget::ProcessBudget::new(32, 0),
+            32,
+            0,
+        );
+        let sender = Arc::new(sender);
+        dispatcher.new_connection(sender.clone()).handle(&req).await;
+        assert_eq!(session.written.lock().unwrap().len(), 1);
+        let error = serde_json::to_value(sender.events().last().unwrap()).unwrap();
+        assert_eq!(error["error"], "terminal input budget exhausted");
+        assert_eq!(sender.context.budget.used(), 0);
     }
 
     #[tokio::test]

@@ -8,7 +8,7 @@ model {
     }
 
     connection = component 'connection' {
-      description 'Connection-scoped native session delivery and bounded command sender.'
+      description 'Connection-scoped native session delivery, capability-gated raw terminal input and bounded command sender.'
       metadata { module 'splitty_client_core::connection' }
     }
 
@@ -59,6 +59,7 @@ model {
     client_root -> client_workspace 'Expose the local workspace model'
     client_root -> embedded 'Expose the embedded service adapter on Unix'
     connection -> splitty.core.mux 'Serialize typed screen operations'
+    connection -> splitty.core.protocol 'Share terminal byte-input capability and size bounds'
     connection -> splitty.server.native 'Use the embedded native session client on Unix'
     connection -> splitty.remote.owner 'Use an owned remote native connection'
     connection -> splitty.transport.budget 'Retain event and attachment byte charges'
@@ -80,6 +81,7 @@ model {
     native_workspace -> splitty.core.pty 'Gate embedded worker terminal tests on PTY availability'
     native_workspace -> client_root 'Own an isolated service and ordered native client'
     embedded -> connection 'Return a connection scoped to the embedded service'
+    embedded -> splitty.core.protocol 'Inject old-peer capability greetings in compatibility tests'
     embedded -> appearance 'Open an owned API-only local appearance reader'
     embedded -> client_root 'Use public event and screen types in embedded probe tests'
     embedded -> splitty.server.control 'Start and stop the isolated control channel'

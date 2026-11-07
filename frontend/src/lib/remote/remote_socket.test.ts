@@ -189,6 +189,7 @@ describe("RemoteSocket before remote.ready", () => {
     r.socket.connect();
     await settle();
     r.socket.send({ type: "input", id: "sess-1", data: "rm -rf ~\r" });
+    r.socket.send({ type: "input_bytes", id: "sess-1", data: "AID/" });
     r.socket.send({ type: "save_image", requestId: "img-1", data: "iVBORw0KGgo=" });
     r.socket.send({ type: "editor.register" });
     r.socket.send({ type: "editor.result", requestId: "req-1", outcome: "dispatched" });

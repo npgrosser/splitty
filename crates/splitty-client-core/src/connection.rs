@@ -1,6 +1,8 @@
 //! A window's ordered native stream, without renderer or endpoint authority.
+use base64::Engine as _;
 use serde_json::{json, Value};
 use splitty_core::mux::ScreenOp;
+use splitty_core::protocol::{INPUT_BYTES_CAPABILITY, MAX_INPUT_BYTES};
 use splitty_transport::{
     budget::{Charged, Lease},
     codec,
@@ -25,6 +27,7 @@ pub struct Client {
     backend: Backend,
     id: Uuid,
     attachments: HashMap<String, Attachment>,
+    byte_input: bool,
 }
 
 struct Attachment {
@@ -115,6 +118,7 @@ impl Client {
             backend,
             id: Uuid::new_v4(),
             attachments: HashMap::new(),
+            byte_input: false,
         }
     }
 
@@ -165,6 +169,16 @@ impl Client {
                     let lease = codec::reserve_json(bytes, &self.sender().context().budget, false)?;
                     let value: Value = serde_json::from_slice(bytes)
                         .map_err(|_| invalid("invalid session JSON"))?;
+                    if value["type"] == "mux.welcome" {
+                        self.byte_input =
+                            value["capabilities"]
+                                .as_array()
+                                .is_some_and(|capabilities| {
+                                    capabilities
+                                        .iter()
+                                        .any(|capability| capability == INPUT_BYTES_CAPABILITY)
+                                });
+                    }
                     if let Some(session) = value["sessionId"].as_str() {
                         observe_attachment(&mut self.attachments, session, value["type"].as_str());
                     }
@@ -356,13 +370,26 @@ impl Client {
 
     pub fn input(&self, session_id: &str, text: &str) -> io::Result<()> {
         self.live(session_id)?;
-        if text.len() > 64 * 1024 {
+        if text.len() > MAX_INPUT_BYTES {
             return Err(invalid("input exceeds chunk limit"));
         }
         self.command(
             text.len(),
             || json!({"type":"input", "id":session_id, "data":text}),
         )
+    }
+
+    /// Preserve emulator input bytes. UTF-8 uses the existing text message;
+    /// other bytes require the current service's advertised extension.
+    pub fn input_bytes(&self, session_id: &str, bytes: &[u8]) -> io::Result<()> {
+        self.live(session_id)?;
+        if let Some(text) = text_input(bytes, self.byte_input)? {
+            return self.input(session_id, text);
+        }
+        self.command(bytes.len().div_ceil(3) * 4, || {
+            json!({"type":"input_bytes", "id":session_id,
+                "data":base64::engine::general_purpose::STANDARD.encode(bytes)})
+        })
     }
 
     pub fn resize(&self, session_id: &str, cols: u16, rows: u16, redraw: bool) -> io::Result<()> {
@@ -455,6 +482,21 @@ impl Client {
     }
 }
 
+/// Decide the wire encoding before any command admission or allocation.
+fn text_input(bytes: &[u8], byte_input: bool) -> io::Result<Option<&str>> {
+    if bytes.len() > MAX_INPUT_BYTES {
+        return Err(invalid("input exceeds chunk limit"));
+    }
+    match std::str::from_utf8(bytes) {
+        Ok(text) => Ok(Some(text)),
+        Err(_) if byte_input => Ok(None),
+        Err(_) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Server needs terminal-input-bytes-v1 for non-UTF-8 terminal input",
+        )),
+    }
+}
+
 /// Count serialized command bytes before allocating a temporary JSON value.
 struct CountBytes(usize);
 impl io::Write for CountBytes {
@@ -527,6 +569,30 @@ fn observe_attachment(
 mod tests {
     use super::*;
     use splitty_transport::budget::ConnectionBudget;
+
+    #[test]
+    fn byte_input_requires_capability_without_breaking_legacy_text_or_splitting_paste() {
+        let paste = "\x1b[200~Grüße\nsecond line\x1b[201~";
+        for supports_bytes in [false, true] {
+            assert_eq!(
+                text_input(paste.as_bytes(), supports_bytes).unwrap(),
+                Some(paste)
+            );
+            assert_eq!(
+                text_input(&vec![b'a'; MAX_INPUT_BYTES + 1], supports_bytes)
+                    .unwrap_err()
+                    .kind(),
+                io::ErrorKind::InvalidData
+            );
+        }
+        let report = b"\x1b[M \x80\xff";
+        assert_eq!(
+            text_input(report, false).unwrap_err().kind(),
+            io::ErrorKind::Unsupported
+        );
+        assert_eq!(text_input(report, true).unwrap(), None);
+        assert!(text_input(&vec![0xff; MAX_INPUT_BYTES], true).is_ok());
+    }
 
     #[test]
     fn operation_errors_preserve_live_output_but_failed_attaches_release_their_state() {

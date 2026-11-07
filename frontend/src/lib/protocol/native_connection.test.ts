@@ -28,6 +28,7 @@ describe("native document connection", () => {
     const socket = new NativeConnection(open, assigned);
     socket.onAuthError = vi.fn(); socket.onConnectionError = vi.fn();
     socket.send({ type: "input", id: "session", data: "never replay" });
+    socket.send({ type: "input_bytes", id: "session", data: "AID/" });
     await socket.connect(); expect(socket.onAuthError).not.toHaveBeenCalled(); expect(socket.onConnectionError).toHaveBeenCalledOnce();
     await socket.connect(); expect(ch.write).not.toHaveBeenCalled();
     socket.send({ type: "input", id: "session", data: "current" }); expect(ch.write).toHaveBeenCalledOnce(); socket.dispose();

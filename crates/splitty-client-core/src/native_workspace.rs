@@ -77,7 +77,7 @@ pub enum Command {
     Input {
         pane: String,
         session: String,
-        text: String,
+        bytes: Vec<u8>,
     },
     ResizePane {
         pane: String,
@@ -694,12 +694,12 @@ async fn run_service(
                         Command::Input {
                             pane,
                             session,
-                            text,
+                            bytes,
                         } => {
                             if model.session_for(&pane) == Some(session.as_str())
                                 && attached.contains(&session)
                             {
-                                client.input(&session, &text)
+                                client.input_bytes(&session, &bytes)
                             } else {
                                 Err(std::io::Error::new(
                                     std::io::ErrorKind::WouldBlock,
@@ -1395,7 +1395,7 @@ mod close_tests {
             .send(Command::Input {
                 pane: pane.clone(),
                 session: session.clone(),
-                text: "printf 'APPEARANCE_%s\\n' 'ALIVE'\n".into(),
+                bytes: b"printf 'APPEARANCE_%s\\n' 'ALIVE'\n".into(),
             })
             .await
             .unwrap();
@@ -1463,7 +1463,7 @@ mod close_tests {
             .send(Command::Input {
                 pane,
                 session: session.clone(),
-                text: "printf 'REFRESH_%s\\n' 'ALIVE'\n".into(),
+                bytes: b"printf 'REFRESH_%s\\n' 'ALIVE'\n".into(),
             })
             .await
             .unwrap();
@@ -1549,6 +1549,25 @@ mod close_tests {
             .id()
             .to_string();
         assert_eq!(split.displayed_panes().len(), 2);
+        commands
+            .send(Command::Input {
+                pane: pane_a.clone(),
+                session: pane_b.session_id.clone(),
+                bytes: vec![0, 0x80, 0xff],
+            })
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if let Update::Status(status) = next_update(&mut updates).await {
+                    if status.contains("Terminal is not attached") {
+                        break;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("raw input with a stale pane/session pair is rejected");
         other.attach(&pane_b.session_id).unwrap();
         session_kind(&mut other, "attached").await;
         other.resize(&pane_b.session_id, 120, 40, true).unwrap();
@@ -1581,7 +1600,7 @@ mod close_tests {
             .send(Command::Input {
                 pane: pane_b.pane_id.clone(),
                 session: pane_b.session_id.clone(),
-                text: "printf 'BEFORE_%s\\n' \"$(stty size)\"\n".into(),
+                bytes: b"printf 'BEFORE_%s\\n' \"$(stty size)\"\n".into(),
             })
             .await
             .unwrap();
@@ -1630,7 +1649,7 @@ mod close_tests {
             .send(Command::Input {
                 pane: pane_b.pane_id.clone(),
                 session: pane_b.session_id.clone(),
-                text: "printf 'HIDDEN_%s\\n' \"$(stty size)\"\n".into(),
+                bytes: b"printf 'HIDDEN_%s\\n' \"$(stty size)\"\n".into(),
             })
             .await
             .unwrap();
@@ -1665,7 +1684,7 @@ mod close_tests {
             .send(Command::Input {
                 pane: pane_b.pane_id.clone(),
                 session: pane_b.session_id.clone(),
-                text: "printf 'RESTORED_%s\\n' \"$(stty size)\"\n".into(),
+                bytes: b"printf 'RESTORED_%s\\n' \"$(stty size)\"\n".into(),
             })
             .await
             .unwrap();

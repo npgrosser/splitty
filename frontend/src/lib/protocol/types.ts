@@ -74,6 +74,7 @@ export type IncomingMessage =
   | { type: "attach"; id: string; cols?: number; rows?: number }
   | { type: "detach"; id: string }
   | { type: "input"; id: string; data: string }
+  | { type: "input_bytes"; id: string; data: string }
   // The size this connection shows the session at; `redraw` after an attach (`pty-size-v1`).
   | { type: "resize"; id: string; cols: number; rows: number; redraw?: boolean }
   | { type: "close"; id: string }

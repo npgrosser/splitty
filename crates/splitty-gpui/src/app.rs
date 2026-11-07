@@ -190,14 +190,14 @@ async fn run_service(
                 }
                 Next::Terminal(Some(terminal::Command::Input {
                     generation: input_generation,
-                    text,
+                    bytes,
                 })) => {
                     if input_generation != generation {
                         continue;
                     }
                     if attached {
                         if let Some(session) = &session {
-                            client.input(session, &text)?;
+                            client.input_bytes(session, &bytes)?;
                         }
                     } else {
                         send_update(

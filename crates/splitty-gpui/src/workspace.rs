@@ -296,11 +296,11 @@ fn terminal_commands(
         let command = match command {
             terminal::Command::Input {
                 generation: 0,
-                text,
+                bytes,
             } => Command::Input {
                 pane: pane.clone(),
                 session: session.clone(),
-                text,
+                bytes,
             },
             terminal::Command::Input { .. } => {
                 return Err("Terminal generation changed".into());
@@ -907,6 +907,11 @@ impl Workspace {
         {
             return;
         }
+        if let Some(previous) = self.panes.get(pane) {
+            previous
+                .terminal
+                .update(cx, |terminal, _| terminal.cancel_pointer());
+        }
         let pending_resize = Arc::new(Mutex::new(None));
         let route = terminal_commands(
             self.commands.clone(),
@@ -990,8 +995,14 @@ impl Workspace {
             self.slot_bounds.clear();
             self.tab_scrolls.clear();
         }
-        self.panes
-            .retain(|pane, view| model.session_for(pane) == Some(view.session.as_str()));
+        self.panes.retain(|pane, view| {
+            let retained = model.session_for(pane) == Some(view.session.as_str());
+            if !retained {
+                view.terminal
+                    .update(cx, |terminal, _| terminal.cancel_pointer());
+            }
+            retained
+        });
         for route in model.routes() {
             self.ensure_pane(&route.pane_id, &route.session_id, cx);
         }
@@ -1049,6 +1060,14 @@ impl Workspace {
             .and_then(LocalWorkspace::shown_screen_id)
             .map(str::to_owned);
         if visible != self.visible || screen != self.visible_screen {
+            for pane in &self.visible {
+                if !visible.contains(pane) {
+                    if let Some(view) = self.panes.get(pane) {
+                        view.terminal
+                            .update(cx, |terminal, _| terminal.cancel_pointer());
+                    }
+                }
+            }
             self.visible = visible;
             self.visible_screen = screen;
             self.visible_pending = true;
@@ -1631,7 +1650,8 @@ impl Workspace {
                     .map(|(pane, view)| Command::Input {
                         pane: pane.clone(),
                         session: view.session.clone(),
-                        text: format!("printf 'NATIVE_WORKSPACE_%s_OK\\n' '{pane}'\r"),
+                        bytes: format!("printf 'NATIVE_WORKSPACE_%s_OK\\n' '{pane}'\r")
+                            .into_bytes(),
                     })
                     .collect();
                 for command in commands {
@@ -1748,7 +1768,7 @@ impl Workspace {
                     Command::Input {
                         pane: first.clone(),
                         session: view.session.clone(),
-                        text: "printf 'NATIVE_HIDDEN_SCREEN_OK\\n'\r".into(),
+                        bytes: b"printf 'NATIVE_HIDDEN_SCREEN_OK\\n'\r".into(),
                     },
                     cx,
                 );
@@ -3326,7 +3346,7 @@ mod tests {
         );
         let input = |generation, text: &str| terminal::Command::Input {
             generation,
-            text: text.to_owned(),
+            bytes: text.as_bytes().to_vec(),
         };
         let paste = "\x1b[200~one\ntwo\x1b[201~";
         first(input(0, paste)).expect("accepted atomic paste");
@@ -3343,11 +3363,11 @@ mod tests {
             Command::Input {
                 pane,
                 session,
-                text,
+                bytes,
             } => {
                 assert_eq!(
-                    (pane.as_str(), session.as_str(), text.as_str()),
-                    ("pane-a", "session-a", paste)
+                    (pane.as_str(), session.as_str(), bytes.as_slice()),
+                    ("pane-a", "session-a", paste.as_bytes())
                 );
             }
             _ => panic!("expected input"),
@@ -3359,20 +3379,34 @@ mod tests {
             Command::Input {
                 pane,
                 session,
-                text,
+                bytes,
             } => {
                 assert_eq!(
-                    (pane.as_str(), session.as_str(), text.as_str()),
-                    ("pane-b", "session-b", "next")
+                    (pane.as_str(), session.as_str(), bytes.as_slice()),
+                    ("pane-b", "session-b", b"next".as_slice())
                 );
             }
             _ => panic!("expected input"),
         }
         match receiver.try_recv().expect("newly accepted input") {
-            Command::Input { text, .. } => assert_eq!(text, "after drain"),
+            Command::Input { bytes, .. } => assert_eq!(bytes, b"after drain"),
             _ => panic!("expected input"),
         }
         assert!(receiver.try_recv().is_err());
+        assert!(first(terminal::Command::Input {
+            generation: 1,
+            bytes: vec![0x80]
+        })
+        .is_err());
+        first(terminal::Command::Input {
+            generation: 0,
+            bytes: vec![0, 0x80, 0xff],
+        })
+        .unwrap();
+        assert!(
+            matches!(receiver.try_recv(), Ok(Command::Input { pane, session, bytes })
+            if pane == "pane-a" && session == "session-a" && bytes == [0, 0x80, 0xff])
+        );
         retry_pending_resize(&sender, "pane-b", "session-b", &second_pending)
             .expect("resize retry admitted");
         assert!(matches!(
