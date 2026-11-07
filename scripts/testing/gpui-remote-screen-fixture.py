@@ -10,12 +10,15 @@ No display server or UI process is started here.
 import argparse
 from contextlib import AbstractContextManager
 import hashlib
+import http.client
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import signal
+import socket
+import stat
 import subprocess
 import sys
 import tarfile
@@ -30,6 +33,8 @@ SCRUB = (
     "ENV", "BASH_ENV", "ZDOTDIR", "CDPATH",
 )
 TARGETS = ("screen-fixture-a.invalid", "screen-fixture-b.invalid")
+SHARED_SCREEN_ID = "fixture-shared-screen"
+SHARED_PANE_ID = "fixture-shared-pane"
 SSH_OPTIONS = (
     "-o", "ExitOnForwardFailure=yes", "-o", "BatchMode=yes",
     "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=15",
@@ -64,6 +69,17 @@ def process_start(pid):
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
     except FileNotFoundError:
         return None
+
+
+class PrivateControl(http.client.HTTPConnection):
+    def __init__(self, path):
+        super().__init__("localhost", timeout=5)
+        self.path = path
+
+    def connect(self):
+        self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.sock.settimeout(5)
+        self.sock.connect(str(self.path))
 
 
 class RemoteScreenFixture(AbstractContextManager):
@@ -138,15 +154,20 @@ class RemoteScreenFixture(AbstractContextManager):
             self.started.append(target)
             self._run([str(self.binary), "daemon", "start"], self._host_env(target))
             host["daemon"] = self._discovered_daemon(target)
-            self._run([str(self.binary), "new-screen", "--name", host["name"]],
-                      self._host_env(target))
+            reply = self._create_shared_screen(target)
+            if reply.get("screenId") != SHARED_SCREEN_ID or reply.get("created", [{}])[0].get("paneId") != SHARED_PANE_ID:
+                raise RuntimeError(f"private create_screen returned unexpected IDs on {target}: {reply}")
             screens = self._json_cli(target, "list-screens", "--json")
             screen = next(item for item in screens if item.get("name") == host["name"])
+            if screen["id"] != SHARED_SCREEN_ID:
+                raise RuntimeError(f"private Screen ID changed on {target}")
             host["screen"] = screen["id"]
             panes = self._json_cli(target, "list-panes", "--screen", screen["id"], "--json")
             if len(panes) != 1:
                 raise RuntimeError(f"unexpected pane count on {target}: {len(panes)}")
             pane, details = next(iter(panes.items()))
+            if pane != SHARED_PANE_ID:
+                raise RuntimeError(f"private pane ID changed on {target}")
             host["pane"] = pane
             host["session"] = details["sessionId"]
             self._wait_for_marker(target)
@@ -211,6 +232,32 @@ class RemoteScreenFixture(AbstractContextManager):
     def _json_cli(self, target, *arguments):
         return json.loads(self._run([str(self.binary), *arguments], self._host_env(target)).stdout)
 
+    def _create_shared_screen(self, target):
+        host = self.hosts[target]
+        control = host["config"] / "run" / "daemon.sock"
+        if not stat.S_ISSOCK(control.lstat().st_mode):
+            raise RuntimeError(f"private control socket absent on {target}")
+        profile = "fixture-a" if target == TARGETS[0] else "fixture-b"
+        body = json.dumps({"screenId": "", "op": {
+            "type": "create_screen", "screenId": SHARED_SCREEN_ID,
+            "newPaneId": SHARED_PANE_ID, "name": host["name"],
+            "shellProfileId": profile,
+        }})
+        connection = PrivateControl(control)
+        try:
+            connection.request("POST", "/api/mux/op", body=body,
+                               headers={"Content-Type": "application/json"})
+            response = connection.getresponse()
+            payload = response.read(65537)
+            if len(payload) > 65536 or response.status != 200:
+                raise RuntimeError(f"private create_screen failed on {target}: HTTP {response.status}: {payload[:500]!r}")
+            value = json.loads(payload)
+            if value.get("ok") is not True:
+                raise RuntimeError(f"private create_screen refused on {target}: {value}")
+            return value
+        finally:
+            connection.close()
+
     def _discovered_daemon(self, target):
         info = json.loads((self.hosts[target]["config"] / "daemon.json").read_text())
         instance, pid = info.get("instance"), info.get("pid")
@@ -273,6 +320,7 @@ class RemoteScreenFixture(AbstractContextManager):
     def manifest(self):
         return {"root": str(self.root), "binarySha256": self.binary_sha256,
                 "payloadSha256": self.payload_sha256, "version": self.version,
+                "sharedScreenId": SHARED_SCREEN_ID, "sharedPaneId": SHARED_PANE_ID,
                 "localConfig": str(self.local_config), "ssh": str(self.ssh),
                 "hosts": {target: {key: str(value) if isinstance(value, Path) else value
                                    for key, value in host.items()}
@@ -427,6 +475,10 @@ def main():
     args = parser.parse_args()
     with RemoteScreenFixture(args.binary) as fixture:
         if args.self_check:
+            a, b = (fixture.hosts[target] for target in TARGETS)
+            assert a["screen"] == b["screen"] == SHARED_SCREEN_ID
+            assert a["pane"] == b["pane"] == SHARED_PANE_ID
+            assert a["session"] != b["session"] and a["shell_pid"] != b["shell_pid"]
             target = TARGETS[0]
             command = "sh -c " + __import__("shlex").quote(PROBE) + " splitty-probe " + __import__("shlex").quote(fixture.version)
             result = fixture._run([str(fixture.ssh), *SSH_OPTIONS, target, "--", command], fixture.ui_env())
