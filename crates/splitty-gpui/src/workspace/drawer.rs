@@ -281,13 +281,16 @@ impl Workspace {
                                 .px_2()
                                 .pt_2()
                                 .pb_1()
+                                .flex()
+                                .items_center()
+                                .gap(chrome_rems(7.))
                                 .border_t_1()
                                 .border_color(rgb(self.appearance.subtle_border))
                                 .text_size(chrome_rems(11.5))
-                                .font_weight(FontWeight::SEMIBOLD)
+                                .font_weight(FontWeight::NORMAL)
                                 .text_color(muted)
                                 .child(Icon::new(IconName::Server).size_3())
-                                .child(format!("  {title}")),
+                                .child(title),
                         );
                     }
                 }
@@ -568,7 +571,7 @@ impl Workspace {
                         if stacked {
                             group_view = group_view
                                 .ml(chrome_rems(30.))
-                                .pl_2()
+                                .pl(chrome_rems(9.))
                                 .border_l_1()
                                 .border_color(rgb(self.appearance.border));
                         }
@@ -785,7 +788,7 @@ impl Workspace {
                             .flex_none()
                             .flex()
                             .justify_center()
-                            .child(Icon::new(IconName::LayoutTemplate).size_3()),
+                            .child(Icon::new(IconName::LayoutGrid).size_3()),
                     )
                     .child("Templates"),
             )
@@ -919,7 +922,7 @@ impl Workspace {
                                             .flex_none()
                                             .flex()
                                             .justify_center()
-                                            .child(Icon::new(IconName::Settings).size_3()),
+                                            .child(Icon::new(IconName::SlidersHorizontal).size_3()),
                                     )
                                     .child("Settings"),
                             )

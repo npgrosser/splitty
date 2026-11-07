@@ -7,7 +7,6 @@ Visual assertions are saved PNGs for review across themes, not exact colors.
 """
 
 import argparse
-import base64
 import fcntl
 import hashlib
 import importlib.util
@@ -497,9 +496,12 @@ def main():
                     " termios.tcsetattr(fd,termios.TCSADRAIN,old)\n"
                     f"pathlib.Path({str(wheel_input)!r}).write_text(data.hex())\n"
                 )
+                # Keep the wheel-routing fixture independent of synthetic typing
+                # throughput: launch a short command through the real terminal.
+                reader_script = owned / "drawer-wheel-reader.py"
+                reader_script.write_text(reader)
                 click("terminal.right_body")
-                encoded = base64.b64encode(reader.encode()).decode()
-                type_text("python3 -c " + shlex.quote(f"import base64;exec(base64.b64decode({encoded!r}))"))
+                type_text("python3 " + shlex.quote(str(reader_script)))
                 key("Return")
                 wait_until(lambda: wheel_ready.exists(), "terminal mouse-report reader did not start", seconds=5)
                 for area in ("drawer.header", "drawer.list", "drawer.footer"):

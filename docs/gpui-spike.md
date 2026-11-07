@@ -162,9 +162,9 @@ commands and arguments remain service-owned. The picker shows unavailable reason
 default and experimental markers, and a launch-time fallback is reported in status.
 Profiles and appearance load independently over the owned auxiliary API stream;
 neither read changes settings. Profile editing is still in the web settings UI.
-Select tabs by clicking their labels, close panes with their tab close control,
-and resize splits by dragging the divider. Right-click a tab or use its **⋯**
-menu to move that running terminal to another local Screen or a **New Screen**.
+Select tabs by clicking their labels, close panes with their tab close control
+or middle-click, and resize splits by dragging the divider. Right-click a local
+tab to move that running terminal to another local Screen or a **New Screen**.
 Opening the menu preserves the selected tab; confirming a move follows its target
 unless later navigation intervened. Terminal-body right-click stays available
 to terminal applications. After closing the final pane,
