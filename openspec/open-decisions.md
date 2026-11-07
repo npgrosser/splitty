@@ -8,16 +8,6 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
-- **`native-local-workspace` NL-1 layout confirmation** (2026-11-07, provisional, tbd): await the authoritative screen snapshot after edits in the first native local workspace, rather than introducing optimistic layout state.
-- **`native-local-workspace` NL-2 development lifetime** (2026-11-07, provisional, tbd): keep the first native workspace isolated per app run with joined service cleanup; production state/persistence migration follows later.
-
-- **`native-terminal-ghostty` NG-1 execution ownership** (2026-11-07, provisional, tbd): keep parsing/render state on the UI thread with bounded delivery while improving invalidation and shaping reuse; move parsing only if measured latency warrants the extra handoff.
-- **`native-terminal-ghostty` NG-2 native dependency** (2026-11-07, provisional, tbd): statically link the verified Ghostty 1.0.0 library from an explicitly prepared prefix; use curated private C declarations without libclang or implicit Cargo downloads.
-
-- **`native-ui-gpui-spike` GSP-1 UI dependencies** (2026-11-07, provisional, tbd): pin GPUI Kit 0.9.0 / GPUI snapshot 0.3.11 for the experimental native window; the UI framework/version choice remains provisional. The separate emulator choice is settled in `native-ui-gpui`: Ghostty is selected for the regular native implementation; the current probe still uses Alacritty 0.26.0 pending replacement.
-- **`native-ui-gpui-spike` GSP-2 client boundary** (2026-11-07, provisional, tbd): start with a small platform-aware adapter retaining charged native messages; defer public protocol extraction and complete client-core migration.
-- **`native-ui-gpui-spike` GSP-3 offscreen evidence** (2026-11-07, provisional, tbd): attempt optional CEF CPU offscreen rendering of an isolated fixed fixture; record failures and unverified platforms, without inferring a scripted-viewer or release-cutover decision.
-
 - **`mux-layout-consistency` MLC-1 workspace-only invalidation** (2026-11-07, provisional, tbd): retain the existing screenless `mux.nudge` for order/activation changes without changed screens. Current clients' workspace-directory reconciliation (including removal and order) is separate from this notification-delivery fix; no new directory protocol is added before the GPUI spike.
 
 - **`splitty-open` D2 rendering without a frame** (2026-11-06, provisional, tbd): Markdown and HTML are sanitized with DOMPurify and rendered into a contained shadow root of the pane; images only from `data:` URLs; the CSPs keep `frame-src 'none'`. Alternative: a sandboxed `srcdoc` iframe (relaxes `frame-src` in three policies, blocked by the Tauri navigation hook on macOS and Linux, and keeps annotations out of the rendered view) or a separate credential-free origin.

@@ -58,16 +58,6 @@ model {
       description 'Platform-neutral native framing, negotiation and resource accounting. No PTY, server, browser or OS endpoint authority.'
     }
 
-    client_core = container 'splitty-client-core' {
-      technology 'Rust library, crates/splitty-client-core'
-      description 'Experimental UI-free native client: connection-scoped session delivery, viewer document and annotation state, and an embedded service adapter.'
-    }
-
-    gpui = container 'splitty-gpui' {
-      technology 'Rust, GPUI, crates/splitty-gpui'
-      description 'Phase-0 native desktop probe for terminal and Markdown panes, with a separate offscreen web-engine experiment.'
-    }
-
     mcp = container 'MCP server' {
       #planned
       technology 'Rust'
@@ -97,7 +87,6 @@ model {
     technology 'WebSocket'
   }
   splitty.desktop -> splitty.web 'shows'
-  splitty.gpui -> splitty.client_core 'uses the native client and embedded service'
   splitty.electron -> splitty.server 'owns embedded and fixed-host native helpers in' {
     technology 'bounded native-v1 child pipes'
   }

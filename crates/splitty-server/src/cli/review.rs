@@ -782,10 +782,8 @@ mod tests {
         };
 
         assert_eq!(
-            decision(&permission, Verdict::Approved, None),
-            json!({"hookSpecificOutput": {
-                "decision": {"behavior": "allow"}, "hookEventName": "PermissionRequest",
-            }})
+            hook_decision(&permission, Verdict::Approved, None),
+            "{\"hookSpecificOutput\":{\"decision\":{\"behavior\":\"allow\"},\"hookEventName\":\"PermissionRequest\"}}\n"
         );
         assert_eq!(
             decision(&permission, Verdict::ChangesRequested, Some(review)),

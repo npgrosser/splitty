@@ -79,18 +79,6 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
-      - name: Install native probe build libraries
-        run: >-
-          sudo apt-get -o Acquire::Retries=3 update &&
-          sudo apt-get -o Acquire::Retries=3 install --yes
-          libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev
-          libfontconfig1-dev libfreetype6-dev libvulkan-dev
-
-      - name: Build pinned native terminal library
-        run: |
-          prefix=$(python3 scripts/bootstrap-libghostty-vt.py --check)
-          echo "GHOSTTY_VT_DIR=$prefix" >> "$GITHUB_ENV"
-
       # The server embeds and serves frontend/dist; the HTTP surface tests check
       # the headers of the real app document.
       - name: Build frontend
@@ -372,14 +360,6 @@ jobs:
         run: |
           cargo clippy --locked -p splitty-gui --all-targets -- -D warnings
           cargo test --locked -p splitty-gui --lib
-
-      - name: Build pinned native terminal library
-        run: |
-          prefix=$(python3 scripts/bootstrap-libghostty-vt.py --check --prefix "$RUNNER_TEMP/splitty-ghostty-vt")
-          echo "GHOSTTY_VT_DIR=$prefix" >> "$GITHUB_ENV"
-
-      - name: Compile experimental native probe on macOS
-        run: cargo check --locked -p splitty-gpui --all-targets
 
       # Gather the independent native IPC runtime evidence even when a
       # core platform test fails. The final gate still fails this job.
