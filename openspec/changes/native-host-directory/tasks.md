@@ -2,9 +2,9 @@
 
 ## 1. Shared directory response contract
 
-- [ ] 1.1 Add the shared directory response records under `splitty-core::native_api::directory` and project the existing server hub directory into them, keeping storage/source types in their current owners; verify with unit serialization tests for exact field names, source spelling, omitted optionals, empty observations and unsigned counts.
-- [ ] 1.2 Extend the existing in-process server directory/conformance tests in `hub/directory.rs` and `http/tests/conformance.rs` to decode the real HTTP/native response with the shared contract, preserve order/deduplication/hidden-host handling and demonstrate zero connector activity for passive reads; run the targeted tests and retain the existing native role-refusal coverage.
-- [ ] 1.3 Update the core/server architecture descriptions and hub-to-core API relationship, verify `docs/protocol.ts` against the unchanged response shape, and record HD1/HD3 in `openspec/open-decisions.md`; completion is the reviewed matching model/docs and passing targeted architecture check.
+- [x] 1.1 Add the shared directory response records under `splitty-core::native_api::directory` and project the existing server hub directory into them, keeping storage/source types in their current owners; verify with unit serialization tests for exact field names, source spelling, omitted optionals, empty observations and unsigned counts.
+- [x] 1.2 Extend the existing in-process server directory/conformance tests in `hub/directory.rs` and `http/tests/conformance.rs` to decode the real HTTP/native response with the shared contract, preserve order/deduplication/hidden-host handling and demonstrate zero connector activity for passive reads; run the targeted tests and retain the existing native role-refusal coverage.
+- [x] 1.3 Update the core/server architecture descriptions and hub-to-core API relationship, verify `docs/protocol.ts` against the unchanged response shape, and record HD1/HD3 in `openspec/open-decisions.md`; completion is the reviewed matching model/docs and passing targeted architecture check.
 
 ## 2. Bounded passive hub client
 
@@ -12,14 +12,14 @@
 - [x] 2.2 Reuse or extract neutral charged API decoding without a hub-to-settings feature dependency; add unit tests for malformed/type-invalid/version-invalid responses, duplicate identities, catalog field bounds, valid directories exceeding 20 hosts, body limits and exhausted budgets. Verify failures leave last-good state intact, first failure differs from empty, and retained snapshots keep leases until their final consumer drops them.
 - [ ] 2.3 Add in-process fake-peer tests using the existing native negotiation/request machinery: delay a reply, inject multiple invalidations, complete the stale reply, and verify one subsequent read supplies the final state. Cover repeated cancellation of `next_update`, stale success/error rejection, an error waiting for a fresh trigger instead of spinning, and old-owner results rejected after replacement.
 - [ ] 2.4 Add in-process pending-read finish tests showing request cancellation, stream completion, no late publication and released admission/byte leases after consumers drop their snapshots; extend existing local-service fake-peer fixtures where practical rather than building a second protocol implementation.
-- [ ] 2.5 Update `architecture/client-core.c4` for the hub module and actual decoder dependencies, and document charged passive state and failure semantics in `docs/architecture.md`; verify the focused architecture check and the module's tests pass together.
+- [x] 2.5 Update `architecture/client-core.c4` for the hub module and actual decoder dependencies, and document charged passive state and failure semantics in `docs/architecture.md`; verify the focused architecture check and the module's tests pass together.
 
 ## 3. Compose hub reads with the native workspace runtime
 
 - [ ] 3.1 Expose internally composed local API streams through embedded and owned service adapters, then integrate the hub reader with native workspace readiness, `hub.changed`, explicit Refresh/Retry commands and source/generation-tagged presentation delivery. Verify initial capability-gated setup, unavailable behavior without the capability, and that owned helper opens use no host target or update intent in unit/in-process tests on the current host.
 - [ ] 3.2 Extend in-process native workspace/service tests to seed aliases and cached Screens, inspect and refresh them without any host/forward connector calls, and interleave session events plus independent settings outcomes while a hub read is pending or fails. Verify local pane/session state and ordered terminal delivery survive; this covers Inspect cached native hosts and Refresh fails after a successful observation.
 - [ ] 3.3 Extend in-process runtime lifecycle tests for invalidation during an active read, source replacement with queued presentation, and accepted shutdown during API setup/read. Verify only the current owner publishes, last-good data never migrates to a replacement, setup futures are joined, and worker cleanup completion includes the hub stream; this covers the invalidation, owner replacement and pending-close scenarios.
-- [ ] 3.4 Update owned/embedded/native-workspace architecture relationships and document the independent hub API stream and shutdown order; verify targeted runtime and architecture tests pass. Core completion does not wait for UI chrome, but the change remains incomplete until section 4 lands.
+- [x] 3.4 Update owned/embedded/native-workspace architecture relationships and document the independent hub API stream and shutdown order; verify targeted runtime and architecture tests pass. Core completion does not wait for UI chrome, but the change remains incomplete until section 4 lands.
 
 ## 4. Native Hosts presentation after workspace chrome
 

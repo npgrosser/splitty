@@ -123,6 +123,9 @@ and explicit uncertain mutation failures. Embedded and owned clients delegate to
 that implementation; the transport never imports domain operations. The native
 `ApiStream` adapter and `LocalServiceClient` reuse it for settings, profiles, zoom
 and templates without consuming terminal events or duplicating scheduling.
+The shared catalog also owns `native_api::directory`, the unchanged merged-host
+response shape. The hub projects its persistence records into this contract;
+native clients do not depend on server storage types.
 
 The development-only `splitty-gpui` window uses `splitty-client-core` as a UI-free
 adapter over one native connection and isolated owned service. The explicit
@@ -264,6 +267,33 @@ One identified visibility job patches only `drawer.pinned`, alternates fairly
 with zoom work and refreshes presentation after its outcome. The view disables
 overlapping toggles and retains confirmed state on rejection or uncertainty;
 no ambiguous write is replayed. These preferences remain local-service-owned.
+
+Passive host inspection uses a third stream, independent of both ordered session
+delivery and the settings scheduler. `RuntimeHub` opens a local API stream only
+after `hub-host-decisions-v1` readiness; embedded and owned adapters use the same
+main-service authority without a remote target or update intent. Initial readiness,
+ordered `hub.changed` events and explicit Refresh/Retry trigger `HubClient` reads.
+One retained request and a dirty generation coalesce invalidations across
+cancelled receive branches. Errors wait for another trigger; a broken stream is
+joined before reopening. A missing capability reports unavailable without polling
+or a second directory merge in the client.
+
+Directory snapshots retain their typed decode budget through shared immutable
+ownership. Admission bounds the response to 1 MiB and validates version, identities,
+duplicates and catalog field limits before publication. The API's merged host
+count is not limited to the persistent catalog's 20 entries. A previous snapshot
+may coexist with its replacement while either is still in use. Loading and
+failure carry that same owner's last valid snapshot; a successful empty response
+replaces it. Owner UUID and client read generation accompany every update. A
+same-generation completion follows Loading, while an older or different-owner
+result cannot replace current presentation. A connection replacement drops the
+old view state instead of carrying its observations to another service.
+
+Hub setup, reads and stream cleanup remain owned across cancellation. Shutdown
+revokes setup, joins pending work and finishes the hub stream alongside settings
+and session cleanup before closing the service. A previous stream-cleanup failure
+remains a failure of final shutdown even after it was displayed. Closing Hosts
+alone leaves the local workspace and its terminals alive.
 
 The same `LocalServiceClient` admits one identified template-library job alongside
 settings and zoom work, with a fair turn between library requests. The template
@@ -885,10 +915,20 @@ remain available for older clients.
 
 Forward supervisors and metadata mutations invalidate a coalescing local watch.
 The common connection loop subscribes before welcome and sends `hub.changed`;
-a window supporting `hub-host-decisions-v1` refreshes passive reads on this
-message and reconnect, while older hubs retain polling. Refreshes never restore
+a web window supporting `hub-host-decisions-v1` refreshes passive reads on this
+message and reconnect, while its older-hub fallback retains polling. Refreshes never restore
 or create forwards. Host update and retry decisions arrive with hub setup
 metadata, using the remote supervisor's shared version comparison.
+
+The experimental native Hosts destination consumes the charged client-core
+directory state described above. Targets and cached Screen IDs remain identities;
+display sanitization does not rewrite them. Cached Screen names, counts and
+observation timestamps describe the last observation, never current reachability.
+The view owns navigation, focus and bounded list rendering, and exposes only
+passive Refresh/Retry. It neither opens a remote workspace nor promotes cached
+Screens to local `LocalWorkspace` entries. Future remote work needs explicit
+opened-screen references and source-qualified view identities; the local policy
+of opening every catalog Screen is not a remote policy.
 
 ### Authoritative templates
 
