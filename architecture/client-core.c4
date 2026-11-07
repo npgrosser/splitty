@@ -43,12 +43,12 @@ model {
     }
 
     client_workspace = component 'client_workspace' {
-      description 'Connection-wide catalog and admission, per-screen canonical snapshots with local tab, focus and maximized-slot projection, session routes, exact tab placement with ordered settlement, clamped captured group navigation and full-scope close impact assessment.'
+      description 'Connection-wide catalog and admission, canonical Screen projections, bounded coherent cross-Screen route collection, captured transfer and exact tab placement settlement, local navigation and full-scope close impact assessment.'
       metadata { module 'splitty_client_core::workspace' }
     }
 
     native_workspace = component 'native_workspace' {
-      description 'Native workspace runtime: one owned service, ordered connection, captured navigation and zoom intents, checked placement and close settlement, independent settings outcomes, verified shutdown, attachment and displayed-pane size and visibility retries.'
+      description 'Native workspace runtime: one owned service and ordered connection, worker-owned workspace collection, identified transfer and zoom outcomes, checked placement and close settlement, independent settings outcomes, verified shutdown and retained attachment and visibility controls.'
       metadata { module 'splitty_client_core::native_workspace' }
     }
 
@@ -116,6 +116,8 @@ model {
     client_workspace -> connection 'Use shared command validation'
     client_workspace -> splitty.core.ids 'Identify panes and split nodes'
     client_workspace -> splitty.core.mux 'Use canonical screen layout, operations and validation'
+    client_workspace -> splitty.transport.codec 'Measure aggregate staged snapshot data before retaining typed models'
+    client_workspace -> splitty.transport.wire 'Bound one workspace collection by the transport frame ceiling'
     client_workspace -> splitty.core.pty 'Gate real-service tests on PTY availability'
     client_workspace -> appearance 'Reuse an isolated in-memory service for launch inheritance tests'
     client_workspace -> client_shell_profiles 'Bound explicit launch profile identifiers'
@@ -125,8 +127,9 @@ model {
     native_workspace -> embedded 'Own appearance fixture service cleanup in runtime tests'
     native_workspace -> splitty.core.protocol 'Broadcast same-service settings events in runtime tests'
     native_workspace -> splitty.core.config 'Verify persistence in an isolated child process'
-    native_workspace -> client_workspace 'Reconcile catalogs and routes; revalidate captured close impact before submission'
+    native_workspace -> client_workspace 'Collect and commit coherent routes, admit captured transfers and revalidate close impact'
     native_workspace -> splitty.core.ids 'Confirm captured pane identity after the ordered close barrier'
+    native_workspace -> splitty.core.mux 'Exercise external Screen transfers against the authoritative store in runtime tests'
     native_workspace -> splitty.core.pty 'Gate embedded worker terminal tests on PTY availability'
     native_workspace -> client_root 'Own an isolated service and ordered native client'
     embedded -> connection 'Return a connection scoped to the embedded service'

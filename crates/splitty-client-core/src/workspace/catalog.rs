@@ -2,7 +2,10 @@
 use super::*;
 use crate::connection::identifier;
 mod placement;
+pub(crate) mod refresh;
+pub(super) mod transfer;
 use placement::PendingTabPlacement;
+use transfer::PendingTransfer;
 
 /// Empty Screens consume model capacity independently of session attachments.
 pub const MAX_LOCAL_SCREENS: usize = 128;
@@ -25,6 +28,9 @@ pub struct LocalWorkspace {
     tab_selection_supported: bool,
     tab_placement_supported: bool,
     pending_placement: Option<PendingTabPlacement>,
+    pending_transfer: Option<PendingTransfer>,
+    reconciling: bool,
+    route_generation: u64,
     catalog_initialized: bool,
     catalog_dirty: bool,
     catalog_in_flight: Option<u64>,
@@ -35,6 +41,11 @@ impl LocalWorkspace {
     /// Assess only local terminal impact, retaining pane and session identity
     /// across a later prompt. The existing admission bounds limit this plan.
     pub fn assess_close(&self, request_id: u64, target: CloseTarget) -> io::Result<ClosePlan> {
+        if self.reconciling && target != CloseTarget::Window {
+            return Err(invalid(
+                "Screen ownership is being reconciled; close again after refresh",
+            ));
+        }
         let mut plan = ClosePlan {
             request_id,
             connection_id: Some(self.connection_id),
@@ -84,6 +95,13 @@ impl LocalWorkspace {
                     self.add_screen_impact(&screen, &mut plan);
                 }
             }
+        }
+        if self.reconciling {
+            plan.affected.push(CloseAffected {
+                identity: CloseIdentity::Reconciliation,
+                busy: false,
+                unresolved: true,
+            });
         }
         plan.affected.sort_by(|a, b| a.identity.cmp(&b.identity));
         let mut busy_sessions = HashSet::new();
@@ -240,6 +258,9 @@ impl LocalWorkspace {
             tab_selection_supported: false,
             tab_placement_supported: false,
             pending_placement: None,
+            pending_transfer: None,
+            reconciling: false,
+            route_generation: 0,
             catalog_initialized: false,
             catalog_dirty: false,
             catalog_in_flight: None,
@@ -590,6 +611,7 @@ impl LocalWorkspace {
     }
 
     pub fn create_screen(&mut self, client: &Client, name: &str) -> io::Result<ScreenIds> {
+        self.require_routes_settled()?;
         self.check_connection(client)?;
         self.require_catalog()?;
         if !self.catalog_initialized {
@@ -622,6 +644,7 @@ impl LocalWorkspace {
     }
     pub fn switch_screen(&mut self, client: &Client, id: &str) -> io::Result<bool> {
         self.check_known(client, id)?;
+        self.cancel_transfer_focus();
         if self.shown.as_deref() == Some(id) {
             self.activate_created = None;
             return Ok(false);
@@ -639,6 +662,7 @@ impl LocalWorkspace {
         Ok(true)
     }
     pub fn rename_screen(&mut self, client: &Client, id: &str, name: &str) -> io::Result<()> {
+        self.require_routes_settled()?;
         self.check_known(client, id)?;
         let mutation = self.next_mutation()?;
         client.rename_screen(id, name)?;
@@ -647,6 +671,7 @@ impl LocalWorkspace {
         Ok(())
     }
     pub fn close_screen(&mut self, client: &Client, id: &str) -> io::Result<()> {
+        self.require_routes_settled()?;
         self.check_known(client, id)?;
         let mutation = self.next_mutation()?;
         client.close_screen(id)?;
@@ -664,12 +689,16 @@ impl LocalWorkspace {
         self.shown_mut().is_ok_and(|screen| screen.focus_pane(pane))
     }
     pub fn sync_selected_tabs(&mut self, client: &Client) -> io::Result<()> {
+        if self.reconciling {
+            return Ok(());
+        }
         if self.shown.is_none() {
             return Ok(());
         }
         self.shown_mut()?.sync_selected_tabs(client)
     }
     pub fn split(&mut self, client: &Client, pane: &str, axis: Axis) -> io::Result<String> {
+        self.require_routes_settled()?;
         self.admit_new_pane()?;
         let result = self.shown_mut()?.split(client, pane, axis);
         if result.is_ok() {
@@ -678,6 +707,7 @@ impl LocalWorkspace {
         result
     }
     pub fn new_tab(&mut self, client: &Client, pane: &str) -> io::Result<String> {
+        self.require_routes_settled()?;
         self.admit_new_pane()?;
         let result = self.shown_mut()?.new_tab(client, pane);
         if result.is_ok() {
@@ -691,6 +721,7 @@ impl LocalWorkspace {
         pane: &str,
         profile_id: &str,
     ) -> io::Result<String> {
+        self.require_routes_settled()?;
         self.admit_new_pane()?;
         let result = self
             .shown_mut()?
@@ -701,6 +732,7 @@ impl LocalWorkspace {
         result
     }
     pub fn new_terminal(&mut self, client: &Client) -> io::Result<String> {
+        self.require_routes_settled()?;
         self.admit_new_pane()?;
         let result = self.shown_mut()?.new_terminal(client);
         if result.is_ok() {
@@ -709,6 +741,7 @@ impl LocalWorkspace {
         result
     }
     pub fn close_pane(&mut self, client: &Client, pane: &str) -> io::Result<()> {
+        self.require_routes_settled()?;
         self.shown_mut()?.close_pane(client, pane)
     }
     /// Execute a captured close against its original Screen.
@@ -718,6 +751,7 @@ impl LocalWorkspace {
         screen: &str,
         pane: &str,
     ) -> io::Result<()> {
+        self.require_routes_settled()?;
         let mutation = self.next_mutation()?;
         self.models
             .get_mut(screen)
@@ -728,13 +762,15 @@ impl LocalWorkspace {
         Ok(())
     }
     pub fn resize_split(&mut self, client: &Client, node: &str, sizes: Vec<f64>) -> io::Result<()> {
+        self.require_routes_settled()?;
         self.shown_mut()?.resize_split(client, node, sizes)
     }
     pub fn capture_drag(&self, pane: &str) -> Option<PaneDrag> {
         self.shown()?.capture_drag(pane)
     }
     pub fn can_move(&self, drag: &PaneDrag, target: &str, placement: MovePlacement) -> bool {
-        self.pending_placement.is_none()
+        !self.reconciling
+            && self.pending_placement.is_none()
             && self
                 .shown()
                 .is_some_and(|screen| screen.can_move(drag, target, placement))

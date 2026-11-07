@@ -115,6 +115,32 @@ tree. Switching Screens preserves terminal emulation and attachments; hidden
 terminals consume output and send protocol replies without claiming visibility
 or PTY size. Returning panes publish their measured sizes again.
 
+Cross-Screen transfers use the existing server `move_pane_to_screen` operation.
+The client captures connection, source Screen, pane and session identity from
+the actual tab, submits once and verifies the authoritative destination. A
+later local navigation cancels deferred follow without canceling verification.
+The tab menu and its focus handling belong to GPUI; admission, observation and
+navigation policy belong to the client workspace, and the server retains all
+layout and session effects.
+
+An ownership change cannot be committed one Screen at a time: source-first
+delivery would remove a route, while target-first delivery would duplicate it.
+The runtime therefore owns one bounded refresh collector outside the cloneable
+UI workspace model. It retains the committed routes while collecting actual
+Screen snapshots between ordered catalog queries. The trailing query also
+settles missing-Screen reads, which send no snapshot. This orders reads on the
+connection; it is not an atomic snapshot against concurrent clients. A complete
+candidate must pass global uniqueness and admission checks before one route
+delta is published. The collector limits aggregate serialized snapshot data to
+16 MiB before retaining typed models, plus the existing Screen and attachment
+counts. Failed collections release staged
+data, report uncertainty and can recover through later reads without replaying
+the mutation. External transfers use the same observation path. Stable
+pane/session pairs retain readiness, attachments and terminal entities across
+Screen changes; obsolete size and visibility claims are withdrawn until the
+next actual layout. Unsettled ownership blocks scoped destructive actions but
+keeps terminal output and assessed whole-window shutdown available.
+
 The native window retains one async receive task for the worker update channel.
 New output wakes that task directly; a separate maintenance deadline still retries
 visibility and size reports. Bounded batches preserve update order and retain

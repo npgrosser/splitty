@@ -301,3 +301,44 @@ fn post_fence_equal_revision_confirms_but_lower_revision_rejects_without_losing_
     assert!(!delta.snapshot_changed);
     assert_eq!(serde_json::to_value(model.snapshot()).unwrap(), before);
 }
+
+#[test]
+fn coherent_cross_screen_refresh_settles_an_earlier_tab_placement() {
+    for superseded in [false, true] {
+        let mut model = workspace();
+        admit(&mut model, "a", "right", None);
+        let mut refresh = crate::workspace::WorkspaceRefresh::default();
+        refresh.begin(&mut model).unwrap();
+        let owner = model.connection_id;
+        model.catalog_in_flight = Some(model.mutation);
+        refresh
+            .apply_catalog(&mut model, owner, &catalog(&["screen", "other"]))
+            .unwrap();
+        let right = if superseded {
+            vec!["d", "e"]
+        } else {
+            vec!["d", "e", "a"]
+        };
+        refresh
+            .apply_snapshot(&mut model, owner, &snapshot(2, &["b", "c"], &right))
+            .unwrap();
+        let other = if superseded { vec!["a"] } else { vec![] };
+        let event = json!({"type":"mux.screen_snapshot","screen":{"id":"other","revision":2,
+            "root":{"type":"slot","id":"other-slot","paneIds":other,"activePaneId":other.first()},
+            "panes":other.iter().map(|pane|(pane.to_string(),json!({"id":pane,"sessionId":format!("session-{pane}")}))).collect::<serde_json::Map<_,_>>(),
+            "sessions":other.iter().map(|pane|(format!("session-{pane}"),json!({"id":format!("session-{pane}"),"status":"running"}))).collect::<serde_json::Map<_,_>>()}});
+        refresh.apply_snapshot(&mut model, owner, &event).unwrap();
+        // Admit the collector's trailing fence through its real bounded sender
+        // in production; this pure test marks that phase after all snapshots.
+        refresh.test_trailing(&mut model);
+        let delta = refresh
+            .apply_catalog(&mut model, owner, &catalog(&["screen", "other"]))
+            .unwrap();
+        assert!(!model.placement_pending());
+        assert_eq!(
+            matches!(delta.placement, Some(PlacementOutcome::Confirmed)),
+            !superseded
+        );
+        assert_eq!(model.session_for("a"), Some("session-a"));
+    }
+}

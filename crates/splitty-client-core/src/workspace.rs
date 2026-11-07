@@ -4,6 +4,10 @@ use crate::{
     connection::{invalid, MAX_ATTACHMENTS},
     Client, ScreenIds,
 };
+pub(crate) use catalog::refresh::WorkspaceRefresh;
+pub use catalog::transfer::{
+    PaneActionTarget, ScreenTransferOutcome, ScreenTransferResult, ScreenTransferTarget,
+};
 pub use catalog::LocalWorkspace;
 use serde::Deserialize;
 use serde_json::Value;
@@ -31,6 +35,9 @@ pub struct WorkspaceDelta {
     pub added: Vec<SessionRoute>,
     pub removed: Vec<SessionRoute>,
     pub placement: Option<PlacementOutcome>,
+    pub transfer: Option<ScreenTransferResult>,
+    pub reconciliation_error: Option<String>,
+    pub coherent_refresh: bool,
 }
 
 /// An exact tab intent has reached its ordered verification point.
@@ -58,6 +65,7 @@ pub enum CloseTarget {
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum CloseIdentity {
     Catalog,
+    Reconciliation,
     Screen(String),
     Pane {
         screen: String,
@@ -447,6 +455,9 @@ impl ScreenModel {
             return Err(invalid("expected screen snapshot"));
         }
         let screen = ScreenState::deserialize(&event["screen"]).map_err(io::Error::other)?;
+        self.apply_screen(Arc::new(screen))
+    }
+    fn apply_screen(&mut self, screen: Arc<ScreenState>) -> io::Result<WorkspaceDelta> {
         if screen.id.as_str() != self.ids.screen_id.as_str() {
             return Ok(WorkspaceDelta::default());
         }
@@ -488,7 +499,7 @@ impl ScreenModel {
                 next.insert(pane_id.clone(), session_id.clone());
             }
         }
-        self.snapshot = Some(Arc::new(screen));
+        self.snapshot = Some(screen);
         self.install_routes(next);
         self.reconcile_selection();
         if let Some(pane_id) = self

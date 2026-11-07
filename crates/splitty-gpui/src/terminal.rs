@@ -352,6 +352,7 @@ pub struct Terminal {
     bounds: Bounds<Pixels>,
     metrics: TerminalMetrics,
     geometry_ready: bool,
+    size_report_pending: bool,
     resized_pixel_cell: Option<(u32, u32)>,
     face: Font,
     size: Size,
@@ -402,6 +403,7 @@ impl Terminal {
             bounds: Bounds::default(),
             metrics: TerminalMetrics::new(1.),
             geometry_ready: false,
+            size_report_pending: false,
             resized_pixel_cell: None,
             // GPUI font lookup takes concrete family names, not CSS generic families.
             face: font(gpui_kit::base::Theme::global(cx).tokens.typography.mono),
@@ -571,9 +573,19 @@ impl Terminal {
         cx.notify();
     }
 
+    /// Ownership changed while the terminal entity survived. Its old bounds
+    /// cannot claim a size for the new location, even if both grids are equal.
+    pub fn invalidate_size_report(&mut self, cx: &mut Context<Self>) {
+        self.cancel_pointer();
+        self.geometry_ready = false;
+        self.size_report_pending = true;
+        self.content_revision = self.content_revision.wrapping_add(1);
+        cx.notify();
+    }
+
     pub fn report_size(&mut self) {
-        if self.geometry_ready {
-            self.send(Command::Resize(self.size.cols, self.size.rows));
+        if self.geometry_ready && self.send(Command::Resize(self.size.cols, self.size.rows)) {
+            self.size_report_pending = false;
         }
     }
 
@@ -1190,6 +1202,9 @@ impl Terminal {
             cx.notify();
         } else {
             self.geometry_ready = true;
+        }
+        if self.size_report_pending {
+            self.report_size();
         }
     }
 

@@ -23,6 +23,7 @@ impl LocalWorkspace {
         self.pending_placement.is_some()
     }
     pub(super) fn require_no_placement(&self) -> io::Result<()> {
+        self.require_routes_settled()?;
         if self.pending_placement.is_some() {
             return Err(invalid(
                 "A tab placement is awaiting authoritative verification",
@@ -31,6 +32,7 @@ impl LocalWorkspace {
         Ok(())
     }
     pub(super) fn cancel_placement_focus(&mut self) {
+        self.cancel_transfer_focus();
         if let Some(pending) = &mut self.pending_placement {
             pending.focus = false;
         }
@@ -234,6 +236,24 @@ impl LocalWorkspace {
             model.select_tab(&pending.drag.pane);
         }
         Some(PlacementOutcome::Confirmed)
+    }
+
+    pub(super) fn settle_placement_after_refresh(
+        &mut self,
+        watermark: u64,
+    ) -> Option<PlacementOutcome> {
+        if let Some(outcome) = self.placement_catalog(self.connection_id, Some(watermark), None) {
+            return Some(outcome);
+        }
+        let id = self.pending_placement.as_ref()?.drag.screen_id.clone();
+        self.placement_snapshot(
+            self.connection_id,
+            &serde_json::json!({"screen":{"id":id}}),
+            Ok(&WorkspaceDelta {
+                snapshot_changed: true,
+                ..WorkspaceDelta::default()
+            }),
+        )
     }
 
     pub fn cycle_tab(

@@ -3,8 +3,9 @@ use crate::{
     appearance::{AppearanceSnapshot, ColorScheme},
     shell_profiles::ShellProfilesSnapshot,
     workspace::{
-        Axis, ClosePlan, CloseTarget, LocalWorkspace, MovePlacement, PaneDrag, PlacementOutcome,
-        TabStep,
+        Axis, ClosePlan, CloseTarget, LocalWorkspace, MovePlacement, PaneActionTarget, PaneDrag,
+        PlacementOutcome, ScreenTransferOutcome, ScreenTransferResult, ScreenTransferTarget,
+        TabStep, WorkspaceRefresh,
     },
     zoom::{ZoomAction, ZoomResult},
     Event,
@@ -24,6 +25,11 @@ use std::{
 use tokio::sync::mpsc;
 
 pub enum Command {
+    TransferPane {
+        request_id: uuid::Uuid,
+        source: PaneActionTarget,
+        target: ScreenTransferTarget,
+    },
     Zoom {
         connection: uuid::Uuid,
         request_id: uuid::Uuid,
@@ -94,6 +100,7 @@ pub enum Command {
         bytes: Vec<u8>,
     },
     ResizePane {
+        route_generation: u64,
         pane: String,
         session: String,
         cols: u16,
@@ -105,6 +112,7 @@ pub enum Command {
     },
 }
 pub enum Update {
+    ScreenTransfer(ScreenTransferResult),
     Zoom(ZoomResult),
     ShellProfiles(Arc<ShellProfilesSnapshot>),
     ShellProfilesError {
@@ -513,6 +521,7 @@ async fn run_service(
             return finish_owned_run(service, Err(error.into()), &cleanup_complete, &stop).await
         }
     };
+    let mut workspace_refresh = WorkspaceRefresh::default();
     let mut settings = None::<RuntimeLocalSettings<'_>>;
     let result = async {
         let mut model = None::<LocalWorkspace>;
@@ -658,6 +667,20 @@ async fn run_service(
                         }
                         continue;
                     }
+                    if let Command::TransferPane { request_id, source, target } = command {
+                        if model.as_ref().is_some_and(|model|model.transfer_request_pending(request_id)) {continue;}
+                        let connection_id=source.connection_id;
+                        let result=if pending_close.is_some() {Err(std::io::Error::other("A close operation is pending"))}
+                            else if let Some(model)=&mut model {
+                                model.transfer_pane(&client,request_id,source,target).and_then(|()|workspace_refresh.begin(model))
+                            } else {Err(std::io::Error::other("Workspace is not ready"))};
+                        if let Err(error)=result {
+                            publish(&updates,Update::ScreenTransfer(ScreenTransferResult{connection_id,request_id,outcome:ScreenTransferOutcome::Rejected(error.to_string())}),&stop).await?;
+                        } else if let Some(model)=&model {
+                            publish(&updates,Update::Workspace(Box::new(model.clone())),&stop).await?;
+                        }
+                        continue;
+                    }
                     if let Command::Zoom { connection, request_id, action } = command {
                         let result = settings.as_mut()
                             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::WouldBlock, "local settings are not ready"))
@@ -680,7 +703,7 @@ async fn run_service(
                         continue;
                     };
                     let result: std::io::Result<()> = match command {
-                        Command::Zoom { .. } | Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
+                        Command::TransferPane { .. } | Command::Zoom { .. } | Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
                             unreachable!("close is handled before normal commands")
                         }
                         Command::CreateScreen(name) => {
@@ -831,12 +854,12 @@ async fn run_service(
                             }
                         }
                         Command::ResizePane {
-                            pane,
+                            route_generation,                            pane,
                             session,
                             cols,
                             rows,
                         } => {
-                            if model.session_for(&pane) == Some(session.as_str())
+                            if model.route_generation() == route_generation && model.session_for(&pane) == Some(session.as_str())
                                 && model.is_displayed_pane(&pane)
                             {
                                 sizes.insert(session.clone(), (cols, rows));
@@ -923,7 +946,7 @@ async fn run_service(
                                 if let Some(model) = &mut model {
                                     let response_generation = model.catalog_request_generation();
                                     let first = !model.catalog_initialized();
-                                    match model.apply_catalog(event.connection_id, json) {
+                                    match workspace_refresh.apply_catalog(model, event.connection_id, json) {
                                         Ok(applied) => {
                                             delta = applied;
                                             if let Some(close) = &mut pending_close {
@@ -979,7 +1002,7 @@ async fn run_service(
                             }
                             Some("mux.screen_snapshot") => {
                                 if let Some(model) = &mut model {
-                                    match model.apply_snapshot(event.connection_id, json) {
+                                    match workspace_refresh.apply_snapshot(model, event.connection_id, json) {
                                         Ok(applied) => {
                                             delta = applied;
                                             accepted_close_snapshot = delta.snapshot_changed;
@@ -1077,6 +1100,7 @@ async fn run_service(
                                 if json["type"] == "mux.op_failed" {
                                     if let Some(model) = &mut model {
                                         model.observe_placement_failure(event.connection_id, json);
+                                        model.observe_transfer_failure(event.connection_id, json);
                                     }
                                     if let Some(close) = &mut pending_close {
                                         close.observe_failure(json);
@@ -1136,7 +1160,7 @@ async fn run_service(
                                     model.screen(screen).is_some(),
                                     model.screen(screen).and_then(|screen| screen.snapshot())
                                         .is_some_and(|snapshot| snapshot.panes.contains_key(&splitty_core::ids::PaneId::from(pane.as_str()))),
-                                    accepted_close_snapshot && json["screen"]["id"] == *screen,
+                                    (accepted_close_snapshot && json["screen"]["id"] == *screen) || delta.coherent_refresh,
                                 ),
                                 CloseTarget::Screen { screen } => (model.screen(screen).is_some(), false, false),
                                 CloseTarget::Window => (false, false, false),
@@ -1157,6 +1181,7 @@ async fn run_service(
                     // must not discard a route or close the owned connection.
                     if delta.snapshot_changed
                         || delta.placement.is_some()
+                        || delta.transfer.is_some()
                         || !delta.added.is_empty()
                         || !delta.removed.is_empty()
                     {
@@ -1165,6 +1190,16 @@ async fn run_service(
                                 .await?;
                         }
                     }
+                    if delta.coherent_refresh {
+                        // Geometry belongs to the new route generation. The UI
+                        // must measure/report again, even when its grid is equal.
+                        desired_visible.clear();
+                        sizes.clear();
+                        pending_resize.clear();
+                        pending_hide.extend(attached.iter().cloned());
+                    }
+                    if let Some(result)=delta.transfer {publish(&updates,Update::ScreenTransfer(result),&stop).await?;}
+                    if let Some(reason)=delta.reconciliation_error {publish(&updates,Update::Status(reason),&stop).await?;}
                     if let Some(PlacementOutcome::Rejected(reason)) = delta.placement {
                         publish(&updates, Update::Status(reason), &stop).await?;
                     }
@@ -1296,7 +1331,7 @@ async fn run_service(
                         control_error = Some(status);
                     }
                 }
-                match model.flush_catalog(&client) {
+                match workspace_refresh.flush(model,&client) {
                     Ok(()) => refresh_error = None,
                     Err(error) => {
                         // Refreshes are read-only and keep their dirty state on
@@ -1755,6 +1790,7 @@ mod close_tests {
         ] {
             commands
                 .send(Command::ResizePane {
+                    route_generation: 0,
                     pane: pane.clone(),
                     session: session.into(),
                     cols,
@@ -1812,6 +1848,7 @@ mod close_tests {
             .unwrap();
         commands
             .send(Command::ResizePane {
+                route_generation: 0,
                 pane: pane_b.pane_id.clone(),
                 session: pane_b.session_id.clone(),
                 cols: 15,
@@ -2107,3 +2144,6 @@ mod profile_launch_tests;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod zoom_tests;
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod transfer_tests;

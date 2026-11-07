@@ -1,17 +1,18 @@
 //! Native projection of one authoritative local screen; no independent dock tree.
 mod shell_profiles;
+mod transfer;
 
 use crate::appearance::NativeAppearance;
 use crate::terminal::{self, Terminal};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
-use gpui_kit::base::{ColorTokens, Theme, ThemeAppearance};
+use gpui_kit::base::{ColorTokens, Popover, Theme, ThemeAppearance};
 use gpui_kit::{prelude::*, *};
 use splitty_client_core::appearance::{AppearanceSnapshot, ColorScheme};
 use splitty_client_core::native_workspace::{Command, Update, Worker};
 use splitty_client_core::shell_profiles::ShellProfilesSnapshot;
 use splitty_client_core::workspace::{
-    Axis, ClosePlan, CloseTarget, LayoutNode, LocalWorkspace, MovePlacement, PaneDrag, ScreenModel,
-    TabStep,
+    Axis, ClosePlan, CloseTarget, LayoutNode, LocalWorkspace, MovePlacement, PaneActionTarget,
+    PaneDrag, ScreenModel, ScreenTransferOutcome, ScreenTransferTarget, TabStep,
 };
 use splitty_client_core::zoom::{Zoom, ZoomAction, ZoomOutcome, ZoomResult};
 use std::{
@@ -323,6 +324,7 @@ fn terminal_commands(
     pane: String,
     session: String,
     pending_resize: Arc<Mutex<Option<(u16, u16)>>>,
+    route_generation: Arc<AtomicU64>,
 ) -> impl Fn(terminal::Command) -> Result<(), String> {
     move |command| {
         let resize = match &command {
@@ -342,6 +344,7 @@ fn terminal_commands(
                 return Err("Terminal generation changed".into());
             }
             terminal::Command::Resize(cols, rows) => Command::ResizePane {
+                route_generation: route_generation.load(Ordering::Acquire),
                 pane: pane.clone(),
                 session: session.clone(),
                 cols,
@@ -374,12 +377,14 @@ fn retry_pending_resize(
     pane: &str,
     session: &str,
     pending: &Arc<Mutex<Option<(u16, u16)>>>,
+    route_generation: &AtomicU64,
 ) -> Result<(), String> {
     let size = pending.lock().map_err(|error| error.to_string())?.take();
     let Some((cols, rows)) = size else {
         return Ok(());
     };
     if let Err(error) = sender.try_send(Command::ResizePane {
+        route_generation: route_generation.load(Ordering::Acquire),
         pane: pane.to_owned(),
         session: session.to_owned(),
         cols,
@@ -415,6 +420,25 @@ struct RenameEditor {
     screen: String,
     connection: String,
     input: Entity<InputState>,
+}
+
+#[derive(Clone)]
+struct TransferMenu {
+    source: PaneActionTarget,
+    selected: usize,
+    scroll: ScrollHandle,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PendingTransfer {
+    connection_id: Uuid,
+    request_id: Uuid,
+}
+
+impl PendingTransfer {
+    fn matches(self, connection_id: Uuid, request_id: Uuid) -> bool {
+        self.connection_id == connection_id && self.request_id == request_id
+    }
 }
 struct PendingClose {
     plan: ClosePlan,
@@ -482,6 +506,9 @@ pub struct Workspace {
     drag: Option<ResizeDrag>,
     visible: Vec<String>,
     visible_screen: Option<String>,
+    visible_owner: Option<Uuid>,
+    visible_route_generation: u64,
+    route_generation: Arc<AtomicU64>,
     search_owner: Option<Entity<Terminal>>,
     visible_pending: bool,
     status: String,
@@ -494,6 +521,8 @@ pub struct Workspace {
     profiles_error: Option<String>,
     profiles_generation: u64,
     profile_picker: Option<ProfilePicker>,
+    transfer_menu: Option<TransferMenu>,
+    pending_transfer: Option<PendingTransfer>,
     desired_scheme: ColorScheme,
     sent_scheme: ColorScheme,
     scheme_pending: bool,
@@ -631,6 +660,9 @@ impl Workspace {
                 drag: None,
                 visible: Vec::new(),
                 visible_screen: None,
+                visible_owner: None,
+                visible_route_generation: 0,
+                route_generation: Arc::new(AtomicU64::new(0)),
                 search_owner: None,
                 visible_pending: false,
                 status: "Starting local workspace…".into(),
@@ -643,6 +675,8 @@ impl Workspace {
                 profiles_error: None,
                 profiles_generation: 0,
                 profile_picker: None,
+                transfer_menu: None,
+                pending_transfer: None,
                 desired_scheme: initial_scheme,
                 sent_scheme: initial_scheme,
                 scheme_pending: false,
@@ -857,6 +891,7 @@ impl Workspace {
         self.send(Command::CreateScreen(name), cx);
     }
     fn switch_screen(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.transfer_menu = None;
         if self.rename.is_some() {
             self.finish_rename(true, window, cx);
         }
@@ -869,6 +904,7 @@ impl Workspace {
         }
     }
     fn start_rename(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.transfer_menu = None;
         self.close_profile_picker(window, cx);
         let Some((name, connection)) = self.model.as_ref().and_then(|model| {
             model
@@ -933,6 +969,7 @@ impl Workspace {
         cx.notify();
     }
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.transfer_menu = None;
         self.close_profile_picker(window, cx);
         if target == CloseTarget::Window && self.cleanup_complete.load(Ordering::Acquire) {
             self.stop();
@@ -1045,6 +1082,7 @@ impl Workspace {
             pane.to_owned(),
             session.to_owned(),
             pending_resize.clone(),
+            self.route_generation.clone(),
         );
         let inputs = self.smoke_terminal_inputs.clone();
         let last_pane = self.smoke_last_input_pane.clone();
@@ -1102,6 +1140,8 @@ impl Workspace {
             self.profiles_error = None;
             self.profiles_generation = 0;
             self.profile_picker = None;
+            self.transfer_menu = None;
+            self.pending_transfer = None;
         }
         if self.rename.is_some() {
             self.smoke_editor_reconciles += u64::from(self.smoke);
@@ -1143,6 +1183,20 @@ impl Workspace {
         for route in model.routes() {
             self.ensure_pane(&route.pane_id, &route.session_id, cx);
         }
+        let routes_changed = self.model.as_ref().is_none_or(|previous| {
+            previous.connection_id() != model.connection_id()
+                || previous.route_generation() != model.route_generation()
+        });
+        if routes_changed {
+            for view in self.panes.values() {
+                if let Ok(mut pending) = view.pending_resize.lock() {
+                    *pending = None;
+                }
+                view.terminal.update(cx, |terminal, cx| {
+                    terminal.invalidate_size_report(cx);
+                });
+            }
+        }
         if model.snapshot().is_some() {
             self.status.clear();
         }
@@ -1160,8 +1214,15 @@ impl Workspace {
             .profile_picker
             .as_ref()
             .is_some_and(|picker| !picker.valid_for(&model));
+        let transfer_cancelled = self
+            .transfer_menu
+            .as_ref()
+            .is_some_and(|menu| model.validate_pane_action(&menu.source).is_err());
         if picker_cancelled {
             self.profile_picker = None;
+        }
+        if transfer_cancelled {
+            self.transfer_menu = None;
         }
         if editor_cancelled {
             self.rename = None;
@@ -1171,6 +1232,8 @@ impl Workspace {
             self.drag = None;
         }
         self.drop_target = None;
+        self.route_generation
+            .store(model.route_generation(), Ordering::Release);
         self.model = Some(model);
         self.flush_scheme();
         self.sync_visible(cx);
@@ -1181,6 +1244,7 @@ impl Workspace {
                 .is_some_and(|pending| pending.prompting)
             && (editor_cancelled
                 || picker_cancelled
+                || transfer_cancelled
                 || old_screen != new_screen
                 || old_focus != new_focus
                 || old_entity != new_entity)
@@ -1204,7 +1268,15 @@ impl Workspace {
             .as_ref()
             .and_then(LocalWorkspace::shown_screen_id)
             .map(str::to_owned);
-        if visible != self.visible || screen != self.visible_screen {
+        let owner = self.model.as_ref().map(LocalWorkspace::connection_id);
+        let generation = self
+            .model
+            .as_ref()
+            .map(LocalWorkspace::route_generation)
+            .unwrap_or(0);
+        let route_changed =
+            owner != self.visible_owner || generation != self.visible_route_generation;
+        if visible != self.visible || screen != self.visible_screen || route_changed {
             for pane in &self.visible {
                 if !visible.contains(pane) {
                     if let Some(view) = self.panes.get(pane) {
@@ -1215,11 +1287,15 @@ impl Workspace {
             }
             self.visible = visible;
             self.visible_screen = screen;
+            self.visible_owner = owner;
+            self.visible_route_generation = generation;
             self.visible_pending = true;
             for pane in &self.visible {
                 if let Some(view) = self.panes.get(pane) {
-                    view.terminal
-                        .update(cx, |terminal, _| terminal.report_size());
+                    if !route_changed {
+                        view.terminal
+                            .update(cx, |terminal, _| terminal.report_size());
+                    }
                 }
             }
         }
@@ -1267,9 +1343,13 @@ impl Workspace {
             let Some(view) = self.panes.get(pane) else {
                 continue;
             };
-            if let Err(error) =
-                retry_pending_resize(&self.commands, pane, &view.session, &view.pending_resize)
-            {
+            if let Err(error) = retry_pending_resize(
+                &self.commands,
+                pane,
+                &view.session,
+                &view.pending_resize,
+                &self.route_generation,
+            ) {
                 let status = format!("Resize pending: {error}");
                 if self.status != status {
                     self.status = status;
@@ -1281,6 +1361,7 @@ impl Workspace {
     fn focus_current(&self, window: &mut Window, cx: &mut App) {
         if self.rename.is_some()
             || self.profile_picker.is_some()
+            || self.transfer_menu.is_some()
             || self
                 .pending_close
                 .as_ref()
@@ -1418,6 +1499,10 @@ impl Workspace {
         {
             // A native confirmation owns keyboard input until it settles.
             cx.stop_propagation();
+            return;
+        }
+        if self.transfer_menu.is_some() {
+            self.transfer_menu_key(&event.keystroke, cx);
             return;
         }
         if let Some(action) = zoom_shortcut(&event.keystroke, cx.platform_info().is_mac()) {
@@ -1592,6 +1677,25 @@ impl Workspace {
                 Update::Workspace(model) => self.reconcile(*model, window, cx),
                 Update::Appearance(snapshot) => self.apply_appearance(&snapshot, window, cx),
                 Update::Zoom(result) => self.apply_zoom_result(result, window, cx),
+                Update::ScreenTransfer(result) => {
+                    if self.pending_transfer.is_some_and(|pending| {
+                        pending.matches(result.connection_id, result.request_id)
+                    }) {
+                        self.pending_transfer = None;
+                        match result.outcome {
+                            ScreenTransferOutcome::Confirmed => {
+                                self.status = "Terminal moved to Screen".into();
+                            }
+                            ScreenTransferOutcome::Rejected(reason) => {
+                                self.status = format!("Move rejected: {reason}");
+                            }
+                            ScreenTransferOutcome::Unverified(reason) => {
+                                self.status = format!("Move unverified: {reason}");
+                            }
+                        }
+                        cx.notify();
+                    }
+                }
                 Update::ShellProfiles(snapshot) => self.apply_profiles(snapshot, cx),
                 Update::ShellProfilesError { connection, reason } => {
                     self.profile_error(&connection.to_string(), reason, cx);
@@ -2434,6 +2538,7 @@ impl Workspace {
                 for (index, pane) in pane_ids.iter().enumerate() {
                     let key = pane.to_string();
                     let close = key.clone();
+                    let right_click = key.clone();
                     let active = selected == Some(pane.as_str());
                     let title = self
                         .model
@@ -2466,6 +2571,13 @@ impl Workspace {
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.select(&key, window, cx)
                                 }))
+                                .on_mouse_down(
+                                    MouseButton::Right,
+                                    cx.listener(move |this, _, window, cx| {
+                                        cx.stop_propagation();
+                                        this.open_transfer_menu(&right_click, window, cx);
+                                    }),
+                                )
                                 .when_some(
                                     self.model
                                         .as_ref()
@@ -2487,6 +2599,7 @@ impl Workspace {
                                         .overflow_hidden()
                                         .child(title),
                                 )
+                                .child(self.render_transfer_menu(pane.as_str(), cx))
                                 .child(
                                     div()
                                         .id(SharedString::from(format!("close-{pane}")))
@@ -3704,12 +3817,14 @@ mod tests {
             "pane-a".into(),
             "session-a".into(),
             first_pending,
+            Arc::new(std::sync::atomic::AtomicU64::new(4)),
         );
         let second = terminal_commands(
             sender.clone(),
             "pane-b".into(),
             "session-b".into(),
             second_pending.clone(),
+            Arc::new(std::sync::atomic::AtomicU64::new(4)),
         );
         let input = |generation, text: &str| terminal::Command::Input {
             generation,
@@ -3774,11 +3889,18 @@ mod tests {
             matches!(receiver.try_recv(), Ok(Command::Input { pane, session, bytes })
             if pane == "pane-a" && session == "session-a" && bytes == [0, 0x80, 0xff])
         );
-        retry_pending_resize(&sender, "pane-b", "session-b", &second_pending)
-            .expect("resize retry admitted");
+        retry_pending_resize(
+            &sender,
+            "pane-b",
+            "session-b",
+            &second_pending,
+            &std::sync::atomic::AtomicU64::new(5),
+        )
+        .expect("resize retry admitted");
         assert!(matches!(
             receiver.try_recv(),
             Ok(Command::ResizePane {
+                route_generation: 5,
                 cols: 130,
                 rows: 41,
                 ..

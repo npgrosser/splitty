@@ -86,7 +86,11 @@ default and experimental markers, and a launch-time fallback is reported in stat
 Profiles and appearance load independently over the owned auxiliary API stream;
 neither read changes settings. Profile editing is still in the web settings UI.
 Select tabs by clicking their labels, close panes with their tab close control,
-and resize splits by dragging the divider. After closing the final pane,
+and resize splits by dragging the divider. Right-click a tab or use its **⋯**
+menu to move that running terminal to another local Screen or a **New Screen**.
+Opening the menu preserves the selected tab; confirming a move follows its target
+unless later navigation intervened. Terminal-body right-click stays available
+to terminal applications. After closing the final pane,
 **New terminal** repopulates the same Screen. Ctrl+Shift+C/V copies and pastes
 in the focused terminal. Wheel input scrolls normal history; in the alternate
 screen it sends up/down keys using the emulator's current cursor-key mode, with
@@ -880,3 +884,46 @@ native Windows/macOS release coverage.
 python3 scripts/testing/gpui-screens.py target/release/splitty-gpui \
   --tab-management --output target/gpui-tab-management
 ```
+
+## Native Screen-transfer acceptance
+
+The optimized binary with SHA-256
+`984922f1ad1231704ed6bdd74594c81e6b454444890914daf0d378fea38614c7`
+passes 14 private-window checks. Both tab right-click and the visible **⋯**
+affordance open a menu for a non-selected tab without selecting it; Escape
+preserves the selection and sends no operation. Moving that captured tab to an
+existing split Screen retains its pane/session IDs and process, follows its
+target and reports the narrower PTY geometry. The same selection and search
+query copy exactly, and the retained history query still has one match. The
+visible menu also moves the terminal to a new Screen. Moving the last terminal
+out of its source removes that Screen while all four fixture processes remain
+alive. Terminal-body right-click still reaches the application as SGR input.
+
+Continued-output checks wait for changed pixels in the terminal's expected
+marker row after the fixture acknowledges its write; a PTY write alone is not
+evidence that the UI painted it. Both resulting LIVE markers were visually
+verified, along with the menu, retained search, target selection and source
+removal. The run exits normally with no surviving children. Its harness and raw
+PTY fixture use a private display, clipboard, configuration and owned control
+socket; the generated evidence records their hashes and authoritative states.
+
+Client checks cover 80 full-suite cases plus the added placement/refresh
+regression, including local and external moves, unchanged attachment and PTY,
+no replay, bounded failed-read recovery, later navigation and joined shutdown.
+All 68 GPUI tests, strict all-target Clippy for both affected crates, formatting
+and 17 architecture checks pass. The same frozen binary reaches workspace smoke
+stage 18 on both Wayland and X11 with hardware D3D12 rendering and complete
+cleanup. Interactive transfer acceptance is limited to a private 1200×760 Linux
+X11 window; this does not establish macOS/Windows behavior or new latency
+measurements. Full merge CI remains deferred on the evaluation branch.
+
+```sh
+python3 scripts/testing/gpui-screen-transfer.py target/release/splitty-gpui \
+  --output /tmp/splitty-transfer-evidence --xclip /path/to/xclip \
+  --visible-trigger-x 255
+```
+
+The runner accepts private Xvfb, library and xdotool overrides. The visible
+trigger coordinate is calibrated for the fixture font and its second tab;
+`--setup-only` captures the initial layout when another environment needs a
+different coordinate.

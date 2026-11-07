@@ -254,6 +254,21 @@ impl Client {
         }}))
     }
 
+    pub(crate) fn submit_screen_transfer(
+        &self,
+        source: &str,
+        pane: &str,
+        target: &str,
+        create: bool,
+    ) -> io::Result<()> {
+        identifier(source)?;
+        identifier(pane)?;
+        identifier(target)?;
+        self.command(0, || json!({"type":"mux.op","screenId":source,"op":{
+            "type":"move_pane_to_screen","paneId":pane,"targetScreenId":target,"createScreen":create
+        }}))
+    }
+
     /// Refill a service-owned screen that ran empty, preserving its ID and name.
     pub fn recreate_screen(&self, screen_id: &str, new_pane_id: &str) -> io::Result<()> {
         self.submit_recreate_screen(screen_id, new_pane_id)?;

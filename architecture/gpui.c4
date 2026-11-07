@@ -23,7 +23,7 @@ model {
     }
 
     gpui_workspace = component 'gpui_workspace' {
-      description 'Screen controls, tab insertion geometry and scrolling, shortcuts, resolved native appearance, canonical presentation root, stable pane entities, focused search ownership and one cancellable close prompt.'
+      description 'Screen controls, captured tab transfer menus, tab insertion geometry and scrolling, shortcuts, resolved appearance, canonical presentation root, stable pane entities, focused search ownership and one cancellable close prompt.'
       metadata { module 'splitty_gpui::workspace' }
     }
 
@@ -59,7 +59,7 @@ model {
     gpui_appearance -> splitty.client_core.appearance 'Consume charged appearance snapshot values'
     gpui_appearance -> splitty.client_core.client_zoom 'Project confirmed display zoom and scope'
     gpui_workspace -> splitty.client_core.client_zoom 'Submit zoom intents and present confirmed scale'
-    gpui_workspace -> splitty.client_core.native_workspace 'Submit assessed close intent and wait for matching approval or settlement'
+    gpui_workspace -> splitty.client_core.native_workspace 'Submit captured transfer and assessed close intents; consume matching outcomes'
     gpui_workspace -> splitty.client_core.client_workspace 'Render the displayed canonical root with local tab and maximized-slot choice'
     gpui_workspace -> splitty.client_core.client_root 'Construct workspace identities in native navigation tests'
     gpui_app -> splitty.client_core.client_root 'Use the public native client API'
