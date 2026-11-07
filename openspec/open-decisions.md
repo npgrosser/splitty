@@ -346,3 +346,6 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 - **Linux deb and rpm packages** (2026-11-07, provisional, tbd): electron-builder builds them next to the AppImage under the package name `splitty-electron`, installed to `/opt/Splitty`; `desktopName` `splitty.desktop` makes the Wayland `app_id` and `StartupWMClass` `splitty`, so desktops match windows to the installed entry. Alternative: the package name `splitty`, or an `app_id` from the reverse-DNS app id.
 - **`shell-default-follows-system` D3 no migration** (2026-11-07, provisional, tbd): a stored default shell profile stays an explicit choice, since it cannot be told apart from one resolved automatically before; switching to "System default" once makes it follow the login shell. Alternative: treat a stored id equal to the current system default as following it.
+
+- **`native-host-directory`, HD1** (2026-11-07, provisional, tbd): share the directory response under core `native_api::directory`, with explicit server-side conversion from unchanged storage/source records.
+- **`native-host-directory`, HD3** (2026-11-07, provisional, tbd): the experimental native directory reader requires `hub-host-decisions-v1`; older local services report unavailable without a second legacy merge or polling implementation.
