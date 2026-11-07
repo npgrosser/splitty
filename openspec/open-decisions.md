@@ -330,3 +330,8 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 - **`native-display-zoom`, NZ-1** (2026-11-07, provisional, tbd): admit up to 32 queued zoom intents beside one running auxiliary API job; alternate ready reads and writes, retain independent mutation outcomes and never retry uncertain writes.
 - **`native-display-zoom`, NZ-2** (2026-11-07, provisional, tbd): native terminal baseline 15/21 px scales uniformly in both scopes; window scope additionally scales chrome from a 16 px rem baseline, without changing OS DPI or introducing terminal-font fields.
+
+- **`native-layout-templates`, NLT-1** (2026-11-07, provisional, tbd): expose the complete local library workflow; remote host selection and YAML editor/import/export UI remain separate.
+- **`native-layout-templates`, NLT-2** (2026-11-07, provisional, tbd): existing-Screen replacement always needs explicit confirmation; a new Screen without commands needs no extra warning. Commands require an explicit choice without an Enter-to-run default.
+- **`native-layout-templates`, NLT-3** (2026-11-07, provisional, tbd): use a session-free pending projection with canonical routes retained separately; later navigation hides it without cancelling the admitted mutation.
+- **`native-layout-templates`, NLT-4** (2026-11-07, provisional, tbd): reuse the existing concrete auxiliary stream and file API semantics; no versioned file writes, generic task framework or second service.
