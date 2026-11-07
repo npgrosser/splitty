@@ -23,7 +23,7 @@ model {
     }
 
     gpui_workspace = component 'gpui_workspace' {
-      description 'Screen controls, canonical layout projection and one cancellable close prompt for pane, Screen and owned window.'
+      description 'Screen controls and shortcuts, borrowed canonical presentation root, stable pane entities and one cancellable close prompt for pane, Screen and owned window.'
       metadata { module 'splitty_gpui::workspace' }
     }
 
@@ -47,7 +47,7 @@ model {
     terminal -> terminal_engine 'Borrow native terminal state and encode checked input'
     gpui_workspace -> terminal 'Keep one terminal view per pane identity'
     gpui_workspace -> splitty.client_core.native_workspace 'Submit assessed close intent and wait for matching approval or settlement'
-    gpui_workspace -> splitty.client_core.client_workspace 'Render the canonical screen and local tab selection'
+    gpui_workspace -> splitty.client_core.client_workspace 'Render the displayed canonical root with local tab and maximized-slot choice'
     gpui_workspace -> splitty.client_core.client_root 'Construct workspace identities in native navigation tests'
     gpui_app -> splitty.client_core.client_root 'Use the public native client API'
     gpui_document -> splitty.client_core.client_root 'Form a source-scoped annotation draft'

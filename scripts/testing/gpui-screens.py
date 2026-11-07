@@ -58,12 +58,20 @@ def main():
     parser.add_argument("--xvfb-lib", type=Path)
     parser.add_argument("--busy-close", action="store_true", help="also exercise the Linux busy-process close prompt")
     parser.add_argument("--close-confirmation", action="store_true", help="exercise pane, Screen, and owned-window close confirmation")
+    parser.add_argument("--navigation", action="store_true", help="exercise native maximize, Screen shortcuts, and restore routing")
+    parser.add_argument("--navigation-keys-only", action="store_true", help="exercise physical shifted-digit Screen keys on a selected XKB layout")
+    parser.add_argument("--maximize-x", type=int, default=850, help="header maximize/restore control X coordinate for --navigation")
+    parser.add_argument("--keyboard-layout", choices=["us", "de"], help="apply this XKB layout on the isolated Xvfb display")
+    parser.add_argument("--setxkbmap", default="setxkbmap")
+    parser.add_argument("--xkb-tools-dir", type=Path, help="prepend private XKB tools to PATH for setxkbmap")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     binary = args.binary.resolve(strict=True)
     env = os.environ.copy()
     env.pop("WAYLAND_DISPLAY", None)
     env["DISPLAY"] = args.display
+    if args.xkb_tools_dir:
+        env["PATH"] = str(args.xkb_tools_dir) + ":" + env.get("PATH", "")
     xvfb_env = env.copy()
     if args.xvfb_lib:
         xvfb_env["LD_LIBRARY_PATH"] = str(args.xvfb_lib) + (":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
@@ -101,10 +109,10 @@ def main():
         x("type", "--clearmodifiers", "--delay", 2, command)
         display.type_key("Return")
 
-    def shell_value(label, expression):
+    def shell_value_at(label, expression, point):
         path = scratch / label
         path.unlink(missing_ok=True)
-        click((300, 180), .1)
+        click(point, .1)
         display.key("Control_L", True)
         display.type_key("c")
         display.key("Control_L", False)
@@ -114,8 +122,33 @@ def main():
         return wait_until(lambda: path.read_text().strip() if path.exists() else None,
                           f"Shell did not write {label}", seconds=8)
 
+    def shell_value(label, expression):
+        return shell_value_at(label, expression, (300, 180))
+
     def shell_pid(label):
         return int(shell_value(label, '"$$"'))
+
+    def shell_pid_at(label, point):
+        return int(shell_value_at(label, '"$$"', point))
+
+    def chord(*keys):
+        for modifier in keys[:-1]:
+            display.key(modifier, True)
+        display.type_key(keys[-1])
+        for modifier in reversed(keys[:-1]):
+            display.key(modifier, False)
+        display.sync()
+        time.sleep(.4)
+
+    def drag_tab(start, target):
+        x("mousemove", "--window", window, *start, "mousedown", 1)
+        time.sleep(.1)
+        x("mousemove", "--window", window, start[0] + 15, start[1] + 20)
+        time.sleep(.15)
+        x("mousemove", "--window", window, *target)
+        time.sleep(.25)
+        x("mouseup", 1)
+        time.sleep(.8)
 
     def focused_shell_pid(label):
         """Check that cancelling a prompt restored terminal keyboard focus."""
@@ -238,6 +271,197 @@ def main():
         result["shellPids"] = {"paneA": a_pid, "paneB": b_pid, "screenC": c_pid, "hiddenD": d_pid}
         result["checks"].append("window-confirm-owned-cleanup")
 
+    def exercise_navigation(a_pid):
+        marker = scratch / "hidden-max-output"
+        send(f"(sleep 4; printf 'HIDDEN_MAX_OUTPUT\\n' | tee '{marker}') &")
+        time.sleep(.2)
+        send("sleep 120")
+        time.sleep(.6)
+        click((960, 20), .8)  # Split right, leaving A busy in the left group.
+        b_pid = focused_shell_pid("nav-b-initial")
+        assert b_pid != a_pid and alive(a_pid), "Split must retain busy A and create B"
+        split_header = window_pixels((650, 47, 530, 32))
+        capture("nav-split")
+
+        chord("Alt_L", "m")
+        max_header = window_pixels((650, 47, 530, 32))
+        assert max_header != split_header, "Mod+M did not change the group viewport"
+        capture("nav-maximized-shortcut")
+        click((args.maximize_x, 20))  # Visible Restore control.
+        assert window_pixels((650, 47, 530, 32)) == split_header, "Visible control did not restore the split viewport"
+        capture("nav-restored-control")
+        chord("Alt_L", "m")
+        assert window_pixels((650, 47, 530, 32)) == max_header, "Mod+M did not maximize again"
+        result["checks"].extend(["maximize-mod-m", "restore-visible-control"])
+
+        click((110, 62), .8)  # New tab C inside maximized group B.
+        c_pid = focused_shell_pid("nav-c-initial")
+        assert c_pid not in (a_pid, b_pid)
+        assert window_pixels((650, 47, 530, 32)) == max_header, "New tab lost maximized viewport"
+        click((40, 62))
+        assert shell_pid("nav-b-tab-return") == b_pid
+        click((130, 62))
+        assert shell_pid("nav-c-tab-return") == c_pid
+        capture("nav-maximized-tabs")
+        result["checks"].append("tabs-retain-maximize-and-sessions")
+
+        chord("Control_L", "Shift_L", "space")  # New Screen 2.
+        d_pid = focused_shell_pid("nav-screen-2-initial")
+        assert d_pid not in (a_pid, b_pid, c_pid)
+        capture("nav-new-screen-shortcut")
+        chord("Alt_L", "Shift_L", "1")
+        assert shell_pid("nav-screen-1-by-key") == c_pid, "Alt+Shift+1 did not select Screen 1"
+        assert window_pixels((650, 47, 530, 32)) == max_header, "Screen 1 lost its maximize choice while hidden"
+        chord("Alt_L", "Shift_L", "2")
+        assert shell_pid("nav-screen-2-by-key") == d_pid, "Alt+Shift+2 did not select Screen 2"
+        result["checks"].extend(["ctrl-shift-space-creates-screen", "shifted-digit-screen-selection", "maximize-survives-screen-switch"])
+
+        # An unavailable index is consumed, not inserted into the shell line.
+        chord("Alt_L", "Shift_L", "9")
+        unavailable = scratch / "nav-index-9"
+        send(f"printf '%s\\n' \"$$\" > '{unavailable}'")
+        assert int(wait_until(lambda: unavailable.read_text().strip() if unavailable.exists() else None,
+                              "Unavailable Screen index leaked into terminal input", seconds=8)) == d_pid
+        result["checks"].append("unavailable-shifted-digit-is-consumed")
+
+        header_before_editor = window_pixels((70, 0, 500, 42))
+        click((250, 20))  # Screen 2 rename editor, with its original short label.
+        x("type", "--clearmodifiers", "--delay", 5, "EditorSafe")
+        chord("Alt_L", "Shift_L", "1")
+        chord("Control_L", "Shift_L", "space")
+        editor_before_tail = window_pixels((180, 0, 150, 42))
+        x("type", "--clearmodifiers", "--delay", 5, "Tail")
+        time.sleep(.2)
+        assert window_pixels((180, 0, 150, 42)) != editor_before_tail, "Rename editor lost keyboard focus"
+        capture("nav-editor-still-focused")
+        display.type_key("Escape")
+        time.sleep(.4)
+        assert window_pixels((70, 0, 500, 42)) == header_before_editor, "Editor shortcuts changed Screens or label"
+        assert shell_pid("nav-editor-focus-return") == d_pid, "Editor lost Screen 2 selection"
+        capture("nav-editor-priority")
+        result["checks"].append("editor-keeps-navigation-shortcuts")
+
+        chord("Alt_L", "Shift_L", "1")
+        assert shell_pid("nav-screen-1-max-return") == c_pid
+        wait_until(lambda: marker.exists(), "Hidden A output did not run", seconds=8)
+        click((165, 20))  # Close Screen 1; A is busy behind maximized C.
+        prompt = close_dialog("nav-hidden-max-close-prompt")
+        assert alive(a_pid) and alive(b_pid) and alive(c_pid), "Hidden busy A was not protected"
+        keep_open("nav-hidden-max-close", prompt)
+        assert focused_shell_pid("nav-max-focus-after-cancel") == c_pid, "Cancel did not restore C focus"
+        assert window_pixels((650, 47, 530, 32)) == max_header, "Close cancellation lost maximize"
+        result["checks"].append("hidden-max-group-close-cancel")
+
+        # Repeat the hidden-busy close with a raw reader in visible C. This
+        # makes terminal-input leakage from modal shortcuts observable byte for
+        # byte, while the earlier prompt established that hidden A is counted.
+        reader = scratch / "modal-reader.py"
+        reader.write_text(
+            "import os, sys, termios, tty\n"
+            "from pathlib import Path\n"
+            "folder = Path(sys.argv[1]); fd = 0; old = termios.tcgetattr(fd); data = bytearray()\n"
+            "try:\n"
+            "    tty.setraw(fd)\n"
+            "    (folder / 'modal.ready').write_text('ready')\n"
+            "    while True:\n"
+            "        key = os.read(fd, 1)\n"
+            "        if not key or key == b'q': break\n"
+            "        data.extend(key)\n"
+            "finally:\n"
+            "    termios.tcsetattr(fd, termios.TCSANOW, old)\n"
+            "    (folder / 'modal.bytes').write_bytes(data)\n"
+        )
+        send(f"python3 '{reader}' '{scratch}'")
+        wait_until(lambda: (scratch / "modal.ready").exists(), "Modal raw reader did not start", seconds=8)
+        time.sleep(.5)
+        header_before_modal = window_pixels((70, 0, 1115, 42))
+        click((165, 20))
+        modal_prompt = close_dialog("nav-modal-priority-prompt")
+        assert alive(a_pid), "Hidden A ended before modal routing check"
+        header_with_modal = window_pixels((70, 0, 1115, 42))
+        chord("Control_L", "Shift_L", "space")
+        chord("Alt_L", "m")
+        chord("Alt_L", "Shift_L", "2")
+        assert window_pixels((70, 0, 1115, 42)) == header_with_modal, (
+            "Modal shortcuts changed Screen membership, selection or maximize state"
+        )
+        assert all(channel > 200 for channel in window_pixels((470, 325, 1, 1))[:3]), (
+            "Modal prompt disappeared after navigation shortcuts"
+        )
+        capture("nav-modal-shortcuts-blocked")
+        keep_open("nav-modal-priority", modal_prompt)
+        assert window_pixels((70, 0, 1115, 42)) == header_before_modal, (
+            "Modal cancellation changed Screen membership, selection or maximize state"
+        )
+        display.type_key("q")
+        wait_until(lambda: (scratch / "modal.bytes").exists(), "Modal cancel did not restore reader focus", seconds=8)
+        assert (scratch / "modal.bytes").read_bytes() == b"", "Modal shortcuts leaked terminal input"
+        assert shell_pid("nav-c-after-modal") == c_pid, "Modal cancel changed C shell"
+        assert window_pixels((650, 47, 530, 32)) == max_header, "Modal cancel lost maximized group"
+        result["checks"].append("modal-priority-blocks-navigation-and-terminal-input")
+
+        # Move tab C to the edge of its own B/C slot. This is a valid move
+        # only because that canonical slot has two tabs; it must restore view.
+        drag_tab((130, 62), (1190, 350))
+        capture("nav-move-restored")
+        assert window_pixels((650, 47, 530, 32)) != max_header, "Admitted edge move did not restore viewport"
+        assert shell_pid_at("nav-c-after-move", (1050, 180)) == c_pid, "Moved C changed shell"
+        assert shell_pid_at("nav-b-after-move", (750, 180)) == b_pid, "B changed shell after move"
+        assert shell_pid_at("nav-a-after-move", (300, 180)) == a_pid, "A changed shell after hidden output"
+        capture("nav-hidden-output-after-restore")
+        result["checks"].extend(["move-restores-canonical-layout", "hidden-output-and-pids-retained"])
+
+        click((1050, 180))  # Focus C in the rightmost group.
+        chord("Alt_L", "m")
+        capture("nav-c-maximized-before-split")
+        click((1070, 20), .8)  # Split below; admitted split restores viewport.
+        e_pid = focused_shell_pid("nav-e-after-split")
+        assert e_pid not in (a_pid, b_pid, c_pid, d_pid)
+        assert shell_pid_at("nav-c-after-split", (1050, 180)) == c_pid
+        capture("nav-split-restored")
+        result["checks"].append("split-restores-canonical-layout")
+
+        chord("Alt_L", "Shift_L", "2")
+        assert shell_pid("nav-screen-2-final") == d_pid
+        click((265, 20))  # Close idle Screen 2.
+        wait_until(lambda: not alive(d_pid), "Screen 2 shell survived its close", seconds=8)
+        click((165, 20))  # Close idle Screen 1; the catalog is now empty.
+        wait_until(lambda: all(not alive(pid) for pid in (a_pid, b_pid, c_pid, e_pid)),
+                   "Screen 1 shells survived its close", seconds=8)
+        capture("nav-empty-workspace")
+        chord("Control_L", "Shift_L", "space")
+        f_pid = focused_shell_pid("nav-from-empty")
+        assert f_pid not in (a_pid, b_pid, c_pid, d_pid, e_pid)
+        capture("nav-new-screen-from-empty")
+        result["checks"].append("ctrl-shift-space-from-empty")
+        result["shellPids"] = {"a": a_pid, "b": b_pid, "c": c_pid, "screen2": d_pid,
+                               "split": e_pid, "emptyFresh": f_pid}
+        time.sleep(1)
+
+    def exercise_navigation_keys_only(a_pid):
+        chord("Control_L", "Shift_L", "space")
+        b_pid = focused_shell_pid("nav-keys-screen-2")
+        chord("Control_L", "Shift_L", "space")
+        c_pid = focused_shell_pid("nav-keys-screen-3")
+        assert len({a_pid, b_pid, c_pid}) == 3, "New Screen shortcut reused a shell"
+        capture("nav-keys-three-screens")
+        for index, expected in [(1, a_pid), (2, b_pid), (3, c_pid)]:
+            chord("Alt_L", "Shift_L", str(index))
+            assert shell_pid(f"nav-keys-index-{index}") == expected, (
+                f"Actual shifted {index} key did not select catalog Screen {index}"
+            )
+            capture(f"nav-keys-selected-{index}")
+        # A missing index must be consumed, leaving the current shell line clean.
+        chord("Alt_L", "Shift_L", "9")
+        unavailable = scratch / "nav-keys-index-9"
+        send(f"printf '%s\\n' \"$$\" > '{unavailable}'")
+        assert int(wait_until(lambda: unavailable.read_text().strip() if unavailable.exists() else None,
+                              "Shifted 9 leaked into terminal input", seconds=8)) == c_pid
+        result["checks"].extend(["actual-shifted-1", "actual-shifted-2", "actual-shifted-3",
+                                  "actual-unavailable-shifted-9-consumed"])
+        result["shellPids"] = {"screen1": a_pid, "screen2": b_pid, "screen3": c_pid}
+        time.sleep(1)
+
     with tempfile.TemporaryDirectory(prefix="splitty-screens-") as directory, \
             (args.output / "xvfb.log").open("w") as xvfb_log, \
             (args.output / "app.log").open("w") as app_log:
@@ -260,6 +484,14 @@ def main():
                     return False
 
             wait_until(xvfb_ready, "Xvfb did not become ready", seconds=20)
+            if args.keyboard_layout:
+                subprocess.run([args.setxkbmap, "-display", args.display, "-layout", args.keyboard_layout],
+                               env=xvfb_env, check=True, capture_output=True, text=True, timeout=10)
+                query = subprocess.check_output([args.setxkbmap, "-display", args.display, "-query"],
+                                                env=xvfb_env, text=True, timeout=10)
+                result["keyboardLayoutQuery"] = query
+                if f"layout:     {args.keyboard_layout}" not in query:
+                    raise RuntimeError(f"XKB layout did not switch to {args.keyboard_layout}: {query}")
             # Display() calls XOpenDisplay(None), which reads this process's
             # DISPLAY rather than the subprocess environment passed above.
             previous_display = os.environ.get("DISPLAY")
@@ -291,7 +523,11 @@ def main():
             x("windowfocus", window)
             capture("initial")
             a_pid = shell_pid("a-initial")
-            if args.close_confirmation:
+            if args.navigation_keys_only:
+                exercise_navigation_keys_only(a_pid)
+            elif args.navigation:
+                exercise_navigation(a_pid)
+            elif args.close_confirmation:
                 exercise_close_confirmation(a_pid)
             else:
                 send("export SPLITTY_SCREEN_TOKEN=alpha")

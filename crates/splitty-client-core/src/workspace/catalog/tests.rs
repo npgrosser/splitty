@@ -48,6 +48,88 @@ fn terminal_snapshot(screen: &str, pane: &str, session: &str, busy: bool) -> Val
     event
 }
 
+fn split_snapshot(screen: &str, revision: u64, left: &[&str], right: &[&str]) -> Value {
+    let panes: Vec<_> = left.iter().chain(right.iter()).copied().collect();
+    json!({"type":"mux.screen_snapshot", "screen":{
+        "id":screen, "revision":revision,
+        "root":{"type":"split","id":format!("root-{screen}"),"axis":"horizontal",
+            "sizes":[0.5,0.5],"children":[
+                {"type":"slot","id":format!("left-{screen}"),"paneIds":left,"activePaneId":left.first()},
+                {"type":"slot","id":format!("right-{screen}"),"paneIds":right,"activePaneId":right.first()}
+            ]},
+        "panes":panes.iter().map(|pane| (pane.to_string(),json!({"id":pane}))).collect::<serde_json::Map<_,_>>(),
+        "sessions":{}
+    }})
+}
+
+#[test]
+fn maximized_group_borrows_canonical_slot_and_survives_tabs_and_screen_switches() {
+    let mut workspace = model(&["a", "b"]);
+    let connection = workspace.connection_id();
+    workspace
+        .apply_snapshot(connection, &split_snapshot("a", 1, &["a1", "a2"], &["a3"]))
+        .unwrap();
+    workspace
+        .apply_snapshot(connection, &split_snapshot("b", 1, &["b1"], &["b2"]))
+        .unwrap();
+    let canonical = workspace.snapshot().unwrap().root.clone();
+    assert!(workspace.toggle_maximize_focused());
+    assert_eq!(workspace.maximized_slot_id(), Some("left-a"));
+    assert_eq!(
+        workspace.presentation_root().unwrap().id().as_str(),
+        "left-a"
+    );
+    assert_eq!(workspace.displayed_panes(), vec!["a1"]);
+    assert!(
+        !workspace.set_maximized_slot(Some("right-a"), Some("a1")),
+        "stale slot/pane pair cannot redirect maximize"
+    );
+    assert_eq!(workspace.maximized_slot_id(), Some("left-a"));
+    workspace.select_tab("a2");
+    assert_eq!(workspace.maximized_slot_id(), Some("left-a"));
+    assert_eq!(workspace.displayed_panes(), vec!["a2"]);
+    assert_eq!(
+        serde_json::to_value(&workspace.snapshot().unwrap().root).unwrap(),
+        serde_json::to_value(&canonical).unwrap()
+    );
+
+    workspace.shown = Some("b".into());
+    assert!(workspace.toggle_maximize_focused());
+    assert_eq!(workspace.maximized_slot_id(), Some("left-b"));
+    workspace.shown = Some("a".into());
+    assert_eq!(workspace.maximized_slot_id(), Some("left-a"));
+    assert_eq!(workspace.focused_pane(), Some("a2"));
+    assert_eq!(
+        workspace.screen("b").unwrap().maximized_slot_id(),
+        Some("left-b")
+    );
+    assert!(workspace.focus_pane("a3"));
+    assert_eq!(
+        workspace.maximized_slot_id(),
+        None,
+        "explicit outside focus restores"
+    );
+    assert_eq!(workspace.focused_pane(), Some("a3"));
+}
+
+#[test]
+fn removed_maximized_slot_restores_full_view_and_focuses_survivor() {
+    let mut workspace = model(&["a"]);
+    let connection = workspace.connection_id();
+    workspace
+        .apply_snapshot(connection, &split_snapshot("a", 1, &["a1"], &["a2"]))
+        .unwrap();
+    assert!(workspace.toggle_maximize_focused());
+    workspace
+        .apply_snapshot(connection, &snapshot("a", &["a2"]))
+        .unwrap();
+    assert_eq!(workspace.maximized_slot_id(), None);
+    assert_eq!(workspace.focused_pane(), Some("a2"));
+    assert_eq!(workspace.displayed_panes(), vec!["a2"]);
+    workspace.reset_connection(Uuid::new_v4());
+    assert_eq!(workspace.maximized_slot_id(), None);
+}
+
 #[test]
 fn close_plan_counts_unique_sessions_across_hidden_screens_and_rejects_identity_changes() {
     let mut workspace = model(&["a", "b"]);
@@ -548,6 +630,231 @@ mod service {
             window.model.session_for(&c.pane_id),
             Some(session_a.as_str())
         );
+        window.client.finish().await.unwrap();
+        service.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn maximized_projection_withdraws_only_hidden_size_claim_and_restores_measured_size() {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let service = EmbeddedService::start();
+        let mut client = service.connect().await.unwrap();
+        loop {
+            if client
+                .next_event()
+                .await
+                .unwrap()
+                .unwrap()
+                .json()
+                .is_some_and(|json| json["type"] == "mux.welcome")
+            {
+                break;
+            }
+        }
+        let mut model = LocalWorkspace::new(client.connection_id());
+        model.set_catalog_supported(true);
+        model.mark_catalog_dirty();
+        let mut window = Window {
+            client,
+            model,
+            output: HashMap::new(),
+        };
+        window
+            .until(|window| window.model.catalog_initialized())
+            .await;
+        let ids = window
+            .model
+            .create_screen(&window.client, "Claims")
+            .unwrap();
+        window.until(|window| window.ready(&ids)).await;
+        let second = window
+            .model
+            .split(&window.client, &ids.pane_id, Axis::Horizontal)
+            .unwrap();
+        window
+            .until(|window| {
+                window
+                    .model
+                    .session_for(&second)
+                    .is_some_and(|session| window.model.session_ready(session))
+            })
+            .await;
+        let first_session = window.model.session_for(&ids.pane_id).unwrap().to_owned();
+        let second_session = window.model.session_for(&second).unwrap().to_owned();
+        assert_ne!(first_session, second_session);
+        assert_eq!(window.model.displayed_panes().len(), 2);
+
+        // A second attached client gives the hidden terminal a distinct size
+        // claimant, so its PTY size proves our claim was really withdrawn.
+        let mut other = service.connect().await.unwrap();
+        loop {
+            if other
+                .next_event()
+                .await
+                .unwrap()
+                .unwrap()
+                .json()
+                .is_some_and(|json| json["type"] == "mux.welcome")
+            {
+                break;
+            }
+        }
+        other.attach(&second_session).unwrap();
+        loop {
+            if other
+                .next_event()
+                .await
+                .unwrap()
+                .unwrap()
+                .json()
+                .is_some_and(|json| json["type"] == "attached")
+            {
+                break;
+            }
+        }
+        other.activity(true).unwrap();
+        other.resize(&second_session, 120, 40, true).unwrap();
+        window.client.activity(true).unwrap();
+        window.client.resize(&second_session, 73, 19, true).unwrap();
+        window
+            .client
+            .input(&second_session, "printf 'BEFORE_%s\\n' \"$(stty size)\"\n")
+            .unwrap();
+        window
+            .until(|window| window.has_output(&second_session, b"BEFORE_19 73"))
+            .await;
+
+        assert!(window.model.focus_pane(&ids.pane_id));
+        let before = window.model.displayed_panes();
+        assert!(window.model.toggle_maximize_focused());
+        assert_eq!(window.model.displayed_panes(), vec![ids.pane_id.clone()]);
+        for pane in before
+            .iter()
+            .filter(|pane| !window.model.is_displayed_pane(pane))
+        {
+            window
+                .client
+                .hide(window.model.session_for(pane).unwrap())
+                .unwrap();
+        }
+        window
+            .client
+            .input(&second_session, "printf 'HIDDEN_%s\\n' \"$(stty size)\"\n")
+            .unwrap();
+        window
+            .until(|window| window.has_output(&second_session, b"HIDDEN_40 120"))
+            .await;
+        assert_eq!(
+            window.model.session_for(&second),
+            Some(second_session.as_str())
+        );
+        let tab = window.model.new_tab(&window.client, &ids.pane_id).unwrap();
+        window
+            .until(|window| {
+                window
+                    .model
+                    .session_for(&tab)
+                    .is_some_and(|session| window.model.session_ready(session))
+            })
+            .await;
+        assert_eq!(
+            window.model.maximized_slot_id(),
+            Some(window.model.focused_slot_id().unwrap())
+        );
+        assert_eq!(window.model.displayed_panes(), vec![tab.clone()]);
+        let close = window
+            .model
+            .assess_close(
+                3,
+                CloseTarget::Screen {
+                    screen: ids.screen_id.clone(),
+                },
+            )
+            .unwrap();
+        assert!(close.affected.iter().any(
+            |item| matches!(&item.identity, CloseIdentity::Pane { pane, .. } if pane == &second)
+        ));
+
+        assert!(window.model.toggle_maximize_focused());
+        assert_eq!(window.model.displayed_panes().len(), 2);
+        window.client.activity(true).unwrap();
+        window.client.resize(&second_session, 73, 19, true).unwrap();
+        window
+            .client
+            .input(
+                &second_session,
+                "printf 'RESTORED_%s\\n' \"$(stty size)\"\n",
+            )
+            .unwrap();
+        window
+            .until(|window| window.has_output(&second_session, b"RESTORED_19 73"))
+            .await;
+        assert_eq!(
+            window.model.session_for(&second),
+            Some(second_session.as_str())
+        );
+        assert!(window.model.toggle_maximize_focused());
+        let retained = window.model.maximized_slot_id().unwrap().to_owned();
+        assert!(window
+            .model
+            .split(&window.client, "missing-pane", Axis::Horizontal)
+            .is_err());
+        assert_eq!(
+            window.model.maximized_slot_id(),
+            Some(retained.as_str()),
+            "failed admission preserves view"
+        );
+        let target = window
+            .model
+            .snapshot()
+            .unwrap()
+            .root
+            .find_slot(&PaneId::from(second.as_str()))
+            .unwrap()
+            .id()
+            .to_string();
+        let drag = window.model.capture_drag(&tab).unwrap();
+        assert!(window
+            .model
+            .move_pane(&window.client, drag, target, MovePlacement::Tab)
+            .unwrap());
+        assert_eq!(
+            window.model.maximized_slot_id(),
+            None,
+            "admitted move restores full view"
+        );
+        window
+            .until(|window| {
+                window.model.snapshot().is_some_and(|screen| {
+                    screen
+                        .root
+                        .find_slot(&PaneId::from(tab.as_str()))
+                        .is_some_and(|slot| slot.id().as_str() != retained)
+                })
+            })
+            .await;
+        assert!(window.model.focus_pane(&second));
+        assert!(window.model.toggle_maximize_focused());
+        let added = window
+            .model
+            .split(&window.client, &second, Axis::Vertical)
+            .unwrap();
+        assert_eq!(
+            window.model.maximized_slot_id(),
+            None,
+            "admitted split restores full view"
+        );
+        window
+            .until(|window| {
+                window
+                    .model
+                    .session_for(&added)
+                    .is_some_and(|session| window.model.session_ready(session))
+            })
+            .await;
+        other.finish().await.unwrap();
         window.client.finish().await.unwrap();
         service.close().await.unwrap();
     }

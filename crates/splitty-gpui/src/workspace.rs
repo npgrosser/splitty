@@ -27,6 +27,9 @@ enum Direction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shortcut {
     NewTab,
+    NewScreen,
+    ScreenIndex(usize),
+    ToggleMaximize,
     SplitRight,
     SplitDown,
     ClosePane,
@@ -35,11 +38,21 @@ enum Shortcut {
 
 fn shortcut(key: &Keystroke, is_mac: bool) -> Option<Shortcut> {
     let mods = key.modifiers;
+    if mods.control
+        && mods.shift
+        && !mods.alt
+        && !mods.platform
+        && !mods.function
+        && key.key == "space"
+    {
+        return Some(Shortcut::NewScreen);
+    }
     if mods.control || mods.function || mods.platform != is_mac || mods.alt == is_mac {
         return None;
     }
     match (key.key.to_ascii_lowercase().as_str(), mods.shift) {
         ("t", false) => Some(Shortcut::NewTab),
+        ("m", false) => Some(Shortcut::ToggleMaximize),
         ("d", false) => Some(Shortcut::SplitRight),
         ("d", true) => Some(Shortcut::SplitDown),
         ("w", false) => Some(Shortcut::ClosePane),
@@ -49,6 +62,42 @@ fn shortcut(key: &Keystroke, is_mac: bool) -> Option<Shortcut> {
         ("down", true) => Some(Shortcut::Focus(Direction::Down)),
         _ => None,
     }
+}
+
+// GPUI's XKB conversion clears Keystroke.modifiers.shift for punctuation.
+// Window::modifiers retains the physical Shift state. Symbol -> digit is only
+// known for these exact XKB layouts; an unknown layout passes through to PTY.
+fn shifted_screen_index(key: &Keystroke, raw_shift: bool, layout: &str) -> Option<usize> {
+    if !raw_shift {
+        return None;
+    }
+    if let Ok(digit) = key.key.parse::<usize>() {
+        if (1..=9).contains(&digit) {
+            return Some(digit - 1);
+        }
+    }
+    let symbols = match layout {
+        "English (US)" => ["!", "@", "#", "$", "%", "^", "&", "*", "("],
+        "German" => ["!", "\"", "§", "$", "%", "&", "/", "(", ")"],
+        _ => return None,
+    };
+    let printed = key.key_char.as_deref().unwrap_or(&key.key);
+    symbols.iter().position(|symbol| *symbol == printed)
+}
+
+fn shortcut_with_layout(
+    key: &Keystroke,
+    is_mac: bool,
+    raw_shift: bool,
+    layout: &str,
+) -> Option<Shortcut> {
+    let mods = key.modifiers;
+    if !mods.control && !mods.function && mods.platform == is_mac && mods.alt != is_mac {
+        if let Some(index) = shifted_screen_index(key, raw_shift, layout) {
+            return Some(Shortcut::ScreenIndex(index));
+        }
+    }
+    shortcut(key, is_mac)
 }
 
 struct VisibleSlot {
@@ -300,6 +349,7 @@ fn admit_close(
 }
 pub struct Workspace {
     model: Option<LocalWorkspace>,
+    focus: FocusHandle,
     panes: HashMap<String, PaneView>,
     commands: mpsc::Sender<Command>,
     stopping: Arc<AtomicBool>,
@@ -421,6 +471,7 @@ impl Workspace {
         (
             Self {
                 model: None,
+                focus: cx.focus_handle(),
                 panes: HashMap::new(),
                 commands,
                 stopping: worker.stop.clone(),
@@ -716,8 +767,8 @@ impl Workspace {
             .as_deref()
             .and_then(|pane| self.panes.get(pane))
             .map(|view| view.terminal.entity_id());
-        if let Some(screen) = model.snapshot() {
-            prune_layout_bounds(&screen.root, &mut self.split_bounds, &mut self.slot_bounds);
+        if let Some(root) = model.presentation_root() {
+            prune_layout_bounds(root, &mut self.split_bounds, &mut self.slot_bounds);
         } else {
             self.split_bounds.clear();
             self.slot_bounds.clear();
@@ -767,9 +818,9 @@ impl Workspace {
     fn sync_visible(&mut self, cx: &mut Context<Self>) {
         let mut visible = Vec::new();
         if let Some(model) = &self.model {
-            if let Some(screen) = model.snapshot() {
+            if let Some(root) = model.presentation_root() {
                 if let Some(shown) = model.shown() {
-                    visible_panes(shown, &screen.root, &mut visible);
+                    visible_panes(shown, root, &mut visible);
                 }
             }
         }
@@ -839,6 +890,8 @@ impl Workspace {
         {
             pane.terminal
                 .update(cx, |terminal, cx| terminal.focus(window, cx));
+        } else {
+            self.focus.focus(window, cx);
         }
     }
     fn select(&mut self, pane: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -857,6 +910,7 @@ impl Workspace {
             .is_some_and(|model| model.focus_pane(pane))
         {
             self.send(Command::Focus(pane.to_owned()), cx);
+            self.sync_visible(cx);
             cx.notify();
         }
     }
@@ -869,7 +923,7 @@ impl Workspace {
         let Some(model) = self.model.as_ref() else {
             return;
         };
-        let Some(screen) = model.snapshot() else {
+        let Some(root) = model.presentation_root() else {
             return;
         };
         let Some(focused) = model.focused_pane() else {
@@ -879,7 +933,7 @@ impl Workspace {
         let Some(shown) = model.shown() else {
             return;
         };
-        visible_slots(shown, &screen.root, &self.slot_bounds, &mut slots);
+        visible_slots(shown, root, &self.slot_bounds, &mut slots);
         let Some(current) = slots.iter().find(|slot| slot.pane == focused) else {
             return;
         };
@@ -913,12 +967,29 @@ impl Workspace {
             cx.notify();
             return;
         }
-        let Some(action) = shortcut(&event.keystroke, cx.platform_info().is_mac()) else {
+        let Some(action) = shortcut_with_layout(
+            &event.keystroke,
+            cx.platform_info().is_mac(),
+            window.modifiers().shift,
+            cx.keyboard_layout().id(),
+        ) else {
             return;
         };
         cx.stop_propagation();
         match action {
             Shortcut::NewTab => self.tab(cx),
+            Shortcut::NewScreen => self.create_screen(cx),
+            Shortcut::ScreenIndex(index) => {
+                if let Some(id) = self
+                    .model
+                    .as_ref()
+                    .and_then(|model| model.screens().get(index))
+                    .map(|info| info.id.to_string())
+                {
+                    self.switch_screen(&id, window, cx);
+                }
+            }
+            Shortcut::ToggleMaximize => self.toggle_maximize(cx),
             Shortcut::SplitRight => self.split(Axis::Horizontal, cx),
             Shortcut::SplitDown => self.split(Axis::Vertical, cx),
             Shortcut::ClosePane => {
@@ -955,6 +1026,29 @@ impl Workspace {
             .map(str::to_owned)
         {
             self.send(Command::Split { pane, axis }, cx);
+        }
+    }
+    fn toggle_maximize(&mut self, cx: &mut Context<Self>) {
+        if let Some(model) = &self.model {
+            if let Some(screen) = model.shown_screen_id() {
+                let (slot, pane) = if model.maximized_slot_id().is_some() {
+                    (None, None)
+                } else {
+                    (
+                        model.focused_slot_id().map(str::to_owned),
+                        model.focused_pane().map(str::to_owned),
+                    )
+                };
+                self.send(
+                    Command::SetMaximized {
+                        screen: screen.to_owned(),
+                        connection: model.connection_id(),
+                        slot,
+                        pane,
+                    },
+                    cx,
+                );
+            }
         }
     }
     fn tab(&mut self, cx: &mut Context<Self>) {
@@ -1967,6 +2061,7 @@ impl Render for Workspace {
             .flex()
             .flex_col()
             .bg(rgb(0x10151c))
+            .track_focus(&self.focus)
             .on_drag_move(cx.listener(Self::drag_hover))
             .text_color(rgb(0xd9e2ef))
             .text_size(px(13.))
@@ -2008,6 +2103,27 @@ impl Render for Workspace {
                     .child(div().font_weight(FontWeight::BOLD).child("SPLITTY"))
                     .child(self.render_screen_controls(cx))
                     .child(div().flex_1())
+                    .child(
+                        div()
+                            .id("maximize-group")
+                            .px_3()
+                            .py_1()
+                            .cursor_pointer()
+                            .bg(rgb(0x293b4d))
+                            .child(
+                                if self
+                                    .model
+                                    .as_ref()
+                                    .and_then(LocalWorkspace::maximized_slot_id)
+                                    .is_some()
+                                {
+                                    "Restore"
+                                } else {
+                                    "Maximize"
+                                },
+                            )
+                            .on_click(cx.listener(|this, _, _, cx| this.toggle_maximize(cx))),
+                    )
                     .child(
                         div()
                             .id("split-horizontal")
@@ -2074,14 +2190,9 @@ impl Render for Workspace {
                         ),
                     );
                 } else {
-                    view = view.child(
-                        div()
-                            .flex_1()
-                            .min_h_0()
-                            .min_w_0()
-                            .p_1()
-                            .child(self.render_node(&screen.root, cx)),
-                    );
+                    view = view.child(div().flex_1().min_h_0().min_w_0().p_1().child(
+                        self.render_node(model.presentation_root().unwrap_or(&screen.root), cx),
+                    ));
                 }
             } else {
                 view = view.child(div().flex_1().p_4().child("Loading local Screen…"));
@@ -2193,8 +2304,8 @@ fn resized_pair(sizes: &[f64], index: usize, delta: f64) -> Option<Vec<f64>> {
 mod tests {
     use super::{
         admit_close, nearest_slot, prune_layout_bounds, resized_pair, retry_pending_resize,
-        shortcut, terminal_commands, visible_slots, Command, Direction, PendingClose, Shortcut,
-        Update, VisibleSlot,
+        shortcut, shortcut_with_layout, terminal_commands, visible_slots, Command, Direction,
+        PendingClose, Shortcut, Update, VisibleSlot,
     };
     use crate::terminal;
     use gpui_kit::{point, px, size, Bounds, Keystroke, Modifiers, Pixels};
@@ -2397,6 +2508,88 @@ mod tests {
                 None
             );
         }
+    }
+
+    #[test]
+    fn navigation_chords_require_actual_shift_and_known_symbol_layout() {
+        let alt = Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        let shifted_alt = Modifiers { shift: true, ..alt };
+        let ctrl_shift = Modifiers {
+            control: true,
+            shift: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            shortcut(&key("m", alt), false),
+            Some(Shortcut::ToggleMaximize)
+        );
+        assert_eq!(
+            shortcut(&key("space", ctrl_shift), false),
+            Some(Shortcut::NewScreen)
+        );
+        assert_eq!(
+            shortcut(
+                &key(
+                    "space",
+                    Modifiers {
+                        alt: true,
+                        ..ctrl_shift
+                    }
+                ),
+                false
+            ),
+            None
+        );
+        assert_eq!(
+            shortcut_with_layout(&key("1", shifted_alt), false, true, "unknown"),
+            Some(Shortcut::ScreenIndex(0))
+        );
+        assert_eq!(
+            shortcut_with_layout(&key("&", alt), false, true, "English (US)"),
+            Some(Shortcut::ScreenIndex(6))
+        );
+        assert_eq!(
+            shortcut_with_layout(&key("&", alt), false, true, "German"),
+            Some(Shortcut::ScreenIndex(5))
+        );
+        assert_eq!(
+            shortcut_with_layout(&key("/", alt), false, true, "German"),
+            Some(Shortcut::ScreenIndex(6))
+        );
+        assert_eq!(
+            shortcut_with_layout(&key("(", alt), false, true, "German"),
+            Some(Shortcut::ScreenIndex(7))
+        );
+        assert_eq!(
+            shortcut_with_layout(&key("(", alt), false, true, "English (US)"),
+            Some(Shortcut::ScreenIndex(8))
+        );
+        assert_eq!(
+            shortcut_with_layout(&key("&", alt), false, false, "German"),
+            None
+        );
+        assert_eq!(
+            shortcut_with_layout(&key("&", alt), false, true, "unknown"),
+            None
+        );
+        assert_eq!(
+            shortcut_with_layout(
+                &key(
+                    "&",
+                    Modifiers {
+                        control: true,
+                        ..alt
+                    }
+                ),
+                false,
+                true,
+                "German"
+            ),
+            None
+        );
     }
 
     fn rectangle(x: f32, y: f32, width: f32, height: f32) -> Bounds<Pixels> {
