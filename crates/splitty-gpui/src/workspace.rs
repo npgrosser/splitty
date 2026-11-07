@@ -446,6 +446,7 @@ pub struct Workspace {
     drag: Option<ResizeDrag>,
     visible: Vec<String>,
     visible_screen: Option<String>,
+    search_owner: Option<Entity<Terminal>>,
     visible_pending: bool,
     status: String,
     appearance: NativeAppearance,
@@ -587,6 +588,7 @@ impl Workspace {
                 drag: None,
                 visible: Vec::new(),
                 visible_screen: None,
+                search_owner: None,
                 visible_pending: false,
                 status: "Starting local workspace…".into(),
                 appearance: NativeAppearance::fallback(&ui_family),
@@ -940,6 +942,7 @@ impl Workspace {
         let selection_background = self.appearance.selection_background;
         let terminal = cx.new(|cx| Terminal::new(commands, cx));
         if let Err(error) = terminal.update(cx, |terminal, cx| {
+            terminal.set_search_active(false, cx);
             terminal.apply_colors(colors, selection_foreground, selection_background, cx)
         }) {
             self.appearance_error = Some(error);
@@ -1078,7 +1081,30 @@ impl Workspace {
                 }
             }
         }
+        self.sync_search_owner(cx);
         self.flush_visible(cx);
+    }
+    fn sync_search_owner(&mut self, cx: &mut Context<Self>) {
+        let next = self
+            .model
+            .as_ref()
+            .and_then(LocalWorkspace::focused_pane)
+            .filter(|pane| self.visible.iter().any(|visible| visible.as_str() == *pane))
+            .and_then(|pane| self.panes.get(pane))
+            .map(|view| view.terminal.clone());
+        if self.search_owner.as_ref().map(Entity::entity_id) == next.as_ref().map(Entity::entity_id)
+        {
+            return;
+        }
+        // Release the previous index before activating the next one. Pane
+        // replacement can keep the same pane ID while changing its entity.
+        if let Some(previous) = self.search_owner.take() {
+            previous.update(cx, |terminal, cx| terminal.set_search_active(false, cx));
+        }
+        if let Some(next) = &next {
+            next.update(cx, |terminal, cx| terminal.set_search_active(true, cx));
+        }
+        self.search_owner = next;
     }
     fn flush_visible(&mut self, cx: &mut Context<Self>) {
         if self.visible_pending {
@@ -1263,6 +1289,13 @@ impl Workspace {
             self.drop_target = None;
             cx.stop_propagation();
             cx.notify();
+            return;
+        }
+        if self
+            .search_owner
+            .as_ref()
+            .is_some_and(|terminal| terminal.read(cx).search_input_focused(window, cx))
+        {
             return;
         }
         let Some(action) = shortcut_with_layout(
@@ -2377,10 +2410,13 @@ impl Workspace {
                                 .min_h_0()
                                 .min_w_0()
                                 .overflow_hidden()
-                                .on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |this, _, _, cx| this.focus(&focus, cx)),
-                                )
+                                .capture_any_mouse_down(cx.listener(
+                                    move |this, event: &MouseDownEvent, _, cx| {
+                                        if event.button == MouseButton::Left {
+                                            this.focus(&focus, cx);
+                                        }
+                                    },
+                                ))
                                 .child(view.terminal.clone()),
                         );
                     } else {

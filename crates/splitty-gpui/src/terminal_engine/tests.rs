@@ -330,6 +330,12 @@ fn pinned_c_abi_layouts_match_64_bit_headers() {
             );
         };
     }
+    layout!(ffi::Allocator, 16, 8);
+    layout!(ffi::AllocatorVtable, 64, 8);
+    layout!(ffi::SelectionBuffer, 24, 8);
+    assert_eq!(mem::offset_of!(ffi::Allocator, vtable), 8);
+    assert_eq!(mem::offset_of!(ffi::AllocatorVtable, free), 24);
+    assert_eq!(mem::offset_of!(ffi::AllocatorVtable, reserved), 32);
     layout!(ffi::Rgb, 3, 1);
     layout!(ffi::StringView, 16, 8);
     layout!(ffi::Buffer, 24, 8);

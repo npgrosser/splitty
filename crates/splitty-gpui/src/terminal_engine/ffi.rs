@@ -12,6 +12,28 @@ pub const NO_VALUE: Status = -4;
 pub const UNSUPPORTED: Status = -8;
 
 #[repr(C)]
+pub struct Allocator {
+    pub context: *mut c_void,
+    pub vtable: *const AllocatorVtable,
+}
+#[repr(C)]
+pub struct AllocatorVtable {
+    pub alloc: Option<unsafe extern "C" fn(*mut c_void, usize, u8, usize) -> *mut c_void>,
+    pub resize:
+        Option<unsafe extern "C" fn(*mut c_void, *mut c_void, usize, u8, usize, usize) -> bool>,
+    pub remap: Option<
+        unsafe extern "C" fn(*mut c_void, *mut c_void, usize, u8, usize, usize) -> *mut c_void,
+    >,
+    pub free: Option<unsafe extern "C" fn(*mut c_void, *mut c_void, usize, u8, usize)>,
+    pub reserved: [usize; 4],
+}
+#[repr(C)]
+pub struct SelectionBuffer {
+    pub ptr: *mut Selection,
+    pub cap: usize,
+    pub len: usize,
+}
+#[repr(C)]
 #[derive(Clone, Copy, Default)]
 pub struct Rgb {
     pub r: u8,
@@ -216,6 +238,26 @@ pub const FORMAT_UNWRAP: c_int = 2;
 pub const FORMAT_SELECTION: c_int = 4;
 
 unsafe extern "C" {
+    pub fn ghostty_search_new(
+        allocator: *const Allocator,
+        out: *mut Handle,
+        terminal: Handle,
+    ) -> Status;
+    pub fn ghostty_search_free(search: Handle);
+    pub fn ghostty_search_set(search: Handle, option: c_int, value: *const c_void) -> Status;
+    pub fn ghostty_search_get(search: Handle, data: c_int, out: *mut c_void) -> Status;
+    pub fn ghostty_search_feed(search: Handle) -> Status;
+    pub fn ghostty_search_tick(search: Handle, status: *mut c_int) -> Status;
+    pub fn ghostty_search_select_next(search: Handle) -> Status;
+    pub fn ghostty_search_select_prev(search: Handle) -> Status;
+    pub fn ghostty_terminal_point_from_grid_ref(
+        terminal: Handle,
+        reference: *const GridRef,
+        tag: c_int,
+        out: *mut Coordinate,
+    ) -> Status;
+    pub fn ghostty_grid_ref_cell(reference: *const GridRef, out: *mut u64) -> Status;
+
     pub fn ghostty_terminal_new(
         allocator: *const c_void,
         out: *mut Handle,

@@ -219,6 +219,27 @@ queue admission. Shift starts local selection; lifecycle cancellation settles
 only the captured live terminal. Wheel uses application reports when requested,
 otherwise the existing local history or alternate-screen cursor-key path.
 
+Native terminal search is local to the terminal adapter and view. The adapter
+owns the search handle, checked allocator and tracked navigation anchor; its
+public results contain only owned, viewport-clipped cell spans. A 16 MiB budget
+covers native search allocations across primary and alternate buffers; a 20,000
+active-buffer match guard limits expensive result operations. Every native call
+checks a sticky allocator failure because the library can return success after
+an internal allocation failure. Reaching a limit discards the index and presents
+a stopped state, never a complete partial result. Small terminal-owned registry
+and pin allocations are outside that search budget.
+Owned result staging is bounded separately: at most 20,000 native match records,
+an 80,000-cell viewport mask and coalesced row spans. Larger grids refuse search
+without affecting terminal operation; the current native view fits that bound.
+
+The view owns query editing, yielding incremental work and highlight painting
+between cached backgrounds and glyphs, with local selection taking priority.
+The workspace activates only the focused visible pane's index, releasing the
+previous one first. Inactive panes retain query/open state, but rebuild their
+index on activation. Output and viewport changes wake search work; completed
+or failed searches do not poll while idle. Search has no session protocol or
+service authority, and its input controls cannot send bytes to the PTY.
+
 The terminal view owns a thread-confined Ghostty VT engine behind an owned Rust
 wrapper; the wrapper contains the C interface and hands the view bounded render
 snapshots. Cached glyph shaping and change-driven GPUI notifications avoid

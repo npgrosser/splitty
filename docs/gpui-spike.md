@@ -118,6 +118,21 @@ layouts. The framework drops physical key codes; symbols from other layouts pass
 through to the terminal rather than selecting a guessed Screen. Pointer Screen
 selection remains available.
 
+Ctrl+F (Cmd+F on macOS) opens find in the focused terminal. Enter searches toward
+older matches; Shift+Enter goes toward newer matches; both wrap. Escape closes
+find and returns typing to the terminal. Search is literal and ASCII
+case-insensitive; other characters match exactly. It covers the retained screen
+and history, including soft-wrapped text. Search highlights do not replace text
+selection or change what Copy copies.
+
+Each terminal remembers its query and whether find is open. Only the focused
+visible pane keeps an active index; changing tabs or Screens rebuilds it when
+that pane returns. The query is limited to 1,024 UTF-8 bytes, native search
+allocations to 16 MiB, and the active screen buffer to 20,000 matches. A limit
+stops search with a refine-query message instead of showing partial results as
+complete. Ordinary output does not retry a failed query. These limits do not
+promise a fixed duration for each library call.
+
 Maximization is a per-window, per-Screen reference to a canonical tab group.
 It preserves tabs, terminal history and hidden output without changing the server
 layout. New tabs and reorder within that group retain it; admitted splits and
@@ -324,6 +339,74 @@ input delivered both up and down application-mode cursor sequences. The optimize
 integrated binary also passed the Wayland/X11 hardware workspace smoke and exited
 cleanly. This verifies the cursor-key fallback. Application mouse reporting is
 covered separately below.
+
+## Native terminal search
+
+The find bar uses the pinned terminal search API. It searches the complete
+retained buffer incrementally, without its synchronous full-history entry point.
+Each scheduled turn performs at most one feed and one history tick; completed
+searches wake only on a relevant change. Native calls still have variable cost.
+
+A standalone C probe on the pinned static library used 5,000 lines and the
+native adapter's 32 MiB/5,000-line retention settings. Sparse output contained
+50 matches; dense output matched every occupied cell. These are isolated library
+measurements, not window latency measurements:
+
+| Case | Uncapped matches | Uncapped process peak | 16 MiB search budget |
+| --- | ---: | ---: | --- |
+| Sparse, 80×24 | 50 | 11.6 MiB | Completes; maximum feed 1.1 ms |
+| Dense, 80×24 | 395,000 | 168.4 MiB | Stops at limit; process peak 22.5 MiB |
+| Sparse, 400×200 | 50 | 38.1 MiB | Completes; maximum feed 2.8 ms |
+| Dense, 400×200 | 1,995,000 | 813.6 MiB | Stops at limit; process peak 34.5 MiB |
+| Dense, 400×200 after unobserved output | 2,034,900 | 842.0 MiB | Stops at limit; maximum feed 13.7 ms |
+
+The uncapped hidden-output catch-up ranged from 526 to 821 ms in these runs.
+With the budget, disposing the index took at most 0.75 ms and all charged search
+allocations were freed. The native API returned success even when its custom
+allocator refused memory, which is why the adapter must check its sticky failure
+flag after every call. Memory figures use the current process's `/proc` VmHWM;
+an inherited `getrusage` high-water value was unsuitable for this probe. The
+budget covers search-owned storage, not the entire terminal or application.
+
+The actual-window search driver uses an isolated display and a raw PTY fixture.
+It records exact input bytes and window pixels, checking that find controls stay
+local, results include history/soft wraps/Unicode, output refreshes counts, and
+tab/Screen activation retains the query. Dense-query failure, refinement,
+independent clipboard selection and VT reset are separate stages. Tesseract with
+English data reads visible status labels; screenshots remain available for
+review. The fixture never calls a product testing API.
+
+```sh
+python3 scripts/testing/gpui-terminal-search.py target/release/splitty-gpui \
+  --output /tmp/splitty-search-evidence --display :95 \
+  --tesseract "$(command -v tesseract)" --xclip "$(command -v xclip)" \
+  --ocr-advisory
+```
+
+Xvfb, xdotool and xclip are required. Their paths, private library directory and
+the OCR data directory can be supplied through the driver's options. The
+clipboard belongs to the private display. `--ocr-advisory` continues byte/focus
+checks after an OCR mismatch and records `visualReviewRequired`; those status
+images require manual review even if the automated interaction checks pass.
+Omit it for strict OCR assertions. `--setup-only` checks fixture startup and does
+not establish search acceptance.
+
+The final search candidate, SHA-256
+`98db7d45534fafb750daccd62d67685e225637e8167daa58f6727b5c885fe0d1`,
+passed 16 actual-window check groups, including exact Unicode clipboard input,
+query restoration, output counts, VT reset, independent selection copy and
+activation through an inactive visible split's find bar. A terminal-origin mouse
+press now releases over the bar and the next motion reports an unheld hover;
+the earlier candidate reproduced the missing-release failure. Search-control
+presses deliver no PTY input. The dense-query limit label was reviewed in the
+captured image because OCR missed it; automated interaction checks and that
+manual visual check are distinct. The app exited normally with no surviving
+owned children.
+
+The implementation passed 53 native tests, native all-target Clippy, formatting
+and all 17 architecture checks. The same final binary passed hardware-accelerated
+Wayland and X11 workspace smoke checks. Search interaction evidence is X11;
+those Wayland checks cover the workspace and graphics path, not find input.
 
 ## Native terminal pointer input acceptance
 

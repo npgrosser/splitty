@@ -4,6 +4,8 @@
 //! and untracked grid references never escape this module. A frame exclusively
 //! borrows the engine; its lending row/cell API prevents snapshot invalidation.
 mod ffi;
+mod search;
+pub use search::{SearchHighlight, SearchProgress, SearchSnapshot};
 
 use anyhow::{anyhow, bail, ensure, Context, Result};
 use std::{cell::RefCell, ffi::c_void, marker::PhantomData, mem, ptr, rc::Rc};
@@ -152,6 +154,7 @@ struct Replies {
 /// Rc's marker makes thread confinement explicit even if handle types change.
 pub struct Engine {
     terminal: ffi::Handle,
+    search: search::SearchState,
     render: ffi::Handle,
     rows: ffi::Handle,
     cells: ffi::Handle,
@@ -179,6 +182,7 @@ impl Engine {
         ensure!(cols > 0 && rows > 0, "Terminal dimensions must be nonzero");
         let mut engine = Self {
             terminal: ptr::null_mut(),
+            search: search::SearchState::default(),
             render: ptr::null_mut(),
             rows: ptr::null_mut(),
             cells: ptr::null_mut(),
@@ -322,6 +326,9 @@ impl Engine {
 
     pub fn feed(&mut self, bytes: &[u8], replay: bool) -> Result<Vec<u8>> {
         self.mouse_dirty |= !bytes.is_empty();
+        if !bytes.is_empty() {
+            self.search.invalidate();
+        }
         self.begin_effects(replay);
         // SAFETY: exclusive terminal access, live input slice for this synchronous
         // call, and no RefCell borrow held while the callback accesses its box.
@@ -342,6 +349,7 @@ impl Engine {
             geometry.cell_width,
             geometry.cell_height,
         )?;
+        replacement.search.revision = self.search.revision.wrapping_add(1);
         *self = replacement;
         Ok(())
     }
@@ -360,6 +368,7 @@ impl Engine {
             ffi::ghostty_terminal_resize(self.terminal, cols, rows, cell_width, cell_height)
         });
         if result.is_ok() {
+            self.search.invalidate();
             self.cols = cols;
             self.height = rows;
             self.cell_width = cell_width;
@@ -386,7 +395,9 @@ impl Engine {
 
     fn scroll_to(&mut self, scroll: ffi::Scroll) -> Result<()> {
         // SAFETY: the tagged union is constructed only by the two methods above.
-        check(unsafe { ffi::ghostty_terminal_scroll_viewport(self.terminal, scroll) })
+        check(unsafe { ffi::ghostty_terminal_scroll_viewport(self.terminal, scroll) })?;
+        self.search.invalidate();
+        Ok(())
     }
 
     /// The pinned terminal.h exposes GhosttyTerminalScreen as a C enum.
@@ -1079,6 +1090,7 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
+        self.clear_search();
         // SAFETY: all handles are uniquely owned, all nullable destructors accept
         // partial initialization. Gesture cleanup requires the still-live terminal.
         // Callback storage is dropped only after this function returns.

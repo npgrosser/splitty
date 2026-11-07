@@ -1,8 +1,10 @@
 //! Native terminal presentation. The service owns the PTY; Ghostty owns VT state.
+mod search;
+
 pub use crate::terminal_engine::ColorConfig as TerminalColors;
 use crate::terminal_engine::{
     Cursor, CursorShape, Engine, MouseAction, MouseButton as EngineMouseButton, MouseInput,
-    MouseModifiers, MousePolicy, MouseTracking, Row, MAX_INPUT,
+    MouseModifiers, MousePolicy, MouseTracking, Row, SearchHighlight, MAX_INPUT,
 };
 use anyhow::{anyhow, Result};
 use gpui_kit::{prelude::*, *};
@@ -110,6 +112,12 @@ impl PointerGestures {
 struct SelectionColors {
     foreground: u32,
     background: u32,
+}
+
+struct SearchPaint<'a> {
+    highlights: &'a [&'a SearchHighlight],
+    passive: u32,
+    active: u32,
 }
 
 #[derive(Clone, Copy)]
@@ -237,6 +245,7 @@ struct CachedRow {
     backgrounds: Vec<BackgroundSpan>,
     underlines: Vec<UnderlineSpan>,
     runs: Vec<ShapedRun>,
+    selected: Vec<Range<u16>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -269,6 +278,8 @@ pub struct Terminal {
     scroll_route: Option<WheelRoute>,
     focus_out_subscription: Option<Subscription>,
     activation_subscription: Option<Subscription>,
+    search: Option<search::SearchUi>,
+    search_active: bool,
     row_cache: HashMap<[u64; 2], CachedRow>,
     colors: TerminalColors,
     selection_foreground: u32,
@@ -315,6 +326,9 @@ impl Terminal {
             scroll_route: None,
             focus_out_subscription: None,
             activation_subscription: None,
+            search: None,
+            // The standalone probe has no workspace focus coordinator.
+            search_active: true,
             row_cache: HashMap::new(),
             colors: TerminalColors::default(),
             selection_foreground: DEFAULT_SELECTION_FOREGROUND,
@@ -335,6 +349,18 @@ impl Terminal {
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
+        if let Some(search) = self
+            .search
+            .as_ref()
+            .filter(|search| self.search_active && search.open)
+        {
+            search.input.update(cx, |input, cx| input.focus(window, cx));
+        } else {
+            self.focus_pty(window, cx);
+        }
+    }
+
+    fn focus_pty(&self, window: &mut Window, cx: &mut App) {
         self.focus.focus(window, cx);
     }
 
@@ -401,6 +427,7 @@ impl Terminal {
             }
             self.smoke_tail.drain(..start);
         }
+        self.search_wake(cx);
         cx.notify();
     }
 
@@ -430,6 +457,7 @@ impl Terminal {
             self.engine = None;
             self.status = format!("Terminal engine reset: {error:#}");
         }
+        self.search_reset(cx);
         cx.notify();
     }
 
@@ -500,6 +528,27 @@ impl Terminal {
 
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
+        let find_modifier = if cx.platform_info().is_mac() {
+            key.modifiers.platform && !key.modifiers.control
+        } else {
+            key.modifiers.control && !key.modifiers.platform
+        };
+        if find_modifier
+            && !key.modifiers.shift
+            && !key.modifiers.alt
+            && key.key.eq_ignore_ascii_case("f")
+        {
+            self.open_search(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if self.search_input_focused(window, cx) {
+            if key.key == "escape" {
+                self.close_search(window, cx);
+                cx.stop_propagation();
+            }
+            return;
+        }
         if (key.modifiers.control && key.modifiers.shift) || key.modifiers.platform {
             match key.key.as_str() {
                 "c" => {
@@ -536,6 +585,7 @@ impl Terminal {
             Some(Ok(Some(bytes))) => {
                 let result = self.engine.as_mut().map(Engine::scroll_bottom);
                 self.operation(result);
+                self.search_wake(cx);
                 self.send_bytes(bytes);
                 window.notify_text_input_changed(&self.focus);
                 cx.stop_propagation();
@@ -725,7 +775,7 @@ impl Terminal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.focus(window, cx);
+        self.focus_pty(window, cx);
         self.pointer_down(event, window);
         cx.notify();
     }
@@ -814,6 +864,7 @@ impl Terminal {
                 WheelRoute::Scrollback => {
                     let result = self.engine.as_mut().map(|engine| engine.scroll(lines));
                     self.operation(result);
+                    self.search_wake(cx);
                 }
                 WheelRoute::AlternateKeys => {
                     let result = self
@@ -902,6 +953,7 @@ impl Terminal {
                 self.send_bytes(reply);
             }
             self.content_revision += 1;
+            self.search_wake(cx);
             self.report_size();
             cx.notify();
         }
@@ -930,6 +982,21 @@ impl Terminal {
         let Some(engine) = self.engine.as_mut() else {
             return Err(anyhow!("Terminal engine is unavailable"));
         };
+        let mut search_rows: HashMap<u16, Vec<&SearchHighlight>> = HashMap::new();
+        if let Some(snapshot) = self
+            .search
+            .as_ref()
+            .filter(|search| self.search_active && search.open)
+            .and_then(|search| search.snapshot.as_ref())
+            .filter(|snapshot| snapshot.revision == engine.search_revision())
+        {
+            for highlight in &snapshot.highlights {
+                search_rows
+                    .entry(highlight.row)
+                    .or_default()
+                    .push(highlight);
+            }
+        }
         let mut frame = engine.frame()?;
         if frame.full_dirty {
             self.row_cache.clear();
@@ -963,7 +1030,22 @@ impl Terminal {
             }
             if let Some(cached) = self.row_cache.get_mut(&id) {
                 cached.last_frame = current_frame;
-                paint_cached_row(cached, index, self.bounds, self.cell_width, window, cx)?;
+                paint_cached_row(
+                    cached,
+                    index,
+                    self.bounds,
+                    self.cell_width,
+                    SearchPaint {
+                        highlights: search_rows
+                            .get(&index)
+                            .map(Vec::as_slice)
+                            .unwrap_or_default(),
+                        passive: self.colors.ansi[3],
+                        active: self.colors.ansi[4],
+                    },
+                    window,
+                    cx,
+                )?;
             }
         }
         frame.finish()?;
@@ -1006,6 +1088,7 @@ fn shape_row(
         backgrounds: Vec::new(),
         underlines: Vec::new(),
         runs: Vec::new(),
+        selected: Vec::new(),
     };
     let mut pending: Option<PendingAscii> = None;
     while let Some(cell) = row.next_cell()? {
@@ -1013,6 +1096,18 @@ fn shape_row(
             continue;
         }
         let width = u16::from(cell.width.max(1));
+        if cell.selected {
+            let end = cell.col.saturating_add(width);
+            if let Some(last) = cached
+                .selected
+                .last_mut()
+                .filter(|last| last.end == cell.col)
+            {
+                last.end = end;
+            } else {
+                cached.selected.push(cell.col..end);
+            }
+        }
         let background = if cell.selected {
             selection.background
         } else {
@@ -1130,6 +1225,7 @@ fn paint_cached_row(
     index: u16,
     bounds: Bounds<Pixels>,
     cell_width: Pixels,
+    search: SearchPaint<'_>,
     window: &mut Window,
     cx: &mut Context<Terminal>,
 ) -> Result<()> {
@@ -1143,6 +1239,31 @@ fn paint_cached_row(
             ),
             rgb(span.color),
         ));
+    }
+    for highlight in search.highlights {
+        let color = if highlight.selected {
+            search.active
+        } else {
+            search.passive
+        };
+        each_unselected_segment(
+            highlight.start_col,
+            highlight.end_col,
+            &row.selected,
+            |segment| {
+                let x = bounds.left() + cell_width * f32::from(segment.start);
+                window.paint_quad(fill(
+                    Bounds::new(
+                        point(x, y),
+                        size(
+                            cell_width * f32::from(segment.end - segment.start),
+                            px(LINE_HEIGHT),
+                        ),
+                    ),
+                    rgb(color).opacity(if highlight.selected { 0.55 } else { 0.35 }),
+                ));
+            },
+        );
     }
     for run in &row.runs {
         let x = bounds.left() + cell_width * f32::from(run.col);
@@ -1168,6 +1289,33 @@ fn paint_cached_row(
         ));
     }
     Ok(())
+}
+
+fn each_unselected_segment(
+    start: u16,
+    end: u16,
+    selected: &[Range<u16>],
+    mut paint: impl FnMut(Range<u16>),
+) {
+    let mut col = start;
+    for selection in selected {
+        if selection.end <= col {
+            continue;
+        }
+        if selection.start >= end {
+            break;
+        }
+        if col < selection.start {
+            paint(col..selection.start.min(end));
+        }
+        col = col.max(selection.end);
+        if col >= end {
+            return;
+        }
+    }
+    if col < end {
+        paint(col..end);
+    }
 }
 
 fn paint_cursor(
@@ -1267,6 +1415,7 @@ impl Render for Terminal {
                     }
                 }));
         }
+        let search_bar = self.search_bar(cx);
         let layout = cx.entity();
         let paint = layout.clone();
         div()
@@ -1322,6 +1471,7 @@ impl Render for Terminal {
                 )
                 .size_full(),
             )
+            .when_some(search_bar, |view, bar| view.child(bar))
             .when_some(self.command_error.clone(), |view, error| {
                 view.child(
                     div()
@@ -1391,6 +1541,7 @@ impl EntityInputHandler for Terminal {
         self.composition.clear();
         let result = self.engine.as_mut().map(Engine::scroll_bottom);
         self.operation(result);
+        self.search_wake(cx);
         self.send(Command::Input {
             generation: self.generation,
             bytes: text.as_bytes().to_vec(),
@@ -1454,13 +1605,24 @@ impl EntityInputHandler for Terminal {
 #[cfg(test)]
 mod tests {
     use super::{
-        alternate_wheel_input, engine_mouse_button, mouse_modifiers, needs_shape, wheel_button,
-        wheel_lines, wheel_route, CachedRow, PointerGestures, PointerRoute, WheelRoute,
+        alternate_wheel_input, each_unselected_segment, engine_mouse_button, mouse_modifiers,
+        needs_shape, wheel_button, wheel_lines, wheel_route, CachedRow, PointerGestures,
+        PointerRoute, WheelRoute,
     };
     use crate::terminal_engine::{
         Engine, MouseButton as EngineMouseButton, MouseModifiers, MousePolicy, MouseTracking,
     };
     use gpui_kit::{Modifiers, MouseButton, NavigationDirection};
+
+    #[test]
+    fn search_highlights_skip_clipboard_selection_without_changing_glyph_runs() {
+        let mut visible = Vec::new();
+        each_unselected_segment(2, 12, &[4..6, 8..10], |segment| visible.push(segment));
+        assert_eq!(visible, vec![2..4, 6..8, 10..12]);
+        visible.clear();
+        each_unselected_segment(3, 7, &[0..5, 6..9], |segment| visible.push(segment));
+        assert_eq!(visible, vec![5..6]);
+    }
 
     #[test]
     fn pointer_gesture_keeps_its_press_route_and_suppresses_rejected_presses() {
@@ -1658,6 +1820,7 @@ mod tests {
             backgrounds: Vec::new(),
             underlines: Vec::new(),
             runs: Vec::new(),
+            selected: Vec::new(),
         };
         {
             let row = second.next_row().expect("first row").expect("visible row");
