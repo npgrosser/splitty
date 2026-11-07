@@ -205,6 +205,7 @@ async fn malformed_profile_json_is_charged_and_rejected() {
         body: "{\"profiles\":[{\"id\":7}]}".into(),
         uncertain: false,
     };
+    let api = crate::api_stream::ApiStream::from(api);
     assert!(decode::<ShellProfilesState>(&api, &reply).is_err());
     api.finish().await.unwrap();
     assert_eq!(budget.used(), 0);

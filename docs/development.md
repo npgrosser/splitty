@@ -81,6 +81,12 @@ The experimental GPUI local workspace has its own isolated service and runbook i
 
 ### Native terminal library for GPUI
 
+For the native Windows window with WSL terminals, see the
+[Windows preview runbook](gpui-spike.md#native-windows-preview). It uses native
+Windows Rust/MSVC for the GUI and a matching Linux backend in an explicitly named
+existing distribution. The frontend assets must be built before compiling the
+Linux backend, which embeds them.
+
 The GPUI app uses statically linked `libghostty-vt` 1.0.0. It needs a matching
 native library for the machine running the app: Linux and macOS build it for
 their own host, and the Windows GPUI client needs a Windows library even when
@@ -107,7 +113,8 @@ On Windows PowerShell:
 ```powershell
 $prefix = python scripts/bootstrap-libghostty-vt.py
 $env:GHOSTTY_VT_DIR = $prefix
-cargo run --release -p splitty-gpui
+cargo build --locked --release -p splitty-gpui
+# Launch with the explicit WSL arguments from the Windows preview runbook.
 ```
 
 The script also accepts `--prefix` with an absolute path. An existing prefix

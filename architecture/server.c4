@@ -4,6 +4,9 @@
 
 model {
   extend splitty.server {
+    service -> splitty.core.native_api 'Reexport the single typed operation catalog and enforce its authority checks'
+    native -> splitty.transport.api_request 'Delegate API-only requests to the shared transaction machine'
+
 
     main = component 'main' {
       description 'Entry point and composition root of the splitty binary (main.rs): the clap command line, serve, daemon start/stop (--end-sessions)/restart/status and the internal daemon run with the adoption of kept sessions, the session-keeper subcommand before the runtime starts, connect (text, or JSON events with --json) and remote-hosts, and control commands with safely rendered process metadata, including confirmed client editor requests and file downloads to a window. Wires the PTY manager, dispatcher, notification engine, effect runner, store, WebSocket and HTTP state and the control socket.'
@@ -60,7 +63,6 @@ model {
     native -> splitty.transport.requests 'Request IDs, deadlines and cancellation generations'
     native -> splitty.transport.wire 'Explicit request, reply and session frame envelopes'
     service -> splitty.transport.budget 'Retain decoded session objects and response capacity'
-    service -> splitty.transport.codec 'Admit JSON object allocation before session validation'
     service -> splitty.transport.wire 'Maximum serialized response size'
     http -> ws 'Authenticated WebSocket upgrade'
     main -> splitty.transport.admission 'Trusted quota keys for the explicit SSH browser gateway'

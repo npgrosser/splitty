@@ -1,8 +1,9 @@
 use super::{theme_name, AppearanceSnapshot, ColorScheme};
+use crate::api_stream::ApiStream as Client;
 use crate::local_service::decode;
 use serde::Deserialize;
+use splitty_core::native_api::Operation;
 use splitty_core::{config::AppearanceSettings, theme::ResolvedTheme};
-use splitty_server::{native::client::Client, service::catalog::Operation};
 use std::io;
 use uuid::Uuid;
 
@@ -43,5 +44,5 @@ pub(crate) async fn read(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "windows")))]
 pub(crate) mod tests;

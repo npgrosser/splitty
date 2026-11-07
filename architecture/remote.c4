@@ -4,6 +4,8 @@
 
 model {
   extend splitty.remote {
+    owner -> splitty.transport.api_request 'Delegate owned API-stream requests without a domain dependency'
+
 
     ssh = component 'ssh' {
       description 'Reaching a host with the system ssh (on Windows the system\'s OpenSSH, without a console window): the validated target (SR-13), the hardened command, stdio-only connections (no terminal, no agent, X11 or configured forwards), forward-only connections (-N, no terminal, agent or X11), relay-only connections (a command, no terminal, agent or X11) and the forwards a host\'s configuration adds (ssh -G), POSIX quoting and allowlists for the one command line the host\'s login shell parses, the Executor trait and what a failure means (127, host keys, refused logins).'

@@ -77,6 +77,49 @@ cargo run --release -p splitty-gpui -- --probe
 cargo run --release -p splitty-gpui -- --smoke
 ```
 
+### Native Windows preview
+
+Build the GUI with native Windows Rust/MSVC and the Windows Ghostty prefix from
+[development](development.md#native-terminal-library-for-gpui). Build the matching
+`splitty-server` binary in an existing WSL distribution. The window runs on Windows;
+its owned service and terminal processes run in that named distribution.
+
+```powershell
+cargo build --locked --release -p splitty-gpui --no-default-features
+& .\target\release\splitty-gpui.exe `
+  --wsl-distro 'Ubuntu' `
+  --wsl-backend '/absolute/path/to/preview/splitty' `
+  --wsl-config-dir '/absolute/path/to/preview/config'
+```
+
+All three arguments are required. Use a separate preview configuration directory;
+the process passes it directly to its owned backend. Startup does not install WSL,
+choose a default distribution, discover a daemon or open a TCP listener. A local
+preview package includes a launcher with those paths already filled in; keep its
+matching backend at that WSL path. This is an evaluation build, not an installer.
+
+Add `--workspace-smoke` for the real-window workflow described below. Normal
+shutdown joins the two native streams and the owned helper. Failed or forced
+helper cleanup is reported as an error; it is never treated as proof that Linux
+sessions closed gracefully. The app never shuts down the distribution. Windows
+input methods, clipboard combinations and interactive smoothness need platform
+testing independently of compilation or the automated workspace smoke.
+
+The Windows acceptance harness runs from WSL against already-built artifacts:
+
+```sh
+python3 scripts/testing/gpui-windows-smoke.py \
+  --exe /mnt/c/path/to/splitty-gpui.exe \
+  --backend /absolute/path/to/preview/splitty --distro Ubuntu \
+  --output /tmp/gpui-win-check --execute
+```
+
+It owns a unique configuration, verifies the launched Windows process identity,
+exercises the workspace, checks the seeded template library in a separate window,
+and verifies helper/session cleanup while an unrelated WSL sentinel survives.
+Use a short output path: the Linux control socket must fit the Unix socket path
+limit. Screenshot inspection is separate evidence from the runtime log.
+
 The default window offers **Split right**, **Split below**, **New tab** and
 **Maximize/Restore** for the focused tab group.
 **Float Tab** moves the focused tiled terminal into a floating tab group, leaving
@@ -1007,3 +1050,40 @@ The runner reuses the Screen-transfer PTY fixture and accepts private Xvfb,
 library and xdotool overrides. `--setup-only` captures the initial layout for
 coordinate calibration. The generated evidence records binary, harness and
 fixture hashes alongside authoritative states, PTY input and screenshots.
+
+## Native Windows workspace verification (2026-11-07)
+
+The optimized Windows candidate has SHA-256
+`2ba95dc60e87a34887fd9c2181dbedd2bca9f340393244b778c9bf49e301cfd6`;
+its matching Linux backend has SHA-256
+`6aac31a85b91312ea380e1549238704586e606e3f292564f0a239349f0b05636`.
+The source manifest accompanying the preview records the exact build inputs.
+The real Windows workspace smoke reached stage 18 and exited successfully with
+hardware rendering. Separate window checks exercised keyboard input/output,
+loaded a seeded template through the auxiliary API stream, and closed normally.
+Owned WSL shells and helper exited; an unrelated WSL process survived.
+
+The smoke now waits for observed idle session metadata before injecting its
+four terminal commands. Attachment alone does not establish shell readiness;
+early automated input can be consumed by shell startup terminal queries. This
+check is a smoke admission rule, not a general prompt-readiness guarantee.
+Normal interactive startup was checked separately without injected startup input.
+
+Targeted checks cover shared API correlation/cancellation, owned helper lifecycle,
+100 client-core regressions, catalog authority/inventory, the real owner reload
+and API smoke, native startup parsing, strict Clippy and 17 architecture checks.
+Five targeted native Windows release tests also passed. These establish supported
+behavior and lifecycle, not latency measurements, complete input-method coverage,
+or parity with every released web feature. Production installers and full merge
+CI remain deferred on the evaluation branch.
+
+The matching final Linux GUI candidate has SHA-256
+`41756f51ec844b52322620c1579ef9bdbc47143f4fdb4536981b7cc3924925f8`.
+It passed the complete private template window acceptance (13 checks, 20 captured
+images) and stage-18 hardware workspace smoke on both Wayland and X11. The real
+shell fixture proved selective saved command execution, layout-only omission,
+replacement cancellation/confirmation, modal input isolation, preservation of
+unrelated work and complete owned cleanup. Review/library transitions explicitly
+restore workspace focus so Escape does not remain assigned to an old root editor.
+These template and workspace checks use this exact binary; earlier feature and
+latency evidence retain their original recorded binaries.

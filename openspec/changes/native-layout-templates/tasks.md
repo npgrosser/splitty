@@ -20,9 +20,9 @@
 
 ## 4. Native presentation and actual-window acceptance
 
-- [ ] 4.1 Add the Templates control/shortcut and one modal for list, extract/root, name/command selection, overwrite/delete and immutable apply review; extend GPUI unit tests for stale requests, explicit choices, modal input ownership and focus restoration, and document the controls in README.md/docs/gpui-spike.md.
-- [ ] 4.2 Render pending tiled/floating layouts and new-Screen chips without canonical state mutation; connect precise outcomes and visibility withdrawal, extend GPUI unit tests for projected active tabs and navigation/close conflicts, and update architecture/gpui.c4.
-- [ ] 4.3 Add private real-window smoke acceptance for extract/save/reload, layout-only versus actual command execution, replacement cancel/confirm, input isolation, pending presentation, unrelated process identity and complete cleanup. Unit/in-process tests cannot establish real pointer/focus/paint routing or command execution through the window; use isolated real shell sessions and captured visual evidence.
+- [x] 4.1 Add the Templates control/shortcut and one modal for list, extract/root, name/command selection, overwrite/delete and immutable apply review; extend GPUI unit tests for stale requests, explicit choices, modal input ownership and focus restoration, and document the controls in README.md/docs/gpui-spike.md.
+- [x] 4.2 Render pending tiled/floating layouts and new-Screen chips without canonical state mutation; connect precise outcomes and visibility withdrawal, extend GPUI unit tests for projected active tabs and navigation/close conflicts, and update architecture/gpui.c4.
+- [x] 4.3 Add private real-window smoke acceptance for extract/save/reload, layout-only versus actual command execution, replacement cancel/confirm, input isolation, pending presentation, unrelated process identity and complete cleanup. Unit/in-process tests cannot establish real pointer/focus/paint routing or command execution through the window; use isolated real shell sessions and captured visual evidence.
 
 ## 5. Integration and preview
 

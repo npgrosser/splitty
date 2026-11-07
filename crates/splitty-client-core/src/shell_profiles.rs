@@ -25,15 +25,14 @@ impl ShellProfilesSnapshot {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 pub(crate) async fn read(
-    client: &mut splitty_server::native::client::Client,
+    client: &mut crate::api_stream::ApiStream,
     connection_id: Uuid,
     generation: u64,
 ) -> std::io::Result<ShellProfilesSnapshot> {
     let reply = client
         .request(
-            splitty_server::service::catalog::Operation::ShellProfilesGet,
+            splitty_core::native_api::Operation::ShellProfilesGet,
             serde_json::Map::new(),
         )
         .await?;

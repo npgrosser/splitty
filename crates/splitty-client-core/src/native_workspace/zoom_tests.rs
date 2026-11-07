@@ -43,7 +43,8 @@ async fn real_service() {
     state.config.write().unwrap().appearance.zoom_scope = "terminals".into();
     let config = state.config.read().unwrap().clone();
     splitty_core::config::save(&config).unwrap();
-    let service = crate::EmbeddedService::from_runtime(runtime);
+    let service =
+        crate::owned_service::OwnedService::from(crate::EmbeddedService::from_runtime(runtime));
     let (commands, receiver) = mpsc::channel(64);
     let (sender, mut updates) = mpsc::channel(64);
     let stop = Arc::new(AtomicBool::new(false));
@@ -187,7 +188,8 @@ async fn real_service() {
 #[tokio::test]
 async fn zoom_before_settings_setup_is_rejected_without_a_forwarding_queue() {
     let (runtime, path) = crate::appearance::local::tests::fixture();
-    let service = crate::EmbeddedService::from_runtime(runtime);
+    let service =
+        crate::owned_service::OwnedService::from(crate::EmbeddedService::from_runtime(runtime));
     let owner = Uuid::new_v4();
     let mut settings = RuntimeLocalService::new(&service, owner, ColorScheme::Dark);
     assert_eq!(

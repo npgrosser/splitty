@@ -1,11 +1,11 @@
 //! One owned API stream for local settings reads and ordered zoom intents, separate from PTY events.
+use crate::api_stream::ApiStream as Client;
 use crate::{
     appearance::{AppearanceSnapshot, ColorScheme},
     shell_profiles::ShellProfilesSnapshot,
     zoom::{ZoomAction, ZoomResult},
 };
 use serde::de::DeserializeOwned;
-use splitty_server::native::client::Client;
 use splitty_transport::{budget::Charged, codec, wire};
 use std::{collections::VecDeque, future::Future, io, pin::Pin, sync::Arc};
 use tokio::sync::Notify;
@@ -67,9 +67,9 @@ pub struct LocalServiceClient {
     scheme: ColorScheme,
 }
 impl LocalServiceClient {
-    pub(crate) fn new(client: Client, connection_id: Uuid, scheme: ColorScheme) -> Self {
+    pub(crate) fn new(client: impl Into<Client>, connection_id: Uuid, scheme: ColorScheme) -> Self {
         Self {
-            client: Some(client),
+            client: Some(client.into()),
             pending: None,
             active_zoom: None,
             template: None,
@@ -324,7 +324,7 @@ pub(crate) fn decode_with_budget<T: DeserializeOwned>(
     Ok(lease.charge(value))
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "windows")))]
 mod tests;
 
 mod zoom;

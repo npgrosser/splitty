@@ -8,7 +8,6 @@ pub mod document;
 #[cfg(not(target_os = "windows"))]
 pub mod embedded;
 pub mod external_links;
-#[cfg(not(target_os = "windows"))]
 pub mod local_service;
 pub mod native_workspace;
 pub mod shell_profiles;
@@ -21,6 +20,8 @@ pub use connection::{AnnotationDraft, Client, Event, Output, ScreenIds};
 pub use document::{Document, DocumentRead};
 #[cfg(not(target_os = "windows"))]
 pub use embedded::EmbeddedService;
-#[cfg(not(target_os = "windows"))]
 pub use local_service::LocalServiceClient;
 pub use workspace::{LocalWorkspace, SessionRoute, WorkspaceDelta};
+
+mod api_stream;
+pub mod owned_service;

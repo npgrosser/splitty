@@ -133,7 +133,7 @@ async fn scripted_tail(
         peer.finish().await.unwrap();
     });
     let client = Connector::default().local(&info).await.unwrap();
-    (client, task, dir)
+    (client.into(), task, dir)
 }
 async fn next(client: &mut LocalServiceClient) -> LocalServiceUpdate {
     tokio::time::timeout(Duration::from_secs(5), client.next_update())

@@ -7,6 +7,11 @@ model {
       metadata { module 'splitty_gpui' }
     }
 
+    gpui_startup = component 'gpui_startup' {
+      description 'Parse explicit native workspace launch options before creating a window, including an isolated Windows WSL backend target.'
+      metadata { module 'splitty_gpui::startup' }
+    }
+
     gpui_app = component 'gpui_app' {
       description 'Legacy terminal and Markdown fixture probe.'
       metadata { module 'splitty_gpui::app' }
@@ -43,6 +48,8 @@ model {
     }
 
     gpui_main -> gpui_app 'Construct and close the probe window'
+    gpui_main -> gpui_startup 'Validate process options before platform startup'
+    gpui_startup -> splitty.client_core.owned_service 'Construct the explicit platform backend configuration'
     gpui_main -> gpui_workspace 'Construct the local workspace window'
     gpui_main -> splitty.client_core.native_workspace 'Join the native workspace runtime'
     gpui_main -> offscreen 'Run an engine child before opening the UI'
@@ -61,6 +68,7 @@ model {
     gpui_appearance -> splitty.client_core.client_zoom 'Project confirmed display zoom and scope'
     gpui_workspace -> splitty.client_core.client_zoom 'Submit zoom intents and present confirmed scale'
     gpui_workspace -> splitty.client_core.native_workspace 'Submit captured transfer, assessed close and template intents; consume matching outcomes'
+    gpui_workspace -> splitty.client_core.owned_service 'Pass the selected backend into the shared workspace worker'
     gpui_workspace -> splitty.client_core.client_workspace 'Render canonical roots and the separate session-free pending template projection'
     gpui_workspace -> splitty.client_core.client_root 'Construct workspace identities in native navigation tests'
     gpui_app -> splitty.client_core.client_root 'Use the public native client API'

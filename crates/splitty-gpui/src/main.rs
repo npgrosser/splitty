@@ -1,8 +1,13 @@
 //! Explicitly invoked native UI experiment; released desktop clients are unchanged.
+#![cfg_attr(
+    all(target_os = "windows", not(debug_assertions)),
+    windows_subsystem = "windows"
+)]
 mod app;
 mod appearance;
 mod document;
 mod offscreen;
+mod startup;
 mod terminal;
 mod terminal_engine;
 mod workspace;
@@ -40,44 +45,24 @@ fn main() -> anyhow::Result<()> {
     if let Some(code) = offscreen::subprocess_exit() {
         std::process::exit(code);
     }
-    let mut smoke = false;
-    let mut probe = false;
-    let mut workspace_smoke = false;
-    let mut web = false;
-    let mut screenshot = None;
-    let mut arguments = std::env::args().skip(1);
-    while let Some(argument) = arguments.next() {
-        match argument.as_str() {
-            "--smoke" => {
-                smoke = true;
-                probe = true;
-            }
-            "--probe" => probe = true,
-            "--workspace-smoke" => workspace_smoke = true,
-            "--web-spike" => {
-                web = true;
-                probe = true;
-            }
-            "--screenshot" => {
-                screenshot =
-                    Some(std::path::PathBuf::from(arguments.next().ok_or_else(
-                        || anyhow::anyhow!("--screenshot requires a path"),
-                    )?))
-            }
-            "--help" | "-h" => {
-                println!(
-                    "splitty-gpui [--workspace-smoke] [--probe | --smoke] [--web-spike] [--screenshot PATH]\nExperimental isolated local workspace with terminal splits and tabs. --workspace-smoke exercises its real sessions, layout and keyboard routing. --probe opens the legacy terminal/Markdown fixture; --smoke checks that fixture and exits. --web-spike selects the fixture with optional CEF.\nWorkspace shortcuts: Cmd on macOS, Alt elsewhere. Modifier+T creates a tab; modifier+D splits right; modifier+Shift+D splits below; modifier+W closes the focused pane; modifier+M toggles the focused group; modifier+Shift+arrow focuses the nearest split group; modifier+PageUp/PageDown selects the previous/next tab in that group. Ctrl+Shift+Space creates a Screen; modifier+Shift+1–9 selects a Screen on verified US/German XKB layouts. Drag a tab into the tab row for exact placement, or into the pane body for a split; the tab row scrolls horizontally. Ctrl+C and Ctrl+Shift+C/V remain terminal input and copy/paste.\n--screenshot requires --smoke and the capture feature; native Linux capture remains unavailable. Manual IME and clipboard remain unverified. Released desktop clients are unchanged."
+    let startup::Options {
+        smoke,
+        probe,
+        workspace_smoke,
+        web,
+        screenshot,
+        backend,
+        help,
+    } = startup::Options::parse(
+        std::env::args().skip(1),
+        cfg!(target_os = "windows"),
+        cfg!(feature = "capture"),
+    )?;
+    if help {
+        println!(
+                    "splitty-gpui [--wsl-distro NAME --wsl-backend PATH --wsl-config-dir PATH] [--workspace-smoke] [--probe | --smoke] [--web-spike] [--screenshot PATH]\nExperimental isolated local workspace with terminal splits and tabs. Windows workspace startup requires all three WSL arguments; backend and config paths are absolute Linux paths in the named existing distribution. No WSL installation or daemon discovery is performed. --workspace-smoke exercises its real sessions, layout and keyboard routing. --probe opens the legacy terminal/Markdown fixture; --smoke checks that fixture and exits. --web-spike selects the fixture with optional CEF.\nWorkspace shortcuts: Cmd on macOS, Alt elsewhere. Modifier+T creates a tab; modifier+D splits right; modifier+Shift+D splits below; modifier+W closes the focused pane; modifier+M toggles the focused group; modifier+Shift+arrow focuses the nearest split group; modifier+PageUp/PageDown selects the previous/next tab in that group. Ctrl+Shift+Space creates a Screen; modifier+Shift+1–9 selects a Screen on verified US/German XKB layouts. Drag a tab into the tab row for exact placement, or into the pane body for a split; the tab row scrolls horizontally. Ctrl+C and Ctrl+Shift+C/V remain terminal input and copy/paste.\n--screenshot requires --smoke and the capture feature; native Linux capture remains unavailable. Manual IME and clipboard remain unverified. Released desktop clients are unchanged."
                 );
-                return Ok(());
-            }
-            other => anyhow::bail!("Unknown probe argument: {other}"),
-        }
-    }
-    if workspace_smoke && probe {
-        anyhow::bail!("--workspace-smoke cannot be combined with probe flags");
-    }
-    if screenshot.is_some() && (!smoke || !cfg!(feature = "capture")) {
-        anyhow::bail!("--screenshot requires --smoke and a build with --features capture");
+        return Ok(());
     }
     let worker = Rc::new(RefCell::new(None));
     let launched_worker = worker.clone();
@@ -97,6 +82,8 @@ fn main() -> anyhow::Result<()> {
                     title: Some(
                         if probe {
                             "Splitty native UI probe"
+                        } else if cfg!(target_os = "windows") {
+                            "Splitty · Windows preview"
                         } else {
                             "Splitty · Local"
                         }
@@ -134,6 +121,7 @@ fn main() -> anyhow::Result<()> {
                         let (workspace, owned_worker) = workspace::Workspace::new(
                             workspace_smoke,
                             reported_outcome,
+                            backend,
                             window,
                             cx,
                         );

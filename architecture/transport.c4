@@ -1,5 +1,14 @@
 model {
   extend splitty.transport {
+    api_request = component 'api_request' {
+      description 'Single API-only Peer transaction implementation with monotonic IDs, cancellation on drop, matching charged replies and uncertain mutation deadlines.'
+      metadata { module 'splitty_transport::api_request' }
+    }
+    api_request -> peer 'Own API-only receive until a matching response or cancellation'
+    api_request -> wire 'Request, Reply and Cancel envelopes without domain operations'
+    api_request -> budget 'Keep decoded responses charged through caller consumption'
+    api_request -> queue 'Exercise isolated peer resource ownership in tests'
+
     wire = component 'wire' {
       description 'Native transport version, frame kinds, generation and delivery receipts, negotiation and operation envelopes. Independent of mux protocol and backend authority.'
       metadata { module 'splitty_transport::wire' spec 'mux-protocol' }

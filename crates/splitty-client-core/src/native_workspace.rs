@@ -13,7 +13,6 @@ use crate::{
     zoom::{ZoomAction, ZoomResult},
     Event,
 };
-#[cfg(not(target_os = "windows"))]
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -176,10 +175,19 @@ pub enum Update {
 pub struct Worker {
     pub stop: Arc<AtomicBool>,
     pub cleanup_complete: Arc<AtomicBool>,
+    /// The worker exited and can be joined, even when cleanup failed. This is
+    /// deliberately separate from successful service-cleanup evidence.
+    pub finished: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<anyhow::Result<()>>>,
 }
 
-#[cfg(not(target_os = "windows"))]
+struct Finished(Arc<AtomicBool>);
+impl Drop for Finished {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 fn profile_fallback_status(
     model: &LocalWorkspace,
     connection: uuid::Uuid,
@@ -212,7 +220,6 @@ fn profile_fallback_status(
 }
 // Setup and reads stay owned across cancelled select branches. Both streams
 // share the embedded service's admission domain, but never consume each other's events.
-#[cfg(not(target_os = "windows"))]
 type LocalServiceSetup<'a> = std::pin::Pin<
     Box<
         dyn std::future::Future<Output = std::io::Result<crate::local_service::LocalServiceClient>>
@@ -220,9 +227,8 @@ type LocalServiceSetup<'a> = std::pin::Pin<
             + 'a,
     >,
 >;
-#[cfg(not(target_os = "windows"))]
 struct RuntimeLocalService<'a> {
-    service: &'a crate::EmbeddedService,
+    service: &'a crate::owned_service::OwnedService,
     connection: uuid::Uuid,
     scheme: ColorScheme,
     setup: Option<LocalServiceSetup<'a>>,
@@ -230,10 +236,9 @@ struct RuntimeLocalService<'a> {
     dirty: bool,
     settings_dirty: bool,
 }
-#[cfg(not(target_os = "windows"))]
 impl<'a> RuntimeLocalService<'a> {
     fn new(
-        service: &'a crate::EmbeddedService,
+        service: &'a crate::owned_service::OwnedService,
         connection: uuid::Uuid,
         scheme: ColorScheme,
     ) -> Self {
@@ -371,7 +376,6 @@ impl<'a> RuntimeLocalService<'a> {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 struct PendingClose {
     request_id: u64,
     target: CloseTarget,
@@ -379,7 +383,6 @@ struct PendingClose {
     catalog_barrier_seen: bool,
     failure: Option<String>,
 }
-#[cfg(not(target_os = "windows"))]
 impl PendingClose {
     fn is_duplicate(&self, request_id: u64) -> bool {
         self.request_id == request_id
@@ -435,7 +438,6 @@ impl PendingClose {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 fn validate_pre_discovery_close(plan: &ClosePlan, confirmed: bool) -> std::io::Result<()> {
     if confirmed && *plan == ClosePlan::startup_window(plan.request_id) {
         Ok(())
@@ -447,9 +449,8 @@ fn validate_pre_discovery_close(plan: &ClosePlan, confirmed: bool) -> std::io::R
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 async fn finish_owned_run(
-    service: crate::EmbeddedService,
+    service: crate::owned_service::OwnedService,
     result: anyhow::Result<()>,
     cleanup_complete: &AtomicBool,
     stop: &AtomicBool,
@@ -475,11 +476,30 @@ impl Worker {
         updates: mpsc::Sender<Update>,
         scheme: ColorScheme,
     ) -> Self {
+        Self::start_with_backend(
+            commands,
+            updates,
+            scheme,
+            crate::owned_service::LocalBackend::default(),
+        )
+    }
+
+    pub fn start_with_backend(
+        commands: mpsc::Receiver<Command>,
+        updates: mpsc::Sender<Update>,
+        scheme: ColorScheme,
+        backend: crate::owned_service::LocalBackend,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let cleanup_complete = Arc::new(AtomicBool::new(false));
         let completed = cleanup_complete.clone();
+        let finished = Arc::new(AtomicBool::new(false));
+        let completion = finished.clone();
         let thread = thread::spawn(move || {
+            // Declared before the runtime: its drop (including cleanup tasks)
+            // precedes this completion signal on every return/unwind path.
+            let _finished = Finished(completion);
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .worker_threads(2)
                 .enable_all()
@@ -492,7 +512,15 @@ impl Worker {
                 }
             };
             runtime.block_on(async {
-                let result = run(commands, updates.clone(), stopping, completed, scheme).await;
+                let result = run(
+                    commands,
+                    updates.clone(),
+                    stopping,
+                    completed,
+                    scheme,
+                    backend,
+                )
+                .await;
                 if let Err(error) = &result {
                     let _ = updates.try_send(Update::Status(format!("Local service: {error:#}")));
                 }
@@ -502,6 +530,7 @@ impl Worker {
         Self {
             stop,
             cleanup_complete,
+            finished,
             thread: Some(thread),
         }
     }
@@ -516,7 +545,6 @@ impl Worker {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 async fn publish(
     updates: &mpsc::Sender<Update>,
     update: Update,
@@ -533,28 +561,20 @@ async fn publish(
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 async fn run(
     commands: mpsc::Receiver<Command>,
     updates: mpsc::Sender<Update>,
     stop: Arc<AtomicBool>,
     cleanup_complete: Arc<AtomicBool>,
     scheme: ColorScheme,
+    backend: crate::owned_service::LocalBackend,
 ) -> anyhow::Result<()> {
-    run_service(
-        crate::EmbeddedService::start(),
-        commands,
-        updates,
-        stop,
-        cleanup_complete,
-        scheme,
-    )
-    .await
+    let service = crate::owned_service::OwnedService::start(backend, &stop).await?;
+    run_service(service, commands, updates, stop, cleanup_complete, scheme).await
 }
 
-#[cfg(not(target_os = "windows"))]
 async fn run_service(
-    service: crate::EmbeddedService,
+    service: impl Into<crate::owned_service::OwnedService>,
     mut commands: mpsc::Receiver<Command>,
     updates: mpsc::Sender<Update>,
     stop: Arc<AtomicBool>,
@@ -562,6 +582,7 @@ async fn run_service(
     scheme: ColorScheme,
 ) -> anyhow::Result<()> {
     use crate::workspace::WorkspaceDelta;
+    let service = service.into();
     let mut client = match service.connect().await {
         Ok(client) => client,
         Err(error) => {
@@ -1534,7 +1555,9 @@ mod close_tests {
     async fn appearance_runtime_rejects_foreign_refresh_and_finishes_started_setup() {
         use std::{future::Future, task::Poll};
         let (runtime, path) = crate::appearance::local::tests::fixture();
-        let service = crate::embedded::EmbeddedService::from_runtime(runtime);
+        let service = crate::owned_service::OwnedService::from(
+            crate::embedded::EmbeddedService::from_runtime(runtime),
+        );
         let connection = uuid::Uuid::new_v4();
         let mut appearance = RuntimeLocalService::new(&service, connection, ColorScheme::Light);
         // Start setup, cancel just the receiving branch, then change the local
@@ -1602,7 +1625,9 @@ mod close_tests {
         let (mut runtime, path) = crate::appearance::local::tests::fixture();
         // Fail native identity validation inside the actual embedded handshake.
         Arc::get_mut(&mut runtime.state).unwrap().instance = "invalid".into();
-        let service = crate::embedded::EmbeddedService::from_runtime(runtime);
+        let service = crate::owned_service::OwnedService::from(
+            crate::embedded::EmbeddedService::from_runtime(runtime),
+        );
         let mut appearance =
             RuntimeLocalService::new(&service, uuid::Uuid::new_v4(), ColorScheme::Dark);
         let mut read = Box::pin(next_appearance(&mut appearance));
@@ -1628,7 +1653,9 @@ mod close_tests {
         let (runtime, path) = crate::appearance::local::tests::fixture();
         let state = runtime.state.clone();
         state.config.write().unwrap().appearance.font_family = "x".repeat(4097);
-        let service = crate::embedded::EmbeddedService::from_runtime(runtime);
+        let service = crate::owned_service::OwnedService::from(
+            crate::embedded::EmbeddedService::from_runtime(runtime),
+        );
         let (commands, receiver) = mpsc::channel(32);
         let (sender, mut updates) = mpsc::channel(64);
         let stop = Arc::new(AtomicBool::new(false));
@@ -2023,7 +2050,7 @@ mod close_tests {
         let completed = AtomicBool::new(false);
         let stop = AtomicBool::new(false);
         let error = finish_owned_run(
-            service,
+            service.into(),
             Err(anyhow::anyhow!("connection failed before client admission")),
             &completed,
             &stop,
@@ -2218,20 +2245,6 @@ mod close_tests {
     }
 }
 
-#[cfg(target_os = "windows")]
-async fn run(
-    _: mpsc::Receiver<Command>,
-    _: mpsc::Sender<Update>,
-    _: Arc<AtomicBool>,
-    cleanup_complete: Arc<AtomicBool>,
-    _: ColorScheme,
-) -> anyhow::Result<()> {
-    cleanup_complete.store(true, Ordering::Release); // no owned service was started
-    anyhow::bail!(
-        "The native Windows workspace needs its owned WSL launcher; this development launcher is not wired yet"
-    )
-}
-
 #[cfg(all(test, not(target_os = "windows")))]
 mod profile_launch_tests;
 
@@ -2245,3 +2258,21 @@ mod transfer_tests;
 mod floating_tests;
 #[cfg(all(test, not(target_os = "windows")))]
 mod template_tests;
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_startup_tests {
+    use super::*;
+    #[test]
+    fn missing_explicit_backend_finishes_but_does_not_claim_successful_cleanup() {
+        let (_commands, receiver) = mpsc::channel(4);
+        let (updates, _receiver) = mpsc::channel(4);
+        let worker = Worker::start(receiver, updates);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !worker.finished.load(Ordering::Acquire) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(!worker.cleanup_complete.load(Ordering::Acquire));
+        assert!(worker.shutdown().is_err());
+    }
+}

@@ -335,3 +335,7 @@ Each point names what holds now, the alternative, and where it is recorded.
 - **`native-layout-templates`, NLT-2** (2026-11-07, provisional, tbd): existing-Screen replacement always needs explicit confirmation; a new Screen without commands needs no extra warning. Commands require an explicit choice without an Enter-to-run default.
 - **`native-layout-templates`, NLT-3** (2026-11-07, provisional, tbd): use a session-free pending projection with canonical routes retained separately; later navigation hides it without cancelling the admitted mutation.
 - **`native-layout-templates`, NLT-4** (2026-11-07, provisional, tbd): reuse the existing concrete auxiliary stream and file API semantics; no versioned file writes, generic task framework or second service.
+
+- **`native-windows-workspace`, NWW-1** (2026-11-07, provisional, tbd): explicit existing-distribution/backend/configuration arguments for the development executable; no automatic provisioning or distribution selector.
+- **`native-windows-workspace`, NWW-2** (2026-11-07, provisional, tbd): move the pure catalog and existing request transaction to shared lower layers, using concrete stream/service wrappers and one worker rather than platform-specific orchestration copies.
+- **`native-windows-workspace`, NWW-3** (2026-11-07, provisional, tbd): deliver a local optimized Windows preview plus launcher and matching WSL backend; releases, installers and full merge CI remain separate.

@@ -1,5 +1,5 @@
 use super::*;
-use serde_json::json;
+use serde_json::{json, Map, Value};
 use std::collections::BTreeSet;
 use syn::visit::{self, Visit};
 
@@ -116,7 +116,7 @@ fn credentials_administration_and_generic_proxy_are_not_native_operations() {
     ] {
         let request = json!({"operation": name, "args": {"url": "http://127.0.0.1/"}});
         assert!(
-            Request::parse(&serde_json::to_vec(&request).expect("JSON"), Role::Main).is_err(),
+            parse_request(&serde_json::to_vec(&request).expect("JSON"), Role::Main).is_err(),
             "{name}"
         );
     }
@@ -139,7 +139,7 @@ fn credentials_administration_and_generic_proxy_are_not_native_operations() {
                 request[field] = json!("attacker-chosen");
             }
             assert!(
-                Request::parse(&serde_json::to_vec(&request).expect("JSON"), Role::Main).is_err(),
+                parse_request(&serde_json::to_vec(&request).expect("JSON"), Role::Main).is_err(),
                 "{field}, in_args={in_args}"
             );
         }
@@ -160,31 +160,31 @@ fn remote_roles_cannot_use_the_assigned_backend_to_obtain_hub_authority() {
     }
     let request = br#"{"operation":"session.send","args":{"id":"terminal-1","body":{"data":"printf hello\n"}}}"#;
     assert!(
-        Request::parse(request, Role::Remote).is_ok(),
+        parse_request(request, Role::Remote).is_ok(),
         "intended terminal authority stays available on its assigned service"
     );
 }
 
 #[test]
 fn argument_shapes_and_existing_smaller_job_limits_are_enforced() {
-    assert!(Request::parse(br#"{"operation":"mux.screen"}"#, Role::Main).is_err());
-    assert!(Request::parse(
+    assert!(parse_request(br#"{"operation":"mux.screen"}"#, Role::Main).is_err());
+    assert!(parse_request(
         br#"{"operation":"mux.screen","args":{"id":null}}"#,
         Role::Main
     )
     .is_err());
-    assert!(Request::parse(
+    assert!(parse_request(
         br#"{"operation":"theme.get","args":{"name":"dark"}}"#,
         Role::Main
     )
     .is_ok());
     let request = serde_json::to_vec(&json!({"operation":"job.input","args":{"id":"job-1","body":{"data":"x".repeat(MAX_JOB_BODY)}}})).expect("JSON");
     assert!(matches!(
-        Request::parse(&request, Role::Main),
+        parse_request(&request, Role::Main),
         Err(Rejection::TooLarge)
     ));
     assert!(matches!(
-        Request::parse(&vec![b' '; MAX_API_BODY + 1], Role::Main),
+        parse_request(&vec![b' '; MAX_API_BODY + 1], Role::Main),
         Err(Rejection::TooLarge)
     ));
 }
@@ -228,4 +228,17 @@ fn validate_session_test(
     bytes: &[u8],
 ) -> Result<splitty_transport::budget::Charged<Value>, Rejection> {
     validate_session(bytes, &Default::default())
+}
+
+fn parse_request(bytes: &[u8], role: Role) -> Result<Request, Rejection> {
+    if bytes.len() > MAX_API_BODY {
+        return Err(Rejection::TooLarge);
+    }
+    let request: Request =
+        serde_json::from_slice(bytes).map_err(|error| Rejection::Invalid(error.to_string()))?;
+    if bytes.len() > request.operation.description().body_limit {
+        return Err(Rejection::TooLarge);
+    }
+    request.validate(role)?;
+    Ok(request)
 }

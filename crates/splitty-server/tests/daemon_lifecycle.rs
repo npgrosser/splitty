@@ -3681,15 +3681,7 @@ fn rust_embedded_owner_shares_runtime_across_reload_and_reaps_its_jobs() {
         use splitty_remote::owner::{Connection, Owner};
         use splitty_transport::{queue, wire::{self, Kind}};
         async fn request(connection: &mut Connection, operation: &str, args: serde_json::Value) -> wire::Reply {
-            static REQUEST_ID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
-            let id = REQUEST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            connection.sender().json(Kind::Request, &wire::Request { id, operation: operation.into(), args: args.as_object().unwrap().clone() }).unwrap();
-            tokio::time::timeout(READ_TIMEOUT, async {
-                loop {
-                    let message = connection.recv().await.expect("live owner stream");
-                    if message.frame.kind == Kind::Reply { break message.frame.decode::<wire::Reply>().unwrap(); }
-                }
-            }).await.unwrap()
+            (*connection.request(operation.into(), args.as_object().unwrap().clone(), Some(READ_TIMEOUT)).await.unwrap()).clone()
         }
         let owner = Owner::spawn(tokio::process::Command::from(command), 1).await.unwrap();
         let pid = i32::try_from(owner.id().unwrap()).unwrap();
@@ -3699,6 +3691,22 @@ fn rust_embedded_owner_shares_runtime_across_reload_and_reaps_its_jobs() {
         let mut first = owner.open_context(None, false, first_context.clone(), |_| {}).await.unwrap();
         let mut second = owner.open_context(None, false, second_context.clone(), |_| {}).await.unwrap();
         assert_eq!(owner.stream_count(), 2);
+        let mut session = owner.open_context(None, false, queue::Context::default(), |_| {}).await.unwrap();
+        // An API-only receiver must never consume this session's welcome/output.
+        let welcome = tokio::time::timeout(READ_TIMEOUT, async {
+            loop {
+                let frame = session.recv().await.unwrap();
+                if frame.frame.kind == Kind::Text {
+                    let value: serde_json::Value = frame.frame.decode().unwrap();
+                    if value["type"] == "mux.welcome" { break value; }
+                }
+            }
+        }).await.unwrap();
+        assert_eq!(welcome["type"], "mux.welcome");
+        for operation in ["home.get", "shellProfiles.get", "template.list"] {
+            assert_eq!(request(&mut first, operation, serde_json::json!({})).await.status, 200);
+        }
+        session.finish().await.unwrap();
         let instance = first.ready().instance.clone();
         assert_eq!(second.ready().instance, instance);
         let reply = request(&mut first, "mux.op", serde_json::json!({"body":{"screenId":"rust-owner-screen","op":{
@@ -3732,7 +3740,7 @@ fn rust_embedded_owner_shares_runtime_across_reload_and_reaps_its_jobs() {
                 tokio::task::yield_now().await;
             }
         }).await.unwrap();
-        tokio::time::timeout(Duration::from_secs(3), owner.close()).await.unwrap();
+        tokio::time::timeout(Duration::from_secs(3), owner.close_result()).await.unwrap().unwrap();
         assert!(kill(Pid::from_raw(pid), None).is_err(), "owner completion observes helper exit");
         assert!(kill(Pid::from_raw(job_pid), None).is_err(), "owner exit includes its managed job; remaining process: {:?}", fs::read_to_string(format!("/proc/{job_pid}/stat")));
         second.finish().await.unwrap();

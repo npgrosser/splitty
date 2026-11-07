@@ -10,3 +10,5 @@ pub mod queue;
 pub mod requests;
 pub mod wire;
 pub mod worker;
+
+pub mod api_request;

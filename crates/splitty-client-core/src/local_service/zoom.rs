@@ -1,7 +1,8 @@
 use super::decode;
+use crate::api_stream::ApiStream as Client;
 use crate::zoom::{Zoom, ZoomAction, ZoomOutcome, ZoomResult};
 use serde::Deserialize;
-use splitty_server::{native::client::Client, service::catalog::Operation};
+use splitty_core::native_api::Operation;
 use splitty_transport::wire;
 use tokio::sync::Notify;
 use uuid::Uuid;
