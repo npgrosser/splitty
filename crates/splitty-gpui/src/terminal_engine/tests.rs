@@ -118,6 +118,26 @@ fn keys_follow_modes_and_leave_printable_commits_to_platform() -> Result<()> {
 }
 
 #[test]
+fn active_screen_tracks_vt_switch_and_arrow_encoding_mode() -> Result<()> {
+    let mut engine = Engine::new(40, 8)?;
+    assert!(!engine.is_alternate_screen()?);
+    engine.feed(b"\x1b[?1049h", false)?;
+    assert!(engine.is_alternate_screen()?);
+    assert_eq!(
+        engine.key("up", false, false, false)?,
+        Some(b"\x1b[A".to_vec())
+    );
+    engine.feed(b"\x1b[?1h", false)?;
+    assert_eq!(
+        engine.key("up", false, false, false)?,
+        Some(b"\x1bOA".to_vec())
+    );
+    engine.feed(b"\x1b[?1049l", false)?;
+    assert!(!engine.is_alternate_screen()?);
+    Ok(())
+}
+
+#[test]
 fn paste_preserves_policy_and_submits_complete_brackets() -> Result<()> {
     let mut engine = Engine::new(20, 3)?;
     assert_eq!(engine.paste("a\r\nb\nc")?, b"a\rb\rc");

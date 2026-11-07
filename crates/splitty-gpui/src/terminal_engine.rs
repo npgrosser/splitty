@@ -225,6 +225,28 @@ impl Engine {
         check(unsafe { ffi::ghostty_terminal_scroll_viewport(self.terminal, scroll) })
     }
 
+    /// The pinned terminal.h exposes GhosttyTerminalScreen as a C enum.
+    /// Keep the mode query beside the native handle so the view never reads
+    /// emulator state through presentation cells or output bytes.
+    pub fn is_alternate_screen(&self) -> Result<bool> {
+        const DATA_ACTIVE_SCREEN: i32 = 6;
+        let mut screen = 0i32;
+        // SAFETY: terminal.h documents a GhosttyTerminalScreen* output for
+        // data key 6. C enums have the same representation as c_int here.
+        check(unsafe {
+            ffi::ghostty_terminal_get(
+                self.terminal,
+                DATA_ACTIVE_SCREEN,
+                ptr::from_mut(&mut screen).cast(),
+            )
+        })?;
+        match screen {
+            0 => Ok(false),
+            1 => Ok(true),
+            other => bail!("Unknown Ghostty active screen: {other}"),
+        }
+    }
+
     pub fn key(
         &mut self,
         key: &str,
