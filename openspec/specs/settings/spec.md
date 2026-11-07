@@ -121,17 +121,22 @@ Native profile reads SHALL belong to the local workspace connection, retain the 
 - **THEN** foreign data is not applied and shutdown cancels pending reads and awaits owned stream cleanup without retaining delivery allocations
 
 ### Requirement: Native Local Drawer Preferences
-The native local workspace SHALL restore Drawer visibility and supported width from the assigned local service's `drawer.pinned` and `drawer.sidebarWidth` settings through `home.get`. An explicit visibility change SHALL update only `drawer.pinned` through `home.update`. Loading preferences SHALL NOT write settings, and foreign or superseded reads SHALL NOT replace current presentation.
+The native local workspace SHALL restore Drawer pinning and supported width from the assigned local service's `drawer.pinned` and `drawer.sidebarWidth` settings through `home.get`. An explicit pin change SHALL update only `drawer.pinned` through `home.update`. Temporary edge reveal or dismissal SHALL NOT mutate settings. Loading preferences SHALL NOT write settings, and foreign or superseded reads SHALL NOT replace current presentation.
 
 #### Scenario: Restore saved preferences
 - **WHEN** the native workspace starts or receives a same-service settings change
-- **THEN** the latest valid local Drawer visibility and bounded width are applied
+- **THEN** the latest valid local Drawer pinning and bounded width are applied
 - **AND** loading or applying those values performs no settings mutation
 
 #### Scenario: Explicit visibility update
-- **WHEN** the user changes Drawer visibility and the local service confirms the update
+- **WHEN** the user changes Drawer pinning and the local service confirms the update
 - **THEN** the effective value is retained by the service and can be restored by a later workspace
 - **AND** unrelated settings remain unchanged
+
+#### Scenario: Temporary unpinned reveal
+- **WHEN** an unpinned Drawer is revealed from the window edge or dismissed
+- **THEN** only transient window presentation changes, without a settings write
+- **AND** revealing it preserves terminal sessions and the terminal workspace geometry
 
 ### Requirement: Native Drawer Mutation Outcomes
 Native Drawer updates SHALL retain connection and request identity, admit at most one pending visibility update and never automatically repeat a mutation. Explicit rejection SHALL retain confirmed presentation and expose failure. An unavailable, uncertain or invalid mutation reply SHALL expose uncertainty and refresh current settings without claiming a persisted outcome. Shutdown SHALL join owned API cleanup.

@@ -423,13 +423,18 @@ Native relative Screen navigation SHALL use the current authoritative catalog or
 - **THEN** the intent does not change another group's selection
 
 ### Requirement: Native Navigation Input Ownership
-Native chrome navigation SHALL leave terminal wheel input with the terminal's existing application/scrollback routing. Editing, confirmation and drag interactions SHALL retain priority over chrome wheel navigation. Horizontal tab-strip scrolling SHALL remain available independently of relative tab selection.
+Native chrome navigation SHALL leave terminal wheel input with the terminal's existing application/scrollback routing. Editing, confirmation and drag interactions SHALL retain priority over chrome wheel navigation. Ordinary vertical wheel input over the Drawer SHALL select neighboring Screens. Deliberate list-overflow scrolling and horizontal tab-strip scrolling SHALL remain available independently of relative selection.
 
 #### Scenario: Terminal and active editing retain input
 - **WHEN** wheel input occurs over terminal content or while an editing, confirmation or drag interaction owns the workspace
 - **THEN** chrome wheel navigation changes neither the shown Screen nor the selected tab
 - **AND** terminal input retains its existing routing where applicable
 
+#### Scenario: Drawer navigation owns its wheel input
+- **WHEN** ordinary vertical wheel input occurs over the Drawer without another interaction owning input
+- **THEN** the neighboring Screen is selected once in displayed order, without wrapping
+- **AND** the event is not delivered to terminal content behind the Drawer
+
 #### Scenario: Overflow browsing
-- **WHEN** a user scrolls a long Screen list or scrolls horizontally through an overflowing tab strip
+- **WHEN** a user deliberately scrolls a long Screen list through a modified wheel gesture, or scrolls horizontally through an overflowing tab strip
 - **THEN** the view reveals the overflow without changing the selected Screen or tab
