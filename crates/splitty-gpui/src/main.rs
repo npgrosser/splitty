@@ -70,7 +70,8 @@ fn main() -> anyhow::Result<()> {
     let reported_window_error = window_error.clone();
     let outcome = Arc::new(AtomicBool::new(false));
     let reported_outcome = outcome.clone();
-    gpui_kit::application().run(move |cx| {
+    let application = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
+    application.run(move |cx| {
         gpui_kit::init(cx);
         gpui_kit::component::theme::Theme::change(
             gpui_kit::component::theme::ThemeMode::Dark,

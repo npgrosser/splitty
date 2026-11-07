@@ -1,4 +1,5 @@
 //! Native projection of one authoritative local screen; no independent dock tree.
+mod chrome;
 mod drawer;
 mod floating;
 mod shell_profiles;
@@ -7,8 +8,13 @@ mod transfer;
 
 use crate::appearance::NativeAppearance;
 use crate::terminal::{self, Terminal};
+use gpui_kit::assets::IconName;
 use gpui_kit::base::input::{Input, InputEvent, InputState};
-use gpui_kit::base::{Popover, Theme};
+use gpui_kit::base::{GlobalState, Popover, Theme};
+use gpui_kit::component::{
+    button::{Button, ButtonVariants},
+    Icon, Sizable,
+};
 use gpui_kit::{prelude::*, *};
 use splitty_client_core::appearance::{
     AppearanceSnapshot, ColorScheme, DrawerVisibilityOutcome, DrawerVisibilityResult,
@@ -2484,6 +2490,12 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if GlobalState::is_in_deferred_context(cx) {
+            if self.drop_target.take().is_some() {
+                cx.notify();
+            }
+            return;
+        }
         let drag = event.drag(cx);
         let target = if drag.owner == cx.entity().entity_id() {
             self.drop_target_at(&drag.origin, event.event.position)
@@ -2573,7 +2585,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.drop_target = None;
-        if drag.owner != cx.entity().entity_id() {
+        if drag.owner != cx.entity().entity_id() || GlobalState::is_in_deferred_context(cx) {
             return;
         }
         let intent = self.drop_target_at(&drag.origin, window.mouse_position());
@@ -2746,33 +2758,6 @@ impl Workspace {
             }
         }
     }
-    fn float_tab(&mut self, cx: &mut Context<Self>) {
-        let Some(model) = self.model.as_ref() else {
-            return;
-        };
-        let Some(pane) = model.focused_pane() else {
-            return;
-        };
-        match model.capture_pane_action(pane) {
-            Ok(source) if model.can_float_pane(&source) => {
-                let request_id = Uuid::new_v4();
-                self.submit_float_action(
-                    request_id,
-                    Command::FloatPane { request_id, source },
-                    true,
-                    cx,
-                );
-            }
-            Ok(_) => {
-                self.status = "Float Tab needs another tiled terminal".into();
-                cx.notify();
-            }
-            Err(error) => {
-                self.status = format!("Float Tab: {error}");
-                cx.notify();
-            }
-        }
-    }
     fn dock_float(&mut self, id: &str, cx: &mut Context<Self>) {
         let target = self
             .model
@@ -2833,6 +2818,9 @@ impl Workspace {
         position: Point<Pixels>,
         cx: &mut Context<Self>,
     ) {
+        if GlobalState::is_in_deferred_context(cx) {
+            return;
+        }
         let Some(viewport) = self.float_viewport else {
             return;
         };
@@ -2995,6 +2983,7 @@ impl Workspace {
                     let key = pane.to_string();
                     let close = key.clone();
                     let right_click = key.clone();
+                    let close_weak = cx.entity().downgrade();
                     let active = selected == Some(pane.as_str());
                     let title = self
                         .model
@@ -3004,69 +2993,76 @@ impl Workspace {
                         .and_then(|pane| pane.title.clone())
                         .filter(|title| !title.is_empty())
                         .unwrap_or_else(|| format!("Terminal {}", index + 1));
-                    tabs =
-                        tabs.child(
-                            div()
-                                .id(SharedString::from(format!("tab-{pane}")))
-                                .flex()
-                                .flex_none()
-                                .items_center()
-                                .gap_3()
-                                .px_3()
-                                .cursor_pointer()
-                                .bg(rgb(if active {
-                                    self.appearance.active
-                                } else {
-                                    self.appearance.raised
-                                }))
-                                .text_color(rgb(if active {
-                                    self.appearance.text
-                                } else {
-                                    self.appearance.secondary
-                                }))
-                                .on_click(cx.listener(move |this, _, window, cx| {
-                                    this.select(&key, window, cx)
-                                }))
-                                .on_mouse_down(
-                                    MouseButton::Right,
-                                    cx.listener(move |this, _, window, cx| {
+                    tabs = tabs.child(
+                        div()
+                            .id(SharedString::from(format!("tab-{pane}")))
+                            .flex()
+                            .flex_none()
+                            .items_center()
+                            .gap_2()
+                            .pl_3()
+                            .pr_1()
+                            .bg(rgb(if active {
+                                self.appearance.active
+                            } else {
+                                self.appearance.raised
+                            }))
+                            .text_color(rgb(if active {
+                                self.appearance.text
+                            } else {
+                                self.appearance.secondary
+                            }))
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                if !GlobalState::is_in_deferred_context(cx) {
+                                    this.select(&key, window, cx);
+                                }
+                            }))
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(move |this, _, window, cx| {
+                                    cx.stop_propagation();
+                                    this.open_transfer_menu(&right_click, window, cx);
+                                }),
+                            )
+                            .when_some(
+                                (surface == Surface::Tiled
+                                    && !GlobalState::is_in_deferred_context(cx))
+                                .then(|| {
+                                    self.model
+                                        .as_ref()
+                                        .and_then(|model| model.capture_drag(pane.as_str()))
+                                })
+                                .flatten(),
+                                |view, origin| {
+                                    view.on_drag(
+                                        TabDrag {
+                                            origin,
+                                            owner: cx.entity().entity_id(),
+                                        },
+                                        |_, _, _, cx| cx.new(|_| DragPreview),
+                                    )
+                                },
+                            )
+                            .child(Icon::new(IconName::SquareTerminal).xsmall())
+                            .child(
+                                div()
+                                    .id(SharedString::from(format!("drag-tab-{pane}")))
+                                    .max_w(chrome_rems(180.))
+                                    .overflow_hidden()
+                                    .child(title.clone()),
+                            )
+                            .child(self.render_transfer_menu(pane.as_str(), cx))
+                            .child(
+                                Button::new(SharedString::from(format!("close-{pane}")))
+                                    .accessibility_label(format!("Close {title}"))
+                                    .tooltip(format!("Close {title}"))
+                                    .icon(Icon::new(IconName::X))
+                                    .ghost()
+                                    .compact()
+                                    .xsmall()
+                                    .on_click(move |_, window, cx| {
                                         cx.stop_propagation();
-                                        this.open_transfer_menu(&right_click, window, cx);
-                                    }),
-                                )
-                                .when_some(
-                                    (surface == Surface::Tiled)
-                                        .then(|| {
-                                            self.model
-                                                .as_ref()
-                                                .and_then(|model| model.capture_drag(pane.as_str()))
-                                        })
-                                        .flatten(),
-                                    |view, origin| {
-                                        view.on_drag(
-                                            TabDrag {
-                                                origin,
-                                                owner: cx.entity().entity_id(),
-                                            },
-                                            |_, _, _, cx| cx.new(|_| DragPreview),
-                                        )
-                                    },
-                                )
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("drag-tab-{pane}")))
-                                        .max_w(chrome_rems(180.))
-                                        .overflow_hidden()
-                                        .child(title),
-                                )
-                                .child(self.render_transfer_menu(pane.as_str(), cx))
-                                .child(
-                                    div()
-                                        .id(SharedString::from(format!("close-{pane}")))
-                                        .px_1()
-                                        .child("×")
-                                        .on_click(cx.listener(move |this, _, window, cx| {
-                                            cx.stop_propagation();
+                                        let _ = close_weak.update(cx, |this, cx| {
                                             if let Some(screen) = this
                                                 .model
                                                 .as_ref()
@@ -3081,47 +3077,19 @@ impl Workspace {
                                                     cx,
                                                 );
                                             }
-                                        })),
-                                ),
-                        );
+                                        });
+                                    }),
+                            ),
+                    );
                 }
-                let new_tab = selected.map(str::to_owned);
-                let plain_tab = new_tab.clone();
-                let mut header = div()
+                let header = div()
                     .flex()
                     .items_center()
                     .flex_none()
                     .h(chrome_rems((self.appearance.font_size + 19.).max(32.)))
                     .bg(rgb(self.appearance.raised))
                     .child(tabs)
-                    .child(
-                        div()
-                            .id(SharedString::from(format!("new-tab-{id}")))
-                            .flex_none()
-                            .px_3()
-                            .cursor_pointer()
-                            .child("+")
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(pane) = &plain_tab {
-                                    this.send(Command::Tab(pane.clone()), cx);
-                                }
-                            })),
-                    );
-                if let Some(pane) = new_tab {
-                    let slot = id.to_string();
-                    header = header.child(
-                        div()
-                            .id(SharedString::from(format!("shell-profile-picker-{id}")))
-                            .flex_none()
-                            .px_2()
-                            .cursor_pointer()
-                            .child("▾")
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.toggle_profile_picker(&slot, &pane, window, cx);
-                            })),
-                    );
-                }
+                    .child(self.render_group_actions(id.as_str(), selected, surface, cx));
                 let focused = self
                     .model
                     .as_ref()
@@ -3130,6 +3098,7 @@ impl Workspace {
                 let bounds_id = id.to_string();
                 let target = id.to_string();
                 let entity = cx.entity();
+                let chrome_scale = self.appearance.zoom.window_scale();
                 let mut slot = div()
                     .id(SharedString::from(format!("slot-{id}")))
                     .relative()
@@ -3152,8 +3121,18 @@ impl Workspace {
                     .child(
                         canvas(
                             move |bounds, _, cx| {
-                                entity.update(cx, |this, _| {
-                                    this.slot_bounds.insert(bounds_id.clone(), bounds);
+                                entity.update(cx, |this, cx| {
+                                    let previous =
+                                        this.slot_bounds.insert(bounds_id.clone(), bounds);
+                                    if chrome::compact_group_actions(
+                                        previous.map(|bounds| bounds.size.width),
+                                        chrome_scale,
+                                    ) != chrome::compact_group_actions(
+                                        Some(bounds.size.width),
+                                        chrome_scale,
+                                    ) {
+                                        cx.notify();
+                                    }
                                 })
                             },
                             |_, (), _, _| {},
@@ -3300,6 +3279,9 @@ impl Workspace {
                                     divider.on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
+                                            if GlobalState::is_in_deferred_context(cx) {
+                                                return;
+                                            }
                                             this.begin_resize(
                                                 node.clone(),
                                                 axis.clone(),
@@ -3396,33 +3378,57 @@ impl Workspace {
                         div()
                             .id(SharedString::from(format!("float-dock-{id}")))
                             .flex_none()
-                            .px_2()
-                            .cursor_pointer()
-                            .child("Dock")
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|_, _, _, cx| cx.stop_propagation()),
                             )
-                            .on_click(cx.listener(move |this, _, _, cx| {
-                                cx.stop_propagation();
-                                this.dock_float(&dock_id, cx);
-                            })),
+                            .child(
+                                Button::new(SharedString::from(format!("dock-button-{id}")))
+                                    .accessibility_label("Dock this floating group")
+                                    .tooltip("Dock this floating group")
+                                    .icon(Icon::new(IconName::PanelsTopLeft))
+                                    .ghost()
+                                    .compact()
+                                    .small()
+                                    .on_click({
+                                        let weak = cx.entity().downgrade();
+                                        move |_, _, cx| {
+                                            cx.stop_propagation();
+                                            let _ = weak.update(cx, |this, cx| {
+                                                this.dock_float(&dock_id, cx)
+                                            });
+                                        }
+                                    }),
+                            ),
                     )
                     .child(
                         div()
                             .id(SharedString::from(format!("float-maximize-{id}")))
                             .flex_none()
-                            .px_2()
-                            .cursor_pointer()
-                            .child("Maximize")
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|_, _, _, cx| cx.stop_propagation()),
                             )
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.maximize_float(&maximize_id, window, cx);
-                            })),
+                            .child(
+                                Button::new(SharedString::from(format!(
+                                    "float-maximize-button-{id}"
+                                )))
+                                .accessibility_label("Maximize this floating group")
+                                .tooltip("Maximize this floating group")
+                                .icon(Icon::new(IconName::Maximize))
+                                .ghost()
+                                .compact()
+                                .small()
+                                .on_click({
+                                    let weak = cx.entity().downgrade();
+                                    move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        let _ = weak.update(cx, |this, cx| {
+                                            this.maximize_float(&maximize_id, window, cx)
+                                        });
+                                    }
+                                }),
+                            ),
                     ),
             )
             .child(div().flex_1().min_h_0().min_w_0().child(self.render_node(
@@ -3464,32 +3470,6 @@ impl Render for Workspace {
         } else {
             "Alt"
         };
-        let empty_screen = self
-            .model
-            .as_ref()
-            .and_then(LocalWorkspace::snapshot)
-            .is_some_and(|screen| screen.panes.is_empty());
-        let floating_focus = self
-            .model
-            .as_ref()
-            .and_then(LocalWorkspace::focused_pane)
-            .is_some_and(|pane| {
-                self.model
-                    .as_ref()
-                    .is_some_and(|model| !model.is_root_pane(pane))
-            });
-        let can_float = self
-            .model
-            .as_ref()
-            .and_then(|model| {
-                model.focused_pane().and_then(|pane| {
-                    model
-                        .capture_pane_action(pane)
-                        .ok()
-                        .map(|source| model.can_float_pane(&source))
-                })
-            })
-            .unwrap_or(false);
         let appearance_message = self
             .appearance_error
             .as_ref()
@@ -3576,152 +3556,27 @@ impl Render for Workspace {
                         div()
                             .flex_none()
                             .font_weight(FontWeight::BOLD)
-                            .child("SPLITTY"),
+                            .child("splitty"),
                     )
                     .child(self.render_drawer_toggle(cx))
-                    .child(
-                        div()
-                            .id("current-screen-wheel")
-                            .flex_none()
-                            .px_2()
-                            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
-                                this.chrome_wheel(WheelTarget::Screens, event, window, cx);
-                            }))
-                            .child(
-                                self.model
-                                    .as_ref()
-                                    .and_then(|model| {
-                                        let shown = model.shown_screen_id()?;
-                                        model
-                                            .screens()
-                                            .iter()
-                                            .enumerate()
-                                            .find(|(_, info)| info.id.as_str() == shown)
-                                            .map(|(index, info)| {
-                                                info.name.clone().unwrap_or_else(|| {
-                                                    format!("Screen {}", index + 1)
-                                                })
-                                            })
-                                    })
-                                    .unwrap_or_else(|| "No Screen".into()),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("templates-open")
-                            .flex_none()
-                            .px_3()
-                            .py_1()
-                            .cursor_pointer()
-                            .bg(rgb(self.appearance.overlay))
-                            .child("Templates")
-                            .on_click(
-                                cx.listener(|this, _, window, cx| {
-                                    this.toggle_templates(window, cx)
-                                }),
-                            ),
-                    )
+                    .child(self.render_screen_navigation(cx))
                     .child(div().flex_1())
                     .child(
-                        div()
-                            .id("maximize-group")
-                            .flex_none()
-                            .px_3()
-                            .py_1()
-                            .cursor_pointer()
-                            .bg(rgb(self.appearance.overlay))
-                            .child(
-                                if self
-                                    .model
-                                    .as_ref()
-                                    .and_then(LocalWorkspace::maximized_slot_id)
-                                    .is_some()
-                                {
-                                    "Restore"
-                                } else {
-                                    "Maximize"
-                                },
-                            )
-                            .on_click(
-                                cx.listener(|this, _, window, cx| this.toggle_maximize(window, cx)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("float-tab")
-                            .flex_none()
-                            .px_3()
-                            .py_1()
-                            .cursor(if can_float {
-                                CursorStyle::PointingHand
-                            } else {
-                                CursorStyle::OperationNotAllowed
-                            })
-                            .text_color(rgb(if can_float {
-                                self.appearance.text
-                            } else {
-                                self.appearance.muted
-                            }))
-                            .bg(rgb(self.appearance.overlay))
-                            .child("Float Tab")
-                            .on_click(cx.listener(|this, _, _, cx| this.float_tab(cx))),
-                    )
-                    .child(
-                        div()
-                            .id("split-horizontal")
-                            .flex_none()
-                            .px_3()
-                            .py_1()
-                            .cursor(if floating_focus {
-                                CursorStyle::OperationNotAllowed
-                            } else {
-                                CursorStyle::PointingHand
-                            })
-                            .text_color(rgb(if floating_focus {
-                                self.appearance.muted
-                            } else {
-                                self.appearance.text
-                            }))
-                            .bg(rgb(self.appearance.overlay))
-                            .child("Split right")
-                            .on_click(
-                                cx.listener(|this, _, _, cx| this.split(Axis::Horizontal, cx)),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .id("split-vertical")
-                            .flex_none()
-                            .px_3()
-                            .py_1()
-                            .cursor(if floating_focus {
-                                CursorStyle::OperationNotAllowed
-                            } else {
-                                CursorStyle::PointingHand
-                            })
-                            .text_color(rgb(if floating_focus {
-                                self.appearance.muted
-                            } else {
-                                self.appearance.text
-                            }))
-                            .bg(rgb(self.appearance.overlay))
-                            .child("Split below")
-                            .on_click(cx.listener(|this, _, _, cx| this.split(Axis::Vertical, cx))),
-                    )
-                    .child(
-                        div()
-                            .id("new-tab")
-                            .flex_none()
-                            .px_3()
-                            .py_1()
-                            .cursor_pointer()
-                            .bg(rgb(self.appearance.overlay))
-                            .child(if empty_screen {
-                                "New terminal"
-                            } else {
-                                "New tab"
-                            })
-                            .on_click(cx.listener(|this, _, _, cx| this.tab(cx))),
+                        Button::new("templates-open")
+                            .accessibility_label("Open Templates")
+                            .tooltip("Open Templates")
+                            .icon(Icon::new(IconName::LayoutTemplate))
+                            .label("Templates")
+                            .ghost()
+                            .compact()
+                            .small()
+                            .on_click({
+                                let weak = cx.entity().downgrade();
+                                move |_, window, cx| {
+                                    let _ = weak
+                                        .update(cx, |this, cx| this.toggle_templates(window, cx));
+                                }
+                            }),
                     ),
             );
         let mut content = div().flex().flex_1().min_h_0().min_w_0();

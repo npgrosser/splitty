@@ -346,3 +346,7 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 - **Linux deb and rpm packages** (2026-11-07, provisional, tbd): electron-builder builds them next to the AppImage under the package name `splitty-electron`, installed to `/opt/Splitty`; `desktopName` `splitty.desktop` makes the Wayland `app_id` and `StartupWMClass` `splitty`, so desktops match windows to the installed entry. Alternative: the package name `splitty`, or an `app_id` from the reverse-DNS app id.
 - **`shell-default-follows-system` D3 no migration** (2026-11-07, provisional, tbd): a stored default shell profile stays an explicit choice, since it cannot be told apart from one resolved automatically before; switching to "System default" once makes it follow the login shell. Alternative: treat a stored id equal to the current system default as following it.
+
+- **`native-workspace-chrome`, NWC-1** (2026-11-07, provisional, tbd): ordinary layout actions live in each group's header; global chrome retains workspace navigation and global actions.
+- **`native-workspace-chrome`, NWC-2** (2026-11-07, provisional, tbd): keep ordinary catalog scrolling and fixed-control Screen wheel navigation, with explicit previous/next affordances; a different list-wheel policy needs a deliberate contract revision.
+- **`native-workspace-chrome`, NWC-3** (2026-11-07, provisional, tbd): adopt toolkit icons and controls with the existing appearance source first; native presets and full theme-token migration remain a separate change.

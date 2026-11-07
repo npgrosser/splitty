@@ -1,9 +1,10 @@
 //! Window-local Screen catalog presentation. The service catalog remains authoritative.
 use super::*;
+use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
-    Disableable, Sizable,
+    Disableable, Icon, Sizable,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -121,7 +122,8 @@ impl Workspace {
             } else {
                 "Show screens"
             })
-            .label("☰  Screens")
+            .icon(Icon::new(IconName::PanelLeft))
+            .label("Screens")
             .on_click(move |_, window, cx| {
                 let _ = weak.update(cx, |this, cx| {
                     this.toggle_drawer(cx);
@@ -208,11 +210,21 @@ impl Workspace {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .label(label.clone())
+                            .child(
+                                div()
+                                    .w_full()
+                                    .min_w_0()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(label.clone()),
+                            )
                             .on_click(move |_, window, cx| {
                                 let _ = weak.update(cx, |this, cx| {
-                                    this.switch_screen(&select, window, cx);
-                                    this.focus_current(window, cx);
+                                    if !GlobalState::is_in_deferred_context(cx) {
+                                        this.switch_screen(&select, window, cx);
+                                        this.focus_current(window, cx);
+                                    }
                                 });
                             }),
                     );
@@ -239,7 +251,7 @@ impl Workspace {
                             .xsmall()
                             .w(chrome_rems(27.))
                             .tooltip(format!("Rename {label}"))
-                            .label("✎")
+                            .icon(Icon::new(IconName::Pencil))
                             .on_click(move |_, window, cx| {
                                 let _ = weak
                                     .update(cx, |this, cx| this.start_rename(&rename, window, cx));
@@ -255,7 +267,7 @@ impl Workspace {
                         .xsmall()
                         .w(chrome_rems(27.))
                         .tooltip(format!("Close {label}"))
-                        .label("×")
+                        .icon(Icon::new(IconName::X))
                         .on_click(move |_, window, cx| {
                             let _ = weak.update(cx, |this, cx| {
                                 this.request_close_screen(&close, window, cx)
@@ -301,7 +313,8 @@ impl Workspace {
             .accessibility_label("Create Screen")
             .small()
             .w_full()
-            .label("+  New screen")
+            .icon(Icon::new(IconName::Plus))
+            .label("New screen")
             .on_click(move |_, _, cx| {
                 let _ = weak.update(cx, |this, cx| this.create_screen(cx));
             });
@@ -311,7 +324,8 @@ impl Workspace {
             .ghost()
             .small()
             .w_full()
-            .label("▦  Templates")
+            .icon(Icon::new(IconName::LayoutTemplate))
+            .label("Templates")
             .on_click(move |_, window, cx| {
                 let _ = weak.update(cx, |this, cx| this.toggle_templates(window, cx));
             });
@@ -373,6 +387,7 @@ impl Workspace {
                 .is_some_and(|close| close.prompting)
             || self.drag.is_some()
             || self.float_gesture.is_some()
+            || GlobalState::is_in_deferred_context(cx)
             || cx.has_active_drag();
         if blocked {
             self.wheel_navigation.admit(target, event, true);

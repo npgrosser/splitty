@@ -196,6 +196,13 @@ horizontal input and Shift+mouse-wheel browse overflowing tabs. Editing, close
 prompts and dragging take priority over this navigation. Terminal wheel handling
 stays inside the terminal view.
 
+Each tab group has a **+** button for a new terminal and a profile picker beside
+it. Split right/below, float/dock and maximize/restore controls act on that group,
+including when a different terminal has keyboard focus. Narrow groups collect
+the secondary actions in an icon menu. Screen navigation also has previous/next
+buttons beside the current Screen name. The pinned GPUI Kit supplies the button
+styling and icon assets; the canonical mux tree remains the only layout model.
+
 Workspace shortcuts use **Cmd** on macOS and **Alt** on other hosts as `Mod`:
 
 | Shortcut | Action |
@@ -1129,3 +1136,25 @@ all workspace and visibility mutations are actual window input. Its geometry
 JSON must be calibrated from the candidate's screenshots, including a cropped
 overflowing tab strip. `--setup-only` captures the initial window; supply
 `window.confirm_close` coordinates when its normal shutdown needs confirmation.
+
+## Native workspace chrome acceptance
+
+The group-control increment passes 85 native UI tests, touched-target Clippy with
+warnings denied, 17 architecture checks, formatting and OpenSpec validation.
+The matching Linux candidate has SHA-256
+`c78f864cefe7f87b163052c07a225ab6499d133f7cade18f350e7ade682d964a`.
+
+`gpui-workspace-chrome.py` passes eight real-window checks with isolated shells:
+new tabs and splits on an unfocused group, keyboard profile selection, compact
+menu navigation isolation, maximize/restore with immediate terminal input,
+float/dock, and selected-tab close. Pane/session identities prove unrelated
+terminals remain intact. A separate 150-percent window checks rendered icons and
+compact-menu splitting. Both runs close normally without owned children left
+behind. The existing Drawer acceptance and all eight display-zoom cases also
+pass with this binary, including the actual profile picker at 300-percent zoom.
+
+The harness reads mux state through the owned control socket; workspace changes
+are real pointer or keyboard input. Supply screenshot-calibrated geometry using
+`--geometry`; setup switches capture the relevant controls for calibration.
+This is private X11 functional evidence. Windows builds and hardware smoothness
+testing remain separate from this UI increment.

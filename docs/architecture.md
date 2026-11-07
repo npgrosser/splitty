@@ -165,6 +165,14 @@ of user intent; browser or terminal-library timing and scrolling workarounds are
 not native feature contracts. Native event normalization stays in the view and
 is tested for platform differences in line/pixel deltas and gesture phases.
 
+Group chrome captures the displayed slot and its selected pane/session instead
+of routing pointer actions through the globally focused group. Before a control
+submits its existing tab, split, float or maximize command, it rechecks the
+connection, Screen, pane/session and current slot selection. This presentation
+boundary lives in `workspace/chrome.rs`; keyboard commands retain their focused
+context. The toolkit supplies actual icon assets and button interaction states,
+while the existing appearance projection and terminal scaling remain separate.
+
 Cross-Screen transfers use the existing server `move_pane_to_screen` operation.
 The client captures connection, source Screen, pane and session identity from
 the actual tab, submits once and verifies the authoritative destination. A

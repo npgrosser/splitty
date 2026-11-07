@@ -426,8 +426,10 @@ def main():
                 if args.level == 3. and args.scope == "window":
                     before_popup = capture("high-zoom-before-popup")
                     popup_y = geometry["top"] - round(geometry["rowPitch"] * .75)
+                    # Calibrated compact Kit header at 300%: profile chevron
+                    # precedes the overflow button at the right edge.
                     no_input("high-zoom-profile-popup", lambda: x(
-                        "mousemove", "--window", window, 1152, popup_y, "click", 1))
+                        "mousemove", "--window", window, 1056, popup_y, "click", 1))
                     time.sleep(.3)
                     popup = capture("high-zoom-profile-popup")
                     assert changed_pixels(before_popup, popup, 700, geometry["top"], 1190, 650) > 500, (
