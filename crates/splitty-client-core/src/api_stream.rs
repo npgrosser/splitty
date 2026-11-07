@@ -1,12 +1,45 @@
 //! A dedicated API stream. Session event delivery uses a different connection.
+use serde::de::DeserializeOwned;
 use splitty_core::native_api::{Operation, Request, Role};
-use splitty_transport::{budget::Charged, peer::Sender, wire};
+use splitty_transport::{budget::Charged, codec, peer::Sender, wire};
 use std::io;
 
 pub(crate) enum ApiStream {
     #[cfg(not(target_os = "windows"))]
     Embedded(splitty_server::native::client::Client),
     Owned(splitty_remote::owner::Connection),
+}
+
+/// Decode a bounded API reply while its wire lease is still held. This is
+/// shared by independent local readers without coupling their schedulers.
+pub(crate) fn decode<T: DeserializeOwned>(
+    client: &ApiStream,
+    reply: &wire::Reply,
+) -> io::Result<Charged<T>> {
+    decode_with_budget(&client.sender().context().budget, reply)
+}
+
+pub(crate) fn decode_with_budget<T: DeserializeOwned>(
+    budget: &splitty_transport::budget::ConnectionBudget,
+    reply: &wire::Reply,
+) -> io::Result<Charged<T>> {
+    if !(200..300).contains(&reply.status) || reply.content_type != wire::ContentType::Json {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("local API returned status {}", reply.status),
+        ));
+    }
+    let bytes = reply.body.as_bytes();
+    if bytes.len() > splitty_core::native_api::MAX_API_BODY {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "local API response exceeds native limit",
+        ));
+    }
+    let lease = codec::reserve_json_typed(bytes, budget, false)?;
+    let value = serde_json::from_slice(bytes)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid local API response"))?;
+    Ok(lease.charge(value))
 }
 #[cfg(not(target_os = "windows"))]
 impl From<splitty_server::native::client::Client> for ApiStream {

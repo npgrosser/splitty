@@ -27,19 +27,35 @@ impl EmbeddedService {
         connection_id: Uuid,
         scheme: crate::appearance::ColorScheme,
     ) -> io::Result<crate::local_service::LocalServiceClient> {
-        let runtime = self
-            .runtime
-            .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "service closed"))?;
-        let client = self
-            .connector
-            .embedded(runtime.state.clone(), service::catalog::Role::Main)
-            .await?;
+        let client = self.api_stream().await?;
         Ok(crate::local_service::LocalServiceClient::new(
             client,
             connection_id,
             scheme,
         ))
+    }
+
+    pub(crate) async fn api_stream(&self) -> io::Result<crate::api_stream::ApiStream> {
+        self.api_stream_with_context(splitty_transport::queue::Context::default())
+            .await
+    }
+
+    pub(crate) async fn api_stream_with_context(
+        &self,
+        context: splitty_transport::queue::Context,
+    ) -> io::Result<crate::api_stream::ApiStream> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "service closed"))?;
+        self.connector
+            .embedded_admitted(
+                runtime.state.clone(),
+                service::catalog::Role::Main,
+                self.connector.admit_context(context)?,
+            )
+            .await
+            .map(Into::into)
     }
 
     /// Call inside the Tokio runtime that remains alive until close completes.

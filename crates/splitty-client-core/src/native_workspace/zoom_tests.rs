@@ -60,12 +60,24 @@ async fn real_service() {
     ));
     let mut ready = None;
     let mut appearance = false;
-    while ready.is_none() || !appearance {
+    let mut attached = None;
+    while ready.is_none()
+        || !appearance
+        || attached.as_ref().is_none_or(|session: &String| {
+            ready.as_deref().is_none_or(|model: &LocalWorkspace| {
+                model
+                    .routes()
+                    .first()
+                    .is_none_or(|route| &route.session_id != session)
+            })
+        })
+    {
         match next(&mut updates).await {
             Update::Workspace(model) if model.routes().len() == 1 && model.snapshot().is_some() => {
                 ready = Some(model)
             }
             Update::Appearance(_) => appearance = true,
+            Update::Attached(session) => attached = Some(session),
             _ => {}
         }
     }

@@ -8,6 +8,7 @@ pub mod document;
 #[cfg(not(target_os = "windows"))]
 pub mod embedded;
 pub mod external_links;
+pub mod hub;
 pub mod local_service;
 pub mod native_workspace;
 pub mod shell_profiles;

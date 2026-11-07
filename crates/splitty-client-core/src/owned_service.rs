@@ -145,19 +145,27 @@ impl OwnedService {
         connection_id: Uuid,
         scheme: ColorScheme,
     ) -> io::Result<LocalServiceClient> {
+        Ok(LocalServiceClient::new(
+            self.api_stream().await?,
+            connection_id,
+            scheme,
+        ))
+    }
+    pub(crate) async fn api_stream(&self) -> io::Result<ApiStream> {
+        self.api_stream_with_context(queue::Context::default())
+            .await
+    }
+    pub(crate) async fn api_stream_with_context(
+        &self,
+        context: queue::Context,
+    ) -> io::Result<ApiStream> {
         match self {
             #[cfg(not(target_os = "windows"))]
-            Self::Embedded(service) => service.local_service_client(connection_id, scheme).await,
-            Self::Owned(owner) => {
-                let stream = owner
-                    .open_context(None, false, queue::Context::default(), |_| {})
-                    .await?;
-                Ok(LocalServiceClient::new(
-                    ApiStream::Owned(stream),
-                    connection_id,
-                    scheme,
-                ))
-            }
+            Self::Embedded(service) => service.api_stream_with_context(context).await,
+            Self::Owned(owner) => owner
+                .open_context(None, false, context, |_| {})
+                .await
+                .map(ApiStream::Owned),
         }
     }
     pub async fn close(self) -> io::Result<()> {
