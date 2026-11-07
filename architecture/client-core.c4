@@ -12,6 +12,11 @@ model {
       metadata { module 'splitty_client_core::connection' }
     }
 
+    appearance = component 'appearance' {
+      description 'Read-only local settings/theme API stream, coalesced charged snapshots and cancellation-safe owned reads.'
+      metadata { module 'splitty_client_core::appearance' }
+    }
+
     client_document = component 'client_document' {
       description 'Versioned viewer document reads and annotation data scoped to their source connection.'
       metadata { module 'splitty_client_core::document' }
@@ -33,6 +38,23 @@ model {
     }
 
     client_root -> connection 'Expose the native client API'
+    client_root -> appearance 'Expose charged appearance snapshots and the local reader'
+    appearance -> splitty.core.config 'Project existing appearance settings without persistence'
+    appearance -> splitty.core.theme 'Decode the service-resolved theme'
+    appearance -> splitty.server.native 'Own one API-only stream and await its cleanup'
+    appearance -> splitty.server.service 'Use fixed read-only operations and in-memory service fixtures'
+    appearance -> splitty.transport.budget 'Retain typed snapshot allocation leases'
+    appearance -> splitty.transport.codec 'Charge bounded typed response decoding'
+    appearance -> splitty.transport.wire 'Validate API reply kind and status'
+    appearance -> connection 'Verify independent session delivery in real-service tests'
+    appearance -> splitty.core.mux 'Construct an isolated workspace in real-service tests'
+    appearance -> splitty.core.protocol 'Construct and observe isolated service events in tests'
+    appearance -> splitty.core.pty 'Own the isolated test service backend'
+    appearance -> splitty.core.shell_profiles 'Build explicit test shell settings'
+    appearance -> splitty.core.template 'Keep test template paths isolated'
+    appearance -> splitty.core.effect_runner 'Construct the isolated test service effect runner'
+    appearance -> splitty.server.client_session 'Verify API reads preserve session broadcasts'
+    appearance -> splitty.server.hub 'Keep test hub paths isolated'
     client_root -> client_document 'Expose viewer document API'
     client_root -> client_workspace 'Expose the local workspace model'
     client_root -> embedded 'Expose the embedded service adapter on Unix'
@@ -54,6 +76,7 @@ model {
     native_workspace -> splitty.core.ids 'Confirm captured pane identity after the ordered close barrier'
     native_workspace -> client_root 'Own an isolated service and ordered native client'
     embedded -> connection 'Return a connection scoped to the embedded service'
+    embedded -> appearance 'Open an owned API-only local appearance reader'
     embedded -> client_root 'Use public event and screen types in embedded probe tests'
     embedded -> splitty.server.control 'Start and stop the isolated control channel'
     embedded -> splitty.server.native 'Connect an owned native session stream'

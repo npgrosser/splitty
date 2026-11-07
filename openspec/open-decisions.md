@@ -8,6 +8,9 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`native-appearance` NA-1 font semantics** (2026-11-07, provisional, tbd): appearance font size/family apply to chrome, with resolved UI theme defaults for unset overrides and working native UI defaults for unsupported values. Terminal typography remains native monospace at 15 px text / 21 px rows; terminal-font configuration and display zoom are separate.
+- **`native-appearance` NA-2 presentation subset** (2026-11-07, provisional, tbd): consume existing local settings for chrome typography and resolved terminal/semantic chrome colors without writes, CSS layout/effects, activation of dormant `terminal.theme` behavior or cross-service live synchronization.
+
 - **`native-local-workspace` NL-1 layout confirmation** (2026-11-07, provisional, tbd): await the authoritative screen snapshot after edits in the first native local workspace, rather than introducing optimistic layout state.
 - **`native-local-workspace` NL-2 development lifetime** (2026-11-07, provisional, tbd): keep the first native workspace isolated per app run with joined service cleanup; production state/persistence migration follows later.
 

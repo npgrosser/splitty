@@ -50,7 +50,7 @@ pub struct Palette {
 }
 
 /// The fully resolved theme sent to the frontend as JSON.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResolvedTheme {
     pub name: String,
     pub variant: Variant,
@@ -65,7 +65,7 @@ pub struct ResolvedTheme {
 }
 
 /// Semantic UI tokens derived from the palette.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct UiTokens {
     pub surface_base: String,
@@ -128,7 +128,7 @@ fn default_dnd_overlay_target() -> String {
 }
 
 /// Terminal color tokens derived from palette (or overridden).
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub struct TerminalTokens {
     pub bg: String,

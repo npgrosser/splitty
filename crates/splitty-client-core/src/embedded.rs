@@ -11,6 +11,28 @@ pub struct EmbeddedService {
 }
 
 impl EmbeddedService {
+    /// A separate API stream owned by this service. It never consumes session
+    /// frames. Bind returned appearance to the workspace's session identity.
+    pub async fn appearance_reader(
+        &self,
+        connection_id: Uuid,
+        scheme: crate::appearance::ColorScheme,
+    ) -> io::Result<crate::appearance::AppearanceReader> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::BrokenPipe, "service closed"))?;
+        let client = self
+            .connector
+            .embedded(runtime.state.clone(), service::catalog::Role::Main)
+            .await?;
+        Ok(crate::appearance::AppearanceReader::new(
+            client,
+            connection_id,
+            scheme,
+        ))
+    }
+
     /// Call inside the Tokio runtime that remains alive until close completes.
     /// No daemon discovery, workspace restoration or network listener is used.
     pub fn start() -> Self {
