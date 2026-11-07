@@ -73,6 +73,21 @@ pub struct ScreenIds {
     pub pane_id: String,
 }
 
+impl ScreenIds {
+    pub fn new() -> Self {
+        Self {
+            screen_id: Uuid::new_v4().to_string(),
+            pane_id: Uuid::new_v4().to_string(),
+        }
+    }
+}
+
+impl Default for ScreenIds {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// A source selection; byte-range mapping belongs to the native text layout.
 pub struct AnnotationDraft {
     pub quote: String,
@@ -206,30 +221,43 @@ impl Client {
     }
 
     pub fn create_screen(&self, name: &str) -> io::Result<ScreenIds> {
-        if name.len() > 256 {
-            return Err(invalid("screen name too long"));
-        }
-        let ids = ScreenIds {
-            screen_id: Uuid::new_v4().to_string(),
-            pane_id: Uuid::new_v4().to_string(),
-        };
-        self.command(name.len(), || json!({"type":"mux.op", "screenId":"", "op":{
-            "type":"create_screen", "screenId":ids.screen_id, "newPaneId":ids.pane_id, "name":name
-        }}))?;
+        let ids = ScreenIds::new();
+        self.create_screen_with_ids(&ids, name)?;
         self.resync(&ids.screen_id)?;
         Ok(ids)
     }
 
+    /// Submit a screen creation with IDs reserved by the caller. A later
+    /// catalog or screen refresh is separate from mutation admission.
+    pub fn create_screen_with_ids(&self, ids: &ScreenIds, name: &str) -> io::Result<()> {
+        if name.len() > 256 {
+            return Err(invalid("screen name too long"));
+        }
+        identifier(&ids.screen_id)?;
+        identifier(&ids.pane_id)?;
+        self.command(name.len(), || json!({"type":"mux.op", "screenId":"", "op":{
+            "type":"create_screen", "screenId":ids.screen_id, "newPaneId":ids.pane_id, "name":name
+        }}))
+    }
+
     /// Refill a service-owned screen that ran empty, preserving its ID and name.
     pub fn recreate_screen(&self, screen_id: &str, new_pane_id: &str) -> io::Result<()> {
+        self.submit_recreate_screen(screen_id, new_pane_id)?;
+        self.resync(screen_id)
+    }
+
+    pub(crate) fn submit_recreate_screen(
+        &self,
+        screen_id: &str,
+        new_pane_id: &str,
+    ) -> io::Result<()> {
         identifier(screen_id)?;
         identifier(new_pane_id)?;
         self.command(0, || {
             json!({"type":"mux.op", "screenId":screen_id, "op":{
                 "type":"create_screen", "screenId":screen_id, "newPaneId":new_pane_id
             }})
-        })?;
-        self.resync(screen_id)
+        })
     }
 
     pub fn resync(&self, screen_id: &str) -> io::Result<()> {
@@ -237,17 +265,55 @@ impl Client {
         self.command(0, || json!({"type":"mux.resync", "screenId":screen_id}))
     }
 
+    pub fn request_workspace(&self) -> io::Result<()> {
+        self.command(0, || json!({"type":"mux.workspace_resync"}))
+    }
+
+    pub fn rename_screen(&self, screen_id: &str, name: &str) -> io::Result<()> {
+        identifier(screen_id)?;
+        if name.len() > 256 {
+            return Err(invalid("screen name too long"));
+        }
+        self.command(name.len(), || {
+            json!({"type":"mux.op", "screenId":screen_id, "op":{
+                "type":"rename_screen", "name":name
+            }})
+        })
+    }
+
+    pub fn close_screen(&self, screen_id: &str) -> io::Result<()> {
+        identifier(screen_id)?;
+        self.command(0, || {
+            json!({"type":"mux.op", "screenId":screen_id, "op":{
+                "type":"close_screen"
+            }})
+        })
+    }
+
+    pub fn set_active_screen(&self, screen_id: &str) -> io::Result<()> {
+        identifier(screen_id)?;
+        self.command(0, || {
+            json!({"type":"mux.op", "screenId":screen_id, "op":{
+                "type":"set_active_screen"
+            }})
+        })
+    }
+
     /// Send a typed mux operation and request the authoritative result. The
     /// origin of a successful operation does not receive a mutation nudge.
     pub fn screen_op(&self, screen_id: &str, op: &ScreenOp) -> io::Result<()> {
+        self.submit_screen_op(screen_id, op)?;
+        self.resync(screen_id)
+    }
+
+    pub(crate) fn submit_screen_op(&self, screen_id: &str, op: &ScreenOp) -> io::Result<()> {
         identifier(screen_id)?;
         let mut size = CountBytes(0);
         serde_json::to_writer(&mut size, op).map_err(io::Error::other)?;
         self.command(
             size.0,
             || json!({"type":"mux.op", "screenId":screen_id, "op":op}),
-        )?;
-        self.resync(screen_id)
+        )
     }
 
     /// Repeated local attachments coalesce: the service streams a session at

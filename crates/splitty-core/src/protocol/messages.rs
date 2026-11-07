@@ -35,6 +35,8 @@ pub const MSG_HIDE: &str = "hide";
 // Mux client → server
 pub const MSG_MUX_OP: &str = "mux.op";
 pub const MSG_MUX_RESYNC: &str = "mux.resync";
+pub const MSG_MUX_WORKSPACE_RESYNC: &str = "mux.workspace_resync";
+pub const WORKSPACE_CATALOG_CAPABILITY: &str = "workspace-catalog-v1";
 
 /// One chunk of a viewer pane's document (`viewer-panes`, Reading A Document).
 pub const MSG_VIEWER_READ: &str = "viewer.read";
@@ -322,6 +324,14 @@ pub enum ServerEvent {
         id: String,
         timestamp: i64,
         screen: ScreenState,
+    },
+
+    #[serde(rename = "mux.workspace_snapshot", rename_all = "camelCase")]
+    MuxWorkspaceSnapshot {
+        id: String,
+        timestamp: i64,
+        screens: Vec<ScreenInfo>,
+        active_screen_id: Option<String>,
     },
 
     #[serde(rename = "mux.nudge", rename_all = "camelCase")]
@@ -651,6 +661,7 @@ impl ServerEvent {
                 // viewer-annotations, Annotations Capability.
                 "viewer-annotations-v1".into(),
                 crate::mux::TEMPLATE_CAPABILITY.into(),
+                WORKSPACE_CATALOG_CAPABILITY.into(),
             ],
             server_mode,
         }
@@ -664,6 +675,18 @@ impl ServerEvent {
             id: generate_event_id(),
             timestamp: now_millis(),
             screen: screen.without_viewer_texts(),
+        }
+    }
+
+    pub fn mux_workspace_snapshot(
+        screens: Vec<ScreenInfo>,
+        active_screen_id: Option<String>,
+    ) -> Self {
+        Self::MuxWorkspaceSnapshot {
+            id: generate_event_id(),
+            timestamp: now_millis(),
+            screens,
+            active_screen_id,
         }
     }
 
@@ -798,12 +821,24 @@ mod tests {
                 "tab-select-v1",
                 "viewer-v1",
                 "viewer-annotations-v1",
-                "server-templates-v1"
+                "server-templates-v1",
+                "workspace-catalog-v1"
             ])
         );
         assert_eq!(wire["type"], "mux.welcome");
         assert_eq!(wire["clientId"], "client");
         assert_eq!(wire["serverMode"], "embedded");
+    }
+
+    #[test]
+    fn workspace_snapshot_has_nullable_active_hint_and_event_envelope() {
+        let wire = serde_json::to_value(ServerEvent::mux_workspace_snapshot(vec![], None))
+            .expect("workspace snapshot");
+        assert_eq!(wire["type"], "mux.workspace_snapshot");
+        assert!(wire["id"].as_str().is_some());
+        assert!(wire["timestamp"].as_i64().is_some());
+        assert_eq!(wire["screens"], serde_json::json!([]));
+        assert!(wire["activeScreenId"].is_null());
     }
 
     #[test]

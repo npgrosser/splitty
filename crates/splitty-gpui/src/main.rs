@@ -5,7 +5,6 @@ mod offscreen;
 mod terminal;
 mod terminal_engine;
 mod workspace;
-mod workspace_session;
 
 use gpui_kit::*;
 use std::{
@@ -25,7 +24,7 @@ impl Render for RootView {
 }
 enum OwnedWorker {
     Probe(app::Worker),
-    Workspace(workspace_session::Worker),
+    Workspace(splitty_client_core::native_workspace::Worker),
 }
 impl OwnedWorker {
     fn shutdown(self) -> anyhow::Result<()> {

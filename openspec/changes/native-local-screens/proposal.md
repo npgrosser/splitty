@@ -26,4 +26,4 @@ Existing workspace lifecycle operations and terminal hide/resize semantics remai
 
 ## Impact
 
-Touches shared protocol types and service session handling, the UI-free client connection/workspace model, and the native workspace worker/view. Updates `docs/protocol.ts`, native workspace architecture documentation and component descriptions. No new runtime dependency, worker per Screen, layout model or transport is introduced.
+Touches shared protocol types and service session handling, the UI-free client connection/workspace model, and the native workspace worker/view. Updates `docs/protocol.ts`, native workspace architecture documentation and component descriptions. No worker per Screen, layout model or transport is introduced. The existing `anyhow` dependency is also declared by client-core when the native worker moves there.

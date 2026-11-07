@@ -1,11 +1,13 @@
-//! One service-owned local screen, projected without a second layout tree.
+//! Service-owned local screens, projected without a second layout tree.
+mod catalog;
 use crate::{
     connection::{invalid, MAX_ATTACHMENTS},
     Client, ScreenIds,
 };
+pub use catalog::LocalWorkspace;
 use serde::Deserialize;
 use serde_json::Value;
-pub use splitty_core::mux::{Axis, Direction, LayoutNode, ScreenState};
+pub use splitty_core::mux::{Axis, Direction, LayoutNode, ScreenInfo, ScreenState};
 use splitty_core::{
     ids::{NodeId, PaneId},
     mux::{self, ScreenOp},
@@ -79,7 +81,7 @@ struct SentTabSelection {
 /// tabs belong to this window; pending IDs prevent another screen's spawn
 /// notification from becoming a local session route.
 #[derive(Clone)]
-pub struct LocalWorkspace {
+pub struct ScreenModel {
     ids: ScreenIds,
     connection_id: Uuid,
     snapshot: Option<Arc<ScreenState>>,
@@ -94,9 +96,10 @@ pub struct LocalWorkspace {
     pane_sessions: HashMap<String, String>,
     session_panes: HashMap<String, String>,
     ready_sessions: HashSet<String>,
+    resync_pending: bool,
 }
 
-impl LocalWorkspace {
+impl ScreenModel {
     pub fn new(ids: ScreenIds, connection_id: Uuid) -> Self {
         let focused_pane = Some(ids.pane_id.clone());
         let pending_panes = HashSet::from([ids.pane_id.clone()]);
@@ -115,6 +118,7 @@ impl LocalWorkspace {
             pane_sessions: HashMap::new(),
             session_panes: HashMap::new(),
             ready_sessions: HashSet::new(),
+            resync_pending: false,
         }
     }
 
@@ -226,12 +230,13 @@ impl LocalWorkspace {
             .ok_or_else(|| invalid("screen snapshot not loaded"))?
             .revision;
         for (slot_id, pane_id) in self.selections_to_sync() {
-            client.screen_op(
+            client.submit_screen_op(
                 self.screen_id(),
                 &ScreenOp::SelectTab {
                     pane_id: PaneId::from(pane_id.as_str()),
                 },
             )?;
+            self.resync_pending = true;
             self.sent_tab_selections.insert(
                 slot_id,
                 SentTabSelection {
@@ -585,8 +590,11 @@ impl LocalWorkspace {
             cwd: self.cwd_for(pane_id),
             shell_profile_id: None,
         };
-        self.send_op(client, &op)?;
         self.pending_panes.insert(new_pane_id.clone());
+        if let Err(error) = self.send_op(client, &op) {
+            self.pending_panes.remove(&new_pane_id);
+            return Err(error);
+        }
         self.pending_focus = Some(new_pane_id.clone());
         Ok(new_pane_id)
     }
@@ -600,8 +608,11 @@ impl LocalWorkspace {
             cwd: self.cwd_for(pane_id),
             shell_profile_id: None,
         };
-        self.send_op(client, &op)?;
         self.pending_panes.insert(new_pane_id.clone());
+        if let Err(error) = self.send_op(client, &op) {
+            self.pending_panes.remove(&new_pane_id);
+            return Err(error);
+        }
         self.pending_focus = Some(new_pane_id.clone());
         Ok(new_pane_id)
     }
@@ -619,14 +630,18 @@ impl LocalWorkspace {
             return Err(invalid("screen is not empty"));
         }
         let pane_id = Uuid::new_v4().to_string();
-        client.recreate_screen(self.screen_id(), &pane_id)?;
         self.pending_panes.insert(pane_id.clone());
+        if let Err(error) = client.submit_recreate_screen(self.screen_id(), &pane_id) {
+            self.pending_panes.remove(&pane_id);
+            return Err(error);
+        }
+        self.resync_pending = true;
         self.pending_focus = Some(pane_id.clone());
         self.pending_recreation = Some(pane_id.clone());
         Ok(pane_id)
     }
 
-    pub fn close_pane(&self, client: &Client, pane_id: &str) -> io::Result<()> {
+    pub fn close_pane(&mut self, client: &Client, pane_id: &str) -> io::Result<()> {
         self.send_op(
             client,
             &ScreenOp::ClosePane {
@@ -636,7 +651,12 @@ impl LocalWorkspace {
         )
     }
 
-    pub fn resize_split(&self, client: &Client, node_id: &str, sizes: Vec<f64>) -> io::Result<()> {
+    pub fn resize_split(
+        &mut self,
+        client: &Client,
+        node_id: &str,
+        sizes: Vec<f64>,
+    ) -> io::Result<()> {
         self.send_op(
             client,
             &ScreenOp::ResizeSplit {
@@ -646,7 +666,7 @@ impl LocalWorkspace {
         )
     }
 
-    fn send_op(&self, client: &Client, op: &ScreenOp) -> io::Result<()> {
+    fn send_op(&mut self, client: &Client, op: &ScreenOp) -> io::Result<()> {
         if client.connection_id() != self.connection_id {
             return Err(invalid("workspace connection changed"));
         }
@@ -654,7 +674,17 @@ impl LocalWorkspace {
             .snapshot()
             .ok_or_else(|| invalid("screen snapshot not loaded"))?;
         mux::validate_screen_op(screen, op).map_err(io::Error::other)?;
-        client.screen_op(&self.ids.screen_id, op)
+        client.submit_screen_op(&self.ids.screen_id, op)?;
+        self.resync_pending = true;
+        Ok(())
+    }
+
+    fn flush_resync(&mut self, client: &Client) -> io::Result<()> {
+        if self.resync_pending {
+            client.resync(self.screen_id())?;
+            self.resync_pending = false;
+        }
+        Ok(())
     }
 
     fn selections_to_sync(&self) -> Vec<(String, String)> {
@@ -951,8 +981,8 @@ mod tests {
     use crate::{EmbeddedService, Event};
     use std::time::Duration;
 
-    fn drag_workspace() -> LocalWorkspace {
-        let mut model = LocalWorkspace::new(
+    fn drag_workspace() -> ScreenModel {
+        let mut model = ScreenModel::new(
             ScreenIds {
                 screen_id: "screen".into(),
                 pane_id: "a".into(),
@@ -972,7 +1002,7 @@ mod tests {
         model
     }
 
-    fn apply_screen(model: &mut LocalWorkspace, screen: ScreenState) -> WorkspaceDelta {
+    fn apply_screen(model: &mut ScreenModel, screen: ScreenState) -> WorkspaceDelta {
         model
             .apply_snapshot(
                 model.connection_id,
@@ -1097,7 +1127,7 @@ mod tests {
     #[test]
     fn pending_spawns_count_toward_attachment_capacity_without_double_counting_routes() {
         let connection_id = Uuid::new_v4();
-        let mut workspace = LocalWorkspace::new(
+        let mut workspace = ScreenModel::new(
             ScreenIds {
                 screen_id: "screen".into(),
                 pane_id: "first".into(),
@@ -1128,7 +1158,7 @@ mod tests {
     #[test]
     fn earlier_snapshot_keeps_pending_focus_until_new_pane_is_confirmed() {
         let connection_id = Uuid::new_v4();
-        let mut workspace = LocalWorkspace::new(
+        let mut workspace = ScreenModel::new(
             ScreenIds {
                 screen_id: "screen".into(),
                 pane_id: "first".into(),
@@ -1161,7 +1191,7 @@ mod tests {
     #[test]
     fn closing_focused_split_falls_back_to_visible_selected_tab() {
         let connection_id = Uuid::new_v4();
-        let mut workspace = LocalWorkspace::new(
+        let mut workspace = ScreenModel::new(
             ScreenIds {
                 screen_id: "screen".into(),
                 pane_id: "a".into(),
@@ -1197,7 +1227,7 @@ mod tests {
     #[test]
     fn tab_sync_requires_capability_and_skips_already_known_selection() {
         let connection_id = Uuid::new_v4();
-        let mut workspace = LocalWorkspace::new(
+        let mut workspace = ScreenModel::new(
             ScreenIds {
                 screen_id: "screen".into(),
                 pane_id: "a".into(),
@@ -1236,7 +1266,8 @@ mod tests {
         assert!(workspace.sent_tab_selections.is_empty());
     }
 
-    async fn next(client: &mut Client, workspace: &mut LocalWorkspace) -> Event {
+    async fn next(client: &mut Client, workspace: &mut ScreenModel) -> Event {
+        workspace.flush_resync(client).expect("screen resync");
         let event = tokio::time::timeout(Duration::from_secs(10), client.next_event())
             .await
             .expect("native event before timeout")
@@ -1277,8 +1308,8 @@ mod tests {
 
     async fn until(
         client: &mut Client,
-        workspace: &mut LocalWorkspace,
-        mut done: impl FnMut(&LocalWorkspace) -> bool,
+        workspace: &mut ScreenModel,
+        mut done: impl FnMut(&ScreenModel) -> bool,
     ) {
         tokio::time::timeout(Duration::from_secs(10), async {
             while !done(workspace) {
@@ -1314,7 +1345,7 @@ mod tests {
             .create_screen("Native workspace test")
             .expect("screen");
         let first_pane = ids.pane_id.clone();
-        let mut workspace = LocalWorkspace::new(ids, client.connection_id());
+        let mut workspace = ScreenModel::new(ids, client.connection_id());
         until(&mut client, &mut workspace, |workspace| {
             workspace.snapshot().is_some() && workspace.session_for(&first_pane).is_some()
         })

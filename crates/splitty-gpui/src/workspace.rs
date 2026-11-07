@@ -1,10 +1,11 @@
 //! Native projection of one authoritative local screen; no independent dock tree.
-use crate::{
-    terminal::{self, Terminal},
-    workspace_session::{Command, Update, Worker},
-};
+use crate::terminal::{self, Terminal};
+use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::{prelude::*, *};
-use splitty_client_core::workspace::{Axis, LayoutNode, LocalWorkspace, MovePlacement, PaneDrag};
+use splitty_client_core::native_workspace::{Command, Update, Worker};
+use splitty_client_core::workspace::{
+    Axis, LayoutNode, LocalWorkspace, MovePlacement, PaneDrag, ScreenModel,
+};
 use std::{
     collections::{HashMap, HashSet},
     sync::{
@@ -151,8 +152,13 @@ fn terminal_commands(
     sender: mpsc::Sender<Command>,
     pane: String,
     session: String,
+    pending_resize: Arc<Mutex<Option<(u16, u16)>>>,
 ) -> impl Fn(terminal::Command) -> Result<(), String> {
     move |command| {
+        let resize = match &command {
+            terminal::Command::Resize(cols, rows) => Some((*cols, *rows)),
+            _ => None,
+        };
         let command = match command {
             terminal::Command::Input {
                 generation: 0,
@@ -172,13 +178,56 @@ fn terminal_commands(
                 rows,
             },
         };
-        sender.try_send(command).map_err(|error| error.to_string())
+        match sender.try_send(command) {
+            Ok(()) => {
+                if resize.is_some() {
+                    if let Ok(mut pending) = pending_resize.lock() {
+                        *pending = None;
+                    }
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Some(size) = resize {
+                    if let Ok(mut pending) = pending_resize.lock() {
+                        *pending = Some(size);
+                    }
+                }
+                Err(error.to_string())
+            }
+        }
     }
+}
+
+fn retry_pending_resize(
+    sender: &mpsc::Sender<Command>,
+    pane: &str,
+    session: &str,
+    pending: &Arc<Mutex<Option<(u16, u16)>>>,
+) -> Result<(), String> {
+    let size = pending.lock().map_err(|error| error.to_string())?.take();
+    let Some((cols, rows)) = size else {
+        return Ok(());
+    };
+    if let Err(error) = sender.try_send(Command::ResizePane {
+        pane: pane.to_owned(),
+        session: session.to_owned(),
+        cols,
+        rows,
+    }) {
+        let mut current = pending.lock().map_err(|error| error.to_string())?;
+        if current.is_none() {
+            *current = Some((cols, rows));
+        }
+        return Err(error.to_string());
+    }
+    Ok(())
 }
 
 struct PaneView {
     session: String,
     terminal: Entity<Terminal>,
+    pending_resize: Arc<Mutex<Option<(u16, u16)>>>,
     marker: bool,
     tail: String,
 }
@@ -192,6 +241,11 @@ struct ResizeDrag {
     last_sent: Instant,
     pending: Vec<f64>,
 }
+struct RenameEditor {
+    screen: String,
+    connection: String,
+    input: Entity<InputState>,
+}
 pub struct Workspace {
     model: Option<LocalWorkspace>,
     panes: HashMap<String, PaneView>,
@@ -203,15 +257,25 @@ pub struct Workspace {
     drop_target: Option<(String, MovePlacement)>,
     drag: Option<ResizeDrag>,
     visible: Vec<String>,
+    visible_screen: Option<String>,
+    visible_pending: bool,
     status: String,
+    rename: Option<RenameEditor>,
+    rename_subscription: Option<Subscription>,
+    close_prompts: HashSet<String>,
     _poll: Task<()>,
     started: Instant,
     smoke: bool,
     smoke_stage: u8,
     smoke_first: Option<String>,
     smoke_tab: Option<String>,
+    smoke_screen: Option<String>,
+    smoke_second_screen: Option<String>,
     smoke_initial: Option<Entity<Terminal>>,
     smoke_markers: bool,
+    smoke_hidden_output: bool,
+    smoke_editor_reconciles: u64,
+    smoke_editor_clean: Arc<AtomicBool>,
     smoke_terminal_inputs: Option<Arc<AtomicU64>>,
     smoke_last_input_pane: Option<Arc<Mutex<Option<String>>>>,
     smoke_shortcut_checks: Arc<AtomicU64>,
@@ -260,15 +324,25 @@ impl Workspace {
                 drop_target: None,
                 drag: None,
                 visible: Vec::new(),
+                visible_screen: None,
+                visible_pending: false,
                 status: "Starting local workspace…".into(),
+                rename: None,
+                rename_subscription: None,
+                close_prompts: HashSet::new(),
                 _poll: poll,
                 started: Instant::now(),
                 smoke,
                 smoke_stage: 0,
                 smoke_first: None,
                 smoke_tab: None,
+                smoke_screen: None,
+                smoke_second_screen: None,
                 smoke_initial: None,
                 smoke_markers: false,
+                smoke_hidden_output: false,
+                smoke_editor_reconciles: 0,
+                smoke_editor_clean: Arc::new(AtomicBool::new(false)),
                 smoke_terminal_inputs: smoke.then(|| Arc::new(AtomicU64::new(0))),
                 smoke_last_input_pane: smoke.then(|| Arc::new(Mutex::new(None))),
                 smoke_shortcut_checks: Arc::new(AtomicU64::new(0)),
@@ -290,6 +364,163 @@ impl Workspace {
             cx.notify();
         }
     }
+    fn create_screen(&mut self, cx: &mut Context<Self>) {
+        let Some(model) = &self.model else {
+            return;
+        };
+        if model.has_pending_create() {
+            return;
+        }
+        let used: HashSet<_> = model
+            .screens()
+            .iter()
+            .filter_map(|screen| screen.name.as_deref())
+            .collect();
+        let name = (1..=model.screens().len() + 1)
+            .map(|number| format!("Screen {number}"))
+            .find(|name| !used.contains(name.as_str()))
+            .unwrap_or_else(|| "Screen".into());
+        self.send(Command::CreateScreen(name), cx);
+    }
+    fn switch_screen(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rename.is_some() {
+            self.finish_rename(true, window, cx);
+        }
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.screen(screen).is_some())
+        {
+            self.send(Command::SwitchScreen(screen.to_owned()), cx);
+        }
+    }
+    fn start_rename(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((name, connection)) = self.model.as_ref().and_then(|model| {
+            model
+                .screens()
+                .iter()
+                .find(|info| info.id.as_str() == screen)
+                .map(|info| {
+                    (
+                        info.name.as_deref().unwrap_or("Screen").to_owned(),
+                        model.connection_id().to_string(),
+                    )
+                })
+        }) else {
+            return;
+        };
+        let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
+        self.rename_subscription = Some(cx.subscribe_in(
+            &input,
+            window,
+            |this, _, event: &InputEvent, window, cx| match event {
+                InputEvent::PressEnter { .. } | InputEvent::Blur => {
+                    this.finish_rename(true, window, cx);
+                }
+                _ => {}
+            },
+        ));
+        self.rename = Some(RenameEditor {
+            screen: screen.to_owned(),
+            connection,
+            input: input.clone(),
+        });
+        input.update(cx, |input, cx| {
+            input.focus(window, cx);
+            input.select_all(window, cx);
+        });
+        cx.notify();
+    }
+    fn finish_rename(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editor) = self.rename.take() else {
+            return;
+        };
+        self.rename_subscription = None;
+        if save {
+            let name = editor.input.read(cx).value().trim().to_owned();
+            if !name.is_empty()
+                && self.model.as_ref().is_some_and(|model| {
+                    model.connection_id().to_string() == editor.connection
+                        && model.screen(&editor.screen).is_some()
+                })
+            {
+                self.send(
+                    Command::RenameScreen {
+                        screen: editor.screen,
+                        connection: editor.connection,
+                        name,
+                    },
+                    cx,
+                );
+            }
+        }
+        self.focus_current(window, cx);
+        cx.notify();
+    }
+    fn request_close_screen(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((name, connection, busy)) = self.model.as_ref().and_then(|model| {
+            let info = model
+                .screens()
+                .iter()
+                .find(|info| info.id.as_str() == screen)?;
+            let busy = model
+                .screen(screen)
+                .and_then(|screen| screen.snapshot())
+                .is_none_or(|snapshot| snapshot.sessions.values().any(|session| session.busy));
+            Some((
+                info.name.as_deref().unwrap_or("Screen").to_owned(),
+                model.connection_id().to_string(),
+                busy,
+            ))
+        }) else {
+            return;
+        };
+        if self.close_prompts.contains(screen) {
+            return;
+        }
+        if !busy {
+            self.send(
+                Command::CloseScreen {
+                    screen: screen.to_owned(),
+                    connection,
+                },
+                cx,
+            );
+            return;
+        }
+        let screen = screen.to_owned();
+        self.close_prompts.insert(screen.clone());
+        let prompt = window.prompt(
+            PromptLevel::Warning,
+            &format!("Close {name} and end its running processes?"),
+            Some("Ends this Screen's sessions."),
+            &["Keep screen", "Close screen"],
+            cx,
+        );
+        cx.spawn_in(window, async move |this, cx| {
+            let confirmed = prompt.await.ok() == Some(1);
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.close_prompts.remove(&screen);
+                if confirmed
+                    && this.model.as_ref().is_some_and(|model| {
+                        model.connection_id().to_string() == connection
+                            && model.screen(&screen).is_some()
+                    })
+                {
+                    this.send(
+                        Command::CloseScreen {
+                            screen: screen.clone(),
+                            connection,
+                        },
+                        cx,
+                    );
+                }
+                this.focus_current(window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
     fn ensure_pane(&mut self, pane: &str, session: &str, cx: &mut Context<Self>) {
         if self
             .panes
@@ -298,7 +529,13 @@ impl Workspace {
         {
             return;
         }
-        let route = terminal_commands(self.commands.clone(), pane.to_owned(), session.to_owned());
+        let pending_resize = Arc::new(Mutex::new(None));
+        let route = terminal_commands(
+            self.commands.clone(),
+            pane.to_owned(),
+            session.to_owned(),
+            pending_resize.clone(),
+        );
         let inputs = self.smoke_terminal_inputs.clone();
         let last_pane = self.smoke_last_input_pane.clone();
         let input_pane = pane.to_owned();
@@ -321,41 +558,94 @@ impl Workspace {
             PaneView {
                 session: session.to_owned(),
                 terminal,
+                pending_resize,
                 marker: false,
                 tail: String::new(),
             },
         );
     }
     fn reconcile(&mut self, model: LocalWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rename.is_some() {
+            self.smoke_editor_reconciles += u64::from(self.smoke);
+        }
+        let old_screen = self
+            .model
+            .as_ref()
+            .and_then(LocalWorkspace::shown_screen_id)
+            .map(str::to_owned);
+        let old_focus = self
+            .model
+            .as_ref()
+            .and_then(LocalWorkspace::focused_pane)
+            .map(str::to_owned);
+        let old_entity = old_focus
+            .as_deref()
+            .and_then(|pane| self.panes.get(pane))
+            .map(|view| view.terminal.entity_id());
         if let Some(screen) = model.snapshot() {
             prune_layout_bounds(&screen.root, &mut self.split_bounds, &mut self.slot_bounds);
-            self.panes
-                .retain(|pane, view| model.session_for(pane) == Some(view.session.as_str()));
-            for pane in screen.panes.keys() {
-                let id = pane.as_str();
-                if let Some(session) = model.session_for(id) {
-                    self.ensure_pane(id, session, cx);
-                }
-            }
+        } else {
+            self.split_bounds.clear();
+            self.slot_bounds.clear();
+        }
+        self.panes
+            .retain(|pane, view| model.session_for(pane) == Some(view.session.as_str()));
+        for route in model.routes() {
+            self.ensure_pane(&route.pane_id, &route.session_id, cx);
+        }
+        if model.snapshot().is_some() {
             self.status.clear();
+        }
+        let new_screen = model.shown_screen_id().map(str::to_owned);
+        let new_focus = model.focused_pane().map(str::to_owned);
+        let new_entity = new_focus
+            .as_deref()
+            .and_then(|pane| self.panes.get(pane))
+            .map(|view| view.terminal.entity_id());
+        let editor_cancelled = self.rename.as_ref().is_some_and(|editor| {
+            model.connection_id().to_string() != editor.connection
+                || model.screen(&editor.screen).is_none()
+        });
+        if editor_cancelled {
+            self.rename = None;
+            self.rename_subscription = None;
+        }
+        if old_screen != new_screen {
+            self.drag = None;
         }
         self.drop_target = None;
         self.model = Some(model);
         self.sync_visible(cx);
-        self.focus_current(window, cx);
+        if self.rename.is_none()
+            && self.close_prompts.is_empty()
+            && (editor_cancelled
+                || old_screen != new_screen
+                || old_focus != new_focus
+                || old_entity != new_entity)
+        {
+            self.focus_current(window, cx);
+        }
         cx.notify();
     }
     fn sync_visible(&mut self, cx: &mut Context<Self>) {
         let mut visible = Vec::new();
         if let Some(model) = &self.model {
             if let Some(screen) = model.snapshot() {
-                visible_panes(model, &screen.root, &mut visible);
+                if let Some(shown) = model.shown() {
+                    visible_panes(shown, &screen.root, &mut visible);
+                }
             }
         }
         visible.sort();
-        if visible != self.visible {
+        let screen = self
+            .model
+            .as_ref()
+            .and_then(LocalWorkspace::shown_screen_id)
+            .map(str::to_owned);
+        if visible != self.visible || screen != self.visible_screen {
             self.visible = visible;
-            self.send(Command::Visible(self.visible.clone()), cx);
+            self.visible_screen = screen;
+            self.visible_pending = true;
             for pane in &self.visible {
                 if let Some(view) = self.panes.get(pane) {
                     view.terminal
@@ -363,8 +653,42 @@ impl Workspace {
                 }
             }
         }
+        self.flush_visible(cx);
+    }
+    fn flush_visible(&mut self, cx: &mut Context<Self>) {
+        if self.visible_pending {
+            match self.commands.try_send(Command::Visible {
+                screen: self.visible_screen.clone(),
+                panes: self.visible.clone(),
+            }) {
+                Ok(()) => self.visible_pending = false,
+                Err(error) => {
+                    self.status = format!("Visibility pending: {error}");
+                    cx.notify();
+                }
+            }
+        }
+    }
+    fn flush_resizes(&mut self, cx: &mut Context<Self>) {
+        for pane in &self.visible {
+            let Some(view) = self.panes.get(pane) else {
+                continue;
+            };
+            if let Err(error) =
+                retry_pending_resize(&self.commands, pane, &view.session, &view.pending_resize)
+            {
+                let status = format!("Resize pending: {error}");
+                if self.status != status {
+                    self.status = status;
+                    cx.notify();
+                }
+            }
+        }
     }
     fn focus_current(&self, window: &mut Window, cx: &mut App) {
+        if self.rename.is_some() || !self.close_prompts.is_empty() {
+            return;
+        }
         if let Some(pane) = self
             .model
             .as_ref()
@@ -410,7 +734,10 @@ impl Workspace {
             return;
         };
         let mut slots = Vec::new();
-        visible_slots(model, &screen.root, &self.slot_bounds, &mut slots);
+        let Some(shown) = model.shown() else {
+            return;
+        };
+        visible_slots(shown, &screen.root, &self.slot_bounds, &mut slots);
         let Some(current) = slots.iter().find(|slot| slot.pane == focused) else {
             return;
         };
@@ -421,6 +748,18 @@ impl Workspace {
         }
     }
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.rename.is_some() {
+            if event.keystroke.key == "escape" {
+                cx.stop_propagation();
+                self.finish_rename(false, window, cx);
+            }
+            return;
+        }
+        if !self.close_prompts.is_empty() {
+            // A native confirmation owns keyboard input until it settles.
+            cx.stop_propagation();
+            return;
+        }
         if event.keystroke.key == "escape" && cx.has_active_drag() {
             cx.stop_active_drag(window);
             self.drop_target = None;
@@ -466,7 +805,17 @@ impl Workspace {
             .and_then(LocalWorkspace::snapshot)
             .is_some_and(|screen| screen.panes.is_empty())
         {
-            self.send(Command::NewTerminal, cx);
+            if let Some(model) = &self.model {
+                if let Some(screen) = model.shown_screen_id() {
+                    self.send(
+                        Command::NewTerminal {
+                            screen: screen.to_owned(),
+                            connection: model.connection_id().to_string(),
+                        },
+                        cx,
+                    );
+                }
+            }
             return;
         }
         if let Some(pane) = self
@@ -494,12 +843,19 @@ impl Workspace {
                     cx.notify();
                 }
                 Update::Attached(session) => {
-                    for view in self.panes.values().filter(|view| view.session == session) {
+                    for (pane, view) in self
+                        .panes
+                        .iter()
+                        .filter(|(_, view)| view.session == session)
+                    {
+                        let visible = self.visible.contains(pane);
                         view.terminal.update(cx, |terminal, cx| {
                             if terminal.engine_ready() {
                                 terminal.status = "Attached".into();
                             }
-                            terminal.report_size();
+                            if visible {
+                                terminal.report_size();
+                            }
                             cx.notify();
                         });
                     }
@@ -547,6 +903,8 @@ impl Workspace {
         if self.smoke {
             self.smoke_tick(window, cx);
         }
+        self.flush_visible(cx);
+        self.flush_resizes(cx);
     }
     fn smoke_key(
         &self,
@@ -604,6 +962,15 @@ impl Workspace {
         let Some(model) = &self.model else {
             return;
         };
+        if self.smoke_stage == 17 && model.catalog_initialized() && model.screens().is_empty() {
+            if !self.panes.is_empty() || !self.visible.is_empty() {
+                self.finish_smoke(false, cx);
+                return;
+            }
+            self.create_screen(cx);
+            self.smoke_stage = 18;
+            return;
+        }
         let Some(screen) = model.snapshot() else {
             return;
         };
@@ -621,6 +988,7 @@ impl Workspace {
                 let Some(first) = model.focused_pane().map(str::to_owned) else {
                     return;
                 };
+                self.smoke_screen = model.shown_screen_id().map(str::to_owned);
                 self.smoke_initial = self.panes.get(&first).map(|view| view.terminal.clone());
                 self.smoke_first = Some(first.clone());
                 self.focus_current(window, cx);
@@ -709,11 +1077,150 @@ impl Workspace {
                     .is_some_and(|(view, original)| {
                         view.terminal.entity_id() == original.entity_id()
                     });
+                if !stable
+                    || !self.smoke_markers
+                    || !self.smoke_shortcuts_clean.load(Ordering::Acquire)
+                    || !self.smoke_normal_input.load(Ordering::Acquire)
+                {
+                    self.finish_smoke(false, cx);
+                    return;
+                }
+                self.send(Command::CreateScreen("Native Smoke 2".into()), cx);
+                self.smoke_stage = 10;
+            }
+            10 if model.screens().len() == 2
+                && model.shown_screen_id() != self.smoke_screen.as_deref()
+                && count == 1 =>
+            {
+                self.smoke_second_screen = model.shown_screen_id().map(str::to_owned);
+                let Some(first) = self.smoke_first.as_ref() else {
+                    return;
+                };
+                let Some(view) = self.panes.get(first) else {
+                    return;
+                };
+                if self
+                    .smoke_initial
+                    .as_ref()
+                    .is_none_or(|old| old.entity_id() != view.terminal.entity_id())
+                {
+                    self.finish_smoke(false, cx);
+                    return;
+                }
+                self.send(
+                    Command::Input {
+                        pane: first.clone(),
+                        session: view.session.clone(),
+                        text: "printf 'NATIVE_HIDDEN_SCREEN_OK\\n'\r".into(),
+                    },
+                    cx,
+                );
+                self.smoke_stage = 11;
+            }
+            11 if self
+                .smoke_first
+                .as_deref()
+                .and_then(|first| self.panes.get(first))
+                .is_some_and(|view| view.tail.contains("NATIVE_HIDDEN_SCREEN_OK")) =>
+            {
+                self.smoke_hidden_output = true;
+                if let Some(old) = self.smoke_screen.clone() {
+                    self.send(Command::SwitchScreen(old), cx);
+                    self.smoke_stage = 12;
+                }
+            }
+            12 if model.shown_screen_id() == self.smoke_screen.as_deref() && count == 3 => {
+                let Some(old) = self.smoke_screen.clone() else {
+                    return;
+                };
+                let focused = model.focused_pane().map(str::to_owned);
+                self.start_rename(&old, window, cx);
+                self.smoke_editor_reconciles = 0;
+                if let Some(pane) = focused {
+                    self.send(Command::Focus(pane), cx);
+                }
+                let Some(editor) = self.rename.as_ref() else {
+                    return;
+                };
+                let input = editor.input.clone();
+                let counter = self.smoke_terminal_inputs.as_ref().unwrap().clone();
+                let clean = self.smoke_editor_clean.clone();
+                let key = Keystroke::parse(if cx.platform_info().is_mac() {
+                    "cmd-d"
+                } else {
+                    "alt-d"
+                })
+                .expect("fixed editor smoke keystroke");
+                window.defer(cx, move |window, cx| {
+                    let before = counter.load(Ordering::Relaxed);
+                    window.dispatch_keystroke(key, cx);
+                    let focused = input.read(cx).focus_handle(cx).is_focused(window);
+                    clean.store(
+                        focused && counter.load(Ordering::Relaxed) == before,
+                        Ordering::Release,
+                    );
+                });
+                self.smoke_stage = 13;
+            }
+            13 if count == 3
+                && self.smoke_editor_reconciles > 0
+                && self.smoke_editor_clean.load(Ordering::Acquire) =>
+            {
+                let Some(editor) = self.rename.as_ref() else {
+                    return;
+                };
+                if !editor.input.read(cx).focus_handle(cx).is_focused(window) {
+                    self.finish_smoke(false, cx);
+                    return;
+                }
+                editor.input.update(cx, |input, cx| {
+                    input.set_value("Renamed Native", window, cx)
+                });
+                self.finish_rename(true, window, cx);
+                self.smoke_stage = 14;
+            }
+            14 if model.screens().iter().any(|info| {
+                info.id.as_str() == self.smoke_screen.as_deref().unwrap_or("")
+                    && info.name.as_deref() == Some("Renamed Native")
+            }) =>
+            {
+                if let Some(second) = self.smoke_second_screen.clone() {
+                    self.send(Command::SwitchScreen(second), cx);
+                    self.smoke_stage = 15;
+                }
+            }
+            15 if model.shown_screen_id() == self.smoke_second_screen.as_deref() => {
+                if let Some(second) = self.smoke_second_screen.clone() {
+                    self.send(
+                        Command::CloseScreen {
+                            screen: second,
+                            connection: model.connection_id().to_string(),
+                        },
+                        cx,
+                    );
+                    self.smoke_stage = 16;
+                }
+            }
+            16 if model.screens().len() == 1
+                && model.shown_screen_id() == self.smoke_screen.as_deref() =>
+            {
+                if let Some(old) = self.smoke_screen.clone() {
+                    self.send(
+                        Command::CloseScreen {
+                            screen: old,
+                            connection: model.connection_id().to_string(),
+                        },
+                        cx,
+                    );
+                    self.smoke_stage = 17;
+                }
+            }
+            18 if model.screens().len() == 1
+                && count == 1
+                && model.shown_screen_id() != self.smoke_screen.as_deref() =>
+            {
                 self.finish_smoke(
-                    stable
-                        && self.smoke_markers
-                        && self.smoke_shortcuts_clean.load(Ordering::Acquire)
-                        && self.smoke_normal_input.load(Ordering::Acquire),
+                    self.smoke_hidden_output && self.smoke_editor_clean.load(Ordering::Acquire),
                     cx,
                 );
             }
@@ -724,7 +1231,7 @@ impl Workspace {
         self.outcome.store(passed, Ordering::Release);
         eprintln!(
             "{}",
-            serde_json::json!({"probe":"splitty-local-workspace","passed":passed,"stage":self.smoke_stage,"panes":self.panes.len(),"distinctSessionMarkers":self.smoke_markers,"shortcutChecks":self.smoke_shortcut_checks.load(Ordering::Acquire),"shortcutsNoInput":self.smoke_shortcuts_clean.load(Ordering::Acquire),"normalInput":self.smoke_normal_input.load(Ordering::Acquire),"visiblePanes":self.visible.len(),"elapsedMs":self.started.elapsed().as_millis(),"status":self.status})
+            serde_json::json!({"probe":"splitty-local-workspace","passed":passed,"stage":self.smoke_stage,"panes":self.panes.len(),"distinctSessionMarkers":self.smoke_markers,"shortcutChecks":self.smoke_shortcut_checks.load(Ordering::Acquire),"shortcutsNoInput":self.smoke_shortcuts_clean.load(Ordering::Acquire),"normalInput":self.smoke_normal_input.load(Ordering::Acquire),"hiddenOutput":self.smoke_hidden_output,"renameEditorKeptFocus":self.smoke_editor_reconciles > 0 && self.smoke_editor_clean.load(Ordering::Acquire),"visiblePanes":self.visible.len(),"elapsedMs":self.started.elapsed().as_millis(),"status":self.status})
         );
         self.stop();
         cx.quit();
@@ -830,6 +1337,115 @@ impl Workspace {
             };
             self.send(command, cx);
         }
+    }
+    fn render_screen_controls(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut screens = div()
+            .id("screen-strip")
+            .flex()
+            .items_center()
+            .gap_1()
+            .max_w(px(390.))
+            .min_w_0()
+            .overflow_x_scroll();
+        if let Some(model) = &self.model {
+            for (index, info) in model.screens().iter().enumerate() {
+                let id = info.id.to_string();
+                let selected = model.shown_screen_id() == Some(id.as_str());
+                let label = info
+                    .name
+                    .as_deref()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| format!("Screen {}", index + 1));
+                let mut chip = div()
+                    .id(SharedString::from(format!("screen-{id}")))
+                    .flex()
+                    .items_center()
+                    .flex_none()
+                    .h(px(28.))
+                    .bg(rgb(if selected { 0x30475b } else { 0x243342 }));
+                if let Some(editor) = self.rename.as_ref().filter(|editor| editor.screen == id) {
+                    chip = chip.child(
+                        div()
+                            .w(px(145.))
+                            .h(px(27.))
+                            .px_1()
+                            .overflow_hidden()
+                            .child(Input::new(&editor.input)),
+                    );
+                    chip = chip.child(
+                        div()
+                            .id(SharedString::from(format!("screen-rename-save-{id}")))
+                            .px_1()
+                            .cursor_pointer()
+                            .child("✓")
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                this.finish_rename(true, window, cx)
+                            })),
+                    );
+                } else {
+                    let switch = id.clone();
+                    let rename = id.clone();
+                    chip = chip
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("screen-select-{id}")))
+                                .max_w(px(120.))
+                                .overflow_hidden()
+                                .px_2()
+                                .cursor_pointer()
+                                .child(label)
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.switch_screen(&switch, window, cx)
+                                })),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("screen-rename-{id}")))
+                                .px_1()
+                                .cursor_pointer()
+                                .child("✎")
+                                .on_click(cx.listener(move |this, _, window, cx| {
+                                    this.start_rename(&rename, window, cx)
+                                })),
+                        );
+                }
+                let close = id.clone();
+                screens = screens.child(
+                    chip.child(
+                        div()
+                            .id(SharedString::from(format!("screen-close-{id}")))
+                            .px_1()
+                            .cursor_pointer()
+                            .child("×")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                this.request_close_screen(&close, window, cx)
+                            })),
+                    ),
+                );
+            }
+            if model.screens().is_empty() {
+                screens = screens.child(div().text_color(rgb(0x91a8bc)).child("No screens"));
+            }
+        }
+        let pending = self
+            .model
+            .as_ref()
+            .is_some_and(LocalWorkspace::has_pending_create);
+        screens
+            .child(
+                div()
+                    .id("new-screen")
+                    .flex_none()
+                    .px_2()
+                    .h(px(28.))
+                    .flex()
+                    .items_center()
+                    .cursor_pointer()
+                    .bg(rgb(if pending { 0x243342 } else { 0x30475b }))
+                    .child("+ Screen")
+                    .on_click(cx.listener(|this, _, _, cx| this.create_screen(cx))),
+            )
+            .into_any_element()
     }
     fn render_node(&self, node: &LayoutNode, cx: &mut Context<Self>) -> AnyElement {
         match node {
@@ -1127,7 +1743,7 @@ impl Render for Workspace {
                     .flex_none()
                     .bg(rgb(0x18232f))
                     .child(div().font_weight(FontWeight::BOLD).child("SPLITTY"))
-                    .child(div().text_color(rgb(0x91a8bc)).child("Local / Screen 1"))
+                    .child(self.render_screen_controls(cx))
                     .child(div().flex_1())
                     .child(
                         div()
@@ -1167,7 +1783,20 @@ impl Render for Workspace {
                     ),
             );
         if let Some(model) = &self.model {
-            if let Some(screen) = model.snapshot() {
+            if model.screens().is_empty() {
+                view = view.child(
+                    div().flex_1().flex().items_center().justify_center().child(
+                        div()
+                            .id("new-screen-empty")
+                            .px_4()
+                            .py_2()
+                            .cursor_pointer()
+                            .bg(rgb(0x293b4d))
+                            .child("New screen")
+                            .on_click(cx.listener(|this, _, _, cx| this.create_screen(cx))),
+                    ),
+                );
+            } else if let Some(screen) = model.snapshot() {
                 if screen.panes.is_empty() {
                     view = view.child(
                         div().flex_1().flex().items_center().justify_center().child(
@@ -1192,7 +1821,7 @@ impl Render for Workspace {
                     );
                 }
             } else {
-                view = view.child(div().flex_1().p_4().child("Starting local terminal…"));
+                view = view.child(div().flex_1().p_4().child("Loading local Screen…"));
             }
         } else {
             view = view.child(div().flex_1().p_4().child("Connecting…"));
@@ -1215,7 +1844,7 @@ impl Render for Workspace {
         )
     }
 }
-fn visible_panes(model: &LocalWorkspace, node: &LayoutNode, out: &mut Vec<String>) {
+fn visible_panes(model: &ScreenModel, node: &LayoutNode, out: &mut Vec<String>) {
     match node {
         LayoutNode::Slot { .. } => {
             if let Some(pane) = model.selected_pane(node) {
@@ -1230,7 +1859,7 @@ fn visible_panes(model: &LocalWorkspace, node: &LayoutNode, out: &mut Vec<String
     }
 }
 fn visible_slots(
-    model: &LocalWorkspace,
+    model: &ScreenModel,
     node: &LayoutNode,
     bounds: &HashMap<String, Bounds<Pixels>>,
     out: &mut Vec<VisibleSlot>,
@@ -1300,16 +1929,19 @@ fn resized_pair(sizes: &[f64], index: usize, delta: f64) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        nearest_slot, prune_layout_bounds, resized_pair, shortcut, terminal_commands,
-        visible_slots, Command, Direction, Shortcut, VisibleSlot,
+        nearest_slot, prune_layout_bounds, resized_pair, retry_pending_resize, shortcut,
+        terminal_commands, visible_slots, Command, Direction, Shortcut, VisibleSlot,
     };
     use crate::terminal;
     use gpui_kit::{point, px, size, Bounds, Keystroke, Modifiers, Pixels};
     use splitty_client_core::{
-        workspace::{LayoutNode, LocalWorkspace},
+        workspace::{LayoutNode, ScreenModel},
         ScreenIds,
     };
-    use std::collections::HashMap;
+    use std::{
+        collections::HashMap,
+        sync::{Arc, Mutex},
+    };
 
     fn key(name: &str, modifiers: Modifiers) -> Keystroke {
         Keystroke {
@@ -1425,7 +2057,7 @@ mod tests {
     #[test]
     fn visible_tab_and_nearest_split_neighbor_follow_screen_geometry() {
         let connection = Default::default();
-        let mut model = LocalWorkspace::new(
+        let mut model = ScreenModel::new(
             ScreenIds {
                 screen_id: "screen".into(),
                 pane_id: "a".into(),
@@ -1562,8 +2194,20 @@ mod tests {
     #[test]
     fn terminal_input_has_one_shared_admission_boundary_and_keeps_atomic_payloads() {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
-        let first = terminal_commands(sender.clone(), "pane-a".into(), "session-a".into());
-        let second = terminal_commands(sender, "pane-b".into(), "session-b".into());
+        let first_pending = Arc::new(Mutex::new(None));
+        let second_pending = Arc::new(Mutex::new(None));
+        let first = terminal_commands(
+            sender.clone(),
+            "pane-a".into(),
+            "session-a".into(),
+            first_pending,
+        );
+        let second = terminal_commands(
+            sender.clone(),
+            "pane-b".into(),
+            "session-b".into(),
+            second_pending.clone(),
+        );
         let input = |generation, text: &str| terminal::Command::Input {
             generation,
             text: text.to_owned(),
@@ -1573,6 +2217,12 @@ mod tests {
         second(input(0, "next")).expect("second pane uses the same queue");
         assert!(first(input(0, "rejected")).is_err());
         assert!(second(terminal::Command::Resize(120, 40)).is_err());
+        assert!(second(terminal::Command::Resize(130, 41)).is_err());
+        assert_eq!(
+            *second_pending.lock().unwrap(),
+            Some((130, 41)),
+            "latest rejected size survives queue pressure"
+        );
         match receiver.try_recv().expect("accepted paste remains queued") {
             Command::Input {
                 pane,
@@ -1607,6 +2257,17 @@ mod tests {
             _ => panic!("expected input"),
         }
         assert!(receiver.try_recv().is_err());
+        retry_pending_resize(&sender, "pane-b", "session-b", &second_pending)
+            .expect("resize retry admitted");
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Command::ResizePane {
+                cols: 130,
+                rows: 41,
+                ..
+            })
+        ));
+        assert_eq!(*second_pending.lock().unwrap(), None);
         drop(receiver);
         assert!(first(input(0, "closed")).is_err());
     }

@@ -622,6 +622,15 @@ interface MuxResync {
   screenId: string;
 }
 
+/**
+ * Request the ordered workspace catalog on this same session stream.
+ * The response follows preceding mux operations from this connection.
+ * Available when mux.welcome advertises workspace-catalog-v1.
+ */
+interface MuxWorkspaceResync {
+  type: "mux.workspace_resync";
+}
+
 type ClientMessage =
   | SessionCreate
   | SessionAttach
@@ -640,7 +649,8 @@ type ClientMessage =
   | MuxDetach
   | MuxOp
   | ExtractTemplate
-  | MuxResync;
+  | MuxResync
+  | MuxWorkspaceResync;
 
 // ============================================================================
 // 3. SERVER → CLIENT EVENTS
@@ -875,7 +885,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "hub-host-decisions-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "viewer-v1" and "viewer-annotations-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "hub-host-decisions-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "viewer-v1" and "viewer-annotations-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -892,6 +902,17 @@ interface ScreenInfo {
 interface MuxScreenSnapshot extends ServerEvent {
   type: "mux.screen_snapshot";
   screen: ScreenState;
+}
+
+/**
+ * One coherent ordered catalog, without pane layouts. Duplicate ordered IDs
+ * occur once at their first position; missing IDs are omitted. The active hint
+ * is null unless it names a returned screen. Names retain the welcome format.
+ */
+interface MuxWorkspaceSnapshot extends ServerEvent {
+  type: "mux.workspace_snapshot";
+  screens: ScreenInfo[];
+  activeScreenId: string | null;
 }
 
 /**
@@ -1024,6 +1045,7 @@ type ServerMessage =
   | MuxPaneSpawned
   | MuxOpFailed
   | MuxScreenSnapshot
+  | MuxWorkspaceSnapshot
   | MuxNudge
   | MuxPaneSpawned
   | MuxBusy

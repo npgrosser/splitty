@@ -1,8 +1,9 @@
 # Native GPUI development app
 
-The development app opens an isolated local Screen with real service-owned
-terminal sessions, split panes, tab groups and draggable dividers. Its layout
-comes from the shared mux tree; existing terminal views survive layout updates.
+The development app opens an isolated workspace with real service-owned terminal
+sessions, local Screens, split panes, tab groups and draggable dividers. Layouts
+come from the shared mux tree; terminal views survive layout updates and Screen
+switches.
 Closing the window ends its owned service. Saved production workspaces and the
 released Electron/Tauri apps remain separate.
 
@@ -78,9 +79,13 @@ The default window offers **Split right**, **Split below** and **New tab**.
 Select tabs by clicking their labels, close panes with their tab close control,
 and resize splits by dragging the divider. After closing the final pane,
 **New terminal** repopulates the same Screen. Ctrl+Shift+C/V copies and pastes
-in the focused terminal. This increment has one local Screen; hosts, saved
-workspace restoration, drag-and-drop, scratchpad and `splitty open` integration
-remain subsequent migration work.
+in the focused terminal. Drag a terminal tab into another group or onto one of
+its four edges to move it without restarting its shell; Escape cancels the drag.
+
+Screen controls create, select, rename and close local Screens. Hidden Screens
+keep their terminal output and scrollback. Closing the last Screen leaves
+**New screen**; closing a Screen ends its sessions. Hosts, saved workspace
+restoration, scratchpad and `splitty open` integration remain subsequent work.
 
 Workspace shortcuts use **Cmd** on macOS and **Alt** on other hosts as `Mod`:
 
@@ -94,10 +99,13 @@ Workspace shortcuts use **Cmd** on macOS and **Alt** on other hosts as `Mod`:
 These chords are handled before terminal input; Ctrl+C and clipboard keys keep
 their terminal behavior. Tab selection remains available by clicking its label.
 
-`--workspace-smoke` exercises four distinct terminal sessions, both split axes,
-tab switching, authoritative divider ratios, pane closure, keyboard routing and
-preserved terminal identity. It requires fresh visible paints and joined service cleanup. The smoke
-driver selects this workflow with `--workspace`; omit it for the legacy fixture.
+`--workspace-smoke` exercises distinct terminal sessions, both split axes, tab
+switching, authoritative divider ratios, pane closure, keyboard routing and
+preserved terminal identity. It also creates, switches, renames and closes local
+Screens, checks hidden output and rename-editor focus, and creates a fresh Screen
+after final closure. It requires fresh visible paints and joined service cleanup.
+The smoke driver selects this workflow with `--workspace`; omit it for the legacy
+fixture.
 
 `--smoke` runs bounded terminal output, loads the Markdown fixture, creates an
 annotation, reconnects to the same service and checks the rendered pane. It
@@ -170,9 +178,9 @@ accelerated path; they do not establish new latency numbers. WSLg presentation
 still adds a host-window transport, and a native Windows UI remains the target
 Windows topology, with server and shells in WSL.
 
-## Local workspace acceptance
+## Initial local workspace acceptance
 
-Repository checks passed: 1,247 workspace Rust tests (including the architecture
+For the initial single-Screen increment, repository checks passed: 1,247 workspace Rust tests (including the architecture
 model), formatting, workspace Clippy with warnings denied, optional CEF Clippy
 and all 19 main specifications. The 20 GPUI tests include actual Ghostty engine
 behavior, render-cache invalidation, divider math and shared command admission
@@ -194,6 +202,33 @@ and [ASCII, CJK, combining accents and emoji](images/gpui-workspace-unicode.png)
 These are native window captures, separate from runtime-log smoke evidence.
 Manual IME, cross-application clipboard, accessibility and other desktop
 platforms still need target-specific acceptance.
+
+## Multiple local Screens acceptance
+
+The multi-Screen increment passes the focused client-core and GPUI tests, all
+architecture checks, formatting, touched-crate Clippy with warnings denied and
+OpenSpec validation. Broad release/CI checks are deferred for this development
+increment. After moving the workspace worker into the native client runtime,
+the optimized window passed the extended workspace smoke on Wayland and X11
+with the hardware D3D12-backed OpenGL device described above. Both runs retained
+hidden output and rename-editor focus and completed owned-service shutdown.
+
+`scripts/testing/gpui-screens.py` drives the normal window through real X11 mouse
+and keyboard events on its own Xvfb display. Its 12 checks create distinct
+shells, rename with Enter and cancel with Escape, preserve shell PID and state
+across switches, return to hidden output, cancel and confirm a busy Screen close,
+close the final Screen and start a fresh shell from the empty workspace. It also
+checks normal window closure and absence of surviving children. External captures
+were reviewed separately from the runtime-log smoke. This is functional evidence,
+not a latency benchmark or acceptance on other desktop platforms.
+
+```sh
+python3 scripts/testing/gpui-screens.py target/release/splitty-gpui \
+  --output /tmp/splitty-screens-evidence --busy-close
+```
+
+The script requires Xvfb and xdotool; their executable paths and the isolated
+display can be selected with its command-line options.
 
 ## Ghostty integration measurements
 

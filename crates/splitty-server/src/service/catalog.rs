@@ -280,6 +280,7 @@ pub const SESSION_OPERATIONS: &[&str] = &[
     "hide",
     "mux.op",
     "mux.resync",
+    "mux.workspace_resync",
     "mux.extract_template",
     "editor.register",
     "editor.result",

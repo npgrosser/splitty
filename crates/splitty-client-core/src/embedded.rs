@@ -334,6 +334,64 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workspace_catalog_uses_the_ordered_native_stream_around_live_session_output() {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let service = service();
+        let mut client = service.connect().await.unwrap();
+        let welcome = kind(&mut client, "mux.welcome").await;
+        assert!(welcome.json().unwrap()["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "workspace-catalog-v1"));
+
+        client.request_workspace().unwrap();
+        let empty = kind(&mut client, "mux.workspace_snapshot").await;
+        assert_eq!(empty.json().unwrap()["screens"], json!([]));
+        assert!(empty.json().unwrap()["activeScreenId"].is_null());
+
+        let ids = ScreenIds::new();
+        client.create_screen_with_ids(&ids, "First").unwrap();
+        client.request_workspace().unwrap();
+        let spawned = kind(&mut client, "mux.pane_spawned").await;
+        assert_eq!(spawned.json().unwrap()["paneId"], ids.pane_id);
+        let session = spawned.json().unwrap()["sessionId"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        let created = kind(&mut client, "mux.workspace_snapshot").await;
+        assert_eq!(
+            created.json().unwrap()["screens"],
+            json!([{"id":ids.screen_id,"name":"First"}])
+        );
+        assert_eq!(created.json().unwrap()["activeScreenId"], ids.screen_id);
+
+        attach(&mut client, &session).await;
+        client
+            .input(&session, "printf 'CATALOG_BEFORE_OK\\n'\n")
+            .unwrap();
+        output(&mut client, b"CATALOG_BEFORE_OK").await;
+        client.rename_screen(&ids.screen_id, "Renamed").unwrap();
+        client.request_workspace().unwrap();
+        let renamed = kind(&mut client, "mux.workspace_snapshot").await;
+        assert_eq!(renamed.json().unwrap()["screens"][0]["name"], "Renamed");
+        client
+            .input(&session, "printf 'CATALOG_AFTER_OK\\n'\n")
+            .unwrap();
+        output(&mut client, b"CATALOG_AFTER_OK").await;
+
+        client.close_screen(&ids.screen_id).unwrap();
+        client.request_workspace().unwrap();
+        let closed = kind(&mut client, "mux.workspace_snapshot").await;
+        assert_eq!(closed.json().unwrap()["screens"], json!([]));
+        assert!(closed.json().unwrap()["activeScreenId"].is_null());
+        client.finish().await.unwrap();
+        service.close().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn retained_events_and_pending_reads_share_the_native_budget() {
         let service = service();
         let mut client = service.connect().await.unwrap();

@@ -95,22 +95,40 @@ No mux-level attach/detach — the client gets screen state via `mux.resync` on 
 ### Client connections
 
 The development-only `splitty-gpui` window uses `splitty-client-core` as a UI-free
-adapter over the same native connection. Its default local workspace shows one
-isolated service-owned screen. `splitty_client_core::workspace` keeps the canonical
-`ScreenState` snapshot, client-generated pending pane IDs and pane-to-session
-routes for the current connection identity. Typed `ScreenOp`s request splits,
-tabs, closes and split resizing; the sender explicitly requests a new snapshot
-because a successful op does not nudge its own connection. The GPUI workspace
-recursively renders that snapshot's slots and splits, keeps terminal entities
-keyed by pane ID across layout changes, and stores the shown tab and focus in
-the window. After a user changes tabs, a server advertising `tab-select-v1`
-receives `select_tab` for changed multi-tab groups, so a rebuilt window can
-restore the choice without nudging another window. An empty screen can receive
-a new terminal under its existing screen ID and name. There is no second docking
-tree. The worker owns the ordered stream,
-attaches each service-created session, routes input and output by both pane and
-session identity, and drops routes removed by a snapshot. The service remains
-the authority for PTYs and layout.
+adapter over one native connection and isolated owned service. The explicit
+`native_workspace` module owns the worker, command/update API and bounded retries
+for attachment, visibility and size controls; GPUI only submits intents and
+consumes updates. This runtime retries safe control admission, never user input
+or layout mutations. Its connection-wide
+`LocalWorkspace` holds the ordered Screen catalog, local shown-screen choice,
+pending lifecycle intents and shared session admission. Each `ScreenModel` keeps
+its canonical `Arc<ScreenState>`, local tab/focus choices and pane/session routes.
+The GPUI view keeps one terminal entity registry across all Screens and renders
+the shown Screen's canonical slots and splits directly, without a second docking
+tree. Switching Screens preserves terminal emulation and attachments; hidden
+terminals consume output and send protocol replies without claiming visibility
+or PTY size. Returning panes publish their measured sizes again.
+
+The capability-gated `mux.workspace_resync` request runs in the serial session
+loop and returns an ordered catalog plus an initial active-screen hint from one
+store read. It therefore follows earlier lifecycle operations on that connection;
+the separately dispatched native API request path is not a mutation barrier.
+One outstanding refresh and a dirty follow-up coalesce requests. A local mutation
+watermark prevents an older catalog response from retiring a newly submitted
+Screen or its pending terminal. Existing mutation nudges refresh the catalog;
+known-Screen `session_metadata` nudges only refresh that Screen. Later active-screen
+hints do not replace a valid window-local choice.
+
+Typed lifecycle operations create, rename, activate and close Screens. Typed
+`ScreenOp`s request splits, tabs, pane closure and split resizing, followed by an
+explicit screen snapshot because a successful op does not nudge its own connection.
+Tab selection is window-local and also persisted through `select_tab` on servers
+advertising `tab-select-v1`. An empty Screen can receive a new terminal under its
+existing ID and name; closing the final Screen leaves an explicit empty workspace.
+Shared admission counts all attached and pending terminal routes across Screens,
+with separate catalog retention bounds. Authoritative removal retires only that
+Screen's routes and entities. Focus restoration is tied to navigation or terminal
+replacement so unrelated updates cannot interrupt a rename editor or close prompt.
 
 Terminal commands enter one shared bounded worker queue directly through a
 terminal-local callback. Each workspace callback captures its pane and session
@@ -144,6 +162,16 @@ the Windows client adapter accepts an owned native stream, while this developmen
 window's Windows launcher remains unwired. Closing the window joins its worker
 after closing its stream and isolated service. See [the spike report](gpui-spike.md)
 for platform evidence; released clients remain unchanged.
+
+This crate boundary is UI-free but currently native: client actions call the
+concrete native `Client`, and the crate depends on transport, remote and service
+runtimes. Browser reuse would require separating portable state/intent handling
+from those adapters; a WebAssembly build is not implemented. The current native
+presence reporting and busy-session close prompt are local MVP subsets of the
+web client's activity and close-impact policies. The retained Markdown probe's
+exact-match anchoring is also narrower than the web annotation algorithm. Future
+feature work must reconcile these shared rules before extending a second
+implementation; focus, dialog rendering and terminal painting stay UI concerns.
 
 The client holds one `ServerConnection` (`lib/connection/`) per server it shows screens of: the local server, the connection `local`, and one `host:<target>` per host with screens in the window, once one of them was shown (see Remote Screens). A connection owns everything that speaks to its server: the socket, the mux client, the attach registry, the session client (`create` queue, sessions, which pane shows which session, the server's home directory) and the handlers of its server commands. Only a browser socket treats an authentication failure as an expired login and queues eligible messages while disconnected. Native connections never open a browser login or queue disconnected input; a host's socket has rules of its own. A lost connection fails the attaches in flight on it, so the views rebuilt after the reconnect send their own.
 
@@ -256,7 +284,7 @@ Handshake adapters reserve serialized control frames before allocating their buf
 
 Notifications have no shared serialized-message ring. The core notification bus holds weak registration objects and synchronously offers each typed event to the subscriber's byte-bounded sender. Each session keeps its subscription alive and uses one pending notification queue with the same connection/process context as its main output. Job events, mux/service broadcasts and port changes all enter that queue, including during registration; welcome is sent directly before pending events are forwarded. Forwarding moves the existing buffer and lease without another allocation. A failed recipient is closed while delivery to others continues. Per-client saturation affects that client; aggregate process-budget exhaustion can reject additional recipients too. Dropped registrations cannot be revived by other aliases of their sender, and registration/send prunes stale weak entries. Mux batches retain pane-spawn-before-nudge order, and a job operation drains its notifications before the next request can resync.
 
-For client mux operations, `Store::dispatch_inspect` compares the operation's before/after screen revisions and membership under one lock. The session handler resolves process effects and publishes a single batch: successful pane-spawn events, then one nudge per affected screen to other clients. Layout-only edits follow the same path; order or activation changes with no changed screen use a screenless nudge. `select_tab` persists the chosen pane in the server's slot but sends no nudge to other windows; each keeps its shown tab until it changes it. Every other parsed rejected operation reports `mux.op_failed` to its sender, whose mux client requests the named screen's snapshot. Workspace-directory reconciliation remains separate: current web clients ignore screenless nudges, and an absent screen has no snapshot response.
+For client mux operations, `Store::dispatch_inspect` compares the operation's before/after screen revisions and membership under one lock. The session handler resolves process effects and publishes a single batch: successful pane-spawn events, then one nudge per affected screen to other clients. Layout-only edits follow the same path; order or activation changes with no changed screen use a screenless nudge. `select_tab` persists the chosen pane in the server's slot but sends no nudge to other windows; each keeps its shown tab until it changes it. Every other parsed rejected operation reports `mux.op_failed` to its sender, whose mux client requests the named screen's snapshot. Workspace-directory reconciliation remains separate: current web clients ignore screenless nudges, and an absent screen has no per-screen snapshot response. The native client reconciles membership through the ordered workspace catalog described above.
 
 All subscriptions of a client share its delivery context with the session and native queues. The snapshot and queued/live chunks remain charged until consumed, not just until dequeued. A stalled subscriber closes that client rather than dropping a partial application frame; capture, keepers and other clients continue. Each queue also has a 1024-item bound so tiny-message floods cannot evade byte accounting. API response vector capacity is reserved while serializing, including results waiting for their caller; browser response bodies retain those leases through HTTP delivery. File/editor request guards remove their registrations synchronously on cancellation, without leaving a detached expiry task.
 

@@ -23,13 +23,8 @@ model {
     }
 
     gpui_workspace = component 'gpui_workspace' {
-      description 'Recursive native projection, stable pane views, local tabs and captured single-pane drag gestures.'
+      description 'Screen controls and canonical layout projection with stable terminal views across local screen switches.'
       metadata { module 'splitty_gpui::workspace' }
-    }
-
-    workspace_session = component 'workspace_session' {
-      description 'Owned local service worker, ordered native stream and pane-scoped session routing.'
-      metadata { module 'splitty_gpui::workspace_session' }
     }
 
     gpui_document = component 'gpui_document' {
@@ -44,18 +39,16 @@ model {
 
     gpui_main -> gpui_app 'Construct and close the probe window'
     gpui_main -> gpui_workspace 'Construct the local workspace window'
-    gpui_main -> workspace_session 'Join the local workspace worker'
+    gpui_main -> splitty.client_core.native_workspace 'Join the native workspace runtime'
     gpui_main -> offscreen 'Run an engine child before opening the UI'
     gpui_app -> gpui_document 'Show Markdown and annotation marks'
     gpui_app -> offscreen 'Composite the offscreen engine frame under an overlay'
     gpui_app -> terminal 'Show terminal output and forward native input'
     terminal -> terminal_engine 'Borrow native terminal state and encode checked input'
     gpui_workspace -> terminal 'Keep one terminal view per pane identity'
-    gpui_workspace -> workspace_session 'Send local layout and session intents'
+    gpui_workspace -> splitty.client_core.native_workspace 'Send typed intents and receive workspace updates'
     gpui_workspace -> splitty.client_core.client_workspace 'Render the canonical screen and local tab selection'
     gpui_workspace -> splitty.client_core.client_root 'Construct workspace identities in native navigation tests'
-    workspace_session -> splitty.client_core.client_workspace 'Reconcile snapshots and session routes'
-    workspace_session -> splitty.client_core.client_root 'Own an isolated service and ordered client stream'
     gpui_app -> splitty.client_core.client_root 'Use the public native client API'
     gpui_document -> splitty.client_core.client_root 'Form a source-scoped annotation draft'
   }

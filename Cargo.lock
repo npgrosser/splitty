@@ -7600,6 +7600,7 @@ dependencies = [
 name = "splitty-client-core"
 version = "0.2.3"
 dependencies = [
+ "anyhow",
  "base64 0.22.1",
  "serde",
  "serde_json",

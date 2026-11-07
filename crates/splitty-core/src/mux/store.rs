@@ -4,7 +4,7 @@
 //! through the reducer. Persistence behavior (whether screens survive disconnects)
 //! is determined by server mode, not per-screen ownership.
 
-use std::sync::RwLock;
+use std::{collections::HashSet, sync::RwLock};
 
 use super::effects::Effect;
 use super::ops::{Op, ScreenOp};
@@ -186,6 +186,32 @@ impl Store {
             .collect()
     }
 
+    /// Project a catalog and usable active hint from one workspace read.
+    /// Keep the first occurrence of each ordered ID; partial orders remain partial.
+    pub fn workspace_catalog(&self) -> (Vec<ScreenInfo>, Option<ScreenId>) {
+        let state = self.state.read().unwrap();
+        let mut seen = HashSet::new();
+        let screens = state
+            .screen_order
+            .iter()
+            .filter_map(|id| {
+                if !seen.insert(id.clone()) {
+                    return None;
+                }
+                state.screens.get(id).map(|screen| ScreenInfo {
+                    id: screen.id.clone(),
+                    name: screen.name.clone(),
+                })
+            })
+            .collect();
+        let active = state
+            .active_screen_id
+            .as_ref()
+            .filter(|id| seen.contains(*id) && state.screens.contains_key(*id))
+            .cloned();
+        (screens, active)
+    }
+
     /// The document of the viewer pane `pane_id`, on whichever screen holds
     /// it; none when no pane of the role `viewer` has that ID.
     pub fn viewer_source(&self, pane_id: &PaneId) -> Option<ViewerSource> {
@@ -276,6 +302,50 @@ impl Default for Store {
 mod tests {
     use super::*;
     use crate::mux::state::Axis;
+
+    #[test]
+    fn workspace_catalog_keeps_order_and_names_but_filters_unlisted_active_screen() {
+        let mut state = WorkspaceState::default();
+        for (id, name) in [
+            ("first", Some("First")),
+            ("second", None),
+            ("unlisted", Some("Hidden")),
+        ] {
+            let id = ScreenId::from(id);
+            state
+                .screens
+                .insert(id.clone(), ScreenState::new(id, name.map(str::to_owned)));
+        }
+        state.screen_order = vec![
+            ScreenId::from("second"),
+            ScreenId::from("second"),
+            ScreenId::from("missing"),
+            ScreenId::from("first"),
+        ];
+        state.active_screen_id = Some(ScreenId::from("unlisted"));
+        let store = Store::with_state(state);
+
+        let (screens, active) = store.workspace_catalog();
+        assert_eq!(
+            screens
+                .iter()
+                .map(|screen| screen.id.as_str())
+                .collect::<Vec<_>>(),
+            ["second", "first"]
+        );
+        assert_eq!(screens[0].name, None);
+        assert_eq!(screens[1].name.as_deref(), Some("First"));
+        assert_eq!(active, None);
+
+        store
+            .dispatch(Op::SetActiveScreen {
+                screen_id: ScreenId::from("first"),
+            })
+            .unwrap();
+        assert_eq!(store.workspace_catalog().1, Some(ScreenId::from("first")));
+        assert_eq!(Store::new().workspace_catalog().0.len(), 0);
+        assert_eq!(Store::new().workspace_catalog().1, None);
+    }
 
     #[test]
     fn dispatch_create_screen() {

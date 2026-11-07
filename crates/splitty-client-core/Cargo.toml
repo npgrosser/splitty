@@ -6,6 +6,7 @@ license.workspace = true
 publish = false
 
 [dependencies]
+anyhow = "1"
 splitty-transport = { path = "../splitty-transport" }
 splitty-remote = { path = "../splitty-remote" }
 splitty-core = { path = "../splitty-core" }

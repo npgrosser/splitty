@@ -6,6 +6,7 @@ pub mod connection;
 pub mod document;
 #[cfg(not(target_os = "windows"))]
 pub mod embedded;
+pub mod native_workspace;
 pub mod workspace;
 
 pub use connection::{AnnotationDraft, Client, Event, Output, ScreenIds};

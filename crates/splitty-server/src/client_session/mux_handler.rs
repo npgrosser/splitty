@@ -159,6 +159,14 @@ impl MuxHandler {
                     tracing::warn!("invalid mux.resync message");
                 }
             }
+            Some(codec::MSG_MUX_WORKSPACE_RESYNC) => {
+                let (screens, active) = self.store.workspace_catalog();
+                self.send_event(&ServerEvent::mux_workspace_snapshot(
+                    screens,
+                    active.map(|id| id.to_string()),
+                ))
+                .await;
+            }
             Some(codec::MSG_VIEWER_REVIEW_ANSWER) => {
                 // Settled once; every answer is acknowledged to its sender
                 // only (`mux-protocol`, Review Answers). The waiting request
@@ -590,6 +598,66 @@ impl MuxHandler {
 mod tests {
     use super::*;
     use crate::client_session::Message;
+
+    #[tokio::test]
+    async fn ordered_workspace_catalog_reflects_rename_and_final_close() {
+        fn next_json(sent: &mut splitty_transport::queue::Receiver<Message>) -> Value {
+            let Message::Text(text) = sent.try_recv().expect("catalog response").value else {
+                panic!("expected text response")
+            };
+            serde_json::from_str(&text).expect("catalog JSON")
+        }
+
+        let store = layout_store();
+        let others = Default::default();
+        let (handler, mut sent) = window(&store, "catalog-client", &others);
+        handler.send_welcome().await;
+        let welcome = next_json(&mut sent);
+        assert!(welcome["capabilities"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|capability| capability == "workspace-catalog-v1"));
+
+        let request = r#"{"type":"mux.workspace_resync"}"#;
+        assert!(handler.try_handle(request).await);
+        let initial = next_json(&mut sent);
+        assert_eq!(initial["type"], "mux.workspace_snapshot");
+        assert_eq!(initial["screens"].as_array().unwrap().len(), 2);
+        assert_eq!(initial["screens"][0]["id"], "screen-1");
+        assert_eq!(initial["screens"][1]["id"], "screen-2");
+        assert_eq!(initial["activeScreenId"], "screen-1");
+
+        assert!(
+            handler
+                .try_handle(
+                    r#"{"type":"mux.op","screenId":"screen-2","op":{"type":"set_active_screen"}}"#
+                )
+                .await
+        );
+        assert!(handler.try_handle(request).await);
+        assert_eq!(next_json(&mut sent)["activeScreenId"], "screen-2");
+
+        assert!(handler.try_handle(r#"{"type":"mux.op","screenId":"screen-2","op":{"type":"rename_screen","name":"Renamed"}}"#).await);
+        assert!(handler.try_handle(request).await);
+        let renamed = next_json(&mut sent);
+        assert_eq!(renamed["screens"][1]["name"], "Renamed");
+
+        for (screen, remaining, active) in
+            [("screen-1", 1, Some("screen-2")), ("screen-2", 0, None)]
+        {
+            handler
+                .handle_value(serde_json::json!({"type":"mux.op", "screenId":screen, "op":{"type":"close_screen"}}))
+                .await;
+            assert!(handler.try_handle(request).await);
+            let snapshot = next_json(&mut sent);
+            assert_eq!(snapshot["screens"].as_array().unwrap().len(), remaining);
+            assert_eq!(snapshot["activeScreenId"].as_str(), active);
+            if remaining == 0 {
+                assert!(snapshot["activeScreenId"].is_null());
+            }
+        }
+    }
 
     #[tokio::test]
     async fn template_apply_announces_only_real_spawns_before_nudge_and_resyncs_authoritative_layout(
