@@ -1391,3 +1391,12 @@ owned children remaining. The remaining Settings/palette implementation is
 unchanged from the preceding candidate. The increment passes 184 client-core
 tests, 98 normal GPUI tests, two additional retained-view tests with the opt-in
 feature, strict targeted Clippy, formatting and 17 architecture checks.
+
+A Windows preview built from the same final source has executable SHA-256
+`abdb25de4b42f38fb0ba1fa9a1898cfcaa331a5cca21b78524cadb47c3fb30ae`
+and matching WSL backend SHA-256
+`fb3529baaff43b6dff21bedf75fccaf08386496a38b1eef469a8f59a0ad7f416`.
+Its narrow startup check verifies hardware graphics, the exact owned backend,
+normal GUI exit code 0 after a close request, and no surviving owned Linux
+process. This check does not establish Windows terminal interaction or Settings
+acceptance; the functional evidence above remains scoped to Linux windows.
