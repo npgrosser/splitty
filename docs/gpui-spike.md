@@ -183,7 +183,7 @@ keep their terminal output and scrollback. Closing the last Screen leaves
 close share one confirmation flow: busy sessions or incomplete session state
 require confirmation, and cancelling preserves the work. Closing the owned window includes
 terminals on hidden Screens. If the affected sessions change while a decision is
-pending, request close again. Hosts, saved workspace restoration, scratchpad and
+pending, request close again. Remote connections, saved workspace restoration, scratchpad and
 `splitty open` integration remain subsequent work.
 
 The Screens Drawer exposes the catalog, creation, rename, assessed close and
@@ -202,6 +202,13 @@ including when a different terminal has keyboard focus. Narrow groups collect
 the secondary actions in an icon menu. Screen navigation also has previous/next
 buttons beside the current Screen name. The pinned GPUI Kit supplies the button
 styling and icon assets; the canonical mux tree remains the only layout model.
+
+**Hosts** shows known targets and aliases with their cached Screen names, pane
+counts and last observation. It distinguishes an observed empty list from a host
+with no Screen observation. These rows are informational; opening the view or
+using **Refresh** does not connect to a host. A failed refresh keeps the last
+valid directory and offers **Retry**. Use **R** to refresh and **Escape** or
+**Screens** to return to the local workspace with terminal focus restored.
 
 Workspace shortcuts use **Cmd** on macOS and **Alt** on other hosts as `Mod`:
 
@@ -1158,3 +1165,29 @@ are real pointer or keyboard input. Supply screenshot-calibrated geometry using
 `--geometry`; setup switches capture the relevant controls for calibration.
 This is private X11 functional evidence. Windows builds and hardware smoothness
 testing remain separate from this UI increment.
+
+## Passive native Hosts acceptance
+
+The Hosts increment passes 126 client-core tests, 88 native UI tests, 17
+architecture checks, focused shared-contract/server conformance tests and
+touched-crate Clippy with warnings denied. Formatting and OpenSpec validation
+pass. The matching Linux candidate has SHA-256
+`8409b93379941dd54427c684535f9d93eaa3bed7c709c27c95fc10236b6a1914`.
+
+`gpui-host-directory.py` passes six private-window acceptance stages at
+135-percent window zoom. Its isolated fixtures include aliases, long targets
+and Screen names, cached Screens, observed-empty and unobserved hosts, and enough
+rows to exercise virtualized scrolling. A valid catalog larger than the native
+API response ceiling produces a real failed refresh: the error and Retry remain
+visible while the exact previously rendered rows are retained. Restoring the
+small catalog and refreshing recovers. Terminal markers before and after the
+failure and after returning to Screens retain the same PID, pane and session.
+The child PATH's SSH spy records no launch. Normal window close exits successfully
+without owned children left behind.
+
+Screenshots verify text truncation with pane counts still visible; a separate
+24-pixel UI-font capture checks three-line row height. The eight group-control
+window checks also pass with this exact candidate. These are private X11
+functional checks, not new hardware smoothness or Windows build evidence.
+Remote connection, live browsing, attach/detach and forwarding controls remain
+subsequent increments; this view only inspects the assigned service's directory.

@@ -2,6 +2,7 @@
 mod chrome;
 mod drawer;
 mod floating;
+mod hosts;
 mod shell_profiles;
 mod templates;
 mod transfer;
@@ -41,6 +42,7 @@ use uuid::Uuid;
 
 use self::drawer::{WheelNavigation, WheelTarget};
 use self::floating::{FloatGesture, FloatGestureKind};
+use self::hosts::{HostKey, HostsView};
 use self::shell_profiles::ProfilePicker;
 use self::templates::TemplateDialog;
 
@@ -523,6 +525,7 @@ fn admit_close(
 pub struct Workspace {
     model: Option<LocalWorkspace>,
     focus: FocusHandle,
+    hosts: HostsView,
     panes: HashMap<String, PaneView>,
     commands: mpsc::Sender<Command>,
     stopping: Arc<AtomicBool>,
@@ -695,6 +698,7 @@ impl Workspace {
             Self {
                 model: None,
                 focus: cx.focus_handle(),
+                hosts: HostsView::default(),
                 panes: HashMap::new(),
                 commands,
                 stopping: worker.stop.clone(),
@@ -1012,6 +1016,11 @@ impl Workspace {
         self.send(Command::CreateScreen(name), cx);
     }
     fn switch_screen(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let was_hosts = self.hosts.open;
+        self.hosts.open = false;
+        if was_hosts {
+            self.sync_visible(cx);
+        }
         self.float_gesture = None;
         self.transfer_menu = None;
         if self.rename.is_some() {
@@ -1023,6 +1032,10 @@ impl Workspace {
             .is_some_and(|model| model.screen(screen).is_some())
         {
             self.send(Command::SwitchScreen(screen.to_owned()), cx);
+        }
+        if was_hosts {
+            self.focus_current(window, cx);
+            cx.notify();
         }
     }
     fn start_rename(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1263,6 +1276,7 @@ impl Workspace {
             .as_ref()
             .is_some_and(|old| old.connection_id() != model.connection_id())
         {
+            self.hosts.set_owner(model.connection_id());
             self.apply_zoom(Zoom::from_values(1.0, "window"), window, cx);
             self.appearance_generation = 0;
             self.drawer_visible = true;
@@ -1286,6 +1300,9 @@ impl Workspace {
             self.float_order.clear();
             self.float_gesture = None;
             self.float_viewport = None;
+        }
+        if self.model.is_none() {
+            self.hosts.set_owner(model.connection_id());
         }
         if self.rename.is_some() {
             self.smoke_editor_reconciles += u64::from(self.smoke);
@@ -1415,7 +1432,8 @@ impl Workspace {
         self.model = Some(model);
         self.flush_scheme();
         self.sync_visible(cx);
-        if self.rename.is_none()
+        if !self.hosts.open
+            && self.rename.is_none()
             && !self
                 .pending_close
                 .as_ref()
@@ -1438,6 +1456,7 @@ impl Workspace {
             .as_ref()
             .map_or_else(Vec::new, LocalWorkspace::displayed_panes);
         if self.pending_template_apply.is_some()
+            || self.hosts.open
             || self
                 .model
                 .as_ref()
@@ -1542,6 +1561,10 @@ impl Workspace {
         }
     }
     fn focus_current(&self, window: &mut Window, cx: &mut App) {
+        if self.hosts.open {
+            self.focus.focus(window, cx);
+            return;
+        }
         if self.rename.is_some()
             || self.template_dialog.is_some()
             || self.profile_picker.is_some()
@@ -1693,6 +1716,21 @@ impl Workspace {
         }
         if self.template_dialog.is_some() {
             self.template_key(&event.keystroke, window, cx);
+            return;
+        }
+        if self.hosts.open {
+            if let Some(action) = HostKey::from_keystroke(&event.keystroke) {
+                cx.stop_propagation();
+                match action {
+                    HostKey::Back => self.show_screens(window, cx),
+                    HostKey::Refresh => self.refresh_hosts(cx),
+                }
+                return;
+            }
+            if let Some(action) = zoom_shortcut(&event.keystroke, cx.platform_info().is_mac()) {
+                cx.stop_propagation();
+                self.submit_zoom(action, cx);
+            }
             return;
         }
         if self.pending_template_apply.is_some()
@@ -1920,6 +1958,11 @@ impl Workspace {
             processed += 1;
             match update {
                 Update::Workspace(model) => self.reconcile(*model, window, cx),
+                Update::HostDirectory(update) => {
+                    if self.hosts.accept(update) {
+                        cx.notify();
+                    }
+                }
                 Update::TemplateApi(result) => self.template_result(result, window, cx),
                 Update::TemplateApply(result) => self.template_apply_result(result, window, cx),
                 Update::Appearance(snapshot) => self.apply_appearance(&snapshot, window, cx),
@@ -3485,7 +3528,14 @@ impl Render for Workspace {
             .map(|(message, _)| message.clone());
         let extra_lines =
             usize::from(appearance_message.is_some()) + usize::from(profile_message.is_some());
-        let primary_status = if self.status.is_empty() {
+        let primary_status = if self.hosts.open {
+            let help = "R refresh · Esc back to Screens";
+            if self.status.is_empty() {
+                help.to_owned()
+            } else {
+                format!("{help} · {}", self.status)
+            }
+        } else if self.status.is_empty() {
             format!(
                 "{} terminals · {modifier}+T tab · {modifier}+D split · {modifier}+Shift+arrows focus · Ctrl+Shift+C/V copy/paste",
                 self.panes.len(),
@@ -3558,33 +3608,42 @@ impl Render for Workspace {
                             .font_weight(FontWeight::BOLD)
                             .child("splitty"),
                     )
-                    .child(self.render_drawer_toggle(cx))
-                    .child(self.render_screen_navigation(cx))
+                    .when(!self.hosts.open, |toolbar| {
+                        toolbar
+                            .child(self.render_drawer_toggle(cx))
+                            .child(self.render_screen_navigation(cx))
+                    })
+                    .child(self.render_hosts_navigation(cx))
                     .child(div().flex_1())
-                    .child(
-                        Button::new("templates-open")
-                            .accessibility_label("Open Templates")
-                            .tooltip("Open Templates")
-                            .icon(Icon::new(IconName::LayoutTemplate))
-                            .label("Templates")
-                            .ghost()
-                            .compact()
-                            .small()
-                            .on_click({
-                                let weak = cx.entity().downgrade();
-                                move |_, window, cx| {
-                                    let _ = weak
-                                        .update(cx, |this, cx| this.toggle_templates(window, cx));
-                                }
-                            }),
-                    ),
+                    .when(!self.hosts.open, |toolbar| {
+                        toolbar.child(
+                            Button::new("templates-open")
+                                .accessibility_label("Open Templates")
+                                .tooltip("Open Templates")
+                                .icon(Icon::new(IconName::LayoutTemplate))
+                                .label("Templates")
+                                .ghost()
+                                .compact()
+                                .small()
+                                .on_click({
+                                    let weak = cx.entity().downgrade();
+                                    move |_, window, cx| {
+                                        let _ = weak.update(cx, |this, cx| {
+                                            this.toggle_templates(window, cx)
+                                        });
+                                    }
+                                }),
+                        )
+                    }),
             );
         let mut content = div().flex().flex_1().min_h_0().min_w_0();
-        if self.drawer_visible {
+        if self.drawer_visible && !self.hosts.open {
             content = content.child(self.render_drawer(cx));
         }
         let mut main_content = div().flex().flex_col().flex_1().min_w_0().min_h_0();
-        if let Some(model) = &self.model {
+        if self.hosts.open {
+            main_content = main_content.child(self.render_hosts(cx));
+        } else if let Some(model) = &self.model {
             if let Some(preview) = model.pending_template() {
                 main_content = main_content.child(self.render_template_preview(preview, cx));
             } else if model.screens().is_empty() {

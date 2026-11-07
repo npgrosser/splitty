@@ -171,6 +171,7 @@ model {
     http -> splitty.core.config 'HomeConfig, ServerConfig, save, update'
     http -> splitty.core.ids 'ids'
     http -> splitty.core.mux 'Store, ScreenOp, Direction, Effect'
+    http -> splitty.core.native_api 'Check shared directory response conformance for HTTP and native requests'
     http -> splitty.core.protocol 'ClientCommand, ServerEvent, SizeConfig (settings updates); sizing types in tests'
     http -> splitty.core.shell_profiles 'ShellProfilesState, detection, updates'
     http -> splitty.core.template 'TemplateStore, FileStore, Template'

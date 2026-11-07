@@ -62,6 +62,7 @@ model {
     gpui_workspace -> gpui_appearance 'Convert resolved theme values for native chrome and terminal colors'
     gpui_workspace -> splitty.client_core.appearance 'Match owner and generation before applying resolved appearance'
     gpui_workspace -> splitty.client_core.client_shell_profiles 'Retain owner-bound service choices for the new-tab picker'
+    gpui_workspace -> splitty.client_core.hub 'Present owner-bound passive host observations and request refreshes'
     gpui_workspace -> splitty.client_core.client_templates 'Review charged template drafts and match identified library replies'
     gpui_appearance -> terminal 'Provide a plain terminal color configuration'
     gpui_appearance -> splitty.client_core.appearance 'Consume charged appearance snapshot values'
