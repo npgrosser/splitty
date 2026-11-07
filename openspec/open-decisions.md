@@ -320,3 +320,6 @@ Each point names what holds now, the alternative, and where it is recorded.
 - **`native-terminal-links`, NL-1** (2026-11-07, provisional, tbd): bound native link targets/logical lines to 16 KiB, 128 rows and 80,000 inspected cells; incomplete detection never opens a prefix.
 - **`native-terminal-links`, NL-2** (2026-11-07, provisional, tbd): Ctrl/Cmd-left-click without Shift takes a local link route even during application mouse tracking, retained through completion/cancellation; release freshly validates the target.
 - **`native-terminal-links`, NL-3** (2026-11-07, provisional, tbd): resolve retained cell metadata without duplicating the terminal parser. Pinned VT discards oversized OSC 8 commands before metadata; their visible labels remain eligible for ordinary URL detection, with no shortened explicit target.
+
+- **`native-display-zoom`, NZ-1** (2026-11-07, provisional, tbd): admit up to 32 queued zoom intents beside one running auxiliary API job; alternate ready reads and writes, retain independent mutation outcomes and never retry uncertain writes.
+- **`native-display-zoom`, NZ-2** (2026-11-07, provisional, tbd): native terminal baseline 15/21 px scales uniformly in both scopes; window scope additionally scales chrome from a 16 px rem baseline, without changing OS DPI or introducing terminal-font fields.

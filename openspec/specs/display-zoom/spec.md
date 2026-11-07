@@ -1,7 +1,7 @@
 # display-zoom Specification
 
 ## Purpose
-TBD - created by archiving change zoom. Update Purpose after archive.
+Display zoom controls how application surfaces and terminal content are enlarged, using bounded keyboard steps and persisted per-server appearance settings.
 
 ## Requirements
 
