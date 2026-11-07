@@ -74,8 +74,25 @@ before the no-replay, retained-inventory and final normal-close assertions, so
 recovery acceptance is not complete. The correction retains navigation choices
 through the existing connection reset, while clearing old routes, snapshots and
 execution authority. All ten focused window-model tests and strict client-core
-Clippy pass after the correction (172 total core tests now); an actual-window
-rerun awaits the combined workspace presentation candidate.
+Clippy pass after the correction (172 total core tests at that checkpoint).
+
+The combined candidate with SHA-256
+`dfe2f2fdbfc1ee66776d82b52daeeda9aaad9505da0e8a572f9b6ed3e55ec968`
+now passes all eight stages of the real-window recovery path. The replacement
+bridge recovers the same right-pane PID, pane and session; local and the other
+host remain usable. Host inventories, live shells and one-time input are
+preserved, and normal close plus fixture cleanup pass. This closes the observed
+focus regression without claiming the broader task 6 matrix: keyboard/duplicate
+host actions, catalog error states, stale consent and callbacks, and
+unsupported-action affordances still need their stated proof.
+
+The Settings candidate with SHA-256
+`90dfd6cb2bafdb46b4a9f3ea7866598814ddd3e2fd99cdfa39b53f97f629c540`
+also passes the separate remote-selected local Settings run. A theme edit changes
+only local config; both remote configs, inventories and live shell PIDs remain
+unchanged, and input returns to the same remote PID, pane and session after the
+editor closes. Normal close and fixture cleanup pass. Other source-local feature
+checks in task 6 remain open.
 
 A separately frozen Windows preview starts on hardware graphics and exits
 normally with its owned WSL processes cleaned up. This establishes startup and
