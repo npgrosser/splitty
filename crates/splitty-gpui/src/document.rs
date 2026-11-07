@@ -59,11 +59,13 @@ impl DocumentView {
         self.last_rendered = None;
         self.status = "Select text to annotate".into();
     }
-    pub fn snapshot(&mut self, annotations: &[Value]) {
+    pub fn snapshot(&mut self, annotations: &[Value]) -> bool {
         if self.annotations != annotations {
             self.annotations = annotations.to_vec();
             self.last_rendered = None;
+            return true;
         }
+        false
     }
     pub fn selection(&self, cx: &App) -> Result<AnnotationDraft, String> {
         let state = self.text.read(cx);
@@ -76,14 +78,14 @@ impl DocumentView {
         let start = self.source.find("Café").ok_or("Smoke passage missing")?;
         draft(&self.source, start..start + "Café — naïve — 日本語".len())
     }
-    pub fn refresh_marks(&mut self, cx: &mut App) {
+    pub fn refresh_marks(&mut self, cx: &mut App) -> bool {
         let rendered = self.text.read(cx).rendered_text();
         if self.last_rendered.as_ref() == Some(&rendered) {
-            return;
+            return false;
         }
         // Parsing is asynchronous. Never convert offsets against an older source.
         if rendered.source() != self.source {
-            return;
+            return false;
         }
         let highlights = self
             .annotations
@@ -108,10 +110,14 @@ impl DocumentView {
                 self.mapped_marks = count;
                 self.revision += 1;
                 self.last_rendered = Some(rendered);
+                true
             }
             Err(error) => {
-                self.status = error.to_string();
+                let status = error.to_string();
+                let changed = self.status != status;
+                self.status = status;
                 self.mapped_marks = 0;
+                changed
             }
         }
     }

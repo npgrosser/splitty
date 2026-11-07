@@ -24,7 +24,7 @@ def records(path):
     return found
 
 
-def run(binary, evidence_dir, backend, web_spike, screenshot_requested):
+def run(binary, evidence_dir, backend, web_spike, screenshot_requested, workspace=False):
     stdout = evidence_dir / f"{backend}.stdout.log"
     stderr = evidence_dir / f"{backend}.stderr.log"
     screenshot = evidence_dir / f"{backend}.png"
@@ -34,7 +34,7 @@ def run(binary, evidence_dir, backend, web_spike, screenshot_requested):
         env.pop("DISPLAY", None)
     else:
         env.pop("WAYLAND_DISPLAY", None)
-    command = [str(binary), "--smoke"]
+    command = [str(binary), "--workspace-smoke" if workspace else "--smoke"]
     if screenshot_requested:
         command.extend(["--screenshot", str(screenshot)])
     if web_spike:
@@ -71,8 +71,10 @@ def run(binary, evidence_dir, backend, web_spike, screenshot_requested):
                 exit_code = process.returncode
 
     parsed = records(stdout) + records(stderr)
-    probes = [item for item in parsed if item.get("probe") == "splitty-gpui"]
+    probe_name = "splitty-local-workspace" if workspace else "splitty-gpui"
+    probes = [item for item in parsed if item.get("probe") == probe_name]
     shutdowns = [item for item in parsed if "probeShutdown" in item]
+    graphics = [item["nativeGraphics"] for item in parsed if "nativeGraphics" in item]
     probe = probes[0] if len(probes) == 1 else None
     shutdown = shutdowns[0] if len(shutdowns) == 1 else None
     image_bytes = screenshot.stat().st_size if screenshot.is_file() else 0
@@ -92,6 +94,7 @@ def run(binary, evidence_dir, backend, web_spike, screenshot_requested):
         "timedOut": timed_out,
         "launchError": launch_error,
         "probe": probe,
+        "graphics": graphics[-1] if graphics else None,
         "probeShutdown": shutdown.get("probeShutdown") if shutdown else None,
         "evidenceKind": "runtime-log-and-screenshot" if image_bytes else "runtime-log",
         "screenshotRequested": screenshot_requested,
@@ -108,16 +111,19 @@ def main():
     parser.add_argument("--evidence-dir", type=Path, required=True)
     parser.add_argument("--backend", choices=("wayland", "x11", "both"), required=True)
     parser.add_argument("--web-spike", action="store_true")
+    parser.add_argument("--workspace", action="store_true", help="Check the local screen with splits and tabs")
     parser.add_argument("--screenshot", action="store_true",
                         help="Require a native PNG from a capture-enabled binary")
     args = parser.parse_args()
+    if args.workspace and (args.web_spike or args.screenshot):
+        parser.error("--workspace cannot be combined with --web-spike or --screenshot")
 
     binary = args.binary.resolve()
     evidence_dir = args.evidence_dir.resolve()
     evidence_dir.mkdir(parents=True, exist_ok=True)
     backends = ["wayland", "x11"] if args.backend == "both" else [args.backend]
     result = {"binary": str(binary), "webSpike": args.web_spike,
-              "screenshotRequested": args.screenshot,
+              "screenshotRequested": args.screenshot, "workspace": args.workspace,
               "runs": []}
     if not binary.is_file() or not os.access(binary, os.X_OK):
         result["error"] = "--binary must name an executable file"
@@ -131,7 +137,7 @@ def main():
         else:
             for backend in backends:
                 result["runs"].append(run(binary, evidence_dir, backend,
-                                          args.web_spike, args.screenshot))
+                                          args.web_spike, args.screenshot, args.workspace))
     result["evidenceKind"] = (
         "runtime-log-and-screenshot" if result["runs"] and all(
             item["screenshotBytes"] > 0 for item in result["runs"]

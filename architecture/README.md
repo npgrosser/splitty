@@ -18,8 +18,8 @@ into operating-system processes.
 | `landscape.c4` | People, external systems, the system `splitty` with its containers and stores |
 | `core.c4` | The components of `splitty-core` and their relationships |
 | `transport.c4` | Platform-neutral native framing, negotiation and resource accounting |
-| `client-core.c4` | The experimental UI-free native client and its service dependencies |
-| `gpui.c4` | The phase-0 GPUI desktop probe and its client-core dependencies |
+| `client-core.c4` | The experimental UI-free native client, local workspace model and service dependencies |
+| `gpui.c4` | The GPUI local workspace, terminal engine and retained fixture probe |
 | `server.c4` | The components of `splitty-server` (the `splitty` binary) and their relationships, also into the core |
 | `remote.c4` | The components of `splitty-remote` (SSH, install, handshake, bridge, tunnel, known hosts) and their relationships |
 | `desktop.c4` | The components of `splitty-gui` (the Tauri app) and their relationships, also into the core and the server |

@@ -1,21 +1,25 @@
-# GPUI phase-0 spike
+# Native GPUI development app
 
-This is an experimental native UI probe. It starts an isolated embedded Splitty
-service for its own terminal and Markdown viewer. It does not attach to a
-production daemon, migrate saved state, or replace the Tauri or Electron app.
-The probe ends its service when its window closes.
+The development app opens an isolated local Screen with real service-owned
+terminal sessions, split panes, tab groups and draggable dividers. Its layout
+comes from the shared mux tree; existing terminal views survive layout updates.
+Closing the window ends its owned service. Saved production workspaces and the
+released Electron/Tauri apps remain separate.
 
 The [native migration proposal](../openspec/changes/native-ui-gpui/proposal.md#terminal-engine-decision)
-selects Ghostty's native terminal core for the first regular implementation.
-The executable and phase-0 evidence below still use Alacritty. The separate
-[Ghostty dependency check](#ghostty-dependency-check) verifies native build and
-linking only; GPUI integration and performance remain unverified.
+selects Ghostty's native terminal core. The current terminal uses statically
+linked `libghostty-vt` 1.0.0 through a UI-independent owned engine. GPUI handles
+input and drawing, caching shaped content for unchanged visible rows.
+
+`--probe` retains the original terminal/Markdown fixture, including the optional
+CEF experiment. The [phase-0 evidence](#phase-0-evidence-and-limits-historical)
+below describes the earlier Alacritty executable, not current performance.
 
 ## Build and run
 
 The app pins [GPUI Kit 0.9.0](https://docs.rs/crate/gpui-kit/0.9.0/source/Cargo.toml)
 (which pins `gpui-pre` 0.3.11) and
-[alacritty_terminal 0.26.0](https://docs.rs/crate/alacritty_terminal/0.26.0).
+[`libghostty-vt` 1.0.0](https://github.com/ghostty-org/ghostty/releases/tag/vt-1.0.0).
 The optional offscreen experiment pins the
 [cef 156.3.0 crate](https://docs.rs/crate/cef/156.3.0+156.0.15).
 
@@ -57,12 +61,31 @@ pnpm --dir frontend install --frozen-lockfile
 pnpm --dir frontend build
 ```
 
-Run from the repository root in a graphical Wayland or X11 session:
+Prepare the pinned native terminal library using the explicit setup described in
+[development](development.md#native-terminal-library-for-gpui). Keep
+`GHOSTTY_VT_DIR` set to that installation prefix. Then run from the repository
+root in a graphical Wayland or X11 session; use an optimized build to assess
+interactive behavior:
 
 ```sh
-cargo run -p splitty-gpui
-cargo run -p splitty-gpui -- --smoke
+cargo run --release -p splitty-gpui
+cargo run --release -p splitty-gpui -- --workspace-smoke
+cargo run --release -p splitty-gpui -- --probe
+cargo run --release -p splitty-gpui -- --smoke
 ```
+
+The default window offers **Split right**, **Split below** and **New tab**.
+Select tabs by clicking their labels, close panes with their tab close control,
+and resize splits by dragging the divider. After closing the final pane,
+**New terminal** repopulates the same Screen. Ctrl+Shift+C/V copies and pastes
+in the focused terminal. This increment has one local Screen; hosts, saved
+workspace restoration, drag-and-drop, scratchpad and `splitty open` integration
+remain subsequent migration work.
+
+`--workspace-smoke` exercises four distinct terminal sessions, both split axes,
+tab switching, authoritative divider ratios, pane closure and preserved terminal
+identity. It requires fresh visible paints and joined service cleanup. The smoke
+driver selects this workflow with `--workspace`; omit it for the legacy fixture.
 
 `--smoke` runs bounded terminal output, loads the Markdown fixture, creates an
 annotation, reconnects to the same service and checks the rendered pane. It
@@ -107,7 +130,93 @@ loader must also find the downloaded `libcef.so` next to the binary, for example
 with `LD_LIBRARY_PATH="$PWD/target/debug${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"`.
 `cargo run` supplies the build library search paths automatically.
 
-## Evidence and limits
+## WSLg graphics
+
+The default Mesa selection in the tested WSLg environment used CPU llvmpipe.
+The same optimized application selected the hardware D3D12-backed OpenGL device
+and passed its local-workspace smoke on both Wayland and X11 with these
+**per-process** settings:
+
+```sh
+GALLIUM_DRIVER=d3d12 MESA_D3D12_DEFAULT_ADAPTER_NAME=NVIDIA \
+  cargo run --release -p splitty-gpui
+```
+
+This is a host-specific development option, not an application default. Use the
+adapter-name substring appropriate for the installed hardware. The native app
+prints a `nativeGraphics` JSON diagnostic with the selected device and
+`software` flag; the smoke driver records it. Check that result rather than
+assuming `vulkaninfo` describes the selected backend. In this run, the selected
+device was `D3D12 (NVIDIA GeForce RTX 4080)` with `software: false` and Mesa
+26.0.8. No system or driver files were changed. See
+[Microsoft's WSLg GPU selection guide](https://github.com/microsoft/wslg/wiki/GPU-selection-in-WSLg)
+for the D3D12 adapter setting.
+
+The matched performance table below deliberately retains its original software
+renderer conditions. Hardware selection and functional smoke establish a usable
+accelerated path; they do not establish new latency numbers. WSLg presentation
+still adds a host-window transport, and a native Windows UI remains the target
+Windows topology, with server and shells in WSL.
+
+## Local workspace acceptance
+
+The local-workspace runtime smoke passed on Wayland and X11 with four distinct
+session markers, both split axes, tab selection, authoritative resize ratios,
+pane closure, retained original terminal identity, current visible paints and
+joined service cleanup. The legacy reconnect/Markdown smoke also passed on both
+backends with CEF disabled and enabled.
+
+An independent X11 interaction run clicked the actual controls and typed shell
+commands into the resulting terminals. It verified five distinct shell process
+IDs, returning to an existing tab's original shell, dragging a divider from
+599 to 780 pixels, closing hidden tabs, closing the final pane and opening a new
+shell in the same empty Screen. The process exited normally with no surviving
+children. External captures show [both split axes](images/gpui-workspace-splits.png)
+and [ASCII, CJK, combining accents and emoji](images/gpui-workspace-unicode.png).
+These are native window captures, separate from runtime-log smoke evidence.
+Manual IME, cross-application clipboard, accessibility and other desktop
+platforms still need target-specific acceptance.
+
+## Ghostty integration measurements
+
+On 2026-11-07, the original Alacritty executable at `273f147` and the Ghostty
+replacement were built with the optimized release profile and the optional CEF
+feature. Both ran the same legacy terminal/Markdown fixture on an isolated Xvfb
+X11 display under WSL2. Vulkan selected Mesa 26.0.8 llvmpipe (LLVM 21.1.8), a
+software renderer; these are not hardware-GPU measurements. No builds or user
+input overlapped the matched runs. Both variants closed normally with no
+surviving owned child processes.
+
+| Metric | Baseline, CEF off | Ghostty, CEF off | Baseline, CEF on | Ghostty, CEF on |
+| --- | ---: | ---: | ---: | ---: |
+| CPU during 5 s without input, process tree | 445.55% | 2.20% | 462.34% | 70.13% |
+| Input to changed X11 pixels, median of 12 | 29.60 ms | 29.56 ms | 30.16 ms | 29.05 ms |
+| Scroll to changed X11 pixels, median | 15.46 ms | 15.59 ms | 16.55 ms | 15.36 ms |
+| Producer completion, 12,000 lines | 0.417 s | 0.403 s | 0.380 s | 0.400 s |
+| Observed settling after output | 0.672 s | 0.629 s | 0.611 s | 0.651 s |
+
+CPU uses 100% for one logical core and includes observed app/CEF/service child
+processes; it excludes the harness and X server. The CEF-on fixture animates at
+10 Hz even without input, so that column does not describe a quiescent browser.
+Input/scroll measurements include X server round trips and capture sampling,
+not physical display latency. Producer completion includes shell and transport;
+settling includes a 150 ms stability interval and is not exact last-frame time.
+
+Removing unconditional window invalidation and reusing shaped rows greatly
+reduces the observed idle CPU workload. This run does **not** demonstrate a
+material input-latency, scrolling or output-throughput improvement. Those metrics
+need repeated measurements on hardware-accelerated target desktops before a
+performance claim. The engine replacement and scheduling changes were measured
+together, so the CPU difference cannot be attributed to Ghostty alone.
+
+The comparison uses `scripts/testing/gpui-performance.py` with `--modes both`,
+12 samples, 12,000 output lines and 5-second idle intervals. Pass
+`--app-argument=--probe` for the current executable; the historical executable
+opens that fixture by default. The harness records binary hashes, device/profile
+labels, per-sample values and normal shutdown. Use a dedicated test display so
+other typing or focus changes cannot invalidate the measurements.
+
+## Phase-0 evidence and limits (historical)
 
 | Check | Current evidence |
 | --- | --- |
@@ -178,6 +287,6 @@ iteration over four dirty render rows. These are isolated library checks, not
 tests of the safe Rust wrapper, GPUI rendering, session replay, selection,
 clipboard, image support or interactive performance. macOS and Windows builds
 remain unverified locally; the native Windows client needs a Windows library,
-independently of its server running in WSL. The current Splitty executable still
-uses Alacritty until the bounded integration described in the proposal is built
-and tested.
+independently of its server running in WSL. This dependency-only check preceded
+the integration described above; it is not evidence for native Windows or
+macOS runtime behavior.

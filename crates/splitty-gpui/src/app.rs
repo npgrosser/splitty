@@ -344,6 +344,7 @@ pub struct Probe {
     screen: Option<String>,
     viewer: Option<String>,
     status: String,
+    terminal_status: String,
     snapshot: Option<Box<Event>>,
     document_owner: Option<Document>,
     started: Instant,
@@ -362,6 +363,8 @@ pub struct Probe {
     web_image: Option<Arc<RenderImage>>,
     web_sequence: u64,
     web_bounds: Bounds<Pixels>,
+    poll_ticks: u64,
+    window_notifications: u64,
 }
 impl Probe {
     pub fn new(
@@ -376,7 +379,16 @@ impl Probe {
         let (tx_terminal, rx_terminal) = mpsc::channel(64);
         let (tx_updates, updates) = mpsc::channel(64);
         let worker = Worker::start(rx_commands, rx_terminal, tx_updates, smoke);
-        let terminal = cx.new(|cx| Terminal::new(tx_terminal, cx));
+        let terminal = cx.new(|cx| {
+            Terminal::new(
+                move |command| {
+                    tx_terminal
+                        .try_send(command)
+                        .map_err(|error| error.to_string())
+                },
+                cx,
+            )
+        });
         terminal.update(cx, |terminal, cx| terminal.focus(window, cx));
         let document = DocumentView::new(cx);
         let poll = cx.spawn_in(window, async move |this, cx| loop {
@@ -434,6 +446,7 @@ impl Probe {
                 screen: None,
                 viewer: None,
                 status: "Starting isolated native service…".into(),
+                terminal_status: "Connecting…".into(),
                 snapshot: None,
                 document_owner: None,
                 started: Instant::now(),
@@ -452,11 +465,15 @@ impl Probe {
                 web_image: None,
                 web_sequence: 0,
                 web_bounds: Bounds::default(),
+                poll_ticks: 0,
+                window_notifications: 0,
             },
             worker,
         )
     }
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.poll_ticks += 1;
+        let mut dirty = false;
         let mut bytes = 0;
         while bytes < 256 * 1024 {
             let Ok(update) = self.updates.try_recv() else {
@@ -480,7 +497,7 @@ impl Probe {
                                     .as_array()
                                     .map(Vec::as_slice)
                                     .unwrap_or(&[]);
-                                self.document.snapshot(annotations);
+                                dirty |= self.document.snapshot(annotations);
                             }
                             self.snapshot = Some(event);
                         }
@@ -490,16 +507,23 @@ impl Probe {
                     Ok(source) => {
                         self.document.set_source(source.to_owned(), cx);
                         self.document_owner = Some(document);
+                        dirty = true;
                     }
-                    Err(error) => self.status = format!("Document is not UTF-8: {error}"),
+                    Err(error) => {
+                        self.status = format!("Document is not UTF-8: {error}");
+                        dirty = true;
+                    }
                 },
                 Update::Ready { screen, viewer } => {
                     self.screen = Some(screen);
                     self.viewer = Some(viewer);
                 }
-                Update::Status(status) => self.status = status,
+                Update::Status(status) => {
+                    dirty |= self.status != status;
+                    self.status = status;
+                }
                 Update::Reset(generation) => {
-                    self.document.snapshot(&[]);
+                    dirty |= self.document.snapshot(&[]);
                     self.terminal
                         .update(cx, |terminal, cx| terminal.reset(generation, cx));
                     self.snapshot = None;
@@ -509,17 +533,41 @@ impl Probe {
                     self.attachments += 1;
                     self.status =
                         "Native service attached · isolated workspace · terminal owns focus".into();
+                    dirty = true;
                     self.terminal.update(cx, |terminal, _| {
-                        terminal.status = "Attached".into();
+                        if terminal.engine_ready() {
+                            terminal.status = "Attached".into();
+                        }
                         terminal.report_size();
                     });
                 }
             }
         }
-        self.document.refresh_marks(cx);
+        dirty |= self.document.refresh_marks(cx);
+        let terminal_status = &self.terminal.read(cx).status;
+        if self.terminal_status != *terminal_status {
+            self.terminal_status.clone_from(terminal_status);
+            dirty = true;
+        }
+        // CEF's message loop and frame handoff must run even when no GPUI paint is pending.
+        if let Some(mut frame) = self.web.poll() {
+            // RenderImage expects BGRA; CEF adapter exposes RGBA for explicit ownership.
+            for pixel in frame.rgba.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+            if let Some(buffer) = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba)
+            {
+                if let Some(previous) = self.web_image.take() {
+                    let _ = window.drop_image(previous);
+                }
+                self.web_image = Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])));
+                self.web_sequence = frame.sequence;
+                dirty = true;
+            }
+        }
         if self.smoke && self.document.loaded() && !self.smoke_annotation_sent {
             if let Ok(draft) = self.document.smoke_annotation() {
-                self.send(Command::Annotate(draft));
+                self.send(Command::Annotate(draft), cx);
                 self.smoke_annotation_sent = true;
             }
         }
@@ -529,7 +577,7 @@ impl Probe {
             && self.terminal.read(cx).saw_smoke
             && self.started.elapsed() >= Duration::from_secs(2)
         {
-            self.send(Command::Reconnect);
+            self.send(Command::Reconnect, cx);
             self.smoke_reconnected = true;
         }
         if self.smoke {
@@ -555,12 +603,14 @@ impl Probe {
                 self.outcome.store(complete, Ordering::Release);
                 eprintln!(
                     "{}",
-                    json!({"engineCloseError":engine_close_error,"attachments":self.attachments,"reconnected":self.smoke_reconnected,"screenshot":self.screenshot,"captureError":capture_error,"offscreenFrame":self.web_sequence,"scriptTicks":self.web.script_ticks(),"terminalPaintCurrent":terminal.painted_current(),"documentPaintCurrent":self.document.painted_current(),"offscreenStatus":self.web.status(),"probe":"splitty-gpui", "passed":complete,"terminalMarker":terminal.saw_smoke,"terminalBytes":terminal.bytes,"paintedFrames":terminal.frames,"documentLoaded":self.document.loaded(),"annotations":self.document.count(),"elapsedMs":self.started.elapsed().as_millis(),"status":self.status,"manualImeClipboard": "unverified"})
+                    json!({"engineCloseError":engine_close_error,"attachments":self.attachments,"reconnected":self.smoke_reconnected,"screenshot":self.screenshot,"captureError":capture_error,"offscreenFrame":self.web_sequence,"scriptTicks":self.web.script_ticks(),"terminalPaintCurrent":terminal.painted_current(),"documentPaintCurrent":self.document.painted_current(),"offscreenStatus":self.web.status(),"probe":"splitty-gpui", "passed":complete,"terminalMarker":terminal.saw_smoke,"terminalBytes":terminal.bytes,"paintedFrames":terminal.frames,"documentLoaded":self.document.loaded(),"annotations":self.document.count(),"pollTicks":self.poll_ticks,"windowNotifications":self.window_notifications,"elapsedMs":self.started.elapsed().as_millis(),"status":self.status,"manualImeClipboard": "unverified"})
                 );
                 cx.quit();
             }
         }
-        cx.notify();
+        if dirty {
+            self.notify(cx);
+        }
     }
     fn prepare_exit(&mut self) -> Option<String> {
         self.stopping.store(true, Ordering::Release);
@@ -575,34 +625,28 @@ impl Probe {
         }
         error
     }
-    fn send(&mut self, command: Command) {
+    fn notify(&mut self, cx: &mut Context<Self>) {
+        self.window_notifications += 1;
+        cx.notify();
+    }
+    fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if let Err(error) = self.commands.try_send(command) {
             self.status = format!("Action not sent: {error}");
+            self.notify(cx);
         }
     }
     fn annotate(&mut self, cx: &mut Context<Self>) {
         match self.document.selection(cx) {
-            Ok(draft) => self.send(Command::Annotate(draft)),
-            Err(error) => self.status = error,
+            Ok(draft) => self.send(Command::Annotate(draft), cx),
+            Err(error) => {
+                self.status = error;
+                self.notify(cx);
+            }
         }
     }
 }
 impl Render for Probe {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if let Some(mut frame) = self.web.poll() {
-            // RenderImage expects BGRA; CEF adapter exposes RGBA for explicit ownership.
-            for pixel in frame.rgba.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
-            }
-            if let Some(buffer) = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba)
-            {
-                if let Some(previous) = self.web_image.take() {
-                    let _ = window.drop_image(previous);
-                }
-                self.web_image = Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])));
-                self.web_sequence = frame.sequence;
-            }
-        }
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let entity = cx.entity();
         let web_panel = div()
             .id("offscreen")
@@ -650,8 +694,8 @@ impl Render for Probe {
         div().size_full().flex().flex_col().bg(rgb(0x10151c)).text_color(rgb(0xd9e2ef)).text_size(px(14.))
             .child(div().p_3().flex().gap_4().child("SPLITTY · native UI phase 0")
                 .child(div().id("annotate").cursor_pointer().px_2().bg(rgb(0x2c4358)).child("Annotate selection").on_click(cx.listener(|this, _, _, cx| this.annotate(cx))))
-                .child(div().id("resync").cursor_pointer().px_2().child("Resync").on_click(cx.listener(|this, _, _, _| this.send(Command::Resync))))
-                .child(div().id("reconnect").cursor_pointer().px_2().child("Reattach").on_click(cx.listener(|this, _, _, _| this.send(Command::Reconnect)))))
+                .child(div().id("resync").cursor_pointer().px_2().child("Resync").on_click(cx.listener(|this, _, _, cx| this.send(Command::Resync, cx))))
+                .child(div().id("reconnect").cursor_pointer().px_2().child("Reattach").on_click(cx.listener(|this, _, _, cx| this.send(Command::Reconnect, cx)))))
             .child(div().flex().flex_1().min_h_0().gap_2().px_2()
                 .child(div().w(relative(0.55)).h_full().overflow_hidden().child(self.terminal.clone()))
                 .child(div().flex_1().h_full().min_w_0().p_3().bg(rgb(0x1b2430)).overflow_hidden().child(self.document.render())))

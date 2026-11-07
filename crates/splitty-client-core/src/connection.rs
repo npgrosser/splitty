@@ -1,5 +1,6 @@
 //! A window's ordered native stream, without renderer or endpoint authority.
 use serde_json::{json, Value};
+use splitty_core::mux::ScreenOp;
 use splitty_transport::{
     budget::{Charged, Lease},
     codec,
@@ -9,7 +10,7 @@ use splitty_transport::{
 use std::{collections::HashMap, io};
 use uuid::Uuid;
 
-const MAX_ATTACHMENTS: usize = 128;
+pub(crate) const MAX_ATTACHMENTS: usize = 128;
 const MAX_ID_BYTES: usize = 128;
 
 enum Backend {
@@ -66,7 +67,7 @@ impl Event {
     }
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct ScreenIds {
     pub screen_id: String,
     pub pane_id: String,
@@ -219,9 +220,34 @@ impl Client {
         Ok(ids)
     }
 
+    /// Refill a service-owned screen that ran empty, preserving its ID and name.
+    pub fn recreate_screen(&self, screen_id: &str, new_pane_id: &str) -> io::Result<()> {
+        identifier(screen_id)?;
+        identifier(new_pane_id)?;
+        self.command(0, || {
+            json!({"type":"mux.op", "screenId":screen_id, "op":{
+                "type":"create_screen", "screenId":screen_id, "newPaneId":new_pane_id
+            }})
+        })?;
+        self.resync(screen_id)
+    }
+
     pub fn resync(&self, screen_id: &str) -> io::Result<()> {
         identifier(screen_id)?;
         self.command(0, || json!({"type":"mux.resync", "screenId":screen_id}))
+    }
+
+    /// Send a typed mux operation and request the authoritative result. The
+    /// origin of a successful operation does not receive a mutation nudge.
+    pub fn screen_op(&self, screen_id: &str, op: &ScreenOp) -> io::Result<()> {
+        identifier(screen_id)?;
+        let mut size = CountBytes(0);
+        serde_json::to_writer(&mut size, op).map_err(io::Error::other)?;
+        self.command(
+            size.0,
+            || json!({"type":"mux.op", "screenId":screen_id, "op":op}),
+        )?;
+        self.resync(screen_id)
     }
 
     /// Repeated local attachments coalesce: the service streams a session at
@@ -360,6 +386,22 @@ impl Client {
         }}))?;
         self.resync(screen_id)?;
         Ok(id)
+    }
+}
+
+/// Count serialized command bytes before allocating a temporary JSON value.
+struct CountBytes(usize);
+impl io::Write for CountBytes {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        self.0 = self
+            .0
+            .checked_add(bytes.len())
+            .ok_or_else(|| invalid("command size overflow"))?;
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 

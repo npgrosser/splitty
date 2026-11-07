@@ -1,20 +1,35 @@
-// The GPUI phase-0 native desktop probe.
+// The GPUI native desktop development window and retained fixture probe.
 
 model {
   extend splitty.gpui {
     gpui_main = component 'gpui_main' {
-      description 'Application entry point and probe window composition.'
+      description 'Application entry point for the local workspace and optional fixture probe.'
       metadata { module 'splitty_gpui' }
     }
 
     gpui_app = component 'gpui_app' {
-      description 'Native probe window, embedded session wiring and pane layout.'
+      description 'Legacy terminal and Markdown fixture probe.'
       metadata { module 'splitty_gpui::app' }
     }
 
     terminal = component 'terminal' {
-      description 'Native terminal emulator view with text painting, scrollback and input.'
+      description 'Native terminal presentation, cached text shaping and session input routing.'
       metadata { module 'splitty_gpui::terminal' }
+    }
+
+    terminal_engine = component 'terminal_engine' {
+      description 'Thread-confined Ghostty ownership, terminal protocol state and borrowed render snapshots.'
+      metadata { module 'splitty_gpui::terminal_engine' }
+    }
+
+    gpui_workspace = component 'gpui_workspace' {
+      description 'Recursive native projection of the service screen with stable pane views and local tab choice.'
+      metadata { module 'splitty_gpui::workspace' }
+    }
+
+    workspace_session = component 'workspace_session' {
+      description 'Owned local service worker, ordered native stream and pane-scoped session routing.'
+      metadata { module 'splitty_gpui::workspace_session' }
     }
 
     gpui_document = component 'gpui_document' {
@@ -28,10 +43,18 @@ model {
     }
 
     gpui_main -> gpui_app 'Construct and close the probe window'
+    gpui_main -> gpui_workspace 'Construct the local workspace window'
+    gpui_main -> workspace_session 'Join the local workspace worker'
     gpui_main -> offscreen 'Run an engine child before opening the UI'
     gpui_app -> gpui_document 'Show Markdown and annotation marks'
     gpui_app -> offscreen 'Composite the offscreen engine frame under an overlay'
     gpui_app -> terminal 'Show terminal output and forward native input'
+    terminal -> terminal_engine 'Borrow native terminal state and encode checked input'
+    gpui_workspace -> terminal 'Keep one terminal view per pane identity'
+    gpui_workspace -> workspace_session 'Send local layout and session intents'
+    gpui_workspace -> splitty.client_core.client_workspace 'Render the canonical screen and local tab selection'
+    workspace_session -> splitty.client_core.client_workspace 'Reconcile snapshots and session routes'
+    workspace_session -> splitty.client_core.client_root 'Own an isolated service and ordered client stream'
     gpui_app -> splitty.client_core.client_root 'Use the public native client API'
     gpui_document -> splitty.client_core.client_root 'Form a source-scoped annotation draft'
   }

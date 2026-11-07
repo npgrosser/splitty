@@ -17,6 +17,11 @@ model {
       metadata { module 'splitty_client_core::document' }
     }
 
+    client_workspace = component 'client_workspace' {
+      description 'Authoritative local screen snapshots, window-local tabs and generation-scoped pane/session routes.'
+      metadata { module 'splitty_client_core::workspace' }
+    }
+
     embedded = component 'embedded' {
       description 'Unix embedded service composition and lifecycle for the native client.'
       metadata { module 'splitty_client_core::embedded' }
@@ -24,7 +29,9 @@ model {
 
     client_root -> connection 'Expose the native client API'
     client_root -> client_document 'Expose viewer document API'
+    client_root -> client_workspace 'Expose the local workspace model'
     client_root -> embedded 'Expose the embedded service adapter on Unix'
+    connection -> splitty.core.mux 'Serialize typed screen operations'
     connection -> splitty.server.native 'Use the embedded native session client on Unix'
     connection -> splitty.remote.owner 'Use an owned remote native connection'
     connection -> splitty.transport.budget 'Retain event and attachment byte charges'
@@ -33,6 +40,11 @@ model {
     connection -> splitty.transport.wire 'Frame kinds and negotiated service readiness'
     client_document -> connection 'Route versioned reads through their owning client'
     client_document -> splitty.transport.budget 'Retain document bytes and pending read capacity'
+    client_workspace -> client_root 'Use public client, screen and event types'
+    client_workspace -> connection 'Use shared command validation'
+    client_workspace -> splitty.core.ids 'Identify panes and split nodes'
+    client_workspace -> splitty.core.mux 'Use canonical screen layout, operations and validation'
+    client_workspace -> splitty.core.pty 'Gate real-service tests on PTY availability'
     embedded -> connection 'Return a connection scoped to the embedded service'
     embedded -> client_root 'Use public event and screen types in embedded probe tests'
     embedded -> splitty.server.control 'Start and stop the isolated control channel'

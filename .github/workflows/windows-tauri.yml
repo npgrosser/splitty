@@ -253,6 +253,13 @@ jobs:
 
       # Compile the platform-neutral adapter/UI without linking the Unix service.
       # This does not assert that the experimental WSL launcher is implemented.
+      - name: Build pinned native terminal library
+        shell: pwsh
+        run: |
+          $prefix = python scripts/bootstrap-libghostty-vt.py --check --prefix (Join-Path $env:RUNNER_TEMP "splitty-ghostty-vt")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value "GHOSTTY_VT_DIR=$prefix"
+
       - name: Compile experimental native probe on Windows
         run: cargo check --locked -p splitty-gpui --all-targets --target x86_64-pc-windows-msvc
 

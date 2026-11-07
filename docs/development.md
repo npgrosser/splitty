@@ -76,8 +76,45 @@ Electron build also requires the frontend dependencies to package shared assets.
 
 ## Running from source
 
-The experimental GPUI phase-0 app has its own isolated service and runbook in
+The experimental GPUI local workspace has its own isolated service and runbook in
 [`gpui-spike.md`](gpui-spike.md). It is separate from the released desktop apps.
+
+### Native terminal library for GPUI
+
+The GPUI app uses statically linked `libghostty-vt` 1.0.0. It needs a matching
+native library for the machine running the app: Linux and macOS build it for
+their own host, and the Windows GPUI client needs a Windows library even when
+its service runs in WSL. Python 3 and a native C/C++ toolchain are required.
+On macOS, install the Xcode command-line tools; the build uses Zig 0.17.0.
+
+Run the explicit bootstrap from the repository root. It downloads the pinned
+Ghostty source and dependency archives and the matching Zig 0.17.0 toolchain,
+checks their SHA-256 hashes, and builds with the supplied offline dependencies
+and a baseline CPU target. It prints an absolute install prefix. Re-running it
+reuses a verified build in the user cache. Cargo itself never downloads or
+builds Ghostty; it requires `GHOSTTY_VT_DIR` to point at that prefix.
+Pass `--check` to compile and run a small Rust static-link check after setup.
+
+On Linux or macOS:
+
+```sh
+prefix=$(python3 scripts/bootstrap-libghostty-vt.py)
+GHOSTTY_VT_DIR="$prefix" cargo run --release -p splitty-gpui
+```
+
+On Windows PowerShell:
+
+```powershell
+$prefix = python scripts/bootstrap-libghostty-vt.py
+$env:GHOSTTY_VT_DIR = $prefix
+cargo run --release -p splitty-gpui
+```
+
+The script also accepts `--prefix` with an absolute path. An existing prefix
+that is not a matching bootstrap build is rejected; choose a new prefix.
+The GPUI build verifies the installed 1.0.0 headers and static archive before
+linking. The development app still needs the usual frontend assets and native
+windowing prerequisites described in the GPUI runbook.
 
 ```bash
 # Backend with the embedded frontend on 127.0.0.1:9800, rebuilt on changes
