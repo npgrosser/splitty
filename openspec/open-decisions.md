@@ -8,7 +8,7 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
-- **`native-ui-gpui-spike` GSP-1 renderer dependencies** (2026-11-07, provisional, tbd): pin GPUI Kit 0.9.0 / GPUI snapshot 0.3.11 and Alacritty 0.26.0 for the experimental native window; final renderer choice remains open.
+- **`native-ui-gpui-spike` GSP-1 UI dependencies** (2026-11-07, provisional, tbd): pin GPUI Kit 0.9.0 / GPUI snapshot 0.3.11 for the experimental native window; the UI framework/version choice remains provisional. The separate emulator choice is settled in `native-ui-gpui`: Ghostty is selected for the regular native implementation; the current probe still uses Alacritty 0.26.0 pending replacement.
 - **`native-ui-gpui-spike` GSP-2 client boundary** (2026-11-07, provisional, tbd): start with a small platform-aware adapter retaining charged native messages; defer public protocol extraction and complete client-core migration.
 - **`native-ui-gpui-spike` GSP-3 offscreen evidence** (2026-11-07, provisional, tbd): attempt optional CEF CPU offscreen rendering of an isolated fixed fixture; record failures and unverified platforms, without inferring a scripted-viewer or release-cutover decision.
 

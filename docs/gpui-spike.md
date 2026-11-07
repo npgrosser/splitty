@@ -5,6 +5,12 @@ service for its own terminal and Markdown viewer. It does not attach to a
 production daemon, migrate saved state, or replace the Tauri or Electron app.
 The probe ends its service when its window closes.
 
+The [native migration proposal](../openspec/changes/native-ui-gpui/proposal.md#terminal-engine-decision)
+selects Ghostty's native terminal core for the first regular implementation.
+The executable and phase-0 evidence below still use Alacritty. The separate
+[Ghostty dependency check](#ghostty-dependency-check) verifies native build and
+linking only; GPUI integration and performance remain unverified.
+
 ## Build and run
 
 The app pins [GPUI Kit 0.9.0](https://docs.rs/crate/gpui-kit/0.9.0/source/Cargo.toml)
@@ -137,3 +143,41 @@ The full workspace build enables JSON insertion-order preservation through a
 transitive UI dependency. A CLI review test now compares parsed JSON and keeps
 its single-line/newline checks, so it validates the protocol independently of
 object key order. No CLI decision behavior was changed.
+
+## Ghostty dependency check
+
+On 2026-11-07, a separate dependency probe built the official
+[`libghostty-vt` 1.0.0 release](https://github.com/ghostty-org/ghostty/releases/tag/vt-1.0.0)
+with Zig 0.17.0 on Linux x86_64. The annotated tag resolves to commit
+`0fa3d577a5614150ff8e2c152de5fb9d5c6d2dec`. The source and bundled dependency
+archives matched the release's published SHA256 sums:
+
+| Archive | SHA256 |
+| --- | --- |
+| `libghostty-vt-1.0.0.tar.gz` | `4a6ef758be721923e1969e7b81b443dcc92d8dd3fb5a39600c03a8817a753676` |
+| `libghostty-vt-1.0.0-deps.tar.gz` | `4d5ea5e448e4c7ea8fb55ccbaa8668f2a97d44f438cee831e2b7ecd162d85c29` |
+
+From the extracted release source, with the matching dependency archive
+unpacked and Zig 0.17.0 available:
+
+```sh
+zig build -Doptimize=ReleaseFast --prefix /tmp/splitty-ghostty-vt-prefix
+```
+
+The release archive contains `LIB_VERSION` and builds the library by default.
+A Git checkout instead needs `-Demit-lib-vt`; see the upstream
+[installation instructions](https://github.com/ghostty-org/ghostty/blob/vt-1.0.0/dist/doxygen/pages/getting-started/installing.md).
+The build installed shared and static libraries, matching headers, pkg-config
+metadata and CMake metadata. Small C and Rust 2024 programs successfully linked
+and ran with both library forms; the statically linked Rust program had no
+runtime dependency on `libghostty-vt`. Header and runtime versions were 1.0.0.
+
+The C functional probe passed fragmented UTF-8 ingestion (`A€`), a cursor-position
+query/reply, resize to 12 columns by 4 rows, formatted text extraction and
+iteration over four dirty render rows. These are isolated library checks, not
+tests of the safe Rust wrapper, GPUI rendering, session replay, selection,
+clipboard, image support or interactive performance. macOS and Windows builds
+remain unverified locally; the native Windows client needs a Windows library,
+independently of its server running in WSL. The current Splitty executable still
+uses Alacritty until the bounded integration described in the proposal is built
+and tested.
