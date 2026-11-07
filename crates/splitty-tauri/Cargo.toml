@@ -36,7 +36,7 @@ splitty-remote = { path = "../splitty-remote" }
 tokio = { workspace = true }
 rand = { workspace = true }
 subtle = "2"
-base64 = "0.22"
+base64 = "0.23"
 splitty-transport = { path = "../splitty-transport" }
 
 [target.'cfg(not(target_os = "windows"))'.dependencies]
