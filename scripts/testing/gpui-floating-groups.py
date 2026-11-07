@@ -81,7 +81,13 @@ def main():
     parser.add_argument("--xclip", type=Path, help="private X11 clipboard reader")
     parser.add_argument("--setup-only", action="store_true", help="validate fixture and root tabs before Float Tab")
     parser.add_argument("--float-tab-x", type=int, default=0,
-                        help="calibrated toolbar Float Tab X coordinate")
+                        help="calibrated group-header Float Tab X coordinate")
+    parser.add_argument("--float-tab-y", type=int, default=20,
+                        help="calibrated group-header Float Tab Y coordinate")
+    parser.add_argument("--float-maximize-right-inset", type=int, default=50,
+                        help="calibrated floating-header maximize inset from its right edge")
+    parser.add_argument("--float-dock-right-inset", type=int, default=105,
+                        help="calibrated floating-header dock inset from its right edge")
     args = parser.parse_args()
     if not args.setup_only and not args.xclip:
         parser.error("full floating acceptance requires --xclip")
@@ -95,6 +101,7 @@ def main():
     config_file.write_text(
         '[appearance]\ntheme_mode = "fixed"\ntheme = "splitty-dark"\nfont_size = 0\n'
         'zoom = 1.0\nzoom_scope = "window"\n\n'
+        '[drawer]\npinned = false\n\n'
         '[shells]\ndefault_profile_id = "floating-fixture"\n\n'
         '[[shells.profiles]]\nid = "floating-fixture"\nname = "Floating fixture"\n'
         f'command = {json.dumps(str(Path(sys.executable).resolve()))}\n'
@@ -114,6 +121,9 @@ def main():
     result = {"binary": str(binary), "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
               "harnessSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "fixtureSha256": hashlib.sha256(FIXTURE.read_bytes()).hexdigest(),
+              "floatTabHit": [args.float_tab_x, args.float_tab_y],
+              "floatHeaderInsets": {"maximize": args.float_maximize_right_inset,
+                                     "dock": args.float_dock_right_inset},
               "display": args.display, "checks": [], "screenshots": [], "states": {},
               "ptyEvents": {}, "paintedMarkerPixels": {}, "passed": False}
     xvfb = app = display = window = None
@@ -338,8 +348,8 @@ def main():
                 result["checks"].append("root-terminal-history-query-and-selection-captured")
 
                 before_b_size = wait_until(lambda: last_size(b["pid"]), "root B size missing")
-                move(args.float_tab_x, 20)
-                no_input("float-focused-b", lambda: click(args.float_tab_x, 20))
+                move(args.float_tab_x, args.float_tab_y)
+                no_input("float-focused-b", lambda: click(args.float_tab_x, args.float_tab_y))
                 floating_b = wait_until(lambda: in_float(screen(screen_id), b["pane"]),
                                         "Float Tab did not create canonical floating B")
                 b_float_id = floating_b["id"]
@@ -418,8 +428,11 @@ def main():
                 root_size_before = (owned / f'sizes-{a["pid"]}.jsonl').read_text()
                 root_live_crop = (5, 130, 250, 80)
                 root_before_output = pixels(root_live_crop)
-                move(bx + bw - 50, by + 16)
-                no_input("maximize-floating-group", lambda: click(bx + bw - 50, by + 16))
+                maximize_x = bx + bw - args.float_maximize_right_inset
+                move(maximize_x, by + 16)
+                no_input("maximize-floating-group", lambda: click(maximize_x, by + 16))
+                assert in_float(screen(screen_id), b["pane"]), (
+                    "floating maximize control docked the group; recalibrate its header inset")
                 capture("floating-maximized")
                 command(a["pid"], "emit")
                 time.sleep(.35)
@@ -549,8 +562,8 @@ def main():
                                "second floating candidate did not launch")
                 assert c["pane"] in [pane for slot in slots(screen(screen_id)["root"])
                                      for pane in slot["paneIds"]]
-                move(args.float_tab_x, 20)
-                no_input("float-second-group", lambda: click(args.float_tab_x, 20))
+                move(args.float_tab_x, args.float_tab_y)
+                no_input("float-second-group", lambda: click(args.float_tab_x, args.float_tab_y))
                 floating_c = wait_until(lambda: in_float(screen(screen_id), c["pane"]),
                                         "second floating group did not appear")
                 assert floating_c["id"] != b_float_id
@@ -642,8 +655,9 @@ def main():
                                                  env=env, timeout=8)
                 assert copied == f'PANE_{b["pid"]}'.encode(), copied
                 capture("pre-dock-floating-selection")
-                move(bx + bw - 105, by + 16)
-                no_input("dock-floating-group-into-empty-root", lambda: click(bx + bw - 105, by + 16))
+                dock_x = bx + bw - args.float_dock_right_inset
+                move(dock_x, by + 16)
+                no_input("dock-floating-group-into-empty-root", lambda: click(dock_x, by + 16))
                 wait_until(lambda: in_float(screen(screen_id), b["pane"]) is None
                            and {pane for slot in slots(screen(screen_id)["root"])
                                 for pane in slot["paneIds"]} == {b["pane"], d["pane"]},

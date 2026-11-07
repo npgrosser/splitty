@@ -157,6 +157,15 @@ def main():
         pane_drag.save_png(path, display.pixels(window, (0, 0, 1200, 760)))
         result["screenshots"].append(str(path))
 
+    def color_pixels(pixels, rgb):
+        # XGetImage is BGRX on this owned X11 display. Allow a small renderer
+        # tolerance but require a substantial solid terminal background patch.
+        red, green, blue = rgb
+        return sum(abs(pixels[offset] - blue) <= 10
+                   and abs(pixels[offset + 1] - green) <= 10
+                   and abs(pixels[offset + 2] - red) <= 10
+                   for offset in range(0, len(pixels), 4))
+
     def api(path):
         def socket():
             candidates = list((config / "run").glob("spike-*.sock"))
@@ -316,6 +325,40 @@ def main():
                 capture("created-renamed-and-switched")
                 result["checks"].append("drawer-create-rename-switch-through-window")
 
+                # Emit from the original shell after its Screen is hidden.
+                # The file proves the PTY wrote; changed terminal pixels after
+                # returning prove the preserved view received that output.
+                click("group.left_body")
+                hidden_marker = owned / "hidden-screen-output.marker"
+                hidden_text = "ROUTED_HIDDEN_SCREEN_OUTPUT"
+                marker_rgb = (17, 201, 83)
+                type_text("(sleep 2; printf '\\033[48;2;17;201;83m          \\033[0m\\n'; "
+                          f"printf '%s\\n' {hidden_text} > {shlex.quote(str(hidden_marker))}) &")
+                key("Return")
+                output_region = geometry["terminal.output_region"]
+                assert len(output_region) == 4 and all(isinstance(value, int) for value in output_region)
+                before_hidden = color_pixels(display.pixels(window, tuple(output_region)), marker_rgb)
+                assert before_hidden < 20, f"marker color was already present: {before_hidden} pixels"
+                click("drawer.row_new")
+                wait_until(lambda: state()["activeScreenId"] == second_id,
+                           "original Screen did not hide before delayed output")
+                assert not hidden_marker.exists(), "output emitted before its Screen was hidden"
+                wait_until(lambda: hidden_marker.exists(), "hidden Screen shell did not emit output")
+                assert state()["activeScreenId"] == second_id, "output did not arrive while original Screen was hidden"
+                assert hidden_marker.read_text().strip() == hidden_text
+                click("drawer.row_initial")
+                wait_until(lambda: state()["activeScreenId"] == initial_id,
+                           "original Screen did not reappear after hidden output")
+                painted = wait_until(
+                    lambda: (count if (count := color_pixels(
+                        display.pixels(window, tuple(output_region)), marker_rgb)) >= 200 else None),
+                    "hidden Screen truecolor output did not paint after return")
+                result["hiddenScreenMarkerPixels"] = {"before": before_hidden, "after": painted}
+                assert alive(initial_pid), "hidden Screen output replaced its shell"
+                assert_routes(state("after-hidden-screen-output"))
+                capture("hidden-screen-output-delivered")
+                result["checks"].append("hidden-screen-output-retains-session-and-paints-after-return")
+
                 for count in range(2, 6):
                     chord("Alt_L", "t")
                     wait_until(lambda: len(state()["screens"][initial_id]["panes"]) == count,
@@ -406,7 +449,9 @@ def main():
                 click("group.second_screen_body")
                 type_text("sleep 60")
                 key("Return")
-                time.sleep(.3)
+                wait_until(lambda: any(session["busy"] for session in
+                                       state()["screens"][second_id]["sessions"].values()),
+                           "second Screen did not enter busy state before close assessment")
                 click("drawer.close_new")
                 capture("screen-close-prompt")
                 assert second_id in state()["screens"], "busy Screen closed without assessment"

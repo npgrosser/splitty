@@ -79,6 +79,12 @@ def main():
     parser.add_argument("--xclip", type=Path, help="private display clipboard reader")
     parser.add_argument("--visible-trigger-x", type=int, default=0,
                         help="calibrated X coordinate of the first tab's visible ⋯ button")
+    parser.add_argument("--context-tab-x", type=int, default=180,
+                        help="calibrated X coordinate inside the nonselected source tab")
+    parser.add_argument("--first-tab-x", type=int, default=45,
+                        help="calibrated X coordinate inside the source's first tab")
+    parser.add_argument("--tab-header-y", type=int, default=62,
+                        help="calibrated Y coordinate through the source tab headers")
     parser.add_argument("--setup-only", action="store_true", help="capture initial layout without transfer actions")
     args = parser.parse_args()
     if not args.setup_only and not args.xclip:
@@ -92,6 +98,7 @@ def main():
     fixture = HERE / "gpui-screen-transfer-fixture.py"
     (config / "config.toml").write_text(
         '[appearance]\ntheme_mode = "fixed"\ntheme = "splitty-dark"\nfont_size = 0\n\n'
+        '[drawer]\npinned = false\n\n'
         '[shells]\ndefault_profile_id = "screen-transfer-fixture"\n\n'
         '[[shells.profiles]]\nid = "screen-transfer-fixture"\nname = "Transfer fixture"\n'
         f'command = {json.dumps(str(Path(sys.executable).resolve()))}\n'
@@ -111,6 +118,8 @@ def main():
     result = {"binary": str(binary), "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
               "harnessSha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
               "fixtureSha256": hashlib.sha256(fixture.read_bytes()).hexdigest(),
+              "tabHitCoordinates": {"contextX": args.context_tab_x, "firstX": args.first_tab_x,
+                                    "visibleX": args.visible_trigger_x, "headerY": args.tab_header_y},
               "display": args.display, "checks": [], "screenshots": [], "ptyEvents": {},
               "states": {}, "passed": False}
     xvfb = app = display = window = None
@@ -318,7 +327,7 @@ def main():
             result["checks"].append("existing-target-has-different-terminal-geometry")
             no_input("return-to-source-a", lambda: chord("Alt_L", "Shift_L", "1"))
             capture("returned-to-source-a")
-            click(45, 62)
+            click(args.first_tab_x, args.tab_header_y)
             wait_until(lambda: a["pane"] in selected(owned_state()["screens"][a_id]),
                        "source first tab was not selected")
             assert c["pane"] not in selected(owned_state()["screens"][a_id])
@@ -326,12 +335,16 @@ def main():
             result["checks"].append("nonselected-source-captured-before-menu")
 
             if args.setup_only:
+                x("mousemove", "--window", window, args.context_tab_x, args.tab_header_y)
+                display.sync()
+                time.sleep(.25)
+                capture("nonselected-source-hover")
                 result["checks"].append("setup-only-geometry-and-owned-fixture")
             else:
                 # Menu coordinates are calibrated against the frozen build's
                 # screenshots; state checks below reject wrong-tab transfers.
                 before_menu = owned_state("before-dismiss")
-                no_input("open-nonselected-context-menu", lambda: click(180, 62, 3))
+                no_input("open-nonselected-context-menu", lambda: click(args.context_tab_x, args.tab_header_y, 3))
                 capture("nonselected-context-menu")
                 no_input("dismiss-transfer-menu", lambda: display.type_key("Escape"))
                 capture("dismissed-menu")
@@ -344,7 +357,7 @@ def main():
                 if not args.visible_trigger_x:
                     raise ValueError("full transfer acceptance requires --visible-trigger-x")
                 no_input("open-nonselected-visible-affordance",
-                         lambda: click(args.visible_trigger_x, 62))
+                         lambda: click(args.visible_trigger_x, args.tab_header_y))
                 capture("nonselected-visible-affordance-menu")
                 no_input("dismiss-nonselected-visible-menu", lambda: display.type_key("Escape"))
                 after_visible_dismiss = owned_state("after-visible-dismiss")
@@ -354,7 +367,7 @@ def main():
                 capture("nonselected-visible-menu-dismissed")
                 result["checks"].append("visible-menu-dismissal-keeps-nonselected-source-and-route")
 
-                no_input("open-nonselected-for-transfer", lambda: click(180, 62, 3))
+                no_input("open-nonselected-for-transfer", lambda: click(args.context_tab_x, args.tab_header_y, 3))
                 capture("nonselected-menu-before-existing-transfer")
                 no_input("choose-existing-target", lambda: display.type_key("Return"))
                 wait_until(lambda: route(owned_state(), c["pane"]) == b_id,
@@ -394,7 +407,7 @@ def main():
                 # The visible ⋯ affordance is tested on the selected moved tab.
                 # Its X is read from the frozen candidate screenshot once.
                 no_input("open-visible-transfer-affordance",
-                         lambda: click(args.visible_trigger_x, 62))
+                         lambda: click(args.visible_trigger_x, args.tab_header_y))
                 capture("visible-affordance-menu")
                 no_input("choose-new-screen", lambda: (
                     display.type_key("Down"), display.type_key("Return")))
@@ -412,7 +425,7 @@ def main():
                 capture("source-a-before-final-transfer")
                 state = owned_state()
                 assert list(state["screens"][a_id]["panes"]) == [a["pane"]]
-                no_input("open-final-source-menu", lambda: click(50, 62, 3))
+                no_input("open-final-source-menu", lambda: click(args.first_tab_x, args.tab_header_y, 3))
                 capture("final-source-menu")
                 no_input("choose-b-for-final-source", lambda: display.type_key("Return"))
                 wait_until(lambda: route(owned_state(), a["pane"]) == b_id
