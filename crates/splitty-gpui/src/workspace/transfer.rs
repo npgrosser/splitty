@@ -12,7 +12,36 @@ fn destination_ids(
         .collect()
 }
 
+fn tab_context_matches(
+    model: &LocalWorkspace,
+    source: SourceToken,
+    screen: &ScreenKey,
+    pane: &str,
+) -> bool {
+    model.source_token() == source
+        && model.shown_screen_id() == Some(screen.screen_id())
+        && model.screen_key(screen.screen_id()) == *screen
+        && model.screen_for(pane) == Some(screen.screen_id())
+}
+
 impl Workspace {
+    pub(super) fn open_transfer_menu_captured(
+        &mut self,
+        source: SourceToken,
+        screen: &ScreenKey,
+        pane: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .model
+            .as_ref()
+            .is_some_and(|model| tab_context_matches(model, source, screen, pane))
+        {
+            return;
+        }
+        self.open_transfer_menu(pane, window, cx);
+    }
     pub(super) fn open_transfer_menu(
         &mut self,
         pane: &str,
@@ -151,7 +180,7 @@ impl Workspace {
                 return;
             }
             ScreenTransferTarget::Existing {
-                screen_id: screen_id.to_owned(),
+                screen: model.screen_key(screen_id),
             }
         } else {
             ScreenTransferTarget::New {
@@ -159,15 +188,18 @@ impl Workspace {
             }
         };
         let request_id = Uuid::new_v4();
-        let connection_id = menu.source.connection_id;
-        match self.commands.try_send(Command::TransferPane {
-            request_id,
-            source: menu.source,
-            target,
-        }) {
+        let source_token = menu.source.source_token();
+        match self.commands.try_send(WorkerCommand::new(
+            source_token,
+            Command::TransferPane {
+                request_id,
+                source: menu.source,
+                target,
+            },
+        )) {
             Ok(()) => {
                 self.pending_transfer = Some(PendingTransfer {
-                    connection_id,
+                    source: source_token,
                     request_id,
                 });
             }
@@ -316,43 +348,76 @@ impl Workspace {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_os = "windows")))]
 mod tests {
-    use super::{destination_ids, PaneActionTarget, PendingTransfer};
-    use splitty_client_core::workspace::ScreenInfo;
-    use uuid::Uuid;
+    use super::tab_context_matches;
+    use splitty_client_core::{workspace::LocalWorkspace, EmbeddedService};
 
-    #[test]
-    fn tab_menu_targets_captured_source_and_ignores_unrelated_transfer_result() {
-        let owner = Uuid::new_v4();
-        let source = PaneActionTarget {
-            connection_id: owner,
-            screen_id: "screen-b".into(),
-            pane_id: "nonselected-pane".into(),
-            session_id: "session-b".into(),
-        };
-        let screens = [
-            ScreenInfo {
-                id: "screen-a".into(),
-                name: Some("First".into()),
-            },
-            ScreenInfo {
-                id: "screen-b".into(),
-                name: Some("Current".into()),
-            },
-            ScreenInfo {
-                id: "screen-c".into(),
-                name: Some("Third".into()),
-            },
-        ];
-        assert_eq!(destination_ids(&screens, &source), ["screen-a", "screen-c"]);
-        assert_eq!(source.pane_id, "nonselected-pane");
-        let pending = PendingTransfer {
-            connection_id: owner,
-            request_id: Uuid::new_v4(),
-        };
-        assert!(pending.matches(owner, pending.request_id));
-        assert!(!pending.matches(owner, Uuid::new_v4()));
-        assert!(!pending.matches(Uuid::new_v4(), pending.request_id));
+    #[tokio::test]
+    async fn nonselected_tab_context_stays_valid_only_on_its_captured_source_and_screen() {
+        let service = EmbeddedService::start();
+        let mut client = service.connect().await.unwrap();
+        let connection = client.connection_id();
+        let mut model = LocalWorkspace::new(connection);
+        model.set_catalog_supported(true);
+        model.mark_catalog_dirty();
+        model.flush_catalog(&client).unwrap();
+        loop {
+            let event = client.next_event().await.unwrap().unwrap();
+            if event
+                .json()
+                .is_some_and(|json| json["type"] == "mux.workspace_snapshot")
+            {
+                model
+                    .apply_catalog(connection, event.json().unwrap())
+                    .unwrap();
+                break;
+            }
+        }
+        let ids = model.create_screen(&client, "Source").unwrap();
+        model.flush_catalog(&client).unwrap();
+        loop {
+            let event = client.next_event().await.unwrap().unwrap();
+            if event
+                .json()
+                .is_some_and(|json| json["type"] == "mux.workspace_snapshot")
+            {
+                model
+                    .apply_catalog(connection, event.json().unwrap())
+                    .unwrap();
+                break;
+            }
+        }
+        let inactive = uuid::Uuid::new_v4().to_string();
+        let snapshot = serde_json::json!({
+            "type":"mux.screen_snapshot",
+            "screen":{"id":ids.screen_id,"revision":1,
+                "root":{"type":"slot","id":"root","paneIds":[ids.pane_id,inactive],"activePaneId":ids.pane_id},
+                "panes":{ids.pane_id.clone():{"id":ids.pane_id},inactive.clone():{"id":inactive}},
+                "sessions":{}}
+        });
+        model.apply_snapshot(connection, &snapshot).unwrap();
+        let screen = model.screen_key(&ids.screen_id);
+        let source = model.source_token();
+        assert!(
+            !model.is_displayed_pane(&inactive),
+            "the context target is deliberately not the selected terminal"
+        );
+        assert!(tab_context_matches(&model, source, &screen, &inactive));
+        assert!(!tab_context_matches(
+            &model,
+            source,
+            &model.screen_key("other"),
+            &inactive
+        ));
+        assert!(!tab_context_matches(
+            &model,
+            LocalWorkspace::new(uuid::Uuid::new_v4()).source_token(),
+            &screen,
+            &inactive
+        ));
+        assert!(!tab_context_matches(&model, source, &screen, "missing"));
+        client.finish().await.unwrap();
+        service.close().await.unwrap();
     }
 }

@@ -439,6 +439,15 @@ impl Terminal {
         }
     }
 
+    /// Rebind the route of a surviving terminal after workspace geometry changes.
+    /// Previously retained closures keep their original captured authority.
+    pub(crate) fn replace_commands(
+        &mut self,
+        commands: impl Fn(Command) -> std::result::Result<(), String> + 'static,
+    ) {
+        self.commands = Box::new(commands);
+    }
+
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
         if let Some(search) = self
             .search

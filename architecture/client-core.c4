@@ -90,12 +90,12 @@ model {
     }
 
     client_workspace = component 'client_workspace' {
-      description 'Connection-wide catalog and admission, canonical tiled/floating Screen projections, bounded coherent cross-Screen route collection, captured transfer, floating action and exact tab placement settlement, ordered relative Screen and captured group navigation, captured template replacement with separate pending presentation and full-scope close impact assessment.'
+      description 'Source-qualified view keys and immutable execution tokens; connection-wide local catalog and admission, canonical tiled/floating Screen projections, bounded coherent cross-Screen route collection, captured transfer, floating action and exact tab placement settlement, ordered relative Screen and captured group navigation, captured template replacement with separate pending presentation and full-scope close impact assessment.'
       metadata { module 'splitty_client_core::workspace' }
     }
 
     native_workspace = component 'native_workspace' {
-      description 'Native workspace runtime: one owned service and ordered connection, worker-owned workspace collection, identified transfer, floating and zoom outcomes, checked placement and close settlement, independent settings outcomes, verified shutdown and retained attachment and visibility controls.'
+      description 'Native workspace runtime: one owned local service and ordered connection, immutable source command admission before effects, source-scoped charged events and attachment delivery, worker-owned workspace collection, identified transfer, floating and zoom outcomes, checked placement and close settlement including channel-owned startup consent, independent settings outcomes, verified shutdown and retained attachment and visibility controls.'
       metadata { module 'splitty_client_core::native_workspace' }
     }
 
@@ -174,6 +174,8 @@ model {
     connection -> splitty.transport.peer 'Receive and send native frames'
     connection -> splitty.transport.wire 'Frame kinds and negotiated service readiness'
     client_document -> connection 'Route versioned reads through their owning client'
+    client_document -> appearance 'Use isolated real-service fixtures to reject reused document identities from another connection'
+    client_document -> client_root 'Open independent fixture clients through the public embedded service seam'
     client_document -> splitty.transport.budget 'Retain document bytes and pending read capacity'
     client_workspace -> client_root 'Use public client, screen and event types'
     client_workspace -> connection 'Use shared command validation'
@@ -191,6 +193,7 @@ model {
     native_workspace -> splitty.core.protocol 'Broadcast same-service settings events in runtime tests'
     native_workspace -> splitty.core.config 'Verify persistence in an isolated child process'
     native_workspace -> client_workspace 'Collect and commit coherent routes, admit captured transfers and revalidate close impact'
+    native_workspace -> connection 'Reject commands with missing or obsolete source authority before effects'
     native_workspace -> splitty.core.ids 'Confirm captured pane identity after the ordered close barrier'
     native_workspace -> splitty.core.mux 'Exercise external Screen transfers against the authoritative store in runtime tests'
     native_workspace -> splitty.core.pty 'Gate embedded worker terminal tests on PTY availability'

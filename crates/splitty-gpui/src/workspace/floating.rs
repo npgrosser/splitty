@@ -1,7 +1,6 @@
 //! Window-local projection and pointer gesture for canonical floating groups.
 use gpui_kit::{point, px, size, Bounds, Pixels, Point};
-use splitty_client_core::workspace::{FloatBounds, FloatingTarget};
-use uuid::Uuid;
+use splitty_client_core::workspace::{FloatBounds, FloatingTarget, ScreenKey, SourceToken};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum FloatGestureKind {
@@ -12,8 +11,8 @@ pub(super) enum FloatGestureKind {
 #[derive(Clone, Debug)]
 pub(super) struct FloatGesture {
     pub target: FloatingTarget,
-    pub connection: Uuid,
-    pub screen: String,
+    pub source: SourceToken,
+    pub screen: ScreenKey,
     pub kind: FloatGestureKind,
     pub origin: Point<Pixels>,
     pub viewport: Bounds<Pixels>,

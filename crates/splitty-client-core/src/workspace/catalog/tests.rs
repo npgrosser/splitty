@@ -48,6 +48,110 @@ fn terminal_snapshot(screen: &str, pane: &str, session: &str, busy: bool) -> Val
     event
 }
 
+#[test]
+fn source_namespaces_and_captured_targets_reject_collisions_even_with_equal_connection_ids() {
+    let mut local = model(&["a", "b"]);
+    let mut other = model(&["a", "b"]);
+    let connection = local.connection_id();
+    other.reset_connection(connection);
+    other.set_catalog_supported(true);
+    catalog(&mut other, &["a", "b"], Some("a"));
+    for workspace in [&mut local, &mut other] {
+        workspace
+            .apply_snapshot(connection, &terminal_snapshot("a", "p", "s", false))
+            .unwrap();
+        workspace
+            .apply_snapshot(connection, &snapshot("b", &[]))
+            .unwrap();
+        workspace.observe_attached(connection, "s");
+    }
+    assert_ne!(local.screen_key("a"), other.screen_key("a"));
+    assert_ne!(local.pane_key("p"), other.pane_key("p"));
+    assert_ne!(
+        local.screen_key("a").layout_key("slot"),
+        other.screen_key("a").layout_key("slot")
+    );
+    assert_ne!(
+        local.screen_key("a").layout_key("slot"),
+        local.screen_key("b").layout_key("slot")
+    );
+    assert!(local.accepts_terminal(&local.terminal_token("p").unwrap()));
+    assert!(!local.accepts_terminal(&other.terminal_token("p").unwrap()));
+    assert!(local
+        .validate_pane_action(&other.capture_pane_action("p").unwrap())
+        .is_err());
+    assert!(local
+        .validate_close(&other.assess_close(1, CloseTarget::Window).unwrap(), true)
+        .is_err());
+    let source = local.capture_pane_action("p").unwrap();
+    assert!(local
+        .transfer_with(
+            Uuid::new_v4(),
+            source,
+            ScreenTransferTarget::Existing {
+                screen: other.screen_key("b")
+            },
+            |_, _, _, _| panic!("foreign Screen must be rejected before sending")
+        )
+        .is_err());
+}
+
+#[test]
+fn terminal_token_survives_same_source_move_and_refresh_but_not_connection_or_session_replacement()
+{
+    let mut workspace = model(&["a", "b"]);
+    let connection = workspace.connection_id();
+    workspace
+        .apply_snapshot(connection, &terminal_snapshot("a", "p", "s", false))
+        .unwrap();
+    workspace
+        .apply_snapshot(connection, &snapshot("b", &[]))
+        .unwrap();
+    let token = workspace.terminal_token("p").unwrap();
+    let key = workspace.pane_key("p");
+    let source = workspace.source_id();
+    let mut empty = snapshot("a", &[]);
+    empty["screen"]["revision"] = json!(2);
+    workspace.apply_snapshot(connection, &empty).unwrap();
+    assert!(!workspace.accepts_terminal(&token));
+    let mut moved = terminal_snapshot("b", "p", "s", false);
+    moved["screen"]["revision"] = json!(2);
+    workspace.apply_snapshot(connection, &moved).unwrap();
+    workspace.route_generation += 1;
+    assert_eq!(workspace.pane_key("p"), key);
+    assert!(
+        workspace.accepts_terminal(&token),
+        "layout fences must not revoke surviving terminal input"
+    );
+    moved["screen"]["revision"] = json!(3);
+    moved["screen"]["panes"]["p"]["sessionId"] = json!("replacement");
+    moved["screen"]["sessions"] = json!({"replacement":{"id":"replacement","status":"running"}});
+    workspace.apply_snapshot(connection, &moved).unwrap();
+    assert!(!workspace.accepts_terminal(&token));
+    let before = workspace.source_token();
+    workspace.reset_connection(Uuid::new_v4());
+    assert_eq!(workspace.source_id(), source);
+    assert_eq!(workspace.pane_key("p"), key);
+    assert_ne!(workspace.source_token(), before);
+    workspace.set_catalog_supported(true);
+    catalog(&mut workspace, &["a"], Some("a"));
+    workspace
+        .apply_snapshot(
+            workspace.connection_id(),
+            &terminal_snapshot("a", "p", "s", false),
+        )
+        .unwrap();
+    assert!(!workspace.accepts_terminal(&token));
+    assert_eq!(
+        workspace.capture_pane_action("p").unwrap().source_token(),
+        workspace.source_token()
+    );
+    assert_eq!(
+        workspace.capture_drag("p").unwrap().source_token(),
+        workspace.source_token()
+    );
+}
+
 fn split_snapshot(screen: &str, revision: u64, left: &[&str], right: &[&str]) -> Value {
     let panes: Vec<_> = left.iter().chain(right.iter()).copied().collect();
     json!({"type":"mux.screen_snapshot", "screen":{

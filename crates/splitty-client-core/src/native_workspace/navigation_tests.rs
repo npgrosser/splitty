@@ -52,13 +52,18 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
     })
     .await;
     let owner = first.connection_id();
+    let scope = first.source_token();
     let screen_a = first.shown_screen_id().unwrap().to_owned();
     let pane_a = first.routes()[0].pane_id.clone();
     commands
-        .send(Command::Split {
-            pane: pane_a.clone(),
-            axis: Axis::Horizontal,
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::Split {
+                screen: first.screen_key(&screen_a),
+                pane: pane_a.clone(),
+                axis: Axis::Horizontal,
+            },
+        ))
         .await
         .unwrap();
     let split = model_where(&mut updates, |model| {
@@ -75,7 +80,16 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
         .find(|route| route.pane_id != pane_a)
         .unwrap()
         .pane_id;
-    commands.send(Command::Tab(pane_b.clone())).await.unwrap();
+    commands
+        .send(Command::new(
+            scope,
+            CommandKind::Tab {
+                screen: first.screen_key(&screen_a),
+                pane: pane_b.clone(),
+            },
+        ))
+        .await
+        .unwrap();
     let tabs = model_where(&mut updates, |model| {
         model.routes().len() == 3
             && model
@@ -111,7 +125,13 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
         .map(|route| (route.pane_id, route.session_id))
         .collect();
     commands
-        .send(Command::Select(pane_a.clone()))
+        .send(Command::new(
+            scope,
+            CommandKind::Select {
+                screen: first.screen_key(&screen_a),
+                pane: pane_a.clone(),
+            },
+        ))
         .await
         .unwrap();
     model_where(&mut updates, |model| {
@@ -119,12 +139,15 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
     })
     .await;
     commands
-        .send(Command::CycleTabInSlot {
-            connection: owner,
-            screen: screen_a.clone(),
-            slot: slot_id.clone(),
-            step,
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::CycleTabInSlot {
+                connection: owner,
+                screen: screen_a.clone(),
+                slot: slot_id.clone(),
+                step,
+            },
+        ))
         .await
         .unwrap();
     let hovered = model_where(&mut updates, |model| {
@@ -135,7 +158,10 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
         assert_eq!(hovered.session_for(pane), Some(session.as_str()));
     }
     commands
-        .send(Command::CreateScreen("Second".into()))
+        .send(Command::new(
+            scope,
+            CommandKind::CreateScreen("Second".into()),
+        ))
         .await
         .unwrap();
     let second = model_where(&mut updates, |model| {
@@ -144,7 +170,10 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
     .await;
     let screen_b = second.shown_screen_id().unwrap().to_owned();
     commands
-        .send(Command::CreateScreen("Third".into()))
+        .send(Command::new(
+            scope,
+            CommandKind::CreateScreen("Third".into()),
+        ))
         .await
         .unwrap();
     let third = model_where(&mut updates, |model| model.screens().len() == 3).await;
@@ -153,10 +182,13 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
     // Both commands are queued before the view receives either result.
     for _ in 0..2 {
         commands
-            .send(Command::CycleScreen {
-                connection: owner,
-                step: TabStep::Previous,
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::CycleScreen {
+                    connection: owner,
+                    step: TabStep::Previous,
+                },
+            ))
             .await
             .unwrap();
     }
@@ -169,28 +201,37 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
         assert_eq!(returned.session_for(pane), Some(session.as_str()));
     }
     commands
-        .send(Command::CycleScreen {
-            connection: uuid::Uuid::new_v4(),
-            step: TabStep::Next,
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::CycleScreen {
+                connection: uuid::Uuid::new_v4(),
+                step: TabStep::Next,
+            },
+        ))
         .await
         .unwrap();
     rejected(&mut updates, "previous connection").await;
     commands
-        .send(Command::CycleTabInSlot {
-            connection: owner,
-            screen: screen_b,
-            slot: slot_id,
-            step: TabStep::Next,
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::CycleTabInSlot {
+                connection: owner,
+                screen: screen_b,
+                slot: slot_id,
+                step: TabStep::Next,
+            },
+        ))
         .await
         .unwrap();
     rejected(&mut updates, "previous Screen").await;
     commands
-        .send(Command::CycleScreen {
-            connection: owner,
-            step: TabStep::Next,
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::CycleScreen {
+                connection: owner,
+                step: TabStep::Next,
+            },
+        ))
         .await
         .unwrap();
     model_where(&mut updates, |model| {

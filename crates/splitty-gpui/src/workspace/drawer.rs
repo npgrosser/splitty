@@ -104,6 +104,7 @@ fn wheel_step(direction: i32) -> TabStep {
 impl Workspace {
     pub(super) fn render_drawer_toggle(&self, cx: &mut Context<Self>) -> AnyElement {
         let weak = cx.entity().downgrade();
+        let source = self.model.as_ref().map(LocalWorkspace::source_token);
         let selected = self.drawer_visible;
         Button::new("drawer-toggle")
             .accessibility_label(if selected {
@@ -126,6 +127,13 @@ impl Workspace {
             .label("Screens")
             .on_click(move |_, window, cx| {
                 let _ = weak.update(cx, |this, cx| {
+                    if !source.is_some_and(|source| {
+                        this.model
+                            .as_ref()
+                            .is_some_and(|model| model.source_token() == source)
+                    }) {
+                        return;
+                    }
                     this.toggle_drawer(cx);
                     this.focus_current(window, cx);
                 });
@@ -134,6 +142,7 @@ impl Workspace {
     }
 
     pub(super) fn render_drawer(&self, cx: &mut Context<Self>) -> AnyElement {
+        let source = self.model.as_ref().map(LocalWorkspace::source_token);
         let mut list = div()
             .id("drawer-screen-list")
             .flex_1()
@@ -190,7 +199,7 @@ impl Workspace {
                 if self
                     .rename
                     .as_ref()
-                    .is_some_and(|editor| editor.screen == id)
+                    .is_some_and(|editor| editor.screen.screen_id() == id)
                 {
                     if let Some(editor) = self.rename.as_ref() {
                         row = row.child(div().flex_1().min_w_0().child(Input::new(&editor.input)));
@@ -221,6 +230,13 @@ impl Workspace {
                             )
                             .on_click(move |_, window, cx| {
                                 let _ = weak.update(cx, |this, cx| {
+                                    if !source.is_some_and(|source| {
+                                        this.model
+                                            .as_ref()
+                                            .is_some_and(|model| model.source_token() == source)
+                                    }) {
+                                        return;
+                                    }
                                     if !GlobalState::is_in_deferred_context(cx) {
                                         this.switch_screen(&select, window, cx);
                                         this.focus_current(window, cx);
@@ -240,7 +256,7 @@ impl Workspace {
                 if self
                     .rename
                     .as_ref()
-                    .is_none_or(|editor| editor.screen != id)
+                    .is_none_or(|editor| editor.screen.screen_id() != id)
                 {
                     let weak = cx.entity().downgrade();
                     row = row.child(
@@ -253,8 +269,15 @@ impl Workspace {
                             .tooltip(format!("Rename {label}"))
                             .icon(Icon::new(IconName::Pencil))
                             .on_click(move |_, window, cx| {
-                                let _ = weak
-                                    .update(cx, |this, cx| this.start_rename(&rename, window, cx));
+                                let _ = weak.update(cx, |this, cx| {
+                                    if source.is_some_and(|source| {
+                                        this.model
+                                            .as_ref()
+                                            .is_some_and(|model| model.source_token() == source)
+                                    }) {
+                                        this.start_rename(&rename, window, cx);
+                                    }
+                                });
                             }),
                     );
                 }
@@ -270,7 +293,13 @@ impl Workspace {
                         .icon(Icon::new(IconName::X))
                         .on_click(move |_, window, cx| {
                             let _ = weak.update(cx, |this, cx| {
-                                this.request_close_screen(&close, window, cx)
+                                if source.is_some_and(|source| {
+                                    this.model
+                                        .as_ref()
+                                        .is_some_and(|model| model.source_token() == source)
+                                }) {
+                                    this.request_close_screen(&close, window, cx)
+                                }
                             });
                         }),
                 );
@@ -316,7 +345,15 @@ impl Workspace {
             .icon(Icon::new(IconName::Plus))
             .label("New screen")
             .on_click(move |_, _, cx| {
-                let _ = weak.update(cx, |this, cx| this.create_screen(cx));
+                let _ = weak.update(cx, |this, cx| {
+                    if source.is_some_and(|source| {
+                        this.model
+                            .as_ref()
+                            .is_some_and(|model| model.source_token() == source)
+                    }) {
+                        this.create_screen(cx);
+                    }
+                });
             });
         let weak = cx.entity().downgrade();
         let templates = Button::new("drawer-templates")
@@ -327,7 +364,15 @@ impl Workspace {
             .icon(Icon::new(IconName::LayoutTemplate))
             .label("Templates")
             .on_click(move |_, window, cx| {
-                let _ = weak.update(cx, |this, cx| this.toggle_templates(window, cx));
+                let _ = weak.update(cx, |this, cx| {
+                    if source.is_some_and(|source| {
+                        this.model
+                            .as_ref()
+                            .is_some_and(|model| model.source_token() == source)
+                    }) {
+                        this.toggle_templates(window, cx);
+                    }
+                });
             });
         div()
             .id("screen-drawer")
@@ -348,8 +393,10 @@ impl Workspace {
                     .items_center()
                     .justify_between()
                     .text_color(rgb(self.appearance.muted))
-                    .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
-                        this.chrome_wheel(WheelTarget::Screens, event, window, cx);
+                    .on_scroll(cx.listener(move |this, event: &ScrollEvent, window, cx| {
+                        if let Some(source) = source {
+                            this.chrome_wheel(source, WheelTarget::Screens, event, window, cx);
+                        }
                     }))
                     .child("SCREENS")
                     .child(
@@ -367,11 +414,19 @@ impl Workspace {
 
     pub(super) fn chrome_wheel(
         &mut self,
+        source: SourceToken,
         target: WheelTarget,
         event: &ScrollEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.source_token() == source)
+        {
+            return;
+        }
         let blocked = self.rename.is_some()
             || self.template_dialog.is_some()
             || self.profile_picker.is_some()
@@ -380,7 +435,7 @@ impl Workspace {
             || self
                 .search_owner
                 .as_ref()
-                .is_some_and(|terminal| terminal.read(cx).search_input_focused(window, cx))
+                .is_some_and(|(_, terminal)| terminal.read(cx).search_input_focused(window, cx))
             || self
                 .pending_close
                 .as_ref()
@@ -406,14 +461,16 @@ impl Workspace {
         };
         for _ in 0..steps.unsigned_abs() {
             match &target {
-                WheelTarget::Screens => self.send(
+                WheelTarget::Screens => self.send_captured(
+                    source,
                     Command::CycleScreen {
                         connection,
                         step: wheel_step(steps),
                     },
                     cx,
                 ),
-                WheelTarget::Slot { screen, slot } => self.send(
+                WheelTarget::Slot { screen, slot } => self.send_captured(
+                    source,
                     Command::CycleTabInSlot {
                         connection,
                         screen: screen.clone(),

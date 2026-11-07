@@ -16,6 +16,7 @@ pub enum TemplateApplyChoice {
 }
 #[derive(Debug)]
 pub struct TemplateApplyPlan {
+    source_id: SourceId,
     connection: Uuid,
     request_id: Uuid,
     screen_id: String,
@@ -29,6 +30,9 @@ pub struct TemplateApplyPlan {
     _lease: Lease,
 }
 impl TemplateApplyPlan {
+    pub fn source_token(&self) -> SourceToken {
+        SourceToken::new(self.source_id, self.connection)
+    }
     pub fn connection_id(&self) -> Uuid {
         self.connection
     }
@@ -245,6 +249,7 @@ impl LocalWorkspace {
             .and_then(ScreenModel::snapshot)
             .map(|s| s.revision);
         let plan = TemplateApplyPlan {
+            source_id: self.source_id,
             connection: self.connection_id,
             request_id,
             screen_id,
@@ -300,7 +305,7 @@ impl LocalWorkspace {
         send: impl FnOnce(&str, &mux::ApplyTemplate) -> io::Result<()>,
     ) -> io::Result<()> {
         self.require_template_idle()?;
-        if plan.connection != self.connection_id || plan.consumed.load(Ordering::Acquire) {
+        if plan.source_token() != self.source_token() || plan.consumed.load(Ordering::Acquire) {
             return Err(invalid(
                 "Template review was already used or belongs to a previous connection",
             ));

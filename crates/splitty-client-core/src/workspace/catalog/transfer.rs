@@ -3,20 +3,27 @@ use super::*;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PaneActionTarget {
+    source_id: SourceId,
     pub connection_id: Uuid,
     pub screen_id: String,
     pub pane_id: String,
     pub session_id: String,
 }
+impl PaneActionTarget {
+    pub fn source_token(&self) -> SourceToken {
+        SourceToken::new(self.source_id, self.connection_id)
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ScreenTransferTarget {
-    Existing { screen_id: String },
+    Existing { screen: ScreenKey },
     New { screen_id: String },
 }
 impl ScreenTransferTarget {
     pub fn screen_id(&self) -> &str {
         match self {
-            Self::Existing { screen_id } | Self::New { screen_id } => screen_id,
+            Self::Existing { screen } => screen.screen_id(),
+            Self::New { screen_id } => screen_id,
         }
     }
 }
@@ -69,6 +76,7 @@ impl LocalWorkspace {
     }
     pub fn capture_pane_action(&self, pane: &str) -> io::Result<PaneActionTarget> {
         let source = PaneActionTarget {
+            source_id: self.source_id,
             connection_id: self.connection_id,
             screen_id: self
                 .shown_screen_id()
@@ -85,7 +93,7 @@ impl LocalWorkspace {
     }
     pub fn validate_pane_action(&self, source: &PaneActionTarget) -> io::Result<()> {
         self.require_routes_settled()?;
-        if source.connection_id != self.connection_id
+        if source.source_token() != self.source_token()
             || self.shown_screen_id() != Some(source.screen_id.as_str())
             || self.screen_for(&source.pane_id) != Some(source.screen_id.as_str())
             || self.session_for(&source.pane_id) != Some(source.session_id.as_str())
@@ -166,11 +174,12 @@ impl LocalWorkspace {
             return Err(invalid("Source and target Screen are the same"));
         }
         match &target {
-            ScreenTransferTarget::Existing { screen_id }
-                if !self
-                    .catalog
-                    .iter()
-                    .any(|info| info.id.as_str() == screen_id) =>
+            ScreenTransferTarget::Existing { screen }
+                if screen.source_id() != self.source_id
+                    || !self
+                        .catalog
+                        .iter()
+                        .any(|info| info.id.as_str() == screen.screen_id()) =>
             {
                 return Err(invalid("Target Screen is gone"))
             }

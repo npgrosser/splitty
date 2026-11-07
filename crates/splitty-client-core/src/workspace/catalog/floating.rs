@@ -4,11 +4,15 @@ use splitty_core::ids::FloatingId;
 
 #[derive(Clone, Debug)]
 pub struct FloatingTarget {
+    source_id: SourceId,
     connection: Uuid,
     snapshot: Arc<ScreenState>,
     id: String,
 }
 impl FloatingTarget {
+    pub fn source_token(&self) -> SourceToken {
+        SourceToken::new(self.source_id, self.connection)
+    }
     pub fn floating_id(&self) -> &str {
         &self.id
     }
@@ -128,6 +132,7 @@ impl LocalWorkspace {
             return Err(invalid("Floating group is gone"));
         }
         Ok(FloatingTarget {
+            source_id: self.source_id,
             connection: self.connection_id,
             snapshot,
             id: id.into(),
@@ -135,7 +140,7 @@ impl LocalWorkspace {
     }
     pub fn validate_float(&self, target: &FloatingTarget) -> io::Result<()> {
         self.require_floating_idle()?;
-        if target.connection != self.connection_id
+        if target.source_token() != self.source_token()
             || self.shown_screen_id() != Some(target.snapshot.id.as_str())
         {
             return Err(invalid("Floating action belongs to a previous Screen"));

@@ -151,6 +151,37 @@ tree. Switching Screens preserves terminal emulation and attachments; hidden
 terminals consume output and send protocol replies without claiming visibility
 or PTY size. Returning panes publish their measured sizes again.
 
+The native client distinguishes stable source identity from current connection
+authority. `SourceId` uses the source's initial connection UUID as its namespace;
+`SourceToken` combines that namespace with the current connection UUID. Screen
+and pane keys carry their source, while layout keys also carry their Screen.
+Canonical IDs inside one owned model remain unchanged. These keys are client
+context rather than wire fields or authorization grants; production still owns
+one local source, without a remote registry.
+
+A native worker command envelope carries its captured source token. Admission
+rejects a foreign or replaced connection before target lookup or effects, then
+applies the existing membership, visibility and consent checks. Session deliveries
+and attachment notices carry the same source context while retaining the original
+charged event. Terminal tokens identify the exact source, connection, pane and
+session; ordinary catalog refreshes do not invalidate unchanged terminal input.
+Route generations fence geometry, Screen revisions fence structural gestures,
+request IDs match pending actions, and document versions fence content. Their
+distinct purposes remain explicit.
+
+Window-close assessment before the first source publication stays a worker-channel
+lifecycle intent. If readiness wins that race, the existing startup consent is
+checked and current local impact is assessed; missing source authority cannot
+authorize another command or skip confirmation.
+
+GPUI retains terminal entities by source-qualified pane identity across moves
+within that source. Callback bindings capture authority immutably; replacing a
+geometry binding preserves its emulator and search state while requesting a fresh
+size measurement. Each binding owns its pending resize slot, so an obsolete
+closure cannot overwrite a newer measurement. Queue retries retain the original
+capture and discard stale sizes instead of attaching current authority to old
+dimensions. Connection or session replacement revokes the old executable view.
+
 The native Drawer is a view of that ordered catalog, not a second workspace
 store. Relative Screen commands resolve the latest local selection on the
 worker's ordered queue, so successive wheel steps do not depend on UI refresh

@@ -21,6 +21,7 @@ struct PendingScreen {
 /// One connection owns every screen model and the shared pending-pane budget.
 #[derive(Clone)]
 pub struct LocalWorkspace {
+    pub(super) source_id: SourceId,
     connection_id: Uuid,
     catalog: Vec<ScreenInfo>,
     models: HashMap<String, ScreenModel>,
@@ -56,6 +57,7 @@ impl LocalWorkspace {
             ));
         }
         let mut plan = ClosePlan {
+            source_id: Some(self.source_id),
             request_id,
             connection_id: Some(self.connection_id),
             target: target.clone(),
@@ -144,7 +146,7 @@ impl LocalWorkspace {
     /// A fresh observation must cover the same identities and must not gain
     /// impact that the user's earlier decision did not include.
     pub fn validate_close(&self, plan: &ClosePlan, confirmed: bool) -> io::Result<()> {
-        if plan.connection_id != Some(self.connection_id) {
+        if plan.source_token() != Some(self.source_token()) {
             return Err(invalid("close belongs to a previous connection"));
         }
         let current = self.assess_close(plan.request_id, plan.target.clone())?;
@@ -264,6 +266,7 @@ impl LocalWorkspace {
 
     pub fn new(connection_id: Uuid) -> Self {
         Self {
+            source_id: SourceId::initial(connection_id),
             connection_id,
             catalog: Vec::new(),
             models: HashMap::new(),
@@ -538,6 +541,7 @@ impl LocalWorkspace {
                     },
                     self.connection_id,
                 );
+                screen.source_id = self.source_id;
                 screen.pending_panes.clear();
                 screen.focused_pane = None;
                 screen.set_tab_selection_supported(self.tab_selection_supported);
@@ -637,7 +641,9 @@ impl LocalWorkspace {
     }
     pub fn reset_connection(&mut self, connection: Uuid) -> WorkspaceDelta {
         let removed = self.routes();
+        let source = self.source_id;
         *self = Self::new(connection);
+        self.source_id = source;
         WorkspaceDelta {
             snapshot_changed: true,
             removed,
@@ -662,6 +668,7 @@ impl LocalWorkspace {
             pane_id: Uuid::new_v4().to_string(),
         };
         let mut screen = ScreenModel::new(ids.clone(), self.connection_id);
+        screen.source_id = self.source_id;
         screen.set_tab_selection_supported(self.tab_selection_supported);
         screen.resync_pending = true;
         self.models.insert(ids.screen_id.clone(), screen);

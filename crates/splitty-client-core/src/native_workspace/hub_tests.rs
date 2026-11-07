@@ -94,12 +94,13 @@ async fn passive_directory_refresh_keeps_local_worker_and_cleanup_independent() 
                     route = Some((first.pane_id.clone(), first.session_id.clone()));
                 }
             }
-            Update::Attached(session) => attached = Some(session),
+            Update::Attached { session, .. } => attached = Some(session),
             _ => {}
         }
     }
     let initial = initial.unwrap();
     let owner = initial.connection_id;
+    let scope = SourceToken::initial(owner);
     let HostDirectoryState::Ready(snapshot) = initial.state else {
         unreachable!()
     };
@@ -115,29 +116,40 @@ async fn passive_directory_refresh_keeps_local_worker_and_cleanup_independent() 
     );
     assert_eq!(snapshot.directory().hosts[0].screens[0].panes, 3);
     commands
-        .send(Command::RefreshHostDirectory {
-            connection: Uuid::new_v4(),
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::RefreshHostDirectory {
+                connection: Uuid::new_v4(),
+            },
+        ))
         .await
         .unwrap();
     commands
-        .send(Command::RefreshHostDirectory { connection: owner })
+        .send(Command::new(
+            scope,
+            CommandKind::RefreshHostDirectory { connection: owner },
+        ))
         .await
         .unwrap();
     let (pane, session) = route.unwrap();
     commands
-        .send(Command::Input {
-            pane,
-            session: session.clone(),
-            bytes: b"printf 'HOSTS_%s\\n' 'PASSIVE_ALIVE'\n".to_vec(),
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::Input {
+                route: TerminalToken::new(scope, &pane, &session),
+                bytes: b"printf 'HOSTS_%s\\n' 'PASSIVE_ALIVE'\n".to_vec(),
+            },
+        ))
         .await
         .unwrap();
     commands
-        .send(Command::SetColorScheme {
-            connection: owner,
-            scheme: ColorScheme::Light,
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::SetColorScheme {
+                connection: owner,
+                scheme: ColorScheme::Light,
+            },
+        ))
         .await
         .unwrap();
     let mut refreshed = None;
@@ -156,7 +168,7 @@ async fn passive_directory_refresh_keeps_local_worker_and_cleanup_independent() 
             {
                 refreshed = Some(update)
             }
-            Update::Event(event) => {
+            Update::Event { event, .. } => {
                 if let Some(chunk) = event.output() {
                     if chunk.session_id == session {
                         output.extend_from_slice(chunk.bytes);

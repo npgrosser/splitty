@@ -48,6 +48,7 @@ enum TemplateMode {
 
 pub(super) struct TemplateDialog {
     owner: Uuid,
+    source: SourceToken,
     mode: TemplateMode,
     catalog: Option<Arc<TemplateCatalogSnapshot>>,
     pending: Option<(Uuid, TemplateApiRequest)>,
@@ -135,7 +136,7 @@ impl Workspace {
         {
             return;
         }
-        let Some(owner) = self.model.as_ref().map(LocalWorkspace::connection_id) else {
+        let Some(source) = self.model.as_ref().map(LocalWorkspace::source_token) else {
             self.status = "Templates are unavailable while the workspace starts".into();
             cx.notify();
             return;
@@ -155,7 +156,8 @@ impl Workspace {
             }
         }
         self.template_dialog = Some(TemplateDialog {
-            owner,
+            owner: source.connection_id(),
+            source,
             mode: TemplateMode::Library,
             catalog: None,
             pending: None,
@@ -204,12 +206,22 @@ impl Workspace {
         if dialog.pending.is_some() {
             return;
         }
+        if !self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.source_token() == dialog.source)
+        {
+            return;
+        }
         let request_id = Uuid::new_v4();
-        match self.commands.try_send(Command::TemplateApi {
-            connection: dialog.owner,
-            request_id,
-            request: request.clone(),
-        }) {
+        match self.commands.try_send(WorkerCommand::new(
+            dialog.source,
+            Command::TemplateApi {
+                connection: dialog.owner,
+                request_id,
+                request: request.clone(),
+            },
+        )) {
             Ok(()) => {
                 dialog.pending = Some((request_id, request));
                 dialog.error = None;
@@ -228,11 +240,9 @@ impl Workspace {
         let Some(dialog) = self.template_dialog.as_mut() else {
             return;
         };
-        if !self
-            .model
-            .as_ref()
-            .is_some_and(|model| model.connection_id() == result.connection_id)
-        {
+        if !self.model.as_ref().is_some_and(|model| {
+            model.source_token() == dialog.source && model.connection_id() == result.connection_id
+        }) {
             return;
         }
         let Some(request) = dialog.accept(result.connection_id, result.request_id) else {
@@ -605,17 +615,20 @@ impl Workspace {
         if !self
             .model
             .as_ref()
-            .is_some_and(|model| model.connection_id() == plan.connection_id())
+            .is_some_and(|model| model.source_token() == plan.source_token())
         {
             dialog.error = Some("Template review belongs to an earlier connection".into());
             cx.notify();
             return;
         }
-        match self.commands.try_send(Command::ApplyTemplate {
-            plan: plan.clone(),
-            choice,
-            replace_confirmed: plan.replacement_impact().is_some(),
-        }) {
+        match self.commands.try_send(WorkerCommand::new(
+            plan.source_token(),
+            Command::ApplyTemplate {
+                plan: plan.clone(),
+                choice,
+                replace_confirmed: plan.replacement_impact().is_some(),
+            },
+        )) {
             Ok(()) => {
                 self.pending_template_apply = Some((plan.connection_id(), plan.request_id()));
                 // The worker publishes a separate pending projection. Dismiss
@@ -1350,6 +1363,7 @@ mod tests {
         let second = Uuid::new_v4();
         let mut dialog = TemplateDialog {
             owner,
+            source: splitty_client_core::workspace::LocalWorkspace::new(owner).source_token(),
             mode: TemplateMode::Library,
             catalog: None,
             pending: Some((second, TemplateApiRequest::List)),

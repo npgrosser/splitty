@@ -293,7 +293,7 @@ fn transfer_accepts_floating_sources_and_close_keeps_whole_window_available() {
             Uuid::new_v4(),
             source,
             ScreenTransferTarget::Existing {
-                screen_id: "b".into(),
+                screen: model.screen_key("b"),
             },
             |screen, pane, target, _| {
                 assert_eq!((screen, pane, target), ("a", "c", "b"));
@@ -317,7 +317,7 @@ fn managed_tabs_float_but_cannot_transfer_and_old_refresh_cannot_settle() {
             Uuid::new_v4(),
             source.clone(),
             ScreenTransferTarget::Existing {
-                screen_id: "b".into()
+                screen: model.screen_key("b")
             },
             |_, _, _, _| panic!("managed transfer admitted")
         )

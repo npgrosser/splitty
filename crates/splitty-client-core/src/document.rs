@@ -241,4 +241,43 @@ mod tests {
             .consume(&chunk(0, MAX_DOCUMENT_BYTES + 1, "v", b"a", false), &budget)
             .is_err());
     }
+
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn reused_request_and_pane_do_not_admit_a_reply_from_another_connection() {
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let service = crate::EmbeddedService::from_runtime(runtime);
+        let mut old_client = service.connect().await.unwrap();
+        let current_client = service.connect().await.unwrap();
+        let old_read = old_client.read_document("same-pane").unwrap();
+        let mut current_read = current_client.read_document("same-pane").unwrap();
+        current_read.request_id.clone_from(&old_read.request_id);
+        let event = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let event = old_client.next_event().await.unwrap().unwrap();
+                if event
+                    .json()
+                    .is_some_and(|json| json["requestId"] == old_read.request_id)
+                {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert!(current_read.accept(&current_client, &event).is_err());
+        assert!(
+            !current_read.finished,
+            "foreign failure must not settle the current read"
+        );
+        assert!(current_read.document.is_none());
+        assert!(current_read.accept(&old_client, &event).is_err());
+        drop(event);
+        drop(old_read);
+        drop(current_read);
+        old_client.finish().await.unwrap();
+        current_client.finish().await.unwrap();
+        service.close().await.unwrap();
+        assert!(!path.exists());
+    }
 }

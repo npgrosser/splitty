@@ -1191,3 +1191,43 @@ window checks also pass with this exact candidate. These are private X11
 functional checks, not new hardware smoothness or Windows build evidence.
 Remote connection, live browsing, attach/detach and forwarding controls remain
 subsequent increments; this view only inspects the assigned service's directory.
+
+## Native source-routing acceptance
+
+Stable source-qualified Screen, pane and layout keys now separate retained view
+identity from current connection/session authority. Worker commands and terminal
+callbacks capture their original target; old output, attachment notices, close
+outcomes and queued resize measurements cannot acquire a replacement's identity.
+Same-source movement retains the emulator and search state. Local behavior and
+the single local service remain unchanged; this is the prerequisite for remote
+Screens, not remote connection support itself.
+
+The increment passes 133 client-core tests and 91 native UI tests, including
+charged-event release, stale document replies, startup-close publication races,
+retained callbacks and saturated resize queues. Both touched crates pass
+all-target Clippy with warnings denied; formatting, 17 architecture checks,
+strict change validation and all main specs pass.
+
+Private X11 window checks cover Drawer navigation and hidden output (9), group
+controls and continuous divider dragging (9), window zoom with retained query
+and hidden-session output (12), and floating groups (21). These checks use
+candidate SHA-256
+`be6f4be9785022c1346befc1aef20504c4bfd58e4a26c8bdc9725a316ddbf8ff`.
+The divider check holds one mouse press through three confirmed canonical
+revisions while retaining every pane/session route. It verifies the correction
+to a Slot-only lookup that previously prevented split divider drags.
+
+The final candidate has SHA-256
+`c283b9eec3614f5b693c4fc0646720bde2f91b2233bd07d80f01586f58529894`.
+Only the transfer module changed after the earlier window checks: the captured
+context menu now accepts a nonselected tab belonging to the shown Screen. Its
+real-model regression and all 14 Screen-transfer window checks pass, including
+Escape dismissal without terminal input, same-session movement, retained text
+selection/find query and continued output after the old Screen disappears.
+Every window run closes normally without owned children left behind.
+
+The existing harnesses perform actual keyboard/pointer interaction and read
+authoritative state from isolated control sockets. These results are functional
+software-rendered X11 evidence, not Windows or hardware-smoothness measurements.
+Full workspace merge CI remains deferred until main integration, as does the next
+Windows test build.

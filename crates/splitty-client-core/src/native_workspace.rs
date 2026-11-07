@@ -7,9 +7,9 @@ use crate::{
     workspace::{
         Axis, ClosePlan, CloseTarget, FloatBounds, FloatingActionOutcome, FloatingActionResult,
         FloatingTarget, LocalWorkspace, MovePlacement, PaneActionTarget, PaneDrag,
-        PlacementOutcome, ScreenTransferOutcome, ScreenTransferResult, ScreenTransferTarget,
-        TabStep, TemplateApplyChoice, TemplateApplyOutcome, TemplateApplyPlan, TemplateApplyResult,
-        WorkspaceRefresh,
+        PlacementOutcome, ScreenKey, ScreenTransferOutcome, ScreenTransferResult,
+        ScreenTransferTarget, SourceToken, TabStep, TemplateApplyChoice, TemplateApplyOutcome,
+        TemplateApplyPlan, TemplateApplyResult, TerminalToken, WorkspaceRefresh,
     },
     zoom::{ZoomAction, ZoomResult},
     Event,
@@ -27,7 +27,67 @@ use std::{
 };
 use tokio::sync::mpsc;
 
-pub enum Command {
+/// One immutable intent captured on its assigned source connection.
+pub struct Command {
+    source: Option<SourceToken>,
+    kind: CommandKind,
+}
+impl Command {
+    pub fn new(source: SourceToken, kind: CommandKind) -> Self {
+        Self {
+            source: Some(source),
+            kind,
+        }
+    }
+    /// Startup close is channel-owned until the first workspace is discovered.
+    pub fn close(plan: ClosePlan, confirmed: bool) -> Self {
+        Self {
+            source: plan.source_token(),
+            kind: CommandKind::RequestClose { plan, confirmed },
+        }
+    }
+    pub fn source_token(&self) -> Option<SourceToken> {
+        self.source
+    }
+    pub fn kind(&self) -> &CommandKind {
+        &self.kind
+    }
+    fn validate_source(&self, current: SourceToken) -> std::io::Result<()> {
+        let startup = self.source.is_none()
+            && matches!(&self.kind, CommandKind::RequestClose { plan, .. }
+                if plan.source_token().is_none() && plan.target == CloseTarget::Window);
+        if !startup && self.source != Some(current) {
+            return Err(crate::connection::invalid(
+                "Command belongs to another source connection",
+            ));
+        }
+        let captured = match &self.kind {
+            CommandKind::Input { route, .. } | CommandKind::ResizePane { route, .. } => {
+                Some(route.source_token())
+            }
+            CommandKind::RequestClose { plan, .. } => plan.source_token(),
+            CommandKind::ApplyTemplate { plan, .. } => Some(plan.source_token()),
+            CommandKind::FloatPane { source, .. } | CommandKind::TransferPane { source, .. } => {
+                Some(source.source_token())
+            }
+            CommandKind::DockFloat { target, .. } | CommandKind::MoveFloat { target, .. } => {
+                Some(target.source_token())
+            }
+            CommandKind::PlaceTab { drag, .. } | CommandKind::MovePane { drag, .. } => {
+                Some(drag.source_token())
+            }
+            _ => self.source,
+        };
+        if captured != self.source {
+            return Err(crate::connection::invalid(
+                "Captured target belongs to another source connection",
+            ));
+        }
+        Ok(())
+    }
+}
+
+pub enum CommandKind {
     RefreshHostDirectory {
         connection: uuid::Uuid,
     },
@@ -81,14 +141,18 @@ pub enum Command {
     },
     RenameScreen {
         screen: String,
-        connection: String,
+        connection: uuid::Uuid,
         name: String,
     },
     Split {
+        screen: ScreenKey,
         pane: String,
         axis: Axis,
     },
-    Tab(String),
+    Tab {
+        screen: ScreenKey,
+        pane: String,
+    },
     ProfileTab {
         connection: uuid::Uuid,
         screen: String,
@@ -98,7 +162,7 @@ pub enum Command {
     },
     NewTerminal {
         screen: String,
-        connection: String,
+        connection: uuid::Uuid,
     },
     SetMaximized {
         screen: String,
@@ -133,25 +197,33 @@ pub enum Command {
         confirmed: bool,
     },
     ResizeSplit {
+        screen: ScreenKey,
+        revision: u64,
         node: String,
         sizes: Vec<f64>,
     },
-    Select(String),
-    Focus(String),
-    Input {
+    Select {
+        screen: ScreenKey,
         pane: String,
-        session: String,
+    },
+    Focus {
+        screen: ScreenKey,
+        pane: String,
+    },
+    Input {
+        route: TerminalToken,
         bytes: Vec<u8>,
     },
     ResizePane {
+        route: TerminalToken,
+        screen: ScreenKey,
         route_generation: u64,
-        pane: String,
-        session: String,
         cols: u16,
         rows: u16,
     },
     Visible {
-        screen: Option<String>,
+        screen: Option<ScreenKey>,
+        route_generation: u64,
         panes: Vec<String>,
     },
 }
@@ -174,24 +246,128 @@ pub enum Update {
         reason: String,
     },
     Workspace(Box<LocalWorkspace>),
-    Event(Box<Event>),
-    Attached(String),
+    Event {
+        source: SourceToken,
+        event: Box<Event>,
+    },
+    Attached {
+        source: SourceToken,
+        session: String,
+    },
     Status(String),
     CloseSubmitted {
         request_id: u64,
-        connection_id: Option<uuid::Uuid>,
+        source: Option<SourceToken>,
     },
     CloseRejected {
+        source: Option<SourceToken>,
         request_id: u64,
         reason: String,
     },
     CloseSettled {
+        source: Option<SourceToken>,
         request_id: u64,
     },
     WindowCloseApproved {
         request_id: u64,
-        connection_id: Option<uuid::Uuid>,
+        source: Option<SourceToken>,
     },
+}
+
+fn validate_command_target(model: &LocalWorkspace, command: &CommandKind) -> std::io::Result<()> {
+    match command {
+        CommandKind::Split { screen, pane, .. }
+        | CommandKind::Tab { screen, pane }
+        | CommandKind::Select { screen, pane }
+        | CommandKind::Focus { screen, pane } => {
+            model.validate_shown_key(screen)?;
+            if model.screen_for(pane) != Some(screen.screen_id()) {
+                return Err(crate::connection::invalid(
+                    "Pane no longer belongs to the captured Screen",
+                ));
+            }
+        }
+        CommandKind::ResizeSplit {
+            screen, revision, ..
+        } => {
+            model.validate_shown_key(screen)?;
+            if model
+                .snapshot()
+                .is_none_or(|snapshot| snapshot.revision != *revision)
+            {
+                return Err(crate::connection::invalid(
+                    "Divider belongs to an obsolete layout",
+                ));
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn rejected_command(source: Option<SourceToken>, command: &CommandKind, reason: String) -> Update {
+    match command {
+        CommandKind::RequestClose { plan, .. } => Update::CloseRejected {
+            source,
+            request_id: plan.request_id,
+            reason,
+        },
+        CommandKind::TemplateApi {
+            connection,
+            request_id,
+            ..
+        } => Update::TemplateApi(TemplateApiResult::rejected(
+            *connection,
+            *request_id,
+            reason,
+        )),
+        CommandKind::ApplyTemplate { plan, .. } => Update::TemplateApply(TemplateApplyResult {
+            connection_id: plan.connection_id(),
+            request_id: plan.request_id(),
+            outcome: TemplateApplyOutcome::Rejected { reason },
+        }),
+        CommandKind::FloatPane { request_id, source } => {
+            Update::FloatingAction(FloatingActionResult {
+                connection_id: source.connection_id,
+                request_id: *request_id,
+                outcome: FloatingActionOutcome::Rejected(reason),
+            })
+        }
+        CommandKind::DockFloat { request_id, target }
+        | CommandKind::MoveFloat {
+            request_id, target, ..
+        } => Update::FloatingAction(FloatingActionResult {
+            connection_id: target.connection_id(),
+            request_id: *request_id,
+            outcome: FloatingActionOutcome::Rejected(reason),
+        }),
+        CommandKind::TransferPane {
+            request_id, source, ..
+        } => Update::ScreenTransfer(ScreenTransferResult {
+            connection_id: source.connection_id,
+            request_id: *request_id,
+            outcome: ScreenTransferOutcome::Rejected(reason),
+        }),
+        CommandKind::Zoom {
+            connection,
+            request_id,
+            ..
+        } => Update::Zoom(ZoomResult::rejected(*connection, *request_id, reason)),
+        CommandKind::SetDrawerVisibility {
+            connection,
+            request_id,
+            ..
+        } => Update::DrawerVisibility(DrawerVisibilityResult::rejected(
+            *connection,
+            *request_id,
+            reason,
+        )),
+        CommandKind::SetColorScheme { connection, .. } => Update::AppearanceError {
+            connection: *connection,
+            reason,
+        },
+        _ => Update::Status(reason),
+    }
 }
 pub struct Worker {
     pub stop: Arc<AtomicBool>,
@@ -611,6 +787,7 @@ impl<'a> RuntimeHub<'a> {
 }
 
 struct PendingClose {
+    source: Option<SourceToken>,
     request_id: u64,
     target: CloseTarget,
     barrier_generation: u64,
@@ -826,6 +1003,7 @@ async fn run_service(
                 .await
         }
     };
+    let source = SourceToken::initial(client.connection_id());
     let mut workspace_refresh = WorkspaceRefresh::default();
     let mut settings = None::<RuntimeLocalService<'_>>;
     let mut hub = None::<RuntimeHub<'_>>;
@@ -902,7 +1080,13 @@ async fn run_service(
                 Next::Tick => {}
                 Next::Command(None) => break,
                 Next::Command(Some(command)) => {
-                    if let Command::RefreshHostDirectory { connection } = command {
+                    if let Err(error) = command.validate_source(source) {
+                        publish(&updates, rejected_command(command.source, &command.kind, error.to_string()), &stop).await?;
+                        continue;
+                    }
+                    let command_source = command.source;
+                    let command = command.kind;
+                    if let CommandKind::RefreshHostDirectory { connection } = command {
                         if let Some(reader) = &mut hub {
                             if let Err(error) = reader.refresh(connection) {
                                 publish(&updates, Update::Status(error.to_string()), &stop).await?;
@@ -912,12 +1096,12 @@ async fn run_service(
                         }
                         continue;
                     }
-                    if let Command::TemplateApi{connection,request_id,request}=command {
+                    if let CommandKind::TemplateApi{connection,request_id,request}=command {
                         let result=if !model.as_ref().is_some_and(|m|m.connection_id()==connection&&m.templates_supported()){Err(std::io::Error::other("Template source or capability unavailable"))}else{settings.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Local service API is not ready")).and_then(|s|s.enqueue_template(connection,request_id,request))};
                         if let Err(error)=result{if error.kind()!=std::io::ErrorKind::AlreadyExists {publish(&updates,Update::TemplateApi(TemplateApiResult::rejected(connection,request_id,error.to_string())),&stop).await?;}}
                         continue;
                     }
-                    if let Command::ApplyTemplate{plan,choice,replace_confirmed}=command {
+                    if let CommandKind::ApplyTemplate{plan,choice,replace_confirmed}=command {
                         let (connection_id,request_id)=(plan.connection_id(),plan.request_id());
                         if model.as_ref().is_some_and(|m|m.template_request_pending(request_id)){continue;}
                         let mut post_failure=None;
@@ -927,7 +1111,19 @@ async fn run_service(
                         if let Err(error)=result{publish(&updates,Update::TemplateApply(TemplateApplyResult{connection_id,request_id,outcome:TemplateApplyOutcome::Rejected{reason:error.to_string()}}),&stop).await?;}
                         continue;
                     }
-                    if let Command::RequestClose { plan, confirmed } = command {
+                    if let CommandKind::RequestClose { mut plan, confirmed } = command {
+                        let response_source = command_source;
+                        if plan.source_token().is_none() {
+                            // The channel-owned startup prompt may race publication.
+                            if let Err(error) = validate_pre_discovery_close(&plan, confirmed) {
+                                last_close_request = last_close_request.max(plan.request_id);
+                                publish(&updates, Update::CloseRejected { source: response_source, request_id: plan.request_id, reason: error.to_string() }, &stop).await?;
+                                continue;
+                            }
+                            if let Some(model) = &model {
+                                plan = model.assess_close(plan.request_id, CloseTarget::Window)?;
+                            }
+                        }
                         let request_id = plan.request_id;
                         if pending_close.as_ref().is_some_and(|close| close.is_duplicate(request_id)) {
                             // The original is still awaiting authoritative settlement.
@@ -968,7 +1164,7 @@ async fn run_service(
                                         &updates,
                                         Update::WindowCloseApproved {
                                             request_id,
-                                            connection_id: plan.connection_id,
+                                            source: response_source,
                                         },
                                         &stop,
                                     )
@@ -978,6 +1174,7 @@ async fn run_service(
                                         .as_ref()
                                         .map_or(0, LocalWorkspace::mutation_generation);
                                     pending_close = Some(PendingClose {
+                                        source: response_source,
                                         request_id,
                                         target: plan.target,
                                         barrier_generation: generation,
@@ -988,7 +1185,7 @@ async fn run_service(
                                         &updates,
                                         Update::CloseSubmitted {
                                             request_id,
-                                            connection_id: plan.connection_id,
+                                            source: response_source,
                                         },
                                         &stop,
                                     )
@@ -999,6 +1196,7 @@ async fn run_service(
                                 publish(
                                     &updates,
                                     Update::CloseRejected {
+                                        source: response_source,
                                         request_id,
                                         reason: error.to_string(),
                                     },
@@ -1013,17 +1211,17 @@ async fn run_service(
                         continue;
                     }
                     let floating_request=match &command {
-                        Command::FloatPane{request_id,source}=>Some((*request_id,source.connection_id)),
-                        Command::DockFloat{request_id,target}|Command::MoveFloat{request_id,target,..}=>Some((*request_id,target.connection_id())),
+                        CommandKind::FloatPane{request_id,source}=>Some((*request_id,source.connection_id)),
+                        CommandKind::DockFloat{request_id,target}|CommandKind::MoveFloat{request_id,target,..}=>Some((*request_id,target.connection_id())),
                         _=>None,
                     };
                     if let Some((request_id,connection_id))=floating_request {
                         if model.as_ref().is_some_and(|model|model.floating_request_pending(request_id)){continue;}
                         let result=if pending_close.is_some(){Err(std::io::Error::other("A close operation is pending"))}
                             else if let Some(model)=&mut model {match command {
-                                Command::FloatPane{source,..}=>model.float_pane(&client,request_id,source),
-                                Command::DockFloat{target,..}=>model.dock_float(&client,request_id,target),
-                                Command::MoveFloat{target,bounds,..}=>model.move_float(&client,request_id,target,bounds),
+                                CommandKind::FloatPane{source,..}=>model.float_pane(&client,request_id,source),
+                                CommandKind::DockFloat{target,..}=>model.dock_float(&client,request_id,target),
+                                CommandKind::MoveFloat{target,bounds,..}=>model.move_float(&client,request_id,target,bounds),
                                 _=>unreachable!("floating command classified"),
                             }} else {Err(std::io::Error::other("Workspace is not ready"))};
                         match result {
@@ -1033,7 +1231,7 @@ async fn run_service(
                         }
                         continue;
                     }
-                    if let Command::TransferPane { request_id, source, target } = command {
+                    if let CommandKind::TransferPane { request_id, source, target } = command {
                         if model.as_ref().is_some_and(|model|model.transfer_request_pending(request_id)) {continue;}
                         let connection_id=source.connection_id;
                         let result=if pending_close.is_some() {Err(std::io::Error::other("A close operation is pending"))}
@@ -1047,7 +1245,7 @@ async fn run_service(
                         }
                         continue;
                     }
-                    if let Command::Zoom { connection, request_id, action } = command {
+                    if let CommandKind::Zoom { connection, request_id, action } = command {
                         let result = settings.as_mut()
                             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::WouldBlock, "local settings are not ready"))
                             .and_then(|settings| settings.enqueue_zoom(connection, request_id, action));
@@ -1056,7 +1254,7 @@ async fn run_service(
                         }
                         continue;
                     }
-                    if let Command::SetDrawerVisibility { connection, request_id, pinned } = command {
+                    if let CommandKind::SetDrawerVisibility { connection, request_id, pinned } = command {
                         let result = settings.as_mut()
                             .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::WouldBlock, "local settings are not ready"))
                             .and_then(|settings| settings.enqueue_drawer_visibility(connection, request_id, pinned));
@@ -1065,7 +1263,7 @@ async fn run_service(
                         }
                         continue;
                     }
-                    if let Command::SetColorScheme { connection, scheme } = command {
+                    if let CommandKind::SetColorScheme { connection, scheme } = command {
                         if let Some(reader) = &mut settings {
                             // A delayed command from another owner cannot choose app settings.
                             if let Err(error) = reader.set_scheme(connection, scheme) {
@@ -1077,11 +1275,15 @@ async fn run_service(
                     let Some(model) = &mut model else {
                         continue;
                     };
+                    if let Err(error) = validate_command_target(model, &command) {
+                        publish(&updates, rejected_command(command_source, &command, error.to_string()), &stop).await?;
+                        continue;
+                    }
                     let result: std::io::Result<()> = match command {
-                        Command::RefreshHostDirectory { .. } | Command::TemplateApi{..} | Command::ApplyTemplate{..} | Command::FloatPane{..} | Command::DockFloat{..} | Command::MoveFloat{..} | Command::TransferPane { .. } | Command::Zoom { .. } | Command::SetDrawerVisibility { .. } | Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
+                        CommandKind::RefreshHostDirectory { .. } | CommandKind::TemplateApi{..} | CommandKind::ApplyTemplate{..} | CommandKind::FloatPane{..} | CommandKind::DockFloat{..} | CommandKind::MoveFloat{..} | CommandKind::TransferPane { .. } | CommandKind::Zoom { .. } | CommandKind::SetDrawerVisibility { .. } | CommandKind::SetColorScheme { .. } | CommandKind::RequestClose { .. } => {
                             unreachable!("close is handled before normal commands")
                         }
-                        Command::CreateScreen(name) => {
+                        CommandKind::CreateScreen(name) => {
                             let result = model.create_screen(&client, &name).map(|_| ());
                             if result.is_ok() {
                                 publish(
@@ -1093,7 +1295,7 @@ async fn run_service(
                             }
                             result
                         }
-                        Command::SwitchScreen(screen) => {
+                        CommandKind::SwitchScreen(screen) => {
                             match model.switch_screen(&client, &screen) {
                                 Ok(changed) => {
                                     if changed {
@@ -1112,7 +1314,7 @@ async fn run_service(
                                 Err(error) => Err(error),
                             }
                         }
-                        Command::CycleScreen { connection, step } => {
+                        CommandKind::CycleScreen { connection, step } => {
                             match model.cycle_screen(&client, connection, step) {
                                 Ok(true) => {
                                     desired_visible.clear();
@@ -1123,12 +1325,12 @@ async fn run_service(
                                 Err(error) => Err(error),
                             }
                         }
-                        Command::RenameScreen {
+                        CommandKind::RenameScreen {
                             screen,
                             connection,
                             name,
                         } => {
-                            if model.connection_id().to_string() == connection {
+                            if model.connection_id() == connection {
                                 model.rename_screen(&client, &screen, &name)
                             } else {
                                 Err(std::io::Error::new(
@@ -1137,15 +1339,15 @@ async fn run_service(
                                 ))
                             }
                         }
-                        Command::Split { pane, axis } => {
+                        CommandKind::Split { pane, axis, .. } => {
                             let result = model.split(&client, &pane, axis).map(|_| ());
                             if result.is_ok() {
                                 publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
                             }
                             result
                         }
-                        Command::Tab(pane) => model.new_tab(&client, &pane).map(|_| ()),
-                        Command::ProfileTab { connection, screen, pane, session, profile_id } => {
+                        CommandKind::Tab { pane, .. } => model.new_tab(&client, &pane).map(|_| ()),
+                        CommandKind::ProfileTab { connection, screen, pane, session, profile_id } => {
                             if connection != model.connection_id()
                                 || model.shown_screen_id() != Some(screen.as_str())
                                 || model.screen_for(&pane) != Some(screen.as_str())
@@ -1160,14 +1362,14 @@ async fn run_service(
                                 model.new_tab_with_profile(&client, &pane, &profile_id).map(|_| ())
                             }
                         }
-                        Command::PlaceTab { drag, target, before } => {
+                        CommandKind::PlaceTab { drag, target, before } => {
                             let result = model.place_tab(&client, drag, target, before);
                             if result.as_ref().is_ok_and(|moved| *moved) {
                                 publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
                             }
                             result.map(|_| ())
                         }
-                        Command::CycleTab { connection, screen, slot, step } => {
+                        CommandKind::CycleTab { connection, screen, slot, step } => {
                             match model.cycle_tab(connection, &screen, &slot, step) {
                                 Ok(true) => {
                                     let result = model.sync_selected_tabs(&client);
@@ -1178,7 +1380,7 @@ async fn run_service(
                                 Err(error) => Err(error),
                             }
                         }
-                        Command::CycleTabInSlot { connection, screen, slot, step } => {
+                        CommandKind::CycleTabInSlot { connection, screen, slot, step } => {
                             match model.cycle_tab_in_slot(connection, &screen, &slot, step) {
                                 Ok(true) => {
                                     let result = model.sync_selected_tabs(&client);
@@ -1189,7 +1391,7 @@ async fn run_service(
                                 Err(error) => Err(error),
                             }
                         }
-                        Command::MovePane {
+                        CommandKind::MovePane {
                             drag,
                             target,
                             placement,
@@ -1200,7 +1402,7 @@ async fn run_service(
                             }
                             result.map(|_| ())
                         }
-                        Command::SetMaximized { screen, connection, slot, pane } => {
+                        CommandKind::SetMaximized { screen, connection, slot, pane } => {
                             if model.connection_id() == connection
                                 && model.shown_screen_id() == Some(screen.as_str())
                                 && model.set_maximized_slot(slot.as_deref(), pane.as_deref())
@@ -1209,8 +1411,8 @@ async fn run_service(
                             }
                             Ok(())
                         }
-                        Command::NewTerminal { screen, connection } => {
-                            if model.connection_id().to_string() == connection
+                        CommandKind::NewTerminal { screen, connection } => {
+                            if model.connection_id() == connection
                                 && model.shown_screen_id() == Some(screen.as_str())
                             {
                                 model.new_terminal(&client).map(|_| ())
@@ -1218,64 +1420,47 @@ async fn run_service(
                                 Ok(())
                             }
                         }
-                        Command::ResizeSplit { node, sizes } => {
+                        CommandKind::ResizeSplit { node, sizes, .. } => {
                             model.resize_split(&client, &node, sizes)
                         }
-                        Command::Select(pane) => {
+                        CommandKind::Select { pane, .. } => {
                             model.select_tab(&pane);
                             let result = model.sync_selected_tabs(&client);
                             publish(&updates, Update::Workspace(Box::new(model.clone())), &stop)
                                 .await?;
                             result
                         }
-                        Command::Focus(pane) => {
+                        CommandKind::Focus { pane, .. } => {
                             model.focus_pane(&pane);
                             publish(&updates, Update::Workspace(Box::new(model.clone())), &stop)
                                 .await?;
                             Ok(())
                         }
-                        Command::Input {
-                            pane,
-                            session,
-                            bytes,
-                        } => {
-                            if model.session_for(&pane) == Some(session.as_str())
-                                && attached.contains(&session)
-                            {
-                                client.input_bytes(&session, &bytes)
+                        CommandKind::Input { route, bytes } => {
+                            if model.accepts_terminal(&route) && attached.contains(route.session_id()) {
+                                client.input_bytes(route.session_id(), &bytes)
                             } else {
-                                Err(std::io::Error::new(
-                                    std::io::ErrorKind::WouldBlock,
-                                    "Terminal is not attached",
-                                ))
+                                Err(std::io::Error::new(std::io::ErrorKind::WouldBlock, "Terminal is not attached"))
                             }
                         }
-                        Command::ResizePane {
-                            route_generation,                            pane,
-                            session,
-                            cols,
-                            rows,
-                        } => {
-                            if model.route_generation() == route_generation && model.session_for(&pane) == Some(session.as_str())
-                                && model.is_displayed_pane(&pane)
+                        CommandKind::ResizePane { route, screen, route_generation, cols, rows } => {
+                            if model.route_generation() == route_generation
+                                && model.accepts_terminal(&route)
+                                && model.validate_shown_key(&screen).is_ok()
+                                && model.screen_for(route.pane_id()) == Some(screen.screen_id())
+                                && model.is_displayed_pane(route.pane_id())
                             {
-                                sizes.insert(session.clone(), (cols, rows));
-                                pending_resize.insert(session);
-                                Ok(())
-                            } else {
-                                Ok(())
+                                sizes.insert(route.session_id().into(), (cols, rows));
+                                pending_resize.insert(route.session_id().into());
                             }
+                            Ok(())
                         }
-                        Command::Visible { screen, panes } => {
-                            if screen.as_deref() != model.shown_screen_id() {
-                                Ok(())
-                            } else {
-                                desired_visible = panes
-                                    .into_iter()
-                                    .filter(|pane| model.is_displayed_pane(pane))
-                                    .collect();
-                                Ok(())
+                        CommandKind::Visible { screen, route_generation, panes } => {
+                            let shown = model.shown_screen_id().map(|id| model.screen_key(id));
+                            if screen == shown && route_generation == model.route_generation() {
+                                desired_visible = panes.into_iter().filter(|pane| model.is_displayed_pane(pane)).collect();
                             }
+                            Ok(())
                         }
                     };
                     if let Err(error) = result {
@@ -1497,7 +1682,7 @@ async fn run_service(
                                         }
                                         publish(
                                             &updates,
-                                            Update::Attached(session.to_owned()),
+                                            Update::Attached { source, session: session.to_owned() },
                                             &stop,
                                         )
                                         .await?;
@@ -1588,8 +1773,8 @@ async fn run_service(
                         if let Some(settled) = settled {
                             if let Some(close) = pending_close.take() {
                                 let update = match settled {
-                                    Ok(()) => Update::CloseSettled { request_id: close.request_id },
-                                    Err(reason) => Update::CloseRejected { request_id: close.request_id, reason },
+                                    Ok(()) => Update::CloseSettled { source: close.source, request_id: close.request_id },
+                                    Err(reason) => Update::CloseRejected { source: close.source, request_id: close.request_id, reason },
                                 };
                                 publish(&updates, update, &stop).await?;
                             }
@@ -1626,7 +1811,7 @@ async fn run_service(
                         publish(&updates, Update::Status(reason), &stop).await?;
                     }
                     // The original native accounting stays alive until UI consumption.
-                    publish(&updates, Update::Event(event), &stop).await?;
+                    publish(&updates, Update::Event { source, event }, &stop).await?;
                 }
             }
             if let Some(model) = &mut model {
@@ -1825,7 +2010,7 @@ mod close_tests {
         let mut output = Vec::new();
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
-                if let Update::Event(event) = next_update(updates).await {
+                if let Update::Event { event, .. } = next_update(updates).await {
                     if let Some(chunk) = event.output() {
                         if chunk.session_id == session {
                             output.extend_from_slice(chunk.bytes);
@@ -2020,14 +2205,17 @@ mod close_tests {
             }
         }
         let model = ready.unwrap();
+        let scope = model.source_token();
         let pane = model.routes()[0].pane_id.clone();
         let session = model.routes()[0].session_id.clone();
         commands
-            .send(Command::Input {
-                pane: pane.clone(),
-                session: session.clone(),
-                bytes: b"printf 'APPEARANCE_%s\\n' 'ALIVE'\n".into(),
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::Input {
+                    route: TerminalToken::new(scope, &pane, &session),
+                    bytes: b"printf 'APPEARANCE_%s\\n' 'ALIVE'\n".into(),
+                },
+            ))
             .await
             .unwrap();
         output_contains(&mut updates, &session, b"APPEARANCE_ALIVE").await;
@@ -2065,17 +2253,23 @@ mod close_tests {
         // A foreign scheme intent followed by a valid owner change must never
         // replace this window's local preference with the foreign choice.
         commands
-            .send(Command::SetColorScheme {
-                connection: uuid::Uuid::new_v4(),
-                scheme: ColorScheme::Light,
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::SetColorScheme {
+                    connection: uuid::Uuid::new_v4(),
+                    scheme: ColorScheme::Light,
+                },
+            ))
             .await
             .unwrap();
         commands
-            .send(Command::SetColorScheme {
-                connection: model.connection_id(),
-                scheme: ColorScheme::Dark,
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::SetColorScheme {
+                    connection: model.connection_id(),
+                    scheme: ColorScheme::Dark,
+                },
+            ))
             .await
             .unwrap();
         loop {
@@ -2104,11 +2298,13 @@ mod close_tests {
             }
         }
         commands
-            .send(Command::Input {
-                pane,
-                session: session.clone(),
-                bytes: b"printf 'REFRESH_%s\\n' 'ALIVE'\n".into(),
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::Input {
+                    route: TerminalToken::new(scope, &pane, &session),
+                    bytes: b"printf 'REFRESH_%s\\n' 'ALIVE'\n".into(),
+                },
+            ))
             .await
             .unwrap();
         output_contains(&mut updates, &session, b"REFRESH_ALIVE").await;
@@ -2151,14 +2347,19 @@ mod close_tests {
             ColorScheme::Dark,
         ));
         let first = stable_model(&mut updates).await;
+        let scope = first.source_token();
         let screen = first.shown_screen_id().unwrap().to_owned();
         let connection = first.connection_id();
         let pane_a = first.routes()[0].pane_id.clone();
         commands
-            .send(Command::Split {
-                pane: pane_a.clone(),
-                axis: Axis::Horizontal,
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::Split {
+                    screen: first.screen_key(&screen),
+                    pane: pane_a.clone(),
+                    axis: Axis::Horizontal,
+                },
+            ))
             .await
             .unwrap();
         let split = tokio::time::timeout(Duration::from_secs(15), async {
@@ -2194,11 +2395,13 @@ mod close_tests {
             .to_string();
         assert_eq!(split.displayed_panes().len(), 2);
         commands
-            .send(Command::Input {
-                pane: pane_a.clone(),
-                session: pane_b.session_id.clone(),
-                bytes: vec![0, 0x80, 0xff],
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::Input {
+                    route: TerminalToken::new(scope, &pane_a, &pane_b.session_id),
+                    bytes: vec![0, 0x80, 0xff],
+                },
+            ))
             .await
             .unwrap();
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -2224,40 +2427,52 @@ mod close_tests {
             (&pane_b.pane_id, pane_b.session_id.as_str(), 73, 19),
         ] {
             commands
-                .send(Command::ResizePane {
-                    route_generation: 0,
-                    pane: pane.clone(),
-                    session: session.into(),
-                    cols,
-                    rows,
-                })
+                .send(Command::new(
+                    scope,
+                    CommandKind::ResizePane {
+                        route_generation: 0,
+                        screen: first.screen_key(&screen),
+                        route: TerminalToken::new(scope, pane, session),
+                        cols,
+                        rows,
+                    },
+                ))
                 .await
                 .unwrap();
         }
         commands
-            .send(Command::Visible {
-                screen: Some(screen.clone()),
-                panes: vec![pane_a.clone(), pane_b.pane_id.clone()],
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::Visible {
+                    route_generation: split.route_generation(),
+                    screen: Some(first.screen_key(&screen)),
+                    panes: vec![pane_a.clone(), pane_b.pane_id.clone()],
+                },
+            ))
             .await
             .unwrap();
         commands
-            .send(Command::Input {
-                pane: pane_b.pane_id.clone(),
-                session: pane_b.session_id.clone(),
-                bytes: b"printf 'BEFORE_%s\\n' \"$(stty size)\"\n".into(),
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::Input {
+                    route: TerminalToken::new(scope, &pane_b.pane_id, &pane_b.session_id),
+                    bytes: b"printf 'BEFORE_%s\\n' \"$(stty size)\"\n".into(),
+                },
+            ))
             .await
             .unwrap();
         output_contains(&mut updates, &pane_b.session_id, b"BEFORE_19 73").await;
 
         commands
-            .send(Command::SetMaximized {
-                screen: screen.clone(),
-                connection,
-                slot: Some(slot_a.clone()),
-                pane: Some(pane_a.clone()),
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::SetMaximized {
+                    screen: screen.clone(),
+                    connection,
+                    slot: Some(slot_a.clone()),
+                    pane: Some(pane_a.clone()),
+                },
+            ))
             .await
             .unwrap();
         loop {
@@ -2275,28 +2490,37 @@ mod close_tests {
         // Delayed pre-maximize UI reports may arrive, but cannot reclaim or
         // resize the hidden group. Its session remains attached for output.
         commands
-            .send(Command::Visible {
-                screen: Some(screen.clone()),
-                panes: vec![pane_a.clone(), pane_b.pane_id.clone()],
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::Visible {
+                    route_generation: split.route_generation(),
+                    screen: Some(first.screen_key(&screen)),
+                    panes: vec![pane_a.clone(), pane_b.pane_id.clone()],
+                },
+            ))
             .await
             .unwrap();
         commands
-            .send(Command::ResizePane {
-                route_generation: 0,
-                pane: pane_b.pane_id.clone(),
-                session: pane_b.session_id.clone(),
-                cols: 15,
-                rows: 15,
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::ResizePane {
+                    route_generation: 0,
+                    screen: first.screen_key(&screen),
+                    route: TerminalToken::new(scope, &pane_b.pane_id, &pane_b.session_id),
+                    cols: 15,
+                    rows: 15,
+                },
+            ))
             .await
             .unwrap();
         commands
-            .send(Command::Input {
-                pane: pane_b.pane_id.clone(),
-                session: pane_b.session_id.clone(),
-                bytes: b"printf 'HIDDEN_%s\\n' \"$(stty size)\"\n".into(),
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::Input {
+                    route: TerminalToken::new(scope, &pane_b.pane_id, &pane_b.session_id),
+                    bytes: b"printf 'HIDDEN_%s\\n' \"$(stty size)\"\n".into(),
+                },
+            ))
             .await
             .unwrap();
         // With no competing claim the PTY could retain 73x19 even if hide was
@@ -2304,12 +2528,15 @@ mod close_tests {
         // keeping hidden output attached and rejecting stale 15x15 reports.
         output_contains(&mut updates, &pane_b.session_id, b"HIDDEN_40 120").await;
         commands
-            .send(Command::SetMaximized {
-                screen: screen.clone(),
-                connection,
-                slot: None,
-                pane: None,
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::SetMaximized {
+                    screen: screen.clone(),
+                    connection,
+                    slot: None,
+                    pane: None,
+                },
+            ))
             .await
             .unwrap();
         loop {
@@ -2320,18 +2547,24 @@ mod close_tests {
             }
         }
         commands
-            .send(Command::Visible {
-                screen: Some(screen),
-                panes: vec![pane_a, pane_b.pane_id.clone()],
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::Visible {
+                    screen: Some(first.screen_key(&screen)),
+                    route_generation: split.route_generation(),
+                    panes: vec![pane_a, pane_b.pane_id.clone()],
+                },
+            ))
             .await
             .unwrap();
         commands
-            .send(Command::Input {
-                pane: pane_b.pane_id.clone(),
-                session: pane_b.session_id.clone(),
-                bytes: b"printf 'RESTORED_%s\\n' \"$(stty size)\"\n".into(),
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::Input {
+                    route: TerminalToken::new(scope, &pane_b.pane_id, &pane_b.session_id),
+                    bytes: b"printf 'RESTORED_%s\\n' \"$(stty size)\"\n".into(),
+                },
+            ))
             .await
             .unwrap();
         output_contains(&mut updates, &pane_b.session_id, b"RESTORED_19 73").await;
@@ -2350,11 +2583,9 @@ mod close_tests {
         let plan = ClosePlan::startup_window(3);
         assert!(validate_pre_discovery_close(&plan, true).is_ok());
         assert!(validate_pre_discovery_close(&plan, false).is_err());
-        let changed = ClosePlan {
-            target: CloseTarget::Screen {
-                screen: "other".into(),
-            },
-            ..plan
+        let mut changed = plan;
+        changed.target = CloseTarget::Screen {
+            screen: "other".into(),
         };
         assert!(validate_pre_discovery_close(&changed, true).is_err());
     }
@@ -2386,10 +2617,14 @@ mod close_tests {
         let (sender, mut updates) = mpsc::channel(64);
         let worker = Worker::start(receiver, sender);
         let model = stable_model(&mut updates).await;
+        let scope = model.source_token();
         commands
-            .send(Command::RequestClose {
-                plan: ClosePlan::startup_window(1),
-                confirmed: true,
+            .send(Command {
+                source: None,
+                kind: CommandKind::RequestClose {
+                    plan: ClosePlan::startup_window(1),
+                    confirmed: false,
+                },
             })
             .await
             .unwrap();
@@ -2401,9 +2636,12 @@ mod close_tests {
         }
         let plan = model.assess_close(2, CloseTarget::Window).unwrap();
         commands
-            .send(Command::RequestClose {
-                plan,
-                confirmed: true,
+            .send(Command {
+                source: Some(scope),
+                kind: CommandKind::RequestClose {
+                    plan,
+                    confirmed: true,
+                },
             })
             .await
             .unwrap();
@@ -2429,6 +2667,7 @@ mod close_tests {
             pane: "pane".into(),
         };
         let mut close = PendingClose {
+            source: None,
             request_id: 7,
             target: target.clone(),
             barrier_generation: 4,
@@ -2454,6 +2693,7 @@ mod close_tests {
         assert!(close.observe_catalog(Some(4)));
         assert!(close.settlement(true, false, true).unwrap().is_err());
         let mut next = PendingClose {
+            source: None,
             request_id: 8,
             target,
             barrier_generation: 5,
@@ -2480,9 +2720,10 @@ mod close_tests {
                 break model;
             }
         };
-        let invalid = |request_id| Command::RequestClose {
-            plan: ClosePlan::startup_window(request_id),
-            confirmed: true,
+        let invalid = |request_id| {
+            let mut plan = model.assess_close(request_id, CloseTarget::Window).unwrap();
+            plan.affected.clear();
+            Command::close(plan, true)
         };
         commands.send(invalid(10)).await.unwrap();
         let mut rejections = Vec::new();
@@ -2490,7 +2731,10 @@ mod close_tests {
             commands.send(invalid(request)).await.unwrap();
         }
         while rejections.len() < 4 {
-            if let Update::CloseRejected { request_id, reason } = next_update(&mut updates).await {
+            if let Update::CloseRejected {
+                request_id, reason, ..
+            } = next_update(&mut updates).await
+            {
                 rejections.push((request_id, reason));
             }
         }
@@ -2511,26 +2755,31 @@ mod close_tests {
         let (sender, mut updates) = mpsc::channel(64);
         let worker = Worker::start(receiver, sender);
         let model = stable_model(&mut updates).await;
+        let scope = model.source_token();
         let plan = model.assess_close(1, CloseTarget::Window).unwrap();
         commands
-            .send(Command::RequestClose {
-                plan: plan.clone(),
-                confirmed: true,
+            .send(Command {
+                source: Some(scope),
+                kind: CommandKind::RequestClose {
+                    plan: plan.clone(),
+                    confirmed: true,
+                },
             })
             .await
             .unwrap();
         commands
-            .send(Command::CreateScreen("must not run".into()))
+            .send(Command::new(
+                scope,
+                CommandKind::CreateScreen("must not run".into()),
+            ))
             .await
             .unwrap();
         loop {
-            if let Update::WindowCloseApproved {
-                request_id,
-                connection_id,
-            } = next_update(&mut updates).await
+            if let Update::WindowCloseApproved { request_id, source } =
+                next_update(&mut updates).await
             {
                 assert_eq!(request_id, 1);
-                assert_eq!(connection_id, plan.connection_id);
+                assert_eq!(source, plan.source_token());
                 break;
             }
         }
@@ -2580,6 +2829,9 @@ mod hub_tests;
 mod floating_tests;
 #[cfg(all(test, not(target_os = "windows")))]
 mod template_tests;
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod source_tests;
 
 #[cfg(all(test, target_os = "windows"))]
 mod windows_startup_tests {

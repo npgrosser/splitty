@@ -88,7 +88,13 @@ pub(super) enum GroupCommand {
 }
 
 impl Workspace {
-    fn cycle_screen_button(&mut self, step: TabStep, window: &mut Window, cx: &mut Context<Self>) {
+    fn cycle_screen_button(
+        &mut self,
+        source: SourceToken,
+        step: TabStep,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
         if self.rename.is_some()
             || GlobalState::is_in_deferred_context(cx)
             || self.template_dialog.is_some()
@@ -101,14 +107,26 @@ impl Workspace {
         {
             return;
         }
-        let Some(connection) = self.model.as_ref().map(LocalWorkspace::connection_id) else {
+        let Some(model) = self
+            .model
+            .as_ref()
+            .filter(|model| model.source_token() == source)
+        else {
             return;
         };
-        self.send(Command::CycleScreen { connection, step }, cx);
+        self.send_captured(
+            source,
+            Command::CycleScreen {
+                connection: model.connection_id(),
+                step,
+            },
+            cx,
+        );
         self.focus_current(window, cx);
     }
 
     pub(super) fn render_screen_navigation(&self, cx: &mut Context<Self>) -> AnyElement {
+        let source = self.model.as_ref().map(LocalWorkspace::source_token);
         let selection = self.model.as_ref().and_then(|model| {
             let shown = model.shown_screen_id()?;
             let index = model
@@ -136,8 +154,10 @@ impl Workspace {
             .flex_none()
             .items_center()
             .gap_1()
-            .on_scroll(cx.listener(|this, event: &ScrollEvent, window, cx| {
-                this.chrome_wheel(WheelTarget::Screens, event, window, cx);
+            .on_scroll(cx.listener(move |this, event: &ScrollEvent, window, cx| {
+                if let Some(source) = source {
+                    this.chrome_wheel(source, WheelTarget::Screens, event, window, cx);
+                }
             }))
             .child(
                 Button::new("previous-screen")
@@ -150,7 +170,9 @@ impl Workspace {
                     .disabled(blocked || count == 0 || index == 0)
                     .on_click(move |_, window, cx| {
                         let _ = previous.update(cx, |this, cx| {
-                            this.cycle_screen_button(TabStep::Previous, window, cx)
+                            if let Some(source) = source {
+                                this.cycle_screen_button(source, TabStep::Previous, window, cx)
+                            }
                         });
                     }),
             )
@@ -175,6 +197,13 @@ impl Workspace {
                         let weak = cx.entity().downgrade();
                         move |_, window, cx| {
                             let _ = weak.update(cx, |this, cx| {
+                                if !source.is_some_and(|source| {
+                                    this.model
+                                        .as_ref()
+                                        .is_some_and(|model| model.source_token() == source)
+                                }) {
+                                    return;
+                                }
                                 this.toggle_drawer(cx);
                                 this.focus_current(window, cx);
                             });
@@ -192,7 +221,9 @@ impl Workspace {
                     .disabled(blocked || count == 0 || index + 1 >= count)
                     .on_click(move |_, window, cx| {
                         let _ = next.update(cx, |this, cx| {
-                            this.cycle_screen_button(TabStep::Next, window, cx)
+                            if let Some(source) = source {
+                                this.cycle_screen_button(source, TabStep::Next, window, cx)
+                            }
                         });
                     }),
             )
@@ -216,14 +247,23 @@ impl Workspace {
         }
         match action {
             GroupCommand::NewTab => {
-                self.send(Command::Tab(target.pane.pane_id.clone()), cx);
+                self.send_captured(
+                    target.pane.source_token(),
+                    Command::Tab {
+                        screen: model.screen_key(&target.pane.screen_id),
+                        pane: target.pane.pane_id.clone(),
+                    },
+                    cx,
+                );
             }
             GroupCommand::Split(axis) => {
                 if !model.is_root_pane(&target.pane.pane_id) {
                     return;
                 }
-                self.send(
+                self.send_captured(
+                    target.pane.source_token(),
                     Command::Split {
+                        screen: model.screen_key(&target.pane.screen_id),
                         pane: target.pane.pane_id.clone(),
                         axis,
                     },
@@ -236,6 +276,7 @@ impl Workspace {
                 }
                 let request_id = Uuid::new_v4();
                 self.submit_float_action(
+                    target.pane.source_token(),
                     request_id,
                     Command::FloatPane {
                         request_id,
@@ -252,12 +293,15 @@ impl Workspace {
                 } else {
                     (Some(target.slot.clone()), Some(target.pane.pane_id.clone()))
                 };
-                match self.commands.try_send(Command::SetMaximized {
-                    screen: target.pane.screen_id.clone(),
-                    connection: target.pane.connection_id,
-                    slot,
-                    pane,
-                }) {
+                match self.commands.try_send(WorkerCommand::new(
+                    target.pane.source_token(),
+                    Command::SetMaximized {
+                        screen: target.pane.screen_id.clone(),
+                        connection: target.pane.connection_id,
+                        slot,
+                        pane,
+                    },
+                )) {
                     Ok(()) => {}
                     Err(error) => {
                         self.status = format!("Action not sent: {error}");
@@ -318,7 +362,9 @@ impl Workspace {
             .is_some_and(|model| model.maximized_slot_id() == Some(slot));
         let tiled = surface == Surface::Tiled;
         let compact = compact_group_actions(
-            self.slot_bounds.get(slot).map(|bounds| bounds.size.width),
+            self.current_layout_key(slot)
+                .and_then(|key| self.slot_bounds.get(&key))
+                .map(|bounds| bounds.size.width),
             self.appearance.zoom.window_scale(),
         );
         let weak = cx.entity().downgrade();

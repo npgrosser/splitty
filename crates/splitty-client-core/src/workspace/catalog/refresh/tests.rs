@@ -34,7 +34,7 @@ fn admit(model: &mut LocalWorkspace, new: bool) -> Uuid {
         }
     } else {
         ScreenTransferTarget::Existing {
-            screen_id: "b".into(),
+            screen: model.screen_key("b"),
         }
     };
     model
@@ -80,7 +80,7 @@ fn captured_hidden_tab_admission_rejects_stale_conflicts_and_queue_failure_atomi
     let source = model.capture_pane_action("q").unwrap();
     assert_eq!(model.focused_pane(), Some("p"));
     let target = ScreenTransferTarget::Existing {
-        screen_id: "b".into(),
+        screen: model.screen_key("b"),
     };
     let before = model.mutation;
     assert!(model
@@ -102,10 +102,10 @@ fn captured_hidden_tab_admission_rejects_stale_conflicts_and_queue_failure_atomi
     assert!(model.validate_pane_action(&stale).is_err());
     for target in [
         ScreenTransferTarget::Existing {
-            screen_id: "a".into(),
+            screen: model.screen_key("a"),
         },
         ScreenTransferTarget::Existing {
-            screen_id: "gone".into(),
+            screen: model.screen_key("gone"),
         },
         ScreenTransferTarget::New {
             screen_id: "b".into(),

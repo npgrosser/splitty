@@ -2,11 +2,8 @@
 use super::*;
 
 struct ProfileSource {
-    connection: String,
-    screen: String,
-    slot: String,
-    pane: String,
-    session: String,
+    route: TerminalToken,
+    slot: LayoutKey,
 }
 
 pub(super) struct ProfilePicker {
@@ -18,15 +15,18 @@ pub(super) struct ProfilePicker {
 impl ProfilePicker {
     pub(super) fn valid_for(&self, model: &LocalWorkspace) -> bool {
         let source = &self.source;
-        if model.connection_id().to_string() != source.connection
-            || model.shown_screen_id() != Some(source.screen.as_str())
+        if model.source_token() != source.route.source_token()
+            || model.shown_screen_id() != Some(source.slot.screen().screen_id())
+            || model.screen_key(source.slot.screen().screen_id()) != *source.slot.screen()
         {
             return false;
         }
         let Some(screen) = model.shown() else {
             return false;
         };
-        let Some(slot @ LayoutNode::Slot { .. }) = presented_slot_by_id(model, &source.slot) else {
+        let Some(slot @ LayoutNode::Slot { .. }) =
+            presented_slot_by_id(model, source.slot.node_id())
+        else {
             return false;
         };
         source_matches_slot(screen, source, slot)
@@ -34,8 +34,8 @@ impl ProfilePicker {
 }
 
 fn source_matches_slot(screen: &ScreenModel, source: &ProfileSource, slot: &LayoutNode) -> bool {
-    screen.selected_pane(slot) == Some(source.pane.as_str())
-        && screen.session_for(&source.pane) == Some(source.session.as_str())
+    screen.selected_pane(slot) == Some(source.route.pane_id())
+        && screen.session_for(source.route.pane_id()) == Some(source.route.session_id())
 }
 
 fn next_id<'a>(ids: &[&'a str], current: Option<&str>, down: bool) -> Option<&'a str> {
@@ -122,7 +122,7 @@ impl Workspace {
         if self
             .profile_picker
             .as_ref()
-            .is_some_and(|picker| picker.source.slot == slot)
+            .is_some_and(|picker| picker.source.slot.node_id() == slot)
         {
             self.close_profile_picker(window, cx);
             return;
@@ -143,7 +143,7 @@ impl Workspace {
         {
             return;
         }
-        let Some(session) = model.shown().and_then(|shown| shown.session_for(pane)) else {
+        let Some(route) = model.terminal_token(pane) else {
             self.status = "Shell profile source is still starting".into();
             cx.notify();
             return;
@@ -166,11 +166,8 @@ impl Workspace {
         });
         self.profile_picker = Some(ProfilePicker {
             source: ProfileSource {
-                connection: model.connection_id().to_string(),
-                screen: screen.to_owned(),
-                slot: slot.to_owned(),
-                pane: pane.to_owned(),
-                session: session.to_owned(),
+                route,
+                slot: model.screen_key(screen).layout_key(slot),
             },
             selected,
             scroll: ScrollHandle::new(),
@@ -257,13 +254,13 @@ impl Workspace {
             return;
         }
         let command = Command::ProfileTab {
-            connection: model.connection_id(),
-            screen: picker.source.screen.clone(),
-            pane: picker.source.pane.clone(),
-            session: picker.source.session.clone(),
+            connection: picker.source.route.source_token().connection_id(),
+            screen: picker.source.slot.screen().screen_id().to_owned(),
+            pane: picker.source.route.pane_id().to_owned(),
+            session: picker.source.route.session_id().to_owned(),
             profile_id: id.to_owned(),
         };
-        self.send(command, cx);
+        self.send_captured(picker.source.route.source_token(), command, cx);
         self.close_profile_picker(window, cx);
     }
 
@@ -401,16 +398,40 @@ impl Workspace {
 mod tests {
     use super::{source_matches_slot, ProfileSource};
     use crate::workspace::presented_slot_in;
-    use splitty_client_core::{workspace::ScreenModel, ScreenIds};
-    use uuid::Uuid;
+    use splitty_client_core::{
+        workspace::{LocalWorkspace, ScreenModel},
+        EmbeddedService, ScreenIds,
+    };
 
-    #[test]
-    fn captured_profile_source_resolves_visible_float_and_rejects_hidden_or_replaced_session() {
-        let connection = Uuid::new_v4();
+    #[cfg(not(target_os = "windows"))]
+    #[tokio::test]
+    async fn captured_profile_source_resolves_float_and_rejects_replaced_session() {
+        let service = EmbeddedService::start();
+        let mut client = service.connect().await.unwrap();
+        let connection = client.connection_id();
+        let mut workspace = LocalWorkspace::new(connection);
+        workspace.set_catalog_supported(true);
+        workspace.mark_catalog_dirty();
+        workspace.flush_catalog(&client).unwrap();
+        loop {
+            let event = client.next_event().await.unwrap().unwrap();
+            if event
+                .json()
+                .is_some_and(|json| json["type"] == "mux.workspace_snapshot")
+            {
+                workspace
+                    .apply_catalog(connection, event.json().unwrap())
+                    .unwrap();
+                break;
+            }
+        }
+        let ids = workspace.create_screen(&client, "screen").unwrap();
+        workspace.observe_spawn(connection, &ids.pane_id, "sf");
+        let route = workspace.terminal_token(&ids.pane_id).unwrap();
         let mut screen = ScreenModel::new(
             ScreenIds {
                 screen_id: "screen".into(),
-                pane_id: "tiled".into(),
+                pane_id: ids.pane_id.clone(),
             },
             connection,
         );
@@ -418,41 +439,38 @@ mod tests {
             "type":"mux.screen_snapshot",
             "screen":{"id":"screen","revision":1,
                 "root":{"type":"slot","id":"tile-slot","paneIds":["tiled"]},
-                "floating":[{"id":"float","root":{"type":"slot","id":"float-slot","paneIds":["floating"]},
+                "floating":[{"id":"float","root":{"type":"slot","id":"float-slot","paneIds":[ids.pane_id]},
                     "bounds":{"x":0.25,"y":0.25,"w":0.5,"h":0.5}}],
-                "panes":{"tiled":{"id":"tiled","sessionId":"st"},
-                    "floating":{"id":"floating","sessionId":"sf"}},
-                "sessions":{"st":{"id":"st","status":"running"},"sf":{"id":"sf","status":"running"}}}
+                "panes":{"tiled":{"id":"tiled"},ids.pane_id.clone():{"id":ids.pane_id,"sessionId":"sf"}},
+                "sessions":{"sf":{"id":"sf","status":"running"}}}
         });
         screen.apply_snapshot(connection, &snapshot).unwrap();
         let source = ProfileSource {
-            connection: connection.to_string(),
-            screen: "screen".into(),
-            slot: "float-slot".into(),
-            pane: "floating".into(),
-            session: "sf".into(),
+            route,
+            slot: workspace.screen_key("screen").layout_key("float-slot"),
         };
         let slot = presented_slot_in(
             screen.presentation_root(),
             screen.presented_floats(),
-            &source.slot,
+            source.slot.node_id(),
         )
         .unwrap();
         assert!(source_matches_slot(&screen, &source, slot));
-        let stale = ProfileSource {
-            session: "replaced".into(),
-            ..source
-        };
-        assert!(!source_matches_slot(&screen, &stale, slot));
-        assert!(
-            screen.toggle_maximize_focused(),
-            "the tiled slot becomes the only presented surface"
-        );
-        assert!(presented_slot_in(
+        let mut replaced = snapshot.clone();
+        replaced["screen"]["revision"] = serde_json::json!(2);
+        replaced["screen"]["panes"][source.route.pane_id()]["sessionId"] =
+            serde_json::json!("replaced");
+        replaced["screen"]["sessions"] =
+            serde_json::json!({"replaced":{"id":"replaced","status":"running"}});
+        screen.apply_snapshot(connection, &replaced).unwrap();
+        let replaced_slot = presented_slot_in(
             screen.presentation_root(),
             screen.presented_floats(),
-            &stale.slot
+            source.slot.node_id(),
         )
-        .is_none());
+        .unwrap();
+        assert!(!source_matches_slot(&screen, &source, replaced_slot));
+        client.finish().await.unwrap();
+        service.close().await.unwrap();
     }
 }

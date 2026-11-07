@@ -1,5 +1,6 @@
 //! Service-owned local screens, projected without a second layout tree.
 mod catalog;
+mod identity;
 use crate::{
     connection::{invalid, MAX_ATTACHMENTS},
     Client, ScreenIds,
@@ -14,6 +15,7 @@ pub use catalog::transfer::{
     PaneActionTarget, ScreenTransferOutcome, ScreenTransferResult, ScreenTransferTarget,
 };
 pub use catalog::LocalWorkspace;
+pub use identity::{LayoutKey, PaneKey, ScreenKey, SourceId, SourceToken, TerminalToken};
 use serde::Deserialize;
 use serde_json::Value;
 pub use splitty_core::mux::{
@@ -99,6 +101,7 @@ pub struct CloseAffected {
 /// prompt; identities and connection generation bind its eventual approval.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ClosePlan {
+    source_id: Option<SourceId>,
     pub request_id: u64,
     pub connection_id: Option<Uuid>,
     pub target: CloseTarget,
@@ -108,6 +111,9 @@ pub struct ClosePlan {
 }
 
 impl ClosePlan {
+    pub fn source_token(&self) -> Option<SourceToken> {
+        Some(SourceToken::new(self.source_id?, self.connection_id?))
+    }
     pub fn needs_confirmation(&self) -> bool {
         self.busy_count != 0 || self.unresolved_count != 0
     }
@@ -115,6 +121,7 @@ impl ClosePlan {
     /// Before discovery, the only meaningful target is the owned window.
     pub fn startup_window(request_id: u64) -> Self {
         Self {
+            source_id: None,
             request_id,
             connection_id: None,
             target: CloseTarget::Window,
@@ -132,6 +139,7 @@ impl ClosePlan {
 /// A drag capability is meaningful only within its captured connection and snapshot.
 #[derive(Clone, Debug)]
 pub struct PaneDrag {
+    source_id: SourceId,
     connection_id: Uuid,
     screen_id: String,
     revision: u64,
@@ -142,6 +150,9 @@ pub struct PaneDrag {
 }
 
 impl PaneDrag {
+    pub fn source_token(&self) -> SourceToken {
+        SourceToken::new(self.source_id, self.connection_id)
+    }
     pub fn pane_id(&self) -> &str {
         &self.pane
     }
@@ -185,6 +196,7 @@ struct SentTabSelection {
 /// notification from becoming a local session route.
 #[derive(Clone)]
 pub struct ScreenModel {
+    source_id: SourceId,
     ids: ScreenIds,
     connection_id: Uuid,
     snapshot: Option<Arc<ScreenState>>,
@@ -208,6 +220,7 @@ impl ScreenModel {
         let focused_pane = Some(ids.pane_id.clone());
         let pending_panes = HashSet::from([ids.pane_id.clone()]);
         Self {
+            source_id: SourceId::initial(connection_id),
             ids,
             connection_id,
             snapshot: None,
@@ -609,6 +622,7 @@ impl ScreenModel {
         let screen = self.snapshot()?;
         let slot = screen.root.find_slot(&PaneId::from(pane))?;
         Some(PaneDrag {
+            source_id: self.source_id,
             connection_id: self.connection_id,
             screen_id: self.screen_id().to_owned(),
             revision: screen.revision,
@@ -634,7 +648,8 @@ impl ScreenModel {
         let screen = self
             .snapshot()
             .ok_or_else(|| invalid("screen snapshot not loaded"))?;
-        if drag.connection_id != self.connection_id
+        if drag.source_id != self.source_id
+            || drag.connection_id != self.connection_id
             || drag.screen_id != self.screen_id()
             || !same_layout(&drag.snapshot.root, &screen.root)
             || self.session_for(&drag.pane) != Some(drag.session.as_str())

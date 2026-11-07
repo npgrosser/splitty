@@ -43,7 +43,9 @@ async fn confirmed(
                 );
                 latest = Some(model);
             }
-            Update::Attached(id) if id == session => panic!("unchanged session reattached"),
+            Update::Attached { session: id, .. } if id == session => {
+                panic!("unchanged session reattached")
+            }
             Update::ScreenTransfer(result) if result.request_id == request => {
                 assert_eq!(result.outcome, ScreenTransferOutcome::Confirmed);
                 return latest.expect("model published before outcome");
@@ -56,7 +58,7 @@ async fn output(updates: &mut mpsc::Receiver<Update>, session: &str) {
     let mut bytes = Vec::new();
     loop {
         match next(updates).await {
-            Update::Event(event) => {
+            Update::Event { event, .. } => {
                 if let Some(chunk) = event.output() {
                     if chunk.session_id == session {
                         assert!(!chunk.replay, "transfer introduced replay");
@@ -67,7 +69,9 @@ async fn output(updates: &mut mpsc::Receiver<Update>, session: &str) {
                     }
                 }
             }
-            Update::Attached(id) if id == session => panic!("unchanged session reattached"),
+            Update::Attached { session: id, .. } if id == session => {
+                panic!("unchanged session reattached")
+            }
             _ => {}
         }
     }
@@ -97,10 +101,17 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
         m.routes().len() == 1 && m.routes().iter().all(|r| m.session_ready(&r.session_id))
     })
     .await;
+    let scope = first.source_token();
     let screen_a = first.shown_screen_id().unwrap().to_owned();
     let first_pane = first.routes()[0].pane_id.clone();
     commands
-        .send(Command::Tab(first_pane.clone()))
+        .send(Command::new(
+            scope,
+            CommandKind::Tab {
+                screen: first.screen_key(&screen_a),
+                pane: first_pane.clone(),
+            },
+        ))
         .await
         .unwrap();
     let tabs = model_where(&mut updates, |m| {
@@ -114,7 +125,10 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
         .unwrap();
     let process = pty.get(&moved.session_id).unwrap();
     commands
-        .send(Command::CreateScreen("Target".into()))
+        .send(Command::new(
+            scope,
+            CommandKind::CreateScreen("Target".into()),
+        ))
         .await
         .unwrap();
     let target = model_where(&mut updates, |m| {
@@ -126,11 +140,20 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
     .await;
     let screen_b = target.shown_screen_id().unwrap().to_owned();
     commands
-        .send(Command::SwitchScreen(screen_a.clone()))
+        .send(Command::new(
+            scope,
+            CommandKind::SwitchScreen(screen_a.clone()),
+        ))
         .await
         .unwrap();
     commands
-        .send(Command::Select(first_pane.clone()))
+        .send(Command::new(
+            scope,
+            CommandKind::Select {
+                screen: first.screen_key(&screen_a),
+                pane: first_pane.clone(),
+            },
+        ))
         .await
         .unwrap();
     let source = model_where(&mut updates, |m| {
@@ -140,13 +163,16 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
     .await;
     let request = Uuid::new_v4();
     commands
-        .send(Command::TransferPane {
-            request_id: request,
-            source: source.capture_pane_action(&moved.pane_id).unwrap(),
-            target: ScreenTransferTarget::Existing {
-                screen_id: screen_b.clone(),
+        .send(Command::new(
+            scope,
+            CommandKind::TransferPane {
+                request_id: request,
+                source: source.capture_pane_action(&moved.pane_id).unwrap(),
+                target: ScreenTransferTarget::Existing {
+                    screen: first.screen_key(&screen_b),
+                },
             },
-        })
+        ))
         .await
         .unwrap();
     let committed = confirmed(&mut updates, request, &moved.pane_id, &moved.session_id).await;
@@ -185,7 +211,9 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
                     break model;
                 }
             }
-            Update::Attached(id) if id == moved.session_id => panic!("external move reattached"),
+            Update::Attached { session: id, .. } if id == moved.session_id => {
+                panic!("external move reattached")
+            }
             _ => {}
         }
     };
@@ -195,7 +223,10 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
         "external move cannot steal focus"
     );
     commands
-        .send(Command::SwitchScreen(external.clone()))
+        .send(Command::new(
+            scope,
+            CommandKind::SwitchScreen(external.clone()),
+        ))
         .await
         .unwrap();
     let source = model_where(&mut updates, |m| {
@@ -205,13 +236,16 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
     let request = Uuid::new_v4();
     let new = Uuid::new_v4().to_string();
     commands
-        .send(Command::TransferPane {
-            request_id: request,
-            source: source.capture_pane_action(&moved.pane_id).unwrap(),
-            target: ScreenTransferTarget::New {
-                screen_id: new.clone(),
+        .send(Command::new(
+            scope,
+            CommandKind::TransferPane {
+                request_id: request,
+                source: source.capture_pane_action(&moved.pane_id).unwrap(),
+                target: ScreenTransferTarget::New {
+                    screen_id: new.clone(),
+                },
             },
-        })
+        ))
         .await
         .unwrap();
     let final_model = confirmed(&mut updates, request, &moved.pane_id, &moved.session_id).await;
@@ -220,11 +254,13 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
     assert_eq!(final_model.routes().len(), 3);
     assert!(Arc::ptr_eq(&process, &pty.get(&moved.session_id).unwrap()));
     commands
-        .send(Command::Input {
-            pane: moved.pane_id.clone(),
-            session: moved.session_id.clone(),
-            bytes: b"printf 'TRANSFER_%s\\n' 'ALIVE'\n".into(),
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::Input {
+                route: TerminalToken::new(scope, &moved.pane_id, &moved.session_id),
+                bytes: b"printf 'TRANSFER_%s\\n' 'ALIVE'\n".into(),
+            },
+        ))
         .await
         .unwrap();
     output(&mut updates, &moved.session_id).await;
@@ -241,18 +277,24 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
     plan.affected.sort_by(|a, b| a.identity.cmp(&b.identity));
     plan.unresolved_count += 1;
     commands
-        .try_send(Command::TransferPane {
-            request_id: request,
-            source: final_model.capture_pane_action(&moved.pane_id).unwrap(),
-            target: ScreenTransferTarget::Existing {
-                screen_id: screen_a,
+        .try_send(Command::new(
+            scope,
+            CommandKind::TransferPane {
+                request_id: request,
+                source: final_model.capture_pane_action(&moved.pane_id).unwrap(),
+                target: ScreenTransferTarget::Existing {
+                    screen: first.screen_key(&screen_a),
+                },
             },
-        })
+        ))
         .unwrap();
     commands
-        .try_send(Command::RequestClose {
-            plan,
-            confirmed: true,
+        .try_send(Command {
+            source: Some(scope),
+            kind: CommandKind::RequestClose {
+                plan,
+                confirmed: true,
+            },
         })
         .unwrap();
     let mut latest = final_model;
@@ -263,9 +305,12 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
             Update::CloseRejected { .. } => {
                 close_id += 1;
                 commands
-                    .send(Command::RequestClose {
-                        plan: latest.assess_close(close_id, CloseTarget::Window).unwrap(),
-                        confirmed: true,
+                    .send(Command {
+                        source: Some(scope),
+                        kind: CommandKind::RequestClose {
+                            plan: latest.assess_close(close_id, CloseTarget::Window).unwrap(),
+                            confirmed: true,
+                        },
                     })
                     .await
                     .unwrap();

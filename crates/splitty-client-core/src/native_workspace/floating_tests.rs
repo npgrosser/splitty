@@ -29,7 +29,7 @@ async fn settled(
     loop {
         match next(updates).await {
             Update::Workspace(model) => latest = Some(model),
-            Update::Attached(id) if id == session => {
+            Update::Attached { session: id, .. } if id == session => {
                 panic!("floating action reattached unchanged terminal")
             }
             Update::FloatingAction(result) if result.request_id == request => {
@@ -65,8 +65,15 @@ async fn floating_tabs_move_and_dock_into_empty_root_keep_live_sessions_and_prof
     })
     .await;
     let first = initial.routes()[0].clone();
+    let scope = initial.source_token();
     commands
-        .send(Command::Tab(first.pane_id.clone()))
+        .send(Command::new(
+            scope,
+            CommandKind::Tab {
+                screen: initial.screen_key(initial.shown_screen_id().unwrap()),
+                pane: first.pane_id.clone(),
+            },
+        ))
         .await
         .unwrap();
     let root = model_where(&mut updates, |m| {
@@ -81,17 +88,21 @@ async fn floating_tabs_move_and_dock_into_empty_root_keep_live_sessions_and_prof
     // Ready model is published just before the initial attachment notification.
     // Drain that notification before testing that subsequent moves never reattach.
     loop {
-        if matches!(next(&mut updates).await, Update::Attached(id) if id == moving.session_id) {
+        if matches!(next(&mut updates).await, Update::Attached { session: id, .. } if id == moving.session_id)
+        {
             break;
         }
     }
     let process = pty.get(&moving.session_id).unwrap();
     let request = Uuid::new_v4();
     commands
-        .send(Command::FloatPane {
-            request_id: request,
-            source: root.capture_pane_action(&moving.pane_id).unwrap(),
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::FloatPane {
+                request_id: request,
+                source: root.capture_pane_action(&moving.pane_id).unwrap(),
+            },
+        ))
         .await
         .unwrap();
     let floated = settled(&mut updates, request, &moving.session_id).await;
@@ -105,7 +116,13 @@ async fn floating_tabs_move_and_dock_into_empty_root_keep_live_sessions_and_prof
         .id
         .to_string();
     commands
-        .send(Command::Tab(moving.pane_id.clone()))
+        .send(Command::new(
+            scope,
+            CommandKind::Tab {
+                screen: floated.screen_key(floated.shown_screen_id().unwrap()),
+                pane: moving.pane_id.clone(),
+            },
+        ))
         .await
         .unwrap();
     let stacked = model_where(&mut updates, |m| {
@@ -140,23 +157,29 @@ async fn floating_tabs_move_and_dock_into_empty_root_keep_live_sessions_and_prof
         h: 0.6,
     };
     commands
-        .send(Command::MoveFloat {
-            request_id: request,
-            target: stacked.capture_float(&float_id).unwrap(),
-            bounds: bounds.clone(),
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::MoveFloat {
+                request_id: request,
+                target: stacked.capture_float(&float_id).unwrap(),
+                bounds: bounds.clone(),
+            },
+        ))
         .await
         .unwrap();
     let moved = settled(&mut updates, request, &moving.session_id).await;
     assert_eq!(moved.floating(&float_id).unwrap().bounds, bounds);
     let slot = moved.focused_slot_id().unwrap().to_owned();
     commands
-        .send(Command::SetMaximized {
-            screen: moved.shown_screen_id().unwrap().into(),
-            connection: moved.connection_id(),
-            slot: Some(slot.clone()),
-            pane: Some(added.pane_id.clone()),
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::SetMaximized {
+                screen: moved.shown_screen_id().unwrap().into(),
+                connection: moved.connection_id(),
+                slot: Some(slot.clone()),
+                pane: Some(added.pane_id.clone()),
+            },
+        ))
         .await
         .unwrap();
     let maximized = model_where(&mut updates, |m| {
@@ -169,12 +192,15 @@ async fn floating_tabs_move_and_dock_into_empty_root_keep_live_sessions_and_prof
     );
     assert!(maximized.presented_floats().is_empty());
     commands
-        .send(Command::SetMaximized {
-            screen: maximized.shown_screen_id().unwrap().into(),
-            connection: maximized.connection_id(),
-            slot: None,
-            pane: None,
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::SetMaximized {
+                screen: maximized.shown_screen_id().unwrap().into(),
+                connection: maximized.connection_id(),
+                slot: None,
+                pane: None,
+            },
+        ))
         .await
         .unwrap();
     let restored = model_where(&mut updates, |m| m.maximized_slot_id().is_none()).await;
@@ -188,9 +214,12 @@ async fn floating_tabs_move_and_dock_into_empty_root_keep_live_sessions_and_prof
         )
         .unwrap();
     commands
-        .send(Command::RequestClose {
-            plan: close,
-            confirmed: true,
+        .send(Command {
+            source: Some(scope),
+            kind: CommandKind::RequestClose {
+                plan: close,
+                confirmed: true,
+            },
         })
         .await
         .unwrap();
@@ -206,7 +235,7 @@ async fn floating_tabs_move_and_dock_into_empty_root_keep_live_sessions_and_prof
             {
                 empty = Some(model)
             }
-            Update::CloseSettled { request_id: 10 } => close_settled = true,
+            Update::CloseSettled { request_id: 10, .. } => close_settled = true,
             Update::CloseRejected { reason, .. } => panic!("close rejected: {reason}"),
             _ => {}
         }
@@ -215,10 +244,13 @@ async fn floating_tabs_move_and_dock_into_empty_root_keep_live_sessions_and_prof
     assert_eq!(empty.routes().len(), 2);
     let request = Uuid::new_v4();
     commands
-        .send(Command::DockFloat {
-            request_id: request,
-            target: empty.capture_float(&float_id).unwrap(),
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::DockFloat {
+                request_id: request,
+                target: empty.capture_float(&float_id).unwrap(),
+            },
+        ))
         .await
         .unwrap();
     let docked = settled(&mut updates, request, &moving.session_id).await;
@@ -227,16 +259,18 @@ async fn floating_tabs_move_and_dock_into_empty_root_keep_live_sessions_and_prof
     assert_eq!(docked.snapshot().unwrap().root.collect_pane_ids().len(), 2);
     assert!(Arc::ptr_eq(&process, &pty.get(&moving.session_id).unwrap()));
     commands
-        .send(Command::Input {
-            pane: moving.pane_id.clone(),
-            session: moving.session_id.clone(),
-            bytes: b"printf 'FLOAT_%s\\n' 'ALIVE'\n".into(),
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::Input {
+                route: TerminalToken::new(scope, &moving.pane_id, &moving.session_id),
+                bytes: b"printf 'FLOAT_%s\\n' 'ALIVE'\n".into(),
+            },
+        ))
         .await
         .unwrap();
     let mut bytes = Vec::new();
     loop {
-        if let Update::Event(event) = next(&mut updates).await {
+        if let Update::Event { event, .. } = next(&mut updates).await {
             if let Some(chunk) = event.output() {
                 if chunk.session_id == moving.session_id {
                     assert!(!chunk.replay);
@@ -249,9 +283,12 @@ async fn floating_tabs_move_and_dock_into_empty_root_keep_live_sessions_and_prof
         }
     }
     commands
-        .send(Command::RequestClose {
-            plan: docked.assess_close(20, CloseTarget::Window).unwrap(),
-            confirmed: true,
+        .send(Command {
+            source: Some(scope),
+            kind: CommandKind::RequestClose {
+                plan: docked.assess_close(20, CloseTarget::Window).unwrap(),
+                confirmed: true,
+            },
         })
         .await
         .unwrap();

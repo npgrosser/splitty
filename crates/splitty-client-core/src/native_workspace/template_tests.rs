@@ -65,7 +65,7 @@ async fn ready(rx: &mut mpsc::Receiver<Update>, pane: &str) -> Box<LocalWorkspac
 async fn output(rx: &mut mpsc::Receiver<Update>, session: &str, marker: &[u8]) {
     let mut bytes = Vec::new();
     loop {
-        if let Update::Event(event) = next(rx).await {
+        if let Update::Event { event, .. } = next(rx).await {
             if let Some(chunk) = event.output() {
                 if chunk.session_id == session {
                     bytes.extend_from_slice(chunk.bytes);
@@ -117,17 +117,21 @@ async fn templates_new_replace_partial_launch_keep_other_pty_and_join_cleanup() 
         }
     }
     let initial = model.unwrap();
+    let scope = initial.source_token();
     let owner = initial.connection_id();
     let unrelated = initial.routes()[0].clone();
     let process = pty.get(&unrelated.session_id).unwrap();
     let load = Uuid::new_v4();
-    tx.send(Command::TemplateApi {
-        connection: owner,
-        request_id: load,
-        request: TemplateApiRequest::Load {
-            slug: "partial".into(),
+    tx.send(Command::new(
+        scope,
+        CommandKind::TemplateApi {
+            connection: owner,
+            request_id: load,
+            request: TemplateApiRequest::Load {
+                slug: "partial".into(),
+            },
         },
-    })
+    ))
     .await
     .unwrap();
     let draft: Arc<TemplateDraft> = loop {
@@ -158,11 +162,14 @@ async fn templates_new_replace_partial_launch_keep_other_pty_and_join_cleanup() 
         .find(|id| plan.pane_name(id.as_str()) == Some("a"))
         .unwrap()
         .to_string();
-    tx.send(Command::ApplyTemplate {
-        plan,
-        choice: TemplateApplyChoice::RunCommands,
-        replace_confirmed: false,
-    })
+    tx.send(Command::new(
+        scope,
+        CommandKind::ApplyTemplate {
+            plan,
+            choice: TemplateApplyChoice::RunCommands,
+            replace_confirmed: false,
+        },
+    ))
     .await
     .unwrap();
     let (mut applied, failures) = settled(&mut updates, id).await;
@@ -199,11 +206,14 @@ async fn templates_new_replace_partial_launch_keep_other_pty_and_join_cleanup() 
         .find(|id| plan.pane_name(id.as_str()) == Some("a"))
         .unwrap()
         .to_string();
-    tx.send(Command::ApplyTemplate {
-        plan,
-        choice: TemplateApplyChoice::LayoutOnly,
-        replace_confirmed: true,
-    })
+    tx.send(Command::new(
+        scope,
+        CommandKind::ApplyTemplate {
+            plan,
+            choice: TemplateApplyChoice::LayoutOnly,
+            replace_confirmed: true,
+        },
+    ))
     .await
     .unwrap();
     let (mut replaced, failures) = settled(&mut updates, id).await;
@@ -217,11 +227,13 @@ async fn templates_new_replace_partial_launch_keep_other_pty_and_join_cleanup() 
     if !replaced.session_ready(&new_session) {
         replaced = ready(&mut updates, &new_pane).await;
     }
-    tx.send(Command::Input {
-        pane: new_pane,
-        session: new_session.clone(),
-        bytes: b"printf 'TPL_ALIVE\\n'\n".to_vec(),
-    })
+    tx.send(Command::new(
+        scope,
+        CommandKind::Input {
+            route: TerminalToken::new(scope, &new_pane, &new_session),
+            bytes: b"printf 'TPL_ALIVE\\n'\n".to_vec(),
+        },
+    ))
     .await
     .unwrap();
     output(&mut updates, &new_session, b"TPL_ALIVE").await;
@@ -235,9 +247,12 @@ async fn templates_new_replace_partial_launch_keep_other_pty_and_join_cleanup() 
         .sessions
         .values()
         .all(|s| s.command.is_none() && s.restore_mode.is_none()));
-    tx.send(Command::RequestClose {
-        plan: replaced.assess_close(100, CloseTarget::Window).unwrap(),
-        confirmed: true,
+    tx.send(Command {
+        source: Some(scope),
+        kind: CommandKind::RequestClose {
+            plan: replaced.assess_close(100, CloseTarget::Window).unwrap(),
+            confirmed: true,
+        },
     })
     .await
     .unwrap();

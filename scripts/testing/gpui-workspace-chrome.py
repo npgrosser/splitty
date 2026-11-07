@@ -69,6 +69,8 @@ def main():
     parser.add_argument("--setup-dock", action="store_true")
     parser.add_argument("--setup-high-menu", action="store_true")
     parser.add_argument("--high-zoom-check", action="store_true")
+    parser.add_argument("--resize-check", action="store_true",
+                        help="drag a divider through several confirmed revisions after the chrome checks")
     parser.add_argument("--zoom", type=float, default=1.0)
     args = parser.parse_args()
     if not 0.5 <= args.zoom <= 3.0:
@@ -427,6 +429,40 @@ def main():
                             capture("tab-closed")
                             result["checks"].append("tab-close-only-ends-selected-session")
                             result["states"]["final"] = closed
+                            if args.resize_check:
+                                before_resize = closed
+                                root = closed["screens"][screen]["root"]
+                                assert root["type"] == "split" and root["axis"] == "horizontal", root
+                                original_routes = routes(closed)
+                                split_id = root["id"]
+                                divider_x, divider_y, divider_width, divider_height = divider
+                                start_x = divider_x + divider_width // 2
+                                drag_y = divider_y + divider_height // 2
+                                x("mousemove", "--window", window, start_x, drag_y, "mousedown", 1)
+                                try:
+                                    for step, offset in enumerate((40, 80, 60), start=1):
+                                        previous_sizes = closed["screens"][screen]["root"]["sizes"]
+                                        previous_revision = closed["screens"][screen]["revision"]
+                                        x("mousemove", "--window", window, start_x + offset, drag_y)
+                                        display.sync()
+                                        closed = wait_until(
+                                            lambda: (s if (s := state())["screens"][screen]["root"]["sizes"] != previous_sizes else None),
+                                            f"divider step {step} did not change canonical sizes")
+                                        current_screen = closed["screens"][screen]
+                                        assert current_screen["revision"] > previous_revision
+                                        assert current_screen["root"]["id"] == split_id
+                                        assert routes(closed) == original_routes
+                                        assert_routes(closed)
+                                        result["states"][f"divider-step-{step}"] = closed
+                                        # Let the published revision reach the retained gesture before
+                                        # moving again while the same mouse press remains held.
+                                        time.sleep(.25)
+                                finally:
+                                    x("mouseup", 1)
+                                    display.sync()
+                                assert routes(state()) == routes(before_resize)
+                                capture("divider-resized")
+                                result["checks"].append("continuous-divider-drag-survives-confirmed-revisions-and-retains-sessions")
             result["passed"] = True
         except Exception as error:
             result["error"] = repr(error)

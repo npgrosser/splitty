@@ -221,17 +221,49 @@ impl Workspace {
         cx.notify();
     }
 
+    fn show_screens_captured(
+        &mut self,
+        source: SourceToken,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.source_token() == source)
+        {
+            self.show_screens(window, cx);
+        }
+    }
+
     pub(super) fn refresh_hosts(&mut self, cx: &mut Context<Self>) {
+        let Some(source) = self.model.as_ref().map(LocalWorkspace::source_token) else {
+            return;
+        };
+        self.refresh_hosts_captured(source, cx);
+    }
+
+    fn refresh_hosts_captured(&mut self, source: SourceToken, cx: &mut Context<Self>) {
         if !self.hosts.can_refresh() {
+            return;
+        }
+        if !self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.source_token() == source)
+        {
             return;
         }
         let Some(connection) = self.hosts.owner else {
             return;
         };
-        if let Err(error) = self
-            .commands
-            .try_send(Command::RefreshHostDirectory { connection })
-        {
+        if connection != source.connection_id() {
+            return;
+        }
+        if let Err(error) = self.commands.try_send(WorkerCommand::new(
+            source,
+            Command::RefreshHostDirectory { connection },
+        )) {
             self.hosts.command_error = Some(format!("Refresh could not be sent: {error}"));
             cx.notify();
         }
@@ -239,18 +271,26 @@ impl Workspace {
 
     pub(super) fn render_hosts_navigation(&self, cx: &mut Context<Self>) -> AnyElement {
         let weak = cx.entity().downgrade();
+        let source = self.model.as_ref().map(LocalWorkspace::source_token);
         Button::new("open-hosts")
             .label("Hosts")
             .accessibility_label("Show Hosts")
             .tooltip("Inspect cached Hosts")
             .icon(Icon::new(IconName::Server))
             .selected(self.hosts.open)
-            .disabled(self.hosts_navigation_blocked() && !self.hosts.open)
+            .disabled(source.is_none() || (self.hosts_navigation_blocked() && !self.hosts.open))
             .ghost()
             .compact()
             .small()
             .on_click(move |_, window, cx| {
                 let _ = weak.update(cx, |this, cx| {
+                    if !source.is_some_and(|source| {
+                        this.model
+                            .as_ref()
+                            .is_some_and(|model| model.source_token() == source)
+                    }) {
+                        return;
+                    }
                     if this.hosts.open {
                         this.show_screens(window, cx);
                     } else {
@@ -306,6 +346,7 @@ impl Workspace {
         };
         let weak_back = cx.entity().downgrade();
         let weak_refresh = cx.entity().downgrade();
+        let source = self.model.as_ref().map(LocalWorkspace::source_token);
         let list = if let Some(snapshot) = snapshot {
             uniform_list("hosts-list", total, move |range, _, cx| {
                 let muted = cx.theme().muted_foreground;
@@ -496,8 +537,11 @@ impl Workspace {
                             .ghost()
                             .small()
                             .on_click(move |_, window, cx| {
-                                let _ =
-                                    weak_back.update(cx, |this, cx| this.show_screens(window, cx));
+                                if let Some(source) = source {
+                                    let _ = weak_back.update(cx, |this, cx| {
+                                        this.show_screens_captured(source, window, cx)
+                                    });
+                                }
                             }),
                     )
                     .child(div().font_weight(FontWeight::BOLD).child("Hosts"))
@@ -513,7 +557,11 @@ impl Workspace {
                             .disabled(loading || !self.hosts.can_refresh())
                             .small()
                             .on_click(move |_, _, cx| {
-                                let _ = weak_refresh.update(cx, |this, cx| this.refresh_hosts(cx));
+                                if let Some(source) = source {
+                                    let _ = weak_refresh.update(cx, |this, cx| {
+                                        this.refresh_hosts_captured(source, cx)
+                                    });
+                                }
                             }),
                     ),
             )

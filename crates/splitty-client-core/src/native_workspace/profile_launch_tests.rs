@@ -65,7 +65,7 @@ async fn output_contains(updates: &mut mpsc::Receiver<Update>, session: &str, ma
     let mut output = Vec::new();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {
-            if let Update::Event(event) = next(updates).await {
+            if let Update::Event { event, .. } = next(updates).await {
                 if let Some(chunk) = event.output() {
                     if chunk.session_id == session {
                         output.extend_from_slice(chunk.bytes);
@@ -117,6 +117,7 @@ async fn captured_profile_launch_and_stale_choices_use_owned_service() {
     ));
 
     let (model, profiles) = initial(&mut updates).await;
+    let scope = model.source_token();
     let connection = model.connection_id();
     assert_eq!(profiles.connection_id(), connection);
     assert!(profiles
@@ -143,12 +144,17 @@ async fn captured_profile_launch_and_stale_choices_use_owned_service() {
         })
         .unwrap();
 
-    let choice = |connection, screen: String, pane: String, session: String| Command::ProfileTab {
-        connection,
-        screen,
-        pane,
-        session,
-        profile_id: "chosen".into(),
+    let choice = |connection, screen: String, pane: String, session: String| {
+        Command::new(
+            scope,
+            CommandKind::ProfileTab {
+                connection,
+                screen,
+                pane,
+                session,
+                profile_id: "chosen".into(),
+            },
+        )
     };
     for invalid in [
         choice(
@@ -298,7 +304,7 @@ async fn captured_profile_launch_and_stale_choices_use_owned_service() {
                 fallback = true
             }
             Update::Workspace(model) if model.routes().len() == 3 => final_model = Some(model),
-            Update::Attached(session) => {
+            Update::Attached { session, .. } => {
                 attached.insert(session);
             }
             _ => {}
@@ -329,16 +335,22 @@ async fn captured_profile_launch_and_stale_choices_use_owned_service() {
     // A live profile-picked terminal still accepts bounded input through the
     // same route after its spawn and attachment notifications settle.
     while !attached.contains(&fallback_route.session_id) {
-        if let Update::Attached(session) = next(&mut updates).await {
+        if let Update::Attached { session, .. } = next(&mut updates).await {
             attached.insert(session);
         }
     }
     commands
-        .send(Command::Input {
-            pane: fallback_route.pane_id.clone(),
-            session: fallback_route.session_id.clone(),
-            bytes: b"printf 'PROFILE_ROUTE_READY\\n'\n".to_vec(),
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::Input {
+                route: TerminalToken::new(
+                    scope,
+                    &fallback_route.pane_id,
+                    &fallback_route.session_id,
+                ),
+                bytes: b"printf 'PROFILE_ROUTE_READY\\n'\n".to_vec(),
+            },
+        ))
         .await
         .unwrap();
     output_contains(

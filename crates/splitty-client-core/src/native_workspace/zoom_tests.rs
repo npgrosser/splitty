@@ -77,21 +77,25 @@ async fn real_service() {
                 ready = Some(model)
             }
             Update::Appearance(_) => appearance = true,
-            Update::Attached(session) => attached = Some(session),
+            Update::Attached { session, .. } => attached = Some(session),
             _ => {}
         }
     }
     let model = ready.unwrap();
+    let scope = model.source_token();
     let owner = model.connection_id();
     let route = model.routes()[0].clone();
     let foreign = Uuid::new_v4();
     let foreign_id = Uuid::new_v4();
     commands
-        .send(Command::Zoom {
-            connection: foreign,
-            request_id: foreign_id,
-            action: ZoomAction::In,
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::Zoom {
+                connection: foreign,
+                request_id: foreign_id,
+                action: ZoomAction::In,
+            },
+        ))
         .await
         .unwrap();
     let actions = [
@@ -103,20 +107,25 @@ async fn real_service() {
     let ids = actions.map(|_| Uuid::new_v4());
     for (request_id, action) in ids.into_iter().zip(actions) {
         commands
-            .send(Command::Zoom {
-                connection: owner,
-                request_id,
-                action,
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::Zoom {
+                    connection: owner,
+                    request_id,
+                    action,
+                },
+            ))
             .await
             .unwrap();
     }
     commands
-        .send(Command::Input {
-            pane: route.pane_id.clone(),
-            session: route.session_id.clone(),
-            bytes: b"printf 'ZOOM_%s\\n' 'ALIVE'\n".to_vec(),
-        })
+        .send(Command::new(
+            scope,
+            CommandKind::Input {
+                route: TerminalToken::new(scope, &route.pane_id, &route.session_id),
+                bytes: b"printf 'ZOOM_%s\\n' 'ALIVE'\n".to_vec(),
+            },
+        ))
         .await
         .unwrap();
     let mut results = Vec::new();
@@ -130,7 +139,7 @@ async fn real_service() {
                 rejected = true;
             }
             Update::Zoom(result) => results.push(result),
-            Update::Event(event) => {
+            Update::Event { event, .. } => {
                 if let Some(chunk) = event.output() {
                     if chunk.session_id == route.session_id {
                         output.extend_from_slice(chunk.bytes);
@@ -161,11 +170,14 @@ async fn real_service() {
         (owner, drawer_request, false),
     ] {
         commands
-            .send(Command::SetDrawerVisibility {
-                connection,
-                request_id,
-                pinned,
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::SetDrawerVisibility {
+                    connection,
+                    request_id,
+                    pinned,
+                },
+            ))
             .await
             .unwrap();
     }
@@ -205,11 +217,14 @@ async fn real_service() {
     // service or mutate its state after joined cleanup reports completion.
     for _ in 0..20 {
         commands
-            .send(Command::Zoom {
-                connection: owner,
-                request_id: Uuid::new_v4(),
-                action: ZoomAction::Reset,
-            })
+            .send(Command::new(
+                scope,
+                CommandKind::Zoom {
+                    connection: owner,
+                    request_id: Uuid::new_v4(),
+                    action: ZoomAction::Reset,
+                },
+            ))
             .await
             .unwrap();
     }
