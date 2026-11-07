@@ -295,3 +295,8 @@ Each point names what holds now, the alternative, and where it is recorded.
 - **`native-close-confirmation` NCC-1** (2026-11-07, provisional, tbd): assess local terminal close impact in a UI-free plan capturing connection, target and affected pane/session identities, including unresolved work; keep one pending close request per native window. Dialogs and focus remain GPUI concerns.
 - **`native-close-confirmation` NCC-2** (2026-11-07, provisional, tbd): validate the captured plan against latest worker-known impact before executing; reject changed identities or newly unconfirmed busy/unresolved work visibly, without automatic destructive retries. This does not lock unobserved concurrent service changes.
 - **`native-close-confirmation` NCC-3** (2026-11-07, provisional, tbd): normal window close waits for matching worker approval; the worker enters closing before approval, rejects subsequent user commands and runs existing owned cleanup. Non-cancellable platform quit and forced termination remain outside confirmation.
+
+## Native workspace navigation (2026-11-07)
+
+- **NN-1 (provisional, tbd):** maximize is a per-window, per-Screen reference to a canonical tab group. It changes neither server layout nor persistence. Tab insertion retains it; admitted split/move or explicit focus outside restores the viewport; removed group identity clears it. See `native-workspace-navigation/design.md`.
+- **NN-2 (provisional, tbd):** native Screen navigation reuses Ctrl+Shift+Space and Mod+Shift+1–9, with Mod+M for maximize/restore. Editing and confirmation dialogs keep priority; new-Screen remains available in an empty workspace.
