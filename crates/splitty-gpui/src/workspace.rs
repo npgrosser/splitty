@@ -301,7 +301,6 @@ fn admit_close(
 pub struct Workspace {
     model: Option<LocalWorkspace>,
     panes: HashMap<String, PaneView>,
-    updates: mpsc::Receiver<Update>,
     commands: mpsc::Sender<Command>,
     stopping: Arc<AtomicBool>,
     cleanup_complete: Arc<AtomicBool>,
@@ -345,17 +344,71 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> (Self, Worker) {
         let (commands, receiver) = mpsc::channel(64);
-        let (sender, updates) = mpsc::channel(64);
+        let (sender, mut updates) = mpsc::channel(64);
         let worker = Worker::start(receiver, sender);
-        let poll = cx.spawn_in(window, async move |this, cx| loop {
-            cx.background_executor()
-                .timer(Duration::from_millis(16))
-                .await;
-            if this
-                .update_in(cx, |this, window, cx| this.poll(window, cx))
-                .is_err()
-            {
-                break;
+        let stopping = worker.stop.clone();
+        let poll = cx.spawn_in(window, async move |this, cx| {
+            let maintenance = Duration::from_millis(16);
+            let mut next_tick = Instant::now() + maintenance;
+            let mut updates_open = true;
+            let mut work_batches = 0_usize;
+            let mut work_updates = 0_usize;
+            loop {
+                if stopping.load(Ordering::Acquire) {
+                    break;
+                }
+                let now = Instant::now();
+                let first = if now >= next_tick {
+                    next_tick = now + maintenance;
+                    None
+                } else {
+                    let timer = cx.background_executor().timer(next_tick - now);
+                    if updates_open {
+                        tokio::select! {
+                            update = updates.recv() => {
+                                if update.is_none() {
+                                    updates_open = false;
+                                }
+                                update
+                            }
+                            _ = timer => {
+                                next_tick = Instant::now() + maintenance;
+                                None
+                            }
+                        }
+                    } else {
+                        timer.await;
+                        next_tick = Instant::now() + maintenance;
+                        None
+                    }
+                };
+                let (paced, processed) = match this.update_in(cx, |this, window, cx| {
+                    this.poll(first, &mut updates, window, cx)
+                }) {
+                    Ok(result) => result,
+                    Err(_) => break,
+                };
+                if stopping.load(Ordering::Acquire) {
+                    break;
+                }
+                if paced {
+                    // Keep the existing 64-update/256 KiB output pacing under
+                    // sustained traffic while small batches wake immediately.
+                    cx.background_executor().timer(maintenance).await;
+                    work_batches = 0;
+                    work_updates = 0;
+                } else if processed != 0 {
+                    work_batches += 1;
+                    work_updates += processed;
+                    if work_batches >= 4 || work_updates >= 64 {
+                        // Many small ready batches must still yield to GPUI.
+                        cx.background_executor()
+                            .timer(Duration::from_millis(1))
+                            .await;
+                        work_batches = 0;
+                        work_updates = 0;
+                    }
+                }
             }
         });
         let entity = cx.entity().downgrade();
@@ -369,7 +422,6 @@ impl Workspace {
             Self {
                 model: None,
                 panes: HashMap::new(),
-                updates,
                 commands,
                 stopping: worker.stop.clone(),
                 cleanup_complete: worker.cleanup_complete.clone(),
@@ -410,8 +462,6 @@ impl Workspace {
     }
     fn stop(&mut self) {
         self.stopping.store(true, Ordering::Release);
-        self.updates.close();
-        while self.updates.try_recv().is_ok() {}
     }
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if let Err(error) = self.commands.try_send(command) {
@@ -936,15 +986,29 @@ impl Workspace {
             self.send(Command::Tab(pane), cx);
         }
     }
-    fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    fn poll(
+        &mut self,
+        first: Option<Update>,
+        updates: &mut mpsc::Receiver<Update>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> (bool, usize) {
         let mut bytes = 0;
+        let mut first = first;
+        let mut processed = 0;
         for _ in 0..64 {
             if bytes >= 256 * 1024 {
                 break;
             }
-            let Ok(update) = self.updates.try_recv() else {
-                break;
+            let update = if let Some(update) = first.take() {
+                update
+            } else {
+                let Ok(update) = updates.try_recv() else {
+                    break;
+                };
+                update
             };
+            processed += 1;
             match update {
                 Update::Workspace(model) => self.reconcile(*model, window, cx),
                 Update::Status(status) => {
@@ -1052,13 +1116,16 @@ impl Workspace {
                     }
                 }
             }
+            if self.stopping.load(Ordering::Acquire) {
+                break;
+            }
         }
         if self.smoke {
             self.smoke_tick(window, cx);
         }
         self.flush_visible(cx);
         self.flush_resizes(cx);
-        if self.updates.is_closed() && self.cleanup_complete.load(Ordering::Acquire) {
+        if updates.is_closed() && self.cleanup_complete.load(Ordering::Acquire) {
             if let Some(pending) = self.pending_close.take() {
                 if pending.plan.target == CloseTarget::Window {
                     self.stop();
@@ -1070,6 +1137,7 @@ impl Workspace {
                 }
             }
         }
+        (processed == 64 || bytes >= 256 * 1024, processed)
     }
     fn smoke_key(
         &self,
@@ -1220,10 +1288,27 @@ impl Workspace {
             }
             5 if matches!(&screen.root,LayoutNode::Split{sizes,..} if (sizes[0]-0.65).abs()<0.001) =>
             {
-                if let Some(tab) = self.smoke_tab.clone() {
-                    self.select(&tab, window, cx);
-                    self.smoke_key(window, cx, "cmd-w", "alt-w", None);
+                let Some(tab) = self.smoke_tab.clone() else {
+                    self.finish_smoke(false, cx);
+                    return;
+                };
+                let Some(screen_id) = model.shown_screen_id() else {
+                    return;
+                };
+                let target = CloseTarget::Pane {
+                    screen: screen_id.to_owned(),
+                    pane: tab.clone(),
+                };
+                let Ok(close) = model.assess_close(0, target) else {
+                    return;
+                };
+                if close.needs_confirmation() {
+                    // The marker can arrive before the shell's later idle
+                    // snapshot. This smoke exercises the no-prompt shortcut.
+                    return;
                 }
+                self.select(&tab, window, cx);
+                self.smoke_key(window, cx, "cmd-w", "alt-w", None);
                 self.smoke_stage = 6;
             }
             6 if count == 3

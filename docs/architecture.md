@@ -109,6 +109,13 @@ tree. Switching Screens preserves terminal emulation and attachments; hidden
 terminals consume output and send protocol replies without claiming visibility
 or PTY size. Returning panes publish their measured sizes again.
 
+The native window retains one async receive task for the worker update channel.
+New output wakes that task directly; a separate maintenance deadline still retries
+visibility and size reports. Bounded batches preserve update order and retain
+transport byte leases through terminal feeding. Large batches keep the existing
+pacing, while repeated small batches also yield so input and drawing can run.
+Dropping the task drops its sole receiver and releases queued delivery leases.
+
 Native pane, Screen and window close gestures share a client-core close plan.
 It captures the connection, affected pane/session identities and known busy or
 unresolved work, including hidden Screens and pending creations. GPUI owns one

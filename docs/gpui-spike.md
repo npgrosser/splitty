@@ -274,6 +274,53 @@ python3 scripts/testing/gpui-screens.py target/release/splitty-gpui \
   --output /tmp/splitty-close-evidence --close-confirmation
 ```
 
+## Workspace output wakeup measurements
+
+The normal workspace now receives worker updates when they arrive instead of
+waiting for its next 16 ms poll. The same task keeps a maintenance deadline for
+visibility/resize retries and yields after bounded work; no second message queue
+or terminal-emulator change is involved.
+
+An optimized native-only baseline and the wakeup build were compared on isolated
+Xvfb under WSL2 with Mesa 26.0.8 llvmpipe (software OpenGL). Each run sent 120
+sequence-checked keys to the same raw-PTY fixture, with identical seeded 20–45 ms
+pauses and a 320×110 response crop. No builds or other UI tests overlapped the runs.
+
+| Metric | Fixed 16 ms poll | Update-driven receive |
+| --- | ---: | ---: |
+| Key request to changed X11 pixels, median | 21.82 ms | 17.17 ms |
+| 95th percentile | 30.47 ms | 23.47 ms |
+| 99th percentile | 38.85 ms | 24.44 ms |
+| Samples at least 30 ms | 7 / 120 | 0 / 120 |
+| Crop capture cost, median | 0.104 ms | 0.110 ms |
+| CPU during 5 s without input, process tree | 2.00% | 2.20% |
+
+This single matched pair supports lower observed response latency in that setup;
+it does not establish physical display latency, hardware-GPU performance or a
+universal percentile guarantee. CPU uses 100% for one logical core, excluding the
+harness and X server. Both runs exited normally without surviving children.
+
+A separate real-window check kept a foreground terminal writer active while
+creating another Screen, opening and cancelling a busy-close prompt, and sending
+Ctrl-C. Both shell identities survived those actions; final owned shutdown left
+no children. The ten close-confirmation checks and 31 GPUI tests also passed.
+The final build passed the workspace smoke on Wayland and X11 with hardware
+D3D12-backed OpenGL. That smoke waits for the shell's known-idle close assessment
+before exercising the no-prompt close shortcut; receiving output alone does not
+prove that its later idle metadata has arrived.
+
+The reusable driver records binary, harness and fixture hashes, raw samples,
+inter-key delays, screenshots and shutdown evidence:
+
+```sh
+python3 scripts/testing/gpui-workspace-performance.py target/release/splitty-gpui \
+  --output /tmp/splitty-workspace-latency
+```
+
+It requires Xvfb, xdotool and the existing native development dependencies. Use
+`--xvfb`, `--xvfb-lib` and `--xdotool` for private dependency installations. The
+companion `gpui-latency-fixture.py` runs only inside the test's owned terminal.
+
 ## Ghostty integration measurements
 
 On 2026-11-07, the original Alacritty executable at `273f147` and the Ghostty
