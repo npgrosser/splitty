@@ -352,3 +352,7 @@ Each point names what holds now, the alternative, and where it is recorded.
 - **`native-workspace-chrome`, NWC-3** (2026-11-07, provisional, tbd): adopt toolkit icons and controls with the existing appearance source first; native presets and full theme-token migration remain a separate change.
 - **`native-host-directory`, HD1** (2026-11-07, provisional, tbd): share the directory response under core `native_api::directory`, with explicit server-side conversion from unchanged storage/source records.
 - **`native-host-directory`, HD3** (2026-11-07, provisional, tbd): the experimental native directory reader requires `hub-host-decisions-v1`; older local services report unavailable without a second legacy merge or polling implementation.
+
+- **`native-source-routing`, SR1** (2026-11-07, provisional, tbd): anchor a stable opaque source namespace to its initial connection UUID; the current connection UUID remains execution authority. No additional window UUID or remote registry.
+- **`native-source-routing`, SR2** (2026-11-07, provisional, tbd): capture callback authority immutably and retain geometry generations, structural revisions and request/document identities for their specific purposes; ordinary catalog updates do not invalidate unchanged terminal input.
+- **`native-source-routing`, SR3** (2026-11-07, provisional, tbd): use spec-driven planning with `skip_specs: true` for this cross-component prerequisite, preserving existing behavioral contracts.
