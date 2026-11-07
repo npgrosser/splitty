@@ -77,7 +77,7 @@ Ghostty supplies terminal state and protocol behavior; GPUI still supplies text 
 
 Image support is a separate compatibility item: Kitty graphics requires native decoding/texture presentation work and does not establish Sixel or iTerm2 parity with the web client's image addon. Choosing the core does not claim full desktop parity or complete image support. Document unsupported behavior and resolve the cutover requirements explicitly. Performance acceptance remains based on optimized native measurements, not the reputation or benchmarks of another terminal application.
 
-The bounded replacement is a separate implementation increment: reproducible native dependency build/linking; an owned, tested Rust boundary; adaptation of the current terminal view while preserving input, selection, scrollback, resize and replay behavior; architecture-model/documentation updates; then native smoke and optimized performance evidence. Retain the existing phase-0 evidence as the Alacritty baseline. Do not combine this replacement with service-driven layout, host migration, image rendering or release cutover.
+The bounded replacement is a separate implementation increment: reproducible native dependency build/linking; an owned, tested Rust boundary; adaptation of the current terminal view while preserving input, selection, scrollback, resize and replay behavior; architecture-model/documentation updates; then native smoke and optimized performance evidence. Retain the existing phase-0 evidence as the Alacritty baseline. Track the terminal replacement and the following local-screen workflow as separate increments with separate acceptance evidence. Host migration, image rendering and release cutover remain later work.
 
 ## Capabilities
 
@@ -122,6 +122,8 @@ Open questions for the design:
 - The development loop without hot reload: rebuild time of the desktop crate, and keeping the client core's tests free of UI so they stay fast.
 
 ## Carried-over design notes
+
+- 2026-11-07, `native-terminal-ghostty` and `native-local-workspace`: the implementation is split into an owned Ghostty engine/presentation increment and a service-driven local-screen increment. The first usable screen requires splits, tab groups, selection, close and divider resizing. GPUI Kit supplies native UI primitives; direct projection of the shared mux tree replaces the browser docking tree, without another layout authority. Initial layout edits wait for authoritative snapshots. Drag-and-drop, scratchpad and `splitty open` follow after this acceptance milestone. WSLg software graphics are a test-environment limit; graphics-driver investigation must not block feature work. A native Windows UI with a WSL service remains the target Windows topology.
 
 - 2026-11-07, terminal engine selection: use Ghostty for the first regular native implementation. Alacritty remains the historical phase-0 baseline until replaced. The earlier rule excluding every engine type from the terminal renderer is superseded by the responsibility boundaries above: concrete safe types inside the terminal feature are acceptable, while workspace, layout and client core remain independent. No runtime emulator selection or generic plugin framework is required.
 
