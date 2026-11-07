@@ -373,3 +373,9 @@ Each point names what holds now, the alternative, and where it is recorded.
 - **`native-host-management`, NHM-1** (2026-11-08, provisional, tbd): target entry means Connect, with optional display name; no offline unnamed bookmark format is added.
 - **`native-host-management`, NHM-2** (2026-11-08, provisional, tbd): typed host mutations share the existing hub API stream and a bounded 16-action queue; directory reads and mutation outcomes remain distinct.
 - **`native-host-management`, NHM-3** (2026-11-08, provisional, tbd): leaving Hosts withdraws pending connection continuations in the worker; current unsaved/forgotten connection work remains distinguishable from saved directory metadata.
+
+- **`native-outbound-ports`, NOP-1 (2026-11-08, provisional, tbd):** independent owned API jobs, initially four active and sixteen pending, with per-mapping order and an independent passive reader.
+- **`native-outbound-ports`, NOP-2 (2026-11-08, provisional, tbd):** browser Open requires a validated opening acknowledgement plus passive confirmation of the exact up mapping; no mutation replay is used to reconcile a lost reply.
+- **`native-outbound-ports`, NOP-3 (2026-11-08, provisional, tbd):** browser consent is separately revocable; closing its initiating surface does not implicitly stop an admitted service-owned forward.
+- **`native-outbound-ports`, NOP-4 (2026-11-08, provisional, tbd):** reuse the existing desktop localhost opening contract; run bounded Windows/WSL endpoint/collision probes and fix or withhold demonstrably mismatched paths, without blanket disabling for missing evidence or adding a proxy protocol.
+- **`native-outbound-ports`, NOP-5 (2026-11-08, provisional, tbd):** Ports extends the existing Hosts destination and completes explicit outbound workflows; reverse sharing and detection-driven automation remain separate parity work.
