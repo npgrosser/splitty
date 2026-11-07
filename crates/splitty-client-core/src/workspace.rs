@@ -754,7 +754,9 @@ impl ScreenModel {
             new_pane_index: None,
             new_pane_id: Some(PaneId::from(new_pane_id.clone())),
             resulting_sizes: None,
-            cwd: self.cwd_for(pane_id),
+            // The service has the authoritative source CWD; a local snapshot
+            // may lag behind its process metadata when this op is admitted.
+            cwd: None,
             shell_profile_id: None,
         };
         self.pending_panes.insert(new_pane_id.clone());
@@ -773,7 +775,7 @@ impl ScreenModel {
         let op = ScreenOp::NewTab {
             pane_id: PaneId::from(pane_id),
             new_pane_id: Some(PaneId::from(new_pane_id.clone())),
-            cwd: self.cwd_for(pane_id),
+            cwd: None,
             shell_profile_id: None,
         };
         self.pending_panes.insert(new_pane_id.clone());
@@ -915,17 +917,6 @@ impl ScreenModel {
             ));
         }
         Ok(())
-    }
-
-    fn cwd_for(&self, pane_id: &str) -> Option<String> {
-        let screen = self.snapshot()?;
-        let pane = screen.panes.get(&PaneId::from(pane_id))?;
-        pane.cwd.clone().or_else(|| {
-            pane.session_id
-                .as_ref()
-                .and_then(|session| screen.sessions.get(session))
-                .and_then(|session| session.cwd.clone())
-        })
     }
 
     fn install_routes(&mut self, routes: HashMap<String, String>) {
@@ -1501,6 +1492,122 @@ mod tests {
         })
         .await
         .expect("workspace update before timeout");
+    }
+
+    #[tokio::test]
+    async fn real_service_inherits_current_cwd_after_client_snapshot_lags() {
+        fn source_cwd<'a>(model: &'a ScreenModel, pane: &str) -> Option<&'a str> {
+            model.snapshot().and_then(|screen| {
+                screen
+                    .panes
+                    .get(&PaneId::from(pane))
+                    .and_then(|pane| pane.cwd.as_deref())
+            })
+        }
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        *runtime.state.shell_profiles.write().unwrap() = serde_json::from_value(
+            serde_json::json!({"defaultProfileId":"test-sh", "profiles":[{
+                "id":"test-sh", "name":"Test shell", "command":"/bin/sh", "args":[],
+                "enabled":true, "available":true, "target":"local", "source":"custom"
+            }]}),
+        )
+        .unwrap();
+        let store = runtime.state.mux_store.clone();
+        let service = EmbeddedService::from_runtime(runtime);
+        let cwd_a = path.join("cwd-a");
+        let cwd_b = path.join("cwd-b");
+        std::fs::create_dir_all(&cwd_a).unwrap();
+        std::fs::create_dir_all(&cwd_b).unwrap();
+        let a = cwd_a.to_string_lossy().into_owned();
+        let b = cwd_b.to_string_lossy().into_owned();
+
+        let mut client = service.connect().await.unwrap();
+        loop {
+            let event = tokio::time::timeout(Duration::from_secs(10), client.next_event())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            if event
+                .json()
+                .is_some_and(|json| json["type"] == "mux.welcome")
+            {
+                break;
+            }
+        }
+        client.activity(true).unwrap();
+        let ids = client.create_screen("CWD inheritance").unwrap();
+        let source_pane = ids.pane_id.clone();
+        let screen_id = splitty_core::ids::ScreenId::from(ids.screen_id.as_str());
+        let mut workspace = ScreenModel::new(ids, client.connection_id());
+        until(&mut client, &mut workspace, |model| {
+            model.session_for(&source_pane).is_some()
+        })
+        .await;
+        let source_session =
+            splitty_core::ids::SessionId::from(workspace.session_for(&source_pane).unwrap());
+        let set_cwd = |cwd: &str| {
+            store
+                .dispatch(mux::Op::UpdateSessionMetadata {
+                    session_id: source_session.clone(),
+                    display_title: "test shell".into(),
+                    cwd: cwd.into(),
+                    busy: false,
+                    exited: false,
+                    exit_code: None,
+                    close: false,
+                })
+                .unwrap();
+        };
+        set_cwd(&a);
+        client.resync(workspace.screen_id()).unwrap();
+        until(&mut client, &mut workspace, |model| {
+            source_cwd(model, &source_pane) == Some(a.as_str())
+        })
+        .await;
+        set_cwd(&b);
+        assert_eq!(source_cwd(&workspace, &source_pane), Some(a.as_str()));
+        assert_eq!(
+            store
+                .get_screen(&screen_id)
+                .unwrap()
+                .sessions
+                .get(&source_session)
+                .unwrap()
+                .cwd
+                .as_deref(),
+            Some(b.as_str())
+        );
+
+        // Admit both operations before consuming a newer screen snapshot.
+        let split_pane = workspace
+            .split(&client, &source_pane, Axis::Horizontal)
+            .unwrap();
+        let tab_pane = workspace.new_tab(&client, &source_pane).unwrap();
+        assert_eq!(source_cwd(&workspace, &source_pane), Some(a.as_str()));
+        until(&mut client, &mut workspace, |model| {
+            model.session_for(&split_pane).is_some() && model.session_for(&tab_pane).is_some()
+        })
+        .await;
+        let screen = store.get_screen(&screen_id).unwrap();
+        for pane in [&split_pane, &tab_pane] {
+            let session = screen.panes[&PaneId::from(pane.as_str())]
+                .session_id
+                .as_ref()
+                .unwrap();
+            assert_eq!(screen.sessions[session].cwd.as_deref(), Some(b.as_str()));
+            assert_eq!(
+                screen.sessions[session].shell_profile_id.as_deref(),
+                Some("test-sh")
+            );
+        }
+
+        drop(client);
+        service.close().await.unwrap();
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[tokio::test]

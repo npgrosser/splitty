@@ -73,6 +73,7 @@ model {
     client_workspace -> splitty.core.ids 'Identify panes and split nodes'
     client_workspace -> splitty.core.mux 'Use canonical screen layout, operations and validation'
     client_workspace -> splitty.core.pty 'Gate real-service tests on PTY availability'
+    client_workspace -> appearance 'Reuse an isolated in-memory service for launch inheritance tests'
     native_workspace -> appearance 'Poll owner-bound appearance without consuming session events'
     native_workspace -> embedded 'Own appearance fixture service cleanup in runtime tests'
     native_workspace -> splitty.core.protocol 'Broadcast same-service settings events in runtime tests'
