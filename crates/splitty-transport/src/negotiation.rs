@@ -336,6 +336,14 @@ pub async fn accept<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 // Keep peer-supplied diagnostics counted for as long as the error retains them.
 #[derive(Debug)]
 struct PreparationFailure(Charged<wire::Closed>);
+/// Return the actual structured preparation failure, if this error came from
+/// a peer `Closed` frame. The error retains its byte charge while borrowed.
+pub fn preparation_failure(error: &io::Error) -> Option<&wire::Closed> {
+    error
+        .get_ref()?
+        .downcast_ref::<PreparationFailure>()
+        .map(|failure| &failure.0.value)
+}
 impl std::fmt::Display for PreparationFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0.message)
@@ -651,11 +659,20 @@ mod tests {
                 }
             );
             assert_eq!(error.to_string(), "setup failed");
+            assert_eq!(
+                preparation_failure(&error),
+                Some(&wire::Closed {
+                    code: wire::CloseCode::BackendLost,
+                    retryable,
+                    message: "setup failed".into(),
+                })
+            );
             assert!(budget.control.used() > 0);
             drop(error);
             assert!(write.is_empty());
             assert_eq!(budget.used(), 0);
         }
+        assert!(preparation_failure(&io::Error::other("setup failed")).is_none());
     }
     #[tokio::test]
     async fn framing_then_preparation_then_verified_service() {

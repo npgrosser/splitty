@@ -202,6 +202,7 @@ pub struct Peer {
     incoming: queue::Receiver<Incoming>,
     cancel: queue::Receiver<Incoming>,
     cancel_ended: bool,
+    closed_reason: Arc<Mutex<Option<Arc<Charged<wire::Closed>>>>>,
     tasks: Vec<JoinHandle<io::Result<()>>>,
 }
 impl Peer {
@@ -228,9 +229,19 @@ impl Peer {
         let ledger = Arc::new(Mutex::new(flow::Credits::new(ready.generation)));
         let read_sender = sender.clone();
         let read_ledger = ledger.clone();
+        let closed_reason = Arc::new(Mutex::new(None));
+        let read_reason = closed_reason.clone();
         let (read_ended, mut ended) = tokio::sync::watch::channel(false);
         let read = tokio::spawn(async move {
-            let result = read_loop(reader, &read_sender, read_ledger, incoming, cancel).await;
+            let result = read_loop(
+                reader,
+                &read_sender,
+                read_ledger,
+                incoming,
+                cancel,
+                &read_reason,
+            )
+            .await;
             // A frame can become ready in the same poll that owner cancellation
             // closes its queue. The lease is dropped by forward; this is a
             // normal end only when cancellation was already in effect.
@@ -267,8 +278,15 @@ impl Peer {
             incoming: in_rx,
             cancel: cancel_rx,
             cancel_ended: false,
+            closed_reason,
             tasks: vec![read, write],
         }
+    }
+    /// The peer's actual terminal `Closed` frame, if one was received. Earlier
+    /// accepted application frames may still be queued; drain `recv` to EOF.
+    /// Clones share the control-byte charge until the final clone is dropped.
+    pub fn closed_reason(&self) -> Option<Arc<Charged<wire::Closed>>> {
+        self.closed_reason.lock().expect("closed reason").clone()
     }
     pub async fn recv(&mut self) -> Option<Charged<Incoming>> {
         loop {
@@ -321,6 +339,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
     ledger: Arc<Mutex<flow::Credits>>,
     incoming: queue::Sender<Incoming>,
     cancel: queue::Sender<Incoming>,
+    closed_reason: &Mutex<Option<Arc<Charged<wire::Closed>>>>,
 ) -> io::Result<()> {
     let mut closing = sender.context.closing();
     let mut ping = time::interval_at(Instant::now() + wire::PING_INTERVAL, wire::PING_INTERVAL);
@@ -403,9 +422,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 }))?;
             }
             Kind::Closed => {
-                frame
+                let reason = frame
                     .value
                     .decode_control::<wire::Closed>(&sender.context.budget)?;
+                *closed_reason.lock().expect("closed reason") = Some(Arc::new(reason));
                 return Ok(());
             }
             _ => {
@@ -1002,7 +1022,7 @@ mod tests {
     #[tokio::test]
     async fn orderly_end_drains_accepted_frames_but_revocation_and_bad_frames_discard() {
         use tokio::io::AsyncWriteExt;
-        for ending in ["eof", "closed", "revoked", "malformed"] {
+        for ending in ["eof", "closed", "bad_closed", "revoked", "malformed"] {
             let (server, mut raw) = tokio::io::duplex(4096);
             let (read, write) = tokio::io::split(server);
             let context = queue::Context::default();
@@ -1043,6 +1063,16 @@ mod tests {
                 )
                 .await
                 .unwrap();
+            } else if ending == "bad_closed" {
+                codec::write(
+                    &mut raw,
+                    &Frame {
+                        kind: Kind::Closed,
+                        payload: b"{bad json".to_vec(),
+                    },
+                )
+                .await
+                .unwrap();
             } else {
                 if ending == "malformed" {
                     raw.write_all(&[255]).await.unwrap();
@@ -1052,11 +1082,24 @@ mod tests {
             // Observe actual reader completion before consuming, so this tests
             // buffered terminal frames rather than racing the consumer against EOF.
             let result = peer.tasks.remove(0).await.unwrap();
-            assert_eq!(result.is_err(), ending == "malformed");
+            assert_eq!(
+                result.is_err(),
+                matches!(ending, "malformed" | "bad_closed")
+            );
+            let reason = peer.closed_reason();
+            if ending == "closed" {
+                let closed = reason.as_ref().expect("received terminal reason");
+                assert_eq!(closed.code, wire::CloseCode::Closed);
+                assert_eq!(closed.message, "done");
+                assert!(!closed.retryable);
+                assert!(context.budget.control.used() > 0);
+            } else {
+                assert!(reason.is_none(), "no fabricated terminal reason");
+            }
             if ending == "revoked" {
                 context.close();
             }
-            if matches!(ending, "revoked" | "malformed") {
+            if matches!(ending, "revoked" | "malformed" | "bad_closed") {
                 assert!(
                     peer.recv().await.is_none(),
                     "hard revocation discards queued input"
@@ -1068,8 +1111,16 @@ mod tests {
                     assert_eq!(frame.frame.kind, expected);
                 }
                 assert!(peer.recv().await.is_none());
+                assert_eq!(peer.closed_reason().is_some(), ending == "closed");
             }
+            let retained = reason.as_ref().map(Arc::clone);
             peer.shutdown().await;
+            if ending == "closed" {
+                assert!(context.budget.control.used() > 0);
+                drop(reason);
+                assert!(context.budget.control.used() > 0);
+            }
+            drop(retained);
             assert_eq!(
                 context.budget.used(),
                 0,

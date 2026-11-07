@@ -22,7 +22,7 @@ model {
       metadata { module 'splitty_transport::codec' spec 'mux-protocol' }
     }
     negotiation = component 'negotiation' {
-      description 'Separate framing and service handshakes with fixed deadlines, instance/purpose verification and bounded preparation.'
+      description 'Separate framing and service handshakes with fixed deadlines, instance/purpose verification and bounded preparation. Typed preparation-failure access borrows the retained charged Closed diagnostic.'
       metadata { module 'splitty_transport::negotiation' }
     }
     requests = component 'requests' {
@@ -46,7 +46,7 @@ model {
       metadata { module 'splitty_transport::worker' }
     }
     peer = component 'peer' {
-      description 'Admitted full-duplex carrier with one persistent reader/writer, separate bounded controls, receipt consumption and liveness; each resumed write checks owner revocation. Confirmed data waits for peer consumption so owned substream relays can bound each producer independently.'
+      description 'Admitted full-duplex carrier with one persistent reader/writer, separate bounded controls, receipt consumption and liveness; each resumed write checks owner revocation. A received terminal Closed reason remains charged through orderly EOF and caller retention. Confirmed data waits for peer consumption so owned substream relays can bound each producer independently.'
       metadata { module 'splitty_transport::peer' }
     }
     budget -> wire 'Default hard ceilings and control reservations'
