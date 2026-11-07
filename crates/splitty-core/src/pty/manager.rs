@@ -313,6 +313,7 @@ mod tests {
         let profiles = ShellProfilesState {
             default_profile_id: default.id.clone(),
             profiles: vec![default, missing],
+            ..ShellProfilesState::default()
         };
         let manager = Manager::with_shell_profiles(Arc::new(RwLock::new(profiles)));
         let mut opts = sh_opts("fallback-session", "");

@@ -25,8 +25,13 @@ export interface ShellProfile {
 }
 
 export interface ShellProfilesState {
+  /** The effective default profile. */
   defaultProfileId: string;
   profiles: ShellProfile[];
+  /** True while the default follows the system default; on save, true stores "follow". */
+  followSystemDefault?: boolean;
+  /** The profile detected for the login shell; absent on older servers. */
+  systemDefaultProfileId?: string;
 }
 
 let current: ShellProfilesState = { defaultProfileId: "", profiles: [] };

@@ -11,6 +11,12 @@
     type ShellProfilesState,
     type ShellTarget,
   } from "../../../lib/shell_profiles.ts";
+  import {
+    chooseDefaultProfile,
+    defaultProfileChoice,
+    supportsSystemDefault,
+    systemDefaultLabel,
+  } from "../../../lib/shell_profile_model.ts";
 
   interface Props {
     collapsed: boolean;
@@ -47,7 +53,7 @@
   }
 
   function setDefault(event: Event): void {
-    draft.defaultProfileId = (event.target as HTMLSelectElement).value;
+    draft = chooseDefaultProfile(draft, (event.target as HTMLSelectElement).value);
     markChanged();
   }
 
@@ -161,7 +167,10 @@
 <SettingsSection title="SHELLS" {collapsed} {onToggle}>
   <div class="shell-settings-toolbar">
     <label for="default-shell-profile">Default profile</label>
-    <select id="default-shell-profile" value={draft.defaultProfileId} onchange={setDefault}>
+    <select id="default-shell-profile" value={defaultProfileChoice(draft)} onchange={setDefault}>
+      {#if supportsSystemDefault(draft)}
+        <option value="">{systemDefaultLabel(draft)}</option>
+      {/if}
       {#each draft.profiles.filter((profile) => profile.enabled && profile.available) as profile}
         <option value={profile.id}>{profile.name}</option>
       {/each}

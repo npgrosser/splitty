@@ -1174,12 +1174,11 @@ mod tests {
 
         let loaded = load_from(&path);
         assert!(!loaded.shells.profiles.is_empty());
-        assert!(!loaded.shells.default_profile_id.is_empty());
-        assert!(loaded
-            .shells
-            .profiles
-            .iter()
-            .any(|profile| profile.id == loaded.shells.default_profile_id));
+        // An empty stored default follows the system default.
+        assert_eq!(loaded.shells.default_profile_id, "");
+        let state = crate::shell_profiles::state_from_settings(&loaded.shells);
+        assert!(state.follow_system_default);
+        assert!(state.default_profile().is_some());
         let ids: std::collections::HashSet<_> = loaded
             .shells
             .profiles

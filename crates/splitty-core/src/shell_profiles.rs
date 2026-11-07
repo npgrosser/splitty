@@ -52,6 +52,7 @@ fn enabled_by_default() -> bool {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellSettings {
+    /// The explicitly chosen default profile; empty follows the system default.
     #[serde(default)]
     pub default_profile_id: String,
     #[serde(default)]
@@ -109,9 +110,17 @@ impl ShellProfile {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ShellProfilesState {
+    /// The effective default profile.
     pub default_profile_id: String,
     #[serde(default)]
     pub profiles: Vec<ShellProfile>,
+    /// Whether the default follows the system default rather than an explicit
+    /// choice. On update, true stores the empty "follow" value.
+    #[serde(default)]
+    pub follow_system_default: bool,
+    /// The profile detected for the login shell; reported, ignored on update.
+    #[serde(default)]
+    pub system_default_profile_id: String,
 }
 
 impl ShellProfilesState {
@@ -360,14 +369,17 @@ pub fn reconcile_shell_settings(
         }
     }
 
+    // The stored default stays the user's explicit choice or empty ("follow the
+    // system default"); the effective default is resolved on every run.
     let requested = settings.default_profile_id.clone();
     let default_profile_id = choose_default(&requested, &profiles, detection);
-    settings.default_profile_id = default_profile_id.clone();
     settings.profiles = profiles.iter().map(ShellProfile::stored).collect();
 
     ShellProfilesState {
         default_profile_id,
         profiles,
+        follow_system_default: requested.is_empty(),
+        system_default_profile_id: detection.system_default_id.clone().unwrap_or_default(),
     }
 }
 
@@ -427,7 +439,12 @@ pub fn apply_shell_profiles_update(
         }
     }
 
-    let requested_default = update.default_profile_id;
+    let follow_system = update.follow_system_default;
+    let requested_default = if follow_system {
+        String::new()
+    } else {
+        update.default_profile_id
+    };
     let mut candidate = ShellSettings {
         default_profile_id: requested_default.clone(),
         profiles: stored,
@@ -437,7 +454,7 @@ pub fn apply_shell_profiles_update(
         .profiles
         .iter()
         .any(|profile| profile.id == requested_default && profile.enabled && profile.available);
-    if !requested_is_valid {
+    if !follow_system && !requested_is_valid {
         if let Some(first) = state
             .profiles
             .iter()
@@ -763,6 +780,7 @@ mod tests {
             ShellProfilesState {
                 default_profile_id: "custom-a".into(),
                 profiles: vec![profile.clone(), profile],
+                ..ShellProfilesState::default()
             },
             &DetectionResult::default(),
         )
@@ -801,6 +819,7 @@ mod tests {
         let state = ShellProfilesState {
             default_profile_id: "default".into(),
             profiles: vec![default, alternate],
+            ..ShellProfilesState::default()
         };
 
         let selected = state
@@ -841,6 +860,7 @@ mod tests {
                         ..detection.profiles[0].clone()
                     },
                 ],
+                ..ShellProfilesState::default()
             },
             &detection,
         )
@@ -848,6 +868,83 @@ mod tests {
         assert_eq!(state.default_profile_id, "shell-zsh");
         assert_eq!(state.profiles[0].id, "shell-zsh");
     }
+    fn detection_with_login_shell(dir: &Path, shell: &str) -> DetectionResult {
+        detect_shell_profiles(&DetectionEnvironment {
+            path: vec![dir.to_path_buf()],
+            shell: Some(dir.join(shell).to_string_lossy().into_owned()),
+            is_wsl: false,
+        })
+    }
+
+    #[test]
+    fn empty_default_follows_the_login_shell_without_storing_it() {
+        let temp = TempDir::new().unwrap();
+        executable(temp.path(), "bash");
+        executable(temp.path(), "zsh");
+        let mut settings = ShellSettings::default();
+
+        let state = reconcile_shell_settings(
+            &mut settings,
+            &detection_with_login_shell(temp.path(), "zsh"),
+        );
+        assert_eq!(state.default_profile_id, "shell-zsh");
+        assert_eq!(state.system_default_profile_id, "shell-zsh");
+        assert!(state.follow_system_default);
+        assert_eq!(settings.default_profile_id, "");
+
+        let state = reconcile_shell_settings(
+            &mut settings,
+            &detection_with_login_shell(temp.path(), "bash"),
+        );
+        assert_eq!(state.default_profile_id, "shell-bash");
+        assert!(state.follow_system_default);
+    }
+
+    #[test]
+    fn explicit_default_survives_a_login_shell_change() {
+        let temp = TempDir::new().unwrap();
+        executable(temp.path(), "bash");
+        executable(temp.path(), "zsh");
+        let detection = detection_with_login_shell(temp.path(), "zsh");
+        let mut settings = ShellSettings::default();
+        let initial = reconcile_shell_settings(&mut settings, &detection);
+
+        let saved = apply_shell_profiles_update(
+            &mut settings,
+            ShellProfilesState {
+                default_profile_id: "shell-bash".into(),
+                follow_system_default: false,
+                ..initial
+            },
+            &detection,
+        )
+        .unwrap();
+        assert_eq!(saved.default_profile_id, "shell-bash");
+        assert!(!saved.follow_system_default);
+        assert_eq!(settings.default_profile_id, "shell-bash");
+
+        let restarted = reconcile_shell_settings(
+            &mut settings,
+            &detection_with_login_shell(temp.path(), "zsh"),
+        );
+        assert_eq!(restarted.default_profile_id, "shell-bash");
+        assert!(!restarted.follow_system_default);
+
+        let followed = apply_shell_profiles_update(
+            &mut settings,
+            ShellProfilesState {
+                default_profile_id: "shell-bash".into(),
+                follow_system_default: true,
+                ..restarted
+            },
+            &detection,
+        )
+        .unwrap();
+        assert_eq!(settings.default_profile_id, "");
+        assert_eq!(followed.default_profile_id, "shell-zsh");
+        assert!(followed.follow_system_default);
+    }
+
     #[test]
     fn unavailable_profiles_fall_back_with_reason() {
         let usable = ShellProfile {
@@ -872,6 +969,7 @@ mod tests {
         let state = ShellProfilesState {
             default_profile_id: usable.id.clone(),
             profiles: vec![usable, unavailable, disabled],
+            ..ShellProfilesState::default()
         };
         for (id, reason) in [
             ("missing", "missing"),
@@ -889,6 +987,7 @@ mod tests {
                 .into_iter()
                 .filter(|p| p.id != "default")
                 .collect(),
+            ..ShellProfilesState::default()
         };
         assert!(none_available.resolve(Some("unavailable"), None).is_err());
     }
