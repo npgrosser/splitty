@@ -1,5 +1,6 @@
 //! Own the local service and route workspace intents on one ordered connection.
 use crate::{
+    appearance::{AppearanceSnapshot, ColorScheme},
     workspace::{Axis, ClosePlan, CloseTarget, LocalWorkspace, MovePlacement, PaneDrag},
     Event,
 };
@@ -18,6 +19,10 @@ use std::{
 use tokio::sync::mpsc;
 
 pub enum Command {
+    SetColorScheme {
+        connection: uuid::Uuid,
+        scheme: ColorScheme,
+    },
     CreateScreen(String),
     SwitchScreen(String),
     RenameScreen {
@@ -72,6 +77,11 @@ pub enum Command {
     },
 }
 pub enum Update {
+    Appearance(Arc<AppearanceSnapshot>),
+    AppearanceError {
+        connection: uuid::Uuid,
+        reason: String,
+    },
     Workspace(Box<LocalWorkspace>),
     Event(Box<Event>),
     Attached(String),
@@ -97,6 +107,109 @@ pub struct Worker {
     pub cleanup_complete: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<anyhow::Result<()>>>,
 }
+// Setup and reads stay owned across cancelled select branches. Both streams
+// share the embedded service's admission domain, but never consume each other's events.
+#[cfg(not(target_os = "windows"))]
+type AppearanceSetup<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = std::io::Result<crate::appearance::AppearanceReader>>
+            + Send
+            + 'a,
+    >,
+>;
+#[cfg(not(target_os = "windows"))]
+struct RuntimeAppearance<'a> {
+    service: &'a crate::EmbeddedService,
+    connection: uuid::Uuid,
+    scheme: ColorScheme,
+    setup: Option<AppearanceSetup<'a>>,
+    reader: Option<crate::appearance::AppearanceReader>,
+    dirty: bool,
+}
+#[cfg(not(target_os = "windows"))]
+impl<'a> RuntimeAppearance<'a> {
+    fn new(
+        service: &'a crate::EmbeddedService,
+        connection: uuid::Uuid,
+        scheme: ColorScheme,
+    ) -> Self {
+        Self {
+            service,
+            connection,
+            scheme,
+            setup: None,
+            reader: None,
+            dirty: true,
+        }
+    }
+
+    fn set_scheme(&mut self, connection: uuid::Uuid, scheme: ColorScheme) -> std::io::Result<()> {
+        if connection != self.connection || scheme == self.scheme {
+            return Ok(());
+        }
+        self.scheme = scheme;
+        self.settings_changed(connection)
+    }
+
+    fn settings_changed(&mut self, connection: uuid::Uuid) -> std::io::Result<()> {
+        if connection != self.connection {
+            return Ok(());
+        }
+        match &mut self.reader {
+            Some(reader) => reader.refresh(connection, self.scheme),
+            None => {
+                self.dirty = true;
+                Ok(())
+            }
+        }
+    }
+
+    async fn next_update(&mut self) -> std::io::Result<AppearanceSnapshot> {
+        loop {
+            if let Some(reader) = &mut self.reader {
+                return reader.next_update().await;
+            }
+            if self.setup.is_none() {
+                if !self.dirty {
+                    std::future::pending::<()>().await;
+                }
+                self.dirty = false;
+                self.setup = Some(Box::pin(
+                    self.service.appearance_reader(self.connection, self.scheme),
+                ));
+            }
+            let result = self.setup.as_mut().expect("appearance setup started").await;
+            self.setup = None;
+            match result {
+                Ok(mut reader) => {
+                    if self.dirty {
+                        reader.refresh(self.connection, self.scheme)?;
+                        self.dirty = false;
+                    }
+                    self.reader = Some(reader);
+                }
+                Err(_) if self.dirty => continue,
+                Err(error) => return Err(error),
+            }
+        }
+    }
+
+    async fn finish(mut self) -> std::io::Result<()> {
+        // Completing a started, time-bounded handshake lets us await its service
+        // cleanup explicitly. Dropping setup would only schedule Drop cleanup.
+        if let Some(setup) = self.setup.take() {
+            // The connector awaits failed setup cleanup before returning an
+            // initialization error. Appearance initialization remains optional
+            // when it happens to finish during close, just as during operation.
+            self.reader = setup.await.ok();
+        }
+        match self.reader {
+            Some(reader) => reader.finish().await,
+            None => Ok(()),
+        }
+    }
+}
+
 #[cfg(not(target_os = "windows"))]
 struct PendingClose {
     request_id: u64,
@@ -193,6 +306,14 @@ async fn finish_owned_run(
 }
 impl Worker {
     pub fn start(commands: mpsc::Receiver<Command>, updates: mpsc::Sender<Update>) -> Self {
+        Self::start_with_scheme(commands, updates, ColorScheme::Dark)
+    }
+
+    pub fn start_with_scheme(
+        commands: mpsc::Receiver<Command>,
+        updates: mpsc::Sender<Update>,
+        scheme: ColorScheme,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stopping = stop.clone();
         let cleanup_complete = Arc::new(AtomicBool::new(false));
@@ -210,7 +331,7 @@ impl Worker {
                 }
             };
             runtime.block_on(async {
-                let result = run(commands, updates.clone(), stopping, completed).await;
+                let result = run(commands, updates.clone(), stopping, completed, scheme).await;
                 if let Err(error) = &result {
                     let _ = updates.try_send(Update::Status(format!("Local service: {error:#}")));
                 }
@@ -257,6 +378,7 @@ async fn run(
     updates: mpsc::Sender<Update>,
     stop: Arc<AtomicBool>,
     cleanup_complete: Arc<AtomicBool>,
+    scheme: ColorScheme,
 ) -> anyhow::Result<()> {
     run_service(
         crate::EmbeddedService::start(),
@@ -264,6 +386,7 @@ async fn run(
         updates,
         stop,
         cleanup_complete,
+        scheme,
     )
     .await
 }
@@ -275,10 +398,17 @@ async fn run_service(
     updates: mpsc::Sender<Update>,
     stop: Arc<AtomicBool>,
     cleanup_complete: Arc<AtomicBool>,
+    scheme: ColorScheme,
 ) -> anyhow::Result<()> {
     use crate::workspace::WorkspaceDelta;
+    let mut client = match service.connect().await {
+        Ok(client) => client,
+        Err(error) => {
+            return finish_owned_run(service, Err(error.into()), &cleanup_complete, &stop).await
+        }
+    };
+    let mut appearance = None::<RuntimeAppearance<'_>>;
     let result = async {
-        let mut client = service.connect().await?;
         let mut model = None::<LocalWorkspace>;
         let mut attached = HashSet::<String>::new();
         let mut visible = HashSet::<String>::new();
@@ -295,12 +425,19 @@ async fn run_service(
         let mut last_close_request = 0_u64;
         let mut pending_close = None::<PendingClose>;
         enum Next {
+            Appearance(std::io::Result<Arc<AppearanceSnapshot>>),
             Event(std::io::Result<Option<Box<Event>>>),
             Command(Option<Command>),
             Tick,
         }
         loop {
             let next = tokio::select! {
+                result = async {
+                    match &mut appearance {
+                        Some(reader) => reader.next_update().await,
+                        None => std::future::pending().await,
+                    }
+                } => Next::Appearance(result.map(Arc::new)),
                 event = client.next_event() => Next::Event(event.map(|event| event.map(Box::new))),
                 command = commands.recv() => Next::Command(command),
                 _ = tick.tick() => Next::Tick,
@@ -310,6 +447,16 @@ async fn run_service(
             }
             let mut close_window = false;
             match next {
+                Next::Appearance(result) => {
+                    let update = match result {
+                        Ok(snapshot) => Update::Appearance(snapshot),
+                        Err(error) => Update::AppearanceError {
+                            connection: client.connection_id(),
+                            reason: error.to_string(),
+                        },
+                    };
+                    publish(&updates, update, &stop).await?;
+                }
                 Next::Tick => {}
                 Next::Command(None) => break,
                 Next::Command(Some(command)) => {
@@ -398,11 +545,20 @@ async fn run_service(
                         }
                         continue;
                     }
+                    if let Command::SetColorScheme { connection, scheme } = command {
+                        if let Some(reader) = &mut appearance {
+                            // A delayed command from another owner cannot choose app appearance.
+                            if let Err(error) = reader.set_scheme(connection, scheme) {
+                                publish(&updates, Update::AppearanceError { connection, reason: error.to_string() }, &stop).await?;
+                            }
+                        }
+                        continue;
+                    }
                     let Some(model) = &mut model else {
                         continue;
                     };
                     let result: std::io::Result<()> = match command {
-                        Command::RequestClose { .. } => {
+                        Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
                             unreachable!("close is handled before normal commands")
                         }
                         Command::CreateScreen(name) => {
@@ -557,6 +713,13 @@ async fn run_service(
                     let mut accepted_close_snapshot = false;
                     if let Some(json) = event.json() {
                         match json["type"].as_str() {
+                            Some("settings.changed") => {
+                                if let Some(reader) = &mut appearance {
+                                    if let Err(error) = reader.settings_changed(event.connection_id) {
+                                        publish(&updates, Update::AppearanceError { connection: event.connection_id, reason: error.to_string() }, &stop).await?;
+                                    }
+                                }
+                            }
                             Some("mux.welcome") if model.is_none() => {
                                 let mut workspace = LocalWorkspace::new(client.connection_id());
                                 let supports_tab_selection =
@@ -593,6 +756,10 @@ async fn run_service(
                                 )
                                 .await?;
                                 model = Some(workspace);
+                                // Establish the UI owner before any appearance can be published.
+                                appearance = Some(RuntimeAppearance::new(
+                                    &service, client.connection_id(), scheme,
+                                ));
                             }
                             Some("mux.workspace_snapshot") => {
                                 if let Some(model) = &mut model {
@@ -974,11 +1141,22 @@ async fn run_service(
                 }
             }
         }
-        client.finish().await?;
         Ok::<(), anyhow::Error>(())
     }
     .await;
-    finish_owned_run(service, result, &cleanup_complete, &stop).await
+    let appearance_cleanup = match appearance.take() {
+        Some(reader) => reader.finish().await.map_err(anyhow::Error::from),
+        None => Ok(()),
+    };
+    drop(appearance);
+    let client_cleanup = client.finish().await.map_err(anyhow::Error::from);
+    finish_owned_run(
+        service,
+        result.and(appearance_cleanup).and(client_cleanup),
+        &cleanup_complete,
+        &stop,
+    )
+    .await
 }
 
 #[cfg(all(test, not(target_os = "windows")))]
@@ -1043,6 +1221,222 @@ mod close_tests {
     }
 
     #[tokio::test]
+    async fn appearance_runtime_rejects_foreign_refresh_and_finishes_started_setup() {
+        use std::{future::Future, task::Poll};
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let service = crate::embedded::EmbeddedService::from_runtime(runtime);
+        let connection = uuid::Uuid::new_v4();
+        let mut appearance = RuntimeAppearance::new(&service, connection, ColorScheme::Light);
+        // Start setup, cancel just the receiving branch, then change the local
+        // preference. The owned handshake survives and yields only the latest choice.
+        let mut read = Box::pin(appearance.next_update());
+        std::future::poll_fn(|cx| {
+            assert!(read.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(read);
+        appearance
+            .set_scheme(connection, ColorScheme::Dark)
+            .unwrap();
+        appearance
+            .set_scheme(uuid::Uuid::new_v4(), ColorScheme::Light)
+            .unwrap();
+        let snapshot = tokio::time::timeout(Duration::from_secs(5), appearance.next_update())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(snapshot.connection_id(), connection);
+        assert_eq!(snapshot.scheme(), ColorScheme::Dark);
+        appearance.settings_changed(uuid::Uuid::new_v4()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), appearance.next_update())
+                .await
+                .is_err()
+        );
+        drop(snapshot);
+        appearance.finish().await.unwrap();
+
+        // Shutdown immediately after beginning a second setup must await that
+        // handshake and close the recovered API stream, even without a snapshot.
+        let mut appearance = RuntimeAppearance::new(&service, connection, ColorScheme::Light);
+        let mut read = Box::pin(appearance.next_update());
+        std::future::poll_fn(|cx| {
+            assert!(read.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(read);
+        tokio::time::timeout(Duration::from_secs(5), appearance.finish())
+            .await
+            .unwrap()
+            .unwrap();
+        service.close().await.unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn appearance_setup_failure_during_close_is_not_a_shutdown_failure() {
+        use std::{future::Future, task::Poll};
+        let (mut runtime, path) = crate::appearance::local::tests::fixture();
+        // Fail native identity validation inside the actual embedded handshake.
+        Arc::get_mut(&mut runtime.state).unwrap().instance = "invalid".into();
+        let service = crate::embedded::EmbeddedService::from_runtime(runtime);
+        let mut appearance =
+            RuntimeAppearance::new(&service, uuid::Uuid::new_v4(), ColorScheme::Dark);
+        let mut read = Box::pin(appearance.next_update());
+        std::future::poll_fn(|cx| {
+            assert!(read.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(read);
+        tokio::time::timeout(Duration::from_secs(5), appearance.finish())
+            .await
+            .unwrap()
+            .unwrap();
+        service.close().await.unwrap();
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
+    async fn appearance_worker_failure_keeps_output_and_recovers_from_local_settings() {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let state = runtime.state.clone();
+        state.config.write().unwrap().appearance.font_family = "x".repeat(4097);
+        let service = crate::embedded::EmbeddedService::from_runtime(runtime);
+        let (commands, receiver) = mpsc::channel(32);
+        let (sender, mut updates) = mpsc::channel(64);
+        let stop = Arc::new(AtomicBool::new(false));
+        let cleanup = Arc::new(AtomicBool::new(false));
+        let worker = tokio::spawn(run_service(
+            service,
+            receiver,
+            sender,
+            stop.clone(),
+            cleanup.clone(),
+            ColorScheme::Light,
+        ));
+        let mut owner = None;
+        let mut ready = None;
+        let mut failed = false;
+        while ready.is_none() || !failed {
+            match next_update(&mut updates).await {
+                Update::Workspace(model) => {
+                    owner = Some(model.connection_id());
+                    if model.snapshot().is_some() && !model.routes().is_empty() {
+                        ready = Some(model);
+                    }
+                }
+                Update::AppearanceError { connection, reason } => {
+                    assert_eq!(
+                        Some(connection),
+                        owner,
+                        "Workspace establishes owner before appearance"
+                    );
+                    assert!(reason.contains("native limit"));
+                    failed = true;
+                }
+                Update::Appearance(_) => panic!("invalid initial settings were published"),
+                _ => {}
+            }
+        }
+        let model = ready.unwrap();
+        let pane = model.routes()[0].pane_id.clone();
+        let session = model.routes()[0].session_id.clone();
+        commands
+            .send(Command::Input {
+                pane: pane.clone(),
+                session: session.clone(),
+                text: "printf 'APPEARANCE_%s\\n' 'ALIVE'\n".into(),
+            })
+            .await
+            .unwrap();
+        output_contains(&mut updates, &session, b"APPEARANCE_ALIVE").await;
+        state.config.write().unwrap().appearance.font_family = "recovered".into();
+        state.client_state.broadcast_events(
+            &[splitty_core::protocol::ServerEvent::settings_changed(
+                json!({}),
+            )],
+            None,
+        );
+        let snapshot = loop {
+            match next_update(&mut updates).await {
+                Update::Appearance(snapshot) => break snapshot,
+                Update::AppearanceError { reason, .. } => panic!("refresh failed: {reason}"),
+                _ => {}
+            }
+        };
+        assert_eq!(snapshot.connection_id(), model.connection_id());
+        assert_eq!(snapshot.settings().font_family, "recovered");
+        assert_eq!(snapshot.scheme(), ColorScheme::Light);
+        drop(snapshot);
+        // A foreign scheme intent followed by a valid owner change must never
+        // replace this window's local preference with the foreign choice.
+        commands
+            .send(Command::SetColorScheme {
+                connection: uuid::Uuid::new_v4(),
+                scheme: ColorScheme::Light,
+            })
+            .await
+            .unwrap();
+        commands
+            .send(Command::SetColorScheme {
+                connection: model.connection_id(),
+                scheme: ColorScheme::Dark,
+            })
+            .await
+            .unwrap();
+        loop {
+            if let Update::Appearance(snapshot) = next_update(&mut updates).await {
+                assert_eq!(snapshot.scheme(), ColorScheme::Dark);
+                break;
+            }
+        }
+        // A later failed refresh reports status without replacing the last
+        // successful snapshot or interrupting the established terminal route.
+        state.config.write().unwrap().appearance.font_family = "x".repeat(4097);
+        state.client_state.broadcast_events(
+            &[splitty_core::protocol::ServerEvent::settings_changed(
+                json!({}),
+            )],
+            None,
+        );
+        loop {
+            match next_update(&mut updates).await {
+                Update::AppearanceError { connection, .. } => {
+                    assert_eq!(connection, model.connection_id());
+                    break;
+                }
+                Update::Appearance(_) => panic!("failed refresh replaced last valid appearance"),
+                _ => {}
+            }
+        }
+        commands
+            .send(Command::Input {
+                pane,
+                session: session.clone(),
+                text: "printf 'REFRESH_%s\\n' 'ALIVE'\n".into(),
+            })
+            .await
+            .unwrap();
+        output_contains(&mut updates, &session, b"REFRESH_ALIVE").await;
+        stop.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(10), worker)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(cleanup.load(Ordering::Acquire));
+        assert!(state.client_state.clients.lock().unwrap().is_empty());
+        drop(updates);
+        assert!(!path.exists());
+    }
+
+    #[tokio::test]
     async fn worker_maximize_filters_stale_visibility_and_size_reports_without_losing_output() {
         if !splitty_core::pty::testing::pty_available() {
             return;
@@ -1066,6 +1460,7 @@ mod close_tests {
             sender,
             stop.clone(),
             cleanup.clone(),
+            ColorScheme::Dark,
         ));
         let first = stable_model(&mut updates).await;
         let screen = first.shown_screen_id().unwrap().to_owned();
@@ -1462,6 +1857,7 @@ async fn run(
     _: mpsc::Sender<Update>,
     _: Arc<AtomicBool>,
     cleanup_complete: Arc<AtomicBool>,
+    _: ColorScheme,
 ) -> anyhow::Result<()> {
     cleanup_complete.store(true, Ordering::Release); // no owned service was started
     anyhow::bail!(

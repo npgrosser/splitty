@@ -11,6 +11,15 @@ pub struct EmbeddedService {
 }
 
 impl EmbeddedService {
+    #[cfg(test)]
+    pub(crate) fn from_runtime(runtime: service::runtime::Runtime) -> Self {
+        Self {
+            runtime: Some(runtime),
+            control: None,
+            connector: Connector::default(),
+        }
+    }
+
     /// A separate API stream owned by this service. It never consumes session
     /// frames. Bind returned appearance to the workspace's session identity.
     pub async fn appearance_reader(
@@ -125,7 +134,8 @@ mod tests {
     fn service() -> EmbeddedService {
         let service = EmbeddedService::start();
         // An explicit in-memory profile avoids depending on the user's shell
-        // startup files. This does not write settings or touch saved workspaces.
+        // startup files. This profile override is memory-only; the production
+        // constructor above still loads configuration and may persist migrations.
         *service
             .runtime
             .as_ref()

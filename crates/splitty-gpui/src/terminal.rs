@@ -1,4 +1,5 @@
 //! Native terminal presentation. The service owns the PTY; Ghostty owns VT state.
+pub use crate::terminal_engine::ColorConfig as TerminalColors;
 use crate::terminal_engine::{Cursor, CursorShape, Engine, Row, MAX_INPUT};
 use anyhow::{anyhow, Result};
 use gpui_kit::{prelude::*, *};
@@ -6,8 +7,21 @@ use std::{collections::HashMap, ops::Range, time::Instant};
 
 const FONT_SIZE: f32 = 15.;
 const LINE_HEIGHT: f32 = 21.;
-const SELECTION_BACKGROUND: u32 = 0x345778;
+const DEFAULT_SELECTION_FOREGROUND: u32 = 0xffffff;
+const DEFAULT_SELECTION_BACKGROUND: u32 = 0x345778;
 const MAX_ALTERNATE_WHEEL_KEYS: i32 = 5;
+
+#[derive(Clone, Copy)]
+struct SelectionColors {
+    foreground: u32,
+    background: u32,
+}
+
+#[derive(Clone, Copy)]
+struct CursorGeometry {
+    bounds: Bounds<Pixels>,
+    cell_width: Pixels,
+}
 
 /// GPUI reports positive Y for upward wheel motion. Keep only the fractional
 /// part across events; a large gesture must not become a long key backlog.
@@ -104,6 +118,9 @@ pub struct Terminal {
     scroll_remainder: f32,
     scroll_alternate: Option<bool>,
     row_cache: HashMap<[u64; 2], CachedRow>,
+    colors: TerminalColors,
+    selection_foreground: u32,
+    selection_background: u32,
     pub status: String,
     pub bytes: usize,
     pub frames: usize,
@@ -144,6 +161,9 @@ impl Terminal {
             scroll_remainder: 0.,
             scroll_alternate: None,
             row_cache: HashMap::new(),
+            colors: TerminalColors::default(),
+            selection_foreground: DEFAULT_SELECTION_FOREGROUND,
+            selection_background: DEFAULT_SELECTION_BACKGROUND,
             status,
             bytes: 0,
             frames: 0,
@@ -169,6 +189,34 @@ impl Terminal {
 
     pub fn engine_ready(&self) -> bool {
         self.engine.is_some()
+    }
+
+    pub fn apply_colors(
+        &mut self,
+        colors: TerminalColors,
+        selection_foreground: u32,
+        selection_background: u32,
+        cx: &mut Context<Self>,
+    ) -> std::result::Result<(), String> {
+        if self.colors == colors
+            && self.selection_foreground == selection_foreground
+            && self.selection_background == selection_background
+        {
+            return Ok(());
+        }
+        if let Some(engine) = self.engine.as_mut() {
+            if let Err(error) = engine.apply_colors(colors) {
+                self.status = format!("Terminal colors: {error:#}");
+                return Err(self.status.clone());
+            }
+        }
+        self.colors = colors;
+        self.selection_foreground = selection_foreground;
+        self.selection_background = selection_background;
+        self.row_cache.clear();
+        self.content_revision += 1;
+        cx.notify();
+        Ok(())
     }
 
     pub fn feed(&mut self, bytes: &[u8], replay: bool, cx: &mut Context<Self>) {
@@ -216,8 +264,10 @@ impl Terminal {
         let result = if let Some(engine) = self.engine.as_mut() {
             engine.reset()
         } else {
-            Engine::new(self.size.cols, self.size.rows).map(|engine| {
+            Engine::new(self.size.cols, self.size.rows).and_then(|mut engine| {
+                engine.apply_colors(self.colors)?;
                 self.engine = Some(engine);
+                Ok(())
             })
         };
         if let Err(error) = result {
@@ -428,6 +478,10 @@ impl Terminal {
                     &self.face,
                     self.cell_width,
                     base,
+                    SelectionColors {
+                        foreground: self.selection_foreground,
+                        background: self.selection_background,
+                    },
                     window,
                     current_frame,
                 )?;
@@ -448,9 +502,15 @@ impl Terminal {
         paint_cursor(
             cursor,
             &self.composition,
+            SelectionColors {
+                foreground: self.selection_foreground,
+                background: self.selection_background,
+            },
             &self.face,
-            self.bounds,
-            self.cell_width,
+            CursorGeometry {
+                bounds: self.bounds,
+                cell_width: self.cell_width,
+            },
             window,
             cx,
         )?;
@@ -467,6 +527,7 @@ fn shape_row(
     face: &Font,
     cell_width: Pixels,
     base_background: u32,
+    selection: SelectionColors,
     window: &mut Window,
     frame: usize,
 ) -> Result<CachedRow> {
@@ -483,7 +544,7 @@ fn shape_row(
         }
         let width = u16::from(cell.width.max(1));
         let background = if cell.selected {
-            SELECTION_BACKGROUND
+            selection.background
         } else {
             cell.background
         };
@@ -494,13 +555,21 @@ fn shape_row(
             cached.underlines.push(UnderlineSpan {
                 col: cell.col,
                 width,
-                color: cell.foreground,
+                color: if cell.selected {
+                    selection.foreground
+                } else {
+                    cell.foreground
+                },
             });
         }
         let visible = !cell.hidden && cell.text != " " && !cell.text.is_empty();
         let ascii = visible && width == 1 && cell.text.len() == 1 && cell.text.is_ascii();
         let style = RunStyle {
-            foreground: cell.foreground,
+            foreground: if cell.selected {
+                selection.foreground
+            } else {
+                cell.foreground
+            },
             bold: cell.bold,
             italic: cell.italic,
         };
@@ -634,9 +703,9 @@ fn paint_cached_row(
 fn paint_cursor(
     cursor: Cursor,
     composition: &str,
+    selection: SelectionColors,
     face: &Font,
-    bounds: Bounds<Pixels>,
-    cell_width: Pixels,
+    geometry: CursorGeometry,
     window: &mut Window,
     cx: &mut Context<Terminal>,
 ) -> Result<()> {
@@ -644,14 +713,14 @@ fn paint_cursor(
         return Ok(());
     }
     let origin = point(
-        bounds.left() + cell_width * f32::from(cursor.col),
-        bounds.top() + px(LINE_HEIGHT) * f32::from(cursor.row),
+        geometry.bounds.left() + geometry.cell_width * f32::from(cursor.col),
+        geometry.bounds.top() + px(LINE_HEIGHT) * f32::from(cursor.row),
     );
     let color = rgb(cursor.color);
     match cursor.shape {
         CursorShape::Block => {
             window.paint_quad(fill(
-                Bounds::new(origin, size(cell_width, px(LINE_HEIGHT))),
+                Bounds::new(origin, size(geometry.cell_width, px(LINE_HEIGHT))),
                 color.opacity(0.35),
             ));
         }
@@ -665,17 +734,20 @@ fn paint_cursor(
             window.paint_quad(fill(
                 Bounds::new(
                     origin + point(px(0.), px(LINE_HEIGHT - 2.)),
-                    size(cell_width, px(2.)),
+                    size(geometry.cell_width, px(2.)),
                 ),
                 color,
             ));
         }
         CursorShape::Hollow => {
-            window.paint_quad(fill(Bounds::new(origin, size(cell_width, px(1.))), color));
+            window.paint_quad(fill(
+                Bounds::new(origin, size(geometry.cell_width, px(1.))),
+                color,
+            ));
             window.paint_quad(fill(
                 Bounds::new(
                     origin + point(px(0.), px(LINE_HEIGHT - 1.)),
-                    size(cell_width, px(1.)),
+                    size(geometry.cell_width, px(1.)),
                 ),
                 color,
             ));
@@ -685,7 +757,7 @@ fn paint_cursor(
             ));
             window.paint_quad(fill(
                 Bounds::new(
-                    origin + point(cell_width - px(1.), px(0.)),
+                    origin + point(geometry.cell_width - px(1.), px(0.)),
                     size(px(1.), px(LINE_HEIGHT)),
                 ),
                 color,
@@ -697,8 +769,8 @@ fn paint_cursor(
         let run = TextRun {
             len: text.len(),
             font: face.clone(),
-            color: rgb(0xffffff).into(),
-            background_color: Some(rgb(SELECTION_BACKGROUND).into()),
+            color: rgb(selection.foreground).into(),
+            background_color: Some(rgb(selection.background).into()),
             underline: None,
             strikethrough: None,
         };
@@ -720,7 +792,7 @@ impl Render for Terminal {
             .relative()
             .size_full()
             .overflow_hidden()
-            .bg(rgb(0x10151c))
+            .bg(rgb(self.colors.background))
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::key))
             .on_mouse_down(

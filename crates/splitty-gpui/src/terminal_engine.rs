@@ -12,6 +12,31 @@ pub const MAX_INPUT: usize = 64 * 1024;
 const MAX_COPY: usize = 16 * 1024 * 1024;
 const SCROLLBACK_BYTES: usize = 32 * 1024 * 1024;
 const SCROLLBACK_LINES: usize = 5000;
+const DEFAULT_ANSI: [u32; 16] = [
+    0x18212d, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf, 0x5c6370,
+    0xff7a85, 0xb5e890, 0xffd891, 0x82c7ff, 0xe8a0ff, 0x7adbea, 0xffffff,
+];
+
+/// Concrete RGB colors only. The service and settings resolver stay outside
+/// Ghostty; indices 16–255 retain the standard xterm palette.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColorConfig {
+    pub foreground: u32,
+    pub background: u32,
+    pub cursor: u32,
+    pub ansi: [u32; 16],
+}
+
+impl Default for ColorConfig {
+    fn default() -> Self {
+        Self {
+            foreground: 0xd9e2ef,
+            background: 0x10151c,
+            cursor: 0x80cbc4,
+            ansi: DEFAULT_ANSI,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CursorShape {
@@ -52,6 +77,7 @@ pub struct Engine {
     cell_width: u32,
     cell_height: u32,
     text: Vec<u8>,
+    colors: ColorConfig,
     _thread: PhantomData<Rc<()>>,
 }
 
@@ -71,6 +97,7 @@ impl Engine {
             cell_width: 0,
             cell_height: 0,
             text: vec![0; 64],
+            colors: ColorConfig::default(),
             _thread: PhantomData,
         };
         // SAFETY: each constructor receives a fresh output slot and the default
@@ -117,10 +144,7 @@ impl Engine {
         }
         engine.option(ffi::OPT_SCROLLBACK_BYTES, &SCROLLBACK_BYTES)?;
         engine.option(ffi::OPT_SCROLLBACK_LINES, &SCROLLBACK_LINES)?;
-        engine.option(ffi::OPT_FOREGROUND, &rgb(0xd9e2ef))?;
-        engine.option(ffi::OPT_BACKGROUND, &rgb(0x10151c))?;
-        engine.option(ffi::OPT_CURSOR, &rgb(0x80cbc4))?;
-        engine.option(ffi::OPT_PALETTE, &palette())?;
+        engine.install_colors(ColorConfig::default())?;
         // Image presentation is outside this probe. No file/shared-memory or
         // clipboard callbacks are installed, and image storage stays disabled.
         let disabled: u64 = 0;
@@ -145,6 +169,22 @@ impl Engine {
         check(unsafe {
             ffi::ghostty_terminal_set(self.terminal, option, ptr::from_ref(value).cast())
         })
+    }
+
+    fn install_colors(&mut self, colors: ColorConfig) -> Result<()> {
+        self.option(ffi::OPT_FOREGROUND, &rgb(colors.foreground))?;
+        self.option(ffi::OPT_BACKGROUND, &rgb(colors.background))?;
+        self.option(ffi::OPT_CURSOR, &rgb(colors.cursor))?;
+        self.option(ffi::OPT_PALETTE, &palette(colors.ansi))?;
+        self.colors = colors;
+        Ok(())
+    }
+
+    pub fn apply_colors(&mut self, colors: ColorConfig) -> Result<()> {
+        if self.colors != colors {
+            self.install_colors(colors)?;
+        }
+        Ok(())
     }
 
     fn begin_effects(&mut self, suppress: bool) {
@@ -177,6 +217,7 @@ impl Engine {
 
     pub fn reset(&mut self) -> Result<()> {
         let mut replacement = Self::new(self.cols, self.height)?;
+        replacement.apply_colors(self.colors)?;
         replacement.resize(self.cols, self.height, self.cell_width, self.cell_height)?;
         *self = replacement;
         Ok(())
@@ -546,7 +587,7 @@ impl Engine {
             row: u16::try_from(viewport_row.min(u64::from(self.height - 1)))?,
             visible,
             shape: CursorShape::Block,
-            color: 0x80cbc4,
+            color: self.colors.cursor,
         })
     }
 
@@ -936,15 +977,11 @@ fn style_color(color: ffi::StyleColor, colors: &ffi::RenderColors, fallback: ffi
         })
     }
 }
-fn palette() -> [ffi::Rgb; 256] {
-    const ANSI: [u32; 16] = [
-        0x18212d, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf, 0x5c6370,
-        0xff7a85, 0xb5e890, 0xffd891, 0x82c7ff, 0xe8a0ff, 0x7adbea, 0xffffff,
-    ];
+fn palette(ansi: [u32; 16]) -> [ffi::Rgb; 256] {
     let mut colors = [ffi::Rgb::default(); 256];
     for index in 0u16..256 {
         let value = match index {
-            0..=15 => ANSI[usize::from(index)],
+            0..=15 => ansi[usize::from(index)],
             16..=231 => {
                 let n = u32::from(index - 16);
                 let component = |n: u32| if n == 0 { 0 } else { 55 + 40 * n };

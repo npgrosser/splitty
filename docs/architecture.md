@@ -122,6 +122,17 @@ transport byte leases through terminal feeding. Large batches keep the existing
 pacing, while repeated small batches also yield so input and drawing can run.
 Dropping the task drops its sole receiver and releases queued delivery leases.
 
+The same native runtime owns one auxiliary API-only appearance stream. After
+publishing the session owner, it polls stream setup and charged settings/theme
+reads alongside terminal events and commands. Same-service settings events and
+owner-checked OS preference changes coalesce; superseded reads cannot replace a
+newer choice. Appearance failures publish a separate status while terminals keep
+working with defaults or the last valid presentation. Setup and read cleanup are
+awaited on every worker exit before owned service shutdown, including update
+receiver failure. The API stream never consumes terminal delivery. Appearance
+font overrides remain chrome settings; resolved terminal colors do not change
+the native terminal's 15 px text and 21 px row metrics.
+
 Native pane, Screen and window close gestures share a client-core close plan.
 It captures the connection, affected pane/session identities and known busy or
 unresolved work, including hidden Screens and pending creations. GPUI owns one

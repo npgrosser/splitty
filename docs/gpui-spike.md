@@ -172,6 +172,66 @@ loader must also find the downloaded `libcef.so` next to the binary, for example
 with `LD_LIBRARY_PATH="$PWD/target/debug${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"`.
 `cargo run` supplies the build library search paths automatically.
 
+## Local appearance
+
+The workspace reads the local service's saved appearance and resolved theme using
+`home.get` and `theme.get`. These reads use one separate owned API stream, so an
+API reply cannot consume terminal session events. Fixed themes use the selected
+name; automatic mode requests the configured light or dark theme for the local
+OS preference. Same-service settings changes and OS preference changes coalesce
+into refreshes. Separate embedded service instances cache their own settings, so
+an edit through another app instance becomes visible after restarting this
+native workspace; cross-process live synchronization is not implemented.
+
+Appearance font size and family apply to workspace chrome, matching the web
+client. Empty/zero overrides use resolved UI theme defaults. The supported size
+range is 8–24 px; a CSS font list selects an available concrete family or a native
+UI generic. Terminal typography remains the existing monospace font at 15 px
+with 21 px rows. A proportional UI font therefore does not alter terminal cells.
+Terminal-font settings and zoom are separate work.
+
+Native colors support checked `#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA`, decimal
+`rgb(...)`/`rgba(...)` with comma-separated channels, and `transparent`. Alpha is
+composed against the selected background. The terminal receives foreground,
+background, cursor, selection and ANSI 0–15 colors; its standard indices 16–255
+remain unchanged. Native cursor drawing uses an overlay, so `cursor-accent`
+text inversion is not implemented. CSS expressions, layout/effect tokens and
+the otherwise unused `terminal.theme` field are not activated by this adapter.
+Unsupported color/font forms use native fallbacks with a status; failed reads
+retain working defaults or the last valid appearance. The appearance reader
+never submits a settings mutation. Existing service startup may still persist
+configuration defaults or migrations through the ordinary settings loader.
+
+There is no native settings editor in this increment. The web client's settings
+remain the reference interface; the native read path and terminal engine consume
+the existing settings and theme contracts.
+
+The focused appearance checks pass: 45 client-core tests, 36 GPUI tests, 23 core
+theme tests and 17 architecture checks, plus touched-target Clippy, formatting
+and strict OpenSpec validation. In-memory service tests exercise initial and
+later read failures while a real PTY continues producing output, recovery after
+same-service settings events, OS theme choice, foreign-source rejection,
+superseded reads and shutdown during setup. A setup failure during close remains
+an optional appearance failure; actual stream/service cleanup errors still
+propagate.
+
+Four isolated X11 startup fixtures cover bundled dark/light themes, an 18 px
+proportional chrome override and unsupported authored color/font values. All
+retain shell identity and history through splits, tabs and maximization, and exit
+normally without surviving children. The measured chrome ink height grows from
+9 to 13 pixels; the same terminal marker remains 129×11 pixels with 21-pixel row
+spacing. The fallback capture shows its persistent status alongside ordinary
+workspace status. These pixel measurements validate the exercised font
+installation, not universal font metrics. Live settings/OS refresh is verified
+in-process; the window matrix uses separate startup fixtures and does not claim
+cross-process synchronization. Hardware workspace smokes also pass under Wayland
+and X11 with D3D12-backed OpenGL.
+
+```sh
+python3 scripts/testing/gpui-screens.py target/release/splitty-gpui \
+  --output /tmp/splitty-appearance-evidence --appearance-matrix
+```
+
 ## WSLg graphics
 
 The default Mesa selection in the tested WSLg environment used CPU llvmpipe.

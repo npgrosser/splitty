@@ -8,7 +8,7 @@ use splitty_transport::budget::Charged;
 use uuid::Uuid;
 
 #[cfg(not(target_os = "windows"))]
-mod local;
+pub(crate) mod local;
 #[cfg(not(target_os = "windows"))]
 pub use local::AppearanceReader;
 
@@ -37,6 +37,13 @@ impl AppearanceSnapshot {
     }
     pub fn settings(&self) -> &AppearanceSettings {
         &self.settings
+    }
+    /// The resolved theme variant, which can differ from the OS preference.
+    pub fn scheme(&self) -> ColorScheme {
+        match self.theme.variant {
+            splitty_core::theme::Variant::Light => ColorScheme::Light,
+            splitty_core::theme::Variant::Dark => ColorScheme::Dark,
+        }
     }
     pub fn theme(&self) -> &ResolvedTheme {
         &self.theme

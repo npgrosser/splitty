@@ -173,4 +173,4 @@ fn decode<T: DeserializeOwned>(client: &Client, reply: &wire::Reply) -> io::Resu
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

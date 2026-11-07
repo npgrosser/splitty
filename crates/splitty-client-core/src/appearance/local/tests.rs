@@ -21,7 +21,7 @@ use std::{path::PathBuf, sync::RwLock, task::Poll, time::Duration};
 // Build the real service entry points without runtime::build/config::load:
 // production startup may persist home-config migrations. No test here writes
 // settings, changes process-global paths or starts a terminal process.
-fn fixture() -> (Runtime, PathBuf) {
+pub(crate) fn fixture() -> (Runtime, PathBuf) {
     let path = std::env::temp_dir().join(format!("splitty-appearance-{}", Uuid::new_v4()));
     let mut config = HomeConfig::default();
     config.appearance.theme_mode = "auto".into();

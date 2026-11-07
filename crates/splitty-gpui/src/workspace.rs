@@ -1,7 +1,10 @@
 //! Native projection of one authoritative local screen; no independent dock tree.
+use crate::appearance::NativeAppearance;
 use crate::terminal::{self, Terminal};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
+use gpui_kit::base::{ColorTokens, Theme, ThemeAppearance};
 use gpui_kit::{prelude::*, *};
+use splitty_client_core::appearance::{AppearanceSnapshot, ColorScheme};
 use splitty_client_core::native_workspace::{Command, Update, Worker};
 use splitty_client_core::workspace::{
     Axis, ClosePlan, CloseTarget, LayoutNode, LocalWorkspace, MovePlacement, PaneDrag, ScreenModel,
@@ -144,12 +147,13 @@ struct TabDrag {
 }
 struct DragPreview;
 impl Render for DragPreview {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let colors = Theme::global(cx).tokens.colors;
         div()
             .px_3()
             .py_1()
-            .bg(rgb(0x293b4d))
-            .text_color(rgb(0xe8eff6))
+            .bg(colors.secondary)
+            .text_color(colors.secondary_foreground)
             .child("Move terminal")
     }
 }
@@ -362,6 +366,15 @@ pub struct Workspace {
     visible_screen: Option<String>,
     visible_pending: bool,
     status: String,
+    appearance: NativeAppearance,
+    appearance_error: Option<String>,
+    appearance_generation: u64,
+    desired_scheme: ColorScheme,
+    sent_scheme: ColorScheme,
+    scheme_pending: bool,
+    _appearance_subscription: Subscription,
+    ui_family: String,
+    mono_family: String,
     rename: Option<RenameEditor>,
     rename_subscription: Option<Subscription>,
     pending_close: Option<PendingClose>,
@@ -395,7 +408,8 @@ impl Workspace {
     ) -> (Self, Worker) {
         let (commands, receiver) = mpsc::channel(64);
         let (sender, mut updates) = mpsc::channel(64);
-        let worker = Worker::start(receiver, sender);
+        let initial_scheme = Self::window_scheme(window);
+        let worker = Worker::start_with_scheme(receiver, sender, initial_scheme);
         let stopping = worker.stop.clone();
         let poll = cx.spawn_in(window, async move |this, cx| {
             let maintenance = Duration::from_millis(16);
@@ -468,6 +482,14 @@ impl Workspace {
             });
             false
         });
+        let appearance_subscription = cx.observe_window_appearance(window, |this, window, _cx| {
+            this.desired_scheme = Self::window_scheme(window);
+            this.scheme_pending = this.desired_scheme != this.sent_scheme;
+            this.flush_scheme();
+        });
+        let typography = Theme::global(cx).tokens.typography;
+        let ui_family = typography.sans.to_string();
+        let mono_family = typography.mono.to_string();
         (
             Self {
                 model: None,
@@ -484,6 +506,15 @@ impl Workspace {
                 visible_screen: None,
                 visible_pending: false,
                 status: "Starting local workspace…".into(),
+                appearance: NativeAppearance::fallback(&ui_family),
+                appearance_error: None,
+                appearance_generation: 0,
+                desired_scheme: initial_scheme,
+                sent_scheme: initial_scheme,
+                scheme_pending: false,
+                _appearance_subscription: appearance_subscription,
+                ui_family,
+                mono_family,
                 rename: None,
                 rename_subscription: None,
                 pending_close: None,
@@ -513,6 +544,85 @@ impl Workspace {
     }
     fn stop(&mut self) {
         self.stopping.store(true, Ordering::Release);
+    }
+    fn window_scheme(window: &Window) -> ColorScheme {
+        match window.appearance() {
+            WindowAppearance::Light | WindowAppearance::VibrantLight => ColorScheme::Light,
+            WindowAppearance::Dark | WindowAppearance::VibrantDark => ColorScheme::Dark,
+        }
+    }
+    fn flush_scheme(&mut self) {
+        if !self.scheme_pending {
+            return;
+        }
+        let Some(model) = &self.model else {
+            return;
+        };
+        if self
+            .commands
+            .try_send(Command::SetColorScheme {
+                connection: model.connection_id(),
+                scheme: self.desired_scheme,
+            })
+            .is_ok()
+        {
+            self.sent_scheme = self.desired_scheme;
+            self.scheme_pending = false;
+        }
+    }
+    fn apply_appearance(
+        &mut self,
+        snapshot: &AppearanceSnapshot,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.connection_id() == snapshot.connection_id())
+        {
+            return;
+        }
+        if snapshot.generation() <= self.appearance_generation {
+            return;
+        }
+        let available_fonts = window.text_system().all_font_names();
+        let next = NativeAppearance::from_snapshot(
+            snapshot,
+            &available_fonts,
+            &self.ui_family,
+            &self.mono_family,
+        );
+        let theme = Theme::global_mut(cx);
+        theme.tokens.typography.sans = next.font_family.clone().into();
+        match snapshot.scheme() {
+            ColorScheme::Light => {
+                theme.appearance = ThemeAppearance::Light;
+                theme.tokens.colors = ColorTokens::light();
+            }
+            ColorScheme::Dark => {
+                theme.appearance = ThemeAppearance::Dark;
+                theme.tokens.colors = ColorTokens::dark();
+            }
+        }
+        let mut failure = None;
+        for view in self.panes.values() {
+            let applied = view.terminal.update(cx, |terminal, cx| {
+                terminal.apply_colors(
+                    next.terminal,
+                    next.selection_foreground,
+                    next.selection_background,
+                    cx,
+                )
+            });
+            if failure.is_none() {
+                failure = applied.err();
+            }
+        }
+        self.appearance = next;
+        self.appearance_generation = snapshot.generation();
+        self.appearance_error = failure;
+        cx.notify();
     }
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
         if let Err(error) = self.commands.try_send(command) {
@@ -737,7 +847,15 @@ impl Workspace {
             }
             route(command)
         };
+        let colors = self.appearance.terminal;
+        let selection_foreground = self.appearance.selection_foreground;
+        let selection_background = self.appearance.selection_background;
         let terminal = cx.new(|cx| Terminal::new(commands, cx));
+        if let Err(error) = terminal.update(cx, |terminal, cx| {
+            terminal.apply_colors(colors, selection_foreground, selection_background, cx)
+        }) {
+            self.appearance_error = Some(error);
+        }
         self.panes.insert(
             pane.to_owned(),
             PaneView {
@@ -750,6 +868,16 @@ impl Workspace {
         );
     }
     fn reconcile(&mut self, model: LocalWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|old| old.connection_id() != model.connection_id())
+        {
+            self.appearance_generation = 0;
+            self.appearance_error = None;
+            self.appearance = NativeAppearance::fallback(&self.ui_family);
+            self.scheme_pending = true;
+        }
         if self.rename.is_some() {
             self.smoke_editor_reconciles += u64::from(self.smoke);
         }
@@ -800,6 +928,7 @@ impl Workspace {
         }
         self.drop_target = None;
         self.model = Some(model);
+        self.flush_scheme();
         self.sync_visible(cx);
         if self.rename.is_none()
             && !self
@@ -1105,6 +1234,17 @@ impl Workspace {
             processed += 1;
             match update {
                 Update::Workspace(model) => self.reconcile(*model, window, cx),
+                Update::Appearance(snapshot) => self.apply_appearance(&snapshot, window, cx),
+                Update::AppearanceError { connection, reason } => {
+                    if self
+                        .model
+                        .as_ref()
+                        .is_some_and(|model| model.connection_id() == connection)
+                    {
+                        self.appearance_error = Some(reason);
+                        cx.notify();
+                    }
+                }
                 Update::Status(status) => {
                     self.status = status;
                     cx.notify();
@@ -1219,6 +1359,7 @@ impl Workspace {
         }
         self.flush_visible(cx);
         self.flush_resizes(cx);
+        self.flush_scheme();
         if updates.is_closed() && self.cleanup_complete.load(Ordering::Acquire) {
             if let Some(pending) = self.pending_close.take() {
                 if pending.plan.target == CloseTarget::Window {
@@ -1705,13 +1846,17 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .flex_none()
-                    .h(px(28.))
-                    .bg(rgb(if selected { 0x30475b } else { 0x243342 }));
+                    .h(px((self.appearance.font_size + 15.).max(28.)))
+                    .bg(rgb(if selected {
+                        self.appearance.active
+                    } else {
+                        self.appearance.raised
+                    }));
                 if let Some(editor) = self.rename.as_ref().filter(|editor| editor.screen == id) {
                     chip = chip.child(
                         div()
                             .w(px(145.))
-                            .h(px(27.))
+                            .h(px((self.appearance.font_size + 14.).max(27.)))
                             .px_1()
                             .overflow_hidden()
                             .child(Input::new(&editor.input)),
@@ -1768,7 +1913,11 @@ impl Workspace {
                 );
             }
             if model.screens().is_empty() {
-                screens = screens.child(div().text_color(rgb(0x91a8bc)).child("No screens"));
+                screens = screens.child(
+                    div()
+                        .text_color(rgb(self.appearance.secondary))
+                        .child("No screens"),
+                );
             }
         }
         let pending = self
@@ -1781,11 +1930,15 @@ impl Workspace {
                     .id("new-screen")
                     .flex_none()
                     .px_2()
-                    .h(px(28.))
+                    .h(px((self.appearance.font_size + 15.).max(28.)))
                     .flex()
                     .items_center()
                     .cursor_pointer()
-                    .bg(rgb(if pending { 0x243342 } else { 0x30475b }))
+                    .bg(rgb(if pending {
+                        self.appearance.raised
+                    } else {
+                        self.appearance.active
+                    }))
                     .child("+ Screen")
                     .on_click(cx.listener(|this, _, _, cx| this.create_screen(cx))),
             )
@@ -1800,10 +1953,10 @@ impl Workspace {
                     .and_then(|model| model.selected_pane(node));
                 let mut tabs = div()
                     .flex()
-                    .h(px(32.))
+                    .h(px((self.appearance.font_size + 19.).max(32.)))
                     .flex_none()
                     .gap_1()
-                    .bg(rgb(0x17212c))
+                    .bg(rgb(self.appearance.raised))
                     .overflow_hidden();
                 for (index, pane) in pane_ids.iter().enumerate() {
                     let key = pane.to_string();
@@ -1826,8 +1979,16 @@ impl Workspace {
                                 .gap_3()
                                 .px_3()
                                 .cursor_pointer()
-                                .bg(rgb(if active { 0x293b4d } else { 0x17212c }))
-                                .text_color(rgb(if active { 0xe8eff6 } else { 0x93a6b9 }))
+                                .bg(rgb(if active {
+                                    self.appearance.active
+                                } else {
+                                    self.appearance.raised
+                                }))
+                                .text_color(rgb(if active {
+                                    self.appearance.text
+                                } else {
+                                    self.appearance.secondary
+                                }))
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.select(&key, window, cx)
                                 }))
@@ -1910,7 +2071,11 @@ impl Workspace {
                     .min_w_0()
                     .min_h_0()
                     .border_1()
-                    .border_color(rgb(if focused { 0x416783 } else { 0x263544 }))
+                    .border_color(rgb(if focused {
+                        self.appearance.border
+                    } else {
+                        self.appearance.subtle_border
+                    }))
                     .child(
                         canvas(
                             move |bounds, _, cx| {
@@ -1955,8 +2120,8 @@ impl Workspace {
                                     .w(highlight.size.width)
                                     .h(highlight.size.height)
                                     .border_2()
-                                    .border_color(rgb(0x76b8e8))
-                                    .bg(rgba(0x4094cc44)),
+                                    .border_color(rgb(self.appearance.accent))
+                                    .bg(rgba((self.appearance.accent << 8) | 0x44)),
                             );
                         }
                     }
@@ -2015,7 +2180,7 @@ impl Workspace {
                             div()
                                 .id(SharedString::from(format!("divider-{id}-{index}")))
                                 .flex_none()
-                                .bg(rgb(0x0d141d))
+                                .bg(rgb(self.appearance.border))
                                 .when(horizontal, |view| {
                                     view.w(px(5.)).h_full().cursor(CursorStyle::ResizeColumn)
                                 })
@@ -2056,15 +2221,21 @@ impl Render for Workspace {
             .as_ref()
             .and_then(LocalWorkspace::snapshot)
             .is_some_and(|screen| screen.panes.is_empty());
+        let appearance_message = self
+            .appearance_error
+            .as_ref()
+            .map(|error| format!("Appearance: {error}"))
+            .or_else(|| self.appearance.notice.map(str::to_owned));
         let mut view = div()
             .size_full()
             .flex()
             .flex_col()
-            .bg(rgb(0x10151c))
+            .bg(rgb(self.appearance.surface))
             .track_focus(&self.focus)
             .on_drag_move(cx.listener(Self::drag_hover))
-            .text_color(rgb(0xd9e2ef))
-            .text_size(px(13.))
+            .text_color(rgb(self.appearance.text))
+            .font(font(self.appearance.font_family.clone()))
+            .text_size(px(self.appearance.font_size))
             .capture_key_down(cx.listener(Self::key))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 if this.drag.is_some() && event.dragging() {
@@ -2096,10 +2267,10 @@ impl Render for Workspace {
                     .flex()
                     .items_center()
                     .gap_3()
-                    .h(px(42.))
+                    .h(px((self.appearance.font_size + 29.).max(42.)))
                     .px_3()
                     .flex_none()
-                    .bg(rgb(0x18232f))
+                    .bg(rgb(self.appearance.raised))
                     .child(div().font_weight(FontWeight::BOLD).child("SPLITTY"))
                     .child(self.render_screen_controls(cx))
                     .child(div().flex_1())
@@ -2109,7 +2280,7 @@ impl Render for Workspace {
                             .px_3()
                             .py_1()
                             .cursor_pointer()
-                            .bg(rgb(0x293b4d))
+                            .bg(rgb(self.appearance.overlay))
                             .child(
                                 if self
                                     .model
@@ -2130,7 +2301,7 @@ impl Render for Workspace {
                             .px_3()
                             .py_1()
                             .cursor_pointer()
-                            .bg(rgb(0x293b4d))
+                            .bg(rgb(self.appearance.overlay))
                             .child("Split right")
                             .on_click(
                                 cx.listener(|this, _, _, cx| this.split(Axis::Horizontal, cx)),
@@ -2142,7 +2313,7 @@ impl Render for Workspace {
                             .px_3()
                             .py_1()
                             .cursor_pointer()
-                            .bg(rgb(0x293b4d))
+                            .bg(rgb(self.appearance.overlay))
                             .child("Split below")
                             .on_click(cx.listener(|this, _, _, cx| this.split(Axis::Vertical, cx))),
                     )
@@ -2152,7 +2323,7 @@ impl Render for Workspace {
                             .px_3()
                             .py_1()
                             .cursor_pointer()
-                            .bg(rgb(0x293b4d))
+                            .bg(rgb(self.appearance.overlay))
                             .child(if empty_screen {
                                 "New terminal"
                             } else {
@@ -2170,7 +2341,7 @@ impl Render for Workspace {
                             .px_4()
                             .py_2()
                             .cursor_pointer()
-                            .bg(rgb(0x293b4d))
+                            .bg(rgb(self.appearance.overlay))
                             .child("New screen")
                             .on_click(cx.listener(|this, _, _, cx| this.create_screen(cx))),
                     ),
@@ -2184,7 +2355,7 @@ impl Render for Workspace {
                                 .px_4()
                                 .py_2()
                                 .cursor_pointer()
-                                .bg(rgb(0x293b4d))
+                                .bg(rgb(self.appearance.overlay))
                                 .child("New terminal")
                                 .on_click(cx.listener(|this, _, _, cx| this.tab(cx))),
                         ),
@@ -2202,11 +2373,18 @@ impl Render for Workspace {
         }
         view.child(
             div()
-                .h(px(25.))
+                .h(px(if appearance_message.is_some() {
+                    (self.appearance.font_size * 2. + 16.).max(42.)
+                } else {
+                    (self.appearance.font_size + 14.).max(25.)
+                }))
                 .px_3()
                 .flex_none()
-                .text_size(px(11.))
-                .text_color(rgb(0x8ea3b7))
+                .flex()
+                .flex_col()
+                .justify_center()
+                .text_size(px((self.appearance.font_size - 2.).max(11.)))
+                .text_color(rgb(self.appearance.muted))
                 .child(if self.status.is_empty() {
                     format!(
                         "{} terminals · {modifier}+T tab · {modifier}+D split · {modifier}+Shift+arrows focus · Ctrl+Shift+C/V copy/paste",
@@ -2214,6 +2392,9 @@ impl Render for Workspace {
                     )
                 } else {
                     self.status.clone()
+                })
+                .when_some(appearance_message, |view, message| {
+                    view.child(div().text_color(rgb(self.appearance.secondary)).child(message))
                 }),
         )
     }

@@ -23,8 +23,13 @@ model {
     }
 
     gpui_workspace = component 'gpui_workspace' {
-      description 'Screen controls and shortcuts, borrowed canonical presentation root, stable pane entities and one cancellable close prompt for pane, Screen and owned window.'
+      description 'Screen controls, shortcuts, resolved native appearance, canonical presentation root, stable pane entities and one cancellable close prompt.'
       metadata { module 'splitty_gpui::workspace' }
+    }
+
+    gpui_appearance = component 'gpui_appearance' {
+      description 'Bounded theme and UI font projection from service-owned appearance snapshots; terminal font remains fixed.'
+      metadata { module 'splitty_gpui::appearance' }
     }
 
     gpui_document = component 'gpui_document' {
@@ -46,6 +51,10 @@ model {
     gpui_app -> terminal 'Show terminal output and forward native input'
     terminal -> terminal_engine 'Borrow native terminal state and encode checked input'
     gpui_workspace -> terminal 'Keep one terminal view per pane identity'
+    gpui_workspace -> gpui_appearance 'Convert resolved theme values for native chrome and terminal colors'
+    gpui_workspace -> splitty.client_core.appearance 'Match owner and generation before applying resolved appearance'
+    gpui_appearance -> terminal 'Provide a plain terminal color configuration'
+    gpui_appearance -> splitty.client_core.appearance 'Consume charged appearance snapshot values'
     gpui_workspace -> splitty.client_core.native_workspace 'Submit assessed close intent and wait for matching approval or settlement'
     gpui_workspace -> splitty.client_core.client_workspace 'Render the displayed canonical root with local tab and maximized-slot choice'
     gpui_workspace -> splitty.client_core.client_root 'Construct workspace identities in native navigation tests'

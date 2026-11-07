@@ -8,6 +8,7 @@ environment prepared for splitty-gpui; no internal smoke mode is used.
 """
 
 import argparse
+from collections import Counter
 import ctypes
 import hashlib
 import importlib.util
@@ -16,6 +17,7 @@ import os
 from pathlib import Path
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 
@@ -48,6 +50,60 @@ def alive(pid):
         return False
 
 
+def rgb(data):
+    """XGetImage on this 24-bit Xvfb stores pixels as BGRA."""
+    return tuple(data[index] for index in (2, 1, 0))
+
+
+def text_bands(data, width, height, background):
+    """Find horizontal terminal text bands from actual rendered pixels."""
+    occupied = []
+    for row in range(height):
+        count = 0
+        for column in range(width):
+            offset = (row * width + column) * 4
+            if max(abs(data[offset + channel] - background[2 - channel]) for channel in range(3)) > 55:
+                count += 1
+        occupied.append(count >= 35)
+    starts = [row for row in range(height) if occupied[row] and (row == 0 or not occupied[row - 1])]
+    ends = [row for row in range(height) if occupied[row] and (row == height - 1 or not occupied[row + 1])]
+    return list(zip(starts, ends))
+
+
+def marker_ink(data, width, bands, background):
+    # The command echo and prior scrollback can precede the six identical M
+    # rows. Select the repeated ink dimensions, not a fixed screen row index.
+    dimensions = []
+    for start, end in bands:
+        columns = []
+        for column in range(width):
+            if any(max(abs(data[(row * width + column) * 4 + channel] - background[2 - channel])
+                       for channel in range(3)) > 55 for row in range(start, end + 1)):
+                columns.append(column)
+        if not columns:
+            raise AssertionError("Marker row has no visible ink")
+        dimensions.append((columns[-1] - columns[0] + 1, end - start + 1))
+    (marker_width, marker_height), count = Counter(dimensions).most_common(1)[0]
+    if count < 3:
+        raise AssertionError(f"Could not identify repeated marker ink dimensions: {dimensions}")
+    return {"width": marker_width, "height": marker_height, "rows": count}
+
+
+def glyph_bounds(data, width, height):
+    """Measure fixed chrome text ink against its surrounding background."""
+    background = rgb(data[:4])
+    points = []
+    for row in range(height):
+        for column in range(width):
+            offset = (row * width + column) * 4
+            if max(abs(data[offset + channel] - background[2 - channel]) for channel in range(3)) > 55:
+                points.append((column, row))
+    if not points:
+        raise AssertionError("Screen label has no visible pixels")
+    return {"width": max(point[0] for point in points) - min(point[0] for point in points) + 1,
+            "height": max(point[1] for point in points) - min(point[1] for point in points) + 1}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", type=Path)
@@ -64,14 +120,70 @@ def main():
     parser.add_argument("--keyboard-layout", choices=["us", "de"], help="apply this XKB layout on the isolated Xvfb display")
     parser.add_argument("--setxkbmap", default="setxkbmap")
     parser.add_argument("--xkb-tools-dir", type=Path, help="prepend private XKB tools to PATH for setxkbmap")
+    parser.add_argument("--appearance-matrix", action="store_true", help="run isolated dark, light, font and fallback startup fixtures")
+    parser.add_argument("--appearance-case", choices=["dark", "light", "font", "fallback"])
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     binary = args.binary.resolve(strict=True)
+    if args.appearance_matrix:
+        cases = {}
+        report = {"binary": str(binary), "sha256": hashlib.sha256(binary.read_bytes()).hexdigest(),
+                  "cases": cases, "passed": False}
+        try:
+            for case in ("dark", "light", "font", "fallback"):
+                command = [sys.executable, str(Path(__file__).resolve()), str(binary),
+                           "--output", str(args.output / case), "--display", args.display,
+                           "--xdotool", str(args.xdotool), "--xvfb", str(args.xvfb),
+                           "--appearance-case", case]
+                if args.xvfb_lib:
+                    command += ["--xvfb-lib", str(args.xvfb_lib)]
+                completed = subprocess.run(command, capture_output=True, text=True, timeout=120)
+                result_path = args.output / case / "result.json"
+                if result_path.exists():
+                    cases[case] = json.loads(result_path.read_text())
+                if completed.returncode:
+                    raise AssertionError(f"{case} appearance case failed; see {result_path}: {completed.stderr[-1000:]}")
+            assert cases["light"]["pixels"]["terminalBackground"][0] > cases["dark"]["pixels"]["terminalBackground"][0] + 100
+            assert cases["font"]["pixels"]["chromeBrandBounds"]["height"] > cases["dark"]["pixels"]["chromeBrandBounds"]["height"] + 2
+            assert cases["fallback"]["pixels"]["chromeBrandBounds"]["height"] < cases["font"]["pixels"]["chromeBrandBounds"]["height"]
+            assert all(case["pixels"]["terminalRowPitch"] == 21 for case in cases.values())
+            for dimension in ("width", "height"):
+                assert cases["font"]["pixels"]["terminalMarkerInk"][dimension] == cases["dark"]["pixels"]["terminalMarkerInk"][dimension], (
+                    "18px proportional chrome setting changed native terminal glyph dimensions"
+                )
+            report["passed"] = True
+        except Exception as error:
+            report["error"] = str(error)
+        (args.output / "result.json").write_text(json.dumps(report, indent=2) + "\n")
+        print(json.dumps(report, indent=2))
+        if not report["passed"]:
+            raise SystemExit(1)
+        return
     env = os.environ.copy()
     env.pop("WAYLAND_DISPLAY", None)
     env["DISPLAY"] = args.display
     if args.xkb_tools_dir:
         env["PATH"] = str(args.xkb_tools_dir) + ":" + env.get("PATH", "")
+    if args.appearance_case:
+        fixture = (args.output / "config").resolve()
+        fixture.mkdir(mode=0o700)
+        fixture.chmod(0o700)
+        (fixture / "themes").mkdir(mode=0o700, exist_ok=True)
+        theme = {"dark": "splitty-dark", "light": "splitty-light",
+                 "font": "splitty-dark", "fallback": "unsupported-native"}[args.appearance_case]
+        config = f'[appearance]\ntheme_mode = "fixed"\ntheme = "{theme}"\n'
+        if args.appearance_case == "font":
+            config += 'font_family = "DejaVu Sans"\nfont_size = 18\n'
+        (fixture / "config.toml").write_text(config)
+        if args.appearance_case == "fallback":
+            source = Path(__file__).resolve().parents[2] / "crates/splitty-core/src/theme/bundled/splitty-dark.toml"
+            authored = source.read_text().replace('name = "Splitty Dark"', 'name = "Unsupported Native Values"')
+            authored += ('surface-base = "oklch(0.5 0.2 90)"\n'
+                         'font-family = "var(--missing-font)"\n'
+                         'font-size = "2rem"\n\n'
+                         '[terminal]\nbg = "color(display-p3 1 0 0)"\n')
+            (fixture / "themes/unsupported-native.toml").write_text(authored)
+        env["SPLITTY_CONFIG_DIR"] = str(fixture)
     xvfb_env = env.copy()
     if args.xvfb_lib:
         xvfb_env["LD_LIBRARY_PATH"] = str(args.xvfb_lib) + (":" + env["LD_LIBRARY_PATH"] if env.get("LD_LIBRARY_PATH") else "")
@@ -462,6 +574,59 @@ def main():
         result["shellPids"] = {"screen1": a_pid, "screen2": b_pid, "screen3": c_pid}
         time.sleep(1)
 
+    def exercise_appearance(a_pid):
+        # The fixture is selected before the app starts. Exercise normal PTY
+        # rendering here; no test-only settings path or OS preference change.
+        time.sleep(.8)
+        terminal_bg = rgb(window_pixels((900, 450, 1, 1)))
+        chrome_bg = rgb(window_pixels((500, 20, 1, 1)))
+        brand = glyph_bounds(window_pixels((10, 6, 24, 28)), 24, 28)
+        result["pixels"] = {"terminalBackground": terminal_bg,
+                            "chromeBackground": chrome_bg, "chromeBrandBounds": brand}
+        if args.appearance_case == "light":
+            assert min(terminal_bg) > 220 and min(chrome_bg) > 150, "Light theme did not reach chrome and terminal pixels"
+        elif args.appearance_case == "fallback":
+            assert terminal_bg == (16, 21, 28), "Unsupported terminal color did not use native fallback"
+            assert chrome_bg != (0, 0, 0), "Unsupported chrome color left the window unusable"
+        else:
+            assert max(terminal_bg) < 90 and max(chrome_bg) < 100, "Dark theme did not reach chrome and terminal pixels"
+        capture(f"appearance-{args.appearance_case}-startup")
+        result["checks"].append("startup-chrome-and-terminal-colors")
+
+        send("export SPLITTY_APPEARANCE_TOKEN=retained")
+        send("clear")
+        send("printf 'MMMMMMMMMMMMMMMM\\n%.0s' 1 2 3 4 5 6")
+        time.sleep(.5)
+        terminal_pixels = window_pixels((20, 80, 300, 250))
+        bands = text_bands(terminal_pixels, 300, 250, terminal_bg)
+        rows = [start for start, _ in bands]
+        pitches = [after - before for before, after in zip(rows, rows[1:])]
+        pitch = max(set(pitches), key=pitches.count) if pitches else None
+        assert pitch == 21 and pitches.count(21) >= 3, f"Rendered terminal rows did not retain 21px pitch: {rows}"
+        result["pixels"].update({"terminalRowStarts": rows, "terminalRowPitch": pitch,
+                                 "terminalMarkerInk": marker_ink(terminal_pixels, 300, bands, terminal_bg)})
+        capture(f"appearance-{args.appearance_case}-terminal-rows")
+        result["checks"].append("terminal-21px-row-pitch")
+
+        send("printf 'APPEARANCE_HISTORY_MARKER\\n'")
+        chord("Alt_L", "d")  # Split right without assuming chrome control width.
+        b_pid = focused_shell_pid("appearance-split-shell")
+        assert b_pid != a_pid and alive(a_pid), "Split changed original shell"
+        chord("Alt_L", "m")  # Maximize B.
+        chord("Alt_L", "t")  # Add tab C without assuming tab strip width.
+        c_pid = focused_shell_pid("appearance-tab-shell")
+        assert c_pid not in (a_pid, b_pid), "Tab reused another shell"
+        click((40, 62))
+        assert shell_pid("appearance-original-tab") == b_pid, "Tab switch lost B"
+        assert alive(c_pid), "Hidden tab C ended while B was selected"
+        chord("Alt_L", "m")  # Restore A/B layout.
+        click((300, 180))
+        assert shell_pid("appearance-a-return") == a_pid, "Split/tab/maximize lost A"
+        assert shell_value("appearance-a-state", '"$SPLITTY_APPEARANCE_TOKEN"') == "retained", "Shell state was lost"
+        capture(f"appearance-{args.appearance_case}-history-retained")
+        result["shellPids"] = {"original": a_pid, "split": b_pid, "tab": c_pid}
+        result["checks"].append("pty-and-history-retained-through-layout")
+
     with tempfile.TemporaryDirectory(prefix="splitty-screens-") as directory, \
             (args.output / "xvfb.log").open("w") as xvfb_log, \
             (args.output / "app.log").open("w") as app_log:
@@ -523,7 +688,9 @@ def main():
             x("windowfocus", window)
             capture("initial")
             a_pid = shell_pid("a-initial")
-            if args.navigation_keys_only:
+            if args.appearance_case:
+                exercise_appearance(a_pid)
+            elif args.navigation_keys_only:
                 exercise_navigation_keys_only(a_pid)
             elif args.navigation:
                 exercise_navigation(a_pid)
@@ -619,7 +786,23 @@ def main():
             descendants = set(performance.process_stats(app.pid)) - {app.pid} if app else set()
             if app is not None:
                 if app.poll() is None and window is not None and display is not None:
+                    before_close = None
+                    if args.appearance_case:
+                        try:
+                            before_close = window_pixels((455, 300, 289, 160))
+                        except (RuntimeError, subprocess.CalledProcessError):
+                            pass
                     display.close_window(window)
+                    if args.appearance_case:
+                        time.sleep(.6)
+                        if app.poll() is None and before_close is not None:
+                            try:
+                                if window_pixels((455, 300, 289, 160)) != before_close:
+                                    capture("appearance-window-close-prompt")
+                                    confirm_close()
+                                    result["checks"].append("window-close-confirmed")
+                            except (RuntimeError, subprocess.CalledProcessError):
+                                pass  # The window may already be gone during normal exit.
                 try:
                     app.wait(timeout=15)
                     result["normalWindowClose"] = True

@@ -271,6 +271,50 @@ fn erased_cells_keep_their_background_and_palette_changes_invalidate() -> Result
 }
 
 #[test]
+fn applied_colors_repaint_retained_content_and_survive_engine_reset() -> Result<()> {
+    let mut engine = Engine::new(20, 3)?;
+    engine.feed(b"keep \x1b[31mred", false)?;
+    assert_eq!(screen(&mut engine)?[0], "keep red");
+    let extended_before = {
+        let frame = engine.frame()?;
+        let color = packed(frame.colors.palette[16]);
+        frame.finish()?;
+        color
+    };
+    let mut colors = ColorConfig {
+        foreground: 0x112233,
+        background: 0x223344,
+        cursor: 0x334455,
+        ..ColorConfig::default()
+    };
+    colors.ansi[1] = 0x445566;
+    engine.apply_colors(colors)?;
+    let mut frame = engine.frame()?;
+    assert_eq!(frame.background, colors.background);
+    assert_eq!(frame.cursor.color, colors.cursor);
+    assert_eq!(packed(frame.colors.palette[16]), extended_before);
+    assert!(frame.full_dirty, "a retained row must be recolored");
+    let mut row = frame.next_row()?.expect("content row");
+    let mut foregrounds = Vec::new();
+    while let Some(cell) = row.next_cell()? {
+        if !cell.text.is_empty() && cell.text != " " {
+            foregrounds.push(cell.foreground);
+        }
+    }
+    assert!(foregrounds.contains(&colors.foreground));
+    assert!(foregrounds.contains(&colors.ansi[1]));
+    frame.finish()?;
+    assert_eq!(screen(&mut engine)?[0], "keep red");
+    engine.reset()?;
+    assert_eq!(engine.colors, colors);
+    let frame = engine.frame()?;
+    assert_eq!(frame.background, colors.background);
+    assert_eq!(frame.cursor.color, colors.cursor);
+    frame.finish()?;
+    Ok(())
+}
+
+#[test]
 fn pinned_c_abi_layouts_match_64_bit_headers() {
     // Linux/macOS/Windows desktop targets have 64-bit pointers. Sizes/alignments
     // were extracted with sizeof/_Alignof from the matching 1.0.0 C headers.
