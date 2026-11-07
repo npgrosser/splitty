@@ -25,7 +25,7 @@ A native client in Rust removes the WebView boundary around the app and the layo
 - **A native desktop client on GPUI** replaces the web UI in the desktop app on Linux, macOS and Windows. Local sessions keep the app-owned embedded service (in-process on Linux and macOS, the WSL helper over inherited pipes on Windows); hosts keep the native SSH path.
 - **A client core in Rust without UI**: connections and per-connection routing, the mux client and screen sync, the session client with attach handling and presence, the host controllers (hub connection, forwards, reverse forwards, remembered screens, host directory), the viewer's document reads and annotation state with anchoring by quote, notifications, templates and settings access. It knows neither GPUI nor transport details beyond the native client connection, and is tested in-process against the real embedded service.
 - **The window renders the server's layout.** The dock edits `ScreenState` through ops instead of reconciling a second layout model, and may apply an op optimistically with the server's own reducer.
-- **A native terminal view** on a Rust-usable terminal emulator, with selection, search, links and OSC 8 handling, the clipboard policy, IME, the PTY size marker and the scratchpad area.
+- **A native terminal view** on a replaceable Rust-usable terminal emulator, with selection, search, links and OSC 8 handling, the clipboard policy, IME, the PTY size marker and the scratchpad area. An engine adapter isolates emulator-specific state and types from the GPUI renderer, workspace and client core; changing that adapter must not change session ownership or layout logic.
 - **Viewer panes render natively** (N5): Markdown, diagrams, SVG, tables, source views with syntax highlighting, diffs and quick edits, with annotations marked on the client's own text layout. A web engine is embedded only for content that runs code, scripted HTML (`viewer-sandboxed-html`) and dev-server pages (`viewer-webview`): rendered offscreen into an element of the window, so overlays, clipping and scrolling work as for any other pane, and holding no authority (no channel to the service, at most a narrow data channel for selections and quotes).
 - **Browser access ends with the web UI.** At cutover, `splitty serve`, the browser gateway with its token, session cookies, bootstrap codes and tickets, and the browser part of `splitty connect` are removed. Until then they stay: the web UI is tested headless through them (N4).
 - **BREAKING (at cutover):** no browser access. Terminal access without the app remains `splitty attach`, also over SSH.
@@ -37,7 +37,7 @@ Phases:
    - a Markdown viewer pane with annotation marks on its rendered text;
    - an offscreen web engine in a pane, under an overlay, on Wayland in particular.
 
-   It decides whether the plan holds and when the cutover is planned (N3).
+   It decides whether the plan holds and when the cutover is planned (N3). The completed bounded probe establishes functional data paths and composition, but does not pass an interactive-performance gate. Before expanding its fixed layout, measure idle CPU, input-to-paint latency, sustained output and scrolling in an optimized build, with CEF disabled and enabled, recording the actual graphics device. Use those measurements to remove unnecessary redraws and repeated text work; a successful smoke is not a performance result.
 1. **Client core**: connection model, mux sync, sessions, viewer documents and annotations, ported with their test cases; no UI.
 2. **Local desktop**: windows, the dock on `ScreenState`, the terminal view, the local workspace, packaging next to the existing apps.
 3. **Hosts**: remote screens, ports and reverse forwards, the host directory and remembered screens.
@@ -51,6 +51,17 @@ Out of scope:
 - A feature freeze of the web client before the spike (N3). Until the cutover is planned, new features keep their logic on the server or in pure functions, as the viewer's anchoring does, so that it carries over.
 - Changes to the mux model, session keepers, the CLI's HTTP API over owner and scoped sockets and the native transport, except where the native client needs them; wire changes only with a capability, because hosts run older daemons.
 - Screen-reader accessibility beyond what GPUI provides (open question).
+
+## Architecture gates before the local desktop
+
+- **Independent client core:** connection identity, ordered session traffic, replay state, mux synchronization and owned-resource cleanup remain independent of GPUI and the emulator. The service continues to own PTYs and authoritative workspace state. A view or rendered document never selects a backend or acquires service authority.
+- **Replaceable emulator:** keep parsing, terminal modes, scrollback and engine-specific selection operations behind a small internal adapter. Expose engine-neutral visible text/style data, cursor, change information and checked input/reply operations. No Alacritty types may cross into the GPUI renderer, workspace or client core. Capability differences must be explicit; replacement does not imply identical image/keyboard/Unicode support or require a runtime plugin system.
+- **Separate native presentation:** GPUI owns text shaping/painting, focus, pointer geometry and IME composition. Clipboard actions and replay-triggered effects remain subject to application policy. Changing the emulator must not require rebuilding workspace, transport, clipboard policy or platform-lifetime logic. Rendering must not copy the entire scrollback or rebuild unchanged rows on every frame.
+- **One layout authority:** the first usable desktop increment renders the service's screen layout and sends split, resize, tab and close intents through the existing mux operations. Its state model must not grow a second independently authoritative dock tree. The current 55/45 terminal/document fixture is not a layout implementation.
+- **Explicit scheduling and ownership:** parsing, UI updates and optional web rendering need measured execution budgets and bounded queues. Idle state must not force whole-window redraws. Frame/document/session ownership, cancellation and shutdown must remain explicit across worker and UI boundaries.
+- **Enforced boundaries:** extend the LikeC4 model and import checks with the engine-adapter/rendering separation when implementing it. Test contracts across that boundary: ordered replay/live bytes, resize, selection, terminal replies, connection identity and teardown. Performance evidence covers idle, typing, output and scrolling separately, with environment and build profile recorded.
+
+The immediate implementation order is performance measurement and emulator separation, followed by the client-core work needed for real service-driven splits/tabs. The full migration remains a draft until its design, behavior deltas and tasks are written.
 
 ## Capabilities
 
@@ -95,6 +106,8 @@ Open questions for the design:
 - The development loop without hot reload: rebuild time of the desktop crate, and keeping the client core's tests free of UI so they stay fast.
 
 ## Carried-over design notes
+
+- 2026-11-07, post-spike architecture review: Alacritty imports are confined to `terminal.rs`, but that GPUI view directly owns its parser/model and consumes its cell, selection and mode types. It is isolated from the service, not yet independently interchangeable with the renderer. The probe requests redraws every 16 ms, shapes/paints nonblank cells individually and parses output on the UI thread. These are concrete optimization candidates, not measured attribution of latency. The preview used an unoptimized build on software Vulkan; optimized measurements and the architecture gates above precede further feature expansion.
 
 - 2026-11-07, `native-ui-gpui-spike`: the native adapter, isolated service lifecycle, terminal and Markdown annotation path now exist as a separately invoked development executable. Reconnect retains the same service session. The full host/workspace/settings client is still future work. Windows has an explicit connection adapter but no runnable owned-helper launcher; no local Windows or macOS runtime evidence exists. See the [evidence matrix](../../../docs/gpui-spike.md) before extending the migration.
 - 2026-11-07, dependency correction from `native-ui-gpui-spike`: GPUI Kit 0.9.0 pins the `gpui-pre`/platform 0.3.11 snapshot, which uses wgpu on Linux. Published `gpui` 0.2.2 uses Blade; those versions must not be described as the same renderer. The probe chooses `alacritty_terminal` 0.26.0 provisionally and implements its own native terminal view. Native Linux screenshot capture is absent in this pinned GPUI platform; runtime logs and external window captures are distinct evidence.
