@@ -118,11 +118,20 @@ def verify_prefix(prefix, target):
 def check_static_link(prefix):
     source = Path(__file__).resolve().parent / "testing" / "ghostty-vt-link.rs"
     with tempfile.TemporaryDirectory(prefix="ghostty-vt-link-") as temporary:
-        executable = Path(temporary) / ("ghostty-vt-link.exe" if sys.platform == "win32" else "ghostty-vt-link")
+        work = Path(temporary)
+        archive = "ghostty-vt-static.lib" if sys.platform == "win32" else "libghostty-vt.a"
+        static_dir = work / "native-static"
+        static_dir.mkdir()
+        shutil.copy2(prefix / "lib" / archive, static_dir / archive)
+        executable = work / ("ghostty-vt-link.exe" if sys.platform == "win32" else "ghostty-vt-link")
         subprocess.run(
-            ["rustc", "--edition=2021", "-L", f"native={prefix / 'lib'}", "-o", str(executable), str(source)],
+            ["rustc", "--edition=2021", "-L", f"native={static_dir}", "-o", str(executable), str(source)],
             check=True,
         )
+        if sys.platform == "darwin":
+            linked = subprocess.run(["otool", "-L", str(executable)], check=True, capture_output=True, text=True)
+            if any("libghostty-vt" in line and ".dylib" in line for line in linked.stdout.splitlines()):
+                raise RuntimeError("Rust static-link smoke unexpectedly depends on libghostty-vt.dylib")
         subprocess.run([str(executable)], check=True)
     print("Pinned static library linked and ran from Rust", file=sys.stderr)
 

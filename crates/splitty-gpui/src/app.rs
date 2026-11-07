@@ -552,7 +552,7 @@ impl Probe {
         // CEF's message loop and frame handoff must run even when no GPUI paint is pending.
         if let Some(mut frame) = self.web.poll() {
             // RenderImage expects BGRA; CEF adapter exposes RGBA for explicit ownership.
-            for pixel in frame.rgba.chunks_exact_mut(4) {
+            for pixel in frame.rgba.as_chunks_mut::<4>().0 {
                 pixel.swap(0, 2);
             }
             if let Some(buffer) = image::RgbaImage::from_raw(frame.width, frame.height, frame.rgba)

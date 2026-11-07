@@ -46,12 +46,27 @@ fn main() {
         archive.display()
     );
 
+    // macOS selected the adjacent dylib from prefix/lib despite a static link declaration.
+    let static_dir =
+        PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR")).join("native-static");
+    fs::create_dir_all(&static_dir).unwrap_or_else(|error| {
+        panic!(
+            "cannot create native static link directory {}: {error}",
+            static_dir.display()
+        )
+    });
+    let static_archive = static_dir.join(archive_name);
+    fs::copy(&archive, &static_archive).unwrap_or_else(|error| {
+        panic!(
+            "cannot stage pinned libghostty-vt archive {} at {}: {error}",
+            archive.display(),
+            static_archive.display()
+        )
+    });
+
     println!("cargo:rerun-if-changed={}", version_header.display());
     println!("cargo:rerun-if-changed={}", archive.display());
-    println!(
-        "cargo:rustc-link-search=native={}",
-        prefix.join("lib").display()
-    );
+    println!("cargo:rustc-link-search=native={}", static_dir.display());
     let name = if target_os == "windows" {
         "ghostty-vt-static"
     } else {
