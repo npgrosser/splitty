@@ -1,5 +1,7 @@
 # Proposal
 
+> Evaluation note, 2026-11-07: native work remains on an isolated feature branch. Native-only replacement, temporary or lasting coexistence with the web client, and retaining the native app as a reference experiment are open outcomes. The cutover and removal sections below describe one conditional direction, not scheduled removal work. This does not commit to a WebAssembly migration or a broad web refactor. Before expanding feature ports, review ownership and concrete reuse across service, client state and presentation.
+
 The bounded Linux phase-0 implementation is recorded in [the spike report](../../../docs/gpui-spike.md)
 (`native-ui-gpui-spike`). Platform and input checks in that report remain gates for
 the full migration described below.
@@ -54,6 +56,7 @@ Out of scope:
 
 ## Architecture gates before the local desktop
 
+- **Reusable feature boundaries:** UI independence alone is insufficient evidence of browser reuse. Keep authoritative service behavior in the existing Rust service, window-local reconciliation and policies behind UI/transport-independent boundaries, and GPUI/browser effects in adapters. Before duplicating a feature controller, identify its existing implementation and decide whether to reuse the server capability, extract a portable client policy, or retain a documented presentation-specific implementation. Do not move local focus, consent or pending edits into global server state.
 - **Independent client core:** connection identity, ordered session traffic, replay state, mux synchronization and owned-resource cleanup remain independent of GPUI and the emulator. The service continues to own PTYs and authoritative workspace state. A view or rendered document never selects a backend or acquires service authority.
 - **Cohesive terminal feature:** keep parsing, terminal modes, scrollback and engine-specific selection operations separate from GPUI presentation and session wiring. Start with one concrete Ghostty integration and small interfaces required by those responsibilities. Safe engine-specific types may be shared with the terminal renderer; they must not leak into workspace, layout or client-core APIs. A generic provider framework, multiple implementations and a duplicate engine-neutral cell model are not requirements. Capability differences must be explicit; a future replacement can require terminal-local adaptations.
 - **Separate native presentation:** GPUI owns text shaping/painting, focus, pointer geometry and IME composition. Clipboard actions and replay-triggered effects remain subject to application policy. Changing the emulator must not require rebuilding workspace, transport, clipboard policy or platform-lifetime logic. Rendering must not copy the entire scrollback or rebuild unchanged rows on every frame.
@@ -122,6 +125,23 @@ Open questions for the design:
 - The development loop without hot reload: rebuild time of the desktop crate, and keeping the client core's tests free of UI so they stay fast.
 
 ## Carried-over design notes
+
+- 2026-11-07, `native-local-screens` architecture review: the four preparatory service changes already share template application, derived pane state, settings authority and hub decisions across clients. Client-side work remains substantial, but it is not all UI code and not all server authority. Current `splitty-client-core` is UI-free, not browser-portable: action methods accept concrete `Client`, the crate depends on native transport/remote/server, and `splitty-core` itself includes PTY/runtime dependencies. A portable client state/intent layer would need a deliberate dependency boundary; compiling the current crate to WebAssembly is not an existing capability.
+
+  | Observed feature | Current mixture or duplication | Boundary to preserve or investigate |
+  | --- | --- | --- |
+  | Screen/session reconciliation | TS `mux/`, `connection/` and attach registry; new Rust workspace/connection code | Shared state rules and generation/route invariants; native stream and browser socket remain adapters. Window selection stays local. |
+  | Template preview | `template_intent.ts` repeats projection/validation already authoritative in `mux/templates.rs` | Reuse canonical projection for optimism if both clients need it, or render an authoritative result; command consent stays in the invoking window. |
+  | Closing | `close_guard.ts` reads Dockview and registries while computing lost processes/scratchpads/annotations | Extract a pure close-impact decision over feature state; each UI renders the prompt and supplies consent. |
+  | Scratchpad | `scratchpad.ts` combines pending-save/snapshot reconciliation with font size and localStorage | Shared editing/synchronization policy with injected time and send effects; UI preferences and storage adapters remain separate. |
+  | Viewer annotations | `viewer/anchoring.ts` is a bounded pure text algorithm; renderers provide source maps | Good small reuse candidate; define UTF-8/UTF-16 offset and normalization contracts before sharing across languages. Storage and review lifecycle already belong to the server. |
+  | Presence and host control | `Presence` has an injected window/clock but also exports DOM wiring; hosts combine service decisions, reconnect state and UI consent | Reuse service decisions and client state machines; keep DOM/GPUI event capture, OS actions, prompts and actual transport outside them. |
+
+  Native types do not remove untrusted-input validation, size bounds, generation checks or capability/version negotiation. WebView security rules remain necessary for every retained web client. Dockview synchronization is an adapter cost, not an inherent requirement that every browser UI own a second authoritative layout. Native value must be judged by actual behavior, performance and maintenance cost, not by requiring browser removal.
+
+  A 2026-11-07 count of `frontend/src` gives 26,537 production TypeScript lines, 7,745 Svelte, 3,025 CSS and 20,009 test/helper lines (excluding `.test.*` and `testing/` from production). `Workspace.svelte` contains 1,000 script lines out of 1,093. These are size observations, not a classification of removable versus reusable logic; earlier 17.5k/one-fifth estimates are historical. The existing web suites are behavioral evidence, not an instruction to translate every line.
+
+  Near-term order: finish the isolated local-screen milestone, audit its concrete native-client seam, then choose one real shared policy/controller and demonstrate reuse before broad migration. A browser WASM adapter is a candidate if both clients need the same portable state machine; it must prove build/packaging cost, bounded messages, replay/order semantics and cross-language text behavior. No blanket WASM conversion or backend relocation follows from this review.
 
 - 2026-11-07, completed `native-terminal-ghostty` and `native-local-workspace`: Ghostty owns emulation behind a UI-independent boundary; GPUI caches shaped rows and no longer repaints an idle window unconditionally. The default development app now renders one service-owned local Screen with splits, tabs, close and divider resizing. Real-window Wayland/X11 smokes and X11 control/typing tests passed, including same-screen refill and stable terminal identity. One shared bounded input queue avoids per-pane forwarding queues. The full check passed 1,247 Rust tests, workspace/CEF Clippy and 19 specifications. Matched software-renderer measurements show an idle CPU improvement without a demonstrated latency gain. A per-process Mesa D3D12 selection also enabled actual hardware rendering on WSLg and passed functional smokes; this does not replace native Windows acceptance. See [the runbook and evidence](../../../docs/gpui-spike.md) for scope and limitations.
 

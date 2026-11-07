@@ -1,5 +1,7 @@
 # Design
 
+> Review note, 2026-11-07: this is a historical TypeScript extraction design. The four service-owned increments are implemented, and an isolated native Rust client now exists. TS-only extraction, shared portable Rust client logic with a browser adapter, and retaining separate presentation adapters are being evaluated; none is selected by this note. See the `native-ui-gpui` proposal's current architecture review. Do not interpret this draft as requiring either two independent feature cores or immediate web removal.
+
 > Draft. Written with the proposal on 2026-11-04 from an inventory of `frontend/src` at that date. Line references are approximate and will drift; the decisions are the point.
 
 ## Context
