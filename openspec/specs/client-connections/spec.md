@@ -407,3 +407,29 @@ Normal Windows preview shutdown SHALL join its owned streams and helper. The cli
 #### Scenario: Cancellation during startup
 - **WHEN** the window closes while its owned helper or API stream is being established
 - **THEN** admitted work remains owned until cleanup is joined and no request is delivered to a replacement backend
+
+### Requirement: Native Relative Workspace Navigation
+Native relative Screen navigation SHALL use the current authoritative catalog order and local selection. Relative tab navigation SHALL target its captured group on the shown Screen. Both SHALL stop at the first and last item, preserve sessions and reject foreign connection identities. Tab navigation SHALL NOT redirect to another group when its captured Screen or group is no longer current.
+
+#### Scenario: Ordered relative Screen intents
+- **WHEN** several relative Screen intents are admitted before the view receives the next update
+- **THEN** each uses the latest local selection in catalog order without wrapping or creating sessions
+- **AND** an intent from a replaced connection cannot navigate the replacement workspace
+
+#### Scenario: Hovered group and stale target
+- **WHEN** relative tab navigation targets a live group on the shown Screen, including an unfocused group
+- **THEN** it selects and focuses that group's neighboring tab using the existing selection persistence semantics
+- **WHEN** the captured Screen is no longer shown or its group was removed
+- **THEN** the intent does not change another group's selection
+
+### Requirement: Native Navigation Input Ownership
+Native chrome navigation SHALL leave terminal wheel input with the terminal's existing application/scrollback routing. Editing, confirmation and drag interactions SHALL retain priority over chrome wheel navigation. Horizontal tab-strip scrolling SHALL remain available independently of relative tab selection.
+
+#### Scenario: Terminal and active editing retain input
+- **WHEN** wheel input occurs over terminal content or while an editing, confirmation or drag interaction owns the workspace
+- **THEN** chrome wheel navigation changes neither the shown Screen nor the selected tab
+- **AND** terminal input retains its existing routing where applicable
+
+#### Scenario: Overflow browsing
+- **WHEN** a user scrolls a long Screen list or scrolls horizontally through an overflowing tab strip
+- **THEN** the view reveals the overflow without changing the selected Screen or tab
