@@ -8,6 +8,9 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`native-screen-transfer` NST-1** (2026-11-07, provisional, tbd): bounded coherent cross-Screen reconciliation uses existing ordered catalog/snapshot reads; an atomic workspace snapshot protocol remains an alternative if measured churn or cost warrants it.
+- **`native-screen-transfer` NST-2** (2026-11-07, provisional, tbd): follow a local transfer only after verification and unless later navigation intervenes; initially limit the tab menu to Screen transfer.
+
 - **`native-tab-management` NT-1** (2026-11-07, provisional, tbd): additive root-only `move_tab` with before-anchor and `tab-placement-v1`; retain legacy moves and derive source proportions from current server state.
 - **`native-tab-management` NT-2** (2026-11-07, provisional, tbd): clamped focused-group Mod+PageUp/PageDown, scrollable tabs with selected-tab reveal and header insertion; same-group reorder retains selection/maximization.
 - **`native-tab-management` NT-3** (2026-11-07, provisional, tbd): one pending exact placement, ordered catalog watermark and accepted post-fence Screen snapshot for settlement, without a new acknowledgment protocol.
