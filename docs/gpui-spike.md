@@ -82,9 +82,21 @@ in the focused terminal. This increment has one local Screen; hosts, saved
 workspace restoration, drag-and-drop, scratchpad and `splitty open` integration
 remain subsequent migration work.
 
+Workspace shortcuts use **Cmd** on macOS and **Alt** on other hosts as `Mod`:
+
+| Shortcut | Action |
+| --- | --- |
+| Mod+T | New tab (or terminal on an empty Screen) |
+| Mod+D / Mod+Shift+D | Split right / below |
+| Mod+W | Close the focused pane |
+| Mod+Shift+Left/Right/Up/Down | Focus the nearest visible split group in that direction |
+
+These chords are handled before terminal input; Ctrl+C and clipboard keys keep
+their terminal behavior. Tab selection remains available by clicking its label.
+
 `--workspace-smoke` exercises four distinct terminal sessions, both split axes,
-tab switching, authoritative divider ratios, pane closure and preserved terminal
-identity. It requires fresh visible paints and joined service cleanup. The smoke
+tab switching, authoritative divider ratios, pane closure, keyboard routing and
+preserved terminal identity. It requires fresh visible paints and joined service cleanup. The smoke
 driver selects this workflow with `--workspace`; omit it for the legacy fixture.
 
 `--smoke` runs bounded terminal output, loads the Markdown fixture, creates an

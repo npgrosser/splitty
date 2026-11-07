@@ -6,14 +6,86 @@ use crate::{
 use gpui_kit::{prelude::*, *};
 use splitty_client_core::workspace::{Axis, LayoutNode, LocalWorkspace};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc,
+        atomic::{AtomicBool, AtomicU64, Ordering},
+        Arc, Mutex,
     },
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Shortcut {
+    NewTab,
+    SplitRight,
+    SplitDown,
+    ClosePane,
+    Focus(Direction),
+}
+
+fn shortcut(key: &Keystroke, is_mac: bool) -> Option<Shortcut> {
+    let mods = key.modifiers;
+    if mods.control || mods.function || mods.platform != is_mac || mods.alt == is_mac {
+        return None;
+    }
+    match (key.key.to_ascii_lowercase().as_str(), mods.shift) {
+        ("t", false) => Some(Shortcut::NewTab),
+        ("d", false) => Some(Shortcut::SplitRight),
+        ("d", true) => Some(Shortcut::SplitDown),
+        ("w", false) => Some(Shortcut::ClosePane),
+        ("left", true) => Some(Shortcut::Focus(Direction::Left)),
+        ("right", true) => Some(Shortcut::Focus(Direction::Right)),
+        ("up", true) => Some(Shortcut::Focus(Direction::Up)),
+        ("down", true) => Some(Shortcut::Focus(Direction::Down)),
+        _ => None,
+    }
+}
+
+struct VisibleSlot {
+    id: String,
+    pane: String,
+    bounds: Bounds<Pixels>,
+}
+
+fn nearest_slot<'a>(
+    slots: &'a [VisibleSlot],
+    current: &str,
+    direction: Direction,
+) -> Option<&'a VisibleSlot> {
+    let source = slots
+        .iter()
+        .find(|slot| slot.id == current)?
+        .bounds
+        .center();
+    let mut best: Option<(f32, &VisibleSlot)> = None;
+    for slot in slots.iter().filter(|slot| slot.id != current) {
+        let center = slot.bounds.center();
+        let dx = f32::from(center.x - source.x);
+        let dy = f32::from(center.y - source.y);
+        let matching = match direction {
+            Direction::Right => dx > 0. && dy.abs() <= dx,
+            Direction::Left => dx < 0. && dy.abs() <= -dx,
+            Direction::Down => dy > 0. && dx.abs() <= dy,
+            Direction::Up => dy < 0. && dx.abs() <= -dy,
+        };
+        if matching {
+            let distance = dx * dx + dy * dy;
+            if best.is_none_or(|(best_distance, _)| distance < best_distance) {
+                best = Some((distance, slot));
+            }
+        }
+    }
+    best.map(|(_, slot)| slot)
+}
 
 // The worker queue is the only admission boundary. A successful terminal send
 // already owns one of its bounded slots, with the pane/session route captured.
@@ -69,6 +141,7 @@ pub struct Workspace {
     commands: mpsc::Sender<Command>,
     stopping: Arc<AtomicBool>,
     split_bounds: HashMap<String, Bounds<Pixels>>,
+    slot_bounds: HashMap<String, Bounds<Pixels>>,
     drag: Option<ResizeDrag>,
     visible: Vec<String>,
     status: String,
@@ -80,6 +153,11 @@ pub struct Workspace {
     smoke_tab: Option<String>,
     smoke_initial: Option<Entity<Terminal>>,
     smoke_markers: bool,
+    smoke_terminal_inputs: Option<Arc<AtomicU64>>,
+    smoke_last_input_pane: Option<Arc<Mutex<Option<String>>>>,
+    smoke_shortcut_checks: Arc<AtomicU64>,
+    smoke_shortcuts_clean: Arc<AtomicBool>,
+    smoke_normal_input: Arc<AtomicBool>,
     outcome: Arc<AtomicBool>,
 }
 impl Workspace {
@@ -119,6 +197,7 @@ impl Workspace {
                 commands,
                 stopping: worker.stop.clone(),
                 split_bounds: HashMap::new(),
+                slot_bounds: HashMap::new(),
                 drag: None,
                 visible: Vec::new(),
                 status: "Starting local workspace…".into(),
@@ -130,6 +209,11 @@ impl Workspace {
                 smoke_tab: None,
                 smoke_initial: None,
                 smoke_markers: false,
+                smoke_terminal_inputs: smoke.then(|| Arc::new(AtomicU64::new(0))),
+                smoke_last_input_pane: smoke.then(|| Arc::new(Mutex::new(None))),
+                smoke_shortcut_checks: Arc::new(AtomicU64::new(0)),
+                smoke_shortcuts_clean: Arc::new(AtomicBool::new(true)),
+                smoke_normal_input: Arc::new(AtomicBool::new(false)),
                 outcome,
             },
             worker,
@@ -154,8 +238,23 @@ impl Workspace {
         {
             return;
         }
-        let commands =
-            terminal_commands(self.commands.clone(), pane.to_owned(), session.to_owned());
+        let route = terminal_commands(self.commands.clone(), pane.to_owned(), session.to_owned());
+        let inputs = self.smoke_terminal_inputs.clone();
+        let last_pane = self.smoke_last_input_pane.clone();
+        let input_pane = pane.to_owned();
+        let commands = move |command| {
+            if matches!(&command, terminal::Command::Input { .. }) {
+                if let Some(inputs) = &inputs {
+                    inputs.fetch_add(1, Ordering::Relaxed);
+                }
+                if let Some(last_pane) = &last_pane {
+                    if let Ok(mut last) = last_pane.lock() {
+                        *last = Some(input_pane.clone());
+                    }
+                }
+            }
+            route(command)
+        };
         let terminal = cx.new(|cx| Terminal::new(commands, cx));
         self.panes.insert(
             pane.to_owned(),
@@ -169,6 +268,7 @@ impl Workspace {
     }
     fn reconcile(&mut self, model: LocalWorkspace, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(screen) = model.snapshot() {
+            prune_layout_bounds(&screen.root, &mut self.split_bounds, &mut self.slot_bounds);
             self.panes
                 .retain(|pane, view| model.session_for(pane) == Some(view.session.as_str()));
             for pane in screen.panes.keys() {
@@ -231,6 +331,54 @@ impl Workspace {
         {
             self.send(Command::Focus(pane.to_owned()), cx);
             cx.notify();
+        }
+    }
+    fn focus_neighbor(
+        &mut self,
+        direction: Direction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(model) = self.model.as_ref() else {
+            return;
+        };
+        let Some(screen) = model.snapshot() else {
+            return;
+        };
+        let Some(focused) = model.focused_pane() else {
+            return;
+        };
+        let mut slots = Vec::new();
+        visible_slots(model, &screen.root, &self.slot_bounds, &mut slots);
+        let Some(current) = slots.iter().find(|slot| slot.pane == focused) else {
+            return;
+        };
+        if let Some(next) = nearest_slot(&slots, &current.id, direction) {
+            let pane = next.pane.clone();
+            self.focus(&pane, cx);
+            self.focus_current(window, cx);
+        }
+    }
+    fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(action) = shortcut(&event.keystroke, cx.platform_info().is_mac()) else {
+            return;
+        };
+        cx.stop_propagation();
+        match action {
+            Shortcut::NewTab => self.tab(cx),
+            Shortcut::SplitRight => self.split(Axis::Horizontal, cx),
+            Shortcut::SplitDown => self.split(Axis::Vertical, cx),
+            Shortcut::ClosePane => {
+                if let Some(pane) = self
+                    .model
+                    .as_ref()
+                    .and_then(LocalWorkspace::focused_pane)
+                    .map(str::to_owned)
+                {
+                    self.send(Command::Close(pane), cx);
+                }
+            }
+            Shortcut::Focus(direction) => self.focus_neighbor(direction, window, cx),
         }
     }
     fn split(&mut self, axis: Axis, cx: &mut Context<Self>) {
@@ -332,6 +480,54 @@ impl Workspace {
             self.smoke_tick(window, cx);
         }
     }
+    fn smoke_key(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        mac: &'static str,
+        other: &'static str,
+        expected_input_pane: Option<String>,
+    ) {
+        let chord = if cx.platform_info().is_mac() {
+            mac
+        } else {
+            other
+        };
+        let key = Keystroke::parse(chord).expect("fixed smoke keystroke");
+        let inputs = self
+            .smoke_terminal_inputs
+            .as_ref()
+            .expect("smoke input counter")
+            .clone();
+        let checks = self.smoke_shortcut_checks.clone();
+        let clean = self.smoke_shortcuts_clean.clone();
+        let normal = self.smoke_normal_input.clone();
+        let last_input = self
+            .smoke_last_input_pane
+            .as_ref()
+            .expect("smoke last input pane")
+            .clone();
+        // Dispatch after this Workspace update returns. The capture callback
+        // updates the same entity, so synchronous dispatch would reborrow it.
+        window.defer(cx, move |window, cx| {
+            let before = inputs.load(Ordering::Relaxed);
+            let handled = window.dispatch_keystroke(key, cx);
+            let after = inputs.load(Ordering::Relaxed);
+            if let Some(expected) = expected_input_pane {
+                let routed_to_focused = last_input
+                    .lock()
+                    .is_ok_and(|last| last.as_deref() == Some(expected.as_str()));
+                normal.store(
+                    handled && after > before && routed_to_focused,
+                    Ordering::Release,
+                );
+            } else if handled && after == before {
+                checks.fetch_add(1, Ordering::Release);
+            } else {
+                clean.store(false, Ordering::Release);
+            }
+        });
+    }
     fn smoke_tick(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.started.elapsed() > Duration::from_secs(40) {
             self.finish_smoke(false, cx);
@@ -359,26 +555,19 @@ impl Workspace {
                 };
                 self.smoke_initial = self.panes.get(&first).map(|view| view.terminal.clone());
                 self.smoke_first = Some(first.clone());
-                self.send(
-                    Command::Split {
-                        pane: first,
-                        axis: Axis::Horizontal,
-                    },
-                    cx,
-                );
+                self.focus_current(window, cx);
+                self.smoke_key(window, cx, "cmd-d", "alt-d", None);
                 self.smoke_stage = 1;
             }
-            1 if count == 2 => {
-                self.split(Axis::Vertical, cx);
+            1 if count == 2 && self.smoke_shortcut_checks.load(Ordering::Acquire) >= 1 => {
+                self.smoke_key(window, cx, "cmd-shift-d", "alt-shift-d", None);
                 self.smoke_stage = 2;
             }
-            2 if count == 3 => {
-                if let Some(first) = self.smoke_first.clone() {
-                    self.send(Command::Tab(first), cx);
-                }
+            2 if count == 3 && self.smoke_shortcut_checks.load(Ordering::Acquire) >= 2 => {
+                self.smoke_key(window, cx, "cmd-t", "alt-t", None);
                 self.smoke_stage = 3;
             }
-            3 if count == 4 => {
+            3 if count == 4 && self.smoke_shortcut_checks.load(Ordering::Acquire) >= 3 => {
                 self.smoke_tab = model.focused_pane().map(str::to_owned);
                 let commands: Vec<_> = self
                     .panes
@@ -396,34 +585,48 @@ impl Workspace {
             }
             4 if count == 4 && self.panes.values().all(|view| view.marker) => {
                 self.smoke_markers = true;
-                let resize = match &screen.root {
-                    LayoutNode::Split { id, children, .. } if children.len() == 2 => {
-                        Some(id.to_string())
-                    }
-                    _ => None,
-                };
                 if let Some(first) = self.smoke_first.clone() {
                     self.select(&first, window, cx);
                 }
-                if let Some(node) = resize {
-                    self.send(
-                        Command::ResizeSplit {
-                            node,
-                            sizes: vec![0.65, 0.35],
-                        },
-                        cx,
-                    );
-                    self.smoke_stage = 5;
+                self.smoke_key(window, cx, "cmd-shift-right", "alt-shift-right", None);
+                self.smoke_stage = 8;
+            }
+            8 if self.smoke_shortcut_checks.load(Ordering::Acquire) >= 4
+                && model.focused_pane() != self.smoke_first.as_deref() =>
+            {
+                self.smoke_key(
+                    window,
+                    cx,
+                    "ctrl-c",
+                    "ctrl-c",
+                    model.focused_pane().map(str::to_owned),
+                );
+                self.smoke_stage = 9;
+            }
+            9 if self.smoke_normal_input.load(Ordering::Acquire) => {
+                if let LayoutNode::Split { id, children, .. } = &screen.root {
+                    if children.len() == 2 {
+                        self.send(
+                            Command::ResizeSplit {
+                                node: id.to_string(),
+                                sizes: vec![0.65, 0.35],
+                            },
+                            cx,
+                        );
+                        self.smoke_stage = 5;
+                    }
                 }
             }
             5 if matches!(&screen.root,LayoutNode::Split{sizes,..} if (sizes[0]-0.65).abs()<0.001) =>
             {
                 if let Some(tab) = self.smoke_tab.clone() {
-                    self.send(Command::Close(tab), cx);
+                    self.select(&tab, window, cx);
+                    self.smoke_key(window, cx, "cmd-w", "alt-w", None);
                 }
                 self.smoke_stage = 6;
             }
             6 if count == 3
+                && self.smoke_shortcut_checks.load(Ordering::Acquire) >= 5
                 && self.visible.iter().all(|pane| {
                     self.panes
                         .get(pane)
@@ -438,7 +641,13 @@ impl Workspace {
                     .is_some_and(|(view, original)| {
                         view.terminal.entity_id() == original.entity_id()
                     });
-                self.finish_smoke(stable && self.smoke_markers, cx);
+                self.finish_smoke(
+                    stable
+                        && self.smoke_markers
+                        && self.smoke_shortcuts_clean.load(Ordering::Acquire)
+                        && self.smoke_normal_input.load(Ordering::Acquire),
+                    cx,
+                );
             }
             _ => {}
         }
@@ -447,7 +656,7 @@ impl Workspace {
         self.outcome.store(passed, Ordering::Release);
         eprintln!(
             "{}",
-            serde_json::json!({"probe":"splitty-local-workspace","passed":passed,"stage":self.smoke_stage,"panes":self.panes.len(),"distinctSessionMarkers":self.smoke_markers,"visiblePanes":self.visible.len(),"elapsedMs":self.started.elapsed().as_millis(),"status":self.status})
+            serde_json::json!({"probe":"splitty-local-workspace","passed":passed,"stage":self.smoke_stage,"panes":self.panes.len(),"distinctSessionMarkers":self.smoke_markers,"shortcutChecks":self.smoke_shortcut_checks.load(Ordering::Acquire),"shortcutsNoInput":self.smoke_shortcuts_clean.load(Ordering::Acquire),"normalInput":self.smoke_normal_input.load(Ordering::Acquire),"visiblePanes":self.visible.len(),"elapsedMs":self.started.elapsed().as_millis(),"status":self.status})
         );
         self.stop();
         cx.quit();
@@ -500,6 +709,8 @@ impl Workspace {
     fn render_node(&self, node: &LayoutNode, cx: &mut Context<Self>) -> AnyElement {
         match node {
             LayoutNode::Slot { id, pane_ids, .. } => {
+                let bounds_id = id.to_string();
+                let entity = cx.entity();
                 let selected = self
                     .model
                     .as_ref()
@@ -570,6 +781,7 @@ impl Workspace {
                     .is_some_and(|pane| pane_ids.iter().any(|id| id.as_str() == pane));
                 let mut slot = div()
                     .id(SharedString::from(format!("slot-{id}")))
+                    .relative()
                     .size_full()
                     .flex()
                     .flex_col()
@@ -577,6 +789,18 @@ impl Workspace {
                     .min_h_0()
                     .border_1()
                     .border_color(rgb(if focused { 0x416783 } else { 0x263544 }))
+                    .child(
+                        canvas(
+                            move |bounds, _, cx| {
+                                entity.update(cx, |this, _| {
+                                    this.slot_bounds.insert(bounds_id.clone(), bounds);
+                                })
+                            },
+                            |_, (), _, _| {},
+                        )
+                        .absolute()
+                        .size_full(),
+                    )
                     .child(tabs);
                 if let Some(pane) = selected {
                     if let Some(view) = self.panes.get(pane) {
@@ -682,6 +906,11 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let modifier = if cx.platform_info().is_mac() {
+            "Cmd"
+        } else {
+            "Alt"
+        };
         let empty_screen = self
             .model
             .as_ref()
@@ -694,6 +923,7 @@ impl Render for Workspace {
             .bg(rgb(0x10151c))
             .text_color(rgb(0xd9e2ef))
             .text_size(px(13.))
+            .capture_key_down(cx.listener(Self::key))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 if this.drag.is_some() && event.dragging() {
                     this.drag_resize(event.position, false, cx);
@@ -802,8 +1032,8 @@ impl Render for Workspace {
                 .text_color(rgb(0x8ea3b7))
                 .child(if self.status.is_empty() {
                     format!(
-                        "{} terminals · Ctrl+Shift+C/V copy/paste · native preview",
-                        self.panes.len()
+                        "{} terminals · {modifier}+T tab · {modifier}+D split · {modifier}+Shift+arrows focus · Ctrl+Shift+C/V copy/paste",
+                        self.panes.len(),
                     )
                 } else {
                     self.status.clone()
@@ -825,6 +1055,59 @@ fn visible_panes(model: &LocalWorkspace, node: &LayoutNode, out: &mut Vec<String
         }
     }
 }
+fn visible_slots(
+    model: &LocalWorkspace,
+    node: &LayoutNode,
+    bounds: &HashMap<String, Bounds<Pixels>>,
+    out: &mut Vec<VisibleSlot>,
+) {
+    match node {
+        LayoutNode::Slot { id, .. } => {
+            if let (Some(pane), Some(bounds)) =
+                (model.selected_pane(node), bounds.get(id.as_str()).copied())
+            {
+                out.push(VisibleSlot {
+                    id: id.to_string(),
+                    pane: pane.to_owned(),
+                    bounds,
+                });
+            }
+        }
+        LayoutNode::Split { children, .. } => {
+            for child in children {
+                visible_slots(model, child, bounds, out);
+            }
+        }
+    }
+}
+fn prune_layout_bounds(
+    root: &LayoutNode,
+    split_bounds: &mut HashMap<String, Bounds<Pixels>>,
+    slot_bounds: &mut HashMap<String, Bounds<Pixels>>,
+) {
+    fn collect<'a>(
+        node: &'a LayoutNode,
+        splits: &mut HashSet<&'a str>,
+        slots: &mut HashSet<&'a str>,
+    ) {
+        match node {
+            LayoutNode::Slot { id, .. } => {
+                slots.insert(id.as_str());
+            }
+            LayoutNode::Split { id, children, .. } => {
+                splits.insert(id.as_str());
+                for child in children {
+                    collect(child, splits, slots);
+                }
+            }
+        }
+    }
+    let mut splits = HashSet::new();
+    let mut slots = HashSet::new();
+    collect(root, &mut splits, &mut slots);
+    split_bounds.retain(|id, _| splits.contains(id.as_str()));
+    slot_bounds.retain(|id, _| slots.contains(id.as_str()));
+}
 fn resized_pair(sizes: &[f64], index: usize, delta: f64) -> Option<Vec<f64>> {
     if index + 1 >= sizes.len()
         || !delta.is_finite()
@@ -842,8 +1125,234 @@ fn resized_pair(sizes: &[f64], index: usize, delta: f64) -> Option<Vec<f64>> {
 }
 #[cfg(test)]
 mod tests {
-    use super::{resized_pair, terminal_commands, Command};
+    use super::{
+        nearest_slot, prune_layout_bounds, resized_pair, shortcut, terminal_commands,
+        visible_slots, Command, Direction, Shortcut, VisibleSlot,
+    };
     use crate::terminal;
+    use gpui_kit::{point, px, size, Bounds, Keystroke, Modifiers, Pixels};
+    use splitty_client_core::{
+        workspace::{LayoutNode, LocalWorkspace},
+        ScreenIds,
+    };
+    use std::collections::HashMap;
+
+    fn key(name: &str, modifiers: Modifiers) -> Keystroke {
+        Keystroke {
+            key: name.into(),
+            modifiers,
+            key_char: None,
+        }
+    }
+
+    #[test]
+    fn shortcut_chords_do_not_claim_terminal_control_or_clipboard_keys() {
+        let alt = Modifiers {
+            alt: true,
+            ..Default::default()
+        };
+        let cmd = Modifiers {
+            platform: true,
+            ..Default::default()
+        };
+        for (is_mac, base) in [(false, alt), (true, cmd)] {
+            assert_eq!(shortcut(&key("t", base), is_mac), Some(Shortcut::NewTab));
+            assert_eq!(
+                shortcut(&key("d", base), is_mac),
+                Some(Shortcut::SplitRight)
+            );
+            assert_eq!(shortcut(&key("w", base), is_mac), Some(Shortcut::ClosePane));
+            let shifted = Modifiers {
+                shift: true,
+                ..base
+            };
+            assert_eq!(
+                shortcut(&key("d", shifted), is_mac),
+                Some(Shortcut::SplitDown)
+            );
+            for (name, direction) in [
+                ("left", Direction::Left),
+                ("right", Direction::Right),
+                ("up", Direction::Up),
+                ("down", Direction::Down),
+            ] {
+                assert_eq!(
+                    shortcut(&key(name, shifted), is_mac),
+                    Some(Shortcut::Focus(direction))
+                );
+            }
+            assert_eq!(shortcut(&key("t", shifted), is_mac), None);
+            assert_eq!(
+                shortcut(
+                    &key(
+                        "d",
+                        Modifiers {
+                            control: true,
+                            ..base
+                        }
+                    ),
+                    is_mac
+                ),
+                None
+            );
+            assert_eq!(
+                shortcut(
+                    &key(
+                        "d",
+                        Modifiers {
+                            function: true,
+                            ..base
+                        }
+                    ),
+                    is_mac
+                ),
+                None
+            );
+            assert_eq!(shortcut(&key("t", base), !is_mac), None);
+        }
+        assert_eq!(
+            shortcut(
+                &key(
+                    "c",
+                    Modifiers {
+                        control: true,
+                        ..Default::default()
+                    }
+                ),
+                false
+            ),
+            None
+        );
+        for name in ["c", "v"] {
+            assert_eq!(
+                shortcut(
+                    &key(
+                        name,
+                        Modifiers {
+                            control: true,
+                            shift: true,
+                            ..Default::default()
+                        }
+                    ),
+                    false
+                ),
+                None
+            );
+        }
+    }
+
+    fn rectangle(x: f32, y: f32, width: f32, height: f32) -> Bounds<Pixels> {
+        Bounds {
+            origin: point(px(x), px(y)),
+            size: size(px(width), px(height)),
+        }
+    }
+
+    #[test]
+    fn visible_tab_and_nearest_split_neighbor_follow_screen_geometry() {
+        let connection = Default::default();
+        let mut model = LocalWorkspace::new(
+            ScreenIds {
+                screen_id: "screen".into(),
+                pane_id: "a".into(),
+            },
+            connection,
+        );
+        let snapshot = serde_json::json!({
+            "type":"mux.screen_snapshot",
+            "screen":{"id":"screen","revision":1,
+                "root":{"type":"split","id":"root","axis":"horizontal","sizes":[0.5,0.5],"children":[
+                    {"type":"slot","id":"left","paneIds":["a","b"]},
+                    {"type":"split","id":"right","axis":"vertical","sizes":[0.5,0.5],"children":[
+                        {"type":"slot","id":"upper","paneIds":["c"]},
+                        {"type":"slot","id":"lower","paneIds":["d"]}
+                    ]}
+                ]},
+                "panes":{"a":{"id":"a"},"b":{"id":"b"},"c":{"id":"c"},"d":{"id":"d"}},
+                "sessions":{}}
+        });
+        model
+            .apply_snapshot(connection, &snapshot)
+            .expect("snapshot");
+        assert!(model.select_tab("b"));
+        let bounds = HashMap::from([
+            ("left".into(), rectangle(0., 0., 100., 200.)),
+            ("upper".into(), rectangle(100., 0., 100., 100.)),
+            ("lower".into(), rectangle(100., 100., 100., 100.)),
+            ("stale".into(), rectangle(200., 0., 100., 100.)),
+        ]);
+        let mut slots = Vec::new();
+        visible_slots(&model, &model.snapshot().unwrap().root, &bounds, &mut slots);
+        assert_eq!(slots.len(), 3, "stale slot bounds are excluded");
+        assert_eq!(slots[0].pane, "b", "window-local selected tab is visible");
+        assert_eq!(
+            nearest_slot(&slots, "left", Direction::Right).map(|slot| slot.pane.as_str()),
+            Some("c"),
+            "equal distance chooses canonical tree order"
+        );
+        assert_eq!(
+            nearest_slot(&slots, "upper", Direction::Down).map(|slot| slot.pane.as_str()),
+            Some("d")
+        );
+        assert!(nearest_slot(&slots, "left", Direction::Left).is_none());
+        assert!(nearest_slot(&slots, "stale", Direction::Right).is_none());
+        let mut missing = bounds;
+        missing.remove("left");
+        let mut slots = Vec::new();
+        visible_slots(
+            &model,
+            &model.snapshot().unwrap().root,
+            &missing,
+            &mut slots,
+        );
+        assert!(nearest_slot(&slots, "left", Direction::Right).is_none());
+    }
+
+    #[test]
+    fn nearest_slot_rejects_diagonal_outside_cone() {
+        let slots = [
+            VisibleSlot {
+                id: "current".into(),
+                pane: "a".into(),
+                bounds: rectangle(0., 0., 100., 100.),
+            },
+            VisibleSlot {
+                id: "diagonal".into(),
+                pane: "b".into(),
+                bounds: rectangle(100., 300., 100., 100.),
+            },
+        ];
+        assert!(nearest_slot(&slots, "current", Direction::Right).is_none());
+    }
+
+    #[test]
+    fn authoritative_layout_releases_closed_slot_and_replaced_split_bounds() {
+        let root: LayoutNode = serde_json::from_value(serde_json::json!({
+            "type":"split","id":"current-split","axis":"horizontal","sizes":[0.5,0.5],
+            "children":[
+                {"type":"slot","id":"left","paneIds":["a"]},
+                {"type":"slot","id":"right","paneIds":["b"]}
+            ]
+        }))
+        .expect("valid authoritative layout");
+        let mut splits = HashMap::from([
+            ("old-split".into(), rectangle(0., 0., 100., 100.)),
+            ("current-split".into(), rectangle(0., 0., 200., 100.)),
+        ]);
+        let mut slots = HashMap::from([
+            ("closed-slot".into(), rectangle(0., 0., 100., 100.)),
+            ("left".into(), rectangle(0., 0., 100., 100.)),
+            ("right".into(), rectangle(100., 0., 100., 100.)),
+        ]);
+        prune_layout_bounds(&root, &mut splits, &mut slots);
+        assert_eq!(
+            splits.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["current-split"]
+        );
+        assert_eq!(slots.len(), 2);
+        assert!(slots.contains_key("left") && slots.contains_key("right"));
+        assert!(!slots.contains_key("closed-slot"));
+    }
 
     #[test]
     fn terminal_input_has_one_shared_admission_boundary_and_keeps_atomic_payloads() {
