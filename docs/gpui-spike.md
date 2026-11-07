@@ -79,7 +79,9 @@ The default window offers **Split right**, **Split below** and **New tab**.
 Select tabs by clicking their labels, close panes with their tab close control,
 and resize splits by dragging the divider. After closing the final pane,
 **New terminal** repopulates the same Screen. Ctrl+Shift+C/V copies and pastes
-in the focused terminal. Drag a terminal tab into another group or onto one of
+in the focused terminal. Wheel input scrolls normal history; in the alternate
+screen it sends up/down keys using the emulator's current cursor-key mode, with
+at most five keys per event. Drag a terminal tab into another group or onto one of
 its four edges to move it without restarting its shell; Escape cancels the drag.
 
 Screen controls create, select, rename and close local Screens. Hidden Screens
@@ -229,6 +231,14 @@ python3 scripts/testing/gpui-screens.py target/release/splitty-gpui \
 
 The script requires Xvfb and xdotool; their executable paths and the isolated
 display can be selected with its command-line options.
+
+The alternate-screen wheel follow-up passes focused engine/input tests and GPUI
+Clippy. An isolated X11 run used raw PTY fixtures: normal-history wheel input
+changed viewport pixels and delivered no PTY bytes, while alternate-screen wheel
+input delivered both up and down application-mode cursor sequences. The optimized
+integrated binary also passed the Wayland/X11 hardware workspace smoke and exited
+cleanly. This verifies the cursor-key fallback; native application mouse reporting
+remains unimplemented.
 
 ## Ghostty integration measurements
 
