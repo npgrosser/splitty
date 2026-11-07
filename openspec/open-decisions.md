@@ -316,3 +316,6 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 - **`native-shell-profile-picker`, NSP-1** (2026-11-07, provisional, tbd): explicit shell selection initially targets new tabs; ordinary tabs and splits keep service-owned inheritance.
 - **`native-shell-profile-picker`, NSP-2** (2026-11-07, provisional, tbd): native profile presentation accepts at most 128 profiles, 256-byte IDs and 512-byte names/reasons, rejecting oversized reads atomically while preserving the last valid state.
+
+- **`native-terminal-links`, NL-1** (2026-11-07, provisional, tbd): bound native link targets/logical lines to 16 KiB, 128 rows and 80,000 inspected cells; incomplete detection never opens a prefix.
+- **`native-terminal-links`, NL-2** (2026-11-07, provisional, tbd): Ctrl/Cmd-left-click without Shift takes a local link route even during application mouse tracking, retained through completion/cancellation; release freshly validates the target.
