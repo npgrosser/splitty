@@ -386,6 +386,7 @@ impl Probe {
                         .try_send(command)
                         .map_err(|error| error.to_string())
                 },
+                crate::terminal::LinkOrigin::Local,
                 cx,
             )
         });

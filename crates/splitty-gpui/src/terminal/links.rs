@@ -4,6 +4,26 @@ use crate::terminal_engine::LinkHit;
 use splitty_client_core::external_links::WebUrl;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LinkOrigin {
+    Local,
+    Remote,
+}
+
+impl LinkOrigin {
+    pub(super) fn activate(
+        self,
+        url: &WebUrl,
+        open: impl FnOnce(&str),
+    ) -> Result<(), &'static str> {
+        if self == Self::Remote && url.is_loopback_or_unspecified() {
+            return Err("Port forwarding for remote links is not available yet");
+        }
+        open(url.as_str());
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct Cell {
     pub col: u16,
     pub row: u16,
@@ -187,6 +207,49 @@ mod tests {
         assert_eq!(
             state.finish(Some(cell), (10., 10.), 8, Some(original)),
             None
+        );
+    }
+
+    #[test]
+    fn completed_remote_loopback_gesture_cannot_reach_opener() {
+        let cell = Cell { col: 4, row: 2 };
+        let mut state = State::default();
+        let mut opened = Vec::new();
+        for (origin, raw, expected_open) in [
+            (LinkOrigin::Local, "http://127.1/", true),
+            (LinkOrigin::Remote, "http://127.1/", false),
+            (LinkOrigin::Remote, "http://localhost@public.example/", true),
+            (LinkOrigin::Remote, "https://example.com/path", true),
+        ] {
+            let target = target(raw, LinkKind::Osc8);
+            state.press(cell, target.clone(), (10., 10.), 7);
+            let url = state
+                .finish(Some(cell), (10., 10.), 7, Some(target))
+                .unwrap();
+            let before = opened.len();
+            let result = origin.activate(&url, |url| opened.push(url.to_owned()));
+            assert_eq!(opened.len() == before + 1, expected_open, "{raw}");
+            assert_eq!(result.is_ok(), expected_open, "{raw}");
+        }
+        state.press(
+            cell,
+            target("http://localhost/", LinkKind::Osc8),
+            (10., 10.),
+            7,
+        );
+        state.moving((20., 10.));
+        assert!(state
+            .finish(
+                Some(cell),
+                (10., 10.),
+                7,
+                Some(target("http://localhost/", LinkKind::Osc8))
+            )
+            .is_none());
+        assert_eq!(
+            opened.len(),
+            3,
+            "dragged link does not reach policy or opener"
         );
     }
 

@@ -35,6 +35,29 @@ impl WebUrl {
     pub fn as_str(&self) -> &str {
         &self.0
     }
+
+    /// Whether this URL addresses the viewer's own loopback or wildcard interface.
+    /// A remote terminal needs an explicit forward before opening such a link.
+    pub fn is_loopback_or_unspecified(&self) -> bool {
+        let Ok(parsed) = url::Url::parse(&self.0) else {
+            return false;
+        };
+        match parsed.host() {
+            Some(url::Host::Domain(domain)) => {
+                let domain = domain.trim_end_matches('.');
+                domain == "localhost" || domain.ends_with(".localhost")
+            }
+            Some(url::Host::Ipv4(ip)) => ip.is_unspecified() || ip.octets()[0] == 127,
+            Some(url::Host::Ipv6(ip)) => {
+                ip.is_unspecified()
+                    || ip.is_loopback()
+                    || ip
+                        .to_ipv4_mapped()
+                        .is_some_and(|mapped| mapped.is_unspecified() || mapped.octets()[0] == 127)
+            }
+            None => false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -118,5 +141,49 @@ mod tests {
         let expands = format!("{prefix}{}", "界".repeat(MAX_URL_BYTES / 4));
         assert!(expands.len() < MAX_URL_BYTES);
         assert!(WebUrl::parse(&expands).is_none());
+    }
+
+    #[test]
+    fn normalized_loopback_and_wildcard_hosts_need_remote_forwarding() {
+        for raw in [
+            "http://localhost/",
+            "http://LOCALHOST./",
+            "https://dev.localhost:8443/a",
+            "http://one.two.localhost./",
+            "http://127.0.0.1/",
+            "http://127.255.2.3/",
+            "http://2130706433/",
+            "http://0x7f000001/",
+            "http://0.0.0.0/",
+            "http://[::1]/",
+            "http://[::]/",
+            "http://[::ffff:127.0.0.1]/",
+            "http://[::ffff:0.0.0.0]/",
+            "http://public.example@127.1/",
+        ] {
+            assert!(
+                WebUrl::parse(raw).unwrap().is_loopback_or_unspecified(),
+                "{raw}"
+            );
+        }
+        for raw in [
+            "http://example.com/localhost",
+            "https://localhost.example/",
+            "http://notlocalhost/",
+            "http://localhost.evil/",
+            "http://127.0.0.1.example/",
+            "http://localhost@public.example/",
+            "http://127.0.0.2@public.example/",
+            "http://0.0.0.1/",
+            "http://128.0.0.1/",
+            "http://[::2]/",
+            "http://[::ffff:192.168.1.2]/",
+            "http://192.168.1.2/",
+        ] {
+            assert!(
+                !WebUrl::parse(raw).unwrap().is_loopback_or_unspecified(),
+                "{raw}"
+            );
+        }
     }
 }

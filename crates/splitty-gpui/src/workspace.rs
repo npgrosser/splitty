@@ -1436,7 +1436,7 @@ impl Workspace {
         let terminal_scale = self.appearance.zoom.terminal_scale();
         let selection_foreground = self.appearance.selection_foreground;
         let selection_background = self.appearance.selection_background;
-        let terminal = cx.new(|cx| Terminal::new(commands, cx));
+        let terminal = cx.new(|cx| Terminal::new(commands, terminal::LinkOrigin::Local, cx));
         if let Err(error) = terminal.update(cx, |terminal, cx| {
             terminal.set_search_active(false, cx);
             terminal.set_zoom(terminal_scale, cx);

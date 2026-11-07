@@ -1,6 +1,7 @@
 //! Native terminal presentation. The service owns the PTY; Ghostty owns VT state.
 mod links;
 mod search;
+pub(crate) use links::LinkOrigin;
 
 pub use crate::terminal_engine::ColorConfig as TerminalColors;
 use crate::terminal_engine::{
@@ -360,6 +361,7 @@ pub struct Terminal {
     composition: String,
     pointer: PointerGestures,
     links: links::State,
+    link_origin: LinkOrigin,
     scroll_remainder: f32,
     scroll_remainder_x: f32,
     scroll_route: Option<WheelRoute>,
@@ -386,8 +388,9 @@ pub struct Terminal {
 }
 
 impl Terminal {
-    pub fn new(
+    pub(crate) fn new(
         commands: impl Fn(Command) -> std::result::Result<(), String> + 'static,
+        link_origin: LinkOrigin,
         cx: &mut Context<Self>,
     ) -> Self {
         let size = Size { cols: 80, rows: 24 };
@@ -412,6 +415,7 @@ impl Terminal {
             composition: String::new(),
             pointer: PointerGestures::default(),
             links: links::State::default(),
+            link_origin,
             scroll_remainder: 0.,
             scroll_remainder_x: 0.,
             scroll_route: None,
@@ -1015,7 +1019,10 @@ impl Terminal {
 
     fn on_pointer_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(url) = self.pointer_up(event, window, false) {
-            cx.open_url(url.as_str());
+            if let Err(reason) = self.link_origin.activate(&url, |url| cx.open_url(url)) {
+                // The workspace paints command_error; status alone is only shown by the probe.
+                self.reject_command(reason.into());
+            }
         }
         cx.notify();
     }
