@@ -1,6 +1,7 @@
 //! Own the local service and route workspace intents on one ordered connection.
 use crate::{
     appearance::{AppearanceSnapshot, ColorScheme},
+    shell_profiles::ShellProfilesSnapshot,
     workspace::{
         Axis, ClosePlan, CloseTarget, LocalWorkspace, MovePlacement, PaneDrag, PlacementOutcome,
         TabStep,
@@ -38,6 +39,13 @@ pub enum Command {
         axis: Axis,
     },
     Tab(String),
+    ProfileTab {
+        connection: uuid::Uuid,
+        screen: String,
+        pane: String,
+        session: String,
+        profile_id: String,
+    },
     NewTerminal {
         screen: String,
         connection: String,
@@ -91,6 +99,11 @@ pub enum Command {
     },
 }
 pub enum Update {
+    ShellProfiles(Arc<ShellProfilesSnapshot>),
+    ShellProfilesError {
+        connection: uuid::Uuid,
+        reason: String,
+    },
     Appearance(Arc<AppearanceSnapshot>),
     AppearanceError {
         connection: uuid::Uuid,
@@ -121,27 +134,61 @@ pub struct Worker {
     pub cleanup_complete: Arc<AtomicBool>,
     thread: Option<thread::JoinHandle<anyhow::Result<()>>>,
 }
+
+#[cfg(not(target_os = "windows"))]
+fn profile_fallback_status(
+    model: &LocalWorkspace,
+    connection: uuid::Uuid,
+    pane: &str,
+    session: &str,
+    event: &serde_json::Value,
+) -> Option<String> {
+    // Spawn events have no Screen ID. Report only after the workspace has
+    // admitted this exact pane/session route from its own connection.
+    if connection != model.connection_id()
+        || model.session_for(pane) != Some(session)
+        || model.pane_for(session) != Some(pane)
+    {
+        return None;
+    }
+    let reason = match event["shellProfileFallbackReason"].as_str()? {
+        "missing" => "missing",
+        "disabled" => "disabled",
+        "unavailable" => "unavailable",
+        _ => return None,
+    };
+    let effective = event["shellProfileId"].as_str()?;
+    if effective.len() > crate::shell_profiles::MAX_PROFILE_ID_BYTES {
+        return None;
+    }
+    let effective: String = effective.chars().filter(|ch| !ch.is_control()).collect();
+    Some(format!(
+        "Shell profile {reason}; started {effective} instead"
+    ))
+}
 // Setup and reads stay owned across cancelled select branches. Both streams
 // share the embedded service's admission domain, but never consume each other's events.
 #[cfg(not(target_os = "windows"))]
-type AppearanceSetup<'a> = std::pin::Pin<
+type LocalSettingsSetup<'a> = std::pin::Pin<
     Box<
-        dyn std::future::Future<Output = std::io::Result<crate::appearance::AppearanceReader>>
-            + Send
+        dyn std::future::Future<
+                Output = std::io::Result<crate::local_settings::LocalSettingsReader>,
+            > + Send
             + 'a,
     >,
 >;
 #[cfg(not(target_os = "windows"))]
-struct RuntimeAppearance<'a> {
+struct RuntimeLocalSettings<'a> {
     service: &'a crate::EmbeddedService,
     connection: uuid::Uuid,
     scheme: ColorScheme,
-    setup: Option<AppearanceSetup<'a>>,
-    reader: Option<crate::appearance::AppearanceReader>,
+    setup: Option<LocalSettingsSetup<'a>>,
+    reader: Option<crate::local_settings::LocalSettingsReader>,
     dirty: bool,
+    settings_dirty: bool,
 }
 #[cfg(not(target_os = "windows"))]
-impl<'a> RuntimeAppearance<'a> {
+impl<'a> RuntimeLocalSettings<'a> {
     fn new(
         service: &'a crate::EmbeddedService,
         connection: uuid::Uuid,
@@ -154,6 +201,7 @@ impl<'a> RuntimeAppearance<'a> {
             setup: None,
             reader: None,
             dirty: true,
+            settings_dirty: false,
         }
     }
 
@@ -162,15 +210,8 @@ impl<'a> RuntimeAppearance<'a> {
             return Ok(());
         }
         self.scheme = scheme;
-        self.settings_changed(connection)
-    }
-
-    fn settings_changed(&mut self, connection: uuid::Uuid) -> std::io::Result<()> {
-        if connection != self.connection {
-            return Ok(());
-        }
         match &mut self.reader {
-            Some(reader) => reader.refresh(connection, self.scheme),
+            Some(reader) => reader.set_scheme(connection, scheme),
             None => {
                 self.dirty = true;
                 Ok(())
@@ -178,10 +219,24 @@ impl<'a> RuntimeAppearance<'a> {
         }
     }
 
-    async fn next_update(&mut self) -> std::io::Result<AppearanceSnapshot> {
+    fn settings_changed(&mut self, connection: uuid::Uuid) -> std::io::Result<()> {
+        if connection != self.connection {
+            return Ok(());
+        }
+        match &mut self.reader {
+            Some(reader) => reader.refresh_settings(connection),
+            None => {
+                self.dirty = true;
+                self.settings_dirty = true;
+                Ok(())
+            }
+        }
+    }
+
+    async fn next_update(&mut self) -> std::io::Result<crate::local_settings::LocalSettingsUpdate> {
         loop {
             if let Some(reader) = &mut self.reader {
-                return reader.next_update().await;
+                return Ok(reader.next_update().await);
             }
             if self.setup.is_none() {
                 if !self.dirty {
@@ -189,17 +244,24 @@ impl<'a> RuntimeAppearance<'a> {
                 }
                 self.dirty = false;
                 self.setup = Some(Box::pin(
-                    self.service.appearance_reader(self.connection, self.scheme),
+                    self.service
+                        .local_settings_reader(self.connection, self.scheme),
                 ));
             }
-            let result = self.setup.as_mut().expect("appearance setup started").await;
+            let result = self
+                .setup
+                .as_mut()
+                .expect("local settings setup started")
+                .await;
             self.setup = None;
             match result {
                 Ok(mut reader) => {
-                    if self.dirty {
-                        reader.refresh(self.connection, self.scheme)?;
-                        self.dirty = false;
+                    reader.set_scheme(self.connection, self.scheme)?;
+                    if self.settings_dirty {
+                        reader.refresh_settings(self.connection)?;
+                        self.settings_dirty = false;
                     }
+                    self.dirty = false;
                     self.reader = Some(reader);
                 }
                 Err(_) if self.dirty => continue,
@@ -213,7 +275,7 @@ impl<'a> RuntimeAppearance<'a> {
         // cleanup explicitly. Dropping setup would only schedule Drop cleanup.
         if let Some(setup) = self.setup.take() {
             // The connector awaits failed setup cleanup before returning an
-            // initialization error. Appearance initialization remains optional
+            // initialization error. Local settings initialization remains optional
             // when it happens to finish during close, just as during operation.
             self.reader = setup.await.ok();
         }
@@ -421,7 +483,7 @@ async fn run_service(
             return finish_owned_run(service, Err(error.into()), &cleanup_complete, &stop).await
         }
     };
-    let mut appearance = None::<RuntimeAppearance<'_>>;
+    let mut settings = None::<RuntimeLocalSettings<'_>>;
     let result = async {
         let mut model = None::<LocalWorkspace>;
         let mut attached = HashSet::<String>::new();
@@ -439,7 +501,7 @@ async fn run_service(
         let mut last_close_request = 0_u64;
         let mut pending_close = None::<PendingClose>;
         enum Next {
-            Appearance(std::io::Result<Arc<AppearanceSnapshot>>),
+            Settings(std::io::Result<crate::local_settings::LocalSettingsUpdate>),
             Event(std::io::Result<Option<Box<Event>>>),
             Command(Option<Command>),
             Tick,
@@ -447,11 +509,11 @@ async fn run_service(
         loop {
             let next = tokio::select! {
                 result = async {
-                    match &mut appearance {
+                    match &mut settings {
                         Some(reader) => reader.next_update().await,
                         None => std::future::pending().await,
                     }
-                } => Next::Appearance(result.map(Arc::new)),
+                } => Next::Settings(result),
                 event = client.next_event() => Next::Event(event.map(|event| event.map(Box::new))),
                 command = commands.recv() => Next::Command(command),
                 _ = tick.tick() => Next::Tick,
@@ -461,13 +523,19 @@ async fn run_service(
             }
             let mut close_window = false;
             match next {
-                Next::Appearance(result) => {
+                Next::Settings(result) => {
+                    use crate::local_settings::LocalSettingsUpdate;
+                    let connection = client.connection_id();
                     let update = match result {
-                        Ok(snapshot) => Update::Appearance(snapshot),
-                        Err(error) => Update::AppearanceError {
-                            connection: client.connection_id(),
-                            reason: error.to_string(),
-                        },
+                        Ok(LocalSettingsUpdate::Appearance(Ok(snapshot))) => Update::Appearance(snapshot),
+                        Ok(LocalSettingsUpdate::Appearance(Err(error))) => Update::AppearanceError { connection, reason: error.to_string() },
+                        Ok(LocalSettingsUpdate::ShellProfiles(Ok(snapshot))) => Update::ShellProfiles(snapshot),
+                        Ok(LocalSettingsUpdate::ShellProfiles(Err(error))) => Update::ShellProfilesError { connection, reason: error.to_string() },
+                        Err(error) => {
+                            // Setup belongs to both reads; report each feature once.
+                            publish(&updates, Update::ShellProfilesError { connection, reason: error.to_string() }, &stop).await?;
+                            Update::AppearanceError { connection, reason: error.to_string() }
+                        }
                     };
                     publish(&updates, update, &stop).await?;
                 }
@@ -560,8 +628,8 @@ async fn run_service(
                         continue;
                     }
                     if let Command::SetColorScheme { connection, scheme } = command {
-                        if let Some(reader) = &mut appearance {
-                            // A delayed command from another owner cannot choose app appearance.
+                        if let Some(reader) = &mut settings {
+                            // A delayed command from another owner cannot choose app settings.
                             if let Err(error) = reader.set_scheme(connection, scheme) {
                                 publish(&updates, Update::AppearanceError { connection, reason: error.to_string() }, &stop).await?;
                             }
@@ -628,6 +696,21 @@ async fn run_service(
                             result
                         }
                         Command::Tab(pane) => model.new_tab(&client, &pane).map(|_| ()),
+                        Command::ProfileTab { connection, screen, pane, session, profile_id } => {
+                            if connection != model.connection_id()
+                                || model.shown_screen_id() != Some(screen.as_str())
+                                || model.screen_for(&pane) != Some(screen.as_str())
+                                || model.session_for(&pane) != Some(session.as_str())
+                                || !model.is_displayed_pane(&pane)
+                            {
+                                Err(std::io::Error::new(
+                                    std::io::ErrorKind::InvalidInput,
+                                    "Shell profile choice belongs to a previous terminal",
+                                ))
+                            } else {
+                                model.new_tab_with_profile(&client, &pane, &profile_id).map(|_| ())
+                            }
+                        }
                         Command::PlaceTab { drag, target, before } => {
                             let result = model.place_tab(&client, drag, target, before);
                             if result.as_ref().is_ok_and(|moved| *moved) {
@@ -746,7 +829,7 @@ async fn run_service(
                     if let Some(json) = event.json() {
                         match json["type"].as_str() {
                             Some("settings.changed") => {
-                                if let Some(reader) = &mut appearance {
+                                if let Some(reader) = &mut settings {
                                     if let Err(error) = reader.settings_changed(event.connection_id) {
                                         publish(&updates, Update::AppearanceError { connection: event.connection_id, reason: error.to_string() }, &stop).await?;
                                     }
@@ -791,8 +874,8 @@ async fn run_service(
                                 )
                                 .await?;
                                 model = Some(workspace);
-                                // Establish the UI owner before any appearance can be published.
-                                appearance = Some(RuntimeAppearance::new(
+                                // Establish the UI owner before any settings can be published.
+                                settings = Some(RuntimeLocalSettings::new(
                                     &service, client.connection_id(), scheme,
                                 ));
                             }
@@ -891,6 +974,9 @@ async fn run_service(
                                     json["sessionId"].as_str(),
                                 ) {
                                     delta = model.observe_spawn(event.connection_id, pane, session);
+                                    if let Some(message) = profile_fallback_status(model, event.connection_id, pane, session, json) {
+                                        publish(&updates, Update::Status(message), &stop).await?;
+                                    }
                                 }
                             }
                             Some("mux.nudge") => {
@@ -1188,15 +1274,15 @@ async fn run_service(
         Ok::<(), anyhow::Error>(())
     }
     .await;
-    let appearance_cleanup = match appearance.take() {
+    let settings_cleanup = match settings.take() {
         Some(reader) => reader.finish().await.map_err(anyhow::Error::from),
         None => Ok(()),
     };
-    drop(appearance);
+    drop(settings);
     let client_cleanup = client.finish().await.map_err(anyhow::Error::from);
     finish_owned_run(
         service,
-        result.and(appearance_cleanup).and(client_cleanup),
+        result.and(settings_cleanup).and(client_cleanup),
         &cleanup_complete,
         &stop,
     )
@@ -1264,16 +1350,28 @@ mod close_tests {
         .expect("claimant session event");
     }
 
+    async fn next_appearance(
+        reader: &mut RuntimeLocalSettings<'_>,
+    ) -> std::io::Result<Arc<AppearanceSnapshot>> {
+        loop {
+            if let crate::local_settings::LocalSettingsUpdate::Appearance(result) =
+                reader.next_update().await?
+            {
+                return result;
+            }
+        }
+    }
+
     #[tokio::test]
     async fn appearance_runtime_rejects_foreign_refresh_and_finishes_started_setup() {
         use std::{future::Future, task::Poll};
         let (runtime, path) = crate::appearance::local::tests::fixture();
         let service = crate::embedded::EmbeddedService::from_runtime(runtime);
         let connection = uuid::Uuid::new_v4();
-        let mut appearance = RuntimeAppearance::new(&service, connection, ColorScheme::Light);
+        let mut appearance = RuntimeLocalSettings::new(&service, connection, ColorScheme::Light);
         // Start setup, cancel just the receiving branch, then change the local
         // preference. The owned handshake survives and yields only the latest choice.
-        let mut read = Box::pin(appearance.next_update());
+        let mut read = Box::pin(next_appearance(&mut appearance));
         std::future::poll_fn(|cx| {
             assert!(read.as_mut().poll(cx).is_pending());
             Poll::Ready(())
@@ -1286,25 +1384,36 @@ mod close_tests {
         appearance
             .set_scheme(uuid::Uuid::new_v4(), ColorScheme::Light)
             .unwrap();
-        let snapshot = tokio::time::timeout(Duration::from_secs(5), appearance.next_update())
-            .await
-            .unwrap()
-            .unwrap();
+        let snapshot =
+            tokio::time::timeout(Duration::from_secs(5), next_appearance(&mut appearance))
+                .await
+                .unwrap()
+                .unwrap();
         assert_eq!(snapshot.connection_id(), connection);
         assert_eq!(snapshot.scheme(), ColorScheme::Dark);
         appearance.settings_changed(uuid::Uuid::new_v4()).unwrap();
         assert!(
-            tokio::time::timeout(Duration::from_millis(20), appearance.next_update())
+            tokio::time::timeout(Duration::from_millis(20), next_appearance(&mut appearance))
                 .await
                 .is_err()
         );
         drop(snapshot);
+        // The runtime also joins cleanup after a refresh has started an API
+        // request, rather than only covering shutdown during initial setup.
+        appearance.settings_changed(connection).unwrap();
+        let mut read = Box::pin(next_appearance(&mut appearance));
+        std::future::poll_fn(|cx| {
+            assert!(read.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(read);
         appearance.finish().await.unwrap();
 
         // Shutdown immediately after beginning a second setup must await that
         // handshake and close the recovered API stream, even without a snapshot.
-        let mut appearance = RuntimeAppearance::new(&service, connection, ColorScheme::Light);
-        let mut read = Box::pin(appearance.next_update());
+        let mut appearance = RuntimeLocalSettings::new(&service, connection, ColorScheme::Light);
+        let mut read = Box::pin(next_appearance(&mut appearance));
         std::future::poll_fn(|cx| {
             assert!(read.as_mut().poll(cx).is_pending());
             Poll::Ready(())
@@ -1327,8 +1436,8 @@ mod close_tests {
         Arc::get_mut(&mut runtime.state).unwrap().instance = "invalid".into();
         let service = crate::embedded::EmbeddedService::from_runtime(runtime);
         let mut appearance =
-            RuntimeAppearance::new(&service, uuid::Uuid::new_v4(), ColorScheme::Dark);
-        let mut read = Box::pin(appearance.next_update());
+            RuntimeLocalSettings::new(&service, uuid::Uuid::new_v4(), ColorScheme::Dark);
+        let mut read = Box::pin(next_appearance(&mut appearance));
         std::future::poll_fn(|cx| {
             assert!(read.as_mut().poll(cx).is_pending());
             Poll::Ready(())
@@ -1367,7 +1476,8 @@ mod close_tests {
         let mut owner = None;
         let mut ready = None;
         let mut failed = false;
-        while ready.is_none() || !failed {
+        let mut profile_generation = None;
+        while ready.is_none() || !failed || profile_generation.is_none() {
             match next_update(&mut updates).await {
                 Update::Workspace(model) => {
                     owner = Some(model.connection_id());
@@ -1383,6 +1493,17 @@ mod close_tests {
                     );
                     assert!(reason.contains("native limit"));
                     failed = true;
+                }
+                Update::ShellProfiles(snapshot) => {
+                    assert_eq!(
+                        Some(snapshot.connection_id()),
+                        owner,
+                        "workspace owner precedes profiles"
+                    );
+                    profile_generation = Some(snapshot.generation());
+                }
+                Update::ShellProfilesError { reason, .. } => {
+                    panic!("independent profiles failed: {reason}")
                 }
                 Update::Appearance(_) => panic!("invalid initial settings were published"),
                 _ => {}
@@ -1401,19 +1522,32 @@ mod close_tests {
             .unwrap();
         output_contains(&mut updates, &session, b"APPEARANCE_ALIVE").await;
         state.config.write().unwrap().appearance.font_family = "recovered".into();
+        state.shell_profiles.write().unwrap().default_profile_id = "refresh-observed".into();
         state.client_state.broadcast_events(
             &[splitty_core::protocol::ServerEvent::settings_changed(
                 json!({}),
             )],
             None,
         );
-        let snapshot = loop {
+        let mut refreshed_appearance = None;
+        let mut refreshed_profiles = false;
+        while refreshed_appearance.is_none() || !refreshed_profiles {
             match next_update(&mut updates).await {
-                Update::Appearance(snapshot) => break snapshot,
+                Update::Appearance(snapshot) => refreshed_appearance = Some(snapshot),
+                Update::ShellProfiles(snapshot) => {
+                    assert_eq!(snapshot.connection_id(), model.connection_id());
+                    assert!(snapshot.generation() > profile_generation.unwrap());
+                    assert_eq!(snapshot.state().default_profile_id, "refresh-observed");
+                    refreshed_profiles = true;
+                }
+                Update::ShellProfilesError { reason, .. } => {
+                    panic!("profile refresh failed: {reason}")
+                }
                 Update::AppearanceError { reason, .. } => panic!("refresh failed: {reason}"),
                 _ => {}
             }
-        };
+        }
+        let snapshot = refreshed_appearance.unwrap();
         assert_eq!(snapshot.connection_id(), model.connection_id());
         assert_eq!(snapshot.settings().font_family, "recovered");
         assert_eq!(snapshot.scheme(), ColorScheme::Light);
@@ -1927,3 +2061,6 @@ async fn run(
         "The native Windows workspace needs its owned WSL launcher; this development launcher is not wired yet"
     )
 }
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod profile_launch_tests;

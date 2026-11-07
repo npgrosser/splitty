@@ -685,6 +685,21 @@ impl LocalWorkspace {
         }
         result
     }
+    pub fn new_tab_with_profile(
+        &mut self,
+        client: &Client,
+        pane: &str,
+        profile_id: &str,
+    ) -> io::Result<String> {
+        self.admit_new_pane()?;
+        let result = self
+            .shown_mut()?
+            .new_tab_with_profile(client, pane, Some(profile_id));
+        if result.is_ok() {
+            self.cancel_placement_focus();
+        }
+        result
+    }
     pub fn new_terminal(&mut self, client: &Client) -> io::Result<String> {
         self.admit_new_pane()?;
         let result = self.shown_mut()?.new_terminal(client);

@@ -770,13 +770,27 @@ impl ScreenModel {
     }
 
     pub fn new_tab(&mut self, client: &Client, pane_id: &str) -> io::Result<String> {
+        self.new_tab_with_profile(client, pane_id, None)
+    }
+
+    pub(super) fn new_tab_with_profile(
+        &mut self,
+        client: &Client,
+        pane_id: &str,
+        profile_id: Option<&str>,
+    ) -> io::Result<String> {
+        if profile_id.is_some_and(|id| {
+            id.is_empty() || id.len() > crate::shell_profiles::MAX_PROFILE_ID_BYTES
+        }) {
+            return Err(invalid("shell profile identifier exceeds native limit"));
+        }
         self.admit_new_pane()?;
         let new_pane_id = Uuid::new_v4().to_string();
         let op = ScreenOp::NewTab {
             pane_id: PaneId::from(pane_id),
             new_pane_id: Some(PaneId::from(new_pane_id.clone())),
             cwd: None,
-            shell_profile_id: None,
+            shell_profile_id: profile_id.map(str::to_owned),
         };
         self.pending_panes.insert(new_pane_id.clone());
         if let Err(error) = self.send_op(client, &op) {

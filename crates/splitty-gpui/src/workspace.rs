@@ -1,4 +1,6 @@
 //! Native projection of one authoritative local screen; no independent dock tree.
+mod shell_profiles;
+
 use crate::appearance::NativeAppearance;
 use crate::terminal::{self, Terminal};
 use gpui_kit::base::input::{Input, InputEvent, InputState};
@@ -6,6 +8,7 @@ use gpui_kit::base::{ColorTokens, Theme, ThemeAppearance};
 use gpui_kit::{prelude::*, *};
 use splitty_client_core::appearance::{AppearanceSnapshot, ColorScheme};
 use splitty_client_core::native_workspace::{Command, Update, Worker};
+use splitty_client_core::shell_profiles::ShellProfilesSnapshot;
 use splitty_client_core::workspace::{
     Axis, ClosePlan, CloseTarget, LayoutNode, LocalWorkspace, MovePlacement, PaneDrag, ScreenModel,
     TabStep,
@@ -21,6 +24,8 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
+
+use self::shell_profiles::ProfilePicker;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Direction {
@@ -452,6 +457,10 @@ pub struct Workspace {
     appearance: NativeAppearance,
     appearance_error: Option<String>,
     appearance_generation: u64,
+    profiles: Option<Arc<ShellProfilesSnapshot>>,
+    profiles_error: Option<String>,
+    profiles_generation: u64,
+    profile_picker: Option<ProfilePicker>,
     desired_scheme: ColorScheme,
     sent_scheme: ColorScheme,
     scheme_pending: bool,
@@ -594,6 +603,10 @@ impl Workspace {
                 appearance: NativeAppearance::fallback(&ui_family),
                 appearance_error: None,
                 appearance_generation: 0,
+                profiles: None,
+                profiles_error: None,
+                profiles_generation: 0,
+                profile_picker: None,
                 desired_scheme: initial_scheme,
                 sent_scheme: initial_scheme,
                 scheme_pending: false,
@@ -746,6 +759,7 @@ impl Workspace {
         }
     }
     fn start_rename(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_profile_picker(window, cx);
         let Some((name, connection)) = self.model.as_ref().and_then(|model| {
             model
                 .screens()
@@ -809,6 +823,7 @@ impl Workspace {
         cx.notify();
     }
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
+        self.close_profile_picker(window, cx);
         if target == CloseTarget::Window && self.cleanup_complete.load(Ordering::Acquire) {
             self.stop();
             cx.quit();
@@ -968,6 +983,10 @@ impl Workspace {
             self.appearance_error = None;
             self.appearance = NativeAppearance::fallback(&self.ui_family);
             self.scheme_pending = true;
+            self.profiles = None;
+            self.profiles_error = None;
+            self.profiles_generation = 0;
+            self.profile_picker = None;
         }
         if self.rename.is_some() {
             self.smoke_editor_reconciles += u64::from(self.smoke);
@@ -1022,6 +1041,13 @@ impl Workspace {
             model.connection_id().to_string() != editor.connection
                 || model.screen(&editor.screen).is_none()
         });
+        let picker_cancelled = self
+            .profile_picker
+            .as_ref()
+            .is_some_and(|picker| !picker.valid_for(&model));
+        if picker_cancelled {
+            self.profile_picker = None;
+        }
         if editor_cancelled {
             self.rename = None;
             self.rename_subscription = None;
@@ -1039,6 +1065,7 @@ impl Workspace {
                 .as_ref()
                 .is_some_and(|pending| pending.prompting)
             && (editor_cancelled
+                || picker_cancelled
                 || old_screen != new_screen
                 || old_focus != new_focus
                 || old_entity != new_entity)
@@ -1138,6 +1165,7 @@ impl Workspace {
     }
     fn focus_current(&self, window: &mut Window, cx: &mut App) {
         if self.rename.is_some()
+            || self.profile_picker.is_some()
             || self
                 .pending_close
                 .as_ref()
@@ -1282,6 +1310,10 @@ impl Workspace {
         {
             // A native confirmation owns keyboard input until it settles.
             cx.stop_propagation();
+            return;
+        }
+        if self.profile_picker.is_some() {
+            self.profile_key(&event.keystroke, window, cx);
             return;
         }
         if event.keystroke.key == "escape" && cx.has_active_drag() {
@@ -1439,6 +1471,10 @@ impl Workspace {
             match update {
                 Update::Workspace(model) => self.reconcile(*model, window, cx),
                 Update::Appearance(snapshot) => self.apply_appearance(&snapshot, window, cx),
+                Update::ShellProfiles(snapshot) => self.apply_profiles(snapshot, cx),
+                Update::ShellProfilesError { connection, reason } => {
+                    self.profile_error(&connection.to_string(), reason, cx);
+                }
                 Update::AppearanceError { connection, reason } => {
                     if self
                         .model
@@ -2343,7 +2379,8 @@ impl Workspace {
                         );
                 }
                 let new_tab = selected.map(str::to_owned);
-                let header = div()
+                let plain_tab = new_tab.clone();
+                let mut header = div()
                     .flex()
                     .items_center()
                     .flex_none()
@@ -2358,11 +2395,26 @@ impl Workspace {
                             .cursor_pointer()
                             .child("+")
                             .on_click(cx.listener(move |this, _, _, cx| {
-                                if let Some(pane) = &new_tab {
+                                if let Some(pane) = &plain_tab {
                                     this.send(Command::Tab(pane.clone()), cx);
                                 }
                             })),
                     );
+                if let Some(pane) = new_tab {
+                    let slot = id.to_string();
+                    header = header.child(
+                        div()
+                            .id(SharedString::from(format!("shell-profile-picker-{id}")))
+                            .flex_none()
+                            .px_2()
+                            .cursor_pointer()
+                            .child("▾")
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                this.toggle_profile_picker(&slot, &pane, window, cx);
+                            })),
+                    );
+                }
                 let focused = self
                     .model
                     .as_ref()
@@ -2560,7 +2612,20 @@ impl Render for Workspace {
             .as_ref()
             .map(|error| format!("Appearance: {error}"))
             .or_else(|| self.appearance.notice.map(str::to_owned));
+        let profile_message = self
+            .profiles_error
+            .as_ref()
+            .map(|error| format!("Profiles: {error}"));
+        let footer_height = match usize::from(appearance_message.is_some())
+            + usize::from(profile_message.is_some())
+        {
+            0 => (self.appearance.font_size + 14.).max(25.),
+            1 => (self.appearance.font_size * 2. + 16.).max(42.),
+            _ => (self.appearance.font_size * 3. + 18.).max(56.),
+        };
+        let picker_overlay = self.profile_picker_overlay(cx);
         let mut view = div()
+            .relative()
             .size_full()
             .flex()
             .flex_col()
@@ -2707,11 +2772,7 @@ impl Render for Workspace {
         }
         view.child(
             div()
-                .h(px(if appearance_message.is_some() {
-                    (self.appearance.font_size * 2. + 16.).max(42.)
-                } else {
-                    (self.appearance.font_size + 14.).max(25.)
-                }))
+                .h(px(footer_height))
                 .px_3()
                 .flex_none()
                 .flex()
@@ -2729,8 +2790,12 @@ impl Render for Workspace {
                 })
                 .when_some(appearance_message, |view, message| {
                     view.child(div().text_color(rgb(self.appearance.secondary)).child(message))
+                })
+                .when_some(profile_message, |view, message| {
+                    view.child(div().text_color(rgb(self.appearance.secondary)).child(message))
                 }),
         )
+        .when_some(picker_overlay, |view, picker| view.child(picker))
     }
 }
 fn visible_panes(model: &ScreenModel, node: &LayoutNode, out: &mut Vec<String>) {

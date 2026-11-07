@@ -9,8 +9,6 @@ use uuid::Uuid;
 
 #[cfg(not(target_os = "windows"))]
 pub(crate) mod local;
-#[cfg(not(target_os = "windows"))]
-pub use local::AppearanceReader;
 
 /// The UI supplies the operating system's preference; no platform calls belong here.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

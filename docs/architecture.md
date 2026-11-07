@@ -122,16 +122,27 @@ transport byte leases through terminal feeding. Large batches keep the existing
 pacing, while repeated small batches also yield so input and drawing can run.
 Dropping the task drops its sole receiver and releases queued delivery leases.
 
-The same native runtime owns one auxiliary API-only appearance stream. After
-publishing the session owner, it polls stream setup and charged settings/theme
-reads alongside terminal events and commands. Same-service settings events and
-owner-checked OS preference changes coalesce; superseded reads cannot replace a
-newer choice. Appearance failures publish a separate status while terminals keep
-working with defaults or the last valid presentation. Setup and read cleanup are
+The same native runtime owns one auxiliary API-only local-settings stream. After
+publishing the session owner, it polls stream setup and separately charged
+appearance/theme and shell-profile reads alongside terminal events and commands.
+Each feature has its own generation, dirty flag and result. Same-service settings
+events refresh both; owner-checked OS preference changes refresh appearance only.
+Alternating dirty reads prevents one feature from starving the other, and
+superseded results cannot replace a newer choice. Each feature reports its own
+failure while the other continues with current data; terminals keep working.
+Setup and read cleanup are
 awaited on every worker exit before owned service shutdown, including update
 receiver failure. The API stream never consumes terminal delivery. Appearance
 font overrides remain chrome settings; resolved terminal colors do not change
 the native terminal's 15 px text and 21 px row metrics.
+
+The new-tab profile picker retains a charged service snapshot, with bounded
+profile count, identifiers and labels. Its explicit choice captures connection,
+Screen, source pane and session; the worker rejects a replaced or no longer
+displayed source before submitting the profile identifier. It never reconstructs
+commands or arguments. Ordinary tabs and splits omit launch overrides so the
+service inherits its current known CWD and profile. Profile fallback remains
+service-owned; a notice is shown only for an admitted pane/session route.
 
 Native pane, Screen and window close gestures share a client-core close plan.
 It captures the connection, affected pane/session identities and known busy or

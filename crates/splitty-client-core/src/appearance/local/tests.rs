@@ -1,4 +1,7 @@
 use super::*;
+use crate::local_settings::{LocalSettingsReader, LocalSettingsUpdate};
+use splitty_transport::wire;
+const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 use crate::connection::Client as SessionClient;
 use serde_json::json;
 use splitty_core::{
@@ -16,7 +19,14 @@ use splitty_server::{
     native::client::Connector,
     service::{catalog::Role, runtime::Runtime, State},
 };
-use std::{path::PathBuf, sync::RwLock, task::Poll, time::Duration};
+use std::{
+    future::Future,
+    path::PathBuf,
+    sync::{Arc, RwLock},
+    task::Poll,
+    time::Duration,
+};
+use tokio::sync::Notify;
 
 // Build the real service entry points without runtime::build/config::load:
 // production startup may persist home-config migrations. No test here writes
@@ -71,8 +81,16 @@ pub(crate) fn fixture() -> (Runtime, PathBuf) {
     (Runtime { state, pty }, path)
 }
 
-async fn snapshot(reader: &mut AppearanceReader) -> AppearanceSnapshot {
-    tokio::time::timeout(Duration::from_secs(5), reader.next_update())
+async fn next_appearance(reader: &mut LocalSettingsReader) -> io::Result<Arc<AppearanceSnapshot>> {
+    loop {
+        if let LocalSettingsUpdate::Appearance(result) = reader.next_update().await {
+            return result;
+        }
+    }
+}
+
+async fn snapshot(reader: &mut LocalSettingsReader) -> Arc<AppearanceSnapshot> {
+    tokio::time::timeout(Duration::from_secs(5), next_appearance(reader))
         .await
         .unwrap()
         .unwrap()
@@ -80,8 +98,8 @@ async fn snapshot(reader: &mut AppearanceReader) -> AppearanceSnapshot {
 
 // Poll just once without running the service task. Cancellation of this outer
 // receive must retain the in-flight API client and the request's allocation.
-async fn begin_read(reader: &mut AppearanceReader) {
-    let mut next = Box::pin(reader.next_update());
+async fn begin_read(reader: &mut LocalSettingsReader) {
+    let mut next = Box::pin(next_appearance(reader));
     std::future::poll_fn(|cx| {
         assert!(next.as_mut().poll(cx).is_pending());
         Poll::Ready(())
@@ -118,7 +136,7 @@ async fn reads_keep_allocations_charged_and_session_events_separate() {
         .await
         .unwrap();
     let budget = api.sender().context().budget.clone();
-    let mut reader = AppearanceReader::new(api, session.connection_id(), ColorScheme::Light);
+    let mut reader = LocalSettingsReader::new(api, session.connection_id(), ColorScheme::Light);
     service.state.client_state.broadcast_events(
         &[ServerEvent::settings_changed(
             json!({"appearance":{"theme":"test"}}),
@@ -171,17 +189,16 @@ async fn cancelled_poll_retains_read_and_refresh_discards_superseded_generation(
         .await
         .unwrap();
     let owner = Uuid::new_v4();
-    let mut reader = AppearanceReader::new(api, owner, ColorScheme::Dark);
+    let mut reader = LocalSettingsReader::new(api, owner, ColorScheme::Dark);
     begin_read(&mut reader).await;
-    assert!(reader.pending.is_some());
-    assert!(reader.refresh(Uuid::new_v4(), ColorScheme::Light).is_err());
-    reader.refresh(owner, ColorScheme::Dark).unwrap();
-    reader.refresh(owner, ColorScheme::Light).unwrap();
+    assert!(reader
+        .set_scheme(Uuid::new_v4(), ColorScheme::Light)
+        .is_err());
+    reader.refresh_settings(owner).unwrap();
+    reader.set_scheme(owner, ColorScheme::Light).unwrap();
     let result = snapshot(&mut reader).await;
     assert_eq!(result.generation(), 3);
     assert_eq!(result.theme().variant, splitty_core::theme::Variant::Light);
-    assert!(!reader.dirty);
-    assert!(reader.pending.is_none());
     drop(result);
     reader.finish().await.unwrap();
     service.close().await.unwrap();
@@ -196,7 +213,7 @@ async fn finish_cancels_pending_request_and_releases_the_owned_stream() {
         .await
         .unwrap();
     let budget = api.sender().context().budget.clone();
-    let mut reader = AppearanceReader::new(api, Uuid::new_v4(), ColorScheme::Dark);
+    let mut reader = LocalSettingsReader::new(api, Uuid::new_v4(), ColorScheme::Dark);
     begin_read(&mut reader).await;
     tokio::time::timeout(Duration::from_secs(5), reader.finish())
         .await
@@ -207,14 +224,17 @@ async fn finish_cancels_pending_request_and_releases_the_owned_stream() {
     assert!(!path.exists());
 }
 
-#[tokio::test]
-async fn malformed_or_oversized_reply_is_rejected_without_losing_budget() {
-    let (service, path) = fixture();
-    let api = Connector::default()
-        .embedded(service.state.clone(), Role::Main)
-        .await
-        .unwrap();
-    let budget = api.sender().context().budget.clone();
+#[test]
+fn malformed_or_oversized_reply_is_rejected_without_losing_budget() {
+    use crate::local_settings::decode_with_budget;
+    use splitty_transport::budget::{ConnectionBudget, ProcessBudget};
+    // Exhaust only this decoder's private budget, not the process-wide admission
+    // pool shared by concurrently running real-service tests.
+    let budget = ConnectionBudget::new(
+        ProcessBudget::new(wire::CONNECTION_BYTES, wire::CONNECTION_CONTROL_BYTES),
+        wire::CONNECTION_BYTES,
+        wire::CONNECTION_CONTROL_BYTES,
+    );
     for (status, content_type, body) in [
         (500, wire::ContentType::Json, "{}".into()),
         (200, wire::ContentType::Text, "{}".into()),
@@ -232,7 +252,7 @@ async fn malformed_or_oversized_reply_is_rejected_without_losing_budget() {
             body,
             uncertain: false,
         };
-        assert!(decode::<HomeAppearance>(&api, &reply).is_err());
+        assert!(decode_with_budget::<HomeAppearance>(&budget, &reply).is_err());
     }
     let reply = wire::Reply {
         id: 1,
@@ -244,14 +264,14 @@ async fn malformed_or_oversized_reply_is_rejected_without_losing_budget() {
     let available = wire::CONNECTION_BYTES - wire::CONNECTION_CONTROL_BYTES - budget.data.used();
     let held = budget.reserve(available, false).unwrap();
     assert_eq!(
-        decode::<HomeAppearance>(&api, &reply).err().unwrap().kind(),
+        decode_with_budget::<HomeAppearance>(&budget, &reply)
+            .err()
+            .unwrap()
+            .kind(),
         io::ErrorKind::OutOfMemory
     );
     drop(held);
-    api.finish().await.unwrap();
     assert_eq!(budget.used(), 0);
-    service.close().await.unwrap();
-    assert!(!path.exists());
 }
 
 #[tokio::test]
@@ -263,19 +283,21 @@ async fn read_error_is_reported_once_and_explicit_refresh_recovers() {
         .await
         .unwrap();
     let owner = Uuid::new_v4();
-    let mut reader = AppearanceReader::new(api, owner, ColorScheme::Dark);
-    let error = tokio::time::timeout(Duration::from_secs(5), reader.next_update())
+    let mut reader = LocalSettingsReader::new(api, owner, ColorScheme::Dark);
+    let error = tokio::time::timeout(Duration::from_secs(5), next_appearance(&mut reader))
         .await
         .unwrap()
         .unwrap_err();
     assert_eq!(error.kind(), io::ErrorKind::InvalidData);
     begin_read(&mut reader).await;
     assert!(
-        reader.pending.is_none(),
+        tokio::time::timeout(Duration::from_millis(20), next_appearance(&mut reader))
+            .await
+            .is_err(),
         "no automatic failed-read retry loop"
     );
     service.state.config.write().unwrap().appearance.font_family = "recovered".into();
-    reader.refresh(owner, ColorScheme::Dark).unwrap();
+    reader.refresh_settings(owner).unwrap();
     let result = snapshot(&mut reader).await;
     assert_eq!(result.generation(), 2);
     assert_eq!(result.settings().font_family, "recovered");

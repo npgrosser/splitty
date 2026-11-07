@@ -13,8 +13,18 @@ model {
     }
 
     appearance = component 'appearance' {
-      description 'Read-only local settings/theme API stream, coalesced charged snapshots and cancellation-safe owned reads.'
+      description 'Read-only local appearance/theme requests and charged snapshots; service fixtures for settings tests.'
       metadata { module 'splitty_client_core::appearance' }
+    }
+
+    local_settings = component 'local_settings' {
+      description 'One owned auxiliary API stream with fair independent appearance/profile refreshes, bounded JSON decoding and cancellation-safe cleanup.'
+      metadata { module 'splitty_client_core::local_settings' }
+    }
+
+    client_shell_profiles = component 'client_shell_profiles' {
+      description 'Charged service-owned profile snapshots and bounded native presentation admission; no command resolution.'
+      metadata { module 'splitty_client_core::shell_profiles' }
     }
 
     client_document = component 'client_document' {
@@ -38,14 +48,29 @@ model {
     }
 
     client_root -> connection 'Expose the native client API'
-    client_root -> appearance 'Expose charged appearance snapshots and the local reader'
+    client_root -> appearance 'Expose charged appearance snapshots'
+    client_root -> local_settings 'Expose the shared local settings reader'
+    client_root -> client_shell_profiles 'Expose service-owned profile snapshots'
+    local_settings -> appearance 'Read appearance independently and reuse in-memory fixtures'
+    local_settings -> client_shell_profiles 'Read independently charged profile snapshots'
+    local_settings -> splitty.server.native 'Own one API stream and await cleanup'
+    local_settings -> splitty.server.service 'Use the real embedded API role in tests'
+    local_settings -> splitty.core.shell_profiles 'Construct typed profile fixtures'
+    local_settings -> splitty.transport.budget 'Retain typed snapshot allocation leases'
+    local_settings -> splitty.transport.codec 'Admit bounded typed response decoding'
+    local_settings -> splitty.transport.wire 'Validate API reply kind and status'
+    client_shell_profiles -> local_settings 'Reuse bounded typed API response decoding'
+    client_shell_profiles -> splitty.core.shell_profiles 'Present the existing service profile contract'
+    client_shell_profiles -> splitty.server.native 'Read on the independently owned API client'
+    client_shell_profiles -> splitty.server.service 'Use the existing read-only profiles operation'
+    client_shell_profiles -> splitty.transport.budget 'Keep profile data charged through presentation'
+    appearance -> local_settings 'Reuse bounded typed response decoding'
     appearance -> splitty.core.config 'Project existing appearance settings without persistence'
     appearance -> splitty.core.theme 'Decode the service-resolved theme'
     appearance -> splitty.server.native 'Own one API-only stream and await its cleanup'
     appearance -> splitty.server.service 'Use fixed read-only operations and in-memory service fixtures'
     appearance -> splitty.transport.budget 'Retain typed snapshot allocation leases'
-    appearance -> splitty.transport.codec 'Charge bounded typed response decoding'
-    appearance -> splitty.transport.wire 'Validate API reply kind and status'
+    appearance -> splitty.transport.wire 'Exercise malformed and oversized API replies in tests'
     appearance -> connection 'Verify independent session delivery in real-service tests'
     appearance -> splitty.core.mux 'Construct an isolated workspace in real-service tests'
     appearance -> splitty.core.protocol 'Construct and observe isolated service events in tests'
@@ -74,6 +99,9 @@ model {
     client_workspace -> splitty.core.mux 'Use canonical screen layout, operations and validation'
     client_workspace -> splitty.core.pty 'Gate real-service tests on PTY availability'
     client_workspace -> appearance 'Reuse an isolated in-memory service for launch inheritance tests'
+    client_workspace -> client_shell_profiles 'Bound explicit launch profile identifiers'
+    native_workspace -> local_settings 'Poll fair owner-bound settings without consuming terminal events'
+    native_workspace -> client_shell_profiles 'Publish charged choices and bound admitted launch fallback notices'
     native_workspace -> appearance 'Poll owner-bound appearance without consuming session events'
     native_workspace -> embedded 'Own appearance fixture service cleanup in runtime tests'
     native_workspace -> splitty.core.protocol 'Broadcast same-service settings events in runtime tests'
@@ -83,7 +111,8 @@ model {
     native_workspace -> client_root 'Own an isolated service and ordered native client'
     embedded -> connection 'Return a connection scoped to the embedded service'
     embedded -> splitty.core.protocol 'Inject old-peer capability greetings in compatibility tests'
-    embedded -> appearance 'Open an owned API-only local appearance reader'
+    embedded -> appearance 'Carry the local OS color preference into settings initialization'
+    embedded -> local_settings 'Open one owned auxiliary settings reader'
     embedded -> client_root 'Use public event and screen types in embedded probe tests'
     embedded -> splitty.server.control 'Start and stop the isolated control channel'
     embedded -> splitty.server.native 'Connect an owned native session stream'

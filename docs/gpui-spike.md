@@ -77,6 +77,14 @@ cargo run --release -p splitty-gpui -- --smoke
 
 The default window offers **Split right**, **Split below**, **New tab** and
 **Maximize/Restore** for the focused tab group.
+The arrow beside a tab group's **+** opens the local shell-profile picker.
+Use Up/Down and Enter to choose an enabled, available profile; Escape or an outside
+click dismisses it. A regular **+** or new-tab shortcut inherits the source shell
+and directory from the service. An explicit choice changes only the profile;
+commands and arguments remain service-owned. The picker shows unavailable reasons,
+default and experimental markers, and a launch-time fallback is reported in status.
+Profiles and appearance load independently over the owned auxiliary API stream;
+neither read changes settings. Profile editing is still in the web settings UI.
 Select tabs by clicking their labels, close panes with their tab close control,
 and resize splits by dragging the divider. After closing the final pane,
 **New terminal** repopulates the same Screen. Ctrl+Shift+C/V copies and pastes
@@ -339,6 +347,39 @@ input delivered both up and down application-mode cursor sequences. The optimize
 integrated binary also passed the Wayland/X11 hardware workspace smoke and exited
 cleanly. This verifies the cursor-key fallback. Application mouse reporting is
 covered separately below.
+
+## Native shell-profile acceptance
+
+The new-tab arrow reads the local service's existing shell profiles. Ordinary
+tabs and splits send no CWD/profile override; explicit selection sends only the
+profile ID. The client admits at most 128 profiles with 256-byte IDs and 512-byte
+names/reasons, retaining the charged snapshot through presentation. Oversized
+reads fail atomically and leave the last valid choices available. Appearance and
+profiles use independent generations on one auxiliary API stream.
+
+The isolated window check creates private configuration and raw PTY profile
+processes. It verifies explicit program/argument selection, plain tab/split
+inheritance, unavailable choices, Escape/outside dismissal, terminal output,
+keyboard and mouse-reporting isolation, and owned-process cleanup:
+
+```sh
+python3 scripts/testing/gpui-shell-profiles.py target/release/splitty-gpui \
+  --output /tmp/splitty-profile-evidence --display :95 \
+  --xvfb /path/to/Xvfb --xdotool /path/to/xdotool
+```
+
+The frozen candidate SHA-256
+`f7ff32f4c8b286ebf538305533614a22a3a7d7c38320580ce0118d38566e76ec`
+passed nine X11 window checks and the Wayland/X11 hardware workspace smoke.
+The picker screenshots also confirm default, experimental and unavailable
+presentation. In-process tests cover newer service CWD versus a stale client
+snapshot, explicit profile precedence, availability-race fallback and rejection
+of stale connection/Screen/pane/session captures. The window check does not force
+an external source mutation while the picker stays open, and is not a latency
+measurement. The 60 client-core tests use `--test-threads=4` to keep concurrent
+real-service fixtures within the existing process-wide transport admission bound;
+the production bound is unchanged. The 53 native and 17 architecture tests and
+both affected crates' all-target Clippy checks also passed.
 
 ## Native terminal search
 

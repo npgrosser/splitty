@@ -370,6 +370,13 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
 
 ## Stale documentation
 
+- **`terminal-sessions` has a contradictory profile-failure scenario** (found 2026-11-07 during
+  `native-shell-profile-picker`): Session Creation Failure says a disabled/unavailable requested
+  profile always fails, while Shell Program Selection and the current resolver correctly specify
+  fallback to an available default. The native picker follows the resolver and reports the
+  effective profile/fallback reason. Reconcile the older failure scenario separately; failure
+  remains correct when no fallback can start.
+
 - **`docs/protocol.ts`** still describes screen ownership, attach/detach, single-attach, `lastClientId`,
   `set_screen_ownership` and the `mux.connect` handshake (lines 11, 25-28, 42, 132-148, 191, 232, 254-261, 460-517,
   624, 666, flows around 723-766), all removed in `fa5e5b7` (March 2026). Op names `split_panel`/`close_panel`/

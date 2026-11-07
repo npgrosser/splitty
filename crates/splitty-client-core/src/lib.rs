@@ -7,14 +7,17 @@ pub mod connection;
 pub mod document;
 #[cfg(not(target_os = "windows"))]
 pub mod embedded;
+#[cfg(not(target_os = "windows"))]
+pub mod local_settings;
 pub mod native_workspace;
+pub mod shell_profiles;
 pub mod workspace;
 
-#[cfg(not(target_os = "windows"))]
-pub use appearance::AppearanceReader;
 pub use appearance::{AppearanceSnapshot, ColorScheme};
 pub use connection::{AnnotationDraft, Client, Event, Output, ScreenIds};
 pub use document::{Document, DocumentRead};
 #[cfg(not(target_os = "windows"))]
 pub use embedded::EmbeddedService;
+#[cfg(not(target_os = "windows"))]
+pub use local_settings::LocalSettingsReader;
 pub use workspace::{LocalWorkspace, SessionRoute, WorkspaceDelta};

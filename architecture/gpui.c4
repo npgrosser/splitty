@@ -53,6 +53,7 @@ model {
     gpui_workspace -> terminal 'Keep one terminal view per pane identity'
     gpui_workspace -> gpui_appearance 'Convert resolved theme values for native chrome and terminal colors'
     gpui_workspace -> splitty.client_core.appearance 'Match owner and generation before applying resolved appearance'
+    gpui_workspace -> splitty.client_core.client_shell_profiles 'Retain owner-bound service choices for the new-tab picker'
     gpui_appearance -> terminal 'Provide a plain terminal color configuration'
     gpui_appearance -> splitty.client_core.appearance 'Consume charged appearance snapshot values'
     gpui_workspace -> splitty.client_core.native_workspace 'Submit assessed close intent and wait for matching approval or settlement'
