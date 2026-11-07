@@ -4,6 +4,13 @@
 
 model {
   extend splitty.core {
+    native_api = component 'native_api' {
+      description 'Portable native API operation inventory, role/argument validation, size ceilings and deadlines; no service execution.'
+      metadata { module 'splitty_core::native_api' }
+    }
+    native_api -> splitty.transport.budget 'Retain decoded session allocation charges'
+    native_api -> splitty.transport.codec 'Validate and charge bounded JSON session envelopes'
+
 
     // Foundations, without dependencies
 

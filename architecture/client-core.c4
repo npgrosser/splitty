@@ -2,6 +2,38 @@
 
 model {
   extend splitty.client_core {
+    api_stream = component 'api_stream' {
+      description 'Concrete embedded or owned API-only stream, sharing typed authority validation and request transactions.'
+      metadata { module 'splitty_client_core::api_stream' }
+    }
+    owned_service = component 'owned_service' {
+      description 'Explicit validated WSL child arguments or Unix embedded startup; one owned backend with separate session/API streams and joined observed cleanup.'
+      metadata { module 'splitty_client_core::owned_service' }
+    }
+    api_stream -> splitty.core.native_api 'Validate operation role and arguments against the shared contract'
+    api_stream -> splitty.server.native 'Delegate embedded API streams on Unix'
+    api_stream -> splitty.remote.owner 'Delegate owned API streams on Windows'
+    api_stream -> splitty.transport.budget 'Retain response decoding leases'
+    api_stream -> splitty.transport.peer 'Expose sender budgeting to bounded typed decoders'
+    api_stream -> splitty.transport.wire 'Return typed native Reply envelopes'
+    owned_service -> api_stream 'Open an independent owned API stream'
+    owned_service -> appearance 'Pass window OS scheme into local reads'
+    owned_service -> local_service 'Initialize the common auxiliary job scheduler'
+    owned_service -> connection 'Return the common session client'
+    owned_service -> client_root 'Create the existing Unix embedded backend'
+    owned_service -> splitty.remote.owner 'Start, open and join the existing app-owned helper'
+    owned_service -> splitty.transport.queue 'Cancel startup while retaining its cleanup future'
+    owned_service -> splitty.core.protocol 'Verify the helper mux version'
+    native_workspace -> owned_service 'Use one orchestration loop for explicit local backend ownership'
+    local_service -> api_stream 'Keep one auxiliary stream and retained jobs across cancellation'
+    local_service -> splitty.core.native_api 'Use shared zoom operation authority'
+    appearance -> api_stream 'Read existing appearance and theme contracts on either platform'
+    appearance -> splitty.core.native_api 'Use fixed typed home and theme operations'
+    client_shell_profiles -> api_stream 'Read bounded profile snapshots on either platform'
+    client_shell_profiles -> splitty.core.native_api 'Use the existing profiles operation'
+    client_templates -> api_stream 'Perform identified template jobs on either platform'
+    client_templates -> splitty.core.native_api 'Use the existing typed library operations'
+
     client_root = component 'client_root' {
       description 'Public library API and module re-exports.'
       metadata { module 'splitty_client_core' }
@@ -62,7 +94,6 @@ model {
       metadata { module 'splitty_client_core::embedded' }
     }
 
-    client_root -> client_templates 'Expose immutable saved-template library data and requests'
     client_templates -> local_service 'Reuse charged API response decoding'
     client_templates -> connection 'Validate captured extraction Screen identifiers'
     client_templates -> appearance 'Use isolated real-service fixtures for library tests'
@@ -83,7 +114,6 @@ model {
     client_root -> local_service 'Expose the owned local settings API client'
     local_service -> client_zoom 'Resolve queued zoom intents against current settings'
     native_workspace -> client_zoom 'Carry identified zoom intents and independent outcomes'
-    client_root -> client_shell_profiles 'Expose service-owned profile snapshots'
     local_service -> appearance 'Read appearance independently and reuse in-memory fixtures'
     local_service -> client_shell_profiles 'Read independently charged profile snapshots'
     local_service -> splitty.server.native 'Own one API stream and await cleanup'
@@ -101,8 +131,6 @@ model {
     local_service -> splitty.transport.queue 'Own isolated fake-peer resource accounting'
     client_shell_profiles -> local_service 'Reuse bounded typed API response decoding'
     client_shell_profiles -> splitty.core.shell_profiles 'Present the existing service profile contract'
-    client_shell_profiles -> splitty.server.native 'Read on the independently owned API client'
-    client_shell_profiles -> splitty.server.service 'Use the existing read-only profiles operation'
     client_shell_profiles -> splitty.transport.budget 'Keep profile data charged through presentation'
     appearance -> local_service 'Reuse bounded typed response decoding'
     appearance -> splitty.core.config 'Project existing appearance settings without persistence'

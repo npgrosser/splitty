@@ -32,6 +32,8 @@ pub struct BridgeProcess {
 /// How a bridge's process ended.
 #[derive(Debug)]
 pub struct Ended {
+    /// Cleanup exceeded its grace period or explicitly killed the bridge.
+    pub forced: bool,
     /// Its exit status, unless waiting for it failed.
     pub status: io::Result<ExitStatus>,
     /// The end of its error output, trimmed.
@@ -378,6 +380,7 @@ impl NativeBridge {
             Err(error) => (
                 Err(io::Error::other("native cleanup task failed")),
                 Ended {
+                    forced: false,
                     status: Err(io::Error::other(error)),
                     stderr: Default::default(),
                     budget: ConnectionBudget::default(),
@@ -428,6 +431,7 @@ impl BridgeProcess {
         let status = self.child.wait().await;
         let stderr = kept_end(self.stderr.take()).await;
         Ended {
+            forced: false,
             status,
             stderr,
             budget: self.budget.clone(),
@@ -438,7 +442,9 @@ impl BridgeProcess {
     pub async fn kill(&mut self) -> Ended {
         // Fails only when the process has already been waited for.
         let _ = self.child.start_kill();
-        self.ended().await
+        let mut ended = self.ended().await;
+        ended.forced = true;
+        ended
     }
 
     async fn finish_owner(&mut self, deadline: Instant) -> Ended {
@@ -446,9 +452,11 @@ impl BridgeProcess {
         // grace before reaping. The relay's identical 500ms kill races cleanup.
         let grace =
             Duration::from_millis(2750).min(deadline.saturating_duration_since(Instant::now()));
+        let mut forced = false;
         let status = match timeout(grace, self.child.wait()).await {
             Ok(status) => status,
             Err(_) => {
+                forced = true;
                 let _ = self.child.start_kill();
                 self.child.wait().await
             }
@@ -456,6 +464,7 @@ impl BridgeProcess {
         let remaining = deadline.saturating_duration_since(Instant::now());
         let stderr = kept_end_for(self.stderr.take(), remaining).await;
         Ended {
+            forced,
             status,
             stderr,
             budget: self.budget.clone(),

@@ -40,6 +40,8 @@ struct Routes {
     next: u32,
     streams: HashMap<u32, Route>,
 }
+type CleanupResult = Result<(), (io::ErrorKind, String)>;
+
 /// One helper and runtime, shared across document replacement.
 pub struct Owner {
     sender: Sender,
@@ -48,6 +50,7 @@ pub struct Owner {
     routes: Arc<Mutex<Routes>>,
     assignment: admission::Assignment,
     exited: watch::Receiver<bool>,
+    completion: Arc<Mutex<Option<CleanupResult>>>,
 }
 impl Owner {
     pub async fn spawn(command: Command, expected_mux: u32) -> io::Result<Arc<Self>> {
@@ -91,6 +94,7 @@ impl Owner {
         let sender = bridge.sender();
         let routes = Arc::new(Mutex::new(Routes::default()));
         let (exited, exit) = watch::channel(false);
+        let completion = Arc::new(Mutex::new(None));
         let owner = Arc::new(Self {
             sender,
             mux,
@@ -98,16 +102,33 @@ impl Owner {
             routes: routes.clone(),
             assignment,
             exited: exit,
+            completion: completion.clone(),
         });
         tokio::spawn(async move {
             let mut bridge = bridge;
+            let mut routing = Ok(());
             while let Some(message) = bridge.recv().await {
-                if route(&routes, message, &bridge.sender().context().budget).is_err() {
+                if let Err(error) = route(&routes, message, &bridge.sender().context().budget) {
+                    routing = Err(error);
                     break;
                 }
             }
             // Cleanup evidence is helper exit, never just a lost carrier.
-            let _ = bridge.finish().await;
+            let (transport, ended) = bridge.finish().await;
+            let result = routing.and(transport).and_then(|()| {
+                if ended.forced { return Err(io::Error::other("owned helper required forced termination; graceful backend cleanup is unconfirmed")); }
+                ended.status.and_then(|status| {
+                    if status.success() {
+                        Ok(())
+                    } else {
+                        Err(io::Error::other(format!(
+                            "owned helper exited unsuccessfully: {status}"
+                        )))
+                    }
+                })
+            });
+            *completion.lock().expect("owner completion") =
+                Some(result.map_err(|error| (error.kind(), error.to_string())));
             for (_, stream) in routes.lock().expect("owner routes").streams.drain() {
                 stream.context.close();
                 stream.released.send_replace(true);
@@ -137,6 +158,17 @@ impl Owner {
         self.sender.close();
         let mut exited = self.exited.clone();
         let _ = exited.wait_for(|done| *done).await;
+    }
+    /// Join the same owned cleanup as `close`, additionally reporting whether
+    /// transport shutdown and the observed helper exit succeeded. A killed
+    /// bridge is never evidence of graceful backend cleanup.
+    pub async fn close_result(&self) -> io::Result<()> {
+        self.close().await;
+        match self.completion.lock().expect("owner completion").as_ref() {
+            Some(Ok(())) => Ok(()),
+            Some(Err((kind, message))) => Err(io::Error::new(*kind, message.clone())),
+            None => Err(io::Error::other("owned helper cleanup was not observed")),
+        }
     }
     pub async fn open_context(
         &self,
@@ -254,6 +286,7 @@ impl Owner {
         });
         // This guard survives cancellation while negotiation is pending.
         let mut connection = Connection {
+            requests: Default::default(),
             peer: None,
             ready: None,
             context: stream_context.clone(),
@@ -399,6 +432,7 @@ async fn relay_stream(
 /// One document's independent native connection. Completion includes the
 /// helper's stream cleanup acknowledgement (or observed helper exit).
 pub struct Connection {
+    requests: splitty_transport::api_request::RequestState,
     peer: Option<Peer>,
     ready: Option<Charged<wire::Ready>>,
     context: queue::Context,
@@ -421,6 +455,22 @@ impl Connection {
     }
     pub async fn recv(&mut self) -> Option<Charged<Incoming>> {
         self.peer.as_mut()?.recv().await
+    }
+    /// API-only stream transaction. Domain authority is validated by the caller.
+    pub async fn request(
+        &mut self,
+        operation: String,
+        args: serde_json::Map<String, serde_json::Value>,
+        deadline: Option<std::time::Duration>,
+    ) -> io::Result<Charged<wire::Reply>> {
+        self.requests
+            .request(
+                self.peer.as_mut().expect("negotiated owner stream"),
+                operation,
+                args,
+                deadline,
+            )
+            .await
     }
     fn cleanup(&mut self) -> impl std::future::Future<Output = io::Result<()>> + Send + 'static {
         self.cleaning = true;
@@ -507,6 +557,7 @@ mod tests {
             }));
             let retained = Arc::downgrade(&capacity);
             let connection = Connection {
+                requests: Default::default(),
                 peer: None,
                 ready: None,
                 context: queue::Context::default(),
@@ -557,6 +608,7 @@ mod tests {
         let (physical, mut helper) = peers();
         let (release, released) = watch::channel(true);
         let connection = Connection {
+            requests: Default::default(),
             peer: None,
             ready: None,
             context: queue::Context::default(),
@@ -645,7 +697,40 @@ mod tests {
             *owner.exited.borrow(),
             "completion includes observed child exit"
         );
-        owner.close().await;
+        assert!(
+            owner.close_result().await.is_err(),
+            "forced exit cannot prove graceful cleanup"
+        );
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn cleanup_result_distinguishes_successful_and_unsuccessful_helper_exit() {
+        let directory = tempfile::tempdir().unwrap();
+        for mode in ["__OWNER_CLEANUP__", "__INVALID_FRAME_EXIT_255__"] {
+            let ready = wire::Ready {
+                generation: 1,
+                instance: "a".repeat(32),
+                mux_protocol: 1,
+                purpose: wire::Purpose::Owner,
+                limits: wire::Limits::default(),
+            };
+            let marker = directory.path().join("cleanup");
+            let mut command = Command::new("python3");
+            command
+                .args(["-u", "-c", include_str!("../tests/native_bridge.py")])
+                .arg(serde_json::to_string(&ready).unwrap())
+                .arg(mode)
+                .arg(&marker);
+            let owner = Owner::spawn(command, 1).await.unwrap();
+            let result = owner.close_result().await;
+            if mode == "__OWNER_CLEANUP__" {
+                result.unwrap();
+                assert!(marker.exists());
+                owner.close_result().await.unwrap();
+            } else {
+                assert!(result.is_err());
+            }
+        }
     }
     #[tokio::test]
     async fn byte_exact_chunks_wait_for_receipts_and_cancellation_is_independent() {

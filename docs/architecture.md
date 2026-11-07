@@ -104,6 +104,26 @@ No mux-level attach/detach — the client gets screen state via `mux.resync` on 
 
 ### Client connections
 
+The native workspace uses one orchestration loop on Unix and Windows. Its concrete
+`OwnedService` owns either an in-process service or an existing WSL distribution's
+explicitly configured helper. Windows passes the distribution, absolute Linux
+backend path and isolated configuration directory as separate `wsl.exe --exec env`
+arguments; it performs no provisioning, daemon discovery or shell interpolation.
+The helper carries independent session and API streams belonging to the same
+service. Closing the window joins those streams and the owned helper; successful
+cleanup requires an observed successful exit, not merely a closed carrier or a
+forcibly terminated bridge. Existing released launchers retain their compatible
+owner-close API.
+
+The portable `core::native_api` catalog is the single source of native operation
+names, role checks, argument bounds and deadlines, reexported by the service.
+`transport::api_request` implements the API-only transaction over a concrete Peer:
+monotonic IDs, cancellation-on-drop, old-reply rejection, charged matching replies
+and explicit uncertain mutation failures. Embedded and owned clients delegate to
+that implementation; the transport never imports domain operations. The native
+`ApiStream` adapter and `LocalServiceClient` reuse it for settings, profiles, zoom
+and templates without consuming terminal events or duplicating scheduling.
+
 The development-only `splitty-gpui` window uses `splitty-client-core` as a UI-free
 adapter over one native connection and isolated owned service. The explicit
 `native_workspace` module owns the worker, command/update API and bounded retries

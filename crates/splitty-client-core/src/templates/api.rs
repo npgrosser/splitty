@@ -1,7 +1,8 @@
 use super::*;
+use crate::api_stream::ApiStream as Client;
 use crate::local_service::decode;
 use serde_json::{json, Map, Value};
-use splitty_server::{native::client::Client, service::catalog::Operation};
+use splitty_core::native_api::Operation;
 use tokio::sync::Notify;
 
 pub(crate) async fn execute(

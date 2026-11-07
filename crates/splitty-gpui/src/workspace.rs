@@ -517,6 +517,7 @@ pub struct Workspace {
     commands: mpsc::Sender<Command>,
     stopping: Arc<AtomicBool>,
     cleanup_complete: Arc<AtomicBool>,
+    worker_finished: Arc<AtomicBool>,
     split_bounds: HashMap<String, Bounds<Pixels>>,
     slot_bounds: HashMap<String, Bounds<Pixels>>,
     tab_scrolls: HashMap<String, TabScroll>,
@@ -582,6 +583,7 @@ impl Workspace {
     pub fn new(
         smoke: bool,
         outcome: Arc<AtomicBool>,
+        backend: splitty_client_core::owned_service::LocalBackend,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Self, Worker) {
@@ -589,7 +591,7 @@ impl Workspace {
         let (commands, receiver) = mpsc::channel(64);
         let (sender, mut updates) = mpsc::channel(64);
         let initial_scheme = Self::window_scheme(window);
-        let worker = Worker::start_with_scheme(receiver, sender, initial_scheme);
+        let worker = Worker::start_with_backend(receiver, sender, initial_scheme, backend);
         let stopping = worker.stop.clone();
         let poll = cx.spawn_in(window, async move |this, cx| {
             let maintenance = Duration::from_millis(16);
@@ -683,6 +685,7 @@ impl Workspace {
                 commands,
                 stopping: worker.stop.clone(),
                 cleanup_complete: worker.cleanup_complete.clone(),
+                worker_finished: worker.finished.clone(),
                 split_bounds: HashMap::new(),
                 slot_bounds: HashMap::new(),
                 tab_scrolls: HashMap::new(),
@@ -1012,7 +1015,10 @@ impl Workspace {
         self.transfer_menu = None;
         self.close_profile_picker(window, cx);
         self.dismiss_templates(window, cx);
-        if target == CloseTarget::Window && self.cleanup_complete.load(Ordering::Acquire) {
+        if target == CloseTarget::Window
+            && (self.cleanup_complete.load(Ordering::Acquire)
+                || self.worker_finished.load(Ordering::Acquire))
+        {
             self.stop();
             cx.quit();
             return;
@@ -2098,6 +2104,23 @@ impl Workspace {
                 self.smoke_stage = 3;
             }
             3 if count == 4 && self.smoke_shortcut_checks.load(Ordering::Acquire) >= 3 => {
+                let Some(screen) = model.shown_screen_id() else {
+                    return;
+                };
+                // Attachment can finish while a shell still reads terminal
+                // queries during startup. Wait for its observed idle state
+                // before injecting commands into all four real terminals.
+                if !model
+                    .assess_close(
+                        0,
+                        CloseTarget::Screen {
+                            screen: screen.to_owned(),
+                        },
+                    )
+                    .is_ok_and(|close| !close.needs_confirmation())
+                {
+                    return;
+                }
                 self.smoke_tab = model.focused_pane().map(str::to_owned);
                 let commands: Vec<_> = self
                     .panes

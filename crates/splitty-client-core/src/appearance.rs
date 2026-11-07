@@ -7,7 +7,6 @@ use splitty_core::{config::AppearanceSettings, theme::ResolvedTheme};
 use splitty_transport::budget::Charged;
 use uuid::Uuid;
 
-#[cfg(not(target_os = "windows"))]
 pub(crate) mod local;
 
 /// The UI supplies the operating system's preference; no platform calls belong here.
@@ -48,7 +47,6 @@ impl AppearanceSnapshot {
     }
 }
 
-#[cfg(not(target_os = "windows"))]
 fn theme_name(settings: &AppearanceSettings, scheme: ColorScheme) -> &str {
     if settings.theme_mode == "auto" {
         match scheme {

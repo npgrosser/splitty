@@ -214,9 +214,7 @@ impl TemplateApiRequest {
         Ok(())
     }
 }
-#[cfg(not(target_os = "windows"))]
 mod api;
-#[cfg(not(target_os = "windows"))]
 pub(crate) use api::execute;
 
 pub(crate) fn serialized_size(value: &impl serde::Serialize) -> io::Result<usize> {

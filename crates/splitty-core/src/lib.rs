@@ -29,3 +29,5 @@ pub mod pty;
 pub mod shell_profiles;
 pub mod template;
 pub mod theme;
+
+pub mod native_api;

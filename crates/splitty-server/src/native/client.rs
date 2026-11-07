@@ -16,7 +16,7 @@ pub struct Client {
     peer: Option<Peer>,
     resources: Option<(admission::Carrier, admission::Stream)>,
     service: Option<ServiceTask>,
-    last_request: u32,
+    requests: splitty_transport::api_request::RequestState,
 }
 
 /// Embedded streams own both ends. Client completion includes the service's
@@ -105,88 +105,23 @@ impl Client {
     ) -> io::Result<Charged<wire::Reply>> {
         let request = crate::service::catalog::Request { operation, args };
         request.validate(Role::Main).map_err(io::Error::other)?;
-        self.last_request = self
-            .last_request
-            .checked_add(1)
-            .ok_or_else(|| io::Error::other("request generation exhausted"))?;
-        let id = self.last_request;
-        let sender = self.sender();
         let name = serde_json::to_value(operation)?
             .as_str()
             .ok_or_else(|| io::Error::other("invalid operation"))?
             .to_owned();
-        sender.json(
-            Kind::Request,
-            &wire::Request {
-                id,
-                operation: name,
-                args: request.args,
-            },
-        )?;
-        struct Cancel {
-            sender: Sender,
-            id: Option<u32>,
-        }
-        impl Drop for Cancel {
-            fn drop(&mut self) {
-                if let Some(id) = self.id {
-                    let _ = self.sender.control(
-                        Kind::Cancel,
-                        &wire::Cancel {
-                            generation: self.sender.generation(),
-                            id,
-                        },
-                    );
-                }
-            }
-        }
-        let mut cancel = Cancel {
-            sender,
-            id: Some(id),
-        };
-        let duration = operation
+        let deadline = operation
             .description()
             .deadline
             .duration()
             .map(|d| d + std::time::Duration::from_secs(1));
-        let wait = async {
-            while let Some(message) = self.recv().await {
-                if message.frame.kind != Kind::Reply {
-                    continue;
-                }
-                let reply = message
-                    .frame
-                    .decode_charged::<wire::Reply>(&cancel.sender.context().budget)?;
-                if reply.id < id {
-                    continue;
-                } // cancelled older request, never reused
-                if reply.id != id {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "reply does not match native request",
-                    ));
-                }
-                return Ok(reply);
-            }
-            Err(io::Error::new(
-                io::ErrorKind::ConnectionAborted,
-                "native connection lost; an admitted mutation may have completed",
-            ))
-        };
-        let result = if let Some(duration) = duration {
-            tokio::time::timeout(duration, wait).await.map_err(|_| {
-                io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "native request deadline exceeded; an admitted mutation may have completed",
-                )
-            })?
-        } else {
-            wait.await
-        };
-        if result.is_ok() {
-            cancel.id = None;
-        }
-        result
+        self.requests
+            .request(
+                self.peer.as_mut().expect("admitted native client"),
+                name,
+                request.args,
+                deadline,
+            )
+            .await
     }
 }
 
@@ -597,7 +532,7 @@ impl Connector {
             peer: Some(peer),
             resources: Some((carrier, stream)),
             service: None,
-            last_request: 0,
+            requests: Default::default(),
         })
     }
 }
@@ -804,7 +739,7 @@ mod tests {
             peer: Some(peer),
             resources: Some((carrier, stream)),
             service: Some(service),
-            last_request: 0,
+            requests: Default::default(),
         };
         let wait = tokio::spawn(client.finish());
         tokio::time::timeout(wire::HANDSHAKE_TIMEOUT, cleaning)
