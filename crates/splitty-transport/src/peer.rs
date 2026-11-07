@@ -231,6 +231,18 @@ impl Peer {
         let (read_ended, mut ended) = tokio::sync::watch::channel(false);
         let read = tokio::spawn(async move {
             let result = read_loop(reader, &read_sender, read_ledger, incoming, cancel).await;
+            // A frame can become ready in the same poll that owner cancellation
+            // closes its queue. The lease is dropped by forward; this is a
+            // normal end only when cancellation was already in effect.
+            let result = match result {
+                Err(error)
+                    if error.kind() == io::ErrorKind::BrokenPipe
+                        && read_sender.context.is_closed() =>
+                {
+                    Ok(())
+                }
+                result => result,
+            };
             if result.is_err() {
                 read_sender.close();
             }
@@ -494,6 +506,69 @@ async fn write_loop<W: AsyncWrite + Unpin>(
 mod tests {
     use super::*;
     use crate::budget::{ConnectionBudget, ProcessBudget};
+    #[tokio::test]
+    async fn owner_close_during_final_payload_read_is_clean_cancellation() {
+        use std::{
+            pin::Pin,
+            task::{Context as TaskContext, Poll},
+        };
+        use tokio::io::{AsyncReadExt, ReadBuf};
+
+        struct CloseAtPayload {
+            encoded: Vec<u8>,
+            offset: usize,
+            context: queue::Context,
+        }
+        impl AsyncRead for CloseAtPayload {
+            fn poll_read(
+                self: Pin<&mut Self>,
+                _: &mut TaskContext<'_>,
+                buf: &mut ReadBuf<'_>,
+            ) -> Poll<io::Result<()>> {
+                let this = self.get_mut();
+                if this.offset >= wire::HEADER_BYTES {
+                    this.context.close();
+                }
+                let length = buf.remaining().min(this.encoded.len() - this.offset);
+                buf.put_slice(&this.encoded[this.offset..this.offset + length]);
+                this.offset += length;
+                Poll::Ready(Ok(()))
+            }
+        }
+
+        let (mut writer, mut encoded_reader) = tokio::io::duplex(128);
+        codec::write(
+            &mut writer,
+            &Frame::data(Kind::Binary, Delivery::new(3), b"x").unwrap(),
+        )
+        .await
+        .unwrap();
+        drop(writer);
+        let mut encoded = Vec::new();
+        encoded_reader.read_to_end(&mut encoded).await.unwrap();
+        let context = queue::Context::default();
+        let reader = CloseAtPayload {
+            encoded,
+            offset: 0,
+            context: context.clone(),
+        };
+        let mut closing = context.closing();
+        let peer = Peer::start(reader, tokio::io::sink(), &ready(), context.clone());
+        time::timeout(wire::HANDSHAKE_TIMEOUT, closing.wait_for(|closed| *closed))
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(
+            peer.finish().await.is_ok(),
+            "owner cancellation cannot turn a valid frame into a transfer error"
+        );
+        assert_eq!(
+            context.budget.used(),
+            0,
+            "the discarded frame releases its lease"
+        );
+    }
+
     #[tokio::test]
     async fn consumed_burst_does_not_exhaust_ordinary_control_slots() {
         let context = queue::Context::default();

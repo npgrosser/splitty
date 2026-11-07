@@ -120,10 +120,16 @@ impl<T> Sender<T> {
     /// Transfer an already counted reassembly buffer without releasing its
     /// lease or charging it twice. Cross-connection charges are never accepted.
     pub fn forward(&self, value: Charged<T>) -> io::Result<()> {
-        if self.context.is_closed() || !value.belongs_to(&self.context.budget) {
+        if !value.belongs_to(&self.context.budget) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "foreign queue transfer",
+            ));
+        }
+        if self.context.is_closed() {
             return Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
-                "invalid queue transfer",
+                "connection closed",
             ));
         }
         self.tx.try_send(value).map_err(|error| {
@@ -180,6 +186,24 @@ impl<T> Receiver<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn foreign_queue_lease_is_invalid_with_open_or_closed_target() {
+        for closed in [false, true] {
+            let target = Context::default();
+            let source = Context::default();
+            let (sender, _receiver) = target.channel::<u8>(1);
+            let foreign = source.budget.reserve(8, false).unwrap().charge(7);
+            if closed {
+                target.close();
+            }
+            assert_eq!(
+                sender.forward(foreign).unwrap_err().kind(),
+                io::ErrorKind::InvalidInput
+            );
+            assert_eq!(source.budget.used(), 0);
+            assert_eq!(target.budget.used(), 0);
+        }
+    }
     #[tokio::test]
     async fn child_context_inherits_revocation_without_closing_its_owner() {
         let owner = Context::default();
