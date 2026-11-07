@@ -233,6 +233,7 @@ pub fn resolve_theme_file(theme: &ThemeFile) -> ResolvedTheme {
     apply_ui_overrides(&mut ui, &theme.overrides);
     apply_terminal_overrides(&mut terminal, &theme.terminal);
     ResolvedTheme {
+        id: None,
         name: theme.name.clone(),
         variant: theme.variant.clone(),
         ui,
@@ -262,13 +263,18 @@ fn is_valid_theme_name(name: &str) -> bool {
 }
 
 pub fn resolve_theme(name: &str, themes_dir: &std::path::Path) -> ResolvedTheme {
+    let named = |id: &str, file: &ThemeFile| {
+        let mut theme = resolve_theme_file(file);
+        theme.id = Some(id.to_owned());
+        theme
+    };
     if let Some(theme_file) = bundled::bundled_theme(name) {
-        return resolve_theme_file(&theme_file);
+        return named(name, &theme_file);
     }
 
     if !is_valid_theme_name(name) {
         tracing::warn!("rejected theme name {name:?}: not a plain identifier");
-        return resolve_theme_file(&bundled::splitty_dark());
+        return named("splitty-dark", &bundled::splitty_dark());
     }
 
     let path = themes_dir.join(format!("{name}.toml"));
@@ -284,16 +290,16 @@ pub fn resolve_theme(name: &str, themes_dir: &std::path::Path) -> ResolvedTheme 
     };
     if !inside_themes_dir {
         tracing::warn!("rejected theme {name:?}: resolves outside the themes directory");
-        return resolve_theme_file(&bundled::splitty_dark());
+        return named("splitty-dark", &bundled::splitty_dark());
     }
 
     if let Ok(content) = std::fs::read_to_string(&path) {
         match toml::from_str::<ThemeFile>(&content) {
-            Ok(theme_file) => return resolve_theme_file(&theme_file),
+            Ok(theme_file) => return named(name, &theme_file),
             Err(e) => tracing::warn!("failed to parse custom theme '{name}': {e}"),
         }
     }
-    resolve_theme_file(&bundled::splitty_dark())
+    named("splitty-dark", &bundled::splitty_dark())
 }
 
 #[cfg(test)]
@@ -304,6 +310,7 @@ mod tests {
     fn test_resolve_dark_tokens() {
         let theme = resolve_theme_file(&bundled::splitty_dark());
         assert_eq!(theme.name, "Splitty Dark");
+        assert!(theme.id.is_none());
         assert_eq!(theme.ui.surface_base, "#0f0f0f");
         assert_eq!(theme.ui.text_primary, "#c8c8c8");
         assert_eq!(theme.ui.accent, "#63a0ff");
@@ -346,6 +353,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let theme = resolve_theme("nonexistent", dir.path());
         assert_eq!(theme.name, "Splitty Dark");
+        assert_eq!(theme.id.as_deref(), Some("splitty-dark"));
     }
 
     #[test]
@@ -408,6 +416,7 @@ success = "#00ff00"
         std::fs::write(dir.path().join("my-custom.toml"), toml_content).unwrap();
         let theme = resolve_theme("my-custom", dir.path());
         assert_eq!(theme.name, "My Custom");
+        assert_eq!(theme.id.as_deref(), Some("my-custom"));
         assert_eq!(theme.ui.surface_base, "#111111");
         assert_eq!(theme.ui.accent, "#ff6600");
     }

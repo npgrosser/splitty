@@ -1259,12 +1259,15 @@ Terminate cancel/confirm, and normal close preserving host sessions. The host
 fixtures share raw Screen and Pane identifiers but use distinct actual sessions
 and processes. The existing local Drawer run passes nine checks on this binary.
 
-The later recovery candidate reconnects automatically after the test terminates
-only the identity-verified private bridge, and local/other-host terminals remain
-usable. That run exposes lost split focus after replacement and stops before its
-remaining assertions. A focused core correction passes its tests; full recovery
-window acceptance remains pending. This is recorded as a failure, not a passed
-reconnect milestone.
+An earlier recovery candidate exposed lost split focus after replacement.
+The corrected combined candidate, SHA-256
+`dfe2f2fdbfc1ee66776d82b52daeeda9aaad9505da0e8a572f9b6ed3e55ec968`,
+passes all eight stages of the actual recovery run. The test terminates only the
+identity-verified private bridge; automatic replacement returns input to the same
+right-pane PID, pane and session. Local and other-host terminals remain usable,
+and the host inventories, live shells and one-time input are preserved. Normal
+window close retains host sessions, and fixture cleanup completes. Broader remote
+error, stale-consent and source-local feature coverage remain open.
 
 A separately frozen Windows preview with executable SHA-256
 `0040161c87051c699f9394aeef61ae31e47395a2ecaed0f4dafb2f31659ffd11`
@@ -1285,9 +1288,9 @@ highlights the whole pane even when dropping there leaves the layout unchanged.
 The Drawer follows the existing web hierarchy: compact Screen headings, monospace
 pane entries, nested split/tab groups, hover actions, New screen below the list,
 and Hosts/Templates at the bottom. The extra workspace toolbar is removed.
-Settings, port management, host creation, unread indicators and Screen reordering
-remain separate increments; the Drawer does not present placeholder controls for
-them.
+Port management, host creation, unread indicators and Screen reordering remain
+separate increments; the Drawer does not present placeholder controls for them.
+The Settings destination is described below.
 
 The optimized Linux candidate has SHA-256
 `dfe2f2fdbfc1ee66776d82b52daeeda9aaad9505da0e8a572f9b6ed3e55ec968`.
@@ -1316,3 +1319,75 @@ Drawer leave handling; the accepted candidate uses the Drawer hitbox's hover
 transition and passes both retractions. These are software-rendered Linux
 functional checks. The previously delivered Windows preview remains unchanged,
 and full workspace merge checks remain deferred.
+
+## Native Settings
+
+Open Settings from the Drawer footer. The editor replaces the workspace content
+while retaining the selected Screen and its terminal sessions. Close or Escape
+returns to the workspace; Escape dismisses an open selector first. Keyboard
+focus returns to the Drawer Settings control. Selecting a Screen or creating a
+new one also leaves the editor. Wheel navigation over the Drawer returns to
+Screens, while scrolling inside the editor remains owned by its content.
+
+The first editor exposes twelve effective settings:
+
+| Group | Controls |
+| --- | --- |
+| Appearance | Theme mode, fixed theme, dark/light themes, interface font size and installed font family, display zoom and zoom scope |
+| Terminal | Terminal colors and close-on-exit behavior |
+| Workspace | Drawer pin state and width |
+
+Interface font settings affect chrome rather than terminal text. The terminal
+palette can follow the interface or use a separate existing Splitty theme; only
+its terminal colors are applied. Palette changes retain emulator state,
+scrollback, session identity and cell geometry. New terminals inherit the current
+palette. The selector uses the service's theme catalog; native Kit preset names
+are not additional persisted themes in this increment.
+
+Settings always belong to the local service, including while a remote Screen is
+selected. The editor sends one typed field update through the existing owned
+local API stream. Opening it does not write config. Controls retain confirmed
+values while saving, and Reset uses the default published by the service. An
+unconfirmed write is reconciled through a fresh read without automatic replay.
+Missing metadata or a missing theme catalog leaves effective values visible and
+disables dependent choices. Other web Settings sections remain absent until the
+native client implements their behavior.
+
+`scripts/testing/gpui-settings.py` drives the production view with actual X11
+input. Use `--setup-only` to capture an isolated window and calibrate a geometry
+JSON, then run its `open`, `theme`, `typography`, `terminal`, `workspace` and
+`rejection` phases against the same immutable optimized binary. Each phase owns
+its config, service socket and shells, records the binary/harness hashes and
+screenshots, and exits through normal window close. The rejection fixture blocks
+only its private atomic-write temporary path. The remote-window harness has a
+separate `settings-remote` phase for local settings ownership with a remote Screen
+selected. These are functional checks; they do not measure hardware smoothness
+or replace Windows/macOS acceptance.
+
+For retained-view failure-state checks, run
+`cargo test -p splitty-gpui --no-default-features --features ui-test-support workspace::settings::tests`.
+This opt-in feature selects the production GPUI backend's test context and
+isolated client-core presentation fixtures. It checks unavailable metadata/catalog
+and rejected, uncertain or stale results without enabling the Kit-wide alternate
+backend or adding fixture APIs to normal builds.
+
+The optimized Linux candidate with SHA-256
+`90dfd6cb2bafdb46b4a9f3ea7866598814ddd3e2fd99cdfa39b53f97f629c540`
+passes all six Settings window phases. They verify no write on open, keyboard and
+pointer navigation, selector-first Escape and trigger focus, content scrolling,
+theme mode and reset, font family/size and zoom, Drawer width/pin, and visible
+save rejection. Independent terminal colors preserve the original PID, pane,
+session, indexed-color history marker and PTY size; a new tab inherits the
+palette. The remote-selected run verifies local-only persistence, unchanged
+remote configs, inventories and shell PIDs, and fresh input to the same remote
+terminal after closing Settings.
+
+The final candidate with SHA-256
+`dd9da69abbfda98ee85c84fe2faafcf3135d5859f3531cee484ac3d918b00425`
+adds Drawer wheel navigation out of Settings/Hosts. Its extended navigation run
+returns from Settings to the preceding Screen and verifies input against that
+Screen's original PID, pane and session. All window runs close normally with no
+owned children remaining. The remaining Settings/palette implementation is
+unchanged from the preceding candidate. The increment passes 184 client-core
+tests, 98 normal GPUI tests, two additional retained-view tests with the opt-in
+feature, strict targeted Clippy, formatting and 17 architecture checks.

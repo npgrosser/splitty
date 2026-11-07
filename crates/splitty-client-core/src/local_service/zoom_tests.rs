@@ -82,14 +82,19 @@ async fn scripted_tail(
                 // No unrelated appearance or home fields are echoed back.
                 assert_eq!(request.args.len(), 1);
                 assert_eq!(request.args["body"].as_object().unwrap().len(), 1);
-                if let Some(appearance) = request.args["body"]["appearance"].as_object() {
-                    assert_eq!(appearance.len(), 1);
-                    assert!(appearance["zoom"].is_number());
-                } else {
-                    let drawer = request.args["body"]["drawer"].as_object().unwrap();
-                    assert_eq!(drawer.len(), 1);
-                    assert!(drawer["pinned"].is_boolean());
-                }
+                let (group, fields) = request.args["body"]
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .next()
+                    .unwrap();
+                let fields = fields.as_object().unwrap();
+                assert_eq!(fields.len(), 1);
+                let (field, _) = fields.iter().next().unwrap();
+                let path = format!("{group}.{field}");
+                assert!(crate::appearance::SettingsField::ALL
+                    .iter()
+                    .any(|field| field.path() == path));
             }
             peer.sender
                 .json(
@@ -342,6 +347,18 @@ async fn uncertain_outcome_refresh_has_newer_generation_without_broadcast() {
             body: theme(),
         },
         Exchange {
+            operation: "home.metadata",
+            status: 200,
+            uncertain: false,
+            body: splitty_core::config::settings_metadata().to_string(),
+        },
+        Exchange {
+            operation: "theme.list",
+            status: 200,
+            uncertain: false,
+            body: "[\"splitty-dark\",\"splitty-light\"]".into(),
+        },
+        Exchange {
             operation: "home.get",
             status: 200,
             uncertain: false,
@@ -364,6 +381,18 @@ async fn uncertain_outcome_refresh_has_newer_generation_without_broadcast() {
             status: 200,
             uncertain: false,
             body: theme(),
+        },
+        Exchange {
+            operation: "home.metadata",
+            status: 200,
+            uncertain: false,
+            body: splitty_core::config::settings_metadata().to_string(),
+        },
+        Exchange {
+            operation: "theme.list",
+            status: 200,
+            uncertain: false,
+            body: "[\"splitty-dark\",\"splitty-light\"]".into(),
         },
     ])
     .await;
@@ -479,6 +508,18 @@ async fn drawer_visibility_confirms_only_service_value_and_refreshes_without_rep
             uncertain: false,
             body: theme(),
         },
+        Exchange {
+            operation: "home.metadata",
+            status: 200,
+            uncertain: false,
+            body: splitty_core::config::settings_metadata().to_string(),
+        },
+        Exchange {
+            operation: "theme.list",
+            status: 200,
+            uncertain: false,
+            body: "[\"splitty-dark\",\"splitty-light\"]".into(),
+        },
     ])
     .await;
     let owner = Uuid::new_v4();
@@ -534,6 +575,18 @@ async fn drawer_visibility_admits_one_and_distinguishes_failure_from_uncertainty
                 status: 200,
                 uncertain: false,
                 body: theme(),
+            },
+            Exchange {
+                operation: "home.metadata",
+                status: 200,
+                uncertain: false,
+                body: splitty_core::config::settings_metadata().to_string(),
+            },
+            Exchange {
+                operation: "theme.list",
+                status: 200,
+                uncertain: false,
+                body: "[\"splitty-dark\",\"splitty-light\"]".into(),
             },
         ])
         .await;
@@ -711,3 +764,5 @@ async fn template_catalog_limit_rejects_atomically_without_hot_retry() {
     server.await.unwrap();
     std::fs::remove_dir_all(path).unwrap();
 }
+
+mod settings_tests;

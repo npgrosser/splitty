@@ -761,6 +761,30 @@ async fn queries_errors_and_service_identity_match_browser_and_native() {
     let mut state = state(ADDR, dir.path());
     Arc::make_mut(&mut state.service).hub = Arc::new(hub(&host, dir.path()));
     let browser = crate::http::build_router(state.clone());
+    // A custom source may deliberately share a built-in display name. The
+    // resolved identifier must describe the actual source on both adapters.
+    std::fs::create_dir_all(&state.themes_dir).unwrap();
+    std::fs::write(
+        state.themes_dir.join("alias-palette.toml"),
+        include_str!("../../../../splitty-core/src/theme/bundled/splitty-dark.toml"),
+    )
+    .unwrap();
+    for (requested, resolved, label) in [
+        ("splitty-dark", "splitty-dark", "Splitty Dark"),
+        ("alias-palette", "alias-palette", "Splitty Dark"),
+        ("missing-palette", "splitty-dark", "Splitty Dark"),
+    ] {
+        let native_theme = native(&state, Operation::ThemeGet, json!({"name": requested})).await;
+        let browser_theme = exchange(
+            &browser,
+            api("GET", &format!("/api/home/theme?name={requested}"), None),
+        )
+        .await;
+        assert_eq!(native_theme, browser_theme);
+        assert_eq!(native_theme.0, StatusCode::OK);
+        assert_eq!(native_theme.1["id"], resolved);
+        assert_eq!(native_theme.1["name"], label);
+    }
     for operation in crate::service::catalog::OPERATIONS.iter().filter(|entry| {
         entry.method == "GET" && entry.arguments.iter().all(|arg| arg.ends_with('?'))
     }) {

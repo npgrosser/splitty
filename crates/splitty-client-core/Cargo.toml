@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[features]
+default = []
+# Opt-in constructors for selected-backend UI integration tests.
+ui-test-support = []
+
 [dependencies]
 anyhow = "1"
 splitty-transport = { path = "../splitty-transport" }

@@ -149,6 +149,11 @@ pub enum CommandKind {
         connection: uuid::Uuid,
         scheme: ColorScheme,
     },
+    UpdateSettings {
+        connection: uuid::Uuid,
+        request_id: uuid::Uuid,
+        edit: crate::appearance::SettingsEdit,
+    },
     SetDrawerVisibility {
         connection: uuid::Uuid,
         request_id: uuid::Uuid,
@@ -254,6 +259,8 @@ pub enum Update {
     FloatingAction(FloatingActionResult),
     ScreenTransfer(ScreenTransferResult),
     Zoom(ZoomResult),
+    SettingsWrite(crate::local_service::SettingsWriteResult),
+    SettingsReconciled(crate::local_service::SettingsReconciled),
     DrawerVisibility(DrawerVisibilityResult),
     ShellProfiles(Arc<ShellProfilesSnapshot>),
     ShellProfilesError {
@@ -373,6 +380,16 @@ fn rejected_command(source: Option<SourceToken>, command: &CommandKind, reason: 
             request_id,
             ..
         } => Update::Zoom(ZoomResult::rejected(*connection, *request_id, reason)),
+        CommandKind::UpdateSettings {
+            connection,
+            request_id,
+            edit,
+        } => Update::SettingsWrite(crate::local_service::SettingsWriteResult::rejected(
+            *connection,
+            *request_id,
+            edit.field(),
+            reason,
+        )),
         CommandKind::SetDrawerVisibility {
             connection,
             request_id,
@@ -522,6 +539,26 @@ impl<'a> RuntimeLocalService<'a> {
             .enqueue_zoom(connection, request_id, action)
     }
 
+    fn enqueue_settings(
+        &mut self,
+        connection: uuid::Uuid,
+        request_id: uuid::Uuid,
+        edit: crate::appearance::SettingsEdit,
+    ) -> std::io::Result<()> {
+        if connection != self.connection {
+            return Err(std::io::Error::other("Local settings source changed"));
+        }
+        self.reader
+            .as_mut()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Local settings are not ready",
+                )
+            })?
+            .enqueue_settings(connection, request_id, edit)
+    }
+
     fn enqueue_drawer_visibility(
         &mut self,
         connection: uuid::Uuid,
@@ -610,7 +647,13 @@ impl<'a> RuntimeLocalService<'a> {
         }
     }
 
-    async fn finish(mut self) -> std::io::Result<()> {
+    #[cfg(test)]
+    async fn finish(self) -> std::io::Result<()> {
+        self.finish_with_outcomes().await.map(|_| ())
+    }
+    async fn finish_with_outcomes(
+        mut self,
+    ) -> std::io::Result<Vec<crate::local_service::SettingsWriteResult>> {
         // Completing a started, time-bounded handshake lets us await its service
         // cleanup explicitly. Dropping setup would only schedule Drop cleanup.
         if let Some(setup) = self.setup.take() {
@@ -620,8 +663,8 @@ impl<'a> RuntimeLocalService<'a> {
             self.reader = setup.await.ok();
         }
         match self.reader {
-            Some(reader) => reader.finish().await,
-            None => Ok(()),
+            Some(reader) => reader.finish_with_outcomes().await,
+            None => Ok(Vec::new()),
         }
     }
 }
@@ -1065,6 +1108,8 @@ async fn run_service(
                     use crate::local_service::LocalServiceUpdate;
                     let connection = local.client.connection_id();
                     let update = match result {
+                        Ok(LocalServiceUpdate::SettingsWrite(result)) => Update::SettingsWrite(result),
+                        Ok(LocalServiceUpdate::SettingsReconciled(result)) => Update::SettingsReconciled(result),
                         Ok(LocalServiceUpdate::Zoom(result)) => Update::Zoom(result),
                         Ok(LocalServiceUpdate::DrawerVisibility(result)) => Update::DrawerVisibility(result),
                         Ok(LocalServiceUpdate::Template(result)) => Update::TemplateApi(result),
@@ -1118,6 +1163,11 @@ async fn run_service(
                         CommandKind::Zoom { connection,request_id,action } => {
                             let result=settings.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"local settings are not ready")).and_then(|settings|settings.enqueue_zoom(connection,request_id,action));
                             if let Err(error)=result { publish(&updates,Update::Zoom(ZoomResult::rejected(connection,request_id,error.to_string())),&stop).await?; }
+                        }
+                        CommandKind::UpdateSettings { connection,request_id,edit } => {
+                            let field = edit.field();
+                            let result=settings.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Local settings are not ready")).and_then(|settings|settings.enqueue_settings(connection,request_id,edit));
+                            if let Err(error)=result { if error.kind()!=std::io::ErrorKind::AlreadyExists { publish(&updates,Update::SettingsWrite(crate::local_service::SettingsWriteResult::rejected(connection,request_id,field,error.to_string())),&stop).await?; } }
                         }
                         CommandKind::SetDrawerVisibility { connection,request_id,pinned } => {
                             let result=settings.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"local settings are not ready")).and_then(|settings|settings.enqueue_drawer_visibility(connection,request_id,pinned));
@@ -1196,7 +1246,17 @@ async fn run_service(
     let (settings_cleanup, hub_cleanup, client_cleanup, remote_cleanup) = tokio::join!(
         async {
             match settings.take() {
-                Some(reader) => reader.finish().await.map_err(anyhow::Error::from),
+                Some(reader) => match reader.finish_with_outcomes().await {
+                    Ok(outcomes) => {
+                        // Closing must not wait for a UI that has stopped draining.
+                        // Preserve final write uncertainty while a sink is available.
+                        for outcome in outcomes {
+                            let _ = updates.try_send(Update::SettingsWrite(outcome));
+                        }
+                        Ok(())
+                    }
+                    Err(error) => Err(anyhow::Error::from(error)),
+                },
                 None => Ok(()),
             }
         },
@@ -1244,6 +1304,7 @@ fn local_command(kind: &CommandKind) -> bool {
             | CommandKind::ApplyTemplate { .. }
             | CommandKind::Zoom { .. }
             | CommandKind::SetColorScheme { .. }
+            | CommandKind::UpdateSettings { .. }
             | CommandKind::SetDrawerVisibility { .. }
             | CommandKind::CreateScreen(_)
             | CommandKind::RenameScreen { .. }

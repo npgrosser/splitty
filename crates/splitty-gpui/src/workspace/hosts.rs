@@ -29,7 +29,6 @@ impl HostKey {
 }
 
 pub(super) struct HostsView {
-    pub(super) open: bool,
     owner: Option<Uuid>,
     generation: u64,
     state: HostDirectoryState,
@@ -40,7 +39,6 @@ pub(super) struct HostsView {
 impl Default for HostsView {
     fn default() -> Self {
         Self {
-            open: false,
             owner: None,
             generation: 0,
             state: HostDirectoryState::Unavailable,
@@ -309,10 +307,10 @@ impl Workspace {
     }
 
     fn show_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.hosts_navigation_blocked() || self.hosts.open {
+        if self.hosts_navigation_blocked() || self.destination == Destination::Hosts {
             return;
         }
-        self.hosts.open = true;
+        self.destination = Destination::Hosts;
         self.wheel_navigation.reset();
         self.sync_visible(cx);
         self.focus.focus(window, cx);
@@ -320,7 +318,7 @@ impl Workspace {
     }
 
     pub(super) fn show_screens(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if !self.hosts.open {
+        if self.destination == Destination::Screens {
             return;
         }
         let browsing = self
@@ -345,7 +343,7 @@ impl Workspace {
                 return;
             }
         }
-        self.hosts.open = false;
+        self.destination = Destination::Screens;
         self.sync_visible(cx);
         self.focus_current(window, cx);
         cx.notify();
@@ -403,8 +401,11 @@ impl Workspace {
         Button::new("open-hosts")
             .accessibility_label("Show Hosts")
             .tooltip("Inspect cached Hosts")
-            .selected(self.hosts.open)
-            .disabled(source.is_none() || (self.hosts_navigation_blocked() && !self.hosts.open))
+            .selected(self.destination == Destination::Hosts)
+            .disabled(
+                source.is_none()
+                    || (self.hosts_navigation_blocked() && self.destination != Destination::Hosts),
+            )
             .ghost()
             .compact()
             .small()
@@ -434,7 +435,7 @@ impl Workspace {
                     }) {
                         return;
                     }
-                    if this.hosts.open {
+                    if this.destination == Destination::Hosts {
                         this.show_screens(window, cx);
                     } else {
                         this.show_hosts(window, cx);

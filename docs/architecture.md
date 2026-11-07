@@ -1042,3 +1042,22 @@ broadcasts the complete `settings.changed` object to every connected window on
 that server; a failed write leaves both persistent and running values alone. Shell
 profile selection and fallback run on the server, with the effective profile and
 fallback reason in the session's `created` event.
+
+The native Settings editor retains controlled widget state in its own view and
+submits typed single-field intents through the workspace's fixed local owner,
+including while a remote Screen is shown. The existing auxiliary API stream
+owns a bounded FIFO, one active transaction and per-field exclusion shared with
+Drawer and zoom commands. Confirmed values come from authoritative reads;
+rejected or uncertain mutations are never replayed. A fresh successful home
+read explicitly releases uncertain fields, even if a subsequent theme read
+fails. Closing the workspace discards unsent work and joins owned cancellation.
+
+The local presentation snapshot carries metadata, theme choices and a separate
+terminal palette. Named theme resolution exposes the actual source identifier
+independently of its display name, so fallback cannot masquerade as the requested
+palette. Missing or mismatched identity preserves the last valid terminal
+colors. Palette changes update retained terminal engines without replacing
+sessions or history. The native appearance adapter applies the UI palette after
+Kit mode selection through the synchronized theme update API, keeping component
+tokens and Base colors aligned; it maintains readable foregrounds and mode
+defaults for unsupported values.

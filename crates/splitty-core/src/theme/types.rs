@@ -52,6 +52,10 @@ pub struct Palette {
 /// The fully resolved theme sent to the frontend as JSON.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ResolvedTheme {
+    /// Stable source identifier, distinct from the authored display name.
+    /// Absent for an unnamed theme file or a reply from an older service.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub name: String,
     pub variant: Variant,
     pub ui: UiTokens,

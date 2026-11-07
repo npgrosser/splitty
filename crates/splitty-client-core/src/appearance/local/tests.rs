@@ -347,3 +347,107 @@ async fn read_error_is_reported_once_and_explicit_refresh_recovers() {
     service.close().await.unwrap();
     assert!(!path.exists());
 }
+
+#[tokio::test]
+async fn editor_reads_service_defaults_limits_and_catalog_without_writes() {
+    use crate::appearance::{SettingsField as F, SettingsValue as V};
+    let (service, path) = fixture();
+    let api = Connector::default()
+        .embedded(service.state.clone(), Role::Main)
+        .await
+        .unwrap();
+    let owner = Uuid::new_v4();
+    let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+    let current = snapshot(&mut reader).await;
+    assert_eq!(current.connection_id(), owner);
+    assert_eq!(current.value(F::FontSize), V::Number(18.0));
+    let metadata = current.metadata().unwrap();
+    assert_eq!(metadata.default_value(F::DrawerPinned), Some(V::Bool(true)));
+    assert_eq!(
+        metadata.default_value(F::TerminalTheme),
+        Some(V::Text("default".into()))
+    );
+    assert_eq!(
+        metadata.choices(F::CloseOnExit).unwrap(),
+        &["always", "never", "graceful"]
+    );
+    let size = metadata.limits(F::FontSize).unwrap();
+    assert!(size.values().contains(&0.0));
+    assert!(size.values().contains(&8.0));
+    assert!(!size.values().contains(&7.0));
+    assert!(current
+        .themes()
+        .unwrap()
+        .iter()
+        .any(|name| name == "splitty-light"));
+    assert!(current.metadata_error().is_none());
+    assert!(current.themes_error().is_none());
+    reader.finish().await.unwrap();
+    service.close().await.unwrap();
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn terminal_palette_is_independent_inherits_and_retains_last_valid_on_failure() {
+    let (service, path) = fixture();
+    service.state.config.write().unwrap().terminal.theme = "splitty-light".into();
+    let api = Connector::default()
+        .embedded(service.state.clone(), Role::Main)
+        .await
+        .unwrap();
+    let owner = Uuid::new_v4();
+    let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+    let first = snapshot(&mut reader).await;
+    assert_eq!(first.theme().id.as_deref(), Some("splitty-dark"));
+    assert_eq!(first.terminal_theme().id.as_deref(), Some("splitty-light"));
+    assert!(first.terminal_palette_error().is_none());
+    service.state.config.write().unwrap().terminal.theme = "missing-palette".into();
+    reader.refresh_settings(owner).unwrap();
+    let missing = snapshot(&mut reader).await;
+    assert_eq!(missing.terminal().theme(), "missing-palette");
+    assert_eq!(
+        missing.terminal_theme().id.as_deref(),
+        Some("splitty-light")
+    );
+    assert!(missing.terminal_palette_error().is_some());
+    assert!(missing.terminal_generation() > first.terminal_generation());
+    service.state.config.write().unwrap().terminal.theme = "default".into();
+    reader.refresh_settings(owner).unwrap();
+    let inherited = snapshot(&mut reader).await;
+    assert_eq!(inherited.terminal_theme().id, inherited.theme().id);
+    reader.set_scheme(owner, ColorScheme::Light).unwrap();
+    let light = snapshot(&mut reader).await;
+    assert_eq!(light.terminal_theme().id.as_deref(), Some("splitty-light"));
+    assert!(light.terminal_palette_error().is_none());
+    reader.finish().await.unwrap();
+    service.close().await.unwrap();
+    assert!(!path.exists());
+}
+
+#[tokio::test]
+async fn superseded_palette_does_not_replace_current_local_palette() {
+    let (service, path) = fixture();
+    let api = Connector::default()
+        .embedded(service.state.clone(), Role::Main)
+        .await
+        .unwrap();
+    let owner = Uuid::new_v4();
+    let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+    let first = snapshot(&mut reader).await;
+    service.state.config.write().unwrap().terminal.theme = "splitty-light".into();
+    reader.refresh_settings(owner).unwrap();
+    begin_read(&mut reader).await;
+    service.state.config.write().unwrap().terminal.theme = "splitty-dark".into();
+    reader.refresh_settings(owner).unwrap();
+    let latest = snapshot(&mut reader).await;
+    assert_eq!(latest.generation(), first.generation() + 2);
+    assert_eq!(
+        latest.terminal_generation(),
+        first.terminal_generation() + 2
+    );
+    assert_eq!(latest.terminal_theme().id.as_deref(), Some("splitty-dark"));
+    assert_eq!(latest.terminal().theme(), "splitty-dark");
+    reader.finish().await.unwrap();
+    service.close().await.unwrap();
+    assert!(!path.exists());
+}

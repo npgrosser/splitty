@@ -19,6 +19,7 @@ import signal
 import stat
 import subprocess
 import time
+import tomllib
 
 HERE = Path(__file__).resolve().parent
 
@@ -34,10 +35,12 @@ fixture_module = helper("remote_screen_fixture", "gpui-remote-screen-fixture.py"
 performance = helper("performance", "gpui-performance.py")
 pane_drag = helper("pane_drag", "gpui-pane-drag.py")
 
-PHASES = ("setup", "connect", "open", "terminal", "two-hosts", "recovery", "detach", "full")
+PHASES = ("setup", "connect", "open", "settings-remote", "terminal", "two-hosts", "recovery", "detach", "full")
 POINTS = {
     "connect": ("hosts.toolbar", "hosts.connect_a"),
     "open": ("hosts.open_a",),
+    "settings-remote": ("drawer.settings", "settings.theme.select", "settings.theme.option",
+                        "terminal.body"),
     "terminal": ("drawer.local_row", "drawer.a_row"),
     "two-hosts": ("hosts.toolbar_remote", "hosts.connect_b", "hosts.open_b", "drawer.b_row"),
     "recovery": ("drawer.a_row", "drawer.b_row", "drawer.local_row"),
@@ -316,6 +319,68 @@ def run_window(args, geometry, result):
                     capture("remote-a-open")
                     result["checks"].append("open-existing-a-terminal-input-matches-private-session")
 
+                if args.phase == "settings-remote":
+                    local_path = owned.local_config / "config.toml"
+                    remote_paths = {target: owned.hosts[target]["config"] / "config.toml"
+                                    for target in fixture_module.TARGETS}
+                    local_before = local_path.read_bytes()
+                    remote_before = {target: path.read_bytes() for target, path in remote_paths.items()}
+                    remote_routes = {target: inventory(target) for target in fixture_module.TARGETS}
+                    remote_shells = {target: sorted(owned._live_shell_markers(target))
+                                     for target in fixture_module.TARGETS}
+                    local_routes = local_state()["screens"]
+                    before_marker = result["terminalMarkers"]["open-a"]
+                    bridge_count = len(bridge_records(a))
+                    assert tomllib.loads(local_before.decode())["appearance"]["theme"] == "splitty-dark"
+                    click("drawer.settings")
+                    capture("settings-on-remote-a")
+                    assert local_path.read_bytes() == local_before, "opening Settings wrote local config"
+                    assert all(path.read_bytes() == remote_before[target]
+                               for target, path in remote_paths.items()), "opening Settings wrote remote config"
+                    click("settings.theme.select")
+                    capture("settings-theme-choices")
+                    click("settings.theme.option")
+
+                    def local_theme_saved():
+                        try:
+                            return tomllib.loads(local_path.read_text())["appearance"]["theme"] == "splitty-light"
+                        except (OSError, KeyError, tomllib.TOMLDecodeError):
+                            return False
+
+                    wait_until(local_theme_saved, "local theme did not persist from remote-selected Settings")
+                    capture("settings-local-theme-saved")
+                    assert local_path.read_bytes() != local_before, "Settings did not write local config"
+                    assert all(path.read_bytes() == remote_before[target]
+                               for target, path in remote_paths.items()), "Settings wrote a remote config"
+                    assert {target: inventory(target) for target in fixture_module.TARGETS} == remote_routes
+                    assert {target: sorted(owned._live_shell_markers(target))
+                            for target in fixture_module.TARGETS} == remote_shells
+                    assert local_state()["screens"] == local_routes, "Settings recreated a local route"
+                    assert len(bridge_records(a)) == bridge_count, "Settings reopened the remote bridge"
+                    settings_pixels = display.pixels(window, (475, 105, 575, 85))
+                    key("Escape")
+                    wait_until(lambda: display.pixels(window, (475, 105, 575, 85)) != settings_pixels,
+                               "Settings did not return to the remote workspace")
+                    capture("remote-a-after-settings-close")
+                    click("terminal.body")
+                    marker(a, "after-local-settings", before_marker)
+                    capture("remote-a-after-local-settings")
+                    assert {target: inventory(target) for target in fixture_module.TARGETS} == remote_routes
+                    assert {target: sorted(owned._live_shell_markers(target))
+                            for target in fixture_module.TARGETS} == remote_shells
+                    assert local_state()["screens"] == local_routes
+                    assert all(path.read_bytes() == remote_before[target]
+                               for target, path in remote_paths.items())
+                    result["settingsRemote"] = {
+                        "localThemeBefore": "splitty-dark", "localThemeAfter": "splitty-light",
+                        "remoteConfigSha256": {target: hashlib.sha256(data).hexdigest()
+                                                for target, data in remote_before.items()},
+                        "remoteRoutes": remote_routes, "remoteShellPids": remote_shells,
+                        "bridgeCount": bridge_count,
+                    }
+                    result["checks"].append(
+                        "remote-selected-settings-write-only-local-config-and-retain-remote-session")
+
                 if PHASES.index(args.phase) >= PHASES.index("terminal"):
                     before_a = panes(a, owned.hosts[a]["screen"])
                     before_b = panes(b, owned.hosts[b]["screen"])
@@ -591,6 +656,8 @@ def main():
         parser.error("interaction phases require screenshot-calibrated --geometry JSON")
     required = set()
     for phase in PHASES[1:PHASES.index(args.phase) + 1]:
+        if phase == "settings-remote" and args.phase != phase:
+            continue
         required.update(POINTS.get(phase, ()))
     required.add("window.confirm_close") if args.phase != "setup" else None
     absent = sorted(required - geometry.keys())

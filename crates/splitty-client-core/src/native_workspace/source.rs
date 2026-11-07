@@ -471,6 +471,7 @@ impl SourceRuntime {
             | CommandKind::MoveFloat { .. }
             | CommandKind::TransferPane { .. }
             | CommandKind::Zoom { .. }
+            | CommandKind::UpdateSettings { .. }
             | CommandKind::SetDrawerVisibility { .. }
             | CommandKind::SetColorScheme { .. }
             | CommandKind::RequestClose { .. } => {

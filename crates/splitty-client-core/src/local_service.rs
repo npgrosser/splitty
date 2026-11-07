@@ -1,7 +1,9 @@
 //! One owned API stream for local settings reads and bounded mutations, separate from PTY events.
 use crate::api_stream::ApiStream as Client;
 use crate::{
-    appearance::{AppearanceSnapshot, ColorScheme, DrawerVisibilityResult},
+    appearance::{
+        AppearanceSnapshot, ColorScheme, DrawerVisibilityResult, SettingsEdit, SettingsField,
+    },
     shell_profiles::ShellProfilesSnapshot,
     zoom::{ZoomAction, ZoomResult},
 };
@@ -9,7 +11,12 @@ use std::{collections::VecDeque, future::Future, io, pin::Pin, sync::Arc};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+mod settings;
+pub use settings::{SettingsReconciled, SettingsWriteOutcome, SettingsWriteResult};
+
 pub enum LocalServiceUpdate {
+    SettingsWrite(SettingsWriteResult),
+    SettingsReconciled(SettingsReconciled),
     Template(crate::templates::TemplateApiResult),
     Zoom(ZoomResult),
     DrawerVisibility(DrawerVisibilityResult),
@@ -37,14 +44,16 @@ impl Feature {
     }
 }
 const MAX_QUEUED_ZOOM: usize = 32;
+const MAX_QUEUED_SETTINGS: usize = 16;
 #[derive(Clone)]
 enum Job {
+    Settings(Uuid, SettingsEdit, u64),
     Read(Feature, u64),
     Zoom(Uuid, ZoomAction),
     DrawerVisibility(Uuid, bool),
     Template(Uuid, crate::templates::TemplateApiRequest),
 }
-type Read = Pin<Box<dyn Future<Output = (Client, Job, LocalServiceUpdate)> + Send>>;
+type Read = Pin<Box<dyn Future<Output = (Client, Job, LocalServiceUpdate, bool)> + Send>>;
 
 /// `next_update` may be cancelled without cancelling the retained request. Each
 /// feature coalesces its own refreshes; completing even a superseded read gives
@@ -52,6 +61,13 @@ type Read = Pin<Box<dyn Future<Output = (Client, Job, LocalServiceUpdate)> + Sen
 /// mutations are submitted at most once and never automatically retried.
 pub struct LocalServiceClient {
     client: Option<Client>,
+    ready: VecDeque<(u64, LocalServiceUpdate)>,
+    settings: VecDeque<(Uuid, SettingsEdit)>,
+    active_settings: Option<(Uuid, SettingsField)>,
+    uncertain_settings: Vec<(SettingsField, Uuid)>,
+    uncertain_legacy: Vec<SettingsField>,
+    last_appearance: Option<Arc<AppearanceSnapshot>>,
+    terminal_generation: u64,
     pending: Option<Read>,
     active_zoom: Option<Uuid>,
     drawer_visibility: Option<(Uuid, bool)>,
@@ -73,6 +89,13 @@ impl LocalServiceClient {
     pub(crate) fn new(client: impl Into<Client>, connection_id: Uuid, scheme: ColorScheme) -> Self {
         Self {
             client: Some(client.into()),
+            ready: VecDeque::new(),
+            settings: VecDeque::new(),
+            active_settings: None,
+            uncertain_settings: Vec::new(),
+            uncertain_legacy: Vec::new(),
+            last_appearance: None,
+            terminal_generation: 1,
             pending: None,
             active_zoom: None,
             drawer_visibility: None,
@@ -106,6 +129,7 @@ impl LocalServiceClient {
             increment(self.generations[0])?,
             increment(self.generations[1])?,
         ];
+        self.terminal_generation = increment(self.terminal_generation)?;
         self.generations = generations;
         self.dirty = [true; 2];
         Ok(())
@@ -114,9 +138,65 @@ impl LocalServiceClient {
         self.check_owner(owner)?;
         if scheme != self.scheme {
             self.generations[0] = increment(self.generations[0])?;
+            self.terminal_generation = increment(self.terminal_generation)?;
             self.scheme = scheme;
             self.dirty[0] = true;
         }
+        Ok(())
+    }
+    fn field_pending(&self, field: SettingsField) -> bool {
+        self.uncertain_legacy.contains(&field)
+            || self
+                .active_settings
+                .is_some_and(|(_, active)| active == field)
+            || self.settings.iter().any(|(_, edit)| edit.field() == field)
+            || self
+                .uncertain_settings
+                .iter()
+                .any(|(blocked, _)| *blocked == field)
+    }
+    pub fn enqueue_settings(
+        &mut self,
+        owner: Uuid,
+        request: Uuid,
+        edit: SettingsEdit,
+    ) -> io::Result<()> {
+        self.check_owner(owner)?;
+        let field = edit.field();
+        if self.active_settings.is_some_and(|(id, _)| id == request)
+            || self.settings.iter().any(|(id, _)| *id == request)
+            || self.uncertain_settings.iter().any(|(_, id)| *id == request)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Settings request is already pending",
+            ));
+        }
+        if self.settings.len() + usize::from(self.active_settings.is_some()) >= MAX_QUEUED_SETTINGS
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Settings queue is full",
+            ));
+        }
+        if self.field_pending(field)
+            || (field == SettingsField::DrawerPinned
+                && (self.drawer_visibility.is_some() || self.active_drawer_visibility.is_some()))
+            || (field == SettingsField::Zoom
+                && (!self.zoom.is_empty() || self.active_zoom.is_some()))
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "This setting is pending or awaiting reconciliation",
+            ));
+        }
+        self.last_appearance
+            .as_ref()
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::WouldBlock, "Local settings are not ready")
+            })?
+            .validate_edit(&edit)?;
+        self.settings.push_back((request, edit));
         Ok(())
     }
     /// Admit one action once. Queue rejection never starts an API request.
@@ -127,6 +207,12 @@ impl LocalServiceClient {
         action: ZoomAction,
     ) -> io::Result<()> {
         self.check_owner(owner)?;
+        if self.field_pending(SettingsField::Zoom) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Display zoom is pending or awaiting reconciliation",
+            ));
+        }
         if self.active_zoom == Some(request) || self.zoom.iter().any(|(id, _)| *id == request) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -150,6 +236,12 @@ impl LocalServiceClient {
         pinned: bool,
     ) -> io::Result<()> {
         self.check_owner(owner)?;
+        if self.field_pending(SettingsField::DrawerPinned) {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Drawer visibility is pending or awaiting reconciliation",
+            ));
+        }
         if self.active_drawer_visibility == Some(request)
             || self.drawer_visibility.is_some_and(|(id, _)| id == request)
         {
@@ -196,6 +288,11 @@ impl LocalServiceClient {
         Ok(())
     }
     pub async fn next_update(&mut self) -> LocalServiceUpdate {
+        if let Some((generation, update)) = self.ready.pop_front() {
+            if generation == self.generations[0] {
+                return update;
+            }
+        }
         loop {
             if self.pending.is_none() {
                 let feature = if self.dirty[self.next.index()] {
@@ -206,11 +303,34 @@ impl LocalServiceClient {
                     None
                 };
                 let job = if self.template.is_some()
-                    && (!self.last_template || (self.zoom.is_empty() && feature.is_none()))
+                    && (!self.last_template
+                        || (self.zoom.is_empty()
+                            && self.settings.is_empty()
+                            && self.drawer_visibility.is_none()
+                            && feature.is_none()))
                 {
                     let (id, request) = self.template.take().expect("queued template");
                     self.active_template = Some(id);
                     Job::Template(id, request)
+                } else if !self.settings.is_empty() && (self.prefer_write || feature.is_none()) {
+                    let (id, edit) = self.settings.pop_front().expect("queued settings");
+                    let generation = match increment(self.generations[0]) {
+                        Ok(generation) => generation,
+                        Err(error) => {
+                            return LocalServiceUpdate::SettingsWrite(
+                                SettingsWriteResult::rejected(
+                                    self.connection_id,
+                                    id,
+                                    edit.field(),
+                                    error.to_string(),
+                                ),
+                            )
+                        }
+                    };
+                    self.generations[0] = generation;
+                    self.terminal_generation = generation.max(self.terminal_generation);
+                    self.active_settings = Some((id, edit.field()));
+                    Job::Settings(id, edit, generation)
                 } else if self.drawer_visibility.is_some()
                     && (self.prefer_write || feature.is_none())
                     && (self.prefer_drawer_visibility || self.zoom.is_empty())
@@ -268,11 +388,25 @@ impl LocalServiceClient {
                 let cancel = self.cancel.clone();
                 let connection = self.connection_id;
                 let scheme = self.scheme;
+                let terminal_generation = self.terminal_generation;
+                let previous = self.last_appearance.clone();
                 self.pending = Some(Box::pin(async move {
                     let cancelled = || {
                         io::Error::new(io::ErrorKind::Interrupted, "local settings read cancelled")
                     };
+                    let mut home_read = false;
                     let result = match job.clone() {
+                        Job::Settings(id, edit, generation) => LocalServiceUpdate::SettingsWrite(
+                            settings::execute(
+                                &mut client,
+                                connection,
+                                id,
+                                edit,
+                                generation,
+                                &cancel,
+                            )
+                            .await,
+                        ),
                         Job::Template(id, request) => LocalServiceUpdate::Template(
                             crate::templates::execute(
                                 &mut client,
@@ -286,7 +420,7 @@ impl LocalServiceClient {
                         Job::Read(Feature::Appearance, generation) => {
                             LocalServiceUpdate::Appearance(tokio::select! { biased;
                                 _ = cancel.notified() => Err(cancelled()),
-                                result = crate::appearance::local::read(&mut client, connection, generation, scheme) => result.map(Arc::new),
+                                result = crate::appearance::local::read(&mut client, connection, generation, scheme, terminal_generation, previous, &mut home_read) => result.map(Arc::new),
                             })
                         }
                         Job::Read(Feature::Profiles, generation) => {
@@ -309,14 +443,31 @@ impl LocalServiceClient {
                             .await,
                         ),
                     };
-                    (client, job, result)
+                    (client, job, result, home_read)
                 }));
             }
-            let (client, job, result) = self.pending.as_mut().expect("settings job started").await;
+            let (client, job, mut result, home_read) =
+                self.pending.as_mut().expect("settings job started").await;
             self.pending = None;
             self.client = Some(client);
             self.last_template = matches!(job, Job::Template(..));
             match job {
+                Job::Settings(id, edit, _) => {
+                    self.active_settings = None;
+                    self.prefer_write = false;
+                    self.dirty[0] = true;
+                    if let LocalServiceUpdate::SettingsWrite(outcome) = &mut result {
+                        // A same-service notification invalidates reads, not a
+                        // matched successful write acknowledgement. The writer's
+                        // own broadcast commonly arrives before its API reply.
+                        // Reserve completion for the latest subsequent read; no
+                        // effective values from the mutation reply are published.
+                        outcome.require_refresh(self.generations[0]);
+                        if matches!(outcome.outcome(), SettingsWriteOutcome::Uncertain { .. }) {
+                            self.uncertain_settings.push((edit.field(), id));
+                        }
+                    }
+                }
                 Job::Template(..) => {
                     self.active_template = None;
                 }
@@ -326,8 +477,16 @@ impl LocalServiceClient {
                     if generation != self.generations[feature.index()] {
                         continue;
                     }
+                    if let LocalServiceUpdate::Appearance(Ok(snapshot)) = &mut result {
+                        self.last_appearance = Some(snapshot.clone());
+                    }
                 }
                 Job::Zoom(..) => {
+                    if matches!(&result, LocalServiceUpdate::Zoom(result) if matches!(result.outcome, crate::zoom::ZoomOutcome::Uncertain { .. }))
+                        && !self.uncertain_legacy.contains(&SettingsField::Zoom)
+                    {
+                        self.uncertain_legacy.push(SettingsField::Zoom);
+                    }
                     self.active_zoom = None;
                     self.prefer_write = false;
                     self.prefer_drawer_visibility = true;
@@ -336,25 +495,52 @@ impl LocalServiceClient {
                     self.dirty[0] = true;
                 }
                 Job::DrawerVisibility(..) => {
+                    if matches!(&result, LocalServiceUpdate::DrawerVisibility(result) if matches!(result.outcome, crate::appearance::DrawerVisibilityOutcome::Uncertain { .. }))
+                        && !self.uncertain_legacy.contains(&SettingsField::DrawerPinned)
+                    {
+                        self.uncertain_legacy.push(SettingsField::DrawerPinned);
+                    }
                     self.active_drawer_visibility = None;
                     self.prefer_write = false;
                     self.prefer_drawer_visibility = false;
                     self.dirty[0] = true;
                 }
             }
+            if home_read {
+                self.uncertain_legacy.clear();
+            }
+            if home_read && !self.uncertain_settings.is_empty() {
+                let reconciled = SettingsReconciled {
+                    connection_id: self.connection_id,
+                    generation: self.generations[0],
+                    requests: std::mem::take(&mut self.uncertain_settings),
+                };
+                self.ready.push_back((self.generations[0], result));
+                return LocalServiceUpdate::SettingsReconciled(reconciled);
+            }
             return result;
         }
     }
-    pub async fn finish(mut self) -> io::Result<()> {
+    pub async fn finish(self) -> io::Result<()> {
+        self.finish_with_outcomes().await.map(|_| ())
+    }
+    /// Discard queued edits, join the owned stream, and retain the active write's
+    /// uncertain close outcome for callers that still have a presentation sink.
+    pub async fn finish_with_outcomes(mut self) -> io::Result<Vec<SettingsWriteResult>> {
+        self.settings.clear();
+        let mut outcomes = Vec::new();
         if let Some(pending) = self.pending.take() {
             self.cancel.notify_one();
-            let (client, _, _) = pending.await;
+            let (client, _, result, _) = pending.await;
+            if let LocalServiceUpdate::SettingsWrite(result) = result {
+                outcomes.push(result);
+            }
             self.client = Some(client);
         }
         if let Some(client) = self.client.take() {
             client.finish().await?;
         }
-        Ok(())
+        Ok(outcomes)
     }
 }
 fn increment(generation: u64) -> io::Result<u64> {

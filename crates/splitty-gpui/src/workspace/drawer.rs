@@ -758,10 +758,10 @@ impl Workspace {
                     )
                     .child("New screen"),
             )
-            .on_click(move |_, _, cx| {
+            .on_click(move |_, window, cx| {
                 let _ = weak.update(cx, |this, cx| {
                     if this.lifecycle_token() == owner {
-                        this.create_screen(cx);
+                        this.create_screen(window, cx);
                     }
                 });
             });
@@ -896,7 +896,41 @@ impl Workspace {
                     .border_t_1()
                     .border_color(rgb(self.appearance.subtle_border))
                     .child(self.render_hosts_navigation(cx))
-                    .child(templates),
+                    .child(templates)
+                    .child(
+                        Button::new("drawer-settings")
+                            .accessibility_label("Open Settings")
+                            .track_focus(&self.settings_trigger)
+                            .ghost()
+                            .small()
+                            .w_full()
+                            .h(chrome_rems(30.))
+                            .selected(self.destination == Destination::Settings)
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .items_center()
+                                    .gap(chrome_rems(10.))
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(
+                                        div()
+                                            .w(chrome_rems(15.))
+                                            .flex_none()
+                                            .flex()
+                                            .justify_center()
+                                            .child(Icon::new(IconName::Settings).size_3()),
+                                    )
+                                    .child("Settings"),
+                            )
+                            .on_click(cx.listener(|this, _, window, cx| {
+                                if this.destination == Destination::Settings {
+                                    this.close_settings(window, cx);
+                                } else {
+                                    this.show_settings(window, cx);
+                                }
+                            })),
+                    ),
             )
             .into_any_element()
     }
@@ -919,23 +953,24 @@ impl Workspace {
             }
             return;
         }
-        let blocked = self.rename.is_some()
-            || self.template_dialog.is_some()
-            || self.profile_picker.is_some()
-            || self.transfer_menu.is_some()
-            || self.pending_template_apply.is_some()
-            || self
-                .search_owner
-                .as_ref()
-                .is_some_and(|(_, terminal)| terminal.read(cx).search_input_focused(window, cx))
-            || self
-                .pending_close
-                .as_ref()
-                .is_some_and(|close| close.prompting)
-            || self.drag.is_some()
-            || self.float_gesture.is_some()
-            || GlobalState::is_in_deferred_context(cx)
-            || cx.has_active_drag();
+        let blocked =
+            (self.destination != Destination::Screens && !matches!(&target, WheelTarget::Screens))
+                || self.rename.is_some()
+                || self.template_dialog.is_some()
+                || self.profile_picker.is_some()
+                || self.transfer_menu.is_some()
+                || self.pending_template_apply.is_some()
+                || self.search_owner.as_ref().is_some_and(|(_, terminal)| {
+                    terminal.read(cx).search_input_focused(window, cx)
+                })
+                || self
+                    .pending_close
+                    .as_ref()
+                    .is_some_and(|close| close.prompting)
+                || self.drag.is_some()
+                || self.float_gesture.is_some()
+                || GlobalState::is_in_deferred_context(cx)
+                || cx.has_active_drag();
         if blocked {
             self.wheel_navigation.admit(target, event, true);
             if WheelNavigation::vertical(event) {
@@ -950,6 +985,12 @@ impl Workspace {
         }
         if steps == 0 {
             return;
+        }
+        if matches!(&target, WheelTarget::Screens) {
+            self.show_screens(window, cx);
+            if self.destination != Destination::Screens {
+                return;
+            }
         }
         for _ in 0..steps.unsigned_abs() {
             match &target {

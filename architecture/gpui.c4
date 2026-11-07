@@ -33,7 +33,7 @@ model {
     }
 
     gpui_appearance = component 'gpui_appearance' {
-      description 'Bounded theme, UI font and zoom projection from service-owned appearance snapshots; chrome font settings remain separate from terminal typography.'
+      description 'Bounded UI font and zoom projection, independent terminal palettes and synchronized Kit semantic colors from service-owned appearance snapshots; palette changes preserve terminal typography and history.'
       metadata { module 'splitty_gpui::appearance' }
     }
 
@@ -61,6 +61,7 @@ model {
     gpui_workspace -> terminal 'Keep one terminal view per source-scoped pane and rebind geometry callbacks when its route or Screen changes'
     gpui_workspace -> gpui_appearance 'Convert resolved theme values for native chrome and terminal colors'
     gpui_workspace -> splitty.client_core.appearance 'Match owner and generation before applying resolved appearance'
+    gpui_workspace -> splitty.client_core.local_service 'Present identified local settings mutation outcomes and explicit uncertainty reconciliation in a retained Settings editor'
     gpui_workspace -> splitty.client_core.client_shell_profiles 'Retain owner-bound service choices for the new-tab picker'
     gpui_workspace -> splitty.client_core.hub 'Present fixed-local passive host observations and request refreshes'
     gpui_workspace -> splitty.client_core.client_templates 'Review charged template drafts and match identified library replies'

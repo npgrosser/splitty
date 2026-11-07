@@ -3,6 +3,7 @@ mod chrome;
 mod drawer;
 mod floating;
 mod hosts;
+mod settings;
 mod shell_profiles;
 #[cfg(test)]
 mod source_routing_tests;
@@ -49,8 +50,16 @@ use uuid::Uuid;
 use self::drawer::{WheelNavigation, WheelTarget};
 use self::floating::{FloatGesture, FloatGestureKind};
 use self::hosts::{HostKey, HostsView};
+use self::settings::{SettingsEvent, SettingsView};
 use self::shell_profiles::ProfilePicker;
 use self::templates::TemplateDialog;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Destination {
+    Screens,
+    Hosts,
+    Settings,
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Surface {
@@ -701,6 +710,10 @@ pub struct Workspace {
     model: Option<WindowWorkspace>,
     focus: FocusHandle,
     hosts: HostsView,
+    settings: Entity<SettingsView>,
+    destination: Destination,
+    settings_trigger: FocusHandle,
+    _settings_subscription: Subscription,
     panes: HashMap<PaneKey, PaneView>,
     commands: mpsc::Sender<WorkerCommand>,
     stopping: Arc<AtomicBool>,
@@ -932,11 +945,50 @@ impl Workspace {
         let typography = Theme::global(cx).tokens.typography;
         let ui_family = typography.sans.to_string();
         let mono_family = typography.mono.to_string();
+        let available_fonts = window.text_system().all_font_names();
+        let settings = cx.new(|cx| SettingsView::new(available_fonts, window, cx));
+        let settings_subscription = cx.subscribe_in(
+            &settings,
+            window,
+            |this, _, event: &SettingsEvent, window, cx| match event {
+                SettingsEvent::Close => this.close_settings(window, cx),
+                SettingsEvent::Update {
+                    connection_id,
+                    request_id,
+                    edit,
+                } => {
+                    let result = this
+                        .local_model()
+                        .filter(|model| model.connection_id() == *connection_id)
+                        .ok_or_else(|| "Settings connection changed".to_owned())
+                        .and_then(|model| {
+                            this.commands
+                                .try_send(WorkerCommand::new(
+                                    model.source_token(),
+                                    Command::UpdateSettings {
+                                        connection: *connection_id,
+                                        request_id: *request_id,
+                                        edit: edit.clone(),
+                                    },
+                                ))
+                                .map_err(|_| "Could not send settings change".to_owned())
+                        });
+                    if let Err(reason) = result {
+                        this.settings
+                            .update(cx, |view, cx| view.reject_update(*request_id, reason, cx));
+                    }
+                }
+            },
+        );
         (
             Self {
                 model: None,
                 focus: cx.focus_handle(),
                 hosts: HostsView::default(),
+                settings,
+                destination: Destination::Screens,
+                settings_trigger: cx.focus_handle(),
+                _settings_subscription: settings_subscription,
                 panes: HashMap::new(),
                 commands,
                 stopping: worker.stop.clone(),
@@ -1052,7 +1104,7 @@ impl Workspace {
     }
     fn apply_appearance(
         &mut self,
-        snapshot: &AppearanceSnapshot,
+        snapshot: &Arc<AppearanceSnapshot>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -1085,22 +1137,7 @@ impl Workspace {
             self.drawer_slide_generation = self.drawer_slide_generation.wrapping_add(1);
             self.drawer_slide_task = None;
         }
-        gpui_kit::component::theme::Theme::change(
-            if snapshot.scheme() == ColorScheme::Light {
-                gpui_kit::component::theme::ThemeMode::Light
-            } else {
-                gpui_kit::component::theme::ThemeMode::Dark
-            },
-            None,
-            cx,
-        );
-        // RootPlugin applies the component theme's font size to the window on
-        // every frame. Keep chrome zoom and font ownership there, after a mode
-        // change has loaded that mode's registered defaults.
-        gpui_kit::component::theme::Theme::update(cx, |theme| {
-            theme.font_family = next.font_family.clone().into();
-            theme.font_size = px(16. * next.zoom.window_scale());
-        });
+        next.apply_component_theme(snapshot.scheme(), cx);
         let mut failure = None;
         for view in self.panes.values() {
             let applied = view.terminal.update(cx, |terminal, cx| {
@@ -1117,7 +1154,52 @@ impl Workspace {
         }
         self.appearance = next;
         self.appearance_generation = snapshot.generation();
-        self.appearance_error = failure;
+        self.appearance_error =
+            failure.or_else(|| snapshot.terminal_palette_error().map(str::to_owned));
+        self.settings.update(cx, |view, cx| {
+            view.set_snapshot(snapshot.clone(), window, cx)
+        });
+        cx.notify();
+    }
+
+    fn show_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.destination == Destination::Settings
+            || self.pending_close.is_some()
+            || self.rename.is_some()
+            || self.template_dialog.is_some()
+            || self.profile_picker.is_some()
+            || self.transfer_menu.is_some()
+            || self.pending_template_apply.is_some()
+            || self.drag.is_some()
+            || self.float_gesture.is_some()
+            || cx.has_active_drag()
+        {
+            return;
+        }
+        if self.destination == Destination::Hosts {
+            self.show_screens(window, cx);
+            if self.destination == Destination::Hosts {
+                return;
+            }
+        }
+        self.destination = Destination::Settings;
+        self.wheel_navigation.reset();
+        self.sync_visible(cx);
+        self.settings.update(cx, |view, cx| view.focus(window, cx));
+        cx.notify();
+    }
+
+    fn close_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.destination != Destination::Settings {
+            return;
+        }
+        self.destination = Destination::Screens;
+        self.sync_visible(cx);
+        if self.drawer_visible || self.drawer_overlay_open {
+            self.settings_trigger.focus(window, cx);
+        } else {
+            self.focus_current(window, cx);
+        }
         cx.notify();
     }
 
@@ -1272,7 +1354,11 @@ impl Workspace {
             cx.notify();
         }
     }
-    fn create_screen(&mut self, cx: &mut Context<Self>) {
+    fn create_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_screens(window, cx);
+        if self.destination != Destination::Screens {
+            return;
+        }
         let Some(model) = self.local_model() else {
             return;
         };
@@ -1296,10 +1382,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let was_hosts = self.hosts.open;
-        self.hosts.open = false;
-        if was_hosts {
-            self.sync_visible(cx);
+        if !self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.opened().iter().any(|entry| entry.key() == &screen))
+        {
+            return;
+        }
+        self.show_screens(window, cx);
+        if self.destination != Destination::Screens {
+            return;
         }
         self.float_gesture = None;
         self.transfer_menu = None;
@@ -1314,10 +1406,6 @@ impl Workspace {
             if let Some(owner) = self.lifecycle_token() {
                 self.send_captured(owner, Command::SwitchScreen(screen), cx);
             }
-        }
-        if was_hosts {
-            self.focus_current(window, cx);
-            cx.notify();
         }
     }
     fn start_rename(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -1710,6 +1798,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.settings.update(cx, |view, cx| {
+            view.set_owner(window_model.local_source().connection_id(), window, cx);
+        });
         let model = window_model
             .shown_key()
             .and_then(|key| window_model.source(key.source_id()))
@@ -1949,7 +2040,7 @@ impl Workspace {
         self.model = Some(window_model);
         self.flush_scheme();
         self.sync_visible(cx);
-        if !self.hosts.open
+        if self.destination == Destination::Screens
             && self.rename.is_none()
             && !self
                 .pending_close
@@ -1976,7 +2067,7 @@ impl Workspace {
                 .collect()
         });
         if self.pending_template_apply.is_some()
-            || self.hosts.open
+            || self.destination != Destination::Screens
             || (!self.is_remote_selected()
                 && self
                     .local_model()
@@ -2095,7 +2186,11 @@ impl Workspace {
         }
     }
     fn focus_current(&self, window: &mut Window, cx: &mut App) {
-        if self.hosts.open {
+        if self.destination == Destination::Settings {
+            self.settings.update(cx, |view, cx| view.focus(window, cx));
+            return;
+        }
+        if self.destination == Destination::Hosts {
             self.focus.focus(window, cx);
             return;
         }
@@ -2393,7 +2488,24 @@ impl Workspace {
         if GlobalState::is_in_deferred_context(cx) {
             return;
         }
-        if self.hosts.open {
+        if self.destination == Destination::Settings {
+            if event.keystroke.key == "escape" {
+                cx.stop_propagation();
+                if self.drawer_overlay_open {
+                    self.close_drawer_overlay(cx);
+                    self.settings.update(cx, |view, cx| view.focus(window, cx));
+                } else {
+                    self.close_settings(window, cx);
+                }
+            } else if shortcut(&event.keystroke, cx.platform_info().is_mac())
+                == Some(Shortcut::ToggleDrawer)
+            {
+                cx.stop_propagation();
+                self.toggle_drawer_overlay(cx);
+            }
+            return;
+        }
+        if self.destination == Destination::Hosts {
             if let Some(action) = HostKey::from_keystroke(&event.keystroke) {
                 cx.stop_propagation();
                 match action {
@@ -2413,13 +2525,16 @@ impl Workspace {
             self.toggle_drawer_overlay(cx);
             return;
         }
-        if event.keystroke.key == "escape" && self.drawer_overlay_open && !self.hosts.open {
+        if event.keystroke.key == "escape"
+            && self.drawer_overlay_open
+            && self.destination != Destination::Hosts
+        {
             cx.stop_propagation();
             self.close_drawer_overlay(cx);
             self.focus_current(window, cx);
             return;
         }
-        if self.hosts.open {
+        if self.destination == Destination::Hosts {
             return;
         }
         let Some(action) = shortcut_with_layout(
@@ -2438,7 +2553,7 @@ impl Workspace {
                 self.toggle_templates(window, cx)
             }
             Shortcut::NewTab => self.tab(cx),
-            Shortcut::NewScreen => self.create_screen(cx),
+            Shortcut::NewScreen => self.create_screen(window, cx),
             Shortcut::ScreenIndex(index) => {
                 if let Some(key) = self
                     .model
@@ -2607,6 +2722,24 @@ impl Workspace {
                 Update::TemplateApi(result) => self.template_result(result, window, cx),
                 Update::TemplateApply(result) => self.template_apply_result(result, window, cx),
                 Update::Appearance(snapshot) => self.apply_appearance(&snapshot, window, cx),
+                Update::SettingsWrite(result) => {
+                    if self
+                        .local_model()
+                        .is_some_and(|model| model.connection_id() == result.connection_id())
+                    {
+                        self.settings
+                            .update(cx, |view, cx| view.apply_write_result(&result, window, cx));
+                    }
+                }
+                Update::SettingsReconciled(result) => {
+                    if self
+                        .local_model()
+                        .is_some_and(|model| model.connection_id() == result.connection_id())
+                    {
+                        self.settings
+                            .update(cx, |view, cx| view.apply_reconciled(&result, cx));
+                    }
+                }
                 Update::DrawerVisibility(result) => self.apply_drawer_visibility(result, cx),
                 Update::Zoom(result) => self.apply_zoom_result(result, window, cx),
                 Update::ScreenTransfer(result) => {
@@ -2903,7 +3036,7 @@ impl Workspace {
                 self.finish_smoke(false, cx);
                 return;
             }
-            self.create_screen(cx);
+            self.create_screen(window, cx);
             self.smoke_stage = 18;
             return;
         }
@@ -4433,7 +4566,7 @@ impl Render for Workspace {
             .map(|(message, _)| message.clone());
         let extra_lines =
             usize::from(appearance_message.is_some()) + usize::from(profile_message.is_some());
-        let primary_status = if self.hosts.open {
+        let primary_status = if self.destination == Destination::Hosts {
             let help = "R refresh · Esc back to Screens";
             if self.status.is_empty() {
                 help.to_owned()
@@ -4506,7 +4639,9 @@ impl Render for Workspace {
             content = content.child(self.render_drawer(cx));
         }
         let mut main_content = div().flex().flex_col().flex_1().min_w_0().min_h_0();
-        if self.hosts.open {
+        if self.destination == Destination::Settings {
+            main_content = main_content.child(self.settings.clone());
+        } else if self.destination == Destination::Hosts {
             main_content = main_content.child(self.render_hosts(cx));
         } else if let Some(model) = self.selected_model() {
             if self.is_remote_selected() {
@@ -4565,14 +4700,14 @@ impl Render for Workspace {
                                 .cursor_pointer()
                                 .bg(rgb(self.appearance.overlay))
                                 .child("New screen")
-                                .on_click(cx.listener(move |this, _, _, cx| {
+                                .on_click(cx.listener(move |this, _, window, cx| {
                                     if toolbar_source.is_some_and(|source| {
                                         this.lifecycle_token() == Some(source)
                                             && this
                                                 .local_model()
                                                 .is_some_and(|model| model.screens().is_empty())
                                     }) {
-                                        this.create_screen(cx);
+                                        this.create_screen(window, cx);
                                     }
                                 })),
                         ),

@@ -1,7 +1,9 @@
 //! Convert service-owned theme values into the bounded native presentation subset.
 //! This adapter never reads settings files or changes terminal font metrics.
 use crate::terminal::TerminalColors;
-use splitty_client_core::appearance::AppearanceSnapshot;
+use gpui_kit::component::theme::{Theme, ThemeColor, ThemeMode};
+use gpui_kit::{px, rgb, App, Hsla, Rgba};
+use splitty_client_core::appearance::{AppearanceSnapshot, ColorScheme};
 use splitty_client_core::zoom::Zoom;
 
 #[derive(Clone, Debug)]
@@ -23,6 +25,7 @@ pub struct NativeAppearance {
     pub selection_background: u32,
     pub zoom: Zoom,
     pub notice: Option<&'static str>,
+    component_palette: ComponentPalette,
 }
 
 impl NativeAppearance {
@@ -45,6 +48,7 @@ impl NativeAppearance {
             selection_background: 0x345778,
             zoom: Zoom::from_values(1.0, "window"),
             notice: None,
+            component_palette: ComponentPalette::default(),
         }
     }
 
@@ -56,7 +60,7 @@ impl NativeAppearance {
     ) -> Self {
         let mut result = Self::fallback(ui_family);
         let ui = &snapshot.theme().ui;
-        let terminal = &snapshot.theme().terminal;
+        let terminal = &snapshot.terminal_theme().terminal;
         let mut fallback_used = false;
         let mut color = |value: &str, background: u32, fallback: u32| {
             parse_color(value)
@@ -126,10 +130,246 @@ impl NativeAppearance {
             Some(family) => result.font_family = family,
             None => fallback_used = true,
         }
+        // Direct workspace chrome and Kit controls share the same readable
+        // text policy. Terminal colors remain exactly the selected palette.
+        result.text = readable_rgb(result.text, result.surface);
+        result.secondary = readable_rgb(result.secondary, result.raised);
+        result.muted = readable_rgb(result.muted, result.surface);
+        let mut token = |value: &str, background| {
+            let parsed = parse_color(value).map(|color| color.over(background));
+            fallback_used |= parsed.is_none();
+            parsed
+        };
+        result.component_palette = ComponentPalette {
+            surface: token(&ui.surface_base, result.surface),
+            raised: token(&ui.surface_raised, result.surface),
+            overlay: token(&ui.surface_overlay, result.raised),
+            text: token(&ui.text_primary, result.surface),
+            secondary: token(&ui.text_secondary, result.surface),
+            border: token(&ui.border_default, result.surface),
+            subtle_border: token(&ui.border_subtle, result.raised),
+            hover: token(&ui.hover_bg, result.raised),
+            active: token(&ui.active_bg, result.raised),
+            accent: token(&ui.accent, result.surface),
+            danger: token(&ui.danger, result.surface),
+            warning: token(&ui.warning, result.surface),
+            success: token(&ui.success, result.surface),
+            scrollbar: token(&ui.scrollbar, result.raised),
+        };
         result.notice = fallback_used
             .then_some("Some theme values are unsupported; native defaults are in use.");
         result
     }
+
+    /// Mode defaults are loaded before the product palette. `Theme::update`
+    /// synchronizes solid colors, render tokens and the Base layer together.
+    pub fn apply_component_theme(&self, scheme: ColorScheme, cx: &mut App) {
+        Theme::change(
+            match scheme {
+                ColorScheme::Light => ThemeMode::Light,
+                ColorScheme::Dark => ThemeMode::Dark,
+            },
+            None,
+            cx,
+        );
+        Theme::update(cx, |theme| {
+            self.component_palette.project(&mut theme.colors);
+            theme.font_family = self.font_family.clone().into();
+            theme.font_size = px(16. * self.zoom.window_scale());
+        });
+    }
+}
+
+/// Validated product colors. Absent tokens retain the active Kit mode's
+/// defaults; no CSS or theme resolution belongs in individual controls.
+#[derive(Clone, Debug, Default)]
+struct ComponentPalette {
+    surface: Option<u32>,
+    raised: Option<u32>,
+    overlay: Option<u32>,
+    text: Option<u32>,
+    secondary: Option<u32>,
+    border: Option<u32>,
+    subtle_border: Option<u32>,
+    hover: Option<u32>,
+    active: Option<u32>,
+    accent: Option<u32>,
+    danger: Option<u32>,
+    warning: Option<u32>,
+    success: Option<u32>,
+    scrollbar: Option<u32>,
+}
+
+impl ComponentPalette {
+    fn project(&self, colors: &mut ThemeColor) {
+        let set = |target: &mut Hsla, value: Option<u32>| {
+            if let Some(value) = value {
+                *target = rgb(value).into();
+            }
+        };
+        set(&mut colors.background, self.surface);
+        set(&mut colors.foreground, self.text);
+        set(&mut colors.popover, self.overlay);
+        set(&mut colors.popover_foreground, self.text);
+        set(&mut colors.sidebar, self.raised);
+        set(&mut colors.sidebar_foreground, self.text);
+        set(&mut colors.sidebar_border, self.subtle_border);
+        set(&mut colors.group_box, self.raised);
+        set(&mut colors.group_box_foreground, self.text);
+        set(&mut colors.secondary, self.raised);
+        set(&mut colors.secondary_foreground, self.text);
+        set(&mut colors.muted, self.raised);
+        set(&mut colors.muted_foreground, self.secondary);
+        set(&mut colors.border, self.border);
+        set(&mut colors.input, self.border);
+        set(&mut colors.accent, self.active);
+        set(&mut colors.accent_foreground, self.text);
+        set(&mut colors.primary, self.accent);
+        set(&mut colors.ring, self.accent);
+        set(&mut colors.caret, self.text);
+        set(&mut colors.danger, self.danger);
+        set(&mut colors.warning, self.warning);
+        set(&mut colors.success, self.success);
+        set(&mut colors.scrollbar_thumb, self.scrollbar);
+        set(&mut colors.scrollbar_thumb_hover, self.secondary);
+        set(&mut colors.list, self.surface);
+        set(&mut colors.list_head, self.raised);
+        set(&mut colors.list_even, self.raised);
+        set(&mut colors.list_hover, self.hover);
+        set(&mut colors.list_active, self.active);
+        set(&mut colors.list_active_border, self.accent);
+        set(&mut colors.selection, self.active);
+        colors.sidebar_accent = colors.accent;
+        colors.sidebar_accent_foreground = readable_text(colors.accent_foreground, colors.accent);
+        colors.sidebar_primary = colors.primary;
+        colors.sidebar_primary_foreground =
+            readable_text(colors.primary_foreground, colors.primary);
+
+        // A valid custom color can still make a label unreadable. Keep its
+        // requested surface and choose a contrasting foreground when needed.
+        colors.foreground = readable_text(colors.foreground, colors.background);
+        colors.popover_foreground = readable_text(colors.popover_foreground, colors.popover);
+        colors.sidebar_foreground = readable_text(colors.sidebar_foreground, colors.sidebar);
+        colors.group_box_foreground = readable_text(colors.group_box_foreground, colors.group_box);
+        colors.muted_foreground = readable_text(colors.muted_foreground, colors.background);
+        colors.accent_foreground = readable_text(colors.accent_foreground, colors.accent);
+        colors.secondary_foreground = readable_text(colors.secondary_foreground, colors.secondary);
+        colors.primary_foreground = readable_text(colors.primary_foreground, colors.primary);
+        colors.danger_foreground = readable_text(colors.danger_foreground, colors.danger);
+        colors.warning_foreground = readable_text(colors.warning_foreground, colors.warning);
+        colors.success_foreground = readable_text(colors.success_foreground, colors.success);
+
+        colors.button = colors.secondary;
+        colors.button_foreground = colors.secondary_foreground;
+        colors.button_hover = self
+            .hover
+            .map_or(colors.button_hover, |value| rgb(value).into());
+        colors.button_active = colors.accent;
+        colors.secondary_hover = colors.button_hover;
+        colors.secondary_active = colors.button_active;
+        colors.primary_hover = state_surface(colors.primary, colors.primary_foreground, 0.08);
+        colors.primary_active = state_surface(colors.primary, colors.primary_foreground, 0.16);
+        colors.danger_hover = state_surface(colors.danger, colors.danger_foreground, 0.08);
+        colors.danger_active = state_surface(colors.danger, colors.danger_foreground, 0.16);
+        colors.warning_hover = state_surface(colors.warning, colors.warning_foreground, 0.08);
+        colors.warning_active = state_surface(colors.warning, colors.warning_foreground, 0.16);
+        colors.success_hover = state_surface(colors.success, colors.success_foreground, 0.08);
+        colors.success_active = state_surface(colors.success, colors.success_foreground, 0.16);
+        colors.button_primary = colors.primary;
+        colors.button_primary_foreground = colors.primary_foreground;
+        colors.button_primary_hover = colors.primary_hover;
+        colors.button_primary_active = colors.primary_active;
+        colors.button_secondary = colors.secondary;
+        colors.button_secondary_foreground = colors.secondary_foreground;
+        colors.button_secondary_hover = colors.secondary_hover;
+        colors.button_secondary_active = colors.secondary_active;
+        colors.button_danger = colors.danger;
+        colors.button_danger_foreground = colors.danger_foreground;
+        colors.button_danger_hover = colors.danger_hover;
+        colors.button_danger_active = colors.danger_active;
+        colors.button_warning = colors.warning;
+        colors.button_warning_foreground = colors.warning_foreground;
+        colors.button_warning_hover = colors.warning_hover;
+        colors.button_warning_active = colors.warning_active;
+        colors.button_success = colors.success;
+        colors.button_success_foreground = colors.success_foreground;
+        colors.button_success_hover = colors.success_hover;
+        colors.button_success_active = colors.success_active;
+    }
+}
+
+fn state_surface(background: Hsla, foreground: Hsla, amount: f32) -> Hsla {
+    let black = rgb(0).into();
+    let white = rgb(0xffffff).into();
+    let target = if contrast(foreground, black) >= contrast(foreground, white) {
+        black
+    } else {
+        white
+    };
+    blend(background, target, amount)
+}
+
+fn blend(background: Hsla, foreground: Hsla, amount: f32) -> Hsla {
+    let a = Rgba::from(background);
+    let b = Rgba::from(foreground);
+    Rgba {
+        r: a.r + (b.r - a.r) * amount,
+        g: a.g + (b.g - a.g) * amount,
+        b: a.b + (b.b - a.b) * amount,
+        a: 1.,
+    }
+    .into()
+}
+
+fn luminance(color: Hsla) -> f32 {
+    let color = Rgba::from(color);
+    let linear = |value: f32| {
+        if value <= 0.04045 {
+            value / 12.92
+        } else {
+            ((value + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+}
+
+fn contrast(a: Hsla, b: Hsla) -> f32 {
+    let a = luminance(a);
+    let b = luminance(b);
+    (a.max(b) + 0.05) / (a.min(b) + 0.05)
+}
+
+fn readable_text(requested: Hsla, background: Hsla) -> Hsla {
+    if contrast(requested, background) >= 4.5 {
+        return requested;
+    }
+    let black = rgb(0).into();
+    let white = rgb(0xffffff).into();
+    let target = if contrast(black, background) >= contrast(white, background) {
+        black
+    } else {
+        white
+    };
+    // Preserve the intended hierarchy and hue: move only as far as needed,
+    // rather than turning every subdued label into pure white or black.
+    let mut low = 0.;
+    let mut high = 1.;
+    for _ in 0..12 {
+        let middle = (low + high) * 0.5;
+        if contrast(blend(requested, target, middle), background) >= 4.6 {
+            high = middle;
+        } else {
+            low = middle;
+        }
+    }
+    blend(requested, target, high)
+}
+
+fn readable_rgb(requested: u32, background: u32) -> u32 {
+    u32::from(Rgba::from(readable_text(
+        rgb(requested).into(),
+        rgb(background).into(),
+    ))) >> 8
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -268,6 +508,77 @@ fn choose_font(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn subdued_text_gains_readability_without_overtaking_primary_text() {
+        let background = rgb(0x10151c).into();
+        let primary = rgb(0xd9e2ef).into();
+        let subdued = readable_text(rgb(0x6b6b6b).into(), background);
+        assert!(contrast(subdued, background) >= 4.5);
+        assert!(luminance(subdued) < luminance(primary));
+        assert_eq!(readable_text(primary, background), primary);
+        let packed: Hsla = rgb(readable_rgb(0x6b6b6b, 0x10151c)).into();
+        assert!(contrast(packed, background) >= 4.5);
+    }
+
+    #[test]
+    fn component_palette_keeps_text_readable_across_modes_and_custom_surfaces() {
+        for defaults in [ThemeColor::light(), ThemeColor::dark()] {
+            for surface in [0x10151c, 0xf4f4f4, 0x765438] {
+                let palette = ComponentPalette {
+                    surface: Some(surface),
+                    raised: Some(surface),
+                    overlay: Some(surface),
+                    text: Some(surface), // deliberately invalid contrast
+                    secondary: Some(surface),
+                    accent: Some(0x76b8e8),
+                    danger: Some(0xff6666),
+                    warning: Some(0xffcc33),
+                    success: Some(0x448855),
+                    ..ComponentPalette::default()
+                };
+                let mut colors = *defaults;
+                palette.project(&mut colors);
+                assert_eq!(colors.background, Hsla::from(rgb(surface)));
+                for (foreground, background) in [
+                    (colors.foreground, colors.background),
+                    (colors.popover_foreground, colors.popover),
+                    (colors.sidebar_foreground, colors.sidebar),
+                    (colors.muted_foreground, colors.background),
+                    (colors.button_primary_foreground, colors.button_primary),
+                    (
+                        colors.button_primary_foreground,
+                        colors.button_primary_hover,
+                    ),
+                    (
+                        colors.button_primary_foreground,
+                        colors.button_primary_active,
+                    ),
+                    (colors.button_danger_foreground, colors.button_danger),
+                    (colors.button_warning_foreground, colors.button_warning),
+                    (colors.button_success_foreground, colors.button_success),
+                ] {
+                    assert!(contrast(foreground, background) >= 4.5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn unsupported_component_tokens_keep_the_new_modes_palette() {
+        let palette = ComponentPalette::default();
+        for defaults in [ThemeColor::light(), ThemeColor::dark()] {
+            let mut colors = *defaults;
+            palette.project(&mut colors);
+            assert_eq!(colors.background, defaults.background);
+            assert_eq!(colors.popover, defaults.popover);
+            assert_eq!(colors.sidebar, defaults.sidebar);
+            assert_eq!(colors.primary, defaults.primary);
+            assert_eq!(colors.border, defaults.border);
+            assert_eq!(colors.input, defaults.input);
+            assert_eq!(colors.danger, defaults.danger);
+        }
+    }
 
     #[test]
     fn supported_colors_compose_alpha_against_the_actual_background() {

@@ -210,10 +210,101 @@ async fn real_service() {
             _ => {}
         }
     }
+    // The editor uses the same local owner and ordered event stream as the
+    // existing keyboard and Drawer controls, with no session replacement.
+    let settings_requests = [Uuid::new_v4(), Uuid::new_v4()];
+    for (request_id, field, value) in [
+        (
+            settings_requests[0],
+            crate::appearance::SettingsField::FontSize,
+            crate::appearance::SettingsValue::Number(20.0),
+        ),
+        (
+            settings_requests[1],
+            crate::appearance::SettingsField::TerminalTheme,
+            crate::appearance::SettingsValue::Text("splitty-light".into()),
+        ),
+    ] {
+        commands
+            .send(Command::new(
+                scope,
+                CommandKind::UpdateSettings {
+                    connection: owner,
+                    request_id,
+                    edit: crate::appearance::SettingsEdit::new(field, value).unwrap(),
+                },
+            ))
+            .await
+            .unwrap();
+    }
+    commands
+        .send(Command::new(
+            scope,
+            CommandKind::Input {
+                route: TerminalToken::new(scope, &route.pane_id, &route.session_id),
+                bytes: b"printf 'SETTINGS_%s\\n' 'ALIVE'\n".to_vec(),
+            },
+        ))
+        .await
+        .unwrap();
+    let mut settings_outcomes = Vec::new();
+    let mut effective = false;
+    let mut changed = false;
+    let mut settings_output = Vec::new();
+    while settings_outcomes.len() < 2
+        || !effective
+        || !changed
+        || !settings_output
+            .windows(b"SETTINGS_ALIVE".len())
+            .any(|bytes| bytes == b"SETTINGS_ALIVE")
+    {
+        match next(&mut updates).await {
+            Update::SettingsWrite(result) if settings_requests.contains(&result.request_id()) => {
+                assert_eq!(result.connection_id(), owner);
+                assert_eq!(
+                    result.outcome(),
+                    &crate::local_service::SettingsWriteOutcome::Confirmed
+                );
+                settings_outcomes.push(result.request_id());
+            }
+            Update::Appearance(snapshot)
+                if snapshot.settings().font_size == 20
+                    && snapshot.terminal().theme() == "splitty-light" =>
+            {
+                assert_eq!(snapshot.connection_id(), owner);
+                assert_eq!(snapshot.theme().id.as_deref(), Some("splitty-dark"));
+                assert_eq!(
+                    snapshot.terminal_theme().id.as_deref(),
+                    Some("splitty-light")
+                );
+                effective = true;
+            }
+            Update::Event { event, .. } => {
+                if event.json().is_some_and(|json| {
+                    json["type"] == "settings.changed"
+                        && json["settings"]["appearance"]["fontSize"] == 20
+                }) {
+                    changed = true;
+                }
+                if let Some(chunk) = event.output() {
+                    if chunk.session_id == route.session_id {
+                        settings_output.extend_from_slice(chunk.bytes);
+                    }
+                }
+            }
+            Update::Workspace(current) => assert_eq!(
+                current.local_source().session_for(&route.pane_id),
+                Some(route.session_id.as_str())
+            ),
+            _ => {}
+        }
+    }
     let saved = splitty_core::config::load_from(&splitty_core::config::config_path());
     assert!(!saved.drawer.pinned);
     assert_eq!(saved.drawer.sidebar_width, config.drawer.sidebar_width);
     assert_eq!(saved.appearance.zoom, 0.9);
+    assert_eq!(saved.appearance.font_size, 20);
+    assert_eq!(saved.terminal.theme, "splitty-light");
     assert_eq!(saved.appearance.zoom_scope, "terminals");
     assert_eq!(saved.appearance.font_family, config.appearance.font_family);
     assert_eq!(saved.shells, config.shells);

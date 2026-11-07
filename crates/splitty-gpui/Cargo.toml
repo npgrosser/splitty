@@ -12,6 +12,7 @@ default = []
 # Enable its feature on the selected backend only. The Kit-wide testing feature
 # also resolves its alternative GPUI Fast backend with incompatible pins.
 capture = ["dep:gpui-platform-capture"]
+ui-test-support = ["capture", "splitty-client-core/ui-test-support"]
 web-spike = ["dep:cef", "dep:percent-encoding", "dep:tempfile"]
 
 [dependencies]

@@ -73,6 +73,7 @@ async fn foreign_source_envelopes_cannot_create_split_select_input_or_enqueue_se
     assert_eq!(foreign_owner.connection_id(), owner.connection_id());
     assert_ne!(foreign_owner.source_id(), owner.source_id());
     let zoom_request = Uuid::new_v4();
+    let settings_request = Uuid::new_v4();
     for kind in [
         CommandKind::CreateScreen("foreign".into()),
         CommandKind::Split {
@@ -87,6 +88,15 @@ async fn foreign_source_envelopes_cannot_create_split_select_input_or_enqueue_se
         CommandKind::Input {
             route: route.clone(),
             bytes: b"printf 'FOREIGN_EFFECT'\n".to_vec(),
+        },
+        CommandKind::UpdateSettings {
+            connection: owner.connection_id(),
+            request_id: settings_request,
+            edit: crate::appearance::SettingsEdit::new(
+                crate::appearance::SettingsField::FontSize,
+                crate::appearance::SettingsValue::Number(20.0),
+            )
+            .unwrap(),
         },
         CommandKind::Zoom {
             connection: owner.connection_id(),
@@ -128,10 +138,21 @@ async fn foreign_source_envelopes_cannot_create_split_select_input_or_enqueue_se
     let mut output = Vec::new();
     let mut rejected = 0;
     let mut zoom_rejected = false;
-    while rejected < 5 || !zoom_rejected || !output.windows(12).any(|part| part == b"SOURCE_ALIVE")
+    let mut settings_rejected = false;
+    while rejected < 5
+        || !zoom_rejected
+        || !settings_rejected
+        || !output.windows(12).any(|part| part == b"SOURCE_ALIVE")
     {
         match next(&mut updates).await {
             Update::Status(reason) if reason.contains("source connection") => rejected += 1,
+            Update::SettingsWrite(result) if result.request_id() == settings_request => {
+                assert!(matches!(
+                    result.outcome(),
+                    crate::local_service::SettingsWriteOutcome::Rejected { .. }
+                ));
+                settings_rejected = true;
+            }
             Update::Zoom(result) if result.request_id == zoom_request => {
                 assert!(matches!(
                     result.outcome,

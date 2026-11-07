@@ -2762,6 +2762,23 @@ export interface NativeDocumentAssignment {
 // authority fields (URL, socket, method, headers, role, backend) are rejected.
 // Argument strings are data for the named operation, never routing authority.
 // body has the same domain schema/validation as the mapped browser endpoint.
+/** Data returned by theme.get and GET /api/home/theme.
+ * id identifies the actual resolved source, including a fallback source;
+ * name remains an authored display name. Older replies may omit id.
+ */
+export interface ResolvedNativeTheme {
+  id?: string;
+  name: string;
+  variant: "light" | "dark";
+  ui: Record<string, string>;
+  terminal: Record<string, string>;
+  effects?: Record<string, string>;
+  layout: {
+    "dnd-overlay-scope": string;
+    "dnd-overlay-target": string;
+  };
+}
+
 export type NativeCall =
   | { operation: "home.get"; args?: { } }
   | { operation: "home.metadata"; args?: { } }
