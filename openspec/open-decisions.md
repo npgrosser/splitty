@@ -313,3 +313,6 @@ Each point names what holds now, the alternative, and where it is recorded.
 - **`native-terminal-search`, NF1** (2026-11-07, provisional, tbd): literal ASCII-insensitive search over the focused terminal's retained screen/history, with a 1,024-byte query limit; no regex/case/whole-word controls initially.
 - **`native-terminal-search`, NF2** (2026-11-07, provisional, tbd): cap native search-owned allocations at 16 MiB and active-buffer matches at 20,000; stop with an explicit refine-query state instead of reporting partial results as complete. These guards do not promise a fixed native-call duration or cap all terminal-owned bookkeeping.
 - **`native-terminal-search`, NF3** (2026-11-07, provisional, tbd): one active index per window, retaining query/open state per terminal while inactive and rebuilding on activation; navigation anchors reset on rebuild.
+
+- **`native-shell-profile-picker`, NSP-1** (2026-11-07, provisional, tbd): explicit shell selection initially targets new tabs; ordinary tabs and splits keep service-owned inheritance.
+- **`native-shell-profile-picker`, NSP-2** (2026-11-07, provisional, tbd): native profile presentation accepts at most 128 profiles, 256-byte IDs and 512-byte names/reasons, rejecting oversized reads atomically while preserving the last valid state.
