@@ -142,7 +142,7 @@ describe("ViewerPaneRenderer", { timeout: 30_000 }, () => {
     screen.api.getPanel("v1")!.api.close();
     release();
     await settled();
-    expect(kept.querySelector(".viewer-bar-label")?.textContent).toBe("/home/me/app/NOTES.md");
+    await vi.waitFor(() => expect(kept.querySelector(".viewer-bar-label")?.textContent).toBe("/home/me/app/NOTES.md"), LOAD);
     expect(closed.childElementCount).toBe(0);
   });
 });
