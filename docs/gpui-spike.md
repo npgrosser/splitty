@@ -75,7 +75,8 @@ cargo run --release -p splitty-gpui -- --probe
 cargo run --release -p splitty-gpui -- --smoke
 ```
 
-The default window offers **Split right**, **Split below** and **New tab**.
+The default window offers **Split right**, **Split below**, **New tab** and
+**Maximize/Restore** for the focused tab group.
 Select tabs by clicking their labels, close panes with their tab close control,
 and resize splits by dragging the divider. After closing the final pane,
 **New terminal** repopulates the same Screen. Ctrl+Shift+C/V copies and pastes
@@ -100,10 +101,25 @@ Workspace shortcuts use **Cmd** on macOS and **Alt** on other hosts as `Mod`:
 | Mod+T | New tab (or terminal on an empty Screen) |
 | Mod+D / Mod+Shift+D | Split right / below |
 | Mod+W | Close the focused pane |
+| Mod+M | Maximize or restore the focused tab group |
+| Ctrl+Shift+Space | Create a local Screen, including from an empty workspace |
+| Mod+Shift+1–9 | Select the corresponding local Screen |
 | Mod+Shift+Left/Right/Up/Down | Focus the nearest visible split group in that direction |
 
 These chords are handled before terminal input; Ctrl+C and clipboard keys keep
-their terminal behavior. Tab selection remains available by clicking its label.
+their terminal behavior. Rename editors and close prompts keep keyboard priority.
+Tab selection remains available by clicking its label. On the pinned Linux
+backend, shifted Screen numbers are verified for standard US and German XKB
+layouts. The framework drops physical key codes; symbols from other layouts pass
+through to the terminal rather than selecting a guessed Screen. Pointer Screen
+selection remains available.
+
+Maximization is a per-window, per-Screen reference to a canonical tab group.
+It preserves tabs, terminal history and hidden output without changing the server
+layout. New tabs retain it; admitted splits and pane moves restore the full view.
+Hidden groups release visible PTY size claims, and restoration reports the
+visible terminals' measured sizes. Screen and window close still include hidden
+groups.
 
 `--workspace-smoke` exercises distinct terminal sessions, both split axes, tab
 switching, authoritative divider ratios, pane closure, keyboard routing and
@@ -272,6 +288,41 @@ claim full web-client close-policy parity.
 ```sh
 python3 scripts/testing/gpui-screens.py target/release/splitty-gpui \
   --output /tmp/splitty-close-evidence --close-confirmation
+```
+
+## Local group maximization and navigation acceptance
+
+The native viewport borrows the maximized group from the canonical mux snapshot.
+One optional group ID per Screen is local view state; no layout rewrite or second
+tree is introduced. Output subscriptions survive hiding, while visibility and
+PTY size claims follow the displayed groups. A competing-client test exercises
+the actual worker: the hidden terminal changes from the workspace's 73×19 claim
+to the other client's 120×40 claim, then returns to 73×19 on restore. Delayed
+pre-maximize visibility and resize reports cannot reclaim the hidden terminal.
+
+Focused checks pass: 36 client-core tests, 32 GPUI tests, 17 architecture checks,
+touched-target Clippy with warnings denied and formatting. The real-window
+`gpui-screens.py --navigation` driver passes fourteen checks on isolated X11:
+maximize/restore, retained tabs and shell identities, hidden output, Screen
+switching, new/direct-Screen keys, unavailable index consumption, editor and modal
+priority, busy hidden-group close cancellation, move/split restoration and new
+Screen creation from an empty workspace. A raw PTY reader verifies that modal
+navigation gestures do not leak input. A separate `--navigation-keys-only` run
+applies the actual German XKB layout and checks shifted 1/2/3 and unavailable 9.
+Both runs exit normally with no surviving children. The optimized final build
+also passes the workspace smoke under hardware D3D12-backed OpenGL on Wayland
+and X11.
+
+The keyboard checks cover Linux XKB standard US and German layouts. They do not
+establish physical-key support for arbitrary layouts or Windows/macOS parity.
+Maximized view choice is not persisted; floating groups and popouts remain
+outside this local increment.
+
+```sh
+python3 scripts/testing/gpui-screens.py target/release/splitty-gpui \
+  --output /tmp/splitty-navigation-evidence --navigation --keyboard-layout us
+python3 scripts/testing/gpui-screens.py target/release/splitty-gpui \
+  --output /tmp/splitty-german-keys-evidence --navigation-keys-only --keyboard-layout de
 ```
 
 ## Workspace output wakeup measurements

@@ -299,4 +299,4 @@ Each point names what holds now, the alternative, and where it is recorded.
 ## Native workspace navigation (2026-11-07)
 
 - **NN-1 (provisional, tbd):** maximize is a per-window, per-Screen reference to a canonical tab group. It changes neither server layout nor persistence. Tab insertion retains it; admitted split/move or explicit focus outside restores the viewport; removed group identity clears it. See `native-workspace-navigation/design.md`.
-- **NN-2 (provisional, tbd):** native Screen navigation reuses Ctrl+Shift+Space and Mod+Shift+1–9, with Mod+M for maximize/restore. Editing and confirmation dialogs keep priority; new-Screen remains available in an empty workspace.
+- **NN-2 (provisional, tbd):** native Screen navigation reuses Ctrl+Shift+Space and Mod+Shift+1–9, with Mod+M for maximize/restore. Editing and confirmation dialogs keep priority; new-Screen remains available in an empty workspace. The pinned Linux key API loses physical digits, so shifted symbols use verified US/German layout mappings and unknown symbols pass through instead of guessing.

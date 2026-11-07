@@ -9,7 +9,7 @@ The native workspace already supports real local Screens, split groups and tabs,
 - Maximize and restore the focused canonical tab group through a visible control and the existing Mod+M convention (Cmd on macOS, Alt elsewhere).
 - Keep maximize state local to this window and Screen. Hidden terminals continue consuming output; visibility and size claims follow the displayed group without changing session ownership or the authoritative layout.
 - Preserve tab selection and group identity during maximize. Reconcile removal or movement safely, and restore the full layout when a split or pane move needs to reveal another group.
-- Add Ctrl+Shift+Space for a new local Screen and Mod+Shift+1–9 for direct Screen selection, retaining terminal/editor key routing and handling an empty workspace.
+- Add Ctrl+Shift+Space for a new local Screen and Mod+Shift+1–9 for direct Screen selection, retaining terminal/editor key routing and handling an empty workspace. On Linux, shifted-symbol selection is limited to verified keyboard layouts because the pinned framework does not expose physical key codes; unsupported symbols pass through.
 
 Out of scope: floating windows, popouts, persistent maximize state, remote Screens, settings controls, new layout protocol operations, a second docking model, browser changes, platform release parity and broad CI.
 

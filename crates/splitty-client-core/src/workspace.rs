@@ -151,6 +151,7 @@ pub struct ScreenModel {
     connection_id: Uuid,
     snapshot: Option<Arc<ScreenState>>,
     focused_pane: Option<String>,
+    maximized_slot: Option<String>,
     pending_focus: Option<String>,
     pending_move: Option<PendingMove>,
     selected_tabs: HashMap<String, String>,
@@ -173,6 +174,7 @@ impl ScreenModel {
             connection_id,
             snapshot: None,
             focused_pane,
+            maximized_slot: None,
             pending_focus: None,
             pending_move: None,
             selected_tabs: HashMap::new(),
@@ -197,6 +199,77 @@ impl ScreenModel {
 
     pub fn focused_pane(&self) -> Option<&str> {
         self.focused_pane.as_deref()
+    }
+
+    /// A window-local projection of the authoritative layout. The slot is
+    /// borrowed from the current snapshot, never copied into another tree.
+    pub fn presentation_root(&self) -> Option<&LayoutNode> {
+        let screen = self.snapshot()?;
+        Some(
+            self.maximized_slot
+                .as_ref()
+                .and_then(|id| screen.root.find_node(&NodeId::from(id.as_str())))
+                .filter(|node| matches!(node, LayoutNode::Slot { pane_ids, .. } if !pane_ids.is_empty()))
+                .unwrap_or(&screen.root),
+        )
+    }
+
+    pub fn maximized_slot_id(&self) -> Option<&str> {
+        self.maximized_slot.as_deref()
+    }
+
+    pub fn focused_slot_id(&self) -> Option<&str> {
+        self.snapshot()?
+            .root
+            .find_slot(&PaneId::from(self.focused_pane()?))
+            .map(|slot| slot.id().as_str())
+    }
+
+    pub fn displayed_panes(&self) -> Vec<String> {
+        let mut panes = Vec::new();
+        if let Some(root) = self.presentation_root() {
+            collect_visible(root, &self.selected_tabs, &mut panes);
+        }
+        panes
+    }
+
+    pub fn is_displayed_pane(&self, pane: &str) -> bool {
+        self.presentation_root()
+            .and_then(|root| root.find_slot(&PaneId::from(pane)))
+            .is_some_and(|slot| self.selected_pane(slot) == Some(pane))
+    }
+
+    pub fn toggle_maximize_focused(&mut self) -> bool {
+        if self.maximized_slot.is_some() {
+            return self.set_maximized_slot(None, None);
+        }
+        let slot = self.focused_slot_id().map(str::to_owned);
+        let pane = self.focused_pane().map(str::to_owned);
+        self.set_maximized_slot(slot.as_deref(), pane.as_deref())
+    }
+
+    /// Apply an intent captured at the gesture, ignoring a slot whose pane
+    /// changed before the worker received it.
+    pub fn set_maximized_slot(&mut self, slot: Option<&str>, pane: Option<&str>) -> bool {
+        match (slot, pane) {
+            (None, None) => self.maximized_slot.take().is_some(),
+            (Some(slot), Some(pane)) => {
+                let valid = self.snapshot().is_some_and(|screen| {
+                    matches!(screen.root.find_node(&NodeId::from(slot)),
+                        Some(LayoutNode::Slot { pane_ids, .. })
+                            if pane_ids.iter().any(|id| id.as_str() == pane))
+                });
+                if !valid || self.maximized_slot.as_deref() == Some(slot) {
+                    return false;
+                }
+                self.maximized_slot = Some(slot.to_owned());
+                if !self.is_displayed_pane(self.focused_pane().unwrap_or("")) {
+                    self.focused_pane = self.displayed_panes().into_iter().next();
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     pub fn session_for(&self, pane_id: &str) -> Option<&str> {
@@ -254,6 +327,13 @@ impl ScreenModel {
         let Some(LayoutNode::Slot { id, .. }) = find_slot(snapshot, pane_id) else {
             return false;
         };
+        if self
+            .maximized_slot
+            .as_deref()
+            .is_some_and(|maximized| maximized != id.as_str())
+        {
+            self.maximized_slot = None;
+        }
         let changed = self.selected_tabs.get(id.as_str()).map(String::as_str) != Some(pane_id);
         self.selected_tabs
             .insert(id.as_str().to_owned(), pane_id.to_owned());
@@ -323,6 +403,7 @@ impl ScreenModel {
         self.pending_recreation = None;
         self.pending_move = None;
         self.sent_tab_selections.clear();
+        self.maximized_slot = None;
         self.snapshot = None;
         self.connection_id = connection_id;
         WorkspaceDelta {
@@ -588,6 +669,7 @@ impl ScreenModel {
             return Ok(false);
         };
         self.send_op(client, &op)?;
+        self.maximized_slot = None;
         self.pending_move = Some(PendingMove {
             drag,
             target,
@@ -660,6 +742,7 @@ impl ScreenModel {
             self.pending_panes.remove(&new_pane_id);
             return Err(error);
         }
+        self.maximized_slot = None;
         self.pending_focus = Some(new_pane_id.clone());
         Ok(new_pane_id)
     }
@@ -846,10 +929,25 @@ impl ScreenModel {
         }
         self.selected_tabs
             .retain(|slot_id, _| valid_slots.contains(slot_id));
+        if self.maximized_slot.as_ref().is_some_and(|slot| {
+            !matches!(
+                screen.root.find_node(&NodeId::from(slot.as_str())),
+                Some(LayoutNode::Slot { pane_ids, .. }) if !pane_ids.is_empty()
+            )
+        }) {
+            self.maximized_slot = None;
+        }
         let mut visible = Vec::new();
-        collect_visible(&screen.root, &self.selected_tabs, &mut visible);
-        for floating in &screen.floating {
-            collect_visible(&floating.root, &self.selected_tabs, &mut visible);
+        let root = self
+            .maximized_slot
+            .as_ref()
+            .and_then(|id| screen.root.find_node(&NodeId::from(id.as_str())))
+            .unwrap_or(&screen.root);
+        collect_visible(root, &self.selected_tabs, &mut visible);
+        if self.maximized_slot.is_none() {
+            for floating in &screen.floating {
+                collect_visible(&floating.root, &self.selected_tabs, &mut visible);
+            }
         }
         if self
             .focused_pane

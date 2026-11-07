@@ -34,6 +34,12 @@ pub enum Command {
         screen: String,
         connection: String,
     },
+    SetMaximized {
+        screen: String,
+        connection: uuid::Uuid,
+        slot: Option<String>,
+        pane: Option<String>,
+    },
     MovePane {
         drag: PaneDrag,
         target: String,
@@ -247,13 +253,30 @@ async fn publish(
 
 #[cfg(not(target_os = "windows"))]
 async fn run(
+    commands: mpsc::Receiver<Command>,
+    updates: mpsc::Sender<Update>,
+    stop: Arc<AtomicBool>,
+    cleanup_complete: Arc<AtomicBool>,
+) -> anyhow::Result<()> {
+    run_service(
+        crate::EmbeddedService::start(),
+        commands,
+        updates,
+        stop,
+        cleanup_complete,
+    )
+    .await
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn run_service(
+    service: crate::EmbeddedService,
     mut commands: mpsc::Receiver<Command>,
     updates: mpsc::Sender<Update>,
     stop: Arc<AtomicBool>,
     cleanup_complete: Arc<AtomicBool>,
 ) -> anyhow::Result<()> {
-    use crate::{workspace::WorkspaceDelta, EmbeddedService};
-    let service = EmbeddedService::start();
+    use crate::workspace::WorkspaceDelta;
     let result = async {
         let mut client = service.connect().await?;
         let mut model = None::<LocalWorkspace>;
@@ -428,16 +451,33 @@ async fn run(
                             }
                         }
                         Command::Split { pane, axis } => {
-                            model.split(&client, &pane, axis).map(|_| ())
+                            let result = model.split(&client, &pane, axis).map(|_| ());
+                            if result.is_ok() {
+                                publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
+                            }
+                            result
                         }
                         Command::Tab(pane) => model.new_tab(&client, &pane).map(|_| ()),
                         Command::MovePane {
                             drag,
                             target,
                             placement,
-                        } => model
-                            .move_pane(&client, drag, target, placement)
-                            .map(|_| ()),
+                        } => {
+                            let result = model.move_pane(&client, drag, target, placement);
+                            if result.as_ref().is_ok_and(|moved| *moved) {
+                                publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
+                            }
+                            result.map(|_| ())
+                        }
+                        Command::SetMaximized { screen, connection, slot, pane } => {
+                            if model.connection_id() == connection
+                                && model.shown_screen_id() == Some(screen.as_str())
+                                && model.set_maximized_slot(slot.as_deref(), pane.as_deref())
+                            {
+                                publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
+                            }
+                            Ok(())
+                        }
                         Command::NewTerminal { screen, connection } => {
                             if model.connection_id().to_string() == connection
                                 && model.shown_screen_id() == Some(screen.as_str())
@@ -486,7 +526,7 @@ async fn run(
                             rows,
                         } => {
                             if model.session_for(&pane) == Some(session.as_str())
-                                && model.screen_for(&pane) == model.shown_screen_id()
+                                && model.is_displayed_pane(&pane)
                             {
                                 sizes.insert(session.clone(), (cols, rows));
                                 pending_resize.insert(session);
@@ -501,7 +541,7 @@ async fn run(
                             } else {
                                 desired_visible = panes
                                     .into_iter()
-                                    .filter(|pane| model.screen_for(pane) == screen.as_deref())
+                                    .filter(|pane| model.is_displayed_pane(pane))
                                     .collect();
                                 Ok(())
                             }
@@ -806,6 +846,7 @@ async fn run(
                 desired_visible.retain(|pane| {
                     model.screen_for(pane) == model.shown_screen_id()
                         && model.session_for(pane).is_some()
+                        && model.is_displayed_pane(pane)
                 });
                 closed_sessions.retain(|session| desired_sessions.contains(session));
                 let mut pending_error = None::<String>;
@@ -966,6 +1007,238 @@ mod close_tests {
                 }
             }
         }
+    }
+
+    async fn output_contains(updates: &mut mpsc::Receiver<Update>, session: &str, marker: &[u8]) {
+        let mut output = Vec::new();
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Update::Event(event) = next_update(updates).await {
+                    if let Some(chunk) = event.output() {
+                        if chunk.session_id == session {
+                            output.extend_from_slice(chunk.bytes);
+                            if output.windows(marker.len()).any(|part| part == marker) {
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        })
+        .await
+        .expect("terminal output marker");
+    }
+
+    async fn session_kind(client: &mut crate::Client, kind: &str) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let event = client.next_event().await.unwrap().expect("live claimant");
+                if event.json().is_some_and(|json| json["type"] == kind) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("claimant session event");
+    }
+
+    #[tokio::test]
+    async fn worker_maximize_filters_stale_visibility_and_size_reports_without_losing_output() {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let (commands, receiver) = mpsc::channel(32);
+        let (sender, mut updates) = mpsc::channel(64);
+        let service = crate::EmbeddedService::start();
+        let mut other = service.connect().await.unwrap();
+        session_kind(&mut other, "mux.welcome").await;
+        // Register the competing client before the worker. Its later size
+        // report is not legacy activity, so the worker remains the most recent
+        // active claimant under both Active and Latest policies.
+        other.activity(false).unwrap();
+        other.request_workspace().unwrap();
+        session_kind(&mut other, "mux.workspace_snapshot").await;
+        let stop = Arc::new(AtomicBool::new(false));
+        let cleanup = Arc::new(AtomicBool::new(false));
+        let worker = tokio::spawn(run_service(
+            service,
+            receiver,
+            sender,
+            stop.clone(),
+            cleanup.clone(),
+        ));
+        let first = stable_model(&mut updates).await;
+        let screen = first.shown_screen_id().unwrap().to_owned();
+        let connection = first.connection_id();
+        let pane_a = first.routes()[0].pane_id.clone();
+        commands
+            .send(Command::Split {
+                pane: pane_a.clone(),
+                axis: Axis::Horizontal,
+            })
+            .await
+            .unwrap();
+        let split = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                if let Update::Workspace(model) = next_update(&mut updates).await {
+                    if model.routes().len() == 2
+                        && model
+                            .routes()
+                            .iter()
+                            .all(|route| model.session_ready(&route.session_id))
+                    {
+                        break model;
+                    }
+                }
+            }
+        })
+        .await
+        .expect("split and attachments");
+        let pane_b = split
+            .routes()
+            .into_iter()
+            .find(|route| route.pane_id != pane_a)
+            .unwrap();
+        let slot_a = split
+            .screen(&screen)
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .root
+            .find_slot(&splitty_core::ids::PaneId::from(pane_a.as_str()))
+            .unwrap()
+            .id()
+            .to_string();
+        assert_eq!(split.displayed_panes().len(), 2);
+        other.attach(&pane_b.session_id).unwrap();
+        session_kind(&mut other, "attached").await;
+        other.resize(&pane_b.session_id, 120, 40, true).unwrap();
+        // The same ordered stream makes the snapshot a barrier for this size
+        // report before the worker publishes its smaller 73x19 claim.
+        other.resync(&screen).unwrap();
+        session_kind(&mut other, "mux.screen_snapshot").await;
+        for (pane, session, cols, rows) in [
+            (&pane_a, split.session_for(&pane_a).unwrap(), 91, 29),
+            (&pane_b.pane_id, pane_b.session_id.as_str(), 73, 19),
+        ] {
+            commands
+                .send(Command::ResizePane {
+                    pane: pane.clone(),
+                    session: session.into(),
+                    cols,
+                    rows,
+                })
+                .await
+                .unwrap();
+        }
+        commands
+            .send(Command::Visible {
+                screen: Some(screen.clone()),
+                panes: vec![pane_a.clone(), pane_b.pane_id.clone()],
+            })
+            .await
+            .unwrap();
+        commands
+            .send(Command::Input {
+                pane: pane_b.pane_id.clone(),
+                session: pane_b.session_id.clone(),
+                text: "printf 'BEFORE_%s\\n' \"$(stty size)\"\n".into(),
+            })
+            .await
+            .unwrap();
+        output_contains(&mut updates, &pane_b.session_id, b"BEFORE_19 73").await;
+
+        commands
+            .send(Command::SetMaximized {
+                screen: screen.clone(),
+                connection,
+                slot: Some(slot_a.clone()),
+                pane: Some(pane_a.clone()),
+            })
+            .await
+            .unwrap();
+        loop {
+            if let Update::Workspace(model) = next_update(&mut updates).await {
+                if model.maximized_slot_id() == Some(slot_a.as_str()) {
+                    assert_eq!(model.displayed_panes(), vec![pane_a.clone()]);
+                    assert_eq!(
+                        model.session_for(&pane_b.pane_id),
+                        Some(pane_b.session_id.as_str())
+                    );
+                    break;
+                }
+            }
+        }
+        // Delayed pre-maximize UI reports may arrive, but cannot reclaim or
+        // resize the hidden group. Its session remains attached for output.
+        commands
+            .send(Command::Visible {
+                screen: Some(screen.clone()),
+                panes: vec![pane_a.clone(), pane_b.pane_id.clone()],
+            })
+            .await
+            .unwrap();
+        commands
+            .send(Command::ResizePane {
+                pane: pane_b.pane_id.clone(),
+                session: pane_b.session_id.clone(),
+                cols: 15,
+                rows: 15,
+            })
+            .await
+            .unwrap();
+        commands
+            .send(Command::Input {
+                pane: pane_b.pane_id.clone(),
+                session: pane_b.session_id.clone(),
+                text: "printf 'HIDDEN_%s\\n' \"$(stty size)\"\n".into(),
+            })
+            .await
+            .unwrap();
+        // With no competing claim the PTY could retain 73x19 even if hide was
+        // omitted. 120x40 proves this worker really withdrew its claim while
+        // keeping hidden output attached and rejecting stale 15x15 reports.
+        output_contains(&mut updates, &pane_b.session_id, b"HIDDEN_40 120").await;
+        commands
+            .send(Command::SetMaximized {
+                screen: screen.clone(),
+                connection,
+                slot: None,
+                pane: None,
+            })
+            .await
+            .unwrap();
+        loop {
+            if let Update::Workspace(model) = next_update(&mut updates).await {
+                if model.maximized_slot_id().is_none() && model.displayed_panes().len() == 2 {
+                    break;
+                }
+            }
+        }
+        commands
+            .send(Command::Visible {
+                screen: Some(screen),
+                panes: vec![pane_a, pane_b.pane_id.clone()],
+            })
+            .await
+            .unwrap();
+        commands
+            .send(Command::Input {
+                pane: pane_b.pane_id.clone(),
+                session: pane_b.session_id.clone(),
+                text: "printf 'RESTORED_%s\\n' \"$(stty size)\"\n".into(),
+            })
+            .await
+            .unwrap();
+        output_contains(&mut updates, &pane_b.session_id, b"RESTORED_19 73").await;
+        other.finish().await.unwrap();
+        stop.store(true, Ordering::Release);
+        tokio::time::timeout(Duration::from_secs(10), worker)
+            .await
+            .expect("owned worker cleanup")
+            .unwrap()
+            .unwrap();
+        assert!(cleanup.load(Ordering::Acquire));
     }
 
     #[test]

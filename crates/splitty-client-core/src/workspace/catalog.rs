@@ -265,6 +265,32 @@ impl LocalWorkspace {
     pub fn snapshot(&self) -> Option<&ScreenState> {
         self.shown().and_then(ScreenModel::snapshot)
     }
+    pub fn presentation_root(&self) -> Option<&LayoutNode> {
+        self.shown().and_then(ScreenModel::presentation_root)
+    }
+    pub fn maximized_slot_id(&self) -> Option<&str> {
+        self.shown().and_then(ScreenModel::maximized_slot_id)
+    }
+    pub fn focused_slot_id(&self) -> Option<&str> {
+        self.shown().and_then(ScreenModel::focused_slot_id)
+    }
+    pub fn displayed_panes(&self) -> Vec<String> {
+        self.shown()
+            .map(ScreenModel::displayed_panes)
+            .unwrap_or_default()
+    }
+    pub fn is_displayed_pane(&self, pane: &str) -> bool {
+        self.shown()
+            .is_some_and(|screen| screen.is_displayed_pane(pane))
+    }
+    pub fn toggle_maximize_focused(&mut self) -> bool {
+        self.shown_mut()
+            .is_ok_and(ScreenModel::toggle_maximize_focused)
+    }
+    pub fn set_maximized_slot(&mut self, slot: Option<&str>, pane: Option<&str>) -> bool {
+        self.shown_mut()
+            .is_ok_and(|screen| screen.set_maximized_slot(slot, pane))
+    }
     pub fn focused_pane(&self) -> Option<&str> {
         self.shown().and_then(ScreenModel::focused_pane)
     }

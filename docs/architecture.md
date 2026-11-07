@@ -102,9 +102,15 @@ consumes updates. This runtime retries safe control admission, never user input
 or layout mutations. Its connection-wide
 `LocalWorkspace` holds the ordered Screen catalog, local shown-screen choice,
 pending lifecycle intents and shared session admission. Each `ScreenModel` keeps
-its canonical `Arc<ScreenState>`, local tab/focus choices and pane/session routes.
+its canonical `Arc<ScreenState>`, local tab/focus choices, an optional maximized
+canonical slot ID and pane/session routes. Maximization borrows that slot as a
+presentation root; it sends no layout operation and maintains no second tree.
+An admitted split or pane move restores the full root, while a new tab in the
+same group and a Screen switch preserve the local choice. Snapshot reconciliation
+clears a removed slot and focuses a visible survivor. The close plan still reads
+the complete canonical Screen, including hidden groups.
 The GPUI view keeps one terminal entity registry across all Screens and renders
-the shown Screen's canonical slots and splits directly, without a second docking
+the shown Screen's presentation slots and splits directly, without a second docking
 tree. Switching Screens preserves terminal emulation and attachments; hidden
 terminals consume output and send protocol replies without claiming visibility
 or PTY size. Returning panes publish their measured sizes again.
