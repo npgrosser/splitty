@@ -28,7 +28,7 @@ None. The existing experimental native local screen contract already covers spli
 
 ## Architecture impact
 
-None; the existing GPUI workspace, terminal view and client workspace component relationships remain the same.
+Runtime component boundaries remain the same. The navigation tests construct workspace identities through the public client API; `architecture/gpui.c4` records that `gpui_workspace -> client_root` dependency, since the model also covers test code.
 
 ## Decisions
 
