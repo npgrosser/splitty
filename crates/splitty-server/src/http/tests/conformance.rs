@@ -5,6 +5,7 @@ use crate::service::catalog::{Operation, Request as NativeRequest, Role};
 use serde_json::Value;
 use splitty_core::ids::{PaneId, ScreenId};
 use splitty_core::mux::{Op, ScreenOp};
+use splitty_core::native_api::directory::Directory;
 
 #[tokio::test]
 async fn conditional_daemon_shutdown_is_owner_only_and_bound_to_the_accepting_instance() {
@@ -173,8 +174,26 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
         framed_call(&viewer, index as u32 + 1, "remote.directory.get", json!({}));
         let reply = framed_reply(&mut viewer).await;
         assert_eq!(reply.status, 200);
-        let directory: Value = serde_json::from_str(&reply.body).unwrap();
-        assert_eq!(directory["hosts"][0]["screens"], screens);
+        let native_wire: Value = serde_json::from_str(&reply.body).unwrap();
+        let native: Directory = serde_json::from_str(&reply.body).unwrap();
+        assert_eq!(native.hosts[0].target, "vm1");
+        assert_eq!(
+            native.hosts[0].screens.len(),
+            screens.as_array().unwrap().len()
+        );
+        assert_eq!(serde_json::to_value(&native).unwrap(), native_wire);
+        let router = crate::http::build_router(state.clone());
+        let (status, http_wire) =
+            exchange(&router, api("GET", "/api/remote/directory", None)).await;
+        assert_eq!(status, StatusCode::OK);
+        let http: Directory = serde_json::from_value(http_wire.clone()).unwrap();
+        assert_eq!(http, native);
+        assert_eq!(http_wire, native_wire);
+        assert_eq!(http_wire["hosts"][0]["screens"], screens);
+        assert!(
+            host.asked().is_empty(),
+            "passive reads must not open a host"
+        );
     }
     let (mut remote, remote_task) = framed(&state, Role::Remote).await;
     let remote_welcome = remote
