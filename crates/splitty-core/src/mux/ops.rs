@@ -198,6 +198,17 @@ pub enum ScreenOp {
         resulting_sizes: Option<Vec<f64>>,
     },
 
+    /// Place one root-layout tab before an existing destination tab, or at
+    /// the end. Unlike MovePane, same-slot reorder preserves active selection.
+    #[serde(rename_all = "camelCase")]
+    MoveTab {
+        pane_id: PaneId,
+        source_slot_id: NodeId,
+        target_slot_id: NodeId,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        before_pane_id: Option<PaneId>,
+    },
+
     /// Replace the root layout with a window's arrangement of the panes it
     /// already holds: tab order, splits and sizes, no pane or session changes.
     ArrangePanes { root: Arrangement },

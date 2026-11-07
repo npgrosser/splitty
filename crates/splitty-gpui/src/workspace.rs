@@ -8,9 +8,12 @@ use splitty_client_core::appearance::{AppearanceSnapshot, ColorScheme};
 use splitty_client_core::native_workspace::{Command, Update, Worker};
 use splitty_client_core::workspace::{
     Axis, ClosePlan, CloseTarget, LayoutNode, LocalWorkspace, MovePlacement, PaneDrag, ScreenModel,
+    TabStep,
 };
 use std::{
+    cell::Cell,
     collections::{HashMap, HashSet},
+    rc::Rc,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex,
@@ -37,6 +40,8 @@ enum Shortcut {
     SplitDown,
     ClosePane,
     Focus(Direction),
+    PreviousTab,
+    NextTab,
 }
 
 fn shortcut(key: &Keystroke, is_mac: bool) -> Option<Shortcut> {
@@ -59,6 +64,8 @@ fn shortcut(key: &Keystroke, is_mac: bool) -> Option<Shortcut> {
         ("d", false) => Some(Shortcut::SplitRight),
         ("d", true) => Some(Shortcut::SplitDown),
         ("w", false) => Some(Shortcut::ClosePane),
+        ("pageup", false) => Some(Shortcut::PreviousTab),
+        ("pagedown", false) => Some(Shortcut::NextTab),
         ("left", true) => Some(Shortcut::Focus(Direction::Left)),
         ("right", true) => Some(Shortcut::Focus(Direction::Right)),
         ("up", true) => Some(Shortcut::Focus(Direction::Up)),
@@ -109,6 +116,12 @@ struct VisibleSlot {
     bounds: Bounds<Pixels>,
 }
 
+#[derive(Clone, Default)]
+struct TabScroll {
+    handle: ScrollHandle,
+    last_width: Rc<Cell<Option<Pixels>>>,
+}
+
 fn nearest_slot<'a>(
     slots: &'a [VisibleSlot],
     current: &str,
@@ -144,6 +157,74 @@ fn nearest_slot<'a>(
 struct TabDrag {
     origin: PaneDrag,
     owner: EntityId,
+}
+#[derive(Clone, Debug, PartialEq)]
+enum DropTarget {
+    Body {
+        slot: String,
+        placement: MovePlacement,
+    },
+    Header {
+        slot: String,
+        before: Option<String>,
+        marker_x: Pixels,
+    },
+}
+
+fn slot_by_id<'a>(node: &'a LayoutNode, id: &str) -> Option<&'a LayoutNode> {
+    match node {
+        LayoutNode::Slot { id: slot, .. } => (slot.as_str() == id).then_some(node),
+        LayoutNode::Split { children, .. } => {
+            children.iter().find_map(|child| slot_by_id(child, id))
+        }
+    }
+}
+
+fn tab_insertion(
+    viewport: Bounds<Pixels>,
+    point: Point<Pixels>,
+    count: usize,
+    offset_x: Pixels,
+    mut bounds_for: impl FnMut(usize) -> Option<Bounds<Pixels>>,
+) -> Option<(usize, Pixels)> {
+    if !viewport.contains(&point) || viewport.size.width <= px(4.) || count == 0 {
+        return None;
+    }
+    let marker = |x: Pixels| {
+        let left = viewport.left() + px(1.);
+        let right = viewport.right() - px(3.);
+        if x < left {
+            left
+        } else if x > right {
+            right
+        } else {
+            x
+        }
+    };
+    for index in 0..count {
+        let bounds = bounds_for(index)?;
+        let left = bounds.left() + offset_x;
+        if point.x < left + bounds.size.width / 2. {
+            return Some((index, marker(left)));
+        }
+    }
+    let last = bounds_for(count - 1)?;
+    Some((count, marker(last.right() + offset_x)))
+}
+
+fn body_drop_zone(
+    slot: Bounds<Pixels>,
+    header_height: Pixels,
+    position: Point<Pixels>,
+) -> Option<MovePlacement> {
+    if !slot.contains(&position) || slot.size.height <= header_height {
+        return None;
+    }
+    let body = Bounds::new(
+        point(slot.left(), slot.top() + header_height),
+        size(slot.size.width, slot.size.height - header_height),
+    );
+    drop_zone(body, position)
 }
 struct DragPreview;
 impl Render for DragPreview {
@@ -360,7 +441,8 @@ pub struct Workspace {
     cleanup_complete: Arc<AtomicBool>,
     split_bounds: HashMap<String, Bounds<Pixels>>,
     slot_bounds: HashMap<String, Bounds<Pixels>>,
-    drop_target: Option<(String, MovePlacement)>,
+    tab_scrolls: HashMap<String, TabScroll>,
+    drop_target: Option<DropTarget>,
     drag: Option<ResizeDrag>,
     visible: Vec<String>,
     visible_screen: Option<String>,
@@ -500,6 +582,7 @@ impl Workspace {
                 cleanup_complete: worker.cleanup_complete.clone(),
                 split_bounds: HashMap::new(),
                 slot_bounds: HashMap::new(),
+                tab_scrolls: HashMap::new(),
                 drop_target: None,
                 drag: None,
                 visible: Vec::new(),
@@ -896,10 +979,16 @@ impl Workspace {
             .and_then(|pane| self.panes.get(pane))
             .map(|view| view.terminal.entity_id());
         if let Some(root) = model.presentation_root() {
-            prune_layout_bounds(root, &mut self.split_bounds, &mut self.slot_bounds);
+            let slots = prune_layout_bounds(root, &mut self.split_bounds, &mut self.slot_bounds);
+            self.tab_scrolls.retain(|id, _| slots.contains(id.as_str()));
+            for slot in slots {
+                self.tab_scrolls.entry(slot.to_owned()).or_default();
+            }
+            reveal_changed_tabs(self.model.as_ref(), &model, &self.tab_scrolls);
         } else {
             self.split_bounds.clear();
             self.slot_bounds.clear();
+            self.tab_scrolls.clear();
         }
         self.panes
             .retain(|pane, view| model.session_for(pane) == Some(view.session.as_str()));
@@ -1027,10 +1116,51 @@ impl Workspace {
         if let Some(model) = &mut self.model {
             model.select_tab(pane);
         }
+        self.reveal_pane(pane);
         self.send(Command::Select(pane.to_owned()), cx);
         self.sync_visible(cx);
         self.focus_current(window, cx);
         cx.notify();
+    }
+    fn reveal_pane(&self, pane: &str) {
+        let Some(model) = self.model.as_ref() else {
+            return;
+        };
+        let Some(slot) = model.focused_slot_id() else {
+            return;
+        };
+        let Some(LayoutNode::Slot { pane_ids, .. }) = model
+            .presentation_root()
+            .and_then(|root| slot_by_id(root, slot))
+        else {
+            return;
+        };
+        if let (Some(handle), Some(index)) = (
+            self.tab_scrolls.get(slot),
+            pane_ids.iter().position(|id| id.as_str() == pane),
+        ) {
+            handle.handle.scroll_to_item(index);
+        }
+    }
+    fn reveal_selected_slot(&self, slot: &str) {
+        let Some(model) = self.model.as_ref() else {
+            return;
+        };
+        let Some(node @ LayoutNode::Slot { pane_ids, .. }) = model
+            .presentation_root()
+            .and_then(|root| slot_by_id(root, slot))
+        else {
+            return;
+        };
+        let Some(selected) = model.selected_pane(node) else {
+            return;
+        };
+        if let (Some(scroll), Some(index)) = (
+            self.tab_scrolls.get(slot),
+            pane_ids.iter().position(|pane| pane.as_str() == selected),
+        ) {
+            scroll.handle.scroll_to_item(index);
+        }
     }
     fn focus(&mut self, pane: &str, cx: &mut Context<Self>) {
         if self
@@ -1071,6 +1201,26 @@ impl Workspace {
             self.focus(&pane, cx);
             self.focus_current(window, cx);
         }
+    }
+    fn cycle_tab(&mut self, step: TabStep, cx: &mut Context<Self>) {
+        let Some(model) = self.model.as_ref() else {
+            return;
+        };
+        let Some(screen) = model.shown_screen_id() else {
+            return;
+        };
+        let Some(slot) = model.focused_slot_id() else {
+            return;
+        };
+        self.send(
+            Command::CycleTab {
+                connection: model.connection_id(),
+                screen: screen.to_owned(),
+                slot: slot.to_owned(),
+                step,
+            },
+            cx,
+        );
     }
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         if self.rename.is_some() {
@@ -1119,6 +1269,8 @@ impl Workspace {
                 }
             }
             Shortcut::ToggleMaximize => self.toggle_maximize(cx),
+            Shortcut::PreviousTab => self.cycle_tab(TabStep::Previous, cx),
+            Shortcut::NextTab => self.cycle_tab(TabStep::Next, cx),
             Shortcut::SplitRight => self.split(Axis::Horizontal, cx),
             Shortcut::SplitDown => self.split(Axis::Vertical, cx),
             Shortcut::ClosePane => {
@@ -1729,14 +1881,7 @@ impl Workspace {
     ) {
         let drag = event.drag(cx);
         let target = if drag.owner == cx.entity().entity_id() {
-            self.model.as_ref().and_then(|model| {
-                self.slot_bounds.iter().find_map(|(slot, bounds)| {
-                    let placement = drop_zone(*bounds, event.event.position)?;
-                    model
-                        .can_move(&drag.origin, slot, placement)
-                        .then(|| (slot.clone(), placement))
-                })
-            })
+            self.drop_target_at(&drag.origin, event.event.position)
         } else {
             None
         };
@@ -1744,6 +1889,49 @@ impl Workspace {
             self.drop_target = target;
             cx.notify();
         }
+    }
+
+    fn tab_header_height(&self) -> Pixels {
+        px((self.appearance.font_size + 19.).max(32.) + 1.)
+    }
+
+    fn drop_target_at(&self, drag: &PaneDrag, position: Point<Pixels>) -> Option<DropTarget> {
+        let model = self.model.as_ref()?;
+        let root = model.presentation_root()?;
+        self.slot_bounds.iter().find_map(|(slot, bounds)| {
+            if !bounds.contains(&position) {
+                return None;
+            }
+            if position.y < bounds.top() + self.tab_header_height() {
+                let LayoutNode::Slot { pane_ids, .. } = slot_by_id(root, slot)? else {
+                    return None;
+                };
+                let scroll = self.tab_scrolls.get(slot)?;
+                let (index, marker) = tab_insertion(
+                    scroll.handle.bounds(),
+                    position,
+                    pane_ids.len(),
+                    scroll.handle.offset().x,
+                    |index| scroll.handle.bounds_for_item(index),
+                )?;
+                let before = pane_ids.get(index).map(ToString::to_string);
+                model
+                    .can_place_tab(drag, slot, before.as_deref())
+                    .then(|| DropTarget::Header {
+                        slot: slot.clone(),
+                        before,
+                        marker_x: marker - bounds.left(),
+                    })
+            } else {
+                let placement = body_drop_zone(*bounds, self.tab_header_height(), position)?;
+                model
+                    .can_move(drag, slot, placement)
+                    .then(|| DropTarget::Body {
+                        slot: slot.clone(),
+                        placement,
+                    })
+            }
+        })
     }
 
     fn drop_pane(
@@ -1757,22 +1945,38 @@ impl Workspace {
         if drag.owner != cx.entity().entity_id() {
             return;
         }
-        let placement = self
-            .slot_bounds
-            .get(target)
-            .and_then(|bounds| drop_zone(*bounds, window.mouse_position()));
-        if let (Some(model), Some(placement)) = (&self.model, placement) {
-            match model.check_move(&drag.origin, target, placement) {
-                Ok(true) => self.send(
-                    Command::MovePane {
-                        drag: drag.origin.clone(),
-                        target: target.to_owned(),
-                        placement,
-                    },
-                    cx,
-                ),
-                Ok(false) => {}
-                Err(error) => self.status = error.to_string(),
+        let intent = self.drop_target_at(&drag.origin, window.mouse_position());
+        if let (Some(model), Some(intent)) = (&self.model, intent) {
+            match intent {
+                DropTarget::Body { slot, placement } if slot == target => {
+                    match model.check_move(&drag.origin, &slot, placement) {
+                        Ok(true) => self.send(
+                            Command::MovePane {
+                                drag: drag.origin.clone(),
+                                target: slot,
+                                placement,
+                            },
+                            cx,
+                        ),
+                        Ok(false) => {}
+                        Err(error) => self.status = error.to_string(),
+                    }
+                }
+                DropTarget::Header { slot, before, .. } if slot == target => {
+                    match model.check_place_tab(&drag.origin, &slot, before.as_deref()) {
+                        Ok(true) => self.send(
+                            Command::PlaceTab {
+                                drag: drag.origin.clone(),
+                                target: slot,
+                                before,
+                            },
+                            cx,
+                        ),
+                        Ok(false) => {}
+                        Err(error) => self.status = error.to_string(),
+                    }
+                }
+                _ => {}
             }
         }
         cx.notify();
@@ -1951,13 +2155,59 @@ impl Workspace {
                     .model
                     .as_ref()
                     .and_then(|model| model.selected_pane(node));
+                let scroll = self
+                    .tab_scrolls
+                    .get(id.as_str())
+                    .cloned()
+                    .unwrap_or_default();
+                let tracked = scroll.clone();
+                let weak = cx.entity().downgrade();
+                let slot_for_width = id.to_string();
+                let identity = self.model.as_ref().and_then(|model| {
+                    Some((model.connection_id(), model.shown_screen_id()?.to_owned()))
+                });
                 let mut tabs = div()
+                    .on_children_prepainted(move |_, window, _| {
+                        let width = tracked.handle.bounds().size.width;
+                        if width <= px(0.) {
+                            return;
+                        }
+                        let previous = tracked.last_width.replace(Some(width));
+                        if previous.is_some_and(|old| width >= old) {
+                            return;
+                        }
+                        let Some((owner, screen)) = identity.clone() else {
+                            return;
+                        };
+                        let weak = weak.clone();
+                        let slot = slot_for_width.clone();
+                        let tracked = tracked.clone();
+                        window.on_next_frame(move |_, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                let same_handle =
+                                    this.tab_scrolls.get(&slot).is_some_and(|current| {
+                                        Rc::ptr_eq(&current.last_width, &tracked.last_width)
+                                    });
+                                let same_screen = this.model.as_ref().is_some_and(|model| {
+                                    model.connection_id() == owner
+                                        && model.shown_screen_id() == Some(screen.as_str())
+                                });
+                                if same_handle && same_screen {
+                                    this.reveal_selected_slot(&slot);
+                                    cx.notify();
+                                }
+                            });
+                        });
+                    })
+                    .id(SharedString::from(format!("tab-strip-{id}")))
                     .flex()
+                    .flex_1()
+                    .min_w_0()
                     .h(px((self.appearance.font_size + 19.).max(32.)))
-                    .flex_none()
                     .gap_1()
                     .bg(rgb(self.appearance.raised))
-                    .overflow_hidden();
+                    .overflow_x_scroll()
+                    .track_scroll(&scroll.handle);
                 for (index, pane) in pane_ids.iter().enumerate() {
                     let key = pane.to_string();
                     let close = key.clone();
@@ -1975,6 +2225,7 @@ impl Workspace {
                             div()
                                 .id(SharedString::from(format!("tab-{pane}")))
                                 .flex()
+                                .flex_none()
                                 .items_center()
                                 .gap_3()
                                 .px_3()
@@ -1992,26 +2243,26 @@ impl Workspace {
                                 .on_click(cx.listener(move |this, _, window, cx| {
                                     this.select(&key, window, cx)
                                 }))
+                                .when_some(
+                                    self.model
+                                        .as_ref()
+                                        .and_then(|model| model.capture_drag(pane.as_str())),
+                                    |view, origin| {
+                                        view.on_drag(
+                                            TabDrag {
+                                                origin,
+                                                owner: cx.entity().entity_id(),
+                                            },
+                                            |_, _, _, cx| cx.new(|_| DragPreview),
+                                        )
+                                    },
+                                )
                                 .child(
                                     div()
                                         .id(SharedString::from(format!("drag-tab-{pane}")))
                                         .max_w(px(180.))
                                         .overflow_hidden()
-                                        .child(title)
-                                        .when_some(
-                                            self.model.as_ref().and_then(|model| {
-                                                model.capture_drag(pane.as_str())
-                                            }),
-                                            |view, origin| {
-                                                view.on_drag(
-                                                    TabDrag {
-                                                        origin,
-                                                        owner: cx.entity().entity_id(),
-                                                    },
-                                                    |_, _, _, cx| cx.new(|_| DragPreview),
-                                                )
-                                            },
-                                        ),
+                                        .child(title),
                                 )
                                 .child(
                                     div()
@@ -2039,18 +2290,26 @@ impl Workspace {
                         );
                 }
                 let new_tab = selected.map(str::to_owned);
-                tabs = tabs.child(
-                    div()
-                        .id(SharedString::from(format!("new-tab-{id}")))
-                        .px_3()
-                        .cursor_pointer()
-                        .child("+")
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if let Some(pane) = &new_tab {
-                                this.send(Command::Tab(pane.clone()), cx);
-                            }
-                        })),
-                );
+                let header = div()
+                    .flex()
+                    .items_center()
+                    .flex_none()
+                    .h(px((self.appearance.font_size + 19.).max(32.)))
+                    .bg(rgb(self.appearance.raised))
+                    .child(tabs)
+                    .child(
+                        div()
+                            .id(SharedString::from(format!("new-tab-{id}")))
+                            .flex_none()
+                            .px_3()
+                            .cursor_pointer()
+                            .child("+")
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if let Some(pane) = &new_tab {
+                                    this.send(Command::Tab(pane.clone()), cx);
+                                }
+                            })),
+                    );
                 let focused = self
                     .model
                     .as_ref()
@@ -2088,7 +2347,7 @@ impl Workspace {
                         .absolute()
                         .size_full(),
                     )
-                    .child(tabs);
+                    .child(header);
                 if let Some(pane) = selected {
                     if let Some(view) = self.panes.get(pane) {
                         let focus = pane.to_owned();
@@ -2108,8 +2367,11 @@ impl Workspace {
                         slot = slot.child(div().p_3().child("Starting terminal…"));
                     }
                 }
-                if let Some((target, placement)) = &self.drop_target {
-                    if target == id.as_str() {
+                match &self.drop_target {
+                    Some(DropTarget::Body {
+                        slot: target,
+                        placement,
+                    }) if target == id.as_str() => {
                         if let Some(bounds) = self.slot_bounds.get(target) {
                             let highlight = drop_highlight(*bounds, *placement);
                             slot = slot.child(
@@ -2125,6 +2387,22 @@ impl Workspace {
                             );
                         }
                     }
+                    Some(DropTarget::Header {
+                        slot: target,
+                        marker_x,
+                        ..
+                    }) if target == id.as_str() => {
+                        slot = slot.child(
+                            div()
+                                .absolute()
+                                .left(*marker_x)
+                                .top_0()
+                                .w(px(3.))
+                                .h(self.tab_header_height())
+                                .bg(rgb(self.appearance.accent)),
+                        );
+                    }
+                    _ => {}
                 }
                 slot.into_any_element()
             }
@@ -2438,11 +2716,11 @@ fn visible_slots(
         }
     }
 }
-fn prune_layout_bounds(
-    root: &LayoutNode,
+fn prune_layout_bounds<'a>(
+    root: &'a LayoutNode,
     split_bounds: &mut HashMap<String, Bounds<Pixels>>,
     slot_bounds: &mut HashMap<String, Bounds<Pixels>>,
-) {
+) -> HashSet<&'a str> {
     fn collect<'a>(
         node: &'a LayoutNode,
         splits: &mut HashSet<&'a str>,
@@ -2465,6 +2743,56 @@ fn prune_layout_bounds(
     collect(root, &mut splits, &mut slots);
     split_bounds.retain(|id, _| splits.contains(id.as_str()));
     slot_bounds.retain(|id, _| slots.contains(id.as_str()));
+    slots
+}
+fn reveal_changed_tabs(
+    previous: Option<&LocalWorkspace>,
+    current: &LocalWorkspace,
+    handles: &HashMap<String, TabScroll>,
+) {
+    fn visit(
+        node: &LayoutNode,
+        previous: Option<&LocalWorkspace>,
+        current: &LocalWorkspace,
+        handles: &HashMap<String, TabScroll>,
+    ) {
+        match node {
+            LayoutNode::Slot { id, pane_ids, .. } => {
+                let old_slot = previous
+                    .and_then(LocalWorkspace::presentation_root)
+                    .and_then(|root| slot_by_id(root, id.as_str()));
+                let changed = match old_slot {
+                    Some(
+                        old_slot @ LayoutNode::Slot {
+                            pane_ids: old_ids, ..
+                        },
+                    ) => {
+                        old_ids != pane_ids
+                            || previous.and_then(|model| model.selected_pane(old_slot))
+                                != current.selected_pane(node)
+                    }
+                    _ => true,
+                };
+                if changed {
+                    if let Some(index) = current.selected_pane(node).and_then(|selected| {
+                        pane_ids.iter().position(|pane| pane.as_str() == selected)
+                    }) {
+                        if let Some(handle) = handles.get(id.as_str()) {
+                            handle.handle.scroll_to_item(index);
+                        }
+                    }
+                }
+            }
+            LayoutNode::Split { children, .. } => {
+                for child in children {
+                    visit(child, previous, current, handles);
+                }
+            }
+        }
+    }
+    if let Some(root) = current.presentation_root() {
+        visit(root, previous, current, handles);
+    }
 }
 fn resized_pair(sizes: &[f64], index: usize, delta: f64) -> Option<Vec<f64>> {
     if index + 1 >= sizes.len()
@@ -2612,6 +2940,14 @@ mod tests {
                 Some(Shortcut::SplitRight)
             );
             assert_eq!(shortcut(&key("w", base), is_mac), Some(Shortcut::ClosePane));
+            assert_eq!(
+                shortcut(&key("pageup", base), is_mac),
+                Some(Shortcut::PreviousTab)
+            );
+            assert_eq!(
+                shortcut(&key("pagedown", base), is_mac),
+                Some(Shortcut::NextTab)
+            );
             let shifted = Modifiers {
                 shift: true,
                 ..base
@@ -2632,6 +2968,8 @@ mod tests {
                 );
             }
             assert_eq!(shortcut(&key("t", shifted), is_mac), None);
+            assert_eq!(shortcut(&key("pageup", shifted), is_mac), None);
+            assert_eq!(shortcut(&key("pagedown", shifted), is_mac), None);
             assert_eq!(
                 shortcut(
                     &key(
@@ -2659,6 +2997,7 @@ mod tests {
                 None
             );
             assert_eq!(shortcut(&key("t", base), !is_mac), None);
+            assert_eq!(shortcut(&key("pageup", base), !is_mac), None);
         }
         assert_eq!(
             shortcut(
@@ -2915,6 +3254,57 @@ mod tests {
         let right = super::drop_highlight(bounds, Right);
         assert_eq!(right.origin.x, px(50.));
         assert_eq!(right.size.width, px(50.));
+    }
+
+    #[test]
+    fn tab_header_insertion_clips_to_viewport_and_body_remains_a_distinct_target() {
+        let viewport = Bounds::new(point(px(0.), px(0.)), size(px(180.), px(32.)));
+        let tab = |index| {
+            Some(Bounds::new(
+                point(px(index as f32 * 60.), px(0.)),
+                size(px(60.), px(32.)),
+            ))
+        };
+        for (x, expected_index, expected_marker) in
+            [(10., 0, 1.), (40., 1, 60.), (90., 2, 120.), (170., 3, 177.)]
+        {
+            assert_eq!(
+                super::tab_insertion(viewport, point(px(x), px(16.)), 3, px(0.), tab),
+                Some((expected_index, px(expected_marker))),
+            );
+        }
+        assert_eq!(
+            super::tab_insertion(viewport, point(px(190.), px(16.)), 3, px(0.), tab),
+            None
+        );
+        let clipped = Bounds::new(point(px(100.), px(0.)), size(px(120.), px(32.)));
+        let shifted = |index| {
+            Some(Bounds::new(
+                point(px(80. + index as f32 * 60.), px(0.)),
+                size(px(60.), px(32.)),
+            ))
+        };
+        assert_eq!(
+            super::tab_insertion(clipped, point(px(105.), px(16.)), 3, px(-20.), shifted),
+            Some((1, px(120.))),
+        );
+        assert_eq!(
+            super::tab_insertion(clipped, point(px(99.), px(16.)), 3, px(-20.), shifted),
+            None
+        );
+        let slot = Bounds::new(point(px(0.), px(0.)), size(px(200.), px(120.)));
+        assert_eq!(
+            super::body_drop_zone(slot, px(33.), point(px(100.), px(20.))),
+            None
+        );
+        assert_eq!(
+            super::body_drop_zone(slot, px(33.), point(px(100.), px(60.))),
+            Some(super::MovePlacement::Tab)
+        );
+        assert_eq!(
+            super::body_drop_zone(slot, px(33.), point(px(100.), px(34.))),
+            Some(super::MovePlacement::Above)
+        );
     }
 
     #[test]

@@ -885,7 +885,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "hub-host-decisions-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "viewer-v1" and "viewer-annotations-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "hub-host-decisions-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1" and "viewer-annotations-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -1126,7 +1126,9 @@ interface SelectTabOp {
  * Move a pane within the root layout: into the slot `targetSlotId`, or beside
  * the node or pane `targetSplitId` in `direction`. Rejected when the target is
  * missing, is no slot (for `targetSlotId`), or is gone once the pane is taken
- * out. Windows send `arrange_panes` for drags instead.
+ * out. Browser windows send `arrange_panes` for drags; native windows use
+ * precise move operations. A target-slot move appends and activates, even
+ * within the same slot.
  */
 interface MovePaneOp {
   type: "move_pane";
@@ -1140,6 +1142,25 @@ interface MovePaneOp {
   resultingSizes?: number[];
   /** Resulting sizes at source (after panel left). */
   sourceResultingSizes?: number[];
+}
+
+/**
+ * Exact root-layout tab placement (requires "tab-placement-v1"). The pane
+ * must still belong to sourceSlotId; targetSlotId must be a root slot.
+ * beforePaneId must name another tab of the destination; omission appends.
+ * Same-slot reorder preserves effective selection, including an implicit
+ * first tab. Cross-slot placement activates the moved pane and collapses an
+ * empty source, preserving current surviving sibling proportions. Existing
+ * pane/session records and surviving layout IDs remain unchanged; no process
+ * effects. Invalid source/target/anchor rejects atomically with mux.op_failed;
+ * accepted placement nudges other clients through ordinary layout propagation.
+ */
+interface MoveTabOp {
+  type: "move_tab";
+  paneId: string;
+  sourceSlotId: string;
+  targetSlotId: string;
+  beforePaneId?: string;
 }
 
 /** A layout tree of `arrange_panes`: a LayoutNode without node IDs. */
@@ -1399,6 +1420,7 @@ type Operation =
   | ResizeSplitOp
   | SelectTabOp
   | MovePaneOp
+  | MoveTabOp
   | ArrangePanesOp
   | CreateScreenOp
   | CloseScreenOp

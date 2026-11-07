@@ -551,6 +551,109 @@ mod service {
         window
             .until(|window| window.has_output(&session_a, b"NATIVE_A_"))
             .await;
+        // Exact placement uses the same ordered connection as output. Reorder
+        // hidden tabs without replacing the canonical slot or selecting them.
+        window.model.set_tab_placement_supported(true);
+        let tab_b = window.model.new_tab(&window.client, &a.pane_id).unwrap();
+        window
+            .until(|window| {
+                window
+                    .model
+                    .session_for(&tab_b)
+                    .is_some_and(|session| window.model.session_ready(session))
+            })
+            .await;
+        let tab_c = window.model.new_tab(&window.client, &a.pane_id).unwrap();
+        window
+            .until(|window| {
+                window
+                    .model
+                    .session_for(&tab_c)
+                    .is_some_and(|session| window.model.session_ready(session))
+            })
+            .await;
+        let session_tab = window.model.session_for(&tab_b).unwrap().to_owned();
+        window.model.select_tab(&a.pane_id);
+        let original_slot = window.model.focused_slot_id().unwrap().to_owned();
+        assert!(window.model.toggle_maximize_focused());
+        let drag = window.model.capture_drag(&tab_b).unwrap();
+        window
+            .model
+            .place_tab(
+                &window.client,
+                drag,
+                original_slot.clone(),
+                Some(a.pane_id.clone()),
+            )
+            .unwrap();
+        window
+            .until(|window| !window.model.placement_pending())
+            .await;
+        assert_eq!(window.model.focused_pane(), Some(a.pane_id.as_str()));
+        assert_eq!(
+            window.model.maximized_slot_id(),
+            Some(original_slot.as_str())
+        );
+        assert_eq!(window.model.session_for(&tab_b), Some(session_tab.as_str()));
+        assert!(window
+            .model
+            .cycle_tab(
+                window.client.connection_id(),
+                &a.screen_id,
+                &original_slot,
+                TabStep::Previous
+            )
+            .unwrap());
+        assert_eq!(window.model.focused_pane(), Some(tab_b.as_str()));
+        assert!(!window
+            .model
+            .cycle_tab(
+                window.client.connection_id(),
+                &a.screen_id,
+                &original_slot,
+                TabStep::Previous
+            )
+            .unwrap());
+        let split = window
+            .model
+            .split(&window.client, &a.pane_id, Axis::Horizontal)
+            .unwrap();
+        window
+            .until(|window| {
+                window
+                    .model
+                    .session_for(&split)
+                    .is_some_and(|session| window.model.session_ready(session))
+            })
+            .await;
+        let target = window
+            .model
+            .snapshot()
+            .unwrap()
+            .root
+            .find_slot(&PaneId::from(split.as_str()))
+            .unwrap()
+            .id()
+            .to_string();
+        let drag = window.model.capture_drag(&tab_b).unwrap();
+        window
+            .model
+            .place_tab(&window.client, drag, target.clone(), Some(split.clone()))
+            .unwrap();
+        window
+            .until(|window| !window.model.placement_pending())
+            .await;
+        assert_eq!(window.model.focused_pane(), Some(tab_b.as_str()));
+        assert_eq!(window.model.focused_slot_id(), Some(target.as_str()));
+        assert_eq!(window.model.session_for(&tab_b), Some(session_tab.as_str()));
+        window
+            .client
+            .input(&session_tab, "printf 'TAB_%s\\n' 'ALIVE'\n")
+            .unwrap();
+        window
+            .until(|window| window.has_output(&session_tab, b"TAB_ALIVE"))
+            .await;
+        window.model.select_tab(&a.pane_id);
         let b = window
             .model
             .create_screen(&window.client, "Second")

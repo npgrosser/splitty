@@ -23,7 +23,7 @@ model {
     }
 
     gpui_workspace = component 'gpui_workspace' {
-      description 'Screen controls, shortcuts, resolved native appearance, canonical presentation root, stable pane entities and one cancellable close prompt.'
+      description 'Screen controls, tab insertion geometry and scrolling, shortcuts, resolved native appearance, canonical presentation root, stable pane entities and one cancellable close prompt.'
       metadata { module 'splitty_gpui::workspace' }
     }
 

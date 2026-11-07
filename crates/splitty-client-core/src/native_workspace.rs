@@ -1,7 +1,10 @@
 //! Own the local service and route workspace intents on one ordered connection.
 use crate::{
     appearance::{AppearanceSnapshot, ColorScheme},
-    workspace::{Axis, ClosePlan, CloseTarget, LocalWorkspace, MovePlacement, PaneDrag},
+    workspace::{
+        Axis, ClosePlan, CloseTarget, LocalWorkspace, MovePlacement, PaneDrag, PlacementOutcome,
+        TabStep,
+    },
     Event,
 };
 #[cfg(not(target_os = "windows"))]
@@ -44,6 +47,17 @@ pub enum Command {
         connection: uuid::Uuid,
         slot: Option<String>,
         pane: Option<String>,
+    },
+    PlaceTab {
+        drag: PaneDrag,
+        target: String,
+        before: Option<String>,
+    },
+    CycleTab {
+        connection: uuid::Uuid,
+        screen: String,
+        slot: String,
+        step: TabStep,
     },
     MovePane {
         drag: PaneDrag,
@@ -614,6 +628,24 @@ async fn run_service(
                             result
                         }
                         Command::Tab(pane) => model.new_tab(&client, &pane).map(|_| ()),
+                        Command::PlaceTab { drag, target, before } => {
+                            let result = model.place_tab(&client, drag, target, before);
+                            if result.as_ref().is_ok_and(|moved| *moved) {
+                                publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
+                            }
+                            result.map(|_| ())
+                        }
+                        Command::CycleTab { connection, screen, slot, step } => {
+                            match model.cycle_tab(connection, &screen, &slot, step) {
+                                Ok(true) => {
+                                    let result = model.sync_selected_tabs(&client);
+                                    publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
+                                    result
+                                }
+                                Ok(false) => Ok(()),
+                                Err(error) => Err(error),
+                            }
+                        }
                         Command::MovePane {
                             drag,
                             target,
@@ -729,6 +761,9 @@ async fn run_service(
                                         })
                                     });
                                 workspace.set_tab_selection_supported(supports_tab_selection);
+                                workspace.set_tab_placement_supported(json["capabilities"].as_array().is_some_and(|capabilities| {
+                                    capabilities.iter().any(|capability| capability.as_str() == Some("tab-placement-v1"))
+                                }));
                                 let supports_catalog =
                                     json["capabilities"].as_array().is_some_and(|capabilities| {
                                         capabilities.iter().any(|capability| {
@@ -788,6 +823,7 @@ async fn run_service(
                                                     }
                                                 }
                                             }
+                                            publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
                                             publish(
                                                 &updates,
                                                 Update::Status(format!(
@@ -823,7 +859,7 @@ async fn run_service(
                                     match model.apply_snapshot(event.connection_id, json) {
                                         Ok(applied) => {
                                             delta = applied;
-                                            accepted_close_snapshot = true;
+                                            accepted_close_snapshot = delta.snapshot_changed;
                                         }
                                         Err(error) => {
                                             if event.connection_id == model.connection_id() {
@@ -835,6 +871,7 @@ async fn run_service(
                                                     }
                                                 }
                                             }
+                                            publish(&updates, Update::Workspace(Box::new(model.clone())), &stop).await?;
                                             publish(
                                                 &updates,
                                                 Update::Status(format!(
@@ -912,6 +949,9 @@ async fn run_service(
                             }
                             Some("mux.op_failed") | Some("error") => {
                                 if json["type"] == "mux.op_failed" {
+                                    if let Some(model) = &mut model {
+                                        model.observe_placement_failure(event.connection_id, json);
+                                    }
                                     if let Some(close) = &mut pending_close {
                                         close.observe_failure(json);
                                     }
@@ -990,6 +1030,7 @@ async fn run_service(
                     // Attachment changes are reconciled below. Queue pressure
                     // must not discard a route or close the owned connection.
                     if delta.snapshot_changed
+                        || delta.placement.is_some()
                         || !delta.added.is_empty()
                         || !delta.removed.is_empty()
                     {
@@ -997,6 +1038,9 @@ async fn run_service(
                             publish(&updates, Update::Workspace(Box::new(model.clone())), &stop)
                                 .await?;
                         }
+                    }
+                    if let Some(PlacementOutcome::Rejected(reason)) = delta.placement {
+                        publish(&updates, Update::Status(reason), &stop).await?;
                     }
                     // The original native accounting stays alive until UI consumption.
                     publish(&updates, Update::Event(event), &stop).await?;

@@ -490,6 +490,7 @@ export type MuxOperation =
   | { type: "close_pane"; paneId: string; resultingSizes?: number[] }
   | { type: "resize_split"; nodeId: string; sizes: number[] }
   | { type: "move_pane"; paneId: string; targetSlotId?: string; targetSplitId?: string; direction?: "right" | "below" | "left" | "above"; resultingSizes?: number[]; sourceResultingSizes?: number[] }
+  | { type: "move_tab"; paneId: string; sourceSlotId: string; targetSlotId: string; beforePaneId?: string }
   // The window's grid after a drag; only the panes the root layout holds (`arrange-panes`).
   | { type: "arrange_panes"; root: Arrangement }
   | { type: "select_tab"; paneId: string }

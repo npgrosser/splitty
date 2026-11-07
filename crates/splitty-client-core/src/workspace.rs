@@ -30,6 +30,20 @@ pub struct WorkspaceDelta {
     pub snapshot_changed: bool,
     pub added: Vec<SessionRoute>,
     pub removed: Vec<SessionRoute>,
+    pub placement: Option<PlacementOutcome>,
+}
+
+/// An exact tab intent has reached its ordered verification point.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PlacementOutcome {
+    Confirmed,
+    Rejected(String),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TabStep {
+    Previous,
+    Next,
 }
 
 /// A native close request names the exact scope the user chose.
@@ -107,6 +121,12 @@ pub struct PaneDrag {
     session: String,
     source_slot: String,
     snapshot: Arc<ScreenState>,
+}
+
+impl PaneDrag {
+    pub fn pane_id(&self) -> &str {
+        &self.pane
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -105,8 +105,8 @@ pending lifecycle intents and shared session admission. Each `ScreenModel` keeps
 its canonical `Arc<ScreenState>`, local tab/focus choices, an optional maximized
 canonical slot ID and pane/session routes. Maximization borrows that slot as a
 presentation root; it sends no layout operation and maintains no second tree.
-An admitted split or pane move restores the full root, while a new tab in the
-same group and a Screen switch preserve the local choice. Snapshot reconciliation
+An admitted split or cross-group pane move restores the full root, while a new tab
+or reorder in the same group and a Screen switch preserve the local choice. Snapshot reconciliation
 clears a removed slot and focuses a visible survivor. The close plan still reads
 the complete canonical Screen, including hidden groups.
 The GPUI view keeps one terminal entity registry across all Screens and renders
@@ -165,6 +165,26 @@ Shared admission counts all attached and pending terminal routes across Screens,
 with separate catalog retention bounds. Authoritative removal retires only that
 Screen's routes and entities. Focus restoration is tied to navigation or terminal
 replacement so unrelated updates cannot interrupt a rename editor or close prompt.
+
+Exact native header placement uses capability-gated `move_tab`, carrying source
+and destination slot IDs plus a before-tab anchor or append intent. The pure mux
+reducer validates these against current state, preserves effective selection for
+same-group reorder and derives surviving source proportions for cross-group moves.
+It retains pane/session records and surviving node identities. Legacy `move_pane`
+keeps append/activate and directional split behavior; the browser retains its
+complete `arrange_panes` path.
+
+One pending exact placement lives in `LocalWorkspace`. Admission commits its
+mutation watermark; an older in-flight catalog cannot settle it. A same-owner
+catalog covering that watermark is the ordered fence for failures and Screen
+existence. After it, the first matching accepted Screen snapshot proves exact
+adjacency/end placement or settles supersession. A matching but unaccepted older
+revision, malformed verification, or removed Screen ends verification with an
+error and retains the last accepted model. Read refreshes can retry admission;
+mutations cannot. Later local navigation cancels deferred focus without dropping
+verification. GPUI owns only tab-strip geometry, scrolling, insertion feedback and
+selected-tab reveal. Previous/next tab commands capture owner, Screen and slot and
+are clamped against the worker's current selection in the shared client model.
 
 Terminal commands enter one shared bounded worker queue directly through a
 terminal-local callback. Each workspace callback captures its pane and session

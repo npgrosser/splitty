@@ -82,8 +82,11 @@ and resize splits by dragging the divider. After closing the final pane,
 **New terminal** repopulates the same Screen. Ctrl+Shift+C/V copies and pastes
 in the focused terminal. Wheel input scrolls normal history; in the alternate
 screen it sends up/down keys using the emulator's current cursor-key mode, with
-at most five keys per event. Drag a terminal tab into another group or onto one of
-its four edges to move it without restarting its shell; Escape cancels the drag.
+at most five keys per event. Drag a terminal tab between header tabs to reorder it
+or insert it into another group; the insertion marker shows the exact position.
+Tab strips scroll horizontally and reveal keyboard-selected tabs. Dropping onto
+a group body or its four edges retains center/edge movement without restarting
+the shell; Escape cancels the drag.
 
 Screen controls create, select, rename and close local Screens. Hidden Screens
 keep their terminal output and scrollback. Closing the last Screen leaves
@@ -102,6 +105,7 @@ Workspace shortcuts use **Cmd** on macOS and **Alt** on other hosts as `Mod`:
 | Mod+D / Mod+Shift+D | Split right / below |
 | Mod+W | Close the focused pane |
 | Mod+M | Maximize or restore the focused tab group |
+| Mod+PageUp / Mod+PageDown | Previous / next tab of the focused group, stopping at its ends |
 | Ctrl+Shift+Space | Create a local Screen, including from an empty workspace |
 | Mod+Shift+1–9 | Select the corresponding local Screen |
 | Mod+Shift+Left/Right/Up/Down | Focus the nearest visible split group in that direction |
@@ -116,7 +120,8 @@ selection remains available.
 
 Maximization is a per-window, per-Screen reference to a canonical tab group.
 It preserves tabs, terminal history and hidden output without changing the server
-layout. New tabs retain it; admitted splits and pane moves restore the full view.
+layout. New tabs and reorder within that group retain it; admitted splits and
+cross-group moves restore the full view.
 Hidden groups release visible PTY size claims, and restoration reports the
 visible terminals' measured sizes. Screen and window close still include hidden
 groups.
@@ -562,6 +567,44 @@ center drops, all four split edges and Escape cancellation on isolated X11 with
 software Vulkan rendering. The original shell process remained the same through
 every move, screenshots retained its terminal history, and normal window closure
 left no child processes. These are functional results, not latency or hardware
-performance evidence. Group moves, tab reordering and cross-window/screen moves
-remain outside this increment. Broader release/CI and cross-platform cutover
+performance evidence. Exact header placement and same-group reordering now use
+the additive `move_tab` operation, preserving canonical slot IDs and active
+selection. It requires `tab-placement-v1`; body/edge moves retain the original
+operation. Group moves and cross-window/screen moves remain later work. Broader release/CI and cross-platform cutover
 validation remain separate.
+
+
+## Exact native tab management acceptance
+
+The native header supports same-group reorder and exact insertion before a tab
+or at the end of another group. The whole tab chip is draggable; ordinary close
+clicks retain their behavior. Overflow strips scroll horizontally, keep the add
+button visible, and reveal selected tabs after keyboard navigation, Screen
+switches and narrowing a previously maximized group. Mod+PageUp/PageDown stops
+at the focused group's ends. Rename editors and close dialogs retain priority.
+
+The real-window `gpui-screens.py --tab-management` run passed seven check groups
+on the release binary with SHA-256
+`4198a51f633c56e3dcaef87c43000f7ccc81c42ec878b6ea26e4988823e22dfb`.
+It compares actual pointer and keyboard gestures against the embedded fixture's
+existing owner-control `/api/mux/state` response and checks original pane/session
+IDs and shell PIDs. Coverage includes first/middle/end reorder with selection and
+maximization retained, cross-group insertion, Escape cancellation, overflowing
+strips after Screen and viewport changes, clamped group navigation, editor/dialog
+priority and ordinary tab closure. The private X11 fixture exited normally with
+no surviving children. This harness additionally requires `curl` to read its own
+service socket; it never discovers an unrelated daemon.
+
+Targeted mux, protocol, session-handler, owner-control, client and GPUI tests,
+touched-package Clippy, frontend type checks and the architecture checks passed.
+Adversarial client tests cover the ordered catalog fence, earlier and malformed
+snapshots, lower revisions, stale identities and navigation during settlement;
+the real-service test retains terminal output through exact placement. The same
+release binary passed the normal workspace smoke on Wayland and X11 with hardware
+D3D12 rendering. These checks establish functionality, not new latency numbers or
+native Windows/macOS release coverage.
+
+```sh
+python3 scripts/testing/gpui-screens.py target/release/splitty-gpui \
+  --tab-management --output target/gpui-tab-management
+```

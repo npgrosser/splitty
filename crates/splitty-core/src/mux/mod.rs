@@ -103,6 +103,12 @@ pub enum MuxError {
     #[error("move target {0} is gone once the pane is taken out")]
     MoveTargetGone(NodeId),
 
+    #[error("pane {pane} is not in root slot {slot}")]
+    PaneOutsideSlot { pane: PaneId, slot: NodeId },
+
+    #[error("pane {0} cannot be its own insertion anchor")]
+    SelfTabAnchor(PaneId),
+
     #[error("the arrangement misses pane {0}")]
     ArrangementMissesPane(PaneId),
 

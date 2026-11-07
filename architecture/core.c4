@@ -55,7 +55,7 @@ model {
     // The mux: pure model, and the effect runner at its edge
 
     mux = component 'mux' {
-      description 'The workspace model: state, ops, validation, the pure reducer (state, op) -> (state, effects), the grid projection and the store. Managed-job launch, ownership, result and never-respawn records live with the layout. Trusted session metadata updates and omitted screen naming remain pure. No I/O.'
+      description 'The workspace model: state, exact tab placement with stable layout identities and server-current proportions, ops, validation, the pure reducer (state, op) -> (state, effects), the grid projection and the store. Managed-job launch, ownership, result and never-respawn records live with the layout. Trusted session metadata updates and omitted screen naming remain pure. No I/O.'
       metadata {
         module 'splitty_core::mux'
         spec 'workspace-model'

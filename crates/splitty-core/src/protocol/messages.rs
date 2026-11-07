@@ -656,6 +656,8 @@ impl ServerEvent {
                 "layout-arrange-v1".into(),
                 // mux-protocol, Selected Tabs Reach the Server.
                 "tab-select-v1".into(),
+                // mux-protocol, Exact Tab Placement Capability.
+                "tab-placement-v1".into(),
                 // viewer-panes, Viewer Capability.
                 "viewer-v1".into(),
                 // viewer-annotations, Annotations Capability.
@@ -819,6 +821,7 @@ mod tests {
                 "scratchpad-v1",
                 "layout-arrange-v1",
                 "tab-select-v1",
+                "tab-placement-v1",
                 "viewer-v1",
                 "viewer-annotations-v1",
                 "server-templates-v1",

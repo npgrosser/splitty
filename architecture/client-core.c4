@@ -23,12 +23,12 @@ model {
     }
 
     client_workspace = component 'client_workspace' {
-      description 'Connection-wide catalog and admission, per-screen canonical snapshots with local tab, focus and maximized-slot projection, session routes and full-scope close impact assessment.'
+      description 'Connection-wide catalog and admission, per-screen canonical snapshots with local tab, focus and maximized-slot projection, session routes, exact tab placement with ordered settlement, clamped captured group navigation and full-scope close impact assessment.'
       metadata { module 'splitty_client_core::workspace' }
     }
 
     native_workspace = component 'native_workspace' {
-      description 'Native workspace runtime: one owned service, ordered connection, captured viewport intents, checked close settlement, verified shutdown, attachment and displayed-pane size and visibility retries.'
+      description 'Native workspace runtime: one owned service, ordered connection, captured viewport and tab navigation intents, checked placement and close settlement, verified shutdown, attachment and displayed-pane size and visibility retries.'
       metadata { module 'splitty_client_core::native_workspace' }
     }
 

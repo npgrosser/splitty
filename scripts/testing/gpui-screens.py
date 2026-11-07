@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import stat
 import subprocess
 import sys
 import tempfile
@@ -122,6 +123,7 @@ def main():
     parser.add_argument("--xkb-tools-dir", type=Path, help="prepend private XKB tools to PATH for setxkbmap")
     parser.add_argument("--appearance-matrix", action="store_true", help="run isolated dark, light, font and fallback startup fixtures")
     parser.add_argument("--appearance-case", choices=["dark", "light", "font", "fallback"])
+    parser.add_argument("--tab-management", action="store_true", help="exercise exact native tab placement and focused-group navigation")
     args = parser.parse_args()
     args.output.mkdir(parents=True, exist_ok=True)
     binary = args.binary.resolve(strict=True)
@@ -164,14 +166,19 @@ def main():
     env["DISPLAY"] = args.display
     if args.xkb_tools_dir:
         env["PATH"] = str(args.xkb_tools_dir) + ":" + env.get("PATH", "")
-    if args.appearance_case:
+    if args.appearance_case or args.tab_management:
         fixture = (args.output / "config").resolve()
         fixture.mkdir(mode=0o700)
         fixture.chmod(0o700)
         (fixture / "themes").mkdir(mode=0o700, exist_ok=True)
         theme = {"dark": "splitty-dark", "light": "splitty-light",
-                 "font": "splitty-dark", "fallback": "unsupported-native"}[args.appearance_case]
+                 "font": "splitty-dark", "fallback": "unsupported-native"}.get(args.appearance_case, "splitty-dark")
         config = f'[appearance]\ntheme_mode = "fixed"\ntheme = "{theme}"\n'
+        if args.tab_management:
+            config += 'font_size = 0\n'
+            for key in ("SPLITTY_SOCK", "SPLITTY_AGENT_SOCK", "SPLITTY_ADDR", "SPLITTY_TOKEN",
+                        "SPLITTY_SERVER", "SPLITTY_PANE_ID", "SPLITTY_SCREEN_ID", "SPLITTY_SESSION_ID"):
+                env.pop(key, None)
         if args.appearance_case == "font":
             config += 'font_family = "DejaVu Sans"\nfont_size = 18\n'
         (fixture / "config.toml").write_text(config)
@@ -196,6 +203,19 @@ def main():
 
     def x(*arguments, timeout=15):
         return subprocess.check_output([str(args.xdotool), *map(str, arguments)], env=env, text=True, timeout=timeout)
+
+    def owned_state():
+        """Read the app's authoritative workspace over its own owner socket."""
+        run_dir = Path(env["SPLITTY_CONFIG_DIR"]) / "run"
+        sockets = list(run_dir.glob("spike-*.sock"))
+        if len(sockets) != 1 or not stat.S_ISSOCK(sockets[0].lstat().st_mode):
+            raise RuntimeError(f"Expected exactly one owned control socket in {run_dir}")
+        response = subprocess.run(["curl", "--fail", "--silent", "--show-error", "--max-time", "5",
+                                   "--unix-socket", str(sockets[0]), "http://localhost/api/mux/state"],
+                                  check=True, capture_output=True, text=True, timeout=7)
+        state = json.loads(response.stdout)
+        result["ownedControlSocket"] = sockets[0].name
+        return state
 
     def click(point, pause=.4):
         x("mousemove", "--window", window, *point, "click", 1)
@@ -252,13 +272,15 @@ def main():
         display.sync()
         time.sleep(.4)
 
-    def drag_tab(start, target):
+    def drag_tab(start, target, cancel=False):
         x("mousemove", "--window", window, *start, "mousedown", 1)
         time.sleep(.1)
         x("mousemove", "--window", window, start[0] + 15, start[1] + 20)
         time.sleep(.15)
         x("mousemove", "--window", window, *target)
         time.sleep(.25)
+        if cancel:
+            display.type_key("Escape")
         x("mouseup", 1)
         time.sleep(.8)
 
@@ -627,6 +649,221 @@ def main():
         result["shellPids"] = {"original": a_pid, "split": b_pid, "tab": c_pid}
         result["checks"].append("pty-and-history-retained-through-layout")
 
+    def exercise_tab_management(a_pid):
+        # This is the real embedded service's existing owner-only read route.
+        # The fixture path is owned by this run; no daemon discovery is used.
+        wait_until(lambda: len(list((fixture / "run").glob("spike-*.sock"))) == 1,
+                   "Embedded owner control socket did not appear", seconds=10)
+        state = owned_state()
+        screen_id = state["activeScreenId"]
+        assert screen_id in state["screens"], "No active Screen in owned service"
+        result["screenId"] = screen_id
+        result["tabStates"] = []
+
+        def slots(node):
+            if node["type"] == "slot":
+                return [node]
+            return [slot for child in node["children"] for slot in slots(child)]
+
+        def view():
+            screen = owned_state()["screens"][screen_id]
+            return screen, slots(screen["root"])
+
+        def slot_with(pane):
+            return next((slot for slot in view()[1] if pane in slot["paneIds"]), None)
+
+        def selected(slot):
+            return slot.get("activePaneId") or slot["paneIds"][0]
+
+        def record(label):
+            screen, current = view()
+            result["tabStates"].append({"label": label, "revision": screen["revision"],
+                                        "slots": [{"id": slot["id"], "paneIds": slot["paneIds"],
+                                                   "activePaneId": slot.get("activePaneId")}
+                                                  for slot in current]})
+            capture(f"tabs-{label}")
+
+        def identity(label, point=(300, 180)):
+            value = shell_value_at(label, '"$SPLITTY_PANE_ID:$SPLITTY_SESSION_ID:$$"', point)
+            pane, session, pid = value.split(":")
+            assert pane and session and pid.isdecimal(), f"Missing owned PTY identity: {value}"
+            return {"pane": pane, "session": session, "pid": int(pid)}
+
+        def wait_order(pane, expected, label, active=None):
+            def matches():
+                slot = slot_with(pane)
+                return slot if slot and slot["paneIds"] == expected and (active is None or selected(slot) == active) else None
+            matched = wait_until(matches, f"{label}: authoritative tab order/selection did not settle", seconds=10)
+            screen, _ = view()
+            for item in identities:
+                assert screen["panes"][item["pane"]]["sessionId"] == item["session"], (
+                    f"{label}: pane/session identity changed"
+                )
+                assert alive(item["pid"]), f"{label}: original shell exited"
+            record(label)
+            return matched
+
+        a = identity("tab-a-initial")
+        assert a["pid"] == a_pid
+        identities = [a]
+        for name in ("b", "c", "d"):
+            chord("Alt_L", "t")
+            identities.append(identity(f"tab-{name}-initial"))
+        a, b, c, d = identities
+        assert len({item["pane"] for item in identities}) == 4
+        assert len({item["session"] for item in identities}) == 4
+        left = wait_order(a["pane"], [item["pane"] for item in identities], "initial-four", d["pane"])
+        left_slot = left["id"]
+        chord("Alt_L", "d")  # A distinct group makes maximization visible.
+        e = identity("tab-e-split", (850, 180))
+        identities.append(e)
+        right_slot = wait_order(e["pane"], [e["pane"]], "split-right", e["pane"])["id"]
+        assert right_slot != left_slot
+        active_chip = rgb(window_pixels((620, 50, 1, 1)))
+        inactive_row = rgb(window_pixels((900, 50, 1, 1)))
+        assert active_chip != inactive_row, "Selected tab cannot be distinguished from its strip"
+        click((300, 180))
+        assert shell_pid("tab-d-before-maximize") == d["pid"]
+        chord("Alt_L", "m")
+        max_header = window_pixels((650, 47, 530, 32))
+        record("maximized-left")
+
+        # The selected D stays selected while its exact position changes.
+        drag_tab((310, 62), (10, 62))  # Whole-chip padding must start the drag.
+        wait_order(a["pane"], [d["pane"], a["pane"], b["pane"], c["pane"]],
+                   "same-group-first", d["pane"])
+        assert window_pixels((650, 47, 530, 32)) == max_header, "Reorder lost maximized group"
+        drag_tab((30, 62), (260, 62))
+        wait_order(a["pane"], [a["pane"], b["pane"], d["pane"], c["pane"]],
+                   "same-group-middle", d["pane"])
+        assert window_pixels((650, 47, 530, 32)) == max_header
+        drag_tab((200, 62), (335, 62))
+        wait_order(a["pane"], [a["pane"], b["pane"], c["pane"], d["pane"]],
+                   "same-group-end", d["pane"])
+        assert window_pixels((650, 47, 530, 32)) == max_header
+        result["checks"].append("same-group-first-middle-end-retains-active-maximize-and-sessions")
+
+        chord("Alt_L", "m")
+        click((850, 180))
+        chord("Alt_L", "t")
+        f = identity("tab-f-right", (850, 180))
+        identities.append(f)
+        wait_order(e["pane"], [e["pane"], f["pane"]], "right-before-cross", f["pane"])
+        drag_tab((285, 62), (705, 62))
+        wait_order(e["pane"], [e["pane"], d["pane"], f["pane"]],
+                   "cross-group-middle", d["pane"])
+        wait_order(a["pane"], [a["pane"], b["pane"], c["pane"]], "cross-group-source")
+        result["checks"].append("cross-group-exact-middle-retains-sessions")
+
+        before_cancel = [(slot["id"], slot["paneIds"], selected(slot)) for slot in view()[1]]
+        drag_tab((625, 62), (835, 62), cancel=True)
+        assert [(slot["id"], slot["paneIds"], selected(slot)) for slot in view()[1]] == before_cancel, (
+            "Escape changed authoritative tab layout or selection"
+        )
+        record("escape-cancelled")
+        result["checks"].append("escape-cancels-tab-placement")
+
+        # Overflow is created inside the right half-width group. The selected
+        # last tab must remain reachable after the strip scrolls into view.
+        for _ in range(8):
+            chord("Alt_L", "t")
+        right = wait_until(lambda: slot_with(e["pane"]) if slot_with(e["pane"]) and len(slot_with(e["pane"])["paneIds"]) == 11 else None,
+                           "Overflow tabs did not appear", seconds=12)
+        last = right["paneIds"][-1]
+        wait_until(lambda: selected(slot_with(e["pane"])) == last,
+                   "Newly created overflow tab was not selected")
+        def revealed_x():
+            row = window_pixels((605, 50, 550, 1))
+            matches = [605 + column for column in range(550)
+                       if rgb(row[column * 4:column * 4 + 4]) == active_chip]
+            return matches if matches and max(matches) > 900 else None
+        assert revealed_x(), "Selected overflow tab was not visible in the right strip"
+        record("overflow-selected-last")
+        chord("Control_L", "Shift_L", "space")
+        away_pid = shell_pid("tab-overflow-other-screen")
+        assert away_pid not in {item["pid"] for item in identities}
+        chord("Alt_L", "Shift_L", "1")
+        wait_until(revealed_x, "Returning to the Screen did not reveal its selected overflow tab")
+        assert selected(slot_with(e["pane"])) == last
+        record("overflow-screen-return-revealed")
+        chord("Alt_L", "m")
+        record("overflow-maximized")
+        chord("Alt_L", "m")
+        wait_until(revealed_x, "Restoring the narrower group clipped its selected overflow tab")
+        record("overflow-narrow-restored-revealed")
+        before_scroll = window_pixels((605, 47, 500, 32))
+        x("mousemove", "--window", window, 900, 62)
+        for _ in range(5):
+            display.wheel(6)  # X11 horizontal wheel left.
+        time.sleep(.5)
+        assert window_pixels((605, 47, 500, 32)) != before_scroll, "Overflow strip did not scroll horizontally"
+        record("overflow-scrolled-left")
+        chord("Alt_L", "Page_Down")
+        assert selected(slot_with(e["pane"])) == last, "Next at end wrapped instead of clamping"
+        chord("Alt_L", "Page_Up")
+        previous = right["paneIds"][-2]
+        wait_until(lambda: selected(slot_with(e["pane"])) == previous,
+                   "Previous did not select prior tab")
+        chord("Alt_L", "Page_Down")
+        wait_until(lambda: selected(slot_with(e["pane"])) == last,
+                   "Next did not return to the last tab")
+        visible = wait_until(revealed_x, "Keyboard selection did not reveal the last overflow tab")
+        click((max(visible) - 30, 62))
+        assert selected(slot_with(e["pane"])) == last, "Visible selected chip did not route to its tab"
+        record("overflow-keyboard-revealed-last")
+        for _ in range(12):
+            chord("Alt_L", "Page_Up")
+        first = right["paneIds"][0]
+        wait_until(lambda: selected(slot_with(e["pane"])) == first,
+                   "Previous did not reach first tab")
+        chord("Alt_L", "Page_Up")
+        assert selected(slot_with(e["pane"])) == first, "Previous at start wrapped instead of clamping"
+        left_active = selected(slot_with(a["pane"]))
+        chord("Alt_L", "Page_Down")
+        assert selected(slot_with(a["pane"])) == left_active, "Focused-group keys changed other group"
+        record("focused-group-clamped-keys")
+        result["checks"].append("overflow-and-clamped-focused-group-keys")
+
+        click((145, 20))  # Screen rename editor has shortcut priority.
+        editor_active = selected(slot_with(e["pane"]))
+        chord("Alt_L", "Page_Down")
+        assert selected(slot_with(e["pane"])) == editor_active, "Editor leaked TabStep"
+        display.type_key("Escape")
+        record("editor-blocked-tabstep")
+        result["checks"].append("editor-blocks-tab-navigation")
+        chord("Alt_L", "Page_Up")
+        wait_until(lambda: selected(slot_with(e["pane"])) == e["pane"],
+                   "Could not select original right-hand shell for modal check")
+        click((850, 180))
+        send("sleep 60")
+        wait_until(lambda: Path(f"/proc/{e['pid']}/task/{e['pid']}/children").read_text().strip(),
+                   "Busy sleep never started in the selected shell", seconds=8)
+        wait_until(lambda: view()[0]["sessions"].get(e["session"], {}).get("busy") is True,
+                   "Service did not observe the selected shell as busy", seconds=8)
+        alt_w()
+        prompt = close_dialog("tabs-modal-priority-prompt")
+        assert all(channel > 200 for channel in window_pixels((470, 325, 1, 1))[:3]), (
+            "Busy pane close did not show a confirmation dialog"
+        )
+        modal_active = selected(slot_with(e["pane"]))
+        chord("Alt_L", "Page_Down")
+        assert selected(slot_with(e["pane"])) == modal_active, "Close dialog leaked TabStep"
+        assert window_pixels((455, 300, 289, 160)) == prompt, "TabStep dismissed the close dialog"
+        keep_open("tabs-modal-priority", prompt)
+        assert focused_shell_pid("tab-after-modal-cancel") == e["pid"], "Close cancel lost original shell"
+        result["checks"].append("modal-blocks-tab-navigation")
+        capture("tabs-before-ordinary-close")
+        click((670, 62))  # Close X of the revealed first right-hand tab E.
+        wait_until(lambda: not alive(e["pid"]) and e["pane"] not in view()[0]["panes"],
+                   "Ordinary tab close did not remove only E", seconds=10)
+        assert all(alive(item["pid"]) for item in identities if item != e), (
+            "Ordinary close ended an unrelated original shell"
+        )
+        record("ordinary-close-preserves-other-tabs")
+        result["checks"].append("ordinary-tab-close-still-works-after-drag")
+        result["shellPids"] = {name: item["pid"] for name, item in zip("abcdef", identities)}
+        result["shellPids"]["otherScreen"] = away_pid
+
     with tempfile.TemporaryDirectory(prefix="splitty-screens-") as directory, \
             (args.output / "xvfb.log").open("w") as xvfb_log, \
             (args.output / "app.log").open("w") as app_log:
@@ -688,7 +925,9 @@ def main():
             x("windowfocus", window)
             capture("initial")
             a_pid = shell_pid("a-initial")
-            if args.appearance_case:
+            if args.tab_management:
+                exercise_tab_management(a_pid)
+            elif args.appearance_case:
                 exercise_appearance(a_pid)
             elif args.navigation_keys_only:
                 exercise_navigation_keys_only(a_pid)
@@ -787,18 +1026,18 @@ def main():
             if app is not None:
                 if app.poll() is None and window is not None and display is not None:
                     before_close = None
-                    if args.appearance_case:
+                    if args.appearance_case or args.tab_management:
                         try:
                             before_close = window_pixels((455, 300, 289, 160))
                         except (RuntimeError, subprocess.CalledProcessError):
                             pass
                     display.close_window(window)
-                    if args.appearance_case:
+                    if args.appearance_case or args.tab_management:
                         time.sleep(.6)
                         if app.poll() is None and before_close is not None:
                             try:
                                 if window_pixels((455, 300, 289, 160)) != before_close:
-                                    capture("appearance-window-close-prompt")
+                                    capture("tabs-window-close-prompt" if args.tab_management else "appearance-window-close-prompt")
                                     confirm_close()
                                     result["checks"].append("window-close-confirmed")
                             except (RuntimeError, subprocess.CalledProcessError):

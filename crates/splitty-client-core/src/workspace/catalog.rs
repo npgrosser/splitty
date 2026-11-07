@@ -1,6 +1,8 @@
 //! Connection-wide catalog, admission and local Screen selection.
 use super::*;
 use crate::connection::identifier;
+mod placement;
+use placement::PendingTabPlacement;
 
 /// Empty Screens consume model capacity independently of session attachments.
 pub const MAX_LOCAL_SCREENS: usize = 128;
@@ -21,6 +23,8 @@ pub struct LocalWorkspace {
     activate_created: Option<String>,
     catalog_supported: bool,
     tab_selection_supported: bool,
+    tab_placement_supported: bool,
+    pending_placement: Option<PendingTabPlacement>,
     catalog_initialized: bool,
     catalog_dirty: bool,
     catalog_in_flight: Option<u64>,
@@ -234,6 +238,8 @@ impl LocalWorkspace {
             activate_created: None,
             catalog_supported: false,
             tab_selection_supported: false,
+            tab_placement_supported: false,
+            pending_placement: None,
             catalog_initialized: false,
             catalog_dirty: false,
             catalog_in_flight: None,
@@ -284,12 +290,22 @@ impl LocalWorkspace {
             .is_some_and(|screen| screen.is_displayed_pane(pane))
     }
     pub fn toggle_maximize_focused(&mut self) -> bool {
-        self.shown_mut()
-            .is_ok_and(ScreenModel::toggle_maximize_focused)
+        let changed = self
+            .shown_mut()
+            .is_ok_and(ScreenModel::toggle_maximize_focused);
+        if changed {
+            self.cancel_placement_focus();
+        }
+        changed
     }
     pub fn set_maximized_slot(&mut self, slot: Option<&str>, pane: Option<&str>) -> bool {
-        self.shown_mut()
-            .is_ok_and(|screen| screen.set_maximized_slot(slot, pane))
+        let changed = self
+            .shown_mut()
+            .is_ok_and(|screen| screen.set_maximized_slot(slot, pane));
+        if changed {
+            self.cancel_placement_focus();
+        }
+        changed
     }
     pub fn focused_pane(&self) -> Option<&str> {
         self.shown().and_then(ScreenModel::focused_pane)
@@ -387,6 +403,20 @@ impl LocalWorkspace {
     }
 
     pub fn apply_catalog(&mut self, connection: Uuid, event: &Value) -> io::Result<WorkspaceDelta> {
+        let watermark = self.catalog_in_flight;
+        let result = self.apply_catalog_inner(connection, event);
+        let outcome = self.placement_catalog(connection, watermark, result.as_ref().err());
+        result.map(|mut delta| {
+            delta.placement = outcome;
+            delta
+        })
+    }
+
+    fn apply_catalog_inner(
+        &mut self,
+        connection: Uuid,
+        event: &Value,
+    ) -> io::Result<WorkspaceDelta> {
         if connection != self.connection_id || !self.catalog_supported {
             return Ok(WorkspaceDelta::default());
         }
@@ -490,6 +520,19 @@ impl LocalWorkspace {
         connection: Uuid,
         event: &Value,
     ) -> io::Result<WorkspaceDelta> {
+        let result = self.apply_snapshot_inner(connection, event);
+        let outcome = self.placement_snapshot(connection, event, result.as_ref());
+        result.map(|mut delta| {
+            delta.placement = outcome;
+            delta
+        })
+    }
+
+    fn apply_snapshot_inner(
+        &mut self,
+        connection: Uuid,
+        event: &Value,
+    ) -> io::Result<WorkspaceDelta> {
         if connection != self.connection_id {
             return Ok(WorkspaceDelta::default());
         }
@@ -569,6 +612,7 @@ impl LocalWorkspace {
             self.models.remove(&ids.screen_id);
             return Err(error);
         }
+        self.cancel_placement_focus();
         self.mutation = mutation;
         self.pending_screens
             .insert(ids.screen_id.clone(), PendingScreen { mutation });
@@ -588,6 +632,7 @@ impl LocalWorkspace {
         if let Some(old) = self.shown.as_ref().and_then(|id| self.models.get_mut(id)) {
             old.pending_move = None;
         }
+        self.cancel_placement_focus();
         self.shown = Some(id.to_owned());
         self.mutation = mutation;
         self.mark_catalog_dirty();
@@ -611,9 +656,11 @@ impl LocalWorkspace {
     }
 
     pub fn select_tab(&mut self, pane: &str) -> bool {
+        self.cancel_placement_focus();
         self.shown_mut().is_ok_and(|screen| screen.select_tab(pane))
     }
     pub fn focus_pane(&mut self, pane: &str) -> bool {
+        self.cancel_placement_focus();
         self.shown_mut().is_ok_and(|screen| screen.focus_pane(pane))
     }
     pub fn sync_selected_tabs(&mut self, client: &Client) -> io::Result<()> {
@@ -624,15 +671,27 @@ impl LocalWorkspace {
     }
     pub fn split(&mut self, client: &Client, pane: &str, axis: Axis) -> io::Result<String> {
         self.admit_new_pane()?;
-        self.shown_mut()?.split(client, pane, axis)
+        let result = self.shown_mut()?.split(client, pane, axis);
+        if result.is_ok() {
+            self.cancel_placement_focus();
+        }
+        result
     }
     pub fn new_tab(&mut self, client: &Client, pane: &str) -> io::Result<String> {
         self.admit_new_pane()?;
-        self.shown_mut()?.new_tab(client, pane)
+        let result = self.shown_mut()?.new_tab(client, pane);
+        if result.is_ok() {
+            self.cancel_placement_focus();
+        }
+        result
     }
     pub fn new_terminal(&mut self, client: &Client) -> io::Result<String> {
         self.admit_new_pane()?;
-        self.shown_mut()?.new_terminal(client)
+        let result = self.shown_mut()?.new_terminal(client);
+        if result.is_ok() {
+            self.cancel_placement_focus();
+        }
+        result
     }
     pub fn close_pane(&mut self, client: &Client, pane: &str) -> io::Result<()> {
         self.shown_mut()?.close_pane(client, pane)
@@ -660,8 +719,10 @@ impl LocalWorkspace {
         self.shown()?.capture_drag(pane)
     }
     pub fn can_move(&self, drag: &PaneDrag, target: &str, placement: MovePlacement) -> bool {
-        self.shown()
-            .is_some_and(|screen| screen.can_move(drag, target, placement))
+        self.pending_placement.is_none()
+            && self
+                .shown()
+                .is_some_and(|screen| screen.can_move(drag, target, placement))
     }
     pub fn check_move(
         &self,
@@ -669,6 +730,7 @@ impl LocalWorkspace {
         target: &str,
         placement: MovePlacement,
     ) -> io::Result<bool> {
+        self.require_no_placement()?;
         self.shown()
             .ok_or_else(|| invalid("no screen selected"))?
             .check_move(drag, target, placement)
@@ -680,6 +742,7 @@ impl LocalWorkspace {
         target: String,
         placement: MovePlacement,
     ) -> io::Result<bool> {
+        self.require_no_placement()?;
         self.shown_mut()?.move_pane(client, drag, target, placement)
     }
     pub fn reject_move(&mut self, connection: Uuid) {

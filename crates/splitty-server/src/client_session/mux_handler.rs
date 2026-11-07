@@ -1022,6 +1022,10 @@ mod tests {
             ),
             (
                 "screen-1",
+                serde_json::json!({"type":"move_tab", "paneId":"p1", "sourceSlotId":"stale", "targetSlotId":"stale"}),
+            ),
+            (
+                "screen-1",
                 serde_json::json!({"type":"float_pane", "paneId":"absent"}),
             ),
             (
@@ -1090,6 +1094,89 @@ mod tests {
                 before
             );
         }
+    }
+
+    #[tokio::test]
+    async fn exact_tab_placement_is_visible_after_ordered_catalog_and_snapshot() {
+        let store = layout_store();
+        let others = Default::default();
+        let (handler, mut sent) = window(&store, "placement-client", &others);
+        handler.send_welcome().await;
+        assert!(next_text(&mut sent)["capabilities"]
+            .as_array()
+            .expect("capabilities")
+            .iter()
+            .any(|cap| cap == "tab-placement-v1"));
+        let screen_id = ScreenId::from("screen-1");
+        let before = store.get_screen(&screen_id).expect("screen");
+        let source = before
+            .root
+            .find_slot(&"p2".into())
+            .expect("source")
+            .id()
+            .clone();
+        let target = before
+            .root
+            .find_slot(&"p1".into())
+            .expect("target")
+            .id()
+            .clone();
+        let place = serde_json::json!({"type":"mux.op", "screenId":"screen-1", "op":{
+            "type":"move_tab", "paneId":"p2", "sourceSlotId":source, "targetSlotId":target, "beforePaneId":"p1"
+        }});
+        handler.handle_value(place.clone()).await;
+        assert!(
+            sent.try_recv().is_err(),
+            "accepted placement has no acknowledgment"
+        );
+        let events = std::mem::take(&mut *others.lock().expect("events"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0]["type"], "mux.nudge");
+        assert_eq!(events[0]["screenId"], "screen-1");
+        assert!(
+            handler
+                .try_handle(r#"{"type":"mux.workspace_resync"}"#)
+                .await
+        );
+        assert!(
+            handler
+                .try_handle(r#"{"type":"mux.resync","screenId":"screen-1"}"#)
+                .await
+        );
+        assert_eq!(next_text(&mut sent)["type"], "mux.workspace_snapshot");
+        let snapshot = next_text(&mut sent);
+        assert_eq!(snapshot["type"], "mux.screen_snapshot");
+        let after = store.get_screen(&screen_id).expect("screen");
+        assert_eq!(snapshot["screen"]["revision"], before.revision + 1);
+        let slot = after.root.find_node(&target).expect("surviving target");
+        assert_eq!(slot.collect_pane_ids(), ["p2", "p1"].map(PaneId::from));
+        assert_eq!(
+            serde_json::to_value(&after.panes).expect("panes"),
+            serde_json::to_value(&before.panes).expect("panes")
+        );
+        assert_eq!(
+            serde_json::to_value(&after.sessions).expect("sessions"),
+            serde_json::to_value(&before.sessions).expect("sessions")
+        );
+        // Repeating a stale source fails before the subsequent catalog fence.
+        handler.handle_value(place).await;
+        assert!(
+            handler
+                .try_handle(r#"{"type":"mux.workspace_resync"}"#)
+                .await
+        );
+        let failure = next_text(&mut sent);
+        assert_eq!(failure["type"], "mux.op_failed");
+        assert_eq!(failure["op"], "move_tab");
+        assert_eq!(failure["screenId"], "screen-1");
+        assert!(failure.get("paneId").is_none());
+        assert_eq!(next_text(&mut sent)["type"], "mux.workspace_snapshot");
+        assert!(sent.try_recv().is_err());
+        assert!(others.lock().expect("events").is_empty());
+        assert_eq!(
+            serde_json::to_value(store.get_screen(&screen_id)).expect("screen"),
+            serde_json::to_value(Some(after)).expect("screen")
+        );
     }
 
     /// Reducer-created layout with no running processes, for layout-only

@@ -42,6 +42,18 @@ pub fn validate_screen_op(state: &ScreenState, op: &ScreenOp) -> Result<(), MuxE
             direction.as_ref(),
             target_split_id.as_ref(),
         ),
+        ScreenOp::MoveTab {
+            pane_id,
+            source_slot_id,
+            target_slot_id,
+            before_pane_id,
+        } => validate_move_tab(
+            state,
+            pane_id,
+            source_slot_id,
+            target_slot_id,
+            before_pane_id.as_ref(),
+        ),
         ScreenOp::ArrangePanes { root } => arranged_root(state, root).map(|_| ()),
         ScreenOp::FloatPane { pane_id, .. } => validate_float_pane(state, pane_id),
         ScreenOp::DockPane { floating_id, .. } => validate_dock_pane(state, floating_id),
@@ -730,6 +742,41 @@ fn validate_move_pane(
         }
         _ => Err(MuxError::MoveTargetRequired),
     }
+}
+
+fn validate_move_tab(
+    state: &ScreenState,
+    pane_id: &PaneId,
+    source_slot_id: &NodeId,
+    target_slot_id: &NodeId,
+    before_pane_id: Option<&PaneId>,
+) -> Result<(), MuxError> {
+    if !state.panes.contains_key(pane_id) {
+        return Err(MuxError::PaneNotFound(pane_id.clone()));
+    }
+    if state.root.find_slot(pane_id).map(LayoutNode::id) != Some(source_slot_id) {
+        return Err(MuxError::PaneOutsideSlot {
+            pane: pane_id.clone(),
+            slot: source_slot_id.clone(),
+        });
+    }
+    let pane_ids = match state.root.find_node(target_slot_id) {
+        Some(LayoutNode::Slot { pane_ids, .. }) => pane_ids,
+        Some(_) => return Err(MuxError::NotASlot(target_slot_id.clone())),
+        None => return Err(MuxError::NodeNotFound(target_slot_id.clone())),
+    };
+    if let Some(before) = before_pane_id {
+        if before == pane_id {
+            return Err(MuxError::SelfTabAnchor(pane_id.clone()));
+        }
+        if !pane_ids.contains(before) {
+            return Err(MuxError::PaneOutsideSlot {
+                pane: before.clone(),
+                slot: target_slot_id.clone(),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// The root layout `arrange_panes` asks for. Pane IDs the screen does not

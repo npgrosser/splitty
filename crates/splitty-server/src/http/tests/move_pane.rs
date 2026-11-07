@@ -174,3 +174,70 @@ async fn an_owner_placement_follows_a_moved_pane_and_an_agent_anchor_does_not() 
     state.client_state.dispatcher.backend().close_all();
     grant_state.client_state.dispatcher.backend().close_all();
 }
+
+/// The owner control API shares exact tab validation and reduction with session clients.
+#[tokio::test]
+async fn exact_tab_placement_via_control_preserves_records_and_rejects_stale_source() {
+    use splitty_core::{
+        ids::{PaneId, ScreenId},
+        mux::{Op, ScreenOp},
+    };
+    let dir = tempfile::tempdir().expect("dir");
+    let state = state(ADDR, dir.path());
+    let screen_id = ScreenId::from("screen");
+    state
+        .mux_store
+        .dispatch(Op::CreateScreen {
+            screen_id: Some(screen_id.clone()),
+            name: None,
+            new_pane_id: Some("p1".into()),
+            shell_profile_id: None,
+        })
+        .expect("seed screen without running effects");
+    let split: ScreenOp = serde_json::from_value(
+        json!({"type":"split_pane", "paneId":"p1", "axis":"horizontal", "newPaneId":"p2"}),
+    )
+    .expect("split");
+    state
+        .mux_store
+        .dispatch_screen(&screen_id, split)
+        .expect("seed split");
+    let before = state.mux_store.get_screen(&screen_id).expect("screen");
+    let source = before
+        .root
+        .find_slot(&PaneId::from("p2"))
+        .expect("source")
+        .id();
+    let target = before
+        .root
+        .find_slot(&PaneId::from("p1"))
+        .expect("target")
+        .id();
+    let body = json!({"screenId":"screen", "op":{
+        "type":"move_tab", "paneId":"p2", "sourceSlotId":source, "targetSlotId":target, "beforePaneId":"p1"
+    }});
+    let control = super::super::build_control_router(state.clone());
+    let (code, reply) = exchange(&control, api("POST", "/api/mux/op", Some(&body))).await;
+    assert_eq!(code, StatusCode::OK, "{reply}");
+    let after = state.mux_store.get_screen(&screen_id).expect("screen");
+    assert_eq!(after.root.id(), target);
+    assert_eq!(
+        after.root.collect_pane_ids(),
+        ["p2", "p1"].map(PaneId::from)
+    );
+    assert_eq!(after.revision, before.revision + 1);
+    assert_eq!(
+        serde_json::to_value(&after.panes).expect("panes"),
+        serde_json::to_value(&before.panes).expect("panes")
+    );
+    assert_eq!(
+        serde_json::to_value(&after.sessions).expect("sessions"),
+        serde_json::to_value(&before.sessions).expect("sessions")
+    );
+    let (code, _) = exchange(&control, api("POST", "/api/mux/op", Some(&body))).await;
+    assert!(!code.is_success());
+    assert_eq!(
+        serde_json::to_value(state.mux_store.get_screen(&screen_id)).expect("screen"),
+        serde_json::to_value(Some(after)).expect("screen")
+    );
+}

@@ -548,6 +548,19 @@ pub fn reduce_screen(
             resulting_sizes,
         )?,
 
+        ScreenOp::MoveTab {
+            pane_id,
+            source_slot_id,
+            target_slot_id,
+            before_pane_id,
+        } => reduce_move_tab(
+            state,
+            pane_id,
+            source_slot_id,
+            target_slot_id,
+            before_pane_id,
+        )?,
+
         ScreenOp::ArrangePanes { root } => {
             let mut state = state;
             state.root = arranged_root(&state, &root)?;
@@ -1462,6 +1475,88 @@ fn reduce_move_pane(
     }
 
     Ok((state, vec![]))
+}
+
+/// Exact tab placement reuses the existing cross-slot removal/collapse path,
+/// but derives surviving proportions from the current authoritative layout.
+/// Same-slot reorder never removes the slot or changes its effective selection.
+fn reduce_move_tab(
+    mut state: ScreenState,
+    pane_id: PaneId,
+    source_slot_id: NodeId,
+    target_slot_id: NodeId,
+    before_pane_id: Option<PaneId>,
+) -> Result<(ScreenState, Vec<Effect>), MuxError> {
+    let same_slot = source_slot_id == target_slot_id;
+    if !same_slot {
+        let source_sizes = surviving_source_sizes(&state.root, &source_slot_id);
+        (state, _) = reduce_move_pane(
+            state,
+            pane_id.clone(),
+            Some(target_slot_id.clone()),
+            None,
+            None,
+            source_sizes,
+            None,
+        )?;
+    }
+    let Some(LayoutNode::Slot {
+        pane_ids,
+        active_pane_id,
+        ..
+    }) = state.root.find_node_mut(&target_slot_id)
+    else {
+        return Err(MuxError::MoveTargetGone(target_slot_id));
+    };
+    // None means the first tab is active. Preserve that tab when order changes.
+    let selected = active_pane_id.clone().or_else(|| pane_ids.first().cloned());
+    pane_ids.retain(|id| id != &pane_id);
+    let index = match before_pane_id {
+        Some(before) => {
+            pane_ids
+                .iter()
+                .position(|id| id == &before)
+                .ok_or(MuxError::PaneOutsideSlot {
+                    pane: before,
+                    slot: target_slot_id,
+                })?
+        }
+        None => pane_ids.len(),
+    };
+    pane_ids.insert(index, pane_id);
+    if same_slot && active_pane_id.is_none() && pane_ids.first() != selected.as_ref() {
+        *active_pane_id = selected;
+    }
+    Ok((state, vec![]))
+}
+
+fn surviving_source_sizes(root: &LayoutNode, source_slot_id: &NodeId) -> Option<Vec<f64>> {
+    let info = root.find_parent_info(source_slot_id)?;
+    let LayoutNode::Split {
+        children, sizes, ..
+    } = root.find_node(&info.id)?
+    else {
+        return None;
+    };
+    let mut remaining: Vec<_> = sizes
+        .iter()
+        .enumerate()
+        .filter_map(|(index, size)| (index != info.index).then_some(*size))
+        .collect();
+    let sum: f64 = remaining.iter().sum();
+    if remaining.len() != children.len() - 1
+        || !sum.is_finite()
+        || sum <= 0.0
+        || remaining
+            .iter()
+            .any(|size| !size.is_finite() || *size < 0.0)
+    {
+        return Some(equal_sizes(children.len() - 1));
+    }
+    for size in &mut remaining {
+        *size /= sum;
+    }
+    Some(remaining)
 }
 
 /// Find the actual node ID for a move target. If the ID is a pane ID, find its slot.
@@ -3335,6 +3430,230 @@ mod tests {
             .unwrap()
             .extend(target.as_object().unwrap().clone());
         serde_json::from_value(op).expect("wire op")
+    }
+
+    fn move_tab(pane: &str, source: &str, target: &str, before: Option<&str>) -> ScreenOp {
+        let mut wire = serde_json::json!({
+            "type":"move_tab", "paneId":pane, "sourceSlotId":source, "targetSlotId":target
+        });
+        if let Some(before) = before {
+            wire["beforePaneId"] = serde_json::json!(before);
+        }
+        let op: ScreenOp = serde_json::from_value(wire.clone()).expect("exact placement wire");
+        assert_eq!(
+            serde_json::to_value(&op).expect("serialized placement"),
+            wire
+        );
+        op
+    }
+
+    #[test]
+    fn move_tab_reorders_exactly_without_changing_selection_or_records() {
+        let mut state = three_pane_screen();
+        state.root = LayoutNode::new_slot(
+            "stack".into(),
+            ["p1", "p2", "p3"].map(PaneId::from).to_vec(),
+        );
+        for active in [None, Some(PaneId::from("p2")), Some(PaneId::from("p3"))] {
+            let mut state = state.clone();
+            let LayoutNode::Slot { active_pane_id, .. } = &mut state.root else {
+                unreachable!()
+            };
+            *active_pane_id = active.clone();
+            let selected = active.unwrap_or_else(|| PaneId::from("p1"));
+            for (pane, before, expected) in [
+                ("p3", Some("p1"), ["p3", "p1", "p2"]),
+                ("p3", Some("p2"), ["p1", "p3", "p2"]),
+                ("p1", None, ["p2", "p3", "p1"]),
+                ("p1", Some("p2"), ["p1", "p2", "p3"]),
+            ] {
+                let (next, effects) =
+                    reduce_screen(state.clone(), move_tab(pane, "stack", "stack", before))
+                        .expect("reordered");
+                assert!(effects.is_empty());
+                assert_eq!(next.revision, state.revision + 1);
+                assert_eq!(next.root.collect_pane_ids(), expected.map(PaneId::from));
+                assert_eq!(node_ids(&next.root), node_ids(&state.root));
+                let LayoutNode::Slot {
+                    pane_ids,
+                    active_pane_id,
+                    ..
+                } = &next.root
+                else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    active_pane_id.as_ref().or(pane_ids.first()),
+                    Some(&selected)
+                );
+                let mut actual = serde_json::to_value(&next).expect("state");
+                let mut original = serde_json::to_value(&state).expect("state");
+                actual["root"] = serde_json::Value::Null;
+                original["root"] = serde_json::Value::Null;
+                actual["revision"] = original["revision"].clone();
+                assert_eq!(actual, original, "records and floating groups survive");
+            }
+        }
+        let single = single_pane_screen();
+        let slot = single.root.id().to_string();
+        let (next, effects) =
+            reduce_screen(single.clone(), move_tab("p1", &slot, &slot, None)).expect("single tab");
+        assert!(effects.is_empty());
+        assert_eq!(shape(&next.root), shape(&single.root));
+    }
+
+    #[test]
+    fn move_tab_collapses_source_using_current_weights_and_exact_destination() {
+        let mut state = three_pane_screen();
+        state.floating.clear();
+        state.name = Some("Concurrent rename".into());
+        state.root = LayoutNode::new_split(
+            "row".into(),
+            Axis::Horizontal,
+            vec![
+                LayoutNode::new_slot("slot1".into(), vec!["p1".into()]),
+                LayoutNode::new_slot("slot2".into(), vec!["p2".into(), "p4".into()]),
+                LayoutNode::new_slot("slot3".into(), vec!["p3".into()]),
+            ],
+            vec![0.2, 0.3, 0.5],
+        );
+        for (before, expected) in [
+            (Some("p4"), vec!["p2", "p1", "p4"]),
+            (None, vec!["p2", "p4", "p1"]),
+        ] {
+            let (next, effects) =
+                reduce_screen(state.clone(), move_tab("p1", "slot1", "slot2", before))
+                    .expect("placed");
+            assert!(effects.is_empty());
+            assert_eq!(next.name, state.name);
+            assert_eq!(
+                serde_json::to_value(&next.panes).expect("panes"),
+                serde_json::to_value(&state.panes).expect("panes")
+            );
+            assert_eq!(
+                serde_json::to_value(&next.sessions).expect("sessions"),
+                serde_json::to_value(&state.sessions).expect("sessions")
+            );
+            assert_eq!(
+                node_ids(&next.root),
+                ["row", "slot2", "slot3"].map(NodeId::from)
+            );
+            let LayoutNode::Split { sizes, .. } = &next.root else {
+                unreachable!()
+            };
+            assert!((sizes[0] - 0.375).abs() < 1e-12);
+            assert!((sizes[1] - 0.625).abs() < 1e-12);
+            let LayoutNode::Slot {
+                pane_ids,
+                active_pane_id,
+                ..
+            } = next.root.find_node(&"slot2".into()).expect("slot")
+            else {
+                unreachable!()
+            };
+            assert_eq!(
+                *pane_ids,
+                expected.into_iter().map(PaneId::from).collect::<Vec<_>>()
+            );
+            assert_eq!(*active_pane_id, Some("p1".into()));
+        }
+        // Nested two-child source collapse leaves the outer proportions untouched.
+        let nested = three_pane_screen();
+        let (next, _) = reduce_screen(nested, move_tab("p2", "slot2", "slot1", Some("p1")))
+            .expect("nested collapse");
+        assert_eq!(
+            node_ids(&next.root),
+            ["column", "slot1", "slot3"].map(NodeId::from)
+        );
+        let LayoutNode::Split { sizes, .. } = next.root else {
+            unreachable!()
+        };
+        assert_eq!(sizes, [0.5, 0.5]);
+        // Zero-width survivors have no defined relative ratio: equal is valid.
+        let LayoutNode::Split { sizes, .. } = &mut state.root else {
+            unreachable!()
+        };
+        *sizes = vec![1.0, 0.0, 0.0];
+        let (next, _) =
+            reduce_screen(state, move_tab("p1", "slot1", "slot2", None)).expect("zero survivors");
+        let LayoutNode::Split { sizes, .. } = next.root else {
+            unreachable!()
+        };
+        assert_eq!(sizes, [0.5, 0.5]);
+    }
+
+    #[test]
+    fn invalid_move_tab_leaves_all_workspace_state_and_revisions_unchanged() {
+        let store = store_with(three_pane_screen());
+        let before = serde_json::to_value(store.get_workspace_state()).expect("state");
+        let changes = store.changes();
+        for (pane, source, target, anchor) in [
+            ("missing", "slot1", "slot2", None),
+            ("p1", "slot2", "slot3", None),
+            ("p1", "slot1", "missing", None),
+            ("p1", "slot1", "row", None),
+            ("p1", "slot1", "slot2", Some("missing")),
+            ("p1", "slot1", "slot2", Some("p3")),
+            ("p1", "slot1", "slot1", Some("p1")),
+            ("p4", "slot4", "slot1", None),
+            ("p1", "slot1", "slot4", Some("p4")),
+        ] {
+            assert!(store
+                .dispatch_screen(&"screen1".into(), move_tab(pane, source, target, anchor))
+                .is_err());
+            assert_eq!(
+                serde_json::to_value(store.get_workspace_state()).expect("state"),
+                before
+            );
+            assert!(!changes.has_changed().expect("watch retained"));
+        }
+    }
+
+    #[test]
+    fn move_tab_from_nonempty_source_preserves_slots_and_legacy_move_still_activates() {
+        let mut state = three_pane_screen();
+        state.floating.clear();
+        state.root = LayoutNode::new_split(
+            "root".into(),
+            Axis::Horizontal,
+            vec![
+                LayoutNode::Slot {
+                    id: "a".into(),
+                    pane_ids: vec!["p1".into(), "p2".into()],
+                    active_pane_id: Some("p1".into()),
+                },
+                LayoutNode::new_slot("b".into(), vec!["p3".into(), "p4".into()]),
+            ],
+            vec![0.7, 0.3],
+        );
+        let (next, _) =
+            reduce_screen(state.clone(), move_tab("p1", "a", "b", Some("p3"))).expect("moved");
+        assert_eq!(node_ids(&next.root), node_ids(&state.root));
+        let LayoutNode::Split { sizes, .. } = &next.root else {
+            unreachable!()
+        };
+        assert_eq!(*sizes, [0.7, 0.3]);
+        let LayoutNode::Slot { active_pane_id, .. } =
+            next.root.find_node(&"a".into()).expect("source")
+        else {
+            unreachable!()
+        };
+        assert_eq!(*active_pane_id, Some("p2".into()));
+        let (legacy, _) = reduce_screen(
+            tabbed_screen(),
+            move_pane("p1", serde_json::json!({"targetSlotId":"stack"})),
+        )
+        .expect("legacy");
+        let LayoutNode::Slot {
+            pane_ids,
+            active_pane_id,
+            ..
+        } = legacy.root
+        else {
+            unreachable!()
+        };
+        assert_eq!(pane_ids, ["p2", "p1"].map(PaneId::from));
+        assert_eq!(active_pane_id, Some("p1".into()));
     }
 
     #[test]
