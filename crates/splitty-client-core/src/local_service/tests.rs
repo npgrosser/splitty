@@ -4,6 +4,7 @@ use splitty_core::shell_profiles::{
     ShellProfile, ShellProfileSource, ShellProfilesState, ShellTarget,
 };
 use splitty_server::{native::client::Connector, service::catalog::Role};
+use splitty_transport::wire;
 use std::{task::Poll, time::Duration};
 
 fn profiles() -> ShellProfilesState {

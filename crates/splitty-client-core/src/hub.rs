@@ -1,0 +1,329 @@
+//! Passive, owner-bound reads of the assigned local service's host directory.
+use crate::api_stream::{decode, ApiStream};
+use splitty_core::native_api::{directory::Directory, Operation};
+use splitty_remote::ssh::SshTarget;
+use splitty_transport::budget::Charged;
+use std::{collections::HashSet, future::Future, io, pin::Pin, sync::Arc};
+use tokio::sync::Notify;
+use uuid::Uuid;
+
+#[derive(Debug)]
+pub struct HostDirectorySnapshot {
+    connection_id: Uuid,
+    generation: u64,
+    directory: Charged<Directory>,
+}
+impl HostDirectorySnapshot {
+    pub fn connection_id(&self) -> Uuid {
+        self.connection_id
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn directory(&self) -> &Directory {
+        &self.directory
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum HostDirectoryState {
+    Unavailable,
+    Loading {
+        previous: Option<Arc<HostDirectorySnapshot>>,
+    },
+    Ready(Arc<HostDirectorySnapshot>),
+    Failed {
+        previous: Option<Arc<HostDirectorySnapshot>>,
+        reason: String,
+    },
+}
+
+/// Loading and its completion share a read generation. Consumers reject only
+/// older generations and may accept a same-generation completion.
+#[derive(Clone, Debug)]
+pub struct HubUpdate {
+    pub connection_id: Uuid,
+    pub generation: u64,
+    pub state: HostDirectoryState,
+}
+impl HubUpdate {
+    pub fn unavailable(connection_id: Uuid) -> Self {
+        Self {
+            connection_id,
+            generation: 0,
+            state: HostDirectoryState::Unavailable,
+        }
+    }
+}
+
+type Pending =
+    Pin<Box<dyn Future<Output = (ApiStream, io::Result<HostDirectorySnapshot>, bool)> + Send>>;
+
+/// One API stream, one retained read and one last-good snapshot. No host
+/// connection or mutation operation is exposed by this seam.
+pub struct HubClient {
+    owner: Uuid,
+    generation: u64,
+    dirty: bool,
+    client: Option<ApiStream>,
+    pending: Option<Pending>,
+    pending_generation: u64,
+    loading_due: bool,
+    last_good: Option<Arc<HostDirectorySnapshot>>,
+    broken: bool,
+    reopen_due: bool,
+    cancel: Arc<Notify>,
+}
+impl HubClient {
+    #[cfg(test)]
+    pub(crate) fn new(client: impl Into<ApiStream>, owner: Uuid) -> Self {
+        Self::with_previous(client, owner, 1, None)
+    }
+    pub(crate) fn with_previous(
+        client: impl Into<ApiStream>,
+        owner: Uuid,
+        generation: u64,
+        last_good: Option<Arc<HostDirectorySnapshot>>,
+    ) -> Self {
+        Self {
+            owner,
+            generation,
+            dirty: true,
+            client: Some(client.into()),
+            pending: None,
+            pending_generation: 0,
+            loading_due: false,
+            last_good,
+            broken: false,
+            reopen_due: false,
+            cancel: Arc::new(Notify::new()),
+        }
+    }
+    pub fn connection_id(&self) -> Uuid {
+        self.owner
+    }
+    pub fn generation(&self) -> u64 {
+        self.generation
+    }
+    pub fn is_broken(&self) -> bool {
+        self.broken
+    }
+    pub(crate) fn take_reopen_due(&mut self) -> bool {
+        std::mem::take(&mut self.reopen_due)
+    }
+    pub fn last_good(&self) -> Option<&Arc<HostDirectorySnapshot>> {
+        self.last_good.as_ref()
+    }
+    pub fn refresh(&mut self, owner: Uuid) -> io::Result<()> {
+        if owner != self.owner {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "hub directory source changed",
+            ));
+        }
+        self.generation = self
+            .generation
+            .checked_add(1)
+            .ok_or_else(|| io::Error::other("hub directory generation exhausted"))?;
+        self.dirty = true;
+        Ok(())
+    }
+    pub async fn next_update(&mut self) -> HubUpdate {
+        loop {
+            if self.pending.is_none() {
+                if !self.dirty {
+                    std::future::pending::<()>().await;
+                }
+                self.dirty = false;
+                let generation = self.generation;
+                let owner = self.owner;
+                let mut client = self.client.take().expect("hub API stream retained");
+                let cancel = self.cancel.clone();
+                self.pending_generation = generation;
+                self.loading_due = true;
+                self.pending = Some(Box::pin(async move {
+                    let read = tokio::select! { biased;
+                        _ = cancel.notified() => Err(io::Error::new(io::ErrorKind::Interrupted, "hub read cancelled")),
+                        result = read(&mut client, owner, generation) => result,
+                    };
+                    let broken = read
+                        .as_ref()
+                        .err()
+                        .is_some_and(|error| error.kind() == io::ErrorKind::BrokenPipe);
+                    (client, read, broken)
+                }));
+            }
+            if self.loading_due {
+                self.loading_due = false;
+                return HubUpdate {
+                    connection_id: self.owner,
+                    generation: self.pending_generation,
+                    state: HostDirectoryState::Loading {
+                        previous: self.last_good.clone(),
+                    },
+                };
+            }
+            let (client, result, broken) = self.pending.as_mut().expect("hub read started").await;
+            self.pending = None;
+            self.client = Some(client);
+            self.broken = broken;
+            if self.pending_generation != self.generation {
+                if broken {
+                    // A refresh arrived during EOF. The old stream cannot
+                    // service it; the runtime must close and reopen once.
+                    self.reopen_due = true;
+                    return HubUpdate {
+                        connection_id: self.owner,
+                        generation: self.generation,
+                        state: HostDirectoryState::Loading {
+                            previous: self.last_good.clone(),
+                        },
+                    };
+                }
+                continue;
+            }
+            let state = match result {
+                Ok(snapshot) => {
+                    let snapshot = Arc::new(snapshot);
+                    self.last_good = Some(snapshot.clone());
+                    HostDirectoryState::Ready(snapshot)
+                }
+                Err(error) => HostDirectoryState::Failed {
+                    previous: self.last_good.clone(),
+                    reason: classify(&error),
+                },
+            };
+            return HubUpdate {
+                connection_id: self.owner,
+                generation: self.generation,
+                state,
+            };
+        }
+    }
+    pub async fn finish(mut self) -> io::Result<()> {
+        if let Some(pending) = self.pending.take() {
+            self.cancel.notify_one();
+            let (client, _, _) = pending.await;
+            self.client = Some(client);
+        }
+        if let Some(client) = self.client.take() {
+            client.finish().await?;
+        }
+        Ok(())
+    }
+}
+
+fn classify(error: &io::Error) -> String {
+    match error.kind() {
+        io::ErrorKind::OutOfMemory | io::ErrorKind::WouldBlock => {
+            "Host directory exceeds local capacity".into()
+        }
+        io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset | io::ErrorKind::TimedOut => {
+            "Host directory connection unavailable".into()
+        }
+        io::ErrorKind::Interrupted => "Host directory read cancelled".into(),
+        _ => "Could not read a valid host directory".into(),
+    }
+}
+
+async fn read(
+    client: &mut ApiStream,
+    owner: Uuid,
+    generation: u64,
+) -> io::Result<HostDirectorySnapshot> {
+    let reply = client
+        .request(Operation::HostDirectory, serde_json::Map::new())
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "directory reply unavailable"))?;
+    if reply.uncertain {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "uncertain directory read",
+        ));
+    }
+    let directory = decode::<Directory>(client, &reply)?;
+    validate(&directory, &client.sender().context().budget)?;
+    Ok(HostDirectorySnapshot {
+        connection_id: owner,
+        generation,
+        directory,
+    })
+}
+
+fn validate(
+    directory: &Directory,
+    budget: &splitty_transport::budget::ConnectionBudget,
+) -> io::Result<()> {
+    let invalid = || {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid host directory response",
+        )
+    };
+    if directory.version != 1 || directory.order.len() > 256 {
+        return Err(invalid());
+    }
+    // Hashing host identities prevents quadratic work on a legal 1 MiB reply.
+    let scratch_bytes = directory.hosts.len().checked_mul(64).ok_or_else(invalid)?;
+    let _scratch = budget.reserve(scratch_bytes, false).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            "host directory validation budget exhausted",
+        )
+    })?;
+    let mut seen = HashSet::new();
+    seen.try_reserve(directory.hosts.len()).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::OutOfMemory,
+            "host directory validation allocation failed",
+        )
+    })?;
+    for (index, target) in directory.order.iter().enumerate() {
+        valid_target(target)?;
+        if directory.order[..index].contains(target) {
+            return Err(invalid());
+        }
+    }
+    for host in &directory.hosts {
+        valid_target(&host.target)?;
+        if !seen.insert(host.target.as_str()) || host.screens.len() > 200 {
+            return Err(invalid());
+        }
+        if host
+            .alias
+            .as_ref()
+            .is_some_and(|alias| alias.chars().count() > 200 || alias.chars().any(char::is_control))
+        {
+            return Err(invalid());
+        }
+        for (index, screen) in host.screens.iter().enumerate() {
+            let id_chars = screen.id.chars().count();
+            if id_chars == 0
+                || id_chars > 256
+                || screen
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| name.chars().count() > 200)
+                || host.screens[..index]
+                    .iter()
+                    .any(|prior| prior.id == screen.id)
+            {
+                return Err(invalid());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn valid_target(target: &str) -> io::Result<()> {
+    match SshTarget::parse(target) {
+        Ok(parsed) if parsed.as_str() == target => Ok(()),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid host target in directory",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests;

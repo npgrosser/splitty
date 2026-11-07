@@ -4,6 +4,8 @@
 //! carry operation data, not URLs, HTTP methods, headers or socket addresses.
 //! Domain validation is performed by the shared operation after admission.
 
+pub mod directory;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use std::io::{self, Write};

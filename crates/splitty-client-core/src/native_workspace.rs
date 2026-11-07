@@ -1,6 +1,7 @@
 //! Own the local service and route workspace intents on one ordered connection.
 use crate::{
     appearance::{AppearanceSnapshot, ColorScheme, DrawerVisibilityResult},
+    hub::{HostDirectorySnapshot, HostDirectoryState, HubClient, HubUpdate},
     shell_profiles::ShellProfilesSnapshot,
     templates::{TemplateApiRequest, TemplateApiResult},
     workspace::{
@@ -27,6 +28,9 @@ use std::{
 use tokio::sync::mpsc;
 
 pub enum Command {
+    RefreshHostDirectory {
+        connection: uuid::Uuid,
+    },
     TemplateApi {
         connection: uuid::Uuid,
         request_id: uuid::Uuid,
@@ -152,6 +156,7 @@ pub enum Command {
     },
 }
 pub enum Update {
+    HostDirectory(HubUpdate),
     TemplateApi(TemplateApiResult),
     TemplateApply(TemplateApplyResult),
     FloatingAction(FloatingActionResult),
@@ -415,6 +420,186 @@ impl<'a> RuntimeLocalService<'a> {
     }
 }
 
+type HubSetup<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<Output = std::io::Result<crate::api_stream::ApiStream>> + Send + 'a,
+    >,
+>;
+type HubClosing = std::pin::Pin<Box<dyn std::future::Future<Output = std::io::Result<()>> + Send>>;
+struct RuntimeHub<'a> {
+    service: &'a crate::owned_service::OwnedService,
+    connection: uuid::Uuid,
+    generation: u64,
+    dirty: bool,
+    reopen: bool,
+    setup: Option<HubSetup<'a>>,
+    setup_context: Option<splitty_transport::queue::Context>,
+    closing: Option<HubClosing>,
+    cleanup_error: Option<std::io::Error>,
+    setup_loading_due: bool,
+    reader: Option<HubClient>,
+    previous: Option<Arc<HostDirectorySnapshot>>,
+}
+impl<'a> RuntimeHub<'a> {
+    fn new(service: &'a crate::owned_service::OwnedService, connection: uuid::Uuid) -> Self {
+        Self {
+            service,
+            connection,
+            generation: 1,
+            dirty: true,
+            reopen: false,
+            setup: None,
+            setup_context: None,
+            closing: None,
+            cleanup_error: None,
+            setup_loading_due: false,
+            reader: None,
+            previous: None,
+        }
+    }
+    fn refresh(&mut self, owner: uuid::Uuid) -> std::io::Result<()> {
+        if owner != self.connection {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "hub directory source changed",
+            ));
+        }
+        if let Some(reader) = &mut self.reader {
+            self.previous = reader.last_good().cloned();
+            if reader.is_broken() {
+                self.generation = self
+                    .generation
+                    .checked_add(1)
+                    .ok_or_else(|| std::io::Error::other("hub generation exhausted"))?;
+                self.reopen = true;
+                self.dirty = true;
+            } else {
+                reader.refresh(owner)?;
+                self.generation = reader.generation();
+            }
+        } else {
+            self.generation = self
+                .generation
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("hub generation exhausted"))?;
+            self.dirty = true;
+            self.setup_loading_due = true;
+        }
+        Ok(())
+    }
+    async fn next_update(&mut self) -> HubUpdate {
+        loop {
+            if self.reopen {
+                self.reopen = false;
+                if let Some(reader) = self.reader.take() {
+                    self.previous = reader.last_good().cloned();
+                    self.closing = Some(Box::pin(reader.finish()));
+                }
+            }
+            if let Some(closing) = &mut self.closing {
+                let result = closing.await;
+                self.closing = None;
+                if let Err(error) = result {
+                    self.dirty = false;
+                    let reason = format!("Host directory stream cleanup failed: {error}");
+                    self.cleanup_error = Some(error);
+                    return HubUpdate {
+                        connection_id: self.connection,
+                        generation: self.generation,
+                        state: HostDirectoryState::Failed {
+                            previous: self.previous.clone(),
+                            reason,
+                        },
+                    };
+                }
+            }
+            if let Some(reader) = &mut self.reader {
+                let update = reader.next_update().await;
+                if reader.take_reopen_due() {
+                    self.reopen = true;
+                    self.dirty = true;
+                }
+                if let HostDirectoryState::Ready(snapshot) = &update.state {
+                    self.previous = Some(snapshot.clone());
+                }
+                return update;
+            }
+            if self.setup.is_none() {
+                if !self.dirty {
+                    std::future::pending::<()>().await;
+                }
+                self.dirty = false;
+                let context = splitty_transport::queue::Context::default();
+                self.setup = Some(Box::pin(
+                    self.service.api_stream_with_context(context.clone()),
+                ));
+                self.setup_context = Some(context);
+            }
+            if self.setup_loading_due {
+                self.setup_loading_due = false;
+                return HubUpdate {
+                    connection_id: self.connection,
+                    generation: self.generation,
+                    state: HostDirectoryState::Loading {
+                        previous: self.previous.clone(),
+                    },
+                };
+            }
+            let result = self.setup.as_mut().expect("hub setup retained").await;
+            self.setup = None;
+            self.setup_context = None;
+            match result {
+                Ok(client) => {
+                    self.reader = Some(HubClient::with_previous(
+                        client,
+                        self.connection,
+                        self.generation,
+                        self.previous.clone(),
+                    ));
+                    self.dirty = false;
+                }
+                Err(_) if self.dirty => continue,
+                Err(_) => {
+                    return HubUpdate {
+                        connection_id: self.connection,
+                        generation: self.generation,
+                        state: HostDirectoryState::Failed {
+                            previous: self.previous.clone(),
+                            reason: "Host directory API unavailable".into(),
+                        },
+                    }
+                }
+            }
+        }
+    }
+    async fn finish(mut self) -> std::io::Result<()> {
+        if let Some(context) = self.setup_context.take() {
+            context.close();
+        }
+        if let Some(setup) = self.setup.take() {
+            if let Ok(client) = setup.await {
+                self.reader = Some(HubClient::with_previous(
+                    client,
+                    self.connection,
+                    self.generation,
+                    self.previous.clone(),
+                ));
+            }
+        }
+        if let Some(closing) = self.closing.take() {
+            if let Err(error) = closing.await {
+                self.cleanup_error.get_or_insert(error);
+            }
+        }
+        if let Some(reader) = self.reader.take() {
+            if let Err(error) = reader.finish().await {
+                self.cleanup_error.get_or_insert(error);
+            }
+        }
+        self.cleanup_error.map_or(Ok(()), Err)
+    }
+}
+
 struct PendingClose {
     request_id: u64,
     target: CloseTarget,
@@ -491,13 +676,15 @@ fn validate_pre_discovery_close(plan: &ClosePlan, confirmed: bool) -> std::io::R
 async fn finish_owned_run(
     service: crate::owned_service::OwnedService,
     result: anyhow::Result<()>,
+    prior_cleanup: anyhow::Result<()>,
     cleanup_complete: &AtomicBool,
     stop: &AtomicBool,
 ) -> anyhow::Result<()> {
     let cleanup = service.close().await;
-    if cleanup.is_ok() {
+    if cleanup.is_ok() && prior_cleanup.is_ok() {
         cleanup_complete.store(true, Ordering::Release);
     }
+    prior_cleanup?;
     cleanup?;
     if stop.load(Ordering::Acquire) {
         Ok(())
@@ -625,11 +812,13 @@ async fn run_service(
     let mut client = match service.connect().await {
         Ok(client) => client,
         Err(error) => {
-            return finish_owned_run(service, Err(error.into()), &cleanup_complete, &stop).await
+            return finish_owned_run(service, Err(error.into()), Ok(()), &cleanup_complete, &stop)
+                .await
         }
     };
     let mut workspace_refresh = WorkspaceRefresh::default();
     let mut settings = None::<RuntimeLocalService<'_>>;
+    let mut hub = None::<RuntimeHub<'_>>;
     let result = async {
         let mut model = None::<LocalWorkspace>;
         let mut attached = HashSet::<String>::new();
@@ -648,6 +837,7 @@ async fn run_service(
         let mut pending_close = None::<PendingClose>;
         enum Next {
             Settings(std::io::Result<crate::local_service::LocalServiceUpdate>),
+            Hub(HubUpdate),
             Event(std::io::Result<Option<Box<Event>>>),
             Command(Option<Command>),
             Tick,
@@ -660,6 +850,12 @@ async fn run_service(
                         None => std::future::pending().await,
                     }
                 } => Next::Settings(result),
+                update = async {
+                    match &mut hub {
+                        Some(reader) => reader.next_update().await,
+                        None => std::future::pending().await,
+                    }
+                } => Next::Hub(update),
                 event = client.next_event() => Next::Event(event.map(|event| event.map(Box::new))),
                 command = commands.recv() => Next::Command(command),
                 _ = tick.tick() => Next::Tick,
@@ -669,6 +865,11 @@ async fn run_service(
             }
             let mut close_window = false;
             match next {
+                Next::Hub(update) => {
+                    if update.connection_id == client.connection_id() {
+                        publish(&updates, Update::HostDirectory(update), &stop).await?;
+                    }
+                }
                 Next::Settings(result) => {
                     use crate::local_service::LocalServiceUpdate;
                     let connection = client.connection_id();
@@ -691,6 +892,16 @@ async fn run_service(
                 Next::Tick => {}
                 Next::Command(None) => break,
                 Next::Command(Some(command)) => {
+                    if let Command::RefreshHostDirectory { connection } = command {
+                        if let Some(reader) = &mut hub {
+                            if let Err(error) = reader.refresh(connection) {
+                                publish(&updates, Update::Status(error.to_string()), &stop).await?;
+                            }
+                        } else if connection == client.connection_id() {
+                            publish(&updates, Update::HostDirectory(HubUpdate::unavailable(connection)), &stop).await?;
+                        }
+                        continue;
+                    }
                     if let Command::TemplateApi{connection,request_id,request}=command {
                         let result=if !model.as_ref().is_some_and(|m|m.connection_id()==connection&&m.templates_supported()){Err(std::io::Error::other("Template source or capability unavailable"))}else{settings.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Local service API is not ready")).and_then(|s|s.enqueue_template(connection,request_id,request))};
                         if let Err(error)=result{if error.kind()!=std::io::ErrorKind::AlreadyExists {publish(&updates,Update::TemplateApi(TemplateApiResult::rejected(connection,request_id,error.to_string())),&stop).await?;}}
@@ -857,7 +1068,7 @@ async fn run_service(
                         continue;
                     };
                     let result: std::io::Result<()> = match command {
-                        Command::TemplateApi{..} | Command::ApplyTemplate{..} | Command::FloatPane{..} | Command::DockFloat{..} | Command::MoveFloat{..} | Command::TransferPane { .. } | Command::Zoom { .. } | Command::SetDrawerVisibility { .. } | Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
+                        Command::RefreshHostDirectory { .. } | Command::TemplateApi{..} | Command::ApplyTemplate{..} | Command::FloatPane{..} | Command::DockFloat{..} | Command::MoveFloat{..} | Command::TransferPane { .. } | Command::Zoom { .. } | Command::SetDrawerVisibility { .. } | Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
                             unreachable!("close is handled before normal commands")
                         }
                         Command::CreateScreen(name) => {
@@ -1074,7 +1285,26 @@ async fn run_service(
                                     }
                                 }
                             }
+                            Some("hub.changed") => {
+                                if let Some(reader) = &mut hub {
+                                    if let Err(error) = reader.refresh(event.connection_id) {
+                                        publish(&updates, Update::Status(error.to_string()), &stop).await?;
+                                    }
+                                }
+                            }
                             Some("mux.welcome") if model.is_none() => {
+                                let supports_hub = json["capabilities"].as_array().is_some_and(|caps| {
+                                    caps.iter().any(|cap| cap.as_str() == Some("hub-host-decisions-v1"))
+                                });
+                                if supports_hub {
+                                    hub = Some(RuntimeHub::new(&service, client.connection_id()));
+                                    publish(&updates, Update::HostDirectory(HubUpdate {
+                                        connection_id: client.connection_id(), generation: 1,
+                                        state: HostDirectoryState::Loading { previous: None },
+                                    }), &stop).await?;
+                                } else {
+                                    publish(&updates, Update::HostDirectory(HubUpdate::unavailable(client.connection_id())), &stop).await?;
+                                }
                                 let mut workspace = LocalWorkspace::new(client.connection_id());
                                 let supports_tab_selection =
                                     json["capabilities"].as_array().is_some_and(|capabilities| {
@@ -1539,10 +1769,16 @@ async fn run_service(
         None => Ok(()),
     };
     drop(settings);
+    let hub_cleanup = match hub.take() {
+        Some(reader) => reader.finish().await.map_err(anyhow::Error::from),
+        None => Ok(()),
+    };
+    drop(hub);
     let client_cleanup = client.finish().await.map_err(anyhow::Error::from);
     finish_owned_run(
         service,
-        result.and(settings_cleanup).and(client_cleanup),
+        result,
+        settings_cleanup.and(hub_cleanup).and(client_cleanup),
         &cleanup_complete,
         &stop,
     )
@@ -2123,6 +2359,7 @@ mod close_tests {
         let error = finish_owned_run(
             service.into(),
             Err(anyhow::anyhow!("connection failed before client admission")),
+            Ok(()),
             &completed,
             &stop,
         )
@@ -2327,6 +2564,9 @@ mod transfer_tests;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod navigation_tests;
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod hub_tests;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod floating_tests;

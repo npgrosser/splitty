@@ -221,6 +221,7 @@ model {
 
     // The client side of remote screens
 
+    hub -> splitty.core.native_api 'Project passive host-directory metadata into the shared response records'
     hub -> splitty.core.config 'config_dir, CONFIG_DIR_VARIABLE'
     hub -> splitty.core.protocol 'PROTOCOL_VERSION'
     hub -> splitty.remote.ssh 'SshTarget, Ssh (stdio-only, forward-only, relay-only), run_checked, classify, host key and login failures'

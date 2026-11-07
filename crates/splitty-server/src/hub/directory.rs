@@ -1,31 +1,22 @@
 //! Passive local metadata, merged once for every kind of client.
 use std::collections::HashSet;
 
-use serde::Serialize;
+use splitty_core::native_api::directory::{
+    Directory, DirectoryHost, DirectoryScreen, DirectorySource,
+};
 use splitty_remote::hosts::Source;
 
 use super::{catalog::CatalogScreen, Hub};
 
-#[derive(Debug, Serialize)]
-pub struct Directory {
-    pub version: u32,
-    pub order: Vec<String>,
-    pub hosts: Vec<DirectoryHost>,
+fn source_response(source: Source) -> DirectorySource {
+    match source {
+        Source::Recent => DirectorySource::Recent,
+        Source::SshConfig => DirectorySource::SshConfig,
+    }
 }
 
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DirectoryHost {
-    pub target: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub alias: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub source: Option<Source>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_connected: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_seen: Option<u64>,
-    pub screens: Vec<CatalogScreen>,
+fn screen_response(screen: &CatalogScreen) -> DirectoryScreen {
+    DirectoryScreen::new(screen.id.clone(), screen.name.clone(), screen.panes)
 }
 
 impl Hub {
@@ -42,13 +33,12 @@ impl Hub {
         let mut hosts: Vec<_> = self
             .known_hosts()
             .into_iter()
-            .map(|host| DirectoryHost {
-                target: host.target,
-                alias: host.alias,
-                source: Some(host.source),
-                last_connected: host.last_connected,
-                last_seen: None,
-                screens: vec![],
+            .map(|host| {
+                let mut response = DirectoryHost::new(host.target);
+                response.alias = host.alias;
+                response.source = Some(source_response(host.source));
+                response.last_connected = host.last_connected;
+                response
             })
             .collect();
         let extra = catalog
@@ -78,19 +68,14 @@ impl Hub {
                 .iter()
                 .find(|h| h.target == target)
                 .and_then(|h| h.alias.clone());
-            hosts.push(DirectoryHost {
-                target,
-                alias,
-                source: None,
-                last_connected: None,
-                last_seen: None,
-                screens: vec![],
-            });
+            let mut response = DirectoryHost::new(target);
+            response.alias = alias;
+            hosts.push(response);
         }
         for host in &mut hosts {
             if let Some(saved) = catalog.hosts.iter().find(|h| h.target == host.target) {
                 host.last_seen = Some(saved.last_seen);
-                host.screens = saved.screens.clone();
+                host.screens = saved.screens.iter().map(screen_response).collect();
             }
         }
         let order = self.host_order().order;
@@ -100,11 +85,7 @@ impl Hub {
                 .position(|target| target == &h.target)
                 .unwrap_or(usize::MAX)
         });
-        Directory {
-            version: 1,
-            hosts,
-            order,
-        }
+        Directory::new(order, hosts)
     }
 }
 
@@ -153,6 +134,18 @@ mod tests {
         );
         assert_eq!(directory.hosts[1].alias.as_deref(), Some("Build"));
         assert_eq!(directory.hosts[1].screens[0].panes, 2);
+        let wire = serde_json::to_value(&directory).unwrap();
+        assert_eq!(wire["version"], 1);
+        assert_eq!(wire["order"], json!(["reverse-only", "vm1"]));
+        assert_eq!(wire["hosts"][1]["source"], "ssh-config");
+        assert_eq!(
+            wire["hosts"][1]["screens"],
+            json!([{"id":"screen","name":"Work","panes":2}])
+        );
+        assert_eq!(
+            serde_json::from_value::<Directory>(wire).unwrap(),
+            directory
+        );
         assert!(host.asked().is_empty());
         assert!(
             !changes.has_changed().unwrap(),

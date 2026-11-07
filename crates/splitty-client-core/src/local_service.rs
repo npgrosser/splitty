@@ -5,8 +5,6 @@ use crate::{
     shell_profiles::ShellProfilesSnapshot,
     zoom::{ZoomAction, ZoomResult},
 };
-use serde::de::DeserializeOwned;
-use splitty_transport::{budget::Charged, codec, wire};
 use std::{collections::VecDeque, future::Future, io, pin::Pin, sync::Arc};
 use tokio::sync::Notify;
 use uuid::Uuid;
@@ -365,41 +363,9 @@ fn increment(generation: u64) -> io::Result<u64> {
         .ok_or_else(|| io::Error::other("local settings generation exhausted"))
 }
 
-/// The reply lease remains alive during charged typed decoding; neither feature
-/// copies an unadmitted JSON body. Error text never retains peer-controlled data.
-pub(crate) fn decode<T: DeserializeOwned>(
-    client: &Client,
-    reply: &wire::Reply,
-) -> io::Result<Charged<T>> {
-    decode_with_budget(&client.sender().context().budget, reply)
-}
-
-pub(crate) fn decode_with_budget<T: DeserializeOwned>(
-    budget: &splitty_transport::budget::ConnectionBudget,
-    reply: &wire::Reply,
-) -> io::Result<Charged<T>> {
-    if !(200..300).contains(&reply.status) || reply.content_type != wire::ContentType::Json {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!("local settings API returned status {}", reply.status),
-        ));
-    }
-    let bytes = reply.body.as_bytes();
-    if bytes.len() > 1024 * 1024 {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            "local settings response exceeds native limit",
-        ));
-    }
-    let lease = codec::reserve_json_typed(bytes, budget, false)?;
-    let value = serde_json::from_slice(bytes).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "invalid local settings response",
-        )
-    })?;
-    Ok(lease.charge(value))
-}
+pub(crate) use crate::api_stream::decode;
+#[cfg(test)]
+pub(crate) use crate::api_stream::decode_with_budget;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod tests;
