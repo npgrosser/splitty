@@ -5,7 +5,7 @@ use crate::{
 };
 use serde::Deserialize;
 use serde_json::Value;
-pub use splitty_core::mux::{Axis, LayoutNode, ScreenState};
+pub use splitty_core::mux::{Axis, Direction, LayoutNode, ScreenState};
 use splitty_core::{
     ids::{NodeId, PaneId},
     mux::{self, ScreenOp},
@@ -30,6 +30,45 @@ pub struct WorkspaceDelta {
     pub removed: Vec<SessionRoute>,
 }
 
+/// A drag capability is meaningful only within its captured connection and snapshot.
+#[derive(Clone, Debug)]
+pub struct PaneDrag {
+    connection_id: Uuid,
+    screen_id: String,
+    revision: u64,
+    pane: String,
+    session: String,
+    source_slot: String,
+    snapshot: Arc<ScreenState>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MovePlacement {
+    Tab,
+    Left,
+    Right,
+    Above,
+    Below,
+}
+impl MovePlacement {
+    fn direction(self) -> Option<Direction> {
+        match self {
+            Self::Tab => None,
+            Self::Left => Some(Direction::Left),
+            Self::Right => Some(Direction::Right),
+            Self::Above => Some(Direction::Above),
+            Self::Below => Some(Direction::Below),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PendingMove {
+    drag: PaneDrag,
+    target: String,
+    placement: MovePlacement,
+}
+
 #[derive(Clone)]
 struct SentTabSelection {
     pane_id: String,
@@ -46,6 +85,7 @@ pub struct LocalWorkspace {
     snapshot: Option<Arc<ScreenState>>,
     focused_pane: Option<String>,
     pending_focus: Option<String>,
+    pending_move: Option<PendingMove>,
     selected_tabs: HashMap<String, String>,
     tab_selection_supported: bool,
     sent_tab_selections: HashMap<String, SentTabSelection>,
@@ -66,6 +106,7 @@ impl LocalWorkspace {
             snapshot: None,
             focused_pane,
             pending_focus: None,
+            pending_move: None,
             selected_tabs: HashMap::new(),
             tab_selection_supported: false,
             sent_tab_selections: HashMap::new(),
@@ -137,6 +178,7 @@ impl LocalWorkspace {
     /// Selection changes immediately in this window. Sync persists it on a
     /// capable server without changing another window's visible tab.
     pub fn select_tab(&mut self, pane_id: &str) -> bool {
+        self.pending_move = None;
         let Some(snapshot) = self.snapshot.as_ref() else {
             return false;
         };
@@ -209,6 +251,7 @@ impl LocalWorkspace {
         self.pending_panes.clear();
         self.pending_focus = None;
         self.pending_recreation = None;
+        self.pending_move = None;
         self.sent_tab_selections.clear();
         self.snapshot = None;
         self.connection_id = connection_id;
@@ -293,6 +336,7 @@ impl LocalWorkspace {
             self.select_tab(&pane_id);
             self.pending_focus = None;
         }
+        self.confirm_move();
         let mut delta = route_delta(&old, &self.pane_sessions);
         delta.snapshot_changed = true;
         Ok(delta)
@@ -350,6 +394,183 @@ impl LocalWorkspace {
         }
         self.install_routes(next);
         route_delta(&old, &self.pane_sessions)
+    }
+
+    pub fn capture_drag(&self, pane: &str) -> Option<PaneDrag> {
+        let screen = self.snapshot()?;
+        let slot = screen.root.find_slot(&PaneId::from(pane))?;
+        Some(PaneDrag {
+            connection_id: self.connection_id,
+            screen_id: self.screen_id().to_owned(),
+            revision: screen.revision,
+            pane: pane.to_owned(),
+            session: self.session_for(pane)?.to_owned(),
+            source_slot: slot.id().to_string(),
+            snapshot: self.snapshot.as_ref()?.clone(),
+        })
+    }
+
+    /// No optimistic layout is installed. None is an intentional same-slot no-op.
+    fn move_op(
+        &self,
+        drag: &PaneDrag,
+        target: &str,
+        placement: MovePlacement,
+    ) -> io::Result<Option<ScreenOp>> {
+        if self.pending_move.is_some() {
+            return Err(invalid(
+                "A pane move is awaiting its authoritative snapshot",
+            ));
+        }
+        let screen = self
+            .snapshot()
+            .ok_or_else(|| invalid("screen snapshot not loaded"))?;
+        if drag.connection_id != self.connection_id
+            || drag.screen_id != self.screen_id()
+            || !same_layout(&drag.snapshot.root, &screen.root)
+            || self.session_for(&drag.pane) != Some(drag.session.as_str())
+        {
+            return Err(invalid("Pane drag is stale; drag the tab again"));
+        }
+        let source = screen
+            .root
+            .find_slot(&PaneId::from(drag.pane.as_str()))
+            .ok_or_else(|| invalid("dragged pane is no longer in the layout"))?;
+        if source.id().as_str() != drag.source_slot {
+            return Err(invalid("dragged pane changed slots"));
+        }
+        if !matches!(
+            screen.root.find_node(&NodeId::from(target)),
+            Some(LayoutNode::Slot { .. })
+        ) {
+            return Err(invalid("drop destination is no longer a slot"));
+        }
+        let LayoutNode::Slot { pane_ids, .. } = source else {
+            unreachable!()
+        };
+        if source.id().as_str() == target
+            && (placement == MovePlacement::Tab || pane_ids.len() == 1)
+        {
+            return Ok(None);
+        }
+        let source_resulting_sizes = if pane_ids.len() == 1 {
+            screen
+                .root
+                .find_parent_info(source.id())
+                .and_then(|parent| {
+                    let LayoutNode::Split { sizes, .. } = screen.root.find_node(&parent.id)? else {
+                        return None;
+                    };
+                    let mut remaining: Vec<_> = sizes
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, size)| (i != parent.index).then_some(*size))
+                        .collect();
+                    let total: f64 = remaining.iter().sum();
+                    let equal = 1. / remaining.len().max(1) as f64;
+                    for size in &mut remaining {
+                        *size = if total > 0. { *size / total } else { equal };
+                    }
+                    Some(remaining)
+                })
+        } else {
+            None
+        };
+        if let Some(sizes) = &source_resulting_sizes {
+            if sizes.is_empty()
+                || sizes.iter().any(|size| !size.is_finite() || *size < 0.)
+                || (sizes.iter().sum::<f64>() - 1.).abs() > 0.01
+            {
+                return Err(invalid("source split has invalid proportions"));
+            }
+        }
+        Ok(Some(ScreenOp::MovePane {
+            pane_id: PaneId::from(drag.pane.as_str()),
+            target_slot_id: (placement == MovePlacement::Tab).then(|| NodeId::from(target)),
+            target_split_id: (placement != MovePlacement::Tab).then(|| NodeId::from(target)),
+            direction: placement.direction(),
+            source_resulting_sizes,
+            resulting_sizes: None,
+        }))
+    }
+
+    pub fn check_move(
+        &self,
+        drag: &PaneDrag,
+        target: &str,
+        placement: MovePlacement,
+    ) -> io::Result<bool> {
+        self.move_op(drag, target, placement).map(|op| op.is_some())
+    }
+
+    pub fn can_move(&self, drag: &PaneDrag, target: &str, placement: MovePlacement) -> bool {
+        self.check_move(drag, target, placement).unwrap_or(false)
+    }
+
+    pub fn move_pane(
+        &mut self,
+        client: &Client,
+        drag: PaneDrag,
+        target: String,
+        placement: MovePlacement,
+    ) -> io::Result<bool> {
+        let Some(op) = self.move_op(&drag, &target, placement)? else {
+            return Ok(false);
+        };
+        self.send_op(client, &op)?;
+        self.pending_move = Some(PendingMove {
+            drag,
+            target,
+            placement,
+        });
+        Ok(true)
+    }
+
+    pub fn reject_move(&mut self, connection: Uuid) {
+        if connection == self.connection_id {
+            self.pending_move = None;
+        }
+    }
+
+    fn confirm_move(&mut self) {
+        let Some(pending) = self.pending_move.as_ref() else {
+            return;
+        };
+        let Some(screen) = self.snapshot() else {
+            return;
+        };
+        if screen.revision <= pending.drag.revision {
+            return;
+        }
+        if self.session_for(&pending.drag.pane) != Some(pending.drag.session.as_str()) {
+            self.pending_move = None;
+            return;
+        }
+        let Some(moved) = screen
+            .root
+            .find_slot(&PaneId::from(pending.drag.pane.as_str()))
+        else {
+            return;
+        };
+        let confirmed = if pending.placement == MovePlacement::Tab {
+            moved.id().as_str() == pending.target
+        } else {
+            let moved_parent = screen.root.find_parent_info(moved.id());
+            let target_parent = screen
+                .root
+                .find_parent_info(&NodeId::from(pending.target.as_str()));
+            moved_parent.zip(target_parent).is_some_and(|(a, b)| {
+                let before = matches!(pending.placement, MovePlacement::Left | MovePlacement::Above);
+                let axis = if matches!(pending.placement, MovePlacement::Left | MovePlacement::Right) { Axis::Horizontal } else { Axis::Vertical };
+                a.id == b.id && a.index == usize::from(!before) && b.index == usize::from(before)
+                    && matches!(screen.root.find_node(&a.id), Some(LayoutNode::Split { axis: actual, children, .. }) if *actual == axis && children.len() == 2)
+            })
+        };
+        if confirmed {
+            let pane = pending.drag.pane.clone();
+            self.pending_move = None;
+            self.select_tab(&pane);
+        }
     }
 
     pub fn split(&mut self, client: &Client, pane_id: &str, axis: Axis) -> io::Result<String> {
@@ -545,6 +766,46 @@ impl LocalWorkspace {
     }
 }
 
+// Compare only the canonical layout, allowing titles/activity and tab focus to
+// advance without making an otherwise valid drag of a running shell stale.
+fn same_layout(a: &LayoutNode, b: &LayoutNode) -> bool {
+    match (a, b) {
+        (
+            LayoutNode::Slot {
+                id: a,
+                pane_ids: ap,
+                ..
+            },
+            LayoutNode::Slot {
+                id: b,
+                pane_ids: bp,
+                ..
+            },
+        ) => a == b && ap == bp,
+        (
+            LayoutNode::Split {
+                id: a,
+                axis: aa,
+                sizes: az,
+                children: ac,
+            },
+            LayoutNode::Split {
+                id: b,
+                axis: ba,
+                sizes: bz,
+                children: bc,
+            },
+        ) => {
+            a == b
+                && aa == ba
+                && az == bz
+                && ac.len() == bc.len()
+                && ac.iter().zip(bc).all(|(a, b)| same_layout(a, b))
+        }
+        _ => false,
+    }
+}
+
 fn find_slot<'a>(screen: &'a ScreenState, pane_id: &str) -> Option<&'a LayoutNode> {
     let pane_id = PaneId::from(pane_id);
     std::iter::once(&screen.root)
@@ -689,6 +950,149 @@ mod tests {
     use super::*;
     use crate::{EmbeddedService, Event};
     use std::time::Duration;
+
+    fn drag_workspace() -> LocalWorkspace {
+        let mut model = LocalWorkspace::new(
+            ScreenIds {
+                screen_id: "screen".into(),
+                pane_id: "a".into(),
+            },
+            Uuid::new_v4(),
+        );
+        let event = serde_json::json!({"type":"mux.screen_snapshot", "screen": {
+            "id":"screen", "revision":1,
+            "root":{"type":"split","id":"root","axis":"horizontal","sizes":[0.2,0.3,0.5],"children":[
+                {"type":"slot","id":"slot-a","paneIds":["a"]},
+                {"type":"slot","id":"slot-b","paneIds":["b"]},
+                {"type":"slot","id":"slot-c","paneIds":["c"]}]},
+            "panes":{"a":{"id":"a","sessionId":"sa"},"b":{"id":"b","sessionId":"sb"},"c":{"id":"c","sessionId":"sc"}},
+            "sessions":{"sa":{"id":"sa","status":"running"},"sb":{"id":"sb","status":"running"},"sc":{"id":"sc","status":"running"}}
+        }});
+        model.apply_snapshot(model.connection_id, &event).unwrap();
+        model
+    }
+
+    fn apply_screen(model: &mut LocalWorkspace, screen: ScreenState) -> WorkspaceDelta {
+        model
+            .apply_snapshot(
+                model.connection_id,
+                &serde_json::json!({"type":"mux.screen_snapshot","screen":screen}),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn pane_drag_rejects_changed_structure_or_route_but_allows_metadata() {
+        let mut model = drag_workspace();
+        let drag = model.capture_drag("c").unwrap();
+        assert!(model.can_move(&drag, "slot-a", MovePlacement::Tab));
+        let mut metadata = model.snapshot().unwrap().clone();
+        metadata.revision += 1;
+        metadata.panes.get_mut(&PaneId::from("c")).unwrap().title = Some("busy shell".into());
+        apply_screen(&mut model, metadata);
+        assert!(model.can_move(&drag, "slot-a", MovePlacement::Tab));
+        assert!(model.check_move(&drag, "gone", MovePlacement::Tab).is_err());
+        model.pane_sessions.insert("c".into(), "replacement".into());
+        assert!(!model.can_move(&drag, "slot-a", MovePlacement::Tab));
+        model.pane_sessions.insert("c".into(), "sc".into());
+        let mut resized = model.snapshot().unwrap().clone();
+        resized.revision += 1;
+        if let LayoutNode::Split { sizes, .. } = &mut resized.root {
+            *sizes = vec![0.3, 0.2, 0.5];
+        }
+        apply_screen(&mut model, resized);
+        assert!(!model.can_move(&drag, "slot-a", MovePlacement::Tab));
+        let fresh = model.capture_drag("c").unwrap();
+        let same_screen = model.snapshot().unwrap().clone();
+        model.reset_connection(Uuid::new_v4());
+        apply_screen(&mut model, same_screen);
+        assert!(!model.can_move(&fresh, "slot-a", MovePlacement::Tab));
+    }
+
+    #[test]
+    fn pane_move_keeps_proportions_and_selects_only_confirmed_placement() {
+        let mut model = drag_workspace();
+        let drag = model.capture_drag("c").unwrap();
+        assert!(model
+            .move_op(&drag, "slot-c", MovePlacement::Tab)
+            .unwrap()
+            .is_none());
+        assert!(model
+            .move_op(&drag, "slot-c", MovePlacement::Left)
+            .unwrap()
+            .is_none());
+        let op = model
+            .move_op(&drag, "slot-a", MovePlacement::Tab)
+            .unwrap()
+            .unwrap();
+        match &op {
+            ScreenOp::MovePane {
+                source_resulting_sizes: Some(sizes),
+                ..
+            } => assert_eq!(sizes, &vec![0.4, 0.6]),
+            _ => panic!("source proportions are required"),
+        }
+        model.pending_move = Some(PendingMove {
+            drag,
+            target: "slot-a".into(),
+            placement: MovePlacement::Tab,
+        });
+        let mut earlier = model.snapshot().unwrap().clone();
+        earlier.revision += 1; // An unrelated metadata snapshot is not a move acknowledgement.
+        apply_screen(&mut model, earlier);
+        assert!(model.pending_move.is_some());
+        assert_eq!(model.focused_pane(), Some("a"));
+        let (next, effects) = mux::reduce_screen(model.snapshot().unwrap().clone(), op).unwrap();
+        assert!(effects.is_empty());
+        let delta = apply_screen(&mut model, next);
+        assert!(delta.added.is_empty() && delta.removed.is_empty());
+        assert_eq!(model.focused_pane(), Some("c"));
+        assert_eq!(model.session_for("c"), Some("sc"));
+        assert!(model.pending_move.is_none());
+        let same_slot = model.capture_drag("c").unwrap();
+        assert!(model.can_move(&same_slot, "slot-a", MovePlacement::Below));
+        model.pending_move = Some(PendingMove {
+            drag: same_slot,
+            target: "slot-a".into(),
+            placement: MovePlacement::Below,
+        });
+        model.reject_move(Uuid::new_v4());
+        assert!(model.pending_move.is_some());
+        model.reject_move(model.connection_id);
+        assert!(model.pending_move.is_none());
+    }
+
+    #[test]
+    fn all_four_edges_confirm_without_session_effects_and_user_focus_cancels_deferred_focus() {
+        for placement in [
+            MovePlacement::Left,
+            MovePlacement::Right,
+            MovePlacement::Above,
+            MovePlacement::Below,
+        ] {
+            let mut model = drag_workspace();
+            let drag = model.capture_drag("c").unwrap();
+            let op = model.move_op(&drag, "slot-a", placement).unwrap().unwrap();
+            model.pending_move = Some(PendingMove {
+                drag: drag.clone(),
+                target: "slot-a".into(),
+                placement,
+            });
+            let (next, effects) =
+                mux::reduce_screen(model.snapshot().unwrap().clone(), op).unwrap();
+            assert!(effects.is_empty());
+            apply_screen(&mut model, next);
+            assert_eq!(model.focused_pane(), Some("c"));
+            assert!(model.pending_move.is_none());
+            model.pending_move = Some(PendingMove {
+                drag,
+                target: "slot-a".into(),
+                placement,
+            });
+            model.select_tab("b");
+            assert!(model.pending_move.is_none());
+        }
+    }
 
     #[test]
     fn pending_spawns_count_toward_attachment_capacity_without_double_counting_routes() {
@@ -1057,6 +1461,83 @@ mod tests {
             workspace.pane_for(&third_session),
             Some(third_pane.as_str())
         );
+
+        // Moving a real terminal changes only its layout: attachment, shell and
+        // pane-to-session route remain stable through stack and edge placement.
+        let moved = workspace
+            .split(&client, &second_pane, Axis::Horizontal)
+            .expect("extra real terminal");
+        until(&mut client, &mut workspace, |w| {
+            w.session_for(&moved).is_some()
+                && w.snapshot().is_some_and(|screen| {
+                    screen
+                        .root
+                        .find_slot(&PaneId::from(moved.as_str()))
+                        .is_some()
+                })
+        })
+        .await;
+        let moved_session = workspace.session_for(&moved).unwrap().to_owned();
+        let root = workspace.snapshot().unwrap().root.id().to_string();
+        workspace
+            .resize_split(&client, &root, vec![0.2, 0.3, 0.5])
+            .unwrap();
+        until(&mut client, &mut workspace, |w| matches!(&w.snapshot().unwrap().root,LayoutNode::Split{sizes,..} if sizes == &vec![0.2,0.3,0.5])).await;
+        let target = workspace
+            .snapshot()
+            .unwrap()
+            .root
+            .find_slot(&PaneId::from(first_pane.as_str()))
+            .unwrap()
+            .id()
+            .to_string();
+        let drag = workspace.capture_drag(&moved).unwrap();
+        workspace
+            .move_pane(&client, drag, target.clone(), MovePlacement::Tab)
+            .expect("move into existing stack");
+        until(&mut client, &mut workspace, |w| w.pending_move.is_none()).await;
+        assert_eq!(workspace.focused_pane(), Some(moved.as_str()));
+        assert!(
+            matches!(&workspace.snapshot().unwrap().root,LayoutNode::Split{sizes,..} if sizes == &vec![0.4,0.6])
+        );
+        for placement in [MovePlacement::Above, MovePlacement::Tab] {
+            let drag = workspace.capture_drag(&moved).unwrap();
+            workspace
+                .move_pane(&client, drag, target.clone(), placement)
+                .expect("move own tab at edge and return");
+            until(&mut client, &mut workspace, |w| w.pending_move.is_none()).await;
+            assert_eq!(workspace.session_for(&moved), Some(moved_session.as_str()));
+            assert_eq!(workspace.focused_pane(), Some(moved.as_str()));
+        }
+        until(&mut client, &mut workspace, |w| {
+            w.session_ready(&moved_session)
+        })
+        .await;
+        client
+            .input(&moved_session, "printf 'MOVED_TERMINAL_ALIVE\\n'\n")
+            .unwrap();
+        let mut moved_output = Vec::new();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while !moved_output
+                .windows(b"MOVED_TERMINAL_ALIVE".len())
+                .any(|part| part == b"MOVED_TERMINAL_ALIVE")
+            {
+                let event = next(&mut client, &mut workspace).await;
+                if let Some(chunk) = event
+                    .output()
+                    .filter(|chunk| chunk.session_id == moved_session)
+                {
+                    moved_output.extend_from_slice(chunk.bytes);
+                }
+            }
+        })
+        .await
+        .expect("moved session continues receiving input");
+        workspace.close_pane(&client, &moved).unwrap();
+        until(&mut client, &mut workspace, |w| {
+            w.session_for(&moved).is_none()
+        })
+        .await;
 
         workspace
             .close_pane(&client, &third_pane)

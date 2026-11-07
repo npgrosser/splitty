@@ -23,7 +23,7 @@ model {
     }
 
     gpui_workspace = component 'gpui_workspace' {
-      description 'Recursive native projection of the service screen with stable pane views and local tab choice.'
+      description 'Recursive native projection, stable pane views, local tabs and captured single-pane drag gestures.'
       metadata { module 'splitty_gpui::workspace' }
     }
 

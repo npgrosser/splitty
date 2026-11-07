@@ -308,3 +308,23 @@ remain unverified locally; the native Windows client needs a Windows library,
 independently of its server running in WSL. This dependency-only check preceded
 the integration described above; it is not evidence for native Windows or
 macOS runtime behavior.
+
+## Native pane movement
+
+The native workspace supports single-tab moves into another slot and onto all
+four split edges using the existing `move_pane` operation. Captured layout and
+route checks reject stale gestures while allowing terminal metadata updates.
+Placement and focus follow the authoritative snapshot; terminal entities and
+sessions remain attached. Surviving source siblings retain their proportions.
+
+Focused client-core tests cover structural/connection/session invalidation,
+metadata-only revisions, source collapse/proportions and selection confirmation.
+A real-service test moves PTY-backed panes and verifies continued input on the
+same session. The mouse-driven smoke in `scripts/testing/gpui-pane-drag.py` passed
+center drops, all four split edges and Escape cancellation on isolated X11 with
+software Vulkan rendering. The original shell process remained the same through
+every move, screenshots retained its terminal history, and normal window closure
+left no child processes. These are functional results, not latency or hardware
+performance evidence. Group moves, tab reordering and cross-window/screen moves
+remain outside this increment. Broader release/CI and cross-platform cutover
+validation remain separate.
