@@ -113,7 +113,7 @@ fn typed_decode_rejects_bad_replies_and_releases_leases() {
 }
 
 #[cfg(unix)]
-mod fake_peer {
+pub(crate) mod fake_peer {
     use super::*;
     use splitty_server::native::client::Connector;
     use splitty_transport::{negotiation, peer::Peer, queue};
@@ -124,9 +124,16 @@ mod fake_peer {
     ) -> (ApiStream, tokio::task::JoinHandle<()>, std::path::PathBuf) {
         scripted_with_gate(replies, None).await
     }
-    async fn scripted_with_gate(
+    pub(crate) async fn scripted_with_gate(
         replies: Vec<(u16, String, bool)>,
         gate: Option<tokio::sync::oneshot::Receiver<()>>,
+    ) -> (ApiStream, tokio::task::JoinHandle<()>, std::path::PathBuf) {
+        scripted_with_gate_observed(replies, gate, None).await
+    }
+    pub(crate) async fn scripted_with_gate_observed(
+        replies: Vec<(u16, String, bool)>,
+        gate: Option<tokio::sync::oneshot::Receiver<()>>,
+        observed: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> (ApiStream, tokio::task::JoinHandle<()>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("hub-read-{}", Uuid::new_v4().simple()));
         std::fs::create_dir(&dir).unwrap();
@@ -167,6 +174,7 @@ mod fake_peer {
                 .unwrap();
             let mut peer = Peer::start(read, write, &ready, context);
             let mut gate = gate;
+            let mut observed = observed;
             for (status, body, uncertain) in replies {
                 let incoming = peer.recv().await.expect("one passive request");
                 let request = incoming
@@ -175,6 +183,9 @@ mod fake_peer {
                     .unwrap();
                 assert_eq!(request.operation, "remote.directory.get");
                 assert!(request.args.is_empty());
+                if let Some(sender) = observed.take() {
+                    sender.send(()).unwrap();
+                }
                 if let Some(wait) = gate.take() {
                     wait.await.unwrap();
                 }
@@ -309,56 +320,62 @@ mod fake_peer {
     #[tokio::test]
     async fn cancelled_receives_retain_read_and_coalesce_superseded_replies() {
         use std::{future::Future, task::Poll};
-        let (send, receive) = tokio::sync::oneshot::channel();
-        let (api, task, dir) = scripted_with_gate(
-            vec![
-                (200, serde_json::to_string(&sample()).unwrap(), false),
-                (
-                    200,
-                    serde_json::to_string(&Directory::new(vec![], vec![])).unwrap(),
-                    false,
-                ),
-            ],
-            Some(receive),
-        )
-        .await;
-        let owner = Uuid::new_v4();
-        let mut client = HubClient::new(api, owner);
-        assert!(matches!(
-            next(&mut client).await.state,
-            HostDirectoryState::Loading { previous: None }
-        ));
-        for _ in 0..3 {
-            let mut pending = Box::pin(client.next_update());
-            std::future::poll_fn(|cx| {
-                assert!(pending.as_mut().poll(cx).is_pending());
-                Poll::Ready(())
-            })
+        for first_status in [200, 500] {
+            let (send, receive) = tokio::sync::oneshot::channel();
+            let (api, task, dir) = scripted_with_gate(
+                vec![
+                    (
+                        first_status,
+                        serde_json::to_string(&sample()).unwrap(),
+                        false,
+                    ),
+                    (
+                        200,
+                        serde_json::to_string(&Directory::new(vec![], vec![])).unwrap(),
+                        false,
+                    ),
+                ],
+                Some(receive),
+            )
             .await;
+            let owner = Uuid::new_v4();
+            let mut client = HubClient::new(api, owner);
+            assert!(matches!(
+                next(&mut client).await.state,
+                HostDirectoryState::Loading { previous: None }
+            ));
+            for _ in 0..3 {
+                let mut pending = Box::pin(client.next_update());
+                std::future::poll_fn(|cx| {
+                    assert!(pending.as_mut().poll(cx).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+            }
+            client.refresh(owner).unwrap();
+            client.refresh(owner).unwrap();
+            send.send(()).unwrap();
+            let loading = next(&mut client).await;
+            assert_eq!(loading.generation, 3);
+            assert!(matches!(
+                loading.state,
+                HostDirectoryState::Loading { previous: None }
+            ));
+            let ready = next(&mut client).await;
+            assert_eq!(ready.generation, 3);
+            assert!(
+                matches!(ready.state, HostDirectoryState::Ready(ref snapshot) if snapshot.directory().hosts.is_empty())
+            );
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), client.next_update())
+                    .await
+                    .is_err()
+            );
+            drop(ready);
+            client.finish().await.unwrap();
+            task.await.unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
         }
-        client.refresh(owner).unwrap();
-        client.refresh(owner).unwrap();
-        send.send(()).unwrap();
-        let loading = next(&mut client).await;
-        assert_eq!(loading.generation, 3);
-        assert!(matches!(
-            loading.state,
-            HostDirectoryState::Loading { previous: None }
-        ));
-        let ready = next(&mut client).await;
-        assert_eq!(ready.generation, 3);
-        assert!(
-            matches!(ready.state, HostDirectoryState::Ready(ref snapshot) if snapshot.directory().hosts.is_empty())
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_millis(20), client.next_update())
-                .await
-                .is_err()
-        );
-        drop(ready);
-        client.finish().await.unwrap();
-        task.await.unwrap();
-        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[tokio::test]
@@ -386,5 +403,124 @@ mod fake_peer {
         let _ = client.finish().await;
         task.await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pending_read_finish_cancels_and_releases_its_stream_without_late_result() {
+        use std::{future::Future, task::Poll};
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let (observed, request_seen) = tokio::sync::oneshot::channel();
+        let (api, server, dir) = scripted_with_gate_observed(
+            vec![(0, String::new(), false)],
+            Some(gate),
+            Some(observed),
+        )
+        .await;
+        let budget = api.sender().context().budget.clone();
+        let mut client = HubClient::new(api, Uuid::new_v4());
+        assert!(matches!(
+            next(&mut client).await.state,
+            HostDirectoryState::Loading { .. }
+        ));
+        let mut pending = Box::pin(client.next_update());
+        std::future::poll_fn(|cx| {
+            assert!(pending.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(pending);
+        request_seen.await.unwrap();
+        client.finish().await.unwrap();
+        assert_eq!(budget.used(), 0);
+        release.send(()).unwrap();
+        server.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn replacement_owner_cannot_inherit_old_snapshot_or_result() {
+        let (old_api, old_server, old_dir) = scripted(vec![(
+            200,
+            serde_json::to_string(&sample()).unwrap(),
+            false,
+        )])
+        .await;
+        let old_owner = Uuid::new_v4();
+        let mut old = HubClient::new(old_api, old_owner);
+        let _ = next(&mut old).await;
+        let old_ready = next(&mut old).await;
+        let HostDirectoryState::Ready(old_snapshot) = old_ready.state else {
+            panic!("old owner ready")
+        };
+        old.finish().await.unwrap();
+        old_server.await.unwrap();
+
+        let (api, server, dir) = scripted(vec![(
+            200,
+            serde_json::to_string(&Directory::new(vec![], vec![])).unwrap(),
+            false,
+        )])
+        .await;
+        let new_owner = Uuid::new_v4();
+        let mut replacement =
+            HubClient::with_previous(api, new_owner, 1, Some(old_snapshot.clone()));
+        assert!(replacement.last_good().is_none());
+        assert!(matches!(
+            next(&mut replacement).await.state,
+            HostDirectoryState::Loading { previous: None }
+        ));
+        let current = next(&mut replacement).await;
+        assert_eq!(current.connection_id, new_owner);
+        assert!(
+            matches!(current.state, HostDirectoryState::Ready(ref snapshot) if snapshot.connection_id() == new_owner && snapshot.directory().hosts.is_empty())
+        );
+        assert_eq!(old_snapshot.connection_id(), old_owner);
+        replacement.finish().await.unwrap();
+        server.await.unwrap();
+        std::fs::remove_dir_all(old_dir).unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn queued_old_owner_reply_remains_scoped_after_replacement_starts() {
+        use std::{future::Future, task::Poll};
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let (old_api, old_server, old_dir) = scripted_with_gate(
+            vec![(200, serde_json::to_string(&sample()).unwrap(), false)],
+            Some(gate),
+        )
+        .await;
+        let old_owner = Uuid::new_v4();
+        let mut old = HubClient::new(old_api, old_owner);
+        let _ = next(&mut old).await;
+        let mut old_wait = Box::pin(old.next_update());
+        std::future::poll_fn(|cx| {
+            assert!(old_wait.as_mut().poll(cx).is_pending());
+            Poll::Ready(())
+        })
+        .await;
+        drop(old_wait);
+
+        let (new_api, new_server, new_dir) = scripted(vec![(
+            200,
+            serde_json::to_string(&Directory::new(vec![], vec![])).unwrap(),
+            false,
+        )])
+        .await;
+        let new_owner = Uuid::new_v4();
+        let mut replacement = HubClient::new(new_api, new_owner);
+        let _ = next(&mut replacement).await;
+        let new_ready = next(&mut replacement).await;
+        assert_eq!(new_ready.connection_id, new_owner);
+        release.send(()).unwrap();
+        let old_ready = next(&mut old).await;
+        assert_eq!(old_ready.connection_id, old_owner);
+        assert_ne!(old_ready.connection_id, new_ready.connection_id);
+        old.finish().await.unwrap();
+        replacement.finish().await.unwrap();
+        old_server.await.unwrap();
+        new_server.await.unwrap();
+        std::fs::remove_dir_all(old_dir).unwrap();
+        std::fs::remove_dir_all(new_dir).unwrap();
     }
 }

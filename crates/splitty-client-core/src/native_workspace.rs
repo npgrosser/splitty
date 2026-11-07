@@ -239,6 +239,16 @@ fn profile_fallback_status(
         "Shell profile {reason}; started {effective} instead"
     ))
 }
+
+fn supports_host_directory(welcome: &serde_json::Value) -> bool {
+    welcome["capabilities"]
+        .as_array()
+        .is_some_and(|capabilities| {
+            capabilities
+                .iter()
+                .any(|capability| capability.as_str() == Some("hub-host-decisions-v1"))
+        })
+}
 // Setup and reads stay owned across cancelled select branches. Both streams
 // share the embedded service's admission domain, but never consume each other's events.
 type LocalServiceSetup<'a> = std::pin::Pin<
@@ -1293,18 +1303,7 @@ async fn run_service(
                                 }
                             }
                             Some("mux.welcome") if model.is_none() => {
-                                let supports_hub = json["capabilities"].as_array().is_some_and(|caps| {
-                                    caps.iter().any(|cap| cap.as_str() == Some("hub-host-decisions-v1"))
-                                });
-                                if supports_hub {
-                                    hub = Some(RuntimeHub::new(&service, client.connection_id()));
-                                    publish(&updates, Update::HostDirectory(HubUpdate {
-                                        connection_id: client.connection_id(), generation: 1,
-                                        state: HostDirectoryState::Loading { previous: None },
-                                    }), &stop).await?;
-                                } else {
-                                    publish(&updates, Update::HostDirectory(HubUpdate::unavailable(client.connection_id())), &stop).await?;
-                                }
+                                let supports_hub = supports_host_directory(json);
                                 let mut workspace = LocalWorkspace::new(client.connection_id());
                                 let supports_tab_selection =
                                     json["capabilities"].as_array().is_some_and(|capabilities| {
@@ -1344,7 +1343,16 @@ async fn run_service(
                                 )
                                 .await?;
                                 model = Some(workspace);
-                                // Establish the UI owner before any settings can be published.
+                                // The UI must accept this owner before feature snapshots.
+                                if supports_hub {
+                                    hub = Some(RuntimeHub::new(&service, client.connection_id()));
+                                    publish(&updates, Update::HostDirectory(HubUpdate {
+                                        connection_id: client.connection_id(), generation: 1,
+                                        state: HostDirectoryState::Loading { previous: None },
+                                    }), &stop).await?;
+                                } else {
+                                    publish(&updates, Update::HostDirectory(HubUpdate::unavailable(client.connection_id())), &stop).await?;
+                                }
                                 settings = Some(RuntimeLocalService::new(
                                     &service, client.connection_id(), scheme,
                                 ));

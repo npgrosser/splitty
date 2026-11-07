@@ -93,7 +93,7 @@ impl HubClient {
             pending: None,
             pending_generation: 0,
             loading_due: false,
-            last_good,
+            last_good: last_good.filter(|snapshot| snapshot.connection_id == owner),
             broken: false,
             reopen_due: false,
             cancel: Arc::new(Notify::new()),
@@ -326,4 +326,4 @@ fn valid_target(target: &str) -> io::Result<()> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;
