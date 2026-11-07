@@ -37,7 +37,7 @@ pub(crate) async fn read(
             serde_json::Map::new(),
         )
         .await?;
-    let state = crate::local_settings::decode::<ShellProfilesState>(client, &reply)?;
+    let state = crate::local_service::decode::<ShellProfilesState>(client, &reply)?;
     if state.profiles.len() > 128
         || state.default_profile_id.len() > MAX_PROFILE_ID_BYTES
         || state.profiles.iter().any(|profile| {

@@ -7,10 +7,12 @@ switches.
 Closing the window ends its owned service. Saved production workspaces and the
 released Electron/Tauri apps remain separate.
 
-The [native migration proposal](../openspec/changes/native-ui-gpui/proposal.md#terminal-engine-decision)
-selects Ghostty's native terminal core. The current terminal uses statically
-linked `libghostty-vt` 1.0.0 through a UI-independent owned engine. GPUI handles
-input and drawing, caching shaped content for unchanged visible rows.
+The current terminal uses statically linked `libghostty-vt` 1.0.0 through a
+UI-independent owned engine. The [terminal build instructions](development.md#native-terminal-library-for-gpui)
+describe its pinned native dependency. GPUI handles input and drawing, caching
+shaped content for unchanged visible rows. This branch evaluates a native client
+alongside the working web client; replacement and long-term coexistence remain
+open product choices.
 
 `--probe` retains the original terminal/Markdown fixture, including the optional
 CEF experiment. The [phase-0 evidence](#phase-0-evidence-and-limits-historical)
@@ -87,6 +89,27 @@ Clicking a float raises it locally without a layout operation. Geometry previews
 commit once on release; Escape, window deactivation and viewport/zoom changes
 cancel them. Out-of-viewport stored bounds are displayed within reach without
 automatically rewriting their saved values.
+
+**Templates** (Alt+P, Cmd+P on macOS) opens the local server's saved-template
+library. Save current Screen first chooses an optional root for relative
+directories, then reviews one server extraction: name, command selections,
+directories and shell profiles. Saving does not extract again after review.
+Overwrite and delete require an explicit choice for the selected file.
+Unsupported template structures are reported before saving or application.
+
+Apply chooses the current Screen or a new Screen and an optional root on the
+target host. Every command is reviewed before **Run commands**; **Layout only**
+omits commands and their restore modes. Replacing an existing Screen ends all
+its terminals, including hidden/floating tabs, even for layout-only application.
+The replacement review is checked again before submission. A new Screen uses
+one apply operation without a throwaway terminal.
+
+The intended layout appears as pending until the server result is established.
+Its placeholders cannot receive terminal input or claim a terminal size.
+Navigating elsewhere keeps that selection when application finishes. A launch
+failure can leave a valid layout and usable sibling terminals; an uncertain
+result is reported without replaying the operation. Escape dismisses template
+dialogs, and Enter never approves command execution.
 
 The arrow beside a tab group's **+** opens the local shell-profile picker.
 Use Up/Down and Enter to choose an enabled, available profile; Escape or an outside

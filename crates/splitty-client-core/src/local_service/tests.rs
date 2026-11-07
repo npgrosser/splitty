@@ -24,19 +24,19 @@ fn profiles() -> ShellProfilesState {
         }],
     }
 }
-async fn next(reader: &mut LocalSettingsClient) -> LocalSettingsUpdate {
+async fn next(reader: &mut LocalServiceClient) -> LocalServiceUpdate {
     tokio::time::timeout(Duration::from_secs(5), reader.next_update())
         .await
         .unwrap()
 }
-async fn profile(reader: &mut LocalSettingsClient) -> io::Result<Arc<ShellProfilesSnapshot>> {
+async fn profile(reader: &mut LocalServiceClient) -> io::Result<Arc<ShellProfilesSnapshot>> {
     loop {
-        if let LocalSettingsUpdate::ShellProfiles(result) = next(reader).await {
+        if let LocalServiceUpdate::ShellProfiles(result) = next(reader).await {
             return result;
         }
     }
 }
-pub(super) async fn begin(reader: &mut LocalSettingsClient) {
+pub(super) async fn begin(reader: &mut LocalServiceClient) {
     let mut read = Box::pin(reader.next_update());
     std::future::poll_fn(|cx| {
         assert!(read.as_mut().poll(cx).is_pending());
@@ -55,14 +55,14 @@ async fn feature_generations_are_fair_and_os_changes_do_not_reload_profiles() {
         .unwrap();
     let budget = api.sender().context().budget.clone();
     let owner = Uuid::new_v4();
-    let mut reader = LocalSettingsClient::new(api, owner, ColorScheme::Dark);
+    let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
     begin(&mut reader).await;
     assert!(reader.refresh_settings(Uuid::new_v4()).is_err());
     reader.refresh_settings(owner).unwrap();
     reader.set_scheme(owner, ColorScheme::Light).unwrap();
     // Superseded appearance work yields priority to profiles, rather than
     // restarting appearance indefinitely while preferences keep changing.
-    let LocalSettingsUpdate::ShellProfiles(result) = next(&mut reader).await else {
+    let LocalServiceUpdate::ShellProfiles(result) = next(&mut reader).await else {
         panic!("profiles were starved");
     };
     let snapshot = result.unwrap();
@@ -71,7 +71,7 @@ async fn feature_generations_are_fair_and_os_changes_do_not_reload_profiles() {
     assert_eq!(snapshot.state().default_profile_id, "chosen");
     assert!(budget.used() > 0);
     drop(snapshot);
-    let LocalSettingsUpdate::Appearance(result) = next(&mut reader).await else {
+    let LocalServiceUpdate::Appearance(result) = next(&mut reader).await else {
         panic!("appearance missing");
     };
     let snapshot = result.unwrap();
@@ -81,7 +81,7 @@ async fn feature_generations_are_fair_and_os_changes_do_not_reload_profiles() {
     reader.set_scheme(owner, ColorScheme::Dark).unwrap();
     assert!(matches!(
         next(&mut reader).await,
-        LocalSettingsUpdate::Appearance(Ok(_))
+        LocalServiceUpdate::Appearance(Ok(_))
     ));
     assert!(
         tokio::time::timeout(Duration::from_millis(20), reader.next_update())
@@ -104,7 +104,7 @@ async fn profile_limits_are_atomic_and_failure_does_not_poison_appearance() {
         .unwrap();
     let budget = api.sender().context().budget.clone();
     let owner = Uuid::new_v4();
-    let mut reader = LocalSettingsClient::new(api, owner, ColorScheme::Dark);
+    let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
     let first = profile(&mut reader).await.unwrap();
     for case in 0..5 {
         let mut invalid = profiles();
@@ -123,8 +123,8 @@ async fn profile_limits_are_atomic_and_failure_does_not_poison_appearance() {
         let updates = [a, b];
         assert!(updates
             .iter()
-            .any(|update| matches!(update, LocalSettingsUpdate::Appearance(Ok(_)))));
-        assert!(updates.iter().any(|update| matches!(update, LocalSettingsUpdate::ShellProfiles(Err(error)) if error.kind() == io::ErrorKind::InvalidData)));
+            .any(|update| matches!(update, LocalServiceUpdate::Appearance(Ok(_)))));
+        assert!(updates.iter().any(|update| matches!(update, LocalServiceUpdate::ShellProfiles(Err(error)) if error.kind() == io::ErrorKind::InvalidData)));
         drop(updates);
         assert_eq!(
             first.state().profiles[0].name,
@@ -145,10 +145,10 @@ async fn profile_limits_are_atomic_and_failure_does_not_poison_appearance() {
     let updates = [a, b];
     assert!(updates
         .iter()
-        .any(|update| matches!(update, LocalSettingsUpdate::Appearance(Err(_)))));
+        .any(|update| matches!(update, LocalServiceUpdate::Appearance(Err(_)))));
     assert!(updates
         .iter()
-        .any(|update| matches!(update, LocalSettingsUpdate::ShellProfiles(Ok(_)))));
+        .any(|update| matches!(update, LocalServiceUpdate::ShellProfiles(Ok(_)))));
     drop(updates);
     drop(first);
     reader.finish().await.unwrap();
@@ -167,10 +167,10 @@ async fn cancelled_profile_read_retains_client_and_shutdown_releases_allocations
         .unwrap();
     let budget = api.sender().context().budget.clone();
     let owner = Uuid::new_v4();
-    let mut reader = LocalSettingsClient::new(api, owner, ColorScheme::Dark);
+    let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
     assert!(matches!(
         next(&mut reader).await,
-        LocalSettingsUpdate::Appearance(Ok(_))
+        LocalServiceUpdate::Appearance(Ok(_))
     ));
     begin(&mut reader).await;
     assert!(reader.pending.is_some());
@@ -178,7 +178,7 @@ async fn cancelled_profile_read_retains_client_and_shutdown_releases_allocations
     // The stale profile result is suppressed; fresh appearance has priority.
     assert!(matches!(
         next(&mut reader).await,
-        LocalSettingsUpdate::Appearance(Ok(_))
+        LocalServiceUpdate::Appearance(Ok(_))
     ));
     begin(&mut reader).await;
     tokio::time::timeout(Duration::from_secs(5), reader.finish())

@@ -147,6 +147,13 @@ On macOS and Linux, local terminals need the
 Cmd is for macOS, Alt for Linux and Windows; all shortcuts are listed
 [below](#keyboard-shortcuts).
 
+In the native local workspace preview, **Templates** (Cmd+P on macOS, Alt+P
+elsewhere) opens the saved-template library. Save the current Screen by
+reviewing its extracted layout and choosing which commands to retain. Loading
+a template lets you create a new Screen or replace the current one. Replacement
+ends that Screen's existing terminals, including with **Layout only**; use
+**Run displayed commands** only after reviewing the exact command list.
+
 ## Advanced: the `splitty` command
 
 Day to day, everything happens in the UI. The `splitty` command adds a few

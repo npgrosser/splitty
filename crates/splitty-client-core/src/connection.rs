@@ -335,6 +335,20 @@ impl Client {
         self.resync(screen_id)
     }
 
+    pub(crate) fn submit_template(
+        &self,
+        screen_id: &str,
+        request: &splitty_core::mux::ApplyTemplate,
+    ) -> io::Result<()> {
+        identifier(screen_id)?;
+        let mut size = CountBytes(0);
+        serde_json::to_writer(&mut size, request).map_err(io::Error::other)?;
+        self.command(size.0, || {
+            let mut op = serde_json::to_value(request).expect("serializable template");
+            op["type"] = json!("apply_template");
+            json!({"type":"mux.op","screenId":screen_id,"op":op})
+        })
+    }
     pub(crate) fn submit_screen_op(&self, screen_id: &str, op: &ScreenOp) -> io::Result<()> {
         identifier(screen_id)?;
         let mut size = CountBytes(0);

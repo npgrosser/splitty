@@ -1,5 +1,5 @@
 use super::*;
-use crate::local_settings::{LocalSettingsClient, LocalSettingsUpdate};
+use crate::local_service::{LocalServiceClient, LocalServiceUpdate};
 use splitty_transport::wire;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 use crate::connection::Client as SessionClient;
@@ -81,15 +81,15 @@ pub(crate) fn fixture() -> (Runtime, PathBuf) {
     (Runtime { state, pty }, path)
 }
 
-async fn next_appearance(reader: &mut LocalSettingsClient) -> io::Result<Arc<AppearanceSnapshot>> {
+async fn next_appearance(reader: &mut LocalServiceClient) -> io::Result<Arc<AppearanceSnapshot>> {
     loop {
-        if let LocalSettingsUpdate::Appearance(result) = reader.next_update().await {
+        if let LocalServiceUpdate::Appearance(result) = reader.next_update().await {
             return result;
         }
     }
 }
 
-async fn snapshot(reader: &mut LocalSettingsClient) -> Arc<AppearanceSnapshot> {
+async fn snapshot(reader: &mut LocalServiceClient) -> Arc<AppearanceSnapshot> {
     tokio::time::timeout(Duration::from_secs(5), next_appearance(reader))
         .await
         .unwrap()
@@ -98,7 +98,7 @@ async fn snapshot(reader: &mut LocalSettingsClient) -> Arc<AppearanceSnapshot> {
 
 // Poll just once without running the service task. Cancellation of this outer
 // receive must retain the in-flight API client and the request's allocation.
-async fn begin_read(reader: &mut LocalSettingsClient) {
+async fn begin_read(reader: &mut LocalServiceClient) {
     let mut next = Box::pin(next_appearance(reader));
     std::future::poll_fn(|cx| {
         assert!(next.as_mut().poll(cx).is_pending());
@@ -136,7 +136,7 @@ async fn reads_keep_allocations_charged_and_session_events_separate() {
         .await
         .unwrap();
     let budget = api.sender().context().budget.clone();
-    let mut reader = LocalSettingsClient::new(api, session.connection_id(), ColorScheme::Light);
+    let mut reader = LocalServiceClient::new(api, session.connection_id(), ColorScheme::Light);
     service.state.client_state.broadcast_events(
         &[ServerEvent::settings_changed(
             json!({"appearance":{"theme":"test"}}),
@@ -189,7 +189,7 @@ async fn cancelled_poll_retains_read_and_refresh_discards_superseded_generation(
         .await
         .unwrap();
     let owner = Uuid::new_v4();
-    let mut reader = LocalSettingsClient::new(api, owner, ColorScheme::Dark);
+    let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
     begin_read(&mut reader).await;
     assert!(reader
         .set_scheme(Uuid::new_v4(), ColorScheme::Light)
@@ -213,7 +213,7 @@ async fn finish_cancels_pending_request_and_releases_the_owned_stream() {
         .await
         .unwrap();
     let budget = api.sender().context().budget.clone();
-    let mut reader = LocalSettingsClient::new(api, Uuid::new_v4(), ColorScheme::Dark);
+    let mut reader = LocalServiceClient::new(api, Uuid::new_v4(), ColorScheme::Dark);
     begin_read(&mut reader).await;
     tokio::time::timeout(Duration::from_secs(5), reader.finish())
         .await
@@ -226,7 +226,7 @@ async fn finish_cancels_pending_request_and_releases_the_owned_stream() {
 
 #[test]
 fn malformed_or_oversized_reply_is_rejected_without_losing_budget() {
-    use crate::local_settings::decode_with_budget;
+    use crate::local_service::decode_with_budget;
     use splitty_transport::budget::{ConnectionBudget, ProcessBudget};
     // Exhaust only this decoder's private budget, not the process-wide admission
     // pool shared by concurrently running real-service tests.
@@ -283,7 +283,7 @@ async fn read_error_is_reported_once_and_explicit_refresh_recovers() {
         .await
         .unwrap();
     let owner = Uuid::new_v4();
-    let mut reader = LocalSettingsClient::new(api, owner, ColorScheme::Dark);
+    let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
     let error = tokio::time::timeout(Duration::from_secs(5), next_appearance(&mut reader))
         .await
         .unwrap()

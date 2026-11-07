@@ -6,6 +6,10 @@ use crate::{
 };
 pub use catalog::floating::{FloatingActionOutcome, FloatingActionResult, FloatingTarget};
 pub(crate) use catalog::refresh::WorkspaceRefresh;
+pub use catalog::templates::{
+    PendingTemplateProjection, TemplateApplyChoice, TemplateApplyOutcome, TemplateApplyPlan,
+    TemplateApplyResult, TemplateApplyTarget, TemplateLaunchError, TemplateProfileFallback,
+};
 pub use catalog::transfer::{
     PaneActionTarget, ScreenTransferOutcome, ScreenTransferResult, ScreenTransferTarget,
 };
@@ -40,6 +44,7 @@ pub struct WorkspaceDelta {
     pub placement: Option<PlacementOutcome>,
     pub transfer: Option<ScreenTransferResult>,
     pub floating: Option<FloatingActionResult>,
+    pub template: Option<TemplateApplyResult>,
     pub reconciliation_error: Option<String>,
     pub coherent_refresh: bool,
 }
@@ -70,6 +75,7 @@ pub enum CloseTarget {
 pub enum CloseIdentity {
     Catalog,
     Reconciliation,
+    Template(String),
     Screen(String),
     Pane {
         screen: String,

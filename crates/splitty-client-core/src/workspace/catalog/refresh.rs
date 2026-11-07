@@ -113,6 +113,7 @@ impl WorkspaceRefresh {
             snapshot_changed: true,
             transfer: model.finish_transfer(Some(reason.clone())),
             floating: model.finish_floating(Some(reason.clone())),
+            template: model.finish_template(Some(reason.clone())),
             reconciliation_error: Some(reason),
             ..WorkspaceDelta::default()
         }
@@ -400,6 +401,7 @@ fn commit(model: &mut LocalWorkspace, batch: &Batch, ending: &Value) -> io::Resu
     let mut delta = route_delta(&old_routes, &next.route_map());
     delta.placement = next.settle_placement_after_refresh(batch.generation);
     delta.floating = next.settle_floating_after_refresh(batch.generation);
+    delta.template = next.settle_template_after_refresh(batch.generation);
     delta.transfer = next.finish_transfer(None);
     delta.snapshot_changed = true;
     delta.coherent_refresh = true;

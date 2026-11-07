@@ -77,7 +77,7 @@ describe("guardedApplyTemplate", () => {
     captureRequests();
     const applied: Template[] = [];
 
-    guardedApplyTemplate(template({ a: {} }), (t) => applied.push(t));
+    expect(guardedApplyTemplate(template({ a: {} }), (t) => applied.push(t))).toBe(true);
 
     expect(applied).toHaveLength(1);
   });
@@ -87,7 +87,7 @@ describe("guardedApplyTemplate", () => {
     const requests = captureRequests();
     const applied: Template[] = [];
 
-    guardedApplyTemplate(template({ a: { command: "rm -rf /" } }), (t) => applied.push(t));
+    expect(guardedApplyTemplate(template({ a: { command: "rm -rf /" } }), (t) => applied.push(t))).toBe(true);
 
     expect(applied).toHaveLength(0);
     expect(requests.last()).not.toBeNull();
@@ -123,6 +123,91 @@ describe("guardedApplyTemplate", () => {
     requests.last()!.cancel();
 
     expect(applied).toHaveLength(0);
+  });
+
+  it("refuses commands without a handler but still applies command-free layouts", () => {
+    const applied: Template[] = [];
+    expect(guardedApplyTemplate(template({ a: { command: "touch marker" } }), t => applied.push(t))).toBe(false);
+    expect(applied).toEqual([]);
+    expect(guardedApplyTemplate(template({ a: {} }), t => applied.push(t))).toBe(true);
+    expect(applied).toHaveLength(1);
+  });
+
+  it("binds the reviewed command, directory and layout to one immutable source snapshot", () => {
+    const requests = captureRequests();
+    const source = template({ a: { command: "printf reviewed", dir: "/reviewed", restore_mode: "shell" } });
+    const applied: Template[] = [];
+    guardedApplyTemplate(source, t => applied.push(t));
+    source.panes.a.command = "printf changed";
+    source.panes.a.dir = "/changed";
+    source.layout.slot = "missing";
+    requests.last()!.approveFull();
+    requests.last()!.approveLayoutOnly();
+    expect(requests.last()!.commands).toMatchObject([{ command: "printf reviewed", dir: "/reviewed" }]);
+    expect(applied).toHaveLength(1);
+    expect(applied[0].panes.a).toMatchObject({ command: "printf reviewed", dir: "/reviewed", restore_mode: "shell" });
+    expect(applied[0].layout.slot).toEqual(["a"]);
+  });
+
+  it("consumes a layout-only choice once and strips its captured restore mode", () => {
+    const requests = captureRequests();
+    const source = template({ a: { command: "printf reviewed", restore_mode: "replay" } });
+    const applied: Template[] = [];
+    guardedApplyTemplate(source, t => applied.push(t));
+    source.panes.a.command = "printf changed";
+    requests.last()!.approveLayoutOnly();
+    requests.last()!.approveFull();
+    requests.last()!.approveLayoutOnly();
+    expect(applied).toHaveLength(1);
+    expect(applied[0].panes.a.command).toBeUndefined();
+    expect(applied[0].panes.a.restore_mode).toBeUndefined();
+  });
+
+  it("captures reactive proxy data from the relative-root flow including floating layouts", () => {
+    const requests = captureRequests();
+    const source = template({ a: { command: "printf reviewed", dir: "./work" } });
+    source.layout = new Proxy({ slot: new Proxy(["a"], {}) }, {});
+    source.panes = new Proxy({ a: new Proxy(source.panes.a, {}) }, {});
+    source.floating = [{ layout: { slot: ["a"] }, bounds: { x: 0.1, y: 0.2, w: 0.3, h: 0.4 } }];
+    const applied: Template[] = [];
+    expect(guardedApplyTemplate(new Proxy(source, {}), t => applied.push(t))).toBe(true);
+    source.panes.a.command = "printf changed";
+    (source.layout.slot as string[]).push("changed");
+    source.floating[0].bounds.x = 0.9;
+    (source.floating[0].layout.slot as string[]).push("changed");
+    requests.last()!.approveFull();
+    expect(applied[0].panes.a.command).toBe("printf reviewed");
+    expect(applied[0].layout.slot).toEqual(["a"]);
+    expect(applied[0].floating).toEqual([{ layout: { slot: ["a"] }, bounds: { x: 0.1, y: 0.2, w: 0.3, h: 0.4 } }]);
+  });
+
+  it("consumes cancellation and rejects late choices", () => {
+    const requests = captureRequests();
+    const applied: Template[] = [];
+    guardedApplyTemplate(template({ a: { command: "printf reviewed" } }), t => applied.push(t));
+    requests.last()!.cancel();
+    requests.last()!.approveFull();
+    expect(applied).toEqual([]);
+  });
+
+  it("does not let an older listener cleanup remove a newer approval handler", () => {
+    const oldCleanup = onTemplateApprovalRequest(() => {});
+    const requests = captureRequests();
+    oldCleanup();
+    expect(guardedApplyTemplate(template({ a: { command: "printf reviewed" } }), () => {})).toBe(true);
+    expect(requests.last()).not.toBeNull();
+  });
+
+  it("fails closed if the approval handler cannot present the request", () => {
+    const handoff: { request?: TemplateApprovalRequest } = {};
+    unsubscribe = onTemplateApprovalRequest(req => {
+      handoff.request = req;
+      throw Error("dialog unavailable");
+    });
+    const applied: Template[] = [];
+    expect(guardedApplyTemplate(template({ a: { command: "printf reviewed" } }), t => applied.push(t))).toBe(false);
+    handoff.request?.approveFull();
+    expect(applied).toEqual([]);
   });
 
   /// A hidden pane must not be able to slip past the prompt: the command list is

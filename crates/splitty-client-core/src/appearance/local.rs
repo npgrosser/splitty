@@ -1,5 +1,5 @@
 use super::{theme_name, AppearanceSnapshot, ColorScheme};
-use crate::local_settings::decode;
+use crate::local_service::decode;
 use serde::Deserialize;
 use splitty_core::{config::AppearanceSettings, theme::ResolvedTheme};
 use splitty_server::{native::client::Client, service::catalog::Operation};

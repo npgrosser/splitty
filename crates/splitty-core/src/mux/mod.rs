@@ -24,7 +24,10 @@ mod state;
 mod store;
 mod templates;
 mod validate;
-pub use templates::{extract_template, template_directory, ApplyTemplate, TEMPLATE_CAPABILITY};
+pub use templates::{
+    extract_template, project_template, template_directory, ApplyTemplate, TemplateProjection,
+    TEMPLATE_CAPABILITY,
+};
 
 pub use effects::Effect;
 pub use grid::{find_neighbor, project_grid, PaneRect};

@@ -9,9 +9,10 @@ pub mod document;
 pub mod embedded;
 pub mod external_links;
 #[cfg(not(target_os = "windows"))]
-pub mod local_settings;
+pub mod local_service;
 pub mod native_workspace;
 pub mod shell_profiles;
+pub mod templates;
 pub mod workspace;
 pub mod zoom;
 
@@ -21,5 +22,5 @@ pub use document::{Document, DocumentRead};
 #[cfg(not(target_os = "windows"))]
 pub use embedded::EmbeddedService;
 #[cfg(not(target_os = "windows"))]
-pub use local_settings::LocalSettingsClient;
+pub use local_service::LocalServiceClient;
 pub use workspace::{LocalWorkspace, SessionRoute, WorkspaceDelta};

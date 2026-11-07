@@ -11,7 +11,8 @@ use std::{collections::VecDeque, future::Future, io, pin::Pin, sync::Arc};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
-pub enum LocalSettingsUpdate {
+pub enum LocalServiceUpdate {
+    Template(crate::templates::TemplateApiResult),
     Zoom(ZoomResult),
     Appearance(io::Result<Arc<AppearanceSnapshot>>),
     ShellProfiles(io::Result<Arc<ShellProfilesSnapshot>>),
@@ -37,21 +38,25 @@ impl Feature {
     }
 }
 const MAX_QUEUED_ZOOM: usize = 32;
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum Job {
     Read(Feature, u64),
     Zoom(Uuid, ZoomAction),
+    Template(Uuid, crate::templates::TemplateApiRequest),
 }
-type Read = Pin<Box<dyn Future<Output = (Client, Job, LocalSettingsUpdate)> + Send>>;
+type Read = Pin<Box<dyn Future<Output = (Client, Job, LocalServiceUpdate)> + Send>>;
 
 /// `next_update` may be cancelled without cancelling the retained request. Each
 /// feature coalesces its own refreshes; completing even a superseded read gives
 /// the other dirty feature priority. Read failures wait for another refresh;
 /// mutations are submitted at most once and never automatically retried.
-pub struct LocalSettingsClient {
+pub struct LocalServiceClient {
     client: Option<Client>,
     pending: Option<Read>,
     active_zoom: Option<Uuid>,
+    template: Option<(Uuid, crate::templates::TemplateApiRequest)>,
+    active_template: Option<Uuid>,
+    last_template: bool,
     zoom: VecDeque<(Uuid, ZoomAction)>,
     prefer_write: bool,
     cancel: Arc<Notify>,
@@ -61,12 +66,15 @@ pub struct LocalSettingsClient {
     next: Feature,
     scheme: ColorScheme,
 }
-impl LocalSettingsClient {
+impl LocalServiceClient {
     pub(crate) fn new(client: Client, connection_id: Uuid, scheme: ColorScheme) -> Self {
         Self {
             client: Some(client),
             pending: None,
             active_zoom: None,
+            template: None,
+            active_template: None,
+            last_template: false,
             zoom: VecDeque::new(),
             prefer_write: false,
             cancel: Arc::new(Notify::new()),
@@ -128,7 +136,35 @@ impl LocalSettingsClient {
         self.zoom.push_back((request, action));
         Ok(())
     }
-    pub async fn next_update(&mut self) -> LocalSettingsUpdate {
+    pub fn enqueue_template(
+        &mut self,
+        owner: Uuid,
+        id: Uuid,
+        request: crate::templates::TemplateApiRequest,
+    ) -> io::Result<()> {
+        self.check_owner(owner)?;
+        if self.active_template == Some(id)
+            || self
+                .template
+                .as_ref()
+                .is_some_and(|(pending, _)| *pending == id)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Template request is already pending",
+            ));
+        }
+        request.validate(owner)?;
+        if self.template.is_some() || self.active_template.is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "A template library operation is pending",
+            ));
+        }
+        self.template = Some((id, request));
+        Ok(())
+    }
+    pub async fn next_update(&mut self) -> LocalServiceUpdate {
         loop {
             if self.pending.is_none() {
                 let feature = if self.dirty[self.next.index()] {
@@ -138,14 +174,20 @@ impl LocalSettingsClient {
                 } else {
                     None
                 };
-                let job = if !self.zoom.is_empty() && (self.prefer_write || feature.is_none()) {
+                let job = if self.template.is_some()
+                    && (!self.last_template || (self.zoom.is_empty() && feature.is_none()))
+                {
+                    let (id, request) = self.template.take().expect("queued template");
+                    self.active_template = Some(id);
+                    Job::Template(id, request)
+                } else if !self.zoom.is_empty() && (self.prefer_write || feature.is_none()) {
                     let (id, action) = self.zoom.pop_front().expect("queued zoom");
                     // Reserve a generation before starting this indivisible job.
                     // No read can publish it until after the mutation outcome.
                     let generation = match increment(self.generations[0]) {
                         Ok(generation) => generation,
                         Err(error) => {
-                            return LocalSettingsUpdate::Zoom(ZoomResult::rejected(
+                            return LocalServiceUpdate::Zoom(ZoomResult::rejected(
                                 self.connection_id,
                                 id,
                                 error.to_string(),
@@ -172,20 +214,30 @@ impl LocalSettingsClient {
                     let cancelled = || {
                         io::Error::new(io::ErrorKind::Interrupted, "local settings read cancelled")
                     };
-                    let result = match job {
+                    let result = match job.clone() {
+                        Job::Template(id, request) => LocalServiceUpdate::Template(
+                            crate::templates::execute(
+                                &mut client,
+                                connection,
+                                id,
+                                request,
+                                &cancel,
+                            )
+                            .await,
+                        ),
                         Job::Read(Feature::Appearance, generation) => {
-                            LocalSettingsUpdate::Appearance(tokio::select! { biased;
+                            LocalServiceUpdate::Appearance(tokio::select! { biased;
                                 _ = cancel.notified() => Err(cancelled()),
                                 result = crate::appearance::local::read(&mut client, connection, generation, scheme) => result.map(Arc::new),
                             })
                         }
                         Job::Read(Feature::Profiles, generation) => {
-                            LocalSettingsUpdate::ShellProfiles(tokio::select! { biased;
+                            LocalServiceUpdate::ShellProfiles(tokio::select! { biased;
                                 _ = cancel.notified() => Err(cancelled()),
                                 result = crate::shell_profiles::read(&mut client, connection, generation) => result.map(Arc::new),
                             })
                         }
-                        Job::Zoom(id, action) => LocalSettingsUpdate::Zoom(
+                        Job::Zoom(id, action) => LocalServiceUpdate::Zoom(
                             zoom::execute(&mut client, connection, id, action, &cancel).await,
                         ),
                     };
@@ -195,7 +247,11 @@ impl LocalSettingsClient {
             let (client, job, result) = self.pending.as_mut().expect("settings job started").await;
             self.pending = None;
             self.client = Some(client);
+            self.last_template = matches!(job, Job::Template(..));
             match job {
+                Job::Template(..) => {
+                    self.active_template = None;
+                }
                 Job::Read(feature, generation) => {
                     self.next = feature.other();
                     self.prefer_write = true;

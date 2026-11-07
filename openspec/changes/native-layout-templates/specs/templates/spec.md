@@ -65,11 +65,12 @@ An admitted native apply SHALL immediately present its intended tiled and floati
 - **AND** unrelated terminal identities and retained content survive reconciliation
 
 ### Requirement: Native Template Application Outcomes
-Native application outcomes SHALL be determined from authoritative layout and launch observations after submission, not solely from an error message. Successful sibling launches SHALL remain usable when another launch fails. Unverifiable outcomes SHALL be reported without replaying application or claiming the previous processes survived.
+Native application outcomes SHALL be determined from authoritative layout and launch observations after submission, not solely from an error message. Successful sibling launches SHALL remain usable when another launch fails. Service-reported shell-profile fallback SHALL remain visible as a notice. Unverifiable outcomes SHALL be reported without replaying application or claiming the previous processes survived.
 
 #### Scenario: Partial launch or post-commit failure
 - **WHEN** the new layout commits but a launch or later effect fails
 - **THEN** the accepted layout remains authoritative, successful sessions remain attached and the failure is visible without waiting indefinitely for every terminal to become ready
+- **AND** a successful launch with a reported shell-profile fallback remains usable and reports that fallback separately from launch failures
 
 #### Scenario: Unverified application
 - **WHEN** current authoritative state cannot be established after submission

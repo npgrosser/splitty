@@ -168,11 +168,11 @@ async fn real_service() {
     let persisted = splitty_core::config::load_from(&splitty_core::config::config_path());
     let restarted = crate::EmbeddedService::start();
     let mut settings = restarted
-        .local_settings_client(Uuid::new_v4(), ColorScheme::Dark)
+        .local_service_client(Uuid::new_v4(), ColorScheme::Dark)
         .await
         .unwrap();
     let snapshot = loop {
-        if let crate::local_settings::LocalSettingsUpdate::Appearance(snapshot) =
+        if let crate::local_service::LocalServiceUpdate::Appearance(snapshot) =
             settings.next_update().await
         {
             break snapshot.unwrap();
@@ -189,7 +189,7 @@ async fn zoom_before_settings_setup_is_rejected_without_a_forwarding_queue() {
     let (runtime, path) = crate::appearance::local::tests::fixture();
     let service = crate::EmbeddedService::from_runtime(runtime);
     let owner = Uuid::new_v4();
-    let mut settings = RuntimeLocalSettings::new(&service, owner, ColorScheme::Dark);
+    let mut settings = RuntimeLocalService::new(&service, owner, ColorScheme::Dark);
     assert_eq!(
         settings
             .enqueue_zoom(owner, Uuid::new_v4(), ZoomAction::In)

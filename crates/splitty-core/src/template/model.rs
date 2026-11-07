@@ -20,6 +20,19 @@ pub struct Template {
     pub floating: Vec<FloatingEntry>,
 }
 
+impl Template {
+    /// Retain commands for selected pane names. A discarded command must not
+    /// retain its restore behavior when this template is saved or applied.
+    pub fn retain_commands(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        for (name, pane) in &mut self.panes {
+            if !keep(name) {
+                pane.command.clear();
+                pane.restore_mode.clear();
+            }
+        }
+    }
+}
+
 /// Defines a terminal pane's command and working directory.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Pane {
@@ -330,6 +343,33 @@ layout:
         let mut t = make_valid_template();
         t.name = String::new();
         assert!(validate(&t).is_err());
+    }
+
+    #[test]
+    fn retained_commands_keep_launch_metadata_and_clear_discarded_restore_modes() {
+        let mut t = make_valid_template();
+        for pane in t.panes.values_mut() {
+            pane.command = "printf hello".into();
+            pane.restore_mode = "close".into();
+            pane.dir = "./work".into();
+            pane.shell_profile = "test-shell".into();
+        }
+        let before = serde_json::to_value(&t).unwrap();
+        t.retain_commands(|name| name == "editor");
+        assert_eq!(
+            serde_json::to_value(&t.panes["editor"]).unwrap(),
+            before["panes"]["editor"]
+        );
+        assert!(t.panes["term"].command.is_empty());
+        assert!(t.panes["term"].restore_mode.is_empty());
+        assert_eq!(t.panes["term"].dir, "./work");
+        assert_eq!(t.panes["term"].shell_profile, "test-shell");
+        assert_eq!(serde_json::to_value(&t.layout).unwrap(), before["layout"]);
+        t.retain_commands(|_| false);
+        assert!(t
+            .panes
+            .values()
+            .all(|pane| pane.command.is_empty() && pane.restore_mode.is_empty()));
     }
 
     #[test]

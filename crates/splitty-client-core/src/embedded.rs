@@ -22,11 +22,11 @@ impl EmbeddedService {
 
     /// A separate API stream owned by this service. It never consumes session
     /// frames. Bind returned settings to the workspace's session identity.
-    pub async fn local_settings_client(
+    pub async fn local_service_client(
         &self,
         connection_id: Uuid,
         scheme: crate::appearance::ColorScheme,
-    ) -> io::Result<crate::local_settings::LocalSettingsClient> {
+    ) -> io::Result<crate::local_service::LocalServiceClient> {
         let runtime = self
             .runtime
             .as_ref()
@@ -35,7 +35,7 @@ impl EmbeddedService {
             .connector
             .embedded(runtime.state.clone(), service::catalog::Role::Main)
             .await?;
-        Ok(crate::local_settings::LocalSettingsClient::new(
+        Ok(crate::local_service::LocalServiceClient::new(
             client,
             connection_id,
             scheme,

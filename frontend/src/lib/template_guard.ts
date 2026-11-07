@@ -1,4 +1,4 @@
-import type { Template, TemplatePane } from "./protocol/types.ts";
+import type { Template, TemplateLayoutNode, TemplatePane } from "./protocol/types.ts";
 
 /**
  * Confirmation gate for templates that carry shell commands.
@@ -49,7 +49,7 @@ let listener: Listener | null = null;
 export function onTemplateApprovalRequest(fn: Listener): () => void {
   listener = fn;
   return () => {
-    listener = null;
+    if (listener === fn) listener = null;
   };
 }
 
@@ -78,27 +78,69 @@ export function withoutCommands(template: Template): Template {
   return { ...template, panes };
 }
 
+function captureLayout(node: TemplateLayoutNode): TemplateLayoutNode {
+  return {
+    ...node,
+    ...(Array.isArray(node.slot) ? { slot: [...node.slot] } : {}),
+    ...(node.children ? { children: node.children.map(captureLayout) } : {}),
+  };
+}
+
+function captureTemplate(template: Template): Template {
+  // Reading the typed data also works for the reactive proxy held by the root
+  // prompt. structuredClone rejects that proxy even though its data is valid.
+  return {
+    ...template,
+    panes: Object.fromEntries(Object.entries(template.panes).map(([name, pane]) => [name, { ...pane }])),
+    layout: captureLayout(template.layout),
+    ...(template.floating ? {
+      floating: template.floating.map(entry => ({ layout: captureLayout(entry.layout), bounds: { ...entry.bounds } })),
+    } : {}),
+  };
+}
+
 /**
  * Apply a template, asking first if it would execute anything.
  *
  * Templates without commands apply directly — there is nothing to warn about,
  * and a prompt on every layout restore would train users to dismiss it.
+ * Returns false when a command approval request cannot be presented.
  */
 export function guardedApplyTemplate(
   template: Template,
   apply: (template: Template) => void,
-): void {
-  const commands = commandsIn(template);
-  if (commands.length === 0 || !listener) {
-    apply(template);
-    return;
+): boolean {
+  // The review and the later operation must see the same content even if the
+  // caller refreshes its source template while the dialog is open.
+  const captured = captureTemplate(template);
+  const commands = commandsIn(captured);
+  if (commands.length === 0) {
+    apply(captured);
+    return true;
   }
 
-  listener({
-    templateName: template.name ?? "template",
-    commands,
-    approveFull: () => apply(template),
-    approveLayoutOnly: () => apply(withoutCommands(template)),
-    cancel: () => {},
-  });
+  const handler = listener;
+  if (!handler) return false;
+
+  let consumed = false;
+  const once = (decision: () => void) => () => {
+    if (consumed) return;
+    consumed = true;
+    decision();
+  };
+  try {
+    handler({
+      templateName: captured.name ?? "template",
+      commands,
+      approveFull: once(() => apply(captured)),
+      approveLayoutOnly: once(() => apply(withoutCommands(captured))),
+      cancel: once(() => {}),
+    });
+    return true;
+  } catch {
+    // A failed dialog handoff must not leave its callbacks able to authorize
+    // command execution later.
+    consumed = true;
+    return false;
+  }
 }

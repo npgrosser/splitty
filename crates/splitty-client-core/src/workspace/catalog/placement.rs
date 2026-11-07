@@ -34,6 +34,7 @@ impl LocalWorkspace {
     pub(super) fn cancel_placement_focus(&mut self) {
         self.cancel_transfer_focus();
         self.cancel_floating_focus();
+        self.cancel_template_follow();
         if let Some(pending) = &mut self.pending_placement {
             pending.focus = false;
         }

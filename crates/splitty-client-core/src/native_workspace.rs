@@ -2,11 +2,13 @@
 use crate::{
     appearance::{AppearanceSnapshot, ColorScheme},
     shell_profiles::ShellProfilesSnapshot,
+    templates::{TemplateApiRequest, TemplateApiResult},
     workspace::{
         Axis, ClosePlan, CloseTarget, FloatBounds, FloatingActionOutcome, FloatingActionResult,
         FloatingTarget, LocalWorkspace, MovePlacement, PaneActionTarget, PaneDrag,
         PlacementOutcome, ScreenTransferOutcome, ScreenTransferResult, ScreenTransferTarget,
-        TabStep, WorkspaceRefresh,
+        TabStep, TemplateApplyChoice, TemplateApplyOutcome, TemplateApplyPlan, TemplateApplyResult,
+        WorkspaceRefresh,
     },
     zoom::{ZoomAction, ZoomResult},
     Event,
@@ -26,6 +28,16 @@ use std::{
 use tokio::sync::mpsc;
 
 pub enum Command {
+    TemplateApi {
+        connection: uuid::Uuid,
+        request_id: uuid::Uuid,
+        request: TemplateApiRequest,
+    },
+    ApplyTemplate {
+        plan: Arc<TemplateApplyPlan>,
+        choice: TemplateApplyChoice,
+        replace_confirmed: bool,
+    },
     FloatPane {
         request_id: uuid::Uuid,
         source: PaneActionTarget,
@@ -126,6 +138,8 @@ pub enum Command {
     },
 }
 pub enum Update {
+    TemplateApi(TemplateApiResult),
+    TemplateApply(TemplateApplyResult),
     FloatingAction(FloatingActionResult),
     ScreenTransfer(ScreenTransferResult),
     Zoom(ZoomResult),
@@ -199,26 +213,25 @@ fn profile_fallback_status(
 // Setup and reads stay owned across cancelled select branches. Both streams
 // share the embedded service's admission domain, but never consume each other's events.
 #[cfg(not(target_os = "windows"))]
-type LocalSettingsSetup<'a> = std::pin::Pin<
+type LocalServiceSetup<'a> = std::pin::Pin<
     Box<
-        dyn std::future::Future<
-                Output = std::io::Result<crate::local_settings::LocalSettingsClient>,
-            > + Send
+        dyn std::future::Future<Output = std::io::Result<crate::local_service::LocalServiceClient>>
+            + Send
             + 'a,
     >,
 >;
 #[cfg(not(target_os = "windows"))]
-struct RuntimeLocalSettings<'a> {
+struct RuntimeLocalService<'a> {
     service: &'a crate::EmbeddedService,
     connection: uuid::Uuid,
     scheme: ColorScheme,
-    setup: Option<LocalSettingsSetup<'a>>,
-    reader: Option<crate::local_settings::LocalSettingsClient>,
+    setup: Option<LocalServiceSetup<'a>>,
+    reader: Option<crate::local_service::LocalServiceClient>,
     dirty: bool,
     settings_dirty: bool,
 }
 #[cfg(not(target_os = "windows"))]
-impl<'a> RuntimeLocalSettings<'a> {
+impl<'a> RuntimeLocalService<'a> {
     fn new(
         service: &'a crate::EmbeddedService,
         connection: uuid::Uuid,
@@ -235,6 +248,25 @@ impl<'a> RuntimeLocalSettings<'a> {
         }
     }
 
+    fn enqueue_template(
+        &mut self,
+        connection: uuid::Uuid,
+        request_id: uuid::Uuid,
+        request: TemplateApiRequest,
+    ) -> std::io::Result<()> {
+        if connection != self.connection {
+            return Err(std::io::Error::other("Template source changed"));
+        }
+        self.reader
+            .as_mut()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Local service API is not ready",
+                )
+            })?
+            .enqueue_template(connection, request_id, request)
+    }
     fn enqueue_zoom(
         &mut self,
         connection: uuid::Uuid,
@@ -286,7 +318,7 @@ impl<'a> RuntimeLocalSettings<'a> {
         }
     }
 
-    async fn next_update(&mut self) -> std::io::Result<crate::local_settings::LocalSettingsUpdate> {
+    async fn next_update(&mut self) -> std::io::Result<crate::local_service::LocalServiceUpdate> {
         loop {
             if let Some(reader) = &mut self.reader {
                 return Ok(reader.next_update().await);
@@ -298,7 +330,7 @@ impl<'a> RuntimeLocalSettings<'a> {
                 self.dirty = false;
                 self.setup = Some(Box::pin(
                     self.service
-                        .local_settings_client(self.connection, self.scheme),
+                        .local_service_client(self.connection, self.scheme),
                 ));
             }
             let result = self
@@ -537,7 +569,7 @@ async fn run_service(
         }
     };
     let mut workspace_refresh = WorkspaceRefresh::default();
-    let mut settings = None::<RuntimeLocalSettings<'_>>;
+    let mut settings = None::<RuntimeLocalService<'_>>;
     let result = async {
         let mut model = None::<LocalWorkspace>;
         let mut attached = HashSet::<String>::new();
@@ -555,7 +587,7 @@ async fn run_service(
         let mut last_close_request = 0_u64;
         let mut pending_close = None::<PendingClose>;
         enum Next {
-            Settings(std::io::Result<crate::local_settings::LocalSettingsUpdate>),
+            Settings(std::io::Result<crate::local_service::LocalServiceUpdate>),
             Event(std::io::Result<Option<Box<Event>>>),
             Command(Option<Command>),
             Tick,
@@ -578,14 +610,15 @@ async fn run_service(
             let mut close_window = false;
             match next {
                 Next::Settings(result) => {
-                    use crate::local_settings::LocalSettingsUpdate;
+                    use crate::local_service::LocalServiceUpdate;
                     let connection = client.connection_id();
                     let update = match result {
-                        Ok(LocalSettingsUpdate::Zoom(result)) => Update::Zoom(result),
-                        Ok(LocalSettingsUpdate::Appearance(Ok(snapshot))) => Update::Appearance(snapshot),
-                        Ok(LocalSettingsUpdate::Appearance(Err(error))) => Update::AppearanceError { connection, reason: error.to_string() },
-                        Ok(LocalSettingsUpdate::ShellProfiles(Ok(snapshot))) => Update::ShellProfiles(snapshot),
-                        Ok(LocalSettingsUpdate::ShellProfiles(Err(error))) => Update::ShellProfilesError { connection, reason: error.to_string() },
+                        Ok(LocalServiceUpdate::Zoom(result)) => Update::Zoom(result),
+                        Ok(LocalServiceUpdate::Template(result))=>Update::TemplateApi(result),
+                        Ok(LocalServiceUpdate::Appearance(Ok(snapshot))) => Update::Appearance(snapshot),
+                        Ok(LocalServiceUpdate::Appearance(Err(error))) => Update::AppearanceError { connection, reason: error.to_string() },
+                        Ok(LocalServiceUpdate::ShellProfiles(Ok(snapshot))) => Update::ShellProfiles(snapshot),
+                        Ok(LocalServiceUpdate::ShellProfiles(Err(error))) => Update::ShellProfilesError { connection, reason: error.to_string() },
                         Err(error) => {
                             // Setup belongs to both reads; report each feature once.
                             publish(&updates, Update::ShellProfilesError { connection, reason: error.to_string() }, &stop).await?;
@@ -597,6 +630,21 @@ async fn run_service(
                 Next::Tick => {}
                 Next::Command(None) => break,
                 Next::Command(Some(command)) => {
+                    if let Command::TemplateApi{connection,request_id,request}=command {
+                        let result=if !model.as_ref().is_some_and(|m|m.connection_id()==connection&&m.templates_supported()){Err(std::io::Error::other("Template source or capability unavailable"))}else{settings.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Local service API is not ready")).and_then(|s|s.enqueue_template(connection,request_id,request))};
+                        if let Err(error)=result{if error.kind()!=std::io::ErrorKind::AlreadyExists {publish(&updates,Update::TemplateApi(TemplateApiResult::rejected(connection,request_id,error.to_string())),&stop).await?;}}
+                        continue;
+                    }
+                    if let Command::ApplyTemplate{plan,choice,replace_confirmed}=command {
+                        let (connection_id,request_id)=(plan.connection_id(),plan.request_id());
+                        if model.as_ref().is_some_and(|m|m.template_request_pending(request_id)){continue;}
+                        let mut post_failure=None;
+                        let result=if pending_close.is_some(){Err(std::io::Error::other("A close operation is pending"))}else{model.as_mut().ok_or_else(||std::io::Error::other("Workspace is not ready")).and_then(|m|m.apply_template(&client,plan,choice,replace_confirmed).map(|()|{if let Err(error)=workspace_refresh.begin(m){post_failure=m.fail_template_observation(error.to_string());}}))};
+                        if let Some(model)=&model{publish(&updates,Update::Workspace(Box::new(model.clone())),&stop).await?;}
+                        if let Some(result)=post_failure{publish(&updates,Update::TemplateApply(result),&stop).await?;}
+                        if let Err(error)=result{publish(&updates,Update::TemplateApply(TemplateApplyResult{connection_id,request_id,outcome:TemplateApplyOutcome::Rejected{reason:error.to_string()}}),&stop).await?;}
+                        continue;
+                    }
                     if let Command::RequestClose { plan, confirmed } = command {
                         let request_id = plan.request_id;
                         if pending_close.as_ref().is_some_and(|close| close.is_duplicate(request_id)) {
@@ -739,7 +787,7 @@ async fn run_service(
                         continue;
                     };
                     let result: std::io::Result<()> = match command {
-                        Command::FloatPane{..} | Command::DockFloat{..} | Command::MoveFloat{..} | Command::TransferPane { .. } | Command::Zoom { .. } | Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
+                        Command::TemplateApi{..} | Command::ApplyTemplate{..} | Command::FloatPane{..} | Command::DockFloat{..} | Command::MoveFloat{..} | Command::TransferPane { .. } | Command::Zoom { .. } | Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
                             unreachable!("close is handled before normal commands")
                         }
                         Command::CreateScreen(name) => {
@@ -942,6 +990,7 @@ async fn run_service(
                                             capability.as_str() == Some("tab-select-v1")
                                         })
                                     });
+                                workspace.set_templates_supported(json["capabilities"].as_array().is_some_and(|caps|caps.iter().any(|cap|cap=="server-templates-v1")));
                                 workspace.set_tab_selection_supported(supports_tab_selection);
                                 workspace.set_tab_placement_supported(json["capabilities"].as_array().is_some_and(|capabilities| {
                                     capabilities.iter().any(|capability| capability.as_str() == Some("tab-placement-v1"))
@@ -974,7 +1023,7 @@ async fn run_service(
                                 .await?;
                                 model = Some(workspace);
                                 // Establish the UI owner before any settings can be published.
-                                settings = Some(RuntimeLocalSettings::new(
+                                settings = Some(RuntimeLocalService::new(
                                     &service, client.connection_id(), scheme,
                                 ));
                             }
@@ -1072,6 +1121,7 @@ async fn run_service(
                                     json["paneId"].as_str(),
                                     json["sessionId"].as_str(),
                                 ) {
+                                    model.observe_template_spawn(event.connection_id,pane,session,json);
                                     delta = model.observe_spawn(event.connection_id, pane, session);
                                     if let Some(message) = profile_fallback_status(model, event.connection_id, pane, session, json) {
                                         publish(&updates, Update::Status(message), &stop).await?;
@@ -1138,6 +1188,7 @@ async fn run_service(
                                         model.observe_placement_failure(event.connection_id, json);
                                         model.observe_transfer_failure(event.connection_id, json);
                                         model.observe_floating_failure(event.connection_id, json);
+                                        model.observe_template_failure(event.connection_id,json);
                                     }
                                     if let Some(close) = &mut pending_close {
                                         close.observe_failure(json);
@@ -1220,6 +1271,7 @@ async fn run_service(
                         || delta.placement.is_some()
                         || delta.transfer.is_some()
                         || delta.floating.is_some()
+                        || delta.template.is_some()
                         || !delta.added.is_empty()
                         || !delta.removed.is_empty()
                     {
@@ -1236,6 +1288,7 @@ async fn run_service(
                         pending_resize.clear();
                         pending_hide.extend(attached.iter().cloned());
                     }
+                    if let Some(result)=delta.template {publish(&updates,Update::TemplateApply(result),&stop).await?;}
                     if let Some(result)=delta.floating {publish(&updates,Update::FloatingAction(result),&stop).await?;}
                     if let Some(result)=delta.transfer {publish(&updates,Update::ScreenTransfer(result),&stop).await?;}
                     if let Some(reason)=delta.reconciliation_error {publish(&updates,Update::Status(reason),&stop).await?;}
@@ -1260,6 +1313,7 @@ async fn run_service(
                         && model.is_displayed_pane(pane)
                 });
                 closed_sessions.retain(|session| desired_sessions.contains(session));
+                closed_sessions.extend(model.failed_template_sessions().map(str::to_owned));
                 let mut pending_error = None::<String>;
                 for session in owned_sessions.clone() {
                     if !desired_sessions.contains(&session) {
@@ -1465,10 +1519,10 @@ mod close_tests {
     }
 
     async fn next_appearance(
-        reader: &mut RuntimeLocalSettings<'_>,
+        reader: &mut RuntimeLocalService<'_>,
     ) -> std::io::Result<Arc<AppearanceSnapshot>> {
         loop {
-            if let crate::local_settings::LocalSettingsUpdate::Appearance(result) =
+            if let crate::local_service::LocalServiceUpdate::Appearance(result) =
                 reader.next_update().await?
             {
                 return result;
@@ -1482,7 +1536,7 @@ mod close_tests {
         let (runtime, path) = crate::appearance::local::tests::fixture();
         let service = crate::embedded::EmbeddedService::from_runtime(runtime);
         let connection = uuid::Uuid::new_v4();
-        let mut appearance = RuntimeLocalSettings::new(&service, connection, ColorScheme::Light);
+        let mut appearance = RuntimeLocalService::new(&service, connection, ColorScheme::Light);
         // Start setup, cancel just the receiving branch, then change the local
         // preference. The owned handshake survives and yields only the latest choice.
         let mut read = Box::pin(next_appearance(&mut appearance));
@@ -1526,7 +1580,7 @@ mod close_tests {
 
         // Shutdown immediately after beginning a second setup must await that
         // handshake and close the recovered API stream, even without a snapshot.
-        let mut appearance = RuntimeLocalSettings::new(&service, connection, ColorScheme::Light);
+        let mut appearance = RuntimeLocalService::new(&service, connection, ColorScheme::Light);
         let mut read = Box::pin(next_appearance(&mut appearance));
         std::future::poll_fn(|cx| {
             assert!(read.as_mut().poll(cx).is_pending());
@@ -1550,7 +1604,7 @@ mod close_tests {
         Arc::get_mut(&mut runtime.state).unwrap().instance = "invalid".into();
         let service = crate::embedded::EmbeddedService::from_runtime(runtime);
         let mut appearance =
-            RuntimeLocalSettings::new(&service, uuid::Uuid::new_v4(), ColorScheme::Dark);
+            RuntimeLocalService::new(&service, uuid::Uuid::new_v4(), ColorScheme::Dark);
         let mut read = Box::pin(next_appearance(&mut appearance));
         std::future::poll_fn(|cx| {
             assert!(read.as_mut().poll(cx).is_pending());
@@ -1567,7 +1621,7 @@ mod close_tests {
     }
 
     #[tokio::test]
-    async fn appearance_worker_failure_keeps_output_and_recovers_from_local_settings() {
+    async fn appearance_worker_failure_keeps_output_and_recovers_from_local_service() {
         if !splitty_core::pty::testing::pty_available() {
             return;
         }
@@ -2189,3 +2243,5 @@ mod transfer_tests;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod floating_tests;
+#[cfg(all(test, not(target_os = "windows")))]
+mod template_tests;

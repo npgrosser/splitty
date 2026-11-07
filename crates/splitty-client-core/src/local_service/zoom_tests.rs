@@ -20,6 +20,7 @@ enum Tail {
     Closed,
     Disconnect,
     Hold(tokio::sync::oneshot::Sender<()>),
+    HoldTemplate(tokio::sync::oneshot::Sender<()>),
 }
 async fn scripted(
     exchanges: Vec<Exchange>,
@@ -102,7 +103,7 @@ async fn scripted_tail(
                 peer.recv().await.is_none(),
                 "mutation was retried without a new intent"
             ),
-            Tail::Disconnect | Tail::Hold(_) => {
+            Tail::Disconnect | Tail::Hold(_) | Tail::HoldTemplate(_) => {
                 let message = peer
                     .recv()
                     .await
@@ -111,10 +112,17 @@ async fn scripted_tail(
                     .frame
                     .decode_charged::<wire::Request>(&peer.sender.context().budget)
                     .unwrap();
-                assert_eq!(request.operation, "home.update");
+                assert_eq!(
+                    request.operation,
+                    if matches!(&tail, Tail::HoldTemplate(_)) {
+                        "template.delete"
+                    } else {
+                        "home.update"
+                    }
+                );
                 drop(request);
                 drop(message);
-                if let Tail::Hold(observed) = tail {
+                if let Tail::Hold(observed) | Tail::HoldTemplate(observed) = tail {
                     observed.send(()).unwrap();
                     while let Some(message) = peer.recv().await {
                         assert_eq!(message.frame.kind, wire::Kind::Cancel);
@@ -127,7 +135,7 @@ async fn scripted_tail(
     let client = Connector::default().local(&info).await.unwrap();
     (client, task, dir)
 }
-async fn next(client: &mut LocalSettingsClient) -> LocalSettingsUpdate {
+async fn next(client: &mut LocalServiceClient) -> LocalServiceUpdate {
     tokio::time::timeout(Duration::from_secs(5), client.next_update())
         .await
         .unwrap()
@@ -178,7 +186,7 @@ async fn uncertain_write_is_not_retried_and_later_intent_reads_again() {
     let (api, task, dir) = scripted(exchanges).await;
     let owner = Uuid::new_v4();
     let budget = api.sender().context().budget.clone();
-    let mut client = LocalSettingsClient::new(api, owner, ColorScheme::Dark);
+    let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
     client.dirty = [false; 2];
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
@@ -187,16 +195,16 @@ async fn uncertain_write_is_not_retried_and_later_intent_reads_again() {
     super::tests::begin(&mut client).await;
     // A read-generation change cannot suppress an accepted write outcome.
     client.set_scheme(owner, ColorScheme::Light).unwrap();
-    let LocalSettingsUpdate::Zoom(result) = next(&mut client).await else {
+    let LocalServiceUpdate::Zoom(result) = next(&mut client).await else {
         panic!("missing outcome")
     };
     assert_eq!(result.request_id, first);
     assert!(matches!(result.outcome, ZoomOutcome::Uncertain { .. }));
     assert!(matches!(
         next(&mut client).await,
-        LocalSettingsUpdate::Appearance(Err(_))
+        LocalServiceUpdate::Appearance(Err(_))
     ));
-    let LocalSettingsUpdate::Zoom(result) = next(&mut client).await else {
+    let LocalServiceUpdate::Zoom(result) = next(&mut client).await else {
         panic!("missing second outcome")
     };
     assert_eq!(result.request_id, second);
@@ -229,12 +237,12 @@ async fn rejected_and_malformed_write_replies_are_distinct() {
         ])
         .await;
         let owner = Uuid::new_v4();
-        let mut client = LocalSettingsClient::new(api, owner, ColorScheme::Dark);
+        let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
         client.dirty = [false; 2];
         client
             .enqueue_zoom(owner, Uuid::new_v4(), ZoomAction::In)
             .unwrap();
-        let LocalSettingsUpdate::Zoom(result) = next(&mut client).await else {
+        let LocalServiceUpdate::Zoom(result) = next(&mut client).await else {
             panic!("outcome")
         };
         assert_eq!(
@@ -258,7 +266,7 @@ async fn capacity_owner_saturation_and_pending_cancel_are_bounded() {
     let budget = api.sender().context().budget.clone();
     let owner = Uuid::new_v4();
     let first = Uuid::new_v4();
-    let mut client = LocalSettingsClient::new(api, owner, ColorScheme::Dark);
+    let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
     assert!(client
         .enqueue_zoom(Uuid::new_v4(), first, ZoomAction::In)
         .is_err());
@@ -279,9 +287,9 @@ async fn capacity_owner_saturation_and_pending_cancel_are_bounded() {
     // A read must progress even with a full mutation queue.
     assert!(matches!(
         next(&mut client).await,
-        LocalSettingsUpdate::Appearance(Ok(_))
+        LocalServiceUpdate::Appearance(Ok(_))
     ));
-    let LocalSettingsUpdate::Zoom(result) = next(&mut client).await else {
+    let LocalServiceUpdate::Zoom(result) = next(&mut client).await else {
         panic!("write starved")
     };
     assert_eq!(result.request_id, first);
@@ -291,7 +299,7 @@ async fn capacity_owner_saturation_and_pending_cancel_are_bounded() {
     );
     assert!(matches!(
         next(&mut client).await,
-        LocalSettingsUpdate::ShellProfiles(Ok(_))
+        LocalServiceUpdate::ShellProfiles(Ok(_))
     ));
     client
         .enqueue_zoom(owner, Uuid::new_v4(), ZoomAction::Out)
@@ -354,9 +362,9 @@ async fn uncertain_outcome_refresh_has_newer_generation_without_broadcast() {
     ])
     .await;
     let owner = Uuid::new_v4();
-    let mut client = LocalSettingsClient::new(api, owner, ColorScheme::Dark);
+    let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
     client.dirty[1] = false;
-    let LocalSettingsUpdate::Appearance(Ok(before)) = next(&mut client).await else {
+    let LocalServiceUpdate::Appearance(Ok(before)) = next(&mut client).await else {
         panic!("initial appearance")
     };
     client
@@ -364,12 +372,12 @@ async fn uncertain_outcome_refresh_has_newer_generation_without_broadcast() {
         .unwrap();
     assert!(matches!(
         next(&mut client).await,
-        LocalSettingsUpdate::Zoom(ZoomResult {
+        LocalServiceUpdate::Zoom(ZoomResult {
             outcome: ZoomOutcome::Uncertain { .. },
             ..
         })
     ));
-    let LocalSettingsUpdate::Appearance(Ok(after)) = next(&mut client).await else {
+    let LocalServiceUpdate::Appearance(Ok(after)) = next(&mut client).await else {
         panic!("reconciled appearance")
     };
     assert!(after.generation() > before.generation());
@@ -407,7 +415,7 @@ async fn lost_mutation_reply_is_uncertain_and_pending_write_cancellation_joins()
         .await;
         let budget = api.sender().context().budget.clone();
         let owner = Uuid::new_v4();
-        let mut client = LocalSettingsClient::new(api, owner, ColorScheme::Dark);
+        let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
         client.dirty = [false; 2];
         client
             .enqueue_zoom(owner, Uuid::new_v4(), ZoomAction::In)
@@ -425,7 +433,7 @@ async fn lost_mutation_reply_is_uncertain_and_pending_write_cancellation_joins()
         } else {
             assert!(matches!(
                 next(&mut client).await,
-                LocalSettingsUpdate::Zoom(ZoomResult {
+                LocalServiceUpdate::Zoom(ZoomResult {
                     outcome: ZoomOutcome::Uncertain { .. },
                     ..
                 })
@@ -436,4 +444,103 @@ async fn lost_mutation_reply_is_uncertain_and_pending_write_cancellation_joins()
         assert_eq!(budget.used(), 0);
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+#[tokio::test]
+async fn template_mutation_uncertainty_is_identified_and_never_replayed() {
+    let (mut client, server, path) = scripted(vec![
+        Exchange {
+            operation: "template.get",
+            status: 404,
+            uncertain: false,
+            body: "{}".into(),
+        },
+        Exchange {
+            operation: "template.save",
+            status: 204,
+            uncertain: true,
+            body: String::new(),
+        },
+    ])
+    .await;
+    let owner = Uuid::new_v4();
+    let request = Uuid::new_v4();
+    let result = crate::templates::execute(
+        &mut client,
+        owner,
+        request,
+        crate::templates::TemplateApiRequest::Save {
+            draft: crate::templates::tests::draft(owner),
+            slug: "uncertain".into(),
+            name: "Saved".into(),
+            included_commands: vec![],
+            overwrite_confirmed: false,
+        },
+        &Notify::new(),
+    )
+    .await;
+    assert_eq!(result.request_id, request);
+    assert!(matches!(
+        result.outcome,
+        crate::templates::TemplateApiOutcome::Uncertain { .. }
+    ));
+    client.finish().await.unwrap();
+    server.await.unwrap();
+    std::fs::remove_dir_all(path).unwrap();
+}
+
+#[tokio::test]
+async fn template_cancelled_poll_retains_request_and_finish_joins_cancel() {
+    let (seen, observed) = tokio::sync::oneshot::channel();
+    let (api, server, path) = scripted_tail(vec![], Tail::HoldTemplate(seen)).await;
+    let budget = api.sender().context().budget.clone();
+    let owner = Uuid::new_v4();
+    let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+    client
+        .enqueue_template(
+            owner,
+            Uuid::new_v4(),
+            crate::templates::TemplateApiRequest::Delete {
+                slug: "captured".into(),
+            },
+        )
+        .unwrap();
+    super::tests::begin(&mut client).await;
+    observed.await.unwrap();
+    assert!(client.active_template.is_some());
+    client.finish().await.unwrap();
+    server.await.unwrap();
+    assert_eq!(budget.used(), 0);
+    std::fs::remove_dir_all(path).unwrap();
+}
+#[tokio::test]
+async fn template_catalog_limit_rejects_atomically_without_hot_retry() {
+    let body = serde_json::to_string(
+        &(0..257)
+            .map(|i| serde_json::json!({"slug":format!("item-{i}"),"displayName":"Item"}))
+            .collect::<Vec<_>>(),
+    )
+    .unwrap();
+    let (mut client, server, path) = scripted(vec![Exchange {
+        operation: "template.list",
+        status: 200,
+        uncertain: false,
+        body,
+    }])
+    .await;
+    let result = crate::templates::execute(
+        &mut client,
+        Uuid::new_v4(),
+        Uuid::new_v4(),
+        crate::templates::TemplateApiRequest::List,
+        &Notify::new(),
+    )
+    .await;
+    assert!(matches!(
+        result.outcome,
+        crate::templates::TemplateApiOutcome::Rejected { .. }
+    ));
+    client.finish().await.unwrap();
+    server.await.unwrap();
+    std::fs::remove_dir_all(path).unwrap();
 }

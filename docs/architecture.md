@@ -180,7 +180,7 @@ transport byte leases through terminal feeding. Large batches keep the existing
 pacing, while repeated small batches also yield so input and drawing can run.
 Dropping the task drops its sole receiver and releases queued delivery leases.
 
-The same native runtime owns one auxiliary API-only local-settings stream. After
+The same native runtime owns one auxiliary API-only local-service stream. After
 publishing the session owner, it polls stream setup and separately charged
 appearance/theme and shell-profile reads alongside terminal events and commands.
 Each feature has its own generation, dirty flag and result. Same-service settings
@@ -208,6 +208,30 @@ emulator even when rounded grid dimensions stay the same; only changed visible
 dimensions need a new PTY size report. Applying zoom cancels gestures whose
 captured pixel geometry is obsolete without replacing sessions, search queries
 or the canonical workspace layout.
+
+The same `LocalServiceClient` admits one identified template-library job alongside
+settings and zoom work, with a fair turn between library requests. The template
+module owns charged immutable drafts and catalog data; it reuses authenticated
+list/load/extract/save/delete operations and never reads files directly. Save
+filters the reviewed draft rather than extracting again, checks the target slug,
+and requires an explicit overwrite choice. Mutation uncertainty is reported
+without replay. API setup, reads and writes retain their owned future through
+poll cancellation and join cleanup on shutdown.
+
+Template application belongs to the workspace model, not the library module.
+A sealed plan captures the exact draft/root, client-generated pane and Screen IDs,
+shared session-free projection and replacement close impact. Submission revalidates
+capability, ownership, capacity and current affected identities before one session
+`apply_template` operation. The pending view has no session routes and withdraws
+canonical visible-size claims while retaining output. Later navigation cancels
+following without resubmitting or cancelling the operation. Coherent post-fence
+observations settle the layout separately from launch readiness; failed terminals
+remain visible diagnostics and do not repeatedly attach nonexistent sessions.
+Successful profile fallbacks retain bounded notices until the confirmed pane/session
+identity can be published; these warnings do not suppress successful attachments.
+Pending work adds an unresolved whole-window close identity, and scoped structural
+actions remain excluded until settlement. A nonmatching layout is uncertain unless
+a scoped rejection and unchanged captured Screen establish non-application.
 
 The new-tab profile picker retains a charged service snapshot, with bounded
 profile count, identifiers and labels. Its explicit choice captures connection,
@@ -812,11 +836,16 @@ metadata, using the remote supervisor's shared version comparison.
 
 ### Authoritative templates
 
-The `apply_template` workspace intent carries a complete saved template, client pane IDs, a root directory and whether to create a screen. `mux::templates` performs pure validation and projection: terminal references become registered panes, splits normalize their ratios, legacy web panes are pruned and floating slots keep their bounds. The replacement keeps the screen name and order and emits kills followed by spawns; each launch carries command, resolved cwd, profile ID and restore mode. The effect runner owns PTY creation, and `mux.pane_spawned` reports only successful spawns before the other clients' nudge. The generic control API refuses application: only a window session connection may send the intent after its command-consent choice.
+The `apply_template` workspace intent carries a complete saved template, client pane IDs, a root directory and whether to create a screen. `mux::project_template` performs pure validation and projection: terminal references become layout panes, splits normalize their ratios, legacy web panes are pruned and floating slots keep their bounds. It requires complete unique client pane IDs and returns no sessions or effects. Authoritative application fills omitted IDs at its dispatch boundary, reuses that projection and checks workspace-wide uniqueness. Replacement keeps the screen name and order and emits kills followed by spawns; each launch carries command, target-host-resolved cwd, profile ID and restore mode. Layout-only replacement also ends the previous terminals. The effect runner owns PTY creation, and `mux.pane_spawned` reports only successful spawns before the other clients' nudge.
+
+The generic control API refuses application; only a window session connection may send this intent. Command approval belongs to that window: the server does not receive or verify a proof of consent. Web and native bind approval to the captured displayed template and consume the decision once. A missing web dialog handler refuses command-bearing application with a visible error. The pure `Template::retain_commands` helper clears both command and restore mode for omitted native commands; the web adapter applies the same rule.
 
 The frontend’s `lib/template_intent.ts` projects the same wire intent into an optimistic snapshot, rendered through `ScreenViews` and `screen_snapshot.ts`. A new screen queues that snapshot before mount, without a throwaway pane. Template panes wait for the mux spawn result, including results that arrived before mount, and never fall back to a direct create. Deterministic template node/floating IDs keep subsequent floating operations aligned before resync. Rejected intents resync the old screen; a rejected new screen is removed from the window. `server-templates-v1` gates both apply and extract and offers an older host's update.
 
 Extraction runs on the target server. The effect runner reads current process titles/directories and actual profile selection, then pure mux conversion prunes viewers, normalizes remaining splits and relativizes directories within an optional root. Empty or viewer-only tiled layouts return an error. Authenticated `POST /api/templates/extract/screen` and native `template.extract` share this operation; `mux.extract_template` / `mux.template_extracted` expose the same read on a screen's session connection, including browser hub connections. The template YAML store format is unchanged.
+
+The native pending view uses the shared Rust projection without speculative session routes. Existing-Screen application captures and revalidates replacement impact, including hidden/floating terminals, and sends one apply operation without a preliminary close or initial terminal. An ordered catalog observation confirms layout separately from launch success: post-commit effect errors cannot prove that the old terminals survived. Unverified outcomes are reported without replay. Native saving retains one reviewed server extraction; overwrite/delete choices identify their captured file target, but the existing file API provides no versioned compare-and-swap guarantee.
+
 ## Settings authority
 
 Each server owns the effective home settings in `config.toml`. The same config layer

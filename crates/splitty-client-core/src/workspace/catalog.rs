@@ -3,6 +3,7 @@ use super::*;
 use crate::connection::identifier;
 pub(super) mod floating;
 mod placement;
+pub(super) mod templates;
 use floating::PendingFloating;
 pub(crate) mod refresh;
 pub(super) mod transfer;
@@ -32,6 +33,9 @@ pub struct LocalWorkspace {
     pending_placement: Option<PendingTabPlacement>,
     pending_transfer: Option<PendingTransfer>,
     pending_floating: Option<PendingFloating>,
+    pending_template: Option<templates::PendingTemplate>,
+    templates_supported: bool,
+    template_failures: HashMap<String, (String, String)>,
     reconciling: bool,
     route_generation: u64,
     catalog_initialized: bool,
@@ -44,7 +48,9 @@ impl LocalWorkspace {
     /// Assess only local terminal impact, retaining pane and session identity
     /// across a later prompt. The existing admission bounds limit this plan.
     pub fn assess_close(&self, request_id: u64, target: CloseTarget) -> io::Result<ClosePlan> {
-        if (self.reconciling || self.pending_floating.is_some()) && target != CloseTarget::Window {
+        if (self.reconciling || self.pending_floating.is_some() || self.pending_template.is_some())
+            && target != CloseTarget::Window
+        {
             return Err(invalid(
                 "Screen ownership is being reconciled; close again after refresh",
             ));
@@ -98,6 +104,13 @@ impl LocalWorkspace {
                     self.add_screen_impact(&screen, &mut plan);
                 }
             }
+        }
+        if let Some(pending) = &self.pending_template {
+            plan.affected.push(CloseAffected {
+                identity: CloseIdentity::Template(pending.preview.request_id().to_string()),
+                busy: false,
+                unresolved: true,
+            });
         }
         if self.reconciling {
             plan.affected.push(CloseAffected {
@@ -263,6 +276,9 @@ impl LocalWorkspace {
             pending_placement: None,
             pending_transfer: None,
             pending_floating: None,
+            pending_template: None,
+            templates_supported: false,
+            template_failures: HashMap::new(),
             reconciling: false,
             route_generation: 0,
             catalog_initialized: false,
@@ -319,11 +335,17 @@ impl LocalWorkspace {
         self.shown().and_then(ScreenModel::focused_slot_id)
     }
     pub fn displayed_panes(&self) -> Vec<String> {
+        if self.pending_template().is_some() {
+            return Vec::new();
+        }
         self.shown()
             .map(ScreenModel::displayed_panes)
             .unwrap_or_default()
     }
     pub fn is_displayed_pane(&self, pane: &str) -> bool {
+        if self.pending_template().is_some() {
+            return false;
+        }
         self.shown()
             .is_some_and(|screen| screen.is_displayed_pane(pane))
     }

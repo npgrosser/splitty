@@ -641,7 +641,7 @@
       if (conn.kind === "remote") askUpdate(conn.key);
       return;
     }
-    guardedApplyTemplate(template, approved => {
+    const admitted = guardedApplyTemplate(template, approved => {
       try {
         if (!conn.mux.templates || connectionFor(source.conn) !== conn || !getScreens().some(screen => screen.id === source.id)) {
           throw Error("The template’s target connection changed; apply it again.");
@@ -662,6 +662,7 @@
         conn.mux.sendOp(wireId, intent.op);
       } catch (error) { toast.error(String(error)); }
     });
+    if (!admitted) toast.error("Could not show template command approval. Apply the template again.");
   }
 
   function handleApplyTemplate(template: Template, root?: string) {

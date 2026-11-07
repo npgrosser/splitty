@@ -36,27 +36,40 @@ pub fn template_directory(dir: &str, root: &str) -> String {
     }
 }
 
-pub(super) fn apply_template(
-    mut state: WorkspaceState,
-    id: ScreenId,
-    request: ApplyTemplate,
-) -> Result<(WorkspaceState, Vec<Effect>), MuxError> {
+/// A validated layout intent, without sessions, generated identities or effects.
+#[derive(Clone, Debug)]
+pub struct TemplateProjection {
+    pub root: LayoutNode,
+    pub floating: Vec<FloatingEntry>,
+    /// Retained terminal names in the authoritative launch order.
+    pub pane_names: Vec<String>,
+    pub skipped_web_count: usize,
+}
+
+impl TemplateProjection {
+    /// Tiled panes followed by floating panes in their layout order.
+    pub fn pane_ids(&self) -> impl Iterator<Item = PaneId> + '_ {
+        self.root.collect_pane_ids().into_iter().chain(
+            self.floating
+                .iter()
+                .flat_map(|entry| entry.root.collect_pane_ids()),
+        )
+    }
+}
+
+/// Project a complete client intent using the same rules as authoritative application.
+/// Every retained terminal must have a supplied nonempty, unique pane ID. This
+/// function does not allocate IDs or resolve paths on the client's host.
+pub fn project_template(request: &ApplyTemplate) -> Result<TemplateProjection, MuxError> {
     template::validate(&request.template).map_err(|e| invalid(e.to_string()))?;
     if request.template.panes.len() > 256 {
         return Err(invalid("at most 256 template panes"));
-    }
-    let old = state.screens.get(&id);
-    if request.create_screen && old.is_some() {
-        return Err(MuxError::ScreenExists(id));
-    }
-    if !request.create_screen && old.is_none() {
-        return Err(MuxError::ScreenNotFound(id));
     }
     let mut names = HashSet::new();
     let mut next_node = 0;
     let root = project_node(
         &request.template.layout,
-        &request,
+        request,
         &mut names,
         0,
         &mut next_node,
@@ -76,7 +89,7 @@ pub(super) fn apply_template(
         if !bounds.is_valid() {
             return Err(invalid("invalid floating bounds"));
         }
-        if let Some(root) = project_node(&entry.layout, &request, &mut names, 0, &mut next_node)? {
+        if let Some(root) = project_node(&entry.layout, request, &mut names, 0, &mut next_node)? {
             floating.push(FloatingEntry {
                 id: FloatingId::from(format!("template-floating-{index}")),
                 root,
@@ -89,27 +102,51 @@ pub(super) fn apply_template(
             return Err(invalid(format!("unused terminal {name}")));
         }
     }
-    // project_node uses the supplied IDs; absent entries get filled once before projection.
-    let ids: Vec<_> = root
-        .collect_pane_ids()
+    let mut pane_names: Vec<_> = names
         .into_iter()
-        .chain(
-            floating
-                .iter()
-                .flat_map(|entry| entry.root.collect_pane_ids()),
-        )
+        .filter(|name| request.template.panes[name].pane_type != "webview")
         .collect();
+    pane_names.sort();
+    let projection = TemplateProjection {
+        root,
+        floating,
+        pane_names,
+        skipped_web_count: request
+            .template
+            .panes
+            .values()
+            .filter(|pane| pane.pane_type == "webview")
+            .count(),
+    };
     let mut unique = HashSet::new();
-    for pane_id in &ids {
-        if pane_id.as_str().is_empty() || !unique.insert(pane_id.clone()) {
+    for pane_id in projection.pane_ids() {
+        if pane_id.as_str().is_empty() || !unique.insert(pane_id) {
             return Err(invalid("template pane IDs must be nonempty and unique"));
         }
+    }
+    Ok(projection)
+}
+
+pub(super) fn apply_template(
+    mut state: WorkspaceState,
+    id: ScreenId,
+    request: ApplyTemplate,
+) -> Result<(WorkspaceState, Vec<Effect>), MuxError> {
+    let projection = project_template(&request)?;
+    let old = state.screens.get(&id);
+    if request.create_screen && old.is_some() {
+        return Err(MuxError::ScreenExists(id));
+    }
+    if !request.create_screen && old.is_none() {
+        return Err(MuxError::ScreenNotFound(id));
+    }
+    for pane_id in projection.pane_ids() {
         if state
             .screens
             .values()
-            .any(|screen| screen.panes.contains_key(pane_id))
+            .any(|screen| screen.panes.contains_key(&pane_id))
         {
-            return Err(MuxError::PaneExists(pane_id.clone()));
+            return Err(MuxError::PaneExists(pane_id));
         }
     }
     let mut screen = ScreenState::new(
@@ -117,8 +154,8 @@ pub(super) fn apply_template(
         old.map_or_else(|| Some(request.template.name.clone()), |s| s.name.clone()),
     );
     screen.revision = old.map_or(1, |s| s.revision + 1);
-    screen.root = root;
-    screen.floating = floating;
+    screen.root = projection.root;
+    screen.floating = projection.floating;
     let mut effects: Vec<_> = old
         .into_iter()
         .flat_map(|s| s.sessions.keys())
@@ -126,13 +163,8 @@ pub(super) fn apply_template(
             session_id: session_id.clone(),
         })
         .collect();
-    let mut ordered_names: Vec<_> = names.into_iter().collect();
-    ordered_names.sort();
-    for name in ordered_names {
+    for name in projection.pane_names {
         let pane = &request.template.panes[&name];
-        if pane.pane_type == "webview" {
-            continue;
-        }
         let pane_id = request.pane_ids[&name].clone();
         let session_id = SessionId::with_prefix("sess");
         let present = |value: &str| (!value.is_empty()).then(|| value.to_owned());
@@ -236,7 +268,13 @@ fn project_node(
                 return Err(invalid(format!("duplicate pane {name}")));
             }
             if request.template.panes[name].pane_type != "webview" {
-                panes.push(request.pane_ids[name].clone());
+                panes.push(
+                    request
+                        .pane_ids
+                        .get(name)
+                        .ok_or_else(|| invalid(format!("missing pane ID for {name}")))?
+                        .clone(),
+                );
             }
         }
         return Ok((!panes.is_empty()).then(|| LayoutNode::Slot {
@@ -438,6 +476,92 @@ mod tests {
                 "floating":[{"layout":{"slot":"c"}, "bounds":{"x":0.1,"y":0.2,"w":0.4,"h":0.3}}]
             }
         })).unwrap()
+    }
+
+    #[test]
+    fn pending_projection_matches_authoritative_layout_without_mutating_the_intent() {
+        let mut r = request();
+        r.template.panes.insert(
+            "web".into(),
+            serde_json::from_value(json!({
+                "type": "webview", "url": "https://example.invalid"
+            }))
+            .unwrap(),
+        );
+        r.template.layout.children[0]
+            .slot
+            .as_mut()
+            .unwrap()
+            .0
+            .push("web".into());
+        // Legacy web panes are pruned and do not need client IDs.
+        let before = serde_json::to_value(&r).unwrap();
+        let preview = project_template(&r).unwrap();
+        assert_eq!(preview.pane_names, ["a", "b", "c"]);
+        assert_eq!(preview.skipped_web_count, 1);
+        assert_eq!(
+            preview
+                .pane_ids()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>(),
+            ["pane-a", "pane-b", "pane-c"]
+        );
+        assert_eq!(serde_json::to_value(&r).unwrap(), before);
+        let again = project_template(&r).unwrap();
+        assert_eq!(
+            serde_json::to_value(&preview.root).unwrap(),
+            serde_json::to_value(&again.root).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&preview.floating).unwrap(),
+            serde_json::to_value(&again.floating).unwrap()
+        );
+        let (state, effects) =
+            apply_template(WorkspaceState::default(), "screen".into(), r).unwrap();
+        let screen = &state.screens[&ScreenId::from("screen")];
+        assert_eq!(
+            serde_json::to_value(&preview.root).unwrap(),
+            serde_json::to_value(&screen.root).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&preview.floating).unwrap(),
+            serde_json::to_value(&screen.floating).unwrap()
+        );
+        assert_eq!(effects.len(), 3);
+        assert_eq!(screen.sessions.len(), 3);
+    }
+
+    #[test]
+    fn projection_requires_complete_unique_nonempty_terminal_ids() {
+        for case in 0..3 {
+            let mut r = request();
+            match case {
+                0 => {
+                    r.pane_ids.remove("c");
+                }
+                1 => {
+                    r.pane_ids.insert("c".into(), "".into());
+                }
+                _ => {
+                    r.pane_ids.insert("c".into(), "pane-a".into());
+                }
+            }
+            assert!(matches!(
+                project_template(&r),
+                Err(MuxError::InvalidTemplate(_))
+            ));
+        }
+        // Omitted IDs remain supported at the authoritative dispatch boundary.
+        let mut r = request();
+        r.pane_ids.clear();
+        let store = Store::new();
+        assert!(store
+            .dispatch(Op::ApplyTemplate {
+                screen_id: "screen".into(),
+                request: Box::new(r),
+            })
+            .is_ok());
+        assert_eq!(store.get_screen(&"screen".into()).unwrap().panes.len(), 3);
     }
 
     #[test]

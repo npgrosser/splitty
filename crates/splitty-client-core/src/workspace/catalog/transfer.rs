@@ -56,7 +56,7 @@ impl LocalWorkspace {
         self.pending_transfer.is_some()
     }
     pub(super) fn require_routes_settled(&self) -> io::Result<()> {
-        if self.reconciling || self.pending_floating.is_some() {
+        if self.reconciling || self.pending_floating.is_some() || self.pending_template.is_some() {
             Err(invalid("Screen ownership is being reconciled"))
         } else {
             Ok(())

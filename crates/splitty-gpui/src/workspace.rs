@@ -1,6 +1,7 @@
 //! Native projection of one authoritative local screen; no independent dock tree.
 mod floating;
 mod shell_profiles;
+mod templates;
 mod transfer;
 
 use crate::appearance::NativeAppearance;
@@ -31,6 +32,7 @@ use uuid::Uuid;
 
 use self::floating::{FloatGesture, FloatGestureKind};
 use self::shell_profiles::ProfilePicker;
+use self::templates::TemplateDialog;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Surface {
@@ -54,6 +56,7 @@ enum Direction {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shortcut {
+    Templates,
     NewTab,
     NewScreen,
     ScreenIndex(usize),
@@ -109,6 +112,7 @@ fn shortcut(key: &Keystroke, is_mac: bool) -> Option<Shortcut> {
         return None;
     }
     match (key.key.to_ascii_lowercase().as_str(), mods.shift) {
+        ("p", false) => Some(Shortcut::Templates),
         ("t", false) => Some(Shortcut::NewTab),
         ("m", false) => Some(Shortcut::ToggleMaximize),
         ("d", false) => Some(Shortcut::SplitRight),
@@ -535,6 +539,8 @@ pub struct Workspace {
     profiles_error: Option<String>,
     profiles_generation: u64,
     profile_picker: Option<ProfilePicker>,
+    template_dialog: Option<TemplateDialog>,
+    pending_template_apply: Option<(Uuid, Uuid)>,
     transfer_menu: Option<TransferMenu>,
     pending_transfer: Option<PendingTransfer>,
     float_order: HashMap<String, Vec<String>>,
@@ -699,6 +705,8 @@ impl Workspace {
                 profiles_error: None,
                 profiles_generation: 0,
                 profile_picker: None,
+                template_dialog: None,
+                pending_template_apply: None,
                 transfer_menu: None,
                 pending_transfer: None,
                 float_order: HashMap::new(),
@@ -1003,6 +1011,7 @@ impl Workspace {
         self.float_gesture = None;
         self.transfer_menu = None;
         self.close_profile_picker(window, cx);
+        self.dismiss_templates(window, cx);
         if target == CloseTarget::Window && self.cleanup_complete.load(Ordering::Acquire) {
             self.stop();
             cx.quit();
@@ -1156,6 +1165,11 @@ impl Workspace {
         );
     }
     fn reconcile(&mut self, model: LocalWorkspace, window: &mut Window, cx: &mut Context<Self>) {
+        let old_preview = self
+            .model
+            .as_ref()
+            .is_some_and(|old| old.pending_template().is_some());
+        let new_preview = model.pending_template().is_some();
         if self
             .model
             .as_ref()
@@ -1172,6 +1186,8 @@ impl Workspace {
             self.profiles_error = None;
             self.profiles_generation = 0;
             self.profile_picker = None;
+            self.template_dialog = None;
+            self.pending_template_apply = None;
             self.transfer_menu = None;
             self.pending_transfer = None;
             self.pending_float = None;
@@ -1294,6 +1310,7 @@ impl Workspace {
                 || picker_cancelled
                 || transfer_cancelled
                 || old_screen != new_screen
+                || (old_preview && !new_preview)
                 || old_focus != new_focus
                 || old_entity != new_entity)
         {
@@ -1306,6 +1323,14 @@ impl Workspace {
             .model
             .as_ref()
             .map_or_else(Vec::new, LocalWorkspace::displayed_panes);
+        if self.pending_template_apply.is_some()
+            || self
+                .model
+                .as_ref()
+                .is_some_and(|model| model.pending_template().is_some())
+        {
+            visible.clear();
+        }
         visible.sort();
         let screen = self
             .model
@@ -1338,7 +1363,7 @@ impl Workspace {
                 if let Some(view) = self.panes.get(pane) {
                     if !route_changed {
                         view.terminal
-                            .update(cx, |terminal, _| terminal.report_size());
+                            .update(cx, |terminal, cx| terminal.invalidate_size_report(cx));
                     }
                 }
             }
@@ -1404,6 +1429,7 @@ impl Workspace {
     }
     fn focus_current(&self, window: &mut Window, cx: &mut App) {
         if self.rename.is_some()
+            || self.template_dialog.is_some()
             || self.profile_picker.is_some()
             || self.transfer_menu.is_some()
             || self
@@ -1411,6 +1437,14 @@ impl Workspace {
                 .as_ref()
                 .is_some_and(|pending| pending.prompting)
         {
+            return;
+        }
+        if self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.pending_template().is_some())
+        {
+            self.focus.focus(window, cx);
             return;
         }
         if let Some(pane) = self
@@ -1543,6 +1577,36 @@ impl Workspace {
             cx.stop_propagation();
             return;
         }
+        if self.template_dialog.is_some() {
+            self.template_key(&event.keystroke, window, cx);
+            return;
+        }
+        if self.pending_template_apply.is_some()
+            || self
+                .model
+                .as_ref()
+                .is_some_and(|model| model.pending_template().is_some())
+        {
+            // Placeholder panes have no admitted session routes. Screen
+            // navigation remains available; every other key stays local.
+            if let Some(Shortcut::ScreenIndex(index)) = shortcut_with_layout(
+                &event.keystroke,
+                cx.platform_info().is_mac(),
+                window.modifiers().shift,
+                cx.keyboard_layout().id(),
+            ) {
+                if let Some(id) = self
+                    .model
+                    .as_ref()
+                    .and_then(|model| model.screens().get(index))
+                    .map(|info| info.id.to_string())
+                {
+                    self.switch_screen(&id, window, cx);
+                }
+            }
+            cx.stop_propagation();
+            return;
+        }
         if self.transfer_menu.is_some() {
             self.transfer_menu_key(&event.keystroke, cx);
             return;
@@ -1592,6 +1656,7 @@ impl Workspace {
         };
         cx.stop_propagation();
         match action {
+            Shortcut::Templates => self.toggle_templates(window, cx),
             Shortcut::NewTab => self.tab(cx),
             Shortcut::NewScreen => self.create_screen(cx),
             Shortcut::ScreenIndex(index) => {
@@ -1737,6 +1802,8 @@ impl Workspace {
             processed += 1;
             match update {
                 Update::Workspace(model) => self.reconcile(*model, window, cx),
+                Update::TemplateApi(result) => self.template_result(result, window, cx),
+                Update::TemplateApply(result) => self.template_apply_result(result, window, cx),
                 Update::Appearance(snapshot) => self.apply_appearance(&snapshot, window, cx),
                 Update::Zoom(result) => self.apply_zoom_result(result, window, cx),
                 Update::ScreenTransfer(result) => {
@@ -2722,11 +2789,17 @@ impl Workspace {
             for (index, info) in model.screens().iter().enumerate() {
                 let id = info.id.to_string();
                 let selected = model.shown_screen_id() == Some(id.as_str());
-                let label = info
+                let mut label = info
                     .name
                     .as_deref()
                     .map(str::to_owned)
                     .unwrap_or_else(|| format!("Screen {}", index + 1));
+                if model
+                    .pending_template()
+                    .is_some_and(|preview| preview.screen_id() == id)
+                {
+                    label.push_str(" · Applying…");
+                }
                 let mut chip = div()
                     .id(SharedString::from(format!("screen-{id}")))
                     .flex()
@@ -2798,7 +2871,23 @@ impl Workspace {
                     ),
                 );
             }
-            if model.screens().is_empty() {
+            if let Some(preview) = model.pending_template().filter(|preview| {
+                !model
+                    .screens()
+                    .iter()
+                    .any(|info| info.id.as_str() == preview.screen_id())
+            }) {
+                screens = screens.child(
+                    div()
+                        .id("template-pending-screen")
+                        .flex_none()
+                        .px_2()
+                        .py_1()
+                        .bg(rgb(self.appearance.active))
+                        .child(format!("{} · Applying…", preview.display_name())),
+                );
+            }
+            if model.pending_template().is_none() && model.screens().is_empty() {
                 screens = screens.child(
                     div()
                         .text_color(rgb(self.appearance.secondary))
@@ -3085,7 +3174,13 @@ impl Workspace {
                                 .child(view.terminal.clone()),
                         );
                     } else {
-                        slot = slot.child(div().p_3().child("Starting terminal…"));
+                        let message = self
+                            .model
+                            .as_ref()
+                            .and_then(|model| model.template_launch_error(pane))
+                            .map(|reason| format!("Terminal failed to start: {reason}"))
+                            .unwrap_or_else(|| "Starting terminal…".to_owned());
+                        slot = slot.child(div().p_3().child(message));
                     }
                 }
                 match if surface == Surface::Tiled {
@@ -3420,6 +3515,7 @@ impl Render for Workspace {
             (self.appearance.font_size * (extra_lines + 1) as f32 + 14. + 2. * extra_lines as f32)
                 .max(25. + 16. * extra_lines as f32);
         let picker_overlay = self.profile_picker_overlay(window, cx);
+        let template_overlay = self.template_overlay(window, cx);
         let mut view = div()
             .relative()
             .size_full()
@@ -3476,6 +3572,21 @@ impl Render for Workspace {
                             .child("SPLITTY"),
                     )
                     .child(self.render_screen_controls(cx))
+                    .child(
+                        div()
+                            .id("templates-open")
+                            .flex_none()
+                            .px_3()
+                            .py_1()
+                            .cursor_pointer()
+                            .bg(rgb(self.appearance.overlay))
+                            .child("Templates")
+                            .on_click(
+                                cx.listener(|this, _, window, cx| {
+                                    this.toggle_templates(window, cx)
+                                }),
+                            ),
+                    )
                     .child(div().flex_1())
                     .child(
                         div()
@@ -3580,7 +3691,9 @@ impl Render for Workspace {
                     ),
             );
         if let Some(model) = &self.model {
-            if model.screens().is_empty() {
+            if let Some(preview) = model.pending_template() {
+                view = view.child(self.render_template_preview(preview, cx));
+            } else if model.screens().is_empty() {
                 view = view.child(
                     div().flex_1().flex().items_center().justify_center().child(
                         div()
@@ -3766,6 +3879,7 @@ impl Render for Workspace {
                 }),
         )
         .when_some(picker_overlay, |view, picker| view.child(picker))
+        .when_some(template_overlay, |view, overlay| view.child(overlay))
     }
 }
 fn first_selected_slot(model: &LocalWorkspace, node: &LayoutNode) -> Option<(String, String)> {
