@@ -8,6 +8,10 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`native-ui-gpui-spike` GSP-1 renderer dependencies** (2026-11-07, provisional, tbd): pin GPUI Kit 0.9.0 / GPUI snapshot 0.3.11 and Alacritty 0.26.0 for the experimental native window; final renderer choice remains open.
+- **`native-ui-gpui-spike` GSP-2 client boundary** (2026-11-07, provisional, tbd): start with a small platform-aware adapter retaining charged native messages; defer public protocol extraction and complete client-core migration.
+- **`native-ui-gpui-spike` GSP-3 offscreen evidence** (2026-11-07, provisional, tbd): attempt optional CEF CPU offscreen rendering of an isolated fixed fixture; record failures and unverified platforms, without inferring a scripted-viewer or release-cutover decision.
+
 - **`mux-layout-consistency` MLC-1 workspace-only invalidation** (2026-11-07, provisional, tbd): retain the existing screenless `mux.nudge` for order/activation changes without changed screens. Current clients' workspace-directory reconciliation (including removal and order) is separate from this notification-delivery fix; no new directory protocol is added before the GPUI spike.
 
 - **`splitty-open` D2 rendering without a frame** (2026-11-06, provisional, tbd): Markdown and HTML are sanitized with DOMPurify and rendered into a contained shadow root of the pane; images only from `data:` URLs; the CSPs keep `frame-src 'none'`. Alternative: a sandboxed `srcdoc` iframe (relaxes `frame-src` in three policies, blocked by the Tauri navigation hook on macOS and Linux, and keeps annotations out of the rendered view) or a separate credential-free origin.
