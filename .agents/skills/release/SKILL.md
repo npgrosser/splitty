@@ -32,7 +32,7 @@ Verify the remote's peeled tag points to `release_sha`. Locate the `Release` run
 
 ## Build for this host and deliver
 
-Read [references/platform-builds.md](references/platform-builds.md) for the detected platform. Build the desktop package locally from **the exact release commit**. WSL means Windows NSIS, macOS means a native or universal DMG, and native Linux means the Electron AppImage. Downloading CI's completed desktop installer is not a substitute for the requested local build.
+Read [references/platform-builds.md](references/platform-builds.md) for the detected platform. Build the desktop package locally from **the exact release commit**. WSL means Windows NSIS, macOS means a native or universal DMG, and native Linux means the Electron AppImage, deb and rpm. Downloading CI's completed desktop installer is not a substitute for the requested local build.
 
 Use a dedicated clean checkout at the release commit if the working tree may change during the build. Keep dependency/build caches when safe, but select only artifacts from this successful build with the expected version/architecture; do not pick the newest file in a directory containing older builds. Do not use test-skipping flags unless requested. Record the commit, build command, output path and checksum.
 

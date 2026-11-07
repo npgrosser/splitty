@@ -131,7 +131,7 @@ which revisions and platform cases have actually passed.
 
 ```bash
 make build/splitty        # server and CLI binary (embeds the frontend)
-make electron             # Linux release formats: Electron AppImage, deb, rpm (rpm needs rpmbuild)
+make electron             # Linux release formats: Electron AppImage, deb, rpm (needs rpmbuild and libcrypt.so.1; Fedora: rpm-build, libxcrypt-compat)
 make build/splitty-gui    # Tauri desktop binary (Linux source build)
 make build/Splitty.app    # macOS app bundle
 make dmg                  # macOS disk image
