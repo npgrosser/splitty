@@ -13,6 +13,7 @@ pub mod local_settings;
 pub mod native_workspace;
 pub mod shell_profiles;
 pub mod workspace;
+pub mod zoom;
 
 pub use appearance::{AppearanceSnapshot, ColorScheme};
 pub use connection::{AnnotationDraft, Client, Event, Output, ScreenIds};
@@ -20,5 +21,5 @@ pub use document::{Document, DocumentRead};
 #[cfg(not(target_os = "windows"))]
 pub use embedded::EmbeddedService;
 #[cfg(not(target_os = "windows"))]
-pub use local_settings::LocalSettingsReader;
+pub use local_settings::LocalSettingsClient;
 pub use workspace::{LocalWorkspace, SessionRoute, WorkspaceDelta};

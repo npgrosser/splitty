@@ -128,13 +128,28 @@ appearance/theme and shell-profile reads alongside terminal events and commands.
 Each feature has its own generation, dirty flag and result. Same-service settings
 events refresh both; owner-checked OS preference changes refresh appearance only.
 Alternating dirty reads prevents one feature from starving the other, and
-superseded results cannot replace a newer choice. Each feature reports its own
-failure while the other continues with current data; terminals keep working.
-Setup and read cleanup are
+superseded results cannot replace a newer choice. The same owned client admits
+up to 32 queued zoom intents beside its active job and alternates ready reads
+and writes. Every intent reads current settings, calculates one bounded zoom
+step with the UI-free `zoom` policy and patches only `appearance.zoom` when it
+changes. Mutation outcomes carry independent request identities; a refresh
+cannot discard an acknowledgement. Failed or uncertain writes are reported
+without retrying the mutation, and subsequent intents begin with a current read.
+This is ordered within one client, not an atomic increment across independent
+clients. Each feature reports its own failure while the others continue with
+current data; terminals keep working. Setup and pending-job cleanup are
 awaited on every worker exit before owned service shutdown, including update
 receiver failure. The API stream never consumes terminal delivery. Appearance
-font overrides remain chrome settings; resolved terminal colors do not change
-the native terminal's 15 px text and 21 px row metrics.
+font overrides remain chrome settings. Display zoom scales the native terminal's
+15 px text and 21 px row baseline in both scopes; window scope also scales native
+chrome through rem units without changing OS DPI. The terminal view owns one
+set of measured metrics for shaping, paint, pointer mapping and IME bounds, and
+passes only grid and pixel geometry into the replaceable emulator. Hidden panes
+retain desired zoom until measured on return. Changed cell pixels refresh the
+emulator even when rounded grid dimensions stay the same; only changed visible
+dimensions need a new PTY size report. Applying zoom cancels gestures whose
+captured pixel geometry is obsolete without replacing sessions, search queries
+or the canonical workspace layout.
 
 The new-tab profile picker retains a charged service snapshot, with bounded
 profile count, identifiers and labels. Its explicit choice captures connection,

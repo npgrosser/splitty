@@ -11,8 +11,8 @@ use anyhow::{anyhow, Result};
 use gpui_kit::{prelude::*, *};
 use std::{collections::HashMap, ops::Range, time::Instant};
 
-const FONT_SIZE: f32 = 15.;
-const LINE_HEIGHT: f32 = 21.;
+const BASE_FONT_SIZE: f32 = 15.;
+const BASE_LINE_HEIGHT: f32 = 21.;
 const DEFAULT_SELECTION_FOREGROUND: u32 = 0xffffff;
 const DEFAULT_SELECTION_BACKGROUND: u32 = 0x345778;
 const MAX_ALTERNATE_WHEEL_KEYS: i32 = 5;
@@ -136,7 +136,68 @@ struct SearchPaint<'a> {
 #[derive(Clone, Copy)]
 struct CursorGeometry {
     bounds: Bounds<Pixels>,
+    metrics: TerminalMetrics,
+}
+
+/// One desired terminal scale. Cell width becomes authoritative only after a
+/// visible layout measures the current font on the current display.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct TerminalMetrics {
+    scale: f32,
+    font_size: Pixels,
+    line_height: Pixels,
     cell_width: Pixels,
+}
+
+impl TerminalMetrics {
+    fn new(scale: f32) -> Self {
+        let scale = if scale.is_finite() && (0.5..=3.).contains(&scale) {
+            scale
+        } else {
+            1.
+        };
+        Self {
+            scale,
+            font_size: px(BASE_FONT_SIZE * scale),
+            line_height: px(BASE_LINE_HEIGHT * scale),
+            // This value is provisional until layout measures the actual face.
+            cell_width: px(9. * scale),
+        }
+    }
+
+    fn pixel_cell(self, display_scale: f32) -> (u32, u32) {
+        (
+            (f32::from(self.cell_width) * display_scale).round().max(1.) as u32,
+            (f32::from(self.line_height) * display_scale)
+                .round()
+                .max(1.) as u32,
+        )
+    }
+
+    fn grid_size(self, width: Pixels, height: Pixels) -> Size {
+        Size {
+            cols: (width / self.cell_width).floor().clamp(2., 400.) as u16,
+            rows: (height / self.line_height).floor().clamp(1., 200.) as u16,
+        }
+    }
+
+    fn hit_cell(self, x: f32, y: f32, size: Size) -> Option<links::Cell> {
+        let cell_width = f32::from(self.cell_width);
+        let row_height = f32::from(self.line_height);
+        if !x.is_finite()
+            || !y.is_finite()
+            || x < 0.
+            || y < 0.
+            || x >= cell_width * f32::from(size.cols)
+            || y >= row_height * f32::from(size.rows)
+        {
+            return None;
+        }
+        Some(links::Cell {
+            col: (x / cell_width).floor() as u16,
+            row: (y / row_height).floor() as u16,
+        })
+    }
 }
 
 /// GPUI reports positive Y for upward wheel motion. Keep only the fractional
@@ -289,7 +350,9 @@ pub struct Terminal {
     command_error: Option<String>,
     focus: FocusHandle,
     bounds: Bounds<Pixels>,
-    cell_width: Pixels,
+    metrics: TerminalMetrics,
+    geometry_ready: bool,
+    resized_pixel_cell: Option<(u32, u32)>,
     face: Font,
     size: Size,
     generation: u64,
@@ -337,7 +400,9 @@ impl Terminal {
             command_error: None,
             focus: cx.focus_handle(),
             bounds: Bounds::default(),
-            cell_width: px(9.),
+            metrics: TerminalMetrics::new(1.),
+            geometry_ready: false,
+            resized_pixel_cell: None,
             // GPUI font lookup takes concrete family names, not CSS generic families.
             face: font(gpui_kit::base::Theme::global(cx).tokens.typography.mono),
             size,
@@ -394,6 +459,24 @@ impl Terminal {
 
     pub fn engine_ready(&self) -> bool {
         self.engine.is_some()
+    }
+
+    /// Stage the confirmed scale. The next visible layout measures the font
+    /// before any painting, hit testing or PTY size claim uses new geometry.
+    pub fn set_zoom(&mut self, scale: f32, cx: &mut Context<Self>) {
+        let metrics = TerminalMetrics::new(scale);
+        if self.metrics.scale == metrics.scale {
+            return;
+        }
+        self.cancel_pointer();
+        self.metrics = metrics;
+        self.geometry_ready = false;
+        self.row_cache.clear();
+        self.scroll_remainder = 0.;
+        self.scroll_remainder_x = 0.;
+        self.scroll_route = None;
+        self.content_revision = self.content_revision.wrapping_add(1);
+        cx.notify();
     }
 
     pub fn apply_colors(
@@ -458,6 +541,8 @@ impl Terminal {
 
     pub fn reset(&mut self, generation: u64, cx: &mut Context<Self>) {
         self.cancel_pointer();
+        self.geometry_ready = false;
+        self.resized_pixel_cell = None;
         self.generation = generation;
         self.frames = 0;
         self.content_revision += 1;
@@ -487,7 +572,9 @@ impl Terminal {
     }
 
     pub fn report_size(&mut self) {
-        self.send(Command::Resize(self.size.cols, self.size.rows));
+        if self.geometry_ready {
+            self.send(Command::Resize(self.size.cols, self.size.rows));
+        }
     }
 
     fn send(&mut self, command: Command) -> bool {
@@ -624,33 +711,25 @@ impl Terminal {
     }
 
     fn cell_at(&self, position: Point<Pixels>) -> (u16, u16) {
-        let col = ((position.x - self.bounds.left()) / self.cell_width)
+        let col = ((position.x - self.bounds.left()) / self.metrics.cell_width)
             .floor()
             .clamp(0., f32::from(self.size.cols - 1)) as u16;
-        let row = ((position.y - self.bounds.top()) / px(LINE_HEIGHT))
+        let row = ((position.y - self.bounds.top()) / self.metrics.line_height)
             .floor()
             .clamp(0., f32::from(self.size.rows - 1)) as u16;
         (col, row)
     }
 
     fn link_cell_at(&self, position: Point<Pixels>) -> Option<links::Cell> {
-        let x = f32::from(position.x - self.bounds.left());
-        let y = f32::from(position.y - self.bounds.top());
-        if !x.is_finite()
-            || !y.is_finite()
-            || x < 0.
-            || y < 0.
-            || x >= f32::from(self.bounds.size.width)
-            || y >= f32::from(self.bounds.size.height)
-            || x >= f32::from(self.cell_width) * f32::from(self.size.cols)
-            || y >= LINE_HEIGHT * f32::from(self.size.rows)
-        {
+        if !self.geometry_ready {
             return None;
         }
-        Some(links::Cell {
-            col: (x / f32::from(self.cell_width)).floor() as u16,
-            row: (y / LINE_HEIGHT).floor() as u16,
-        })
+        let x = f32::from(position.x - self.bounds.left());
+        let y = f32::from(position.y - self.bounds.top());
+        if x >= f32::from(self.bounds.size.width) || y >= f32::from(self.bounds.size.height) {
+            return None;
+        }
+        self.metrics.hit_cell(x, y, self.size)
     }
 
     fn link_at(&mut self, cell: links::Cell) -> Option<links::Target> {
@@ -718,6 +797,9 @@ impl Terminal {
     }
 
     fn pointer_down(&mut self, event: &MouseDownEvent, window: &Window, mac: bool) {
+        if !self.geometry_ready {
+            return;
+        }
         let position = self.pointer_position(event.position, window);
         self.pointer.last_position = Some(position);
         if event.button == MouseButton::Left
@@ -768,6 +850,9 @@ impl Terminal {
     }
 
     fn pointer_move(&mut self, event: &MouseMoveEvent, window: &Window, mac: bool) -> bool {
+        if !self.geometry_ready {
+            return self.links.cancel_hover();
+        }
         let position = self.pointer_position(event.position, window);
         self.pointer.last_position = Some(position);
         self.links.moving(position);
@@ -819,6 +904,9 @@ impl Terminal {
         window: &Window,
         outside: bool,
     ) -> Option<splitty_client_core::external_links::WebUrl> {
+        if !self.geometry_ready {
+            return None;
+        }
         let route = self.pointer.take(event.button)?;
         match route {
             PointerRoute::Selection => {
@@ -944,6 +1032,10 @@ impl Terminal {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if !self.geometry_ready {
+            cx.stop_propagation();
+            return;
+        }
         let alternate = match self.engine.as_ref().map(Engine::is_alternate_screen) {
             Some(Ok(alternate)) => alternate,
             Some(Err(error)) => {
@@ -970,8 +1062,8 @@ impl Terminal {
         }
         let (delta_x, delta_y) = match event.delta {
             ScrollDelta::Pixels(delta) => (
-                f32::from(delta.x) / LINE_HEIGHT,
-                f32::from(delta.y) / LINE_HEIGHT,
+                f32::from(delta.x) / f32::from(self.metrics.line_height),
+                f32::from(delta.y) / f32::from(self.metrics.line_height),
             ),
             ScrollDelta::Lines(delta) => (delta.x, delta.y),
         };
@@ -1032,40 +1124,39 @@ impl Terminal {
     fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
         self.bounds = bounds;
         let font_id = window.text_system().resolve_font(&self.face);
-        if let Ok(advance) = window.text_system().advance(font_id, px(FONT_SIZE), 'M') {
+        if let Ok(advance) = window
+            .text_system()
+            .advance(font_id, self.metrics.font_size, 'M')
+        {
             let width = advance.width.max(px(1.));
-            if width != self.cell_width {
-                self.cell_width = width;
+            if width != self.metrics.cell_width {
+                self.metrics.cell_width = width;
                 self.row_cache.clear();
+                self.content_revision = self.content_revision.wrapping_add(1);
             }
         }
         // Pixel positions are floats; clamp before converting to protocol cell dimensions.
-        let size = Size {
-            cols: (bounds.size.width / self.cell_width)
-                .floor()
-                .clamp(2., 400.) as u16,
-            rows: (bounds.size.height / px(LINE_HEIGHT))
-                .floor()
-                .clamp(1., 200.) as u16,
-        };
+        let size = self
+            .metrics
+            .grid_size(bounds.size.width, bounds.size.height);
         let scale = window.scale_factor();
         self.links.geometry(links::Geometry {
             origin: (f32::from(bounds.origin.x), f32::from(bounds.origin.y)),
             extent: (f32::from(bounds.size.width), f32::from(bounds.size.height)),
-            cell_width: f32::from(self.cell_width),
+            cell_width: f32::from(self.metrics.cell_width),
             scale,
             size: (size.cols, size.rows),
         });
         let mouse_width = f32::from(bounds.size.width)
-            .min(f32::from(self.cell_width) * f32::from(size.cols))
+            .min(f32::from(self.metrics.cell_width) * f32::from(size.cols))
             .max(1.)
             * scale;
         let mouse_height = f32::from(bounds.size.height)
-            .min(LINE_HEIGHT * f32::from(size.rows))
+            .min(f32::from(self.metrics.line_height) * f32::from(size.rows))
             .max(1.)
             * scale;
-        let mouse_cell_width = f32::from(self.cell_width) * scale;
-        let mouse_cell_height = LINE_HEIGHT * scale;
+        let mouse_cell_width = f32::from(self.metrics.cell_width) * scale;
+        let mouse_cell_height = f32::from(self.metrics.line_height) * scale;
         let result = self.engine.as_mut().map(|engine| {
             engine.set_mouse_geometry(
                 mouse_width,
@@ -1075,26 +1166,37 @@ impl Terminal {
             )
         });
         self.operation(result);
-        if self.size != size {
-            self.size = size;
+        let size_changed = self.size != size;
+        let pixel_cell = self.metrics.pixel_cell(scale);
+        if size_changed || self.resized_pixel_cell != Some(pixel_cell) {
             self.row_cache.clear();
-            let cell_width = (f32::from(self.cell_width) * window.scale_factor()).round() as u32;
-            let cell_height = (LINE_HEIGHT * window.scale_factor()).round() as u32;
             let result = self
                 .engine
                 .as_mut()
-                .map(|engine| engine.resize(size.cols, size.rows, cell_width, cell_height));
+                .map(|engine| engine.resize(size.cols, size.rows, pixel_cell.0, pixel_cell.1));
+            if result.as_ref().is_some_and(|reply| reply.is_ok()) {
+                self.resized_pixel_cell = Some(pixel_cell);
+                self.size = size;
+                self.geometry_ready = true;
+            }
             if let Some(reply) = result.and_then(|result| self.output(result)) {
                 self.send_bytes(reply);
             }
             self.content_revision += 1;
             self.search_wake(cx);
-            self.report_size();
+            if size_changed {
+                self.report_size();
+            }
             cx.notify();
+        } else {
+            self.geometry_ready = true;
         }
     }
 
     fn paint(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.geometry_ready {
+            return;
+        }
         // Element move/exit handlers can miss a held pointer while it crosses
         // another view. Observe window capture moves for the admitted link
         // gesture; a later return to the original cell must not reopen it.
@@ -1170,7 +1272,7 @@ impl Terminal {
                 let cached = shape_row(
                     &mut row,
                     &self.face,
-                    self.cell_width,
+                    self.metrics,
                     base,
                     SelectionColors {
                         foreground: self.selection_foreground,
@@ -1191,7 +1293,7 @@ impl Terminal {
                     cached,
                     index,
                     self.bounds,
-                    self.cell_width,
+                    self.metrics,
                     SearchPaint {
                         highlights: search_rows
                             .get(&index)
@@ -1218,7 +1320,7 @@ impl Terminal {
             &self.face,
             CursorGeometry {
                 bounds: self.bounds,
-                cell_width: self.cell_width,
+                metrics: self.metrics,
             },
             window,
             cx,
@@ -1234,7 +1336,7 @@ fn needs_shape(cached: Option<&CachedRow>, row_dirty: bool, full_dirty: bool) ->
 fn shape_row(
     row: &mut Row<'_>,
     face: &Font,
-    cell_width: Pixels,
+    metrics: TerminalMetrics,
     base_background: u32,
     selection: SelectionColors,
     window: &mut Window,
@@ -1304,23 +1406,23 @@ fn shape_row(
                     continue;
                 }
             }
-            flush_ascii(&mut pending, &mut cached.runs, face, cell_width, window);
+            flush_ascii(&mut pending, &mut cached.runs, face, metrics, window);
             pending = Some(PendingAscii {
                 col: cell.col,
                 text: cell.text.to_owned(),
                 style,
             });
         } else {
-            flush_ascii(&mut pending, &mut cached.runs, face, cell_width, window);
+            flush_ascii(&mut pending, &mut cached.runs, face, metrics, window);
             if visible {
                 cached.runs.push(ShapedRun {
                     col: cell.col,
-                    line: shape_text(cell.text, style, face, None, window),
+                    line: shape_text(cell.text, style, face, metrics.font_size, None, window),
                 });
             }
         }
     }
-    flush_ascii(&mut pending, &mut cached.runs, face, cell_width, window);
+    flush_ascii(&mut pending, &mut cached.runs, face, metrics, window);
     Ok(cached)
 }
 
@@ -1338,14 +1440,21 @@ fn flush_ascii(
     pending: &mut Option<PendingAscii>,
     runs: &mut Vec<ShapedRun>,
     face: &Font,
-    cell_width: Pixels,
+    metrics: TerminalMetrics,
     window: &mut Window,
 ) {
     if let Some(run) = pending.take() {
         runs.push(ShapedRun {
             col: run.col,
             // GPUI fixes each glyph advance, not the total shaped line width.
-            line: shape_text(&run.text, run.style, face, Some(cell_width), window),
+            line: shape_text(
+                &run.text,
+                run.style,
+                face,
+                metrics.font_size,
+                Some(metrics.cell_width),
+                window,
+            ),
         });
     }
 }
@@ -1354,6 +1463,7 @@ fn shape_text(
     text: &str,
     style: RunStyle,
     base_face: &Font,
+    font_size: Pixels,
     glyph_width: Option<Pixels>,
     window: &mut Window,
 ) -> ShapedLine {
@@ -1374,25 +1484,28 @@ fn shape_text(
     };
     window
         .text_system()
-        .shape_line(text.to_owned().into(), px(FONT_SIZE), &[run], glyph_width)
+        .shape_line(text.to_owned().into(), font_size, &[run], glyph_width)
 }
 
 fn paint_cached_row(
     row: &CachedRow,
     index: u16,
     bounds: Bounds<Pixels>,
-    cell_width: Pixels,
+    metrics: TerminalMetrics,
     search: SearchPaint<'_>,
     window: &mut Window,
     cx: &mut Context<Terminal>,
 ) -> Result<()> {
-    let y = bounds.top() + px(LINE_HEIGHT) * f32::from(index);
+    let y = bounds.top() + metrics.line_height * f32::from(index);
     for span in &row.backgrounds {
-        let x = bounds.left() + cell_width * f32::from(span.col);
+        let x = bounds.left() + metrics.cell_width * f32::from(span.col);
         window.paint_quad(fill(
             Bounds::new(
                 point(x, y),
-                size(cell_width * f32::from(span.width), px(LINE_HEIGHT)),
+                size(
+                    metrics.cell_width * f32::from(span.width),
+                    metrics.line_height,
+                ),
             ),
             rgb(span.color),
         ));
@@ -1408,13 +1521,13 @@ fn paint_cached_row(
             highlight.end_col,
             &row.selected,
             |segment| {
-                let x = bounds.left() + cell_width * f32::from(segment.start);
+                let x = bounds.left() + metrics.cell_width * f32::from(segment.start);
                 window.paint_quad(fill(
                     Bounds::new(
                         point(x, y),
                         size(
-                            cell_width * f32::from(segment.end - segment.start),
-                            px(LINE_HEIGHT),
+                            metrics.cell_width * f32::from(segment.end - segment.start),
+                            metrics.line_height,
                         ),
                     ),
                     rgb(color).opacity(if highlight.selected { 0.55 } else { 0.35 }),
@@ -1423,11 +1536,11 @@ fn paint_cached_row(
         );
     }
     for run in &row.runs {
-        let x = bounds.left() + cell_width * f32::from(run.col);
+        let x = bounds.left() + metrics.cell_width * f32::from(run.col);
         run.line
             .paint(
                 point(x, y),
-                px(LINE_HEIGHT),
+                metrics.line_height,
                 TextAlign::Left,
                 None,
                 window,
@@ -1436,11 +1549,14 @@ fn paint_cached_row(
             .map_err(|error| anyhow!("Text paint: {error}"))?;
     }
     for span in &row.underlines {
-        let x = bounds.left() + cell_width * f32::from(span.col);
+        let x = bounds.left() + metrics.cell_width * f32::from(span.col);
         window.paint_quad(fill(
             Bounds::new(
-                point(x, y + px(LINE_HEIGHT - 2.)),
-                size(cell_width * f32::from(span.width), px(1.)),
+                point(x, y + metrics.line_height - px(2. * metrics.scale)),
+                size(
+                    metrics.cell_width * f32::from(span.width),
+                    px(metrics.scale),
+                ),
             ),
             rgb(span.color),
         ));
@@ -1487,53 +1603,56 @@ fn paint_cursor(
     if !cursor.visible {
         return Ok(());
     }
+    let metrics = geometry.metrics;
+    let hairline = px(metrics.scale.max(1.));
+    let bar = px((2. * metrics.scale).max(1.));
     let origin = point(
-        geometry.bounds.left() + geometry.cell_width * f32::from(cursor.col),
-        geometry.bounds.top() + px(LINE_HEIGHT) * f32::from(cursor.row),
+        geometry.bounds.left() + metrics.cell_width * f32::from(cursor.col),
+        geometry.bounds.top() + metrics.line_height * f32::from(cursor.row),
     );
     let color = rgb(cursor.color);
     match cursor.shape {
         CursorShape::Block => {
             window.paint_quad(fill(
-                Bounds::new(origin, size(geometry.cell_width, px(LINE_HEIGHT))),
+                Bounds::new(origin, size(metrics.cell_width, metrics.line_height)),
                 color.opacity(0.35),
             ));
         }
         CursorShape::Bar => {
             window.paint_quad(fill(
-                Bounds::new(origin, size(px(2.), px(LINE_HEIGHT))),
+                Bounds::new(origin, size(bar, metrics.line_height)),
                 color,
             ));
         }
         CursorShape::Underline => {
             window.paint_quad(fill(
                 Bounds::new(
-                    origin + point(px(0.), px(LINE_HEIGHT - 2.)),
-                    size(geometry.cell_width, px(2.)),
+                    origin + point(px(0.), metrics.line_height - bar),
+                    size(metrics.cell_width, bar),
                 ),
                 color,
             ));
         }
         CursorShape::Hollow => {
             window.paint_quad(fill(
-                Bounds::new(origin, size(geometry.cell_width, px(1.))),
+                Bounds::new(origin, size(metrics.cell_width, hairline)),
                 color,
             ));
             window.paint_quad(fill(
                 Bounds::new(
-                    origin + point(px(0.), px(LINE_HEIGHT - 1.)),
-                    size(geometry.cell_width, px(1.)),
+                    origin + point(px(0.), metrics.line_height - hairline),
+                    size(metrics.cell_width, hairline),
                 ),
                 color,
             ));
             window.paint_quad(fill(
-                Bounds::new(origin, size(px(1.), px(LINE_HEIGHT))),
+                Bounds::new(origin, size(hairline, metrics.line_height)),
                 color,
             ));
             window.paint_quad(fill(
                 Bounds::new(
-                    origin + point(geometry.cell_width - px(1.), px(0.)),
-                    size(px(1.), px(LINE_HEIGHT)),
+                    origin + point(metrics.cell_width - hairline, px(0.)),
+                    size(hairline, metrics.line_height),
                 ),
                 color,
             ));
@@ -1551,8 +1670,15 @@ fn paint_cursor(
         };
         window
             .text_system()
-            .shape_line(text, px(FONT_SIZE), &[run], None)
-            .paint(origin, px(LINE_HEIGHT), TextAlign::Left, None, window, cx)
+            .shape_line(text, metrics.font_size, &[run], None)
+            .paint(
+                origin,
+                metrics.line_height,
+                TextAlign::Left,
+                None,
+                window,
+                cx,
+            )
             .map_err(|error| anyhow!("Composition paint: {error}"))?;
     }
     Ok(())
@@ -1648,7 +1774,7 @@ impl Render for Terminal {
                         .py_1()
                         .overflow_hidden()
                         .text_ellipsis()
-                        .text_size(px(12.))
+                        .text_size(rems(12. / 16.))
                         .bg(rgb(self.colors.background))
                         .text_color(rgb(self.colors.foreground))
                         .child(preview),
@@ -1664,7 +1790,7 @@ impl Render for Terminal {
                         .right_0()
                         .px_2()
                         .py_1()
-                        .text_size(px(12.))
+                        .text_size(rems(12. / 16.))
                         .bg(rgb(0x612b32))
                         .text_color(rgb(0xffe4e6))
                         .child(error),
@@ -1755,6 +1881,9 @@ impl EntityInputHandler for Terminal {
         _: &mut Window,
         _: &mut Context<Self>,
     ) -> Option<Bounds<Pixels>> {
+        if !self.geometry_ready {
+            return None;
+        }
         let cursor = self.engine.as_mut()?.cursor().ok()?;
         if !cursor.visible {
             return None;
@@ -1762,10 +1891,10 @@ impl EntityInputHandler for Terminal {
         Some(Bounds::new(
             self.bounds.origin
                 + point(
-                    self.cell_width * f32::from(cursor.col),
-                    px(LINE_HEIGHT) * f32::from(cursor.row),
+                    self.metrics.cell_width * f32::from(cursor.col),
+                    self.metrics.line_height * f32::from(cursor.row),
                 ),
-            size(self.cell_width, px(LINE_HEIGHT)),
+            size(self.metrics.cell_width, self.metrics.line_height),
         ))
     }
 
@@ -1791,12 +1920,45 @@ mod tests {
     use super::{
         alternate_wheel_input, each_unselected_segment, engine_mouse_button, link_modifier,
         mouse_modifiers, needs_shape, wheel_button, wheel_lines, wheel_route, CachedRow,
-        PointerGestures, PointerRoute, WheelRoute,
+        PointerGestures, PointerRoute, TerminalMetrics, WheelRoute,
     };
     use crate::terminal_engine::{
         Engine, MouseButton as EngineMouseButton, MouseModifiers, MousePolicy, MouseTracking,
     };
-    use gpui_kit::{Modifiers, MouseButton, NavigationDirection};
+    use gpui_kit::{px, Modifiers, MouseButton, NavigationDirection};
+
+    #[test]
+    fn scaled_text_grid_and_hit_cells_share_the_same_metrics() {
+        for (scale, font, row) in [(0.5, 7.5, 10.5), (1.25, 18.75, 26.25), (3., 45., 63.)] {
+            let mut metrics = TerminalMetrics::new(scale);
+            metrics.cell_width = px(9. * scale);
+            assert_eq!(f32::from(metrics.font_size), font);
+            assert_eq!(f32::from(metrics.line_height), row);
+            let grid = metrics.grid_size(px(90. * scale), px(84. * scale));
+            assert_eq!((grid.cols, grid.rows), (10, 4));
+            let cell = metrics
+                .hit_cell(3.5 * 9. * scale, 2.5 * row, grid)
+                .expect("point in scaled grid");
+            assert_eq!((cell.col, cell.row), (3, 2));
+            assert!(metrics
+                .hit_cell(10. * 9. * scale, 2.5 * row, grid)
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn pixel_cell_change_refreshes_vt_even_when_grid_dimensions_match() {
+        let baseline = TerminalMetrics::new(1.);
+        let enlarged = TerminalMetrics::new(1.25);
+        let small_bounds = (px(20.), px(20.));
+        assert_eq!(
+            baseline.grid_size(small_bounds.0, small_bounds.1),
+            enlarged.grid_size(small_bounds.0, small_bounds.1)
+        );
+        assert_ne!(baseline.pixel_cell(1.), enlarged.pixel_cell(1.));
+        assert_ne!(baseline.pixel_cell(1.), baseline.pixel_cell(1.5));
+        assert_eq!(TerminalMetrics::new(f32::NAN).scale, 1.);
+    }
 
     #[test]
     fn link_modifier_matches_host_shortcut_without_claiming_shift_selection() {

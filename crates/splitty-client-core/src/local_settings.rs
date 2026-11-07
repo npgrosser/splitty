@@ -1,16 +1,18 @@
-//! One owned API stream for the two local settings reads, separate from PTY events.
+//! One owned API stream for local settings reads and ordered zoom intents, separate from PTY events.
 use crate::{
     appearance::{AppearanceSnapshot, ColorScheme},
     shell_profiles::ShellProfilesSnapshot,
+    zoom::{ZoomAction, ZoomResult},
 };
 use serde::de::DeserializeOwned;
 use splitty_server::native::client::Client;
 use splitty_transport::{budget::Charged, codec, wire};
-use std::{future::Future, io, pin::Pin, sync::Arc};
+use std::{collections::VecDeque, future::Future, io, pin::Pin, sync::Arc};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
 pub enum LocalSettingsUpdate {
+    Zoom(ZoomResult),
     Appearance(io::Result<Arc<AppearanceSnapshot>>),
     ShellProfiles(io::Result<Arc<ShellProfilesSnapshot>>),
 }
@@ -34,14 +36,24 @@ impl Feature {
         }
     }
 }
-type Read = Pin<Box<dyn Future<Output = (Client, Feature, u64, LocalSettingsUpdate)> + Send>>;
+const MAX_QUEUED_ZOOM: usize = 32;
+#[derive(Clone, Copy)]
+enum Job {
+    Read(Feature, u64),
+    Zoom(Uuid, ZoomAction),
+}
+type Read = Pin<Box<dyn Future<Output = (Client, Job, LocalSettingsUpdate)> + Send>>;
 
 /// `next_update` may be cancelled without cancelling the retained request. Each
 /// feature coalesces its own refreshes; completing even a superseded read gives
-/// the other dirty feature priority. No request is retried without a refresh.
-pub struct LocalSettingsReader {
+/// the other dirty feature priority. Read failures wait for another refresh;
+/// mutations are submitted at most once and never automatically retried.
+pub struct LocalSettingsClient {
     client: Option<Client>,
     pending: Option<Read>,
+    active_zoom: Option<Uuid>,
+    zoom: VecDeque<(Uuid, ZoomAction)>,
+    prefer_write: bool,
     cancel: Arc<Notify>,
     connection_id: Uuid,
     generations: [u64; 2],
@@ -49,11 +61,14 @@ pub struct LocalSettingsReader {
     next: Feature,
     scheme: ColorScheme,
 }
-impl LocalSettingsReader {
+impl LocalSettingsClient {
     pub(crate) fn new(client: Client, connection_id: Uuid, scheme: ColorScheme) -> Self {
         Self {
             client: Some(client),
             pending: None,
+            active_zoom: None,
+            zoom: VecDeque::new(),
+            prefer_write: false,
             cancel: Arc::new(Notify::new()),
             connection_id,
             generations: [1; 2],
@@ -90,53 +105,111 @@ impl LocalSettingsReader {
         }
         Ok(())
     }
+    /// Admit one action once. Queue rejection never starts an API request.
+    pub fn enqueue_zoom(
+        &mut self,
+        owner: Uuid,
+        request: Uuid,
+        action: ZoomAction,
+    ) -> io::Result<()> {
+        self.check_owner(owner)?;
+        if self.active_zoom == Some(request) || self.zoom.iter().any(|(id, _)| *id == request) {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "zoom request is already pending",
+            ));
+        }
+        if self.zoom.len() == MAX_QUEUED_ZOOM {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "zoom queue is full",
+            ));
+        }
+        self.zoom.push_back((request, action));
+        Ok(())
+    }
     pub async fn next_update(&mut self) -> LocalSettingsUpdate {
         loop {
             if self.pending.is_none() {
                 let feature = if self.dirty[self.next.index()] {
-                    self.next
+                    Some(self.next)
                 } else if self.dirty[self.next.other().index()] {
-                    self.next.other()
+                    Some(self.next.other())
                 } else {
-                    std::future::pending::<Feature>().await
+                    None
+                };
+                let job = if !self.zoom.is_empty() && (self.prefer_write || feature.is_none()) {
+                    let (id, action) = self.zoom.pop_front().expect("queued zoom");
+                    // Reserve a generation before starting this indivisible job.
+                    // No read can publish it until after the mutation outcome.
+                    let generation = match increment(self.generations[0]) {
+                        Ok(generation) => generation,
+                        Err(error) => {
+                            return LocalSettingsUpdate::Zoom(ZoomResult::rejected(
+                                self.connection_id,
+                                id,
+                                error.to_string(),
+                            ))
+                        }
+                    };
+                    self.generations[0] = generation;
+                    self.active_zoom = Some(id);
+                    Job::Zoom(id, action)
+                } else if let Some(feature) = feature {
+                    self.dirty[feature.index()] = false;
+                    Job::Read(feature, self.generations[feature.index()])
+                } else {
+                    std::future::pending::<Job>().await
                 };
                 let mut client = self
                     .client
                     .take()
-                    .expect("local settings reader owns its client");
+                    .expect("local settings client owns its stream");
                 let cancel = self.cancel.clone();
                 let connection = self.connection_id;
-                let generation = self.generations[feature.index()];
                 let scheme = self.scheme;
-                self.dirty[feature.index()] = false;
                 self.pending = Some(Box::pin(async move {
                     let cancelled = || {
                         io::Error::new(io::ErrorKind::Interrupted, "local settings read cancelled")
                     };
-                    let result = match feature {
-                        Feature::Appearance => {
+                    let result = match job {
+                        Job::Read(Feature::Appearance, generation) => {
                             LocalSettingsUpdate::Appearance(tokio::select! { biased;
                                 _ = cancel.notified() => Err(cancelled()),
                                 result = crate::appearance::local::read(&mut client, connection, generation, scheme) => result.map(Arc::new),
                             })
                         }
-                        Feature::Profiles => {
+                        Job::Read(Feature::Profiles, generation) => {
                             LocalSettingsUpdate::ShellProfiles(tokio::select! { biased;
                                 _ = cancel.notified() => Err(cancelled()),
                                 result = crate::shell_profiles::read(&mut client, connection, generation) => result.map(Arc::new),
                             })
                         }
+                        Job::Zoom(id, action) => LocalSettingsUpdate::Zoom(
+                            zoom::execute(&mut client, connection, id, action, &cancel).await,
+                        ),
                     };
-                    (client, feature, generation, result)
+                    (client, job, result)
                 }));
             }
-            let (client, feature, generation, result) =
-                self.pending.as_mut().expect("settings read started").await;
+            let (client, job, result) = self.pending.as_mut().expect("settings job started").await;
             self.pending = None;
             self.client = Some(client);
-            self.next = feature.other();
-            if generation != self.generations[feature.index()] {
-                continue;
+            match job {
+                Job::Read(feature, generation) => {
+                    self.next = feature.other();
+                    self.prefer_write = true;
+                    if generation != self.generations[feature.index()] {
+                        continue;
+                    }
+                }
+                Job::Zoom(..) => {
+                    self.active_zoom = None;
+                    self.prefer_write = false;
+                    // There is no concurrent read: every later appearance starts
+                    // after this outcome, even when a settings event raced it.
+                    self.dirty[0] = true;
+                }
             }
             return result;
         }
@@ -144,7 +217,7 @@ impl LocalSettingsReader {
     pub async fn finish(mut self) -> io::Result<()> {
         if let Some(pending) = self.pending.take() {
             self.cancel.notify_one();
-            let (client, _, _, _) = pending.await;
+            let (client, _, _) = pending.await;
             self.client = Some(client);
         }
         if let Some(client) = self.client.take() {
@@ -197,3 +270,8 @@ pub(crate) fn decode_with_budget<T: DeserializeOwned>(
 
 #[cfg(test)]
 mod tests;
+
+mod zoom;
+
+#[cfg(all(test, unix))]
+mod zoom_tests;

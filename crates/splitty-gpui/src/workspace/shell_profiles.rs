@@ -268,14 +268,19 @@ impl Workspace {
         self.close_profile_picker(window, cx);
     }
 
-    pub(super) fn profile_picker_overlay(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(super) fn profile_picker_overlay(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
         let picker = self.profile_picker.as_ref()?;
         let colors = &self.appearance;
         let mut entries = div()
             .id("shell-profile-list")
             .flex()
             .flex_col()
-            .max_h(px(360.))
+            .max_h(px((360. * self.appearance.zoom.window_scale())
+                .min(f32::from(window.viewport_size().height) * 0.55)))
             .overflow_y_scroll()
             .track_scroll(&picker.scroll);
         let mut count = 0;
@@ -320,7 +325,7 @@ impl Workspace {
                     .text_color(rgb(if available { colors.text } else { colors.muted }))
                     .child(title)
                     .when_some(detail, |row, reason| {
-                        row.child(div().text_size(px(11.)).child(reason))
+                        row.child(div().text_size(chrome_rems(11.)).child(reason))
                     })
                     .when(available, |row| {
                         row.cursor_pointer()
@@ -342,9 +347,10 @@ impl Workspace {
         let menu = div()
             .id("shell-profile-picker")
             .absolute()
-            .top(px((self.appearance.font_size + 34.).max(47.)))
-            .right(px(12.))
-            .w(px(360.))
+            .top(chrome_rems((self.appearance.font_size + 34.).max(47.)))
+            .right(chrome_rems(12.))
+            .w(chrome_rems(360.))
+            .max_w(relative(0.9))
             .p_2()
             .border_1()
             .border_color(rgb(colors.border))

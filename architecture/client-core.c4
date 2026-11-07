@@ -18,7 +18,7 @@ model {
     }
 
     local_settings = component 'local_settings' {
-      description 'One owned auxiliary API stream with fair independent appearance/profile refreshes, bounded JSON decoding and cancellation-safe cleanup.'
+      description 'One owned auxiliary API stream with fair independent appearance/profile refreshes and bounded ordered zoom mutations, explicit outcomes and cancellation-safe cleanup.'
       metadata { module 'splitty_client_core::local_settings' }
     }
 
@@ -37,13 +37,18 @@ model {
       metadata { module 'splitty_client_core::external_links' }
     }
 
+    client_zoom = component 'client_zoom' {
+      description 'Pure bounded display zoom levels, scope projection and keyboard intent steps.'
+      metadata { module 'splitty_client_core::zoom' }
+    }
+
     client_workspace = component 'client_workspace' {
       description 'Connection-wide catalog and admission, per-screen canonical snapshots with local tab, focus and maximized-slot projection, session routes, exact tab placement with ordered settlement, clamped captured group navigation and full-scope close impact assessment.'
       metadata { module 'splitty_client_core::workspace' }
     }
 
     native_workspace = component 'native_workspace' {
-      description 'Native workspace runtime: one owned service, ordered connection, captured viewport and tab navigation intents, checked placement and close settlement, verified shutdown, attachment and displayed-pane size and visibility retries.'
+      description 'Native workspace runtime: one owned service, ordered connection, captured navigation and zoom intents, checked placement and close settlement, independent settings outcomes, verified shutdown, attachment and displayed-pane size and visibility retries.'
       metadata { module 'splitty_client_core::native_workspace' }
     }
 
@@ -54,16 +59,25 @@ model {
 
     client_root -> connection 'Expose the native client API'
     client_root -> appearance 'Expose charged appearance snapshots'
-    client_root -> local_settings 'Expose the shared local settings reader'
+    client_root -> local_settings 'Expose the owned local settings API client'
+    local_settings -> client_zoom 'Resolve queued zoom intents against current settings'
+    native_workspace -> client_zoom 'Carry identified zoom intents and independent outcomes'
     client_root -> client_shell_profiles 'Expose service-owned profile snapshots'
     local_settings -> appearance 'Read appearance independently and reuse in-memory fixtures'
     local_settings -> client_shell_profiles 'Read independently charged profile snapshots'
     local_settings -> splitty.server.native 'Own one API stream and await cleanup'
     local_settings -> splitty.server.service 'Use the real embedded API role in tests'
     local_settings -> splitty.core.shell_profiles 'Construct typed profile fixtures'
+    local_settings -> splitty.core.config 'Build isolated settings reply fixtures'
+    local_settings -> splitty.core.theme 'Supply valid theme replies during reconciliation tests'
+    local_settings -> splitty.core.daemon 'Describe an owned fake native endpoint in tests'
+    local_settings -> splitty.core.protocol 'Use the current handshake version in fake-peer tests'
     local_settings -> splitty.transport.budget 'Retain typed snapshot allocation leases'
     local_settings -> splitty.transport.codec 'Admit bounded typed response decoding'
     local_settings -> splitty.transport.wire 'Validate API reply kind and status'
+    local_settings -> splitty.transport.negotiation 'Exercise real native admission in fake-peer tests'
+    local_settings -> splitty.transport.peer 'Script uncertainty and stream loss without a second client protocol'
+    local_settings -> splitty.transport.queue 'Own isolated fake-peer resource accounting'
     client_shell_profiles -> local_settings 'Reuse bounded typed API response decoding'
     client_shell_profiles -> splitty.core.shell_profiles 'Present the existing service profile contract'
     client_shell_profiles -> splitty.server.native 'Read on the independently owned API client'
@@ -110,6 +124,7 @@ model {
     native_workspace -> appearance 'Poll owner-bound appearance without consuming session events'
     native_workspace -> embedded 'Own appearance fixture service cleanup in runtime tests'
     native_workspace -> splitty.core.protocol 'Broadcast same-service settings events in runtime tests'
+    native_workspace -> splitty.core.config 'Verify persistence in an isolated child process'
     native_workspace -> client_workspace 'Reconcile catalogs and routes; revalidate captured close impact before submission'
     native_workspace -> splitty.core.ids 'Confirm captured pane identity after the ordered close barrier'
     native_workspace -> splitty.core.pty 'Gate embedded worker terminal tests on PTY availability'
@@ -117,7 +132,7 @@ model {
     embedded -> connection 'Return a connection scoped to the embedded service'
     embedded -> splitty.core.protocol 'Inject old-peer capability greetings in compatibility tests'
     embedded -> appearance 'Carry the local OS color preference into settings initialization'
-    embedded -> local_settings 'Open one owned auxiliary settings reader'
+    embedded -> local_settings 'Open one owned auxiliary settings client'
     embedded -> client_root 'Use public event and screen types in embedded probe tests'
     embedded -> splitty.server.control 'Start and stop the isolated control channel'
     embedded -> splitty.server.native 'Connect an owned native session stream'

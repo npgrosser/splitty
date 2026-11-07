@@ -24,19 +24,19 @@ fn profiles() -> ShellProfilesState {
         }],
     }
 }
-async fn next(reader: &mut LocalSettingsReader) -> LocalSettingsUpdate {
+async fn next(reader: &mut LocalSettingsClient) -> LocalSettingsUpdate {
     tokio::time::timeout(Duration::from_secs(5), reader.next_update())
         .await
         .unwrap()
 }
-async fn profile(reader: &mut LocalSettingsReader) -> io::Result<Arc<ShellProfilesSnapshot>> {
+async fn profile(reader: &mut LocalSettingsClient) -> io::Result<Arc<ShellProfilesSnapshot>> {
     loop {
         if let LocalSettingsUpdate::ShellProfiles(result) = next(reader).await {
             return result;
         }
     }
 }
-async fn begin(reader: &mut LocalSettingsReader) {
+pub(super) async fn begin(reader: &mut LocalSettingsClient) {
     let mut read = Box::pin(reader.next_update());
     std::future::poll_fn(|cx| {
         assert!(read.as_mut().poll(cx).is_pending());
@@ -55,7 +55,7 @@ async fn feature_generations_are_fair_and_os_changes_do_not_reload_profiles() {
         .unwrap();
     let budget = api.sender().context().budget.clone();
     let owner = Uuid::new_v4();
-    let mut reader = LocalSettingsReader::new(api, owner, ColorScheme::Dark);
+    let mut reader = LocalSettingsClient::new(api, owner, ColorScheme::Dark);
     begin(&mut reader).await;
     assert!(reader.refresh_settings(Uuid::new_v4()).is_err());
     reader.refresh_settings(owner).unwrap();
@@ -104,7 +104,7 @@ async fn profile_limits_are_atomic_and_failure_does_not_poison_appearance() {
         .unwrap();
     let budget = api.sender().context().budget.clone();
     let owner = Uuid::new_v4();
-    let mut reader = LocalSettingsReader::new(api, owner, ColorScheme::Dark);
+    let mut reader = LocalSettingsClient::new(api, owner, ColorScheme::Dark);
     let first = profile(&mut reader).await.unwrap();
     for case in 0..5 {
         let mut invalid = profiles();
@@ -167,7 +167,7 @@ async fn cancelled_profile_read_retains_client_and_shutdown_releases_allocations
         .unwrap();
     let budget = api.sender().context().budget.clone();
     let owner = Uuid::new_v4();
-    let mut reader = LocalSettingsReader::new(api, owner, ColorScheme::Dark);
+    let mut reader = LocalSettingsClient::new(api, owner, ColorScheme::Dark);
     assert!(matches!(
         next(&mut reader).await,
         LocalSettingsUpdate::Appearance(Ok(_))

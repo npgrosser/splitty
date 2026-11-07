@@ -13,7 +13,7 @@ model {
     }
 
     terminal = component 'terminal' {
-      description 'Native terminal presentation, cached text shaping, local find editing and highlights, pointer geometry and admitted gesture lifetime, deliberate validated browser links, and byte-preserving session input routing.'
+      description 'Native terminal presentation with coherent zoom metrics, cached text shaping, local find editing and highlights, pointer geometry and admitted gesture lifetime, deliberate validated browser links, and byte-preserving session input routing.'
       metadata { module 'splitty_gpui::terminal' }
     }
 
@@ -28,7 +28,7 @@ model {
     }
 
     gpui_appearance = component 'gpui_appearance' {
-      description 'Bounded theme and UI font projection from service-owned appearance snapshots; terminal font remains fixed.'
+      description 'Bounded theme, UI font and zoom projection from service-owned appearance snapshots; chrome font settings remain separate from terminal typography.'
       metadata { module 'splitty_gpui::appearance' }
     }
 
@@ -57,6 +57,8 @@ model {
     gpui_workspace -> splitty.client_core.client_shell_profiles 'Retain owner-bound service choices for the new-tab picker'
     gpui_appearance -> terminal 'Provide a plain terminal color configuration'
     gpui_appearance -> splitty.client_core.appearance 'Consume charged appearance snapshot values'
+    gpui_appearance -> splitty.client_core.client_zoom 'Project confirmed display zoom and scope'
+    gpui_workspace -> splitty.client_core.client_zoom 'Submit zoom intents and present confirmed scale'
     gpui_workspace -> splitty.client_core.native_workspace 'Submit assessed close intent and wait for matching approval or settlement'
     gpui_workspace -> splitty.client_core.client_workspace 'Render the displayed canonical root with local tab and maximized-slot choice'
     gpui_workspace -> splitty.client_core.client_root 'Construct workspace identities in native navigation tests'

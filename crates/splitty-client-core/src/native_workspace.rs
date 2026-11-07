@@ -6,6 +6,7 @@ use crate::{
         Axis, ClosePlan, CloseTarget, LocalWorkspace, MovePlacement, PaneDrag, PlacementOutcome,
         TabStep,
     },
+    zoom::{ZoomAction, ZoomResult},
     Event,
 };
 #[cfg(not(target_os = "windows"))]
@@ -23,6 +24,11 @@ use std::{
 use tokio::sync::mpsc;
 
 pub enum Command {
+    Zoom {
+        connection: uuid::Uuid,
+        request_id: uuid::Uuid,
+        action: ZoomAction,
+    },
     SetColorScheme {
         connection: uuid::Uuid,
         scheme: ColorScheme,
@@ -99,6 +105,7 @@ pub enum Command {
     },
 }
 pub enum Update {
+    Zoom(ZoomResult),
     ShellProfiles(Arc<ShellProfilesSnapshot>),
     ShellProfilesError {
         connection: uuid::Uuid,
@@ -172,7 +179,7 @@ fn profile_fallback_status(
 type LocalSettingsSetup<'a> = std::pin::Pin<
     Box<
         dyn std::future::Future<
-                Output = std::io::Result<crate::local_settings::LocalSettingsReader>,
+                Output = std::io::Result<crate::local_settings::LocalSettingsClient>,
             > + Send
             + 'a,
     >,
@@ -183,7 +190,7 @@ struct RuntimeLocalSettings<'a> {
     connection: uuid::Uuid,
     scheme: ColorScheme,
     setup: Option<LocalSettingsSetup<'a>>,
-    reader: Option<crate::local_settings::LocalSettingsReader>,
+    reader: Option<crate::local_settings::LocalSettingsClient>,
     dirty: bool,
     settings_dirty: bool,
 }
@@ -203,6 +210,29 @@ impl<'a> RuntimeLocalSettings<'a> {
             dirty: true,
             settings_dirty: false,
         }
+    }
+
+    fn enqueue_zoom(
+        &mut self,
+        connection: uuid::Uuid,
+        request_id: uuid::Uuid,
+        action: ZoomAction,
+    ) -> std::io::Result<()> {
+        if connection != self.connection {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "local settings source changed",
+            ));
+        }
+        self.reader
+            .as_mut()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "local settings are not ready",
+                )
+            })?
+            .enqueue_zoom(connection, request_id, action)
     }
 
     fn set_scheme(&mut self, connection: uuid::Uuid, scheme: ColorScheme) -> std::io::Result<()> {
@@ -245,7 +275,7 @@ impl<'a> RuntimeLocalSettings<'a> {
                 self.dirty = false;
                 self.setup = Some(Box::pin(
                     self.service
-                        .local_settings_reader(self.connection, self.scheme),
+                        .local_settings_client(self.connection, self.scheme),
                 ));
             }
             let result = self
@@ -527,6 +557,7 @@ async fn run_service(
                     use crate::local_settings::LocalSettingsUpdate;
                     let connection = client.connection_id();
                     let update = match result {
+                        Ok(LocalSettingsUpdate::Zoom(result)) => Update::Zoom(result),
                         Ok(LocalSettingsUpdate::Appearance(Ok(snapshot))) => Update::Appearance(snapshot),
                         Ok(LocalSettingsUpdate::Appearance(Err(error))) => Update::AppearanceError { connection, reason: error.to_string() },
                         Ok(LocalSettingsUpdate::ShellProfiles(Ok(snapshot))) => Update::ShellProfiles(snapshot),
@@ -627,6 +658,15 @@ async fn run_service(
                         }
                         continue;
                     }
+                    if let Command::Zoom { connection, request_id, action } = command {
+                        let result = settings.as_mut()
+                            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::WouldBlock, "local settings are not ready"))
+                            .and_then(|settings| settings.enqueue_zoom(connection, request_id, action));
+                        if let Err(error) = result {
+                            publish(&updates, Update::Zoom(ZoomResult::rejected(connection, request_id, error.to_string())), &stop).await?;
+                        }
+                        continue;
+                    }
                     if let Command::SetColorScheme { connection, scheme } = command {
                         if let Some(reader) = &mut settings {
                             // A delayed command from another owner cannot choose app settings.
@@ -640,7 +680,7 @@ async fn run_service(
                         continue;
                     };
                     let result: std::io::Result<()> = match command {
-                        Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
+                        Command::Zoom { .. } | Command::SetColorScheme { .. } | Command::RequestClose { .. } => {
                             unreachable!("close is handled before normal commands")
                         }
                         Command::CreateScreen(name) => {
@@ -2064,3 +2104,6 @@ async fn run(
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod profile_launch_tests;
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod zoom_tests;

@@ -2,6 +2,7 @@
 //! This adapter never reads settings files or changes terminal font metrics.
 use crate::terminal::TerminalColors;
 use splitty_client_core::appearance::AppearanceSnapshot;
+use splitty_client_core::zoom::Zoom;
 
 #[derive(Clone, Debug)]
 pub struct NativeAppearance {
@@ -20,6 +21,7 @@ pub struct NativeAppearance {
     pub terminal: TerminalColors,
     pub selection_foreground: u32,
     pub selection_background: u32,
+    pub zoom: Zoom,
     pub notice: Option<&'static str>,
 }
 
@@ -41,6 +43,7 @@ impl NativeAppearance {
             terminal: TerminalColors::default(),
             selection_foreground: 0xd9e2ef,
             selection_background: 0x345778,
+            zoom: Zoom::from_values(1.0, "window"),
             notice: None,
         }
     }
@@ -110,6 +113,7 @@ impl NativeAppearance {
             *target = color(value, background, *target);
         }
         let settings = snapshot.settings();
+        result.zoom = Zoom::from_values(settings.zoom, &settings.zoom_scope);
         let (size, invalid_size) = chrome_font_size(settings.font_size, &ui.font_size);
         result.font_size = size;
         fallback_used |= invalid_size;

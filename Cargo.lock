@@ -7664,6 +7664,7 @@ dependencies = [
  "splitty-client-core",
  "tempfile",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

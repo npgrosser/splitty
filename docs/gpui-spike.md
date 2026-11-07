@@ -226,9 +226,10 @@ native workspace; cross-process live synchronization is not implemented.
 Appearance font size and family apply to workspace chrome, matching the web
 client. Empty/zero overrides use resolved UI theme defaults. The supported size
 range is 8–24 px; a CSS font list selects an available concrete family or a native
-UI generic. Terminal typography remains the existing monospace font at 15 px
-with 21 px rows. A proportional UI font therefore does not alter terminal cells.
-Terminal-font settings and zoom are separate work.
+UI generic. Terminal typography uses the existing monospace font at a 15 px
+baseline with 21 px rows. A proportional UI font therefore does not alter
+terminal cells. Display zoom scales that baseline; general terminal-font
+settings remain separate work.
 
 Native colors support checked `#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA`, decimal
 `rgb(...)`/`rgba(...)` with comma-separated channels, and `transparent`. Alpha is
@@ -238,13 +239,30 @@ remain unchanged. Native cursor drawing uses an overlay, so `cursor-accent`
 text inversion is not implemented. CSS expressions, layout/effect tokens and
 the otherwise unused `terminal.theme` field are not activated by this adapter.
 Unsupported color/font forms use native fallbacks with a status; failed reads
-retain working defaults or the last valid appearance. The appearance reader
-never submits a settings mutation. Existing service startup may still persist
+retain working defaults or the last valid appearance. Appearance refreshes do
+not submit settings mutations; explicit zoom shortcuts use the same owned API
+client for bounded ordered updates. Existing service startup may still persist
 configuration defaults or migrations through the ordinary settings loader.
 
 There is no native settings editor in this increment. The web client's settings
 remain the reference interface; the native read path and terminal engine consume
 the existing settings and theme contracts.
+
+Native display zoom uses the saved `appearance.zoom` and `zoom_scope` settings.
+Ctrl on Linux, or Cmd on macOS, with `+`/`=` and `-` selects the existing zoom
+steps from 50 to 300 percent; `0` resets to 100 percent. These shortcuts are
+handled before terminal and editor input. Window scope scales terminal content
+and application controls together; terminal scope leaves chrome at its usual
+size. System dialogs keep platform scaling. Zoom preserves running processes,
+history and per-pane search text, including hidden panes.
+
+Each shortcut requests one ordered settings action from the local client core.
+The view shows the confirmed result; failures and uncertain saves are reported
+without retrying the action. The queue admits up to 32 waiting actions beside
+one running job and reports overflow. Each action reads current settings and
+patches only zoom, preserving unrelated fields. This is not an atomic increment
+across separate clients. The app remembers confirmed zoom through the existing
+settings file; no terminal-font setting or OS DPI override is introduced.
 
 The focused appearance checks pass: 45 client-core tests, 36 GPUI tests, 23 core
 theme tests and 17 architecture checks, plus touched-target Clippy, formatting
@@ -271,6 +289,47 @@ and X11 with D3D12-backed OpenGL.
 python3 scripts/testing/gpui-screens.py target/release/splitty-gpui \
   --output /tmp/splitty-appearance-evidence --appearance-matrix
 ```
+
+## Native display-zoom acceptance
+
+The accepted optimized binary has SHA-256
+`25ea7af25a282901d144594af97d77a87ac28ed8c1fef1a5849ecd3bd0f685b7`.
+The private X11 matrix covers both scopes at 50, 125 and 300 percent, plus two
+restarts using the settings saved by real keyboard actions. Observed terminal
+row pitches are 11, 26 and 63 pixels in both scopes. Terminal-only chrome stays
+at the same 79-pixel content origin; window scope moves it to 40, 98 and 235
+pixels. Glyph ink heights agree between scopes at each level.
+
+Rapid zoom actions and Ctrl+0 produce no bytes in any owned PTY. Existing and
+hidden tabs keep their process identity, query, history and background output;
+hidden PTYs report no new size until revealed. Scaled OSC8 targets reach a private
+opener spy, application mouse reports use scaled rows, and the find editor
+retains its text. At 300 percent, the profile menu fits the viewport and the
+toolbar scrolls to its controls. Zoom during a held divider gesture preserves
+the settled split ratio after further movement and release. The tests wait for
+rendered geometry as well as persistence: a saved setting can precede its UI
+acknowledgement. Screenshots were inspected for retained history, both chrome
+scopes, the menu, toolbar and split geometry. All eight runs exit normally with
+no surviving children.
+
+The same frozen binary passes the hardware workspace smoke under Wayland and
+X11, reaching stage 18 with D3D12-backed graphics. Targeted checks include 72
+client-core tests, 67 GPUI tests, all-target Clippy for both crates and 17
+architecture checks. After the high-zoom toolbar/footer correction, all 14
+workspace tests and native Clippy pass again. The interactive matrix uses a
+private 1200×760 Linux Xvfb window; it does not establish macOS/Windows behavior,
+manual IME composition, arbitrary window sizes or new latency measurements.
+Full-workspace merge CI remains deferred for this evaluation branch.
+
+```sh
+python3 scripts/testing/gpui-display-zoom.py target/release/splitty-gpui \
+  --output /tmp/splitty-zoom-evidence --matrix --xclip /path/to/xclip
+```
+
+The runner accepts private Xvfb, library-directory and xdotool overrides. It
+records binary, harness and fixture hashes, exact PTY input, persisted settings,
+process lifetimes and screenshots. Its opener and clipboard checks stay inside
+the owned display and generated configuration.
 
 ## WSLg graphics
 

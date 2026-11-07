@@ -13,6 +13,7 @@ use splitty_client_core::workspace::{
     Axis, ClosePlan, CloseTarget, LayoutNode, LocalWorkspace, MovePlacement, PaneDrag, ScreenModel,
     TabStep,
 };
+use splitty_client_core::zoom::{Zoom, ZoomAction, ZoomOutcome, ZoomResult};
 use std::{
     cell::Cell,
     collections::{HashMap, HashSet},
@@ -24,6 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 use tokio::sync::mpsc;
+use uuid::Uuid;
 
 use self::shell_profiles::ProfilePicker;
 
@@ -47,6 +49,34 @@ enum Shortcut {
     Focus(Direction),
     PreviousTab,
     NextTab,
+}
+
+fn chrome_rems(base_px: f32) -> Rems {
+    rems(base_px / 16.)
+}
+
+fn tab_header_pixels(font_size: f32, window_scale: f32) -> Pixels {
+    px((font_size + 19.).max(32.) * window_scale + 1.)
+}
+
+fn zoom_shortcut(key: &Keystroke, is_mac: bool) -> Option<ZoomAction> {
+    let mods = key.modifiers;
+    if mods.alt
+        || mods.function
+        || if is_mac {
+            !mods.platform || mods.control
+        } else {
+            !mods.control || mods.platform
+        }
+    {
+        return None;
+    }
+    match key.key.as_str() {
+        "+" | "=" => Some(ZoomAction::In),
+        "-" => Some(ZoomAction::Out),
+        "0" => Some(ZoomAction::Reset),
+        _ => None,
+    }
 }
 
 fn shortcut(key: &Keystroke, is_mac: bool) -> Option<Shortcut> {
@@ -190,14 +220,15 @@ fn tab_insertion(
     point: Point<Pixels>,
     count: usize,
     offset_x: Pixels,
+    scale: f32,
     mut bounds_for: impl FnMut(usize) -> Option<Bounds<Pixels>>,
 ) -> Option<(usize, Pixels)> {
-    if !viewport.contains(&point) || viewport.size.width <= px(4.) || count == 0 {
+    if !viewport.contains(&point) || viewport.size.width <= px(4. * scale) || count == 0 {
         return None;
     }
     let marker = |x: Pixels| {
-        let left = viewport.left() + px(1.);
-        let right = viewport.right() - px(3.);
+        let left = viewport.left() + px(scale);
+        let right = viewport.right() - px(3. * scale);
         if x < left {
             left
         } else if x > right {
@@ -457,6 +488,8 @@ pub struct Workspace {
     appearance: NativeAppearance,
     appearance_error: Option<String>,
     appearance_generation: u64,
+    pending_zoom: HashSet<Uuid>,
+    zoom_feedback: Option<(String, Instant)>,
     profiles: Option<Arc<ShellProfilesSnapshot>>,
     profiles_error: Option<String>,
     profiles_generation: u64,
@@ -498,6 +531,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Self, Worker) {
+        window.set_rem_size(px(16.));
         let (commands, receiver) = mpsc::channel(64);
         let (sender, mut updates) = mpsc::channel(64);
         let initial_scheme = Self::window_scheme(window);
@@ -603,6 +637,8 @@ impl Workspace {
                 appearance: NativeAppearance::fallback(&ui_family),
                 appearance_error: None,
                 appearance_generation: 0,
+                pending_zoom: HashSet::new(),
+                zoom_feedback: None,
                 profiles: None,
                 profiles_error: None,
                 profiles_generation: 0,
@@ -691,6 +727,7 @@ impl Workspace {
             &self.ui_family,
             &self.mono_family,
         );
+        self.apply_zoom(next.zoom, window, cx);
         let theme = Theme::global_mut(cx);
         theme.tokens.typography.sans = next.font_family.clone().into();
         match snapshot.scheme() {
@@ -720,6 +757,79 @@ impl Workspace {
         self.appearance = next;
         self.appearance_generation = snapshot.generation();
         self.appearance_error = failure;
+        cx.notify();
+    }
+
+    fn apply_zoom(&mut self, zoom: Zoom, window: &mut Window, cx: &mut Context<Self>) {
+        if self.appearance.zoom == zoom {
+            return;
+        }
+        if cx.has_active_drag() {
+            cx.stop_active_drag(window);
+        }
+        self.drag = None;
+        self.drop_target = None;
+        self.split_bounds.clear();
+        self.slot_bounds.clear();
+        window.set_rem_size(px(16. * zoom.window_scale()));
+        for view in self.panes.values() {
+            view.terminal.update(cx, |terminal, cx| {
+                terminal.set_zoom(zoom.terminal_scale(), cx)
+            });
+        }
+        self.appearance.zoom = zoom;
+        cx.notify();
+    }
+
+    fn submit_zoom(&mut self, action: ZoomAction, cx: &mut Context<Self>) {
+        let Some(model) = self.model.as_ref() else {
+            self.status = "Zoom is unavailable while the workspace starts".into();
+            cx.notify();
+            return;
+        };
+        let request_id = Uuid::new_v4();
+        match self.commands.try_send(Command::Zoom {
+            connection: model.connection_id(),
+            request_id,
+            action,
+        }) {
+            Ok(()) => {
+                self.pending_zoom.insert(request_id);
+            }
+            Err(error) => {
+                self.status = format!("Zoom request not sent: {error}");
+                cx.notify();
+            }
+        }
+    }
+
+    fn apply_zoom_result(
+        &mut self,
+        result: ZoomResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.connection_id() == result.connection_id)
+            || !self.pending_zoom.remove(&result.request_id)
+        {
+            return;
+        }
+        match result.outcome {
+            ZoomOutcome::Confirmed(zoom) => {
+                self.apply_zoom(zoom, window, cx);
+                self.zoom_feedback = Some((
+                    format!("Zoom {} %", (zoom.level() * 100.).round() as u32),
+                    Instant::now() + Duration::from_millis(1200),
+                ));
+            }
+            ZoomOutcome::Rejected { reason } => self.status = format!("Zoom: {reason}"),
+            ZoomOutcome::Uncertain { reason } => {
+                self.status = format!("Zoom outcome uncertain: {reason}")
+            }
+        }
         cx.notify();
     }
     fn send(&mut self, command: Command, cx: &mut Context<Self>) {
@@ -953,11 +1063,13 @@ impl Workspace {
             route(command)
         };
         let colors = self.appearance.terminal;
+        let terminal_scale = self.appearance.zoom.terminal_scale();
         let selection_foreground = self.appearance.selection_foreground;
         let selection_background = self.appearance.selection_background;
         let terminal = cx.new(|cx| Terminal::new(commands, cx));
         if let Err(error) = terminal.update(cx, |terminal, cx| {
             terminal.set_search_active(false, cx);
+            terminal.set_zoom(terminal_scale, cx);
             terminal.apply_colors(colors, selection_foreground, selection_background, cx)
         }) {
             self.appearance_error = Some(error);
@@ -979,9 +1091,12 @@ impl Workspace {
             .as_ref()
             .is_some_and(|old| old.connection_id() != model.connection_id())
         {
+            self.apply_zoom(Zoom::from_values(1.0, "window"), window, cx);
             self.appearance_generation = 0;
             self.appearance_error = None;
             self.appearance = NativeAppearance::fallback(&self.ui_family);
+            self.pending_zoom.clear();
+            self.zoom_feedback = None;
             self.scheme_pending = true;
             self.profiles = None;
             self.profiles_error = None;
@@ -1296,13 +1411,6 @@ impl Workspace {
         );
     }
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.rename.is_some() {
-            if event.keystroke.key == "escape" {
-                cx.stop_propagation();
-                self.finish_rename(false, window, cx);
-            }
-            return;
-        }
         if self
             .pending_close
             .as_ref()
@@ -1310,6 +1418,18 @@ impl Workspace {
         {
             // A native confirmation owns keyboard input until it settles.
             cx.stop_propagation();
+            return;
+        }
+        if let Some(action) = zoom_shortcut(&event.keystroke, cx.platform_info().is_mac()) {
+            cx.stop_propagation();
+            self.submit_zoom(action, cx);
+            return;
+        }
+        if self.rename.is_some() {
+            if event.keystroke.key == "escape" {
+                cx.stop_propagation();
+                self.finish_rename(false, window, cx);
+            }
             return;
         }
         if self.profile_picker.is_some() {
@@ -1471,6 +1591,7 @@ impl Workspace {
             match update {
                 Update::Workspace(model) => self.reconcile(*model, window, cx),
                 Update::Appearance(snapshot) => self.apply_appearance(&snapshot, window, cx),
+                Update::Zoom(result) => self.apply_zoom_result(result, window, cx),
                 Update::ShellProfiles(snapshot) => self.apply_profiles(snapshot, cx),
                 Update::ShellProfilesError { connection, reason } => {
                     self.profile_error(&connection.to_string(), reason, cx);
@@ -1596,6 +1717,14 @@ impl Workspace {
         }
         if self.smoke {
             self.smoke_tick(window, cx);
+        }
+        if self
+            .zoom_feedback
+            .as_ref()
+            .is_some_and(|(_, until)| Instant::now() >= *until)
+        {
+            self.zoom_feedback = None;
+            cx.notify();
         }
         self.flush_visible(cx);
         self.flush_resizes(cx);
@@ -1981,7 +2110,10 @@ impl Workspace {
     }
 
     fn tab_header_height(&self) -> Pixels {
-        px((self.appearance.font_size + 19.).max(32.) + 1.)
+        tab_header_pixels(
+            self.appearance.font_size,
+            self.appearance.zoom.window_scale(),
+        )
     }
 
     fn drop_target_at(&self, drag: &PaneDrag, position: Point<Pixels>) -> Option<DropTarget> {
@@ -2001,6 +2133,7 @@ impl Workspace {
                     position,
                     pane_ids.len(),
                     scroll.handle.offset().x,
+                    self.appearance.zoom.window_scale(),
                     |index| scroll.handle.bounds_for_item(index),
                 )?;
                 let before = pane_ids.get(index).map(ToString::to_string);
@@ -2122,8 +2255,9 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_1()
-            .max_w(px(390.))
-            .min_w_0()
+            .flex_shrink_0()
+            .min_w(chrome_rems(200.))
+            .max_w(chrome_rems(390.))
             .overflow_x_scroll();
         if let Some(model) = &self.model {
             for (index, info) in model.screens().iter().enumerate() {
@@ -2139,7 +2273,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .flex_none()
-                    .h(px((self.appearance.font_size + 15.).max(28.)))
+                    .h(chrome_rems((self.appearance.font_size + 15.).max(28.)))
                     .bg(rgb(if selected {
                         self.appearance.active
                     } else {
@@ -2148,8 +2282,8 @@ impl Workspace {
                 if let Some(editor) = self.rename.as_ref().filter(|editor| editor.screen == id) {
                     chip = chip.child(
                         div()
-                            .w(px(145.))
-                            .h(px((self.appearance.font_size + 14.).max(27.)))
+                            .w(chrome_rems(145.))
+                            .h(chrome_rems((self.appearance.font_size + 14.).max(27.)))
                             .px_1()
                             .overflow_hidden()
                             .child(Input::new(&editor.input)),
@@ -2171,7 +2305,7 @@ impl Workspace {
                         .child(
                             div()
                                 .id(SharedString::from(format!("screen-select-{id}")))
-                                .max_w(px(120.))
+                                .max_w(chrome_rems(120.))
                                 .overflow_hidden()
                                 .px_2()
                                 .cursor_pointer()
@@ -2223,7 +2357,7 @@ impl Workspace {
                     .id("new-screen")
                     .flex_none()
                     .px_2()
-                    .h(px((self.appearance.font_size + 15.).max(28.)))
+                    .h(chrome_rems((self.appearance.font_size + 15.).max(28.)))
                     .flex()
                     .items_center()
                     .cursor_pointer()
@@ -2292,7 +2426,7 @@ impl Workspace {
                     .flex()
                     .flex_1()
                     .min_w_0()
-                    .h(px((self.appearance.font_size + 19.).max(32.)))
+                    .h(chrome_rems((self.appearance.font_size + 19.).max(32.)))
                     .gap_1()
                     .bg(rgb(self.appearance.raised))
                     .overflow_x_scroll()
@@ -2349,7 +2483,7 @@ impl Workspace {
                                 .child(
                                     div()
                                         .id(SharedString::from(format!("drag-tab-{pane}")))
-                                        .max_w(px(180.))
+                                        .max_w(chrome_rems(180.))
                                         .overflow_hidden()
                                         .child(title),
                                 )
@@ -2384,7 +2518,7 @@ impl Workspace {
                     .flex()
                     .items_center()
                     .flex_none()
-                    .h(px((self.appearance.font_size + 19.).max(32.)))
+                    .h(chrome_rems((self.appearance.font_size + 19.).max(32.)))
                     .bg(rgb(self.appearance.raised))
                     .child(tabs)
                     .child(
@@ -2505,7 +2639,7 @@ impl Workspace {
                                 .absolute()
                                 .left(*marker_x)
                                 .top_0()
-                                .w(px(3.))
+                                .w(chrome_rems(3.))
                                 .h(self.tab_header_height())
                                 .bg(rgb(self.appearance.accent)),
                         );
@@ -2568,10 +2702,14 @@ impl Workspace {
                                 .flex_none()
                                 .bg(rgb(self.appearance.border))
                                 .when(horizontal, |view| {
-                                    view.w(px(5.)).h_full().cursor(CursorStyle::ResizeColumn)
+                                    view.w(chrome_rems(5.))
+                                        .h_full()
+                                        .cursor(CursorStyle::ResizeColumn)
                                 })
                                 .when(!horizontal, |view| {
-                                    view.h(px(5.)).w_full().cursor(CursorStyle::ResizeRow)
+                                    view.h(chrome_rems(5.))
+                                        .w_full()
+                                        .cursor(CursorStyle::ResizeRow)
                                 })
                                 .on_mouse_down(
                                     MouseButton::Left,
@@ -2596,7 +2734,7 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let modifier = if cx.platform_info().is_mac() {
             "Cmd"
         } else {
@@ -2616,14 +2754,29 @@ impl Render for Workspace {
             .profiles_error
             .as_ref()
             .map(|error| format!("Profiles: {error}"));
-        let footer_height = match usize::from(appearance_message.is_some())
-            + usize::from(profile_message.is_some())
-        {
-            0 => (self.appearance.font_size + 14.).max(25.),
-            1 => (self.appearance.font_size * 2. + 16.).max(42.),
-            _ => (self.appearance.font_size * 3. + 18.).max(56.),
+        let zoom_message = self
+            .zoom_feedback
+            .as_ref()
+            .map(|(message, _)| message.clone());
+        let extra_lines =
+            usize::from(appearance_message.is_some()) + usize::from(profile_message.is_some());
+        let primary_status = if self.status.is_empty() {
+            format!(
+                "{} terminals · {modifier}+T tab · {modifier}+D split · {modifier}+Shift+arrows focus · Ctrl+Shift+C/V copy/paste",
+                self.panes.len(),
+            )
+        } else {
+            self.status.clone()
         };
-        let picker_overlay = self.profile_picker_overlay(cx);
+        let primary_status = if let Some(message) = zoom_message {
+            format!("{message} · {primary_status}")
+        } else {
+            primary_status
+        };
+        let footer_height =
+            (self.appearance.font_size * (extra_lines + 1) as f32 + 14. + 2. * extra_lines as f32)
+                .max(25. + 16. * extra_lines as f32);
+        let picker_overlay = self.profile_picker_overlay(window, cx);
         let mut view = div()
             .relative()
             .size_full()
@@ -2634,7 +2787,7 @@ impl Render for Workspace {
             .on_drag_move(cx.listener(Self::drag_hover))
             .text_color(rgb(self.appearance.text))
             .font(font(self.appearance.font_family.clone()))
-            .text_size(px(self.appearance.font_size))
+            .text_size(chrome_rems(self.appearance.font_size))
             .capture_key_down(cx.listener(Self::key))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 if this.drag.is_some() && event.dragging() {
@@ -2663,19 +2816,28 @@ impl Render for Workspace {
             )
             .child(
                 div()
+                    .id("workspace-toolbar")
                     .flex()
                     .items_center()
                     .gap_3()
-                    .h(px((self.appearance.font_size + 29.).max(42.)))
+                    .h(chrome_rems((self.appearance.font_size + 29.).max(42.)))
                     .px_3()
                     .flex_none()
+                    .min_w_0()
+                    .overflow_x_scroll()
                     .bg(rgb(self.appearance.raised))
-                    .child(div().font_weight(FontWeight::BOLD).child("SPLITTY"))
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_weight(FontWeight::BOLD)
+                            .child("SPLITTY"),
+                    )
                     .child(self.render_screen_controls(cx))
                     .child(div().flex_1())
                     .child(
                         div()
                             .id("maximize-group")
+                            .flex_none()
                             .px_3()
                             .py_1()
                             .cursor_pointer()
@@ -2697,6 +2859,7 @@ impl Render for Workspace {
                     .child(
                         div()
                             .id("split-horizontal")
+                            .flex_none()
                             .px_3()
                             .py_1()
                             .cursor_pointer()
@@ -2709,6 +2872,7 @@ impl Render for Workspace {
                     .child(
                         div()
                             .id("split-vertical")
+                            .flex_none()
                             .px_3()
                             .py_1()
                             .cursor_pointer()
@@ -2719,6 +2883,7 @@ impl Render for Workspace {
                     .child(
                         div()
                             .id("new-tab")
+                            .flex_none()
                             .px_3()
                             .py_1()
                             .cursor_pointer()
@@ -2772,27 +2937,43 @@ impl Render for Workspace {
         }
         view.child(
             div()
-                .h(px(footer_height))
+                .h(chrome_rems(footer_height))
                 .px_3()
                 .flex_none()
                 .flex()
                 .flex_col()
                 .justify_center()
-                .text_size(px((self.appearance.font_size - 2.).max(11.)))
+                .text_size(chrome_rems((self.appearance.font_size - 2.).max(11.)))
                 .text_color(rgb(self.appearance.muted))
-                .child(if self.status.is_empty() {
-                    format!(
-                        "{} terminals · {modifier}+T tab · {modifier}+D split · {modifier}+Shift+arrows focus · Ctrl+Shift+C/V copy/paste",
-                        self.panes.len(),
-                    )
-                } else {
-                    self.status.clone()
-                })
+                .child(
+                    div()
+                        .min_w_0()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .child(primary_status),
+                )
                 .when_some(appearance_message, |view, message| {
-                    view.child(div().text_color(rgb(self.appearance.secondary)).child(message))
+                    view.child(
+                        div()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(rgb(self.appearance.secondary))
+                            .child(message),
+                    )
                 })
                 .when_some(profile_message, |view, message| {
-                    view.child(div().text_color(rgb(self.appearance.secondary)).child(message))
+                    view.child(
+                        div()
+                            .min_w_0()
+                            .whitespace_nowrap()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .text_color(rgb(self.appearance.secondary))
+                            .child(message),
+                    )
                 }),
         )
         .when_some(picker_overlay, |view, picker| view.child(picker))
@@ -2934,13 +3115,14 @@ fn resized_pair(sizes: &[f64], index: usize, delta: f64) -> Option<Vec<f64>> {
 mod tests {
     use super::{
         admit_close, nearest_slot, prune_layout_bounds, resized_pair, retry_pending_resize,
-        shortcut, shortcut_with_layout, terminal_commands, visible_slots, Command, Direction,
-        PendingClose, Shortcut, Update, VisibleSlot,
+        shortcut, shortcut_with_layout, tab_header_pixels, terminal_commands, visible_slots,
+        zoom_shortcut, Command, Direction, PendingClose, Shortcut, Update, VisibleSlot,
     };
     use crate::terminal;
     use gpui_kit::{point, px, size, Bounds, Keystroke, Modifiers, Pixels};
     use splitty_client_core::{
         workspace::{ClosePlan, CloseTarget, LayoutNode, LocalWorkspace, ScreenModel},
+        zoom::ZoomAction,
         ScreenIds,
     };
     use std::{
@@ -2954,6 +3136,90 @@ mod tests {
             modifiers,
             key_char: None,
         }
+    }
+
+    #[test]
+    fn zoom_shortcuts_use_logical_keys_and_do_not_claim_other_modifiers() {
+        for (mac, base) in [
+            (
+                false,
+                Modifiers {
+                    control: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                true,
+                Modifiers {
+                    platform: true,
+                    ..Default::default()
+                },
+            ),
+        ] {
+            for (name, action) in [
+                ("+", ZoomAction::In),
+                ("=", ZoomAction::In),
+                ("-", ZoomAction::Out),
+                ("0", ZoomAction::Reset),
+            ] {
+                assert_eq!(zoom_shortcut(&key(name, base), mac), Some(action));
+            }
+            assert_eq!(
+                zoom_shortcut(
+                    &key(
+                        "+",
+                        Modifiers {
+                            shift: true,
+                            ..base
+                        }
+                    ),
+                    mac
+                ),
+                Some(ZoomAction::In)
+            );
+            for modifiers in [
+                Modifiers { alt: true, ..base },
+                Modifiers {
+                    function: true,
+                    ..base
+                },
+                Modifiers {
+                    control: true,
+                    platform: true,
+                    ..base
+                },
+            ] {
+                assert_eq!(zoom_shortcut(&key("=", modifiers), mac), None);
+            }
+            assert_eq!(zoom_shortcut(&key("f", base), mac), None);
+        }
+    }
+
+    #[test]
+    fn scaled_tab_header_and_insertion_marker_match_visible_geometry() {
+        assert_eq!(tab_header_pixels(13., 0.5), px(17.));
+        assert_eq!(tab_header_pixels(13., 1.25), px(41.));
+        assert_eq!(tab_header_pixels(13., 3.), px(97.));
+        let viewport = Bounds::new(point(px(0.), px(0.)), size(px(540.), px(97.)));
+        let tab = |index| {
+            Some(Bounds::new(
+                point(px(index as f32 * 180.), px(0.)),
+                size(px(180.), px(97.)),
+            ))
+        };
+        assert_eq!(
+            super::tab_insertion(viewport, point(px(530.), px(48.)), 3, px(0.), 3., tab),
+            Some((3, px(531.)))
+        );
+        let slot = Bounds::new(point(px(0.), px(0.)), size(px(540.), px(400.)));
+        assert_eq!(
+            super::body_drop_zone(slot, tab_header_pixels(13., 3.), point(px(200.), px(96.))),
+            None
+        );
+        assert!(
+            super::body_drop_zone(slot, tab_header_pixels(13., 3.), point(px(200.), px(150.)))
+                .is_some()
+        );
     }
 
     #[test]
@@ -3390,12 +3656,12 @@ mod tests {
             [(10., 0, 1.), (40., 1, 60.), (90., 2, 120.), (170., 3, 177.)]
         {
             assert_eq!(
-                super::tab_insertion(viewport, point(px(x), px(16.)), 3, px(0.), tab),
+                super::tab_insertion(viewport, point(px(x), px(16.)), 3, px(0.), 1., tab),
                 Some((expected_index, px(expected_marker))),
             );
         }
         assert_eq!(
-            super::tab_insertion(viewport, point(px(190.), px(16.)), 3, px(0.), tab),
+            super::tab_insertion(viewport, point(px(190.), px(16.)), 3, px(0.), 1., tab),
             None
         );
         let clipped = Bounds::new(point(px(100.), px(0.)), size(px(120.), px(32.)));
@@ -3406,11 +3672,11 @@ mod tests {
             ))
         };
         assert_eq!(
-            super::tab_insertion(clipped, point(px(105.), px(16.)), 3, px(-20.), shifted),
+            super::tab_insertion(clipped, point(px(105.), px(16.)), 3, px(-20.), 1., shifted),
             Some((1, px(120.))),
         );
         assert_eq!(
-            super::tab_insertion(clipped, point(px(99.), px(16.)), 3, px(-20.), shifted),
+            super::tab_insertion(clipped, point(px(99.), px(16.)), 3, px(-20.), 1., shifted),
             None
         );
         let slot = Bounds::new(point(px(0.), px(0.)), size(px(200.), px(120.)));
