@@ -24,7 +24,7 @@
     "smoke:browser-assignment": "electron scripts/smoke-browser-assignment.cjs"
   },
   "devDependencies": {
-    "electron": "^44.10.0",
+    "electron": "^45.2.2",
     "electron-builder": "^26.18.0",
     "typescript": "^5.9.0"
   },
