@@ -1990,3 +1990,33 @@ All 39 checksum-listed package files were independently verified. Drawer quick
 ports and notification controls retain their separate Linux input acceptance;
 individual Windows interactions for those additions remain unverified. Remote
 Screen creation is not part of this frozen preview.
+
+### Native remote Screen creation candidate (2026-11-08)
+
+An opened, ready host group now offers a quiet New Screen action alongside
+Ports. Shared client-core admission captures the exact host and connection,
+reserves Screen/pane capacity, sends the existing unnamed creation once and
+adopts its host-assigned name and sessions only through coherent canonical
+observation. An unconfirmed reference remains explicit after connection loss;
+recovery observes its identity without replaying creation or inventing success.
+Detaching withdraws the reference without terminating host work.
+
+Follow is separately revocable through final selection publication. Newer
+Screen/destination navigation, accepted exact detach or window close, and a
+new local Screen/template creation prevent late focus or selection changes.
+Per-host enqueue latches are independent of the latest visible outcome, so an
+older host's rejection cannot strand its action or cancel newer host intent.
+
+Frozen source `34bedd5250281e75531c744dd4ec58d313d4b472` passes 267 client-core
+tests, 187 GPUI tests, strict all-target Clippy for both crates, 17 architecture
+tests, formatting and strict validation of the affected changes. This includes
+existing local creation/template and assessed remote close regressions. The
+1229-file source/asset manifest is SHA-256
+`92c9ea8fa9a6620e3ab779116ecf7547879f672bb00efbe6ed1dc2095603bcc8`;
+the Linux GUI executable is
+`c7c2610712b1335d2b853311c3f7eddcddacc3b204a8a7e5e12c492e3378fb7e`.
+The previously frozen Linux fixture backend is reused after verifying unchanged
+server/core/remote/transport/shell-integration sources and lockfile; its hash is
+`5880d40578ee539f5d0e635a7d7fb2e1a9c7b7aa7f7dd5797cc9ea94e79ca3ba`.
+Actual-window acceptance is pending. No new Windows package or smoothness claim
+is implied by these checks; full workspace CI remains deferred.
