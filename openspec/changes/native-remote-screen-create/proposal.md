@@ -11,6 +11,7 @@ The native workspace can open and operate existing remote Screens but cannot cre
 - Keep the newly requested reference separate from canonical Screen data. Confirm its effective state through the existing ordered catalog/snapshot collector, with bounded uncertainty and no mutation replay after disconnect.
 - Follow a confirmed Screen only while the original navigation intent remains current. Detach and normal window close preserve host sessions, including a Screen whose creation outcome was not observed.
 - Use the host's existing atomic default-name assignment and adopt its canonical name; no client-side copy of the naming policy.
+- Preserve progress of terminal input and workspace observations during sustained native events by bounding Linux platform event dispatch; keep existing application queue limits and source ordering.
 
 This advances [Milestone 120](../../../roadmap/README.md), building on `native-remote-screens` and `native-drawer-host-ports`. Their unfinished acceptance obligations remain independent.
 
@@ -28,4 +29,4 @@ None.
 
 ## Impact
 
-The implementation extends `splitty-client-core` connection serialization, the existing source/window collection and native worker. GPUI submits a captured typed intent and projects the shared pending/outcome state. The server remains authoritative for layout, session lifecycle, launch defaults and names; no new service, protocol or dependency is required. Correct the touched `CreateScreenOp` documentation in `docs/protocol.ts` to its existing Rust shape. Update the client-core/GPUI architecture descriptions and the native Remote Screens lifecycle documentation.
+The implementation extends `splitty-client-core` connection serialization, the existing source/window collection and native worker. GPUI submits a captured typed intent and projects the shared pending/outcome state. The server remains authoritative for layout, session lifecycle, launch defaults and names; no new service or protocol is required. A narrowly patched, pinned Linux platform dependency makes native event dispatch finite; retain its Apache-2.0 license and source provenance without adding application queueing policy. Correct the touched `CreateScreenOp` documentation in `docs/protocol.ts` to its existing Rust shape. Update the client-core/GPUI architecture descriptions and the native Remote Screens lifecycle documentation.

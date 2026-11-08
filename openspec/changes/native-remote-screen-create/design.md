@@ -103,9 +103,17 @@ Expose a quiet, keyboard-reachable Kit Button/Action for New Screen on the exist
 
 On successful UI enqueue, entering the Screens destination is part of this deliberate creation action; a failed enqueue preserves the previous destination. Later destination changes cancel follow. Do not navigate again when an asynchronous admission/outcome publication arrives. Use the existing pending Screen/reference presentation, host feedback and focus path. Unknown name is a temporary state label, not a guessed Screen N. Explain offline/reconciling/capacity/uncertain states with actionable bounded feedback; no extra confirmation is required for a normal additive Screen creation. Preserve Kit focus, disabled behavior, Drawer autohide and compact rem-based geometry. No new painter, modal flow or permanent status bar is needed.
 
+### 8. Finite Linux platform event dispatch
+
+Actual-window confirmation exposed sustained native-event starvation in the pinned Linux platform: the GUI kept accepting keyboard callbacks while its foreground workspace poll did not run for 1.995 seconds. The worker then waited 1.073 seconds on its full bounded update channel and the command channel rejected a suffix of the input. Once polling resumed, 64 updates took 755 microseconds. The trace contained neither a slow collector/reconciliation nor a poll-task exit. Creation/transport logic is not an appropriate owner for this scheduler problem.
+
+Keep the current bounded command/update channels, input admission and exact-source ordering. Patch only the published `gpui-pre-linux` 0.3.11 dependency with finite native event batches and at most one explicitly scheduled continuation for buffered XCB events. Both the native source callback and the platform's after-runnable path must use that same bound. Preserve native event order, XIM handling, release/press key-repeat adjacency across batch boundaries, Expose processing and eventual delivery when XCB has buffered events but its fd no longer signals readiness. Do not replace the issue with larger queues, input replay, slower test typing or an application callback that reenters workspace polling.
+
+Use an explicit Cargo path patch with vendored published source, version/checksum provenance, license and a small documented patch; never modify an external Cargo registry cache as a hidden build prerequisite. Treat this as an external dependency rather than a new Splitty domain crate. Remove the patch only after an equivalent upstream version passes the same regressions. Pure batch/continuation tests establish event preservation and finite scheduling; the existing real-window fixture establishes actual keyboard/worker progress. Temporary payload-free timing instrumentation is private diagnostic evidence, not a new production API.
+
 ## Architecture impact
 
-Update descriptions/relationships of `splitty.client_core.connection`, `client_workspace` and `native_workspace` in `architecture/client-core.c4`, and the existing GPUI workspace component/relationship in `architecture/gpui.c4`. The connection remains a bounded serializer; client_workspace owns reservation, captured admission and canonical reconciliation; native_workspace owns service polling and effect delivery; GPUI owns only interaction and projection. Existing dependency directions suffice; no new crate or top-level module is planned.
+Update descriptions/relationships of `splitty.client_core.connection`, `client_workspace` and `native_workspace` in `architecture/client-core.c4`, and the existing GPUI main/workspace components and relationships in `architecture/gpui.c4`. The connection remains a bounded serializer; client_workspace owns reservation, captured admission and canonical reconciliation; native_workspace owns service polling and effect delivery; GPUI owns only interaction and projection. Existing dependency directions suffice; no new Splitty crate or top-level module is planned. Document the pinned external Linux platform patch and its finite dispatch responsibility in the GPUI composition-root description, `docs/architecture.md` and build documentation; exclude vendored third-party source from workspace membership rather than assigning it application ownership.
 
 Update `docs/architecture.md` in the native client/Remote Screens ownership account to describe pending references, observation across reconnect, capacity release and follow cancellation. Correct only the touched CreateScreenOp declaration/documentation in `docs/protocol.ts`. No transport/server policy changes are planned. Extend existing fixtures, not a public fake-peer API or new process harness.
 
@@ -119,6 +127,7 @@ The active `native-remote-screens` plan still contains explicit exclusions for n
 - **Follow arrives after user navigation:** carry request-qualified cancellation through the Core and test selected identity plus actual terminal focus.
 - **Another client edits/removes the Screen immediately:** use its canonical current state; never recreate or infer that the original first pane still exists.
 - **Compact host header becomes crowded:** reuse existing Kit control sizing, preserve truncation and focus-ring space, and verify actual bounds/input in the existing production-view fixture and Linux window.
+- **Sustained native events starve foreground work:** finite platform batches must reschedule buffered events without losing input or repeat/IME state; prove continuation ownership and actual two-source input progress under the existing queue limits.
 
 ## Provisional decisions
 
@@ -126,6 +135,7 @@ The active `native-remote-screens` plan still contains explicit exclusions for n
 - **RSC-2 (2026-11-08, provisional, tbd):** an unresolved submitted reference and its unused pane reservation survive ordinary connection replacement; current conclusive absence can release local reservation without claiming historical nonexecution. Explicit detach releases only local interest.
 - **RSC-3 (2026-11-08, provisional, tbd):** delegate native default remote names to the existing server operation, omitting name and adopting the canonical result; other clients retain their current policy.
 - **RSC-4 (2026-11-08, provisional, tbd):** confirmation follows once unless later navigation, destination departure or disconnect revokes it; later recovery never restores old focus intent.
+- **RSC-5 (2026-11-08, provisional, tbd):** restore foreground fairness at the pinned external Linux event-loop boundary with explicit vendored source/provenance and bounded continuations; retain application queue limits and ordering rather than adding replay or a second ingress queue.
 
 ## Migration Plan
 

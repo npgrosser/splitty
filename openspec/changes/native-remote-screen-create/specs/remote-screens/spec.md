@@ -72,6 +72,11 @@ A submitted native creation SHALL remain an explicit unresolved reference until 
 - **THEN** its bounded unresolved reservation remains accounted for across connection replacement
 - **AND** successful canonical adoption converts rather than duplicates that reservation; conclusive current absence or explicit reference removal releases its unused local reservation without claiming that remote work was stopped
 
+#### Scenario: Terminal input progresses during confirmation
+- **WHEN** sustained native keyboard events target another current terminal while a host's creation is pending or being confirmed
+- **THEN** terminal input and workspace observations continue to make progress within the existing bounded admission, and admitted input retains its order and exact source
+- **AND** creation does not require slower typing, unbounded queues, input replay or retargeting to the new Screen
+
 ### Requirement: Native Remote Creation Selection And Detach
 Native creation SHALL follow its confirmed reference only while the original selection intent remains current. Later navigation, disconnection, detachment or owner shutdown SHALL revoke that follow. Detach SHALL remove only the reference and its client-owned claims; late observations SHALL NOT reopen it. Normal window shutdown SHALL preserve remote sessions even when creation completion was not observed.
 
