@@ -11,12 +11,11 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable, Sizable,
 };
 use gpui_kit::{prelude::*, *};
-use splitty_client_core::appearance::{
-    AppearanceSnapshot, SettingsEdit, SettingsField, SettingsValue,
-};
+use splitty_client_core::appearance::AppearanceSnapshot;
 use splitty_client_core::local_service::{
     SettingsReconciled, SettingsWriteOutcome, SettingsWriteResult,
 };
+use splitty_client_core::settings::{SettingsEdit, SettingsField, SettingsValue};
 use uuid::Uuid;
 
 const APPEARANCE: &[SettingsField] = &[
@@ -841,10 +840,11 @@ mod tests {
     use super::{SettingsView, WriteState};
     use gpui_kit::{Entity, TestAppContext};
     use splitty_client_core::appearance::test_support::{settings_snapshot, Availability};
-    use splitty_client_core::appearance::{AppearanceSnapshot, SettingsField, SettingsValue};
+    use splitty_client_core::appearance::AppearanceSnapshot;
     use splitty_client_core::local_service::{
         SettingsReconciled, SettingsWriteOutcome, SettingsWriteResult,
     };
+    use splitty_client_core::settings::{SettingsField, SettingsValue};
     use std::sync::Arc;
     use uuid::Uuid;
 

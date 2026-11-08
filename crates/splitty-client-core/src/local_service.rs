@@ -1,9 +1,8 @@
 //! One owned API stream for local settings reads and bounded mutations, separate from PTY events.
 use crate::api_stream::ApiStream as Client;
 use crate::{
-    appearance::{
-        AppearanceSnapshot, ColorScheme, DrawerVisibilityResult, SettingsEdit, SettingsField,
-    },
+    appearance::{AppearanceSnapshot, ColorScheme, DrawerVisibilityResult},
+    settings::{SettingsEdit, SettingsField},
     shell_profiles::ShellProfilesSnapshot,
     zoom::{ZoomAction, ZoomResult},
 };

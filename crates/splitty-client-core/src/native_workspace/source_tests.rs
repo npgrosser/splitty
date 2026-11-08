@@ -96,9 +96,9 @@ async fn foreign_source_envelopes_cannot_create_split_select_input_or_enqueue_se
         CommandKind::UpdateSettings {
             connection: owner.connection_id(),
             request_id: settings_request,
-            edit: crate::appearance::SettingsEdit::new(
-                crate::appearance::SettingsField::FontSize,
-                crate::appearance::SettingsValue::Number(20.0),
+            edit: crate::settings::SettingsEdit::new(
+                crate::settings::SettingsField::FontSize,
+                crate::settings::SettingsValue::Number(20.0),
             )
             .unwrap(),
         },

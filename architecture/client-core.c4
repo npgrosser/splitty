@@ -58,8 +58,13 @@ model {
     }
 
     appearance = component 'appearance' {
-      description 'Charged local effective settings, bounded metadata and catalog choices, independent terminal palette source identity, and typed single-field editor intents; UI appearance remains separate from terminal color selection.'
+      description 'Charged local appearance and Drawer projection, theme resolution and catalog choices, and independent terminal palette source identity; UI appearance remains separate from terminal color selection.'
       metadata { module 'splitty_client_core::appearance' }
+    }
+
+    client_settings = component 'client_settings' {
+      description 'UI-free bounded settings field, value, single-field edit and service metadata contracts shared by local mutations and presentation.'
+      metadata { module 'splitty_client_core::settings' }
     }
 
     local_service = component 'local_service' {
@@ -172,6 +177,7 @@ model {
     local_service -> client_zoom 'Resolve queued zoom intents against current settings'
     native_workspace -> client_zoom 'Carry identified zoom intents and independent outcomes'
     local_service -> appearance 'Read appearance independently and reuse in-memory fixtures'
+    local_service -> client_settings 'Queue and validate shared single-field settings edits'
     hub -> api_stream 'Serialize retained directory reads and bounded metadata jobs on one owned stream'
     hub -> client_workspace 'Capture immutable local execution tokens in host metadata requests and outcomes'
     hub -> splitty.core.native_api 'Use the shared directory and existing host metadata operations'
@@ -197,6 +203,7 @@ model {
     client_shell_profiles -> splitty.core.shell_profiles 'Present the existing service profile contract'
     client_shell_profiles -> splitty.transport.budget 'Keep profile data charged through presentation'
     appearance -> local_service 'Reuse bounded typed response decoding'
+    appearance -> client_settings 'Project charged local settings through shared field and metadata contracts'
     appearance -> splitty.core.config 'Project existing appearance and Drawer preferences without write-on-load'
     appearance -> splitty.core.theme 'Decode the service-resolved theme'
     appearance -> splitty.server.native 'Own one API-only stream and await its cleanup'
@@ -239,6 +246,7 @@ model {
     client_workspace -> owned_service 'Own and close the isolated service fixture used by the metadata removal regression'
     client_workspace -> client_shell_profiles 'Bound explicit launch profile identifiers'
     native_workspace -> local_service 'Poll fair owner-bound settings without consuming terminal events'
+    native_workspace -> client_settings 'Carry typed settings edits across the worker command boundary'
     native_workspace -> client_shell_profiles 'Publish charged choices and bound admitted launch fallback notices'
     native_workspace -> appearance 'Poll owner-bound appearance without consuming session events'
     native_workspace -> embedded 'Own appearance fixture service cleanup in runtime tests'

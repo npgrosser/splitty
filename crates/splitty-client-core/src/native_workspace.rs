@@ -186,7 +186,7 @@ pub enum CommandKind {
     UpdateSettings {
         connection: uuid::Uuid,
         request_id: uuid::Uuid,
-        edit: crate::appearance::SettingsEdit,
+        edit: crate::settings::SettingsEdit,
     },
     SetDrawerVisibility {
         connection: uuid::Uuid,
@@ -623,7 +623,7 @@ impl<'a> RuntimeLocalService<'a> {
         &mut self,
         connection: uuid::Uuid,
         request_id: uuid::Uuid,
-        edit: crate::appearance::SettingsEdit,
+        edit: crate::settings::SettingsEdit,
     ) -> std::io::Result<()> {
         if connection != self.connection {
             return Err(std::io::Error::other("Local settings source changed"));

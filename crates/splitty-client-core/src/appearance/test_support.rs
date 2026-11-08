@@ -1,6 +1,7 @@
 //! Opt-in charged snapshots for UI integration tests only.
 
 use super::*;
+use crate::settings::SettingsMetadata;
 use splitty_core::{config::settings_metadata, theme::resolve_theme};
 use splitty_transport::budget::ConnectionBudget;
 

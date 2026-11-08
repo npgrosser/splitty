@@ -396,6 +396,10 @@ Dropping the task drops its sole receiver and releases queued delivery leases.
 The same native runtime owns one auxiliary API-only local-service stream. After
 publishing the session owner, it polls stream setup and separately charged
 appearance/theme, shell-profile and notification-settings reads alongside terminal events and commands.
+The UI-free client settings module owns bounded field, value, edit and service
+metadata contracts shared by that mutation path and the native editor. Appearance
+keeps the charged theme and terminal-palette projection and its terminal
+presentation preferences; it does not own the shared edit vocabulary.
 Each feature has its own generation, dirty flag and result. Same-service settings
 events refresh all three; owner-checked OS preference changes refresh appearance only.
 Round-robin dirty reads prevent one feature from starving the others, and

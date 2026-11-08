@@ -112,7 +112,7 @@ async fn scripted_tail(
                 assert_eq!(fields.len(), 1);
                 let (field, _) = fields.iter().next().unwrap();
                 let path = format!("{group}.{field}");
-                assert!(crate::appearance::SettingsField::ALL
+                assert!(crate::settings::SettingsField::ALL
                     .iter()
                     .any(|field| field.path() == path));
             }

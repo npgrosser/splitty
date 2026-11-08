@@ -1,9 +1,7 @@
-use super::{
-    theme_name, AppearanceSnapshot, ColorScheme, HomePresentation, SettingsMetadata,
-    TerminalPreferences,
-};
+use super::{theme_name, AppearanceSnapshot, ColorScheme, HomePresentation, TerminalPreferences};
 use crate::api_stream::ApiStream as Client;
 use crate::local_service::decode;
+use crate::settings::SettingsMetadata;
 use serde::Deserialize;
 use splitty_core::native_api::Operation;
 use splitty_core::{

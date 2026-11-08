@@ -216,13 +216,13 @@ async fn real_service() {
     for (request_id, field, value) in [
         (
             settings_requests[0],
-            crate::appearance::SettingsField::FontSize,
-            crate::appearance::SettingsValue::Number(20.0),
+            crate::settings::SettingsField::FontSize,
+            crate::settings::SettingsValue::Number(20.0),
         ),
         (
             settings_requests[1],
-            crate::appearance::SettingsField::TerminalTheme,
-            crate::appearance::SettingsValue::Text("splitty-light".into()),
+            crate::settings::SettingsField::TerminalTheme,
+            crate::settings::SettingsValue::Text("splitty-light".into()),
         ),
     ] {
         commands
@@ -231,7 +231,7 @@ async fn real_service() {
                 CommandKind::UpdateSettings {
                     connection: owner,
                     request_id,
-                    edit: crate::appearance::SettingsEdit::new(field, value).unwrap(),
+                    edit: crate::settings::SettingsEdit::new(field, value).unwrap(),
                 },
             ))
             .await

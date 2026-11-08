@@ -1,7 +1,8 @@
 use super::decode;
 use crate::{
     api_stream::ApiStream,
-    appearance::{local::HomeAppearance, SettingsEdit, SettingsField},
+    appearance::local::HomeAppearance,
+    settings::{SettingsEdit, SettingsField},
 };
 use splitty_core::native_api::Operation;
 use splitty_transport::wire;

@@ -1,5 +1,5 @@
 use super::*;
-use crate::appearance::{SettingsEdit, SettingsField as F, SettingsValue as V};
+use crate::settings::{SettingsEdit, SettingsField as F, SettingsValue as V};
 
 fn exchange(operation: &'static str, body: String) -> Exchange {
     Exchange {

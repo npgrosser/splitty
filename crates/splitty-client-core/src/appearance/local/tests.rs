@@ -356,7 +356,7 @@ async fn read_error_is_reported_once_and_explicit_refresh_recovers() {
 
 #[tokio::test]
 async fn editor_reads_service_defaults_limits_and_catalog_without_writes() {
-    use crate::appearance::{SettingsField as F, SettingsValue as V};
+    use crate::settings::{SettingsField as F, SettingsValue as V};
     let (service, path) = fixture();
     let api = Connector::default()
         .embedded(service.state.clone(), Role::Main)

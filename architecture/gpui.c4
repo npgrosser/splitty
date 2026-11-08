@@ -73,6 +73,7 @@ model {
     gpui_host_update -> splitty.client_core.native_workspace 'Send owner-bound request, confirm or dismiss intents; consume prepared or rejected replies'
     gpui_workspace -> splitty.client_core.client_notifications 'Supply window observation, admit source facts and render bounded unread projections'
     gpui_workspace -> splitty.client_core.appearance 'Match owner and generation before applying resolved appearance'
+    gpui_workspace -> splitty.client_core.client_settings 'Build bounded typed settings edits and render service metadata choices'
     gpui_workspace -> splitty.client_core.local_service 'Present settings editor outcomes and owner/generation-bound notification switch reads'
     gpui_workspace -> splitty.client_core.client_shell_profiles 'Retain owner-bound service choices for the new-tab picker'
     gpui_workspace -> splitty.client_core.hub 'Present fixed-local host observations and retained Connect/name forms, submit validated metadata intents and match identified outcomes'

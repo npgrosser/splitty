@@ -131,21 +131,6 @@ impl SettingsEdit {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct TerminalPreferences {
-    theme: String,
-    close_on_exit: String,
-}
-impl TerminalPreferences {
-    pub fn theme(&self) -> &str {
-        &self.theme
-    }
-    pub fn close_on_exit(&self) -> &str {
-        &self.close_on_exit
-    }
-}
-
-#[derive(Debug, Deserialize)]
 pub struct SettingsMetadata {
     defaults: serde_json::Value,
     limits: BTreeMap<String, SettingsLimits>,

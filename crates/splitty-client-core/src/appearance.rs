@@ -11,11 +11,10 @@ use splitty_transport::budget::Charged;
 use std::sync::Arc;
 use uuid::Uuid;
 
-mod settings;
-pub use settings::{
-    SettingsEdit, SettingsField, SettingsLimits, SettingsMetadata, SettingsValue,
-    TerminalPreferences,
-};
+use crate::settings::{SettingsEdit, SettingsField, SettingsMetadata, SettingsValue};
+
+mod terminal_preferences;
+pub use terminal_preferences::TerminalPreferences;
 
 pub(crate) mod local;
 #[cfg(feature = "ui-test-support")]
