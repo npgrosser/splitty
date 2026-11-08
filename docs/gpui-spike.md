@@ -1753,3 +1753,32 @@ including intermediate spacing between two groups and no commands from motion.
 Pane spacing, running title-icon emphasis and full-title tooltips also follow
 the web presentation. These later Drawer changes are not in the frozen
 Interaction preview.
+
+### Native terminal context actions (2026-11-08)
+
+The terminal body now opens a captured Kit context menu with Copy, Paste, Find,
+Split Right/Below, Show Drawer and assessed Close Pane actions. Application mouse
+reporting keeps priority; Shift chooses the local menu for that gesture. Local
+Copy and Find remain available on retained offline terminals, while writes need
+separately captured live authority. Both keyboard and menu actions reuse the
+same terminal implementations.
+
+Focus carries an exact terminal token into the shared worker and updates only
+window presentation state, including offline retained views. Queue rejection
+does not advance optimistic focus. Search ownership follows retained displayed
+identity independently from live activity reporting. Delayed callbacks validate
+source, Screen, session, entity and terminal generation before acting.
+
+Five production-view menu tests cover pointer and keyboard activation, an
+initially unfocused split, exact bracketed paste bytes, Copy/Find offline, busy
+close assessment, gesture ownership, failed admission and 15 obsolete-action
+cases. Shared model/worker tests cover retained focus and source rejection.
+After integration with Drawer motion, all 156 GPUI tests and all 17 architecture
+checks pass. Strict GPUI/client-core Clippy and strict change validation pass.
+Real-window context-menu acceptance remains separate; these actions are not in
+the frozen Interaction preview.
+
+The additional Windows Drawer wheel probe remained inconclusive because the
+synthetic input setup could not establish its starting visible selection. The
+server's active Screen field does not represent each native window's selection.
+All owned probe processes were cleaned up; the delivered preview was unchanged.
