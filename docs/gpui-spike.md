@@ -1532,6 +1532,29 @@ short enough for the private Unix control socket.
 
 ### Windows endpoint follow-up
 
+The matching Windows GUI has SHA-256
+`4b4cdc4e55f1baae2d83eb5f3fd60db47df4e5e2015eefba55454ed545780c51`.
+The final preview uses a static Linux x86_64 WSL backend with SHA-256
+`e09ff8f2a7d63f27c8adee49b50e15c39b5a92c25847b1a069d8ca3a174d1815`,
+built from the same server sources with verified frontend assets and matching
+shell integration. This corrects the earlier dynamic preview backend's missing
+remote installation payload: the existing installer can package the static
+server itself for a matching Linux x86_64 host. No single-architecture runtime
+payload override is installed, and other host architectures are not established
+by this preview.
+
+An owned fake-SSH installation probe, with all payload overrides absent, reaches
+the production install script and verifies the uploaded archive's checksum,
+installed binary, version 0.2.4 and shell-integration files. It deliberately
+refuses the subsequent handshake; that probe proves installation rather than a
+real SSH connection or a remotely running daemon. A separate owned backend
+fixture verifies normal service readiness and session behavior. The final
+Windows GUI starts with this dedicated backend on hardware graphics, exits with
+code 0 and leaves no owned Windows or WSL process. The preceding candidate's
+stage-18 Windows workspace smoke is retained as separate, earlier evidence.
+The Linux Ports window run above used the previous compatible backend; it is
+not relabeled as a run with the new static artifact.
+
 The Windows native-app forwarding workflow is **unrun** for this increment.
 Its prepared follow-up uses the selected WSL service, two distinguishable remote
 HTTP responses and an independently owned Windows listener: request a forward
