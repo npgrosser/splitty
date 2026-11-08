@@ -5,6 +5,7 @@ mod floating;
 mod host_update;
 mod hosts;
 mod ports;
+mod screen_motion;
 mod settings;
 mod shell_profiles;
 #[cfg(test)]
@@ -53,6 +54,7 @@ use self::drawer::{ScreenDrop, WheelNavigation, WheelTarget};
 use self::floating::{FloatGesture, FloatGestureKind};
 use self::hosts::{HostKey, HostsView};
 use self::ports::PortsView;
+use self::screen_motion::{ScreenMotion, ScreenProjection};
 use self::settings::{SettingsEvent, SettingsView};
 use self::shell_profiles::ProfilePicker;
 use self::templates::TemplateDialog;
@@ -791,6 +793,8 @@ pub struct Workspace {
     pending_transfer: Option<PendingTransfer>,
     float_order: HashMap<ScreenKey, Vec<String>>,
     float_viewport: Option<Bounds<Pixels>>,
+    screen_viewport: Option<Bounds<Pixels>>,
+    screen_motion: ScreenMotion,
     float_gesture: Option<FloatGesture>,
     pending_float: Option<PendingFloat>,
     desired_scheme: ColorScheme,
@@ -990,8 +994,11 @@ impl Workspace {
                 cx.stop_active_drag(window);
                 cx.notify();
             }
-            if !window.is_window_active() && this.float_gesture.take().is_some() {
-                cx.notify();
+            if !window.is_window_active() {
+                let changed = this.float_gesture.take().is_some() | this.screen_motion.clear();
+                if changed {
+                    cx.notify();
+                }
             }
         });
         let drawer_bounds_subscription = cx.observe_window_bounds(window, |this, window, cx| {
@@ -1098,6 +1105,8 @@ impl Workspace {
                 pending_transfer: None,
                 float_order: HashMap::new(),
                 float_viewport: None,
+                screen_viewport: None,
+                screen_motion: ScreenMotion::default(),
                 float_gesture: None,
                 pending_float: None,
                 desired_scheme: initial_scheme,
@@ -1220,6 +1229,7 @@ impl Workspace {
                 failure = applied.err();
             }
         }
+        self.screen_motion.clear();
         self.appearance = next;
         self.appearance_generation = snapshot.generation();
         self.appearance_error =
@@ -1922,6 +1932,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.prepare_screen_motion(&window_model, window, cx);
         self.ports_owner_changed(window_model.local_source().source_token(), window, cx);
         self.revoke_missing_terminal_links(&window_model);
         self.settings.update(cx, |view, cx| {
@@ -2089,13 +2100,20 @@ impl Workspace {
                 || previous.route_generation() != model.route_generation()
         });
         if routes_changed {
-            for view in self.panes.values() {
+            let displayed: HashSet<_> = model
+                .displayed_panes()
+                .into_iter()
+                .map(|pane| model.pane_key(&pane))
+                .collect();
+            for (pane, view) in &self.panes {
                 if let Ok(mut pending) = view.pending_resize.lock() {
                     *pending = None;
                 }
-                view.terminal.update(cx, |terminal, cx| {
-                    terminal.invalidate_size_report(cx);
-                });
+                if displayed.contains(pane) {
+                    view.terminal.update(cx, |terminal, cx| {
+                        terminal.invalidate_size_report(cx);
+                    });
+                }
             }
         }
         if model.snapshot().is_some() {
@@ -2204,6 +2222,9 @@ impl Workspace {
         cx.notify();
     }
     fn sync_visible(&mut self, cx: &mut Context<Self>) {
+        if self.destination != Destination::Screens {
+            self.screen_motion.clear();
+        }
         let mut visible = self.selected_model().map_or_else(Vec::new, |model| {
             model
                 .displayed_panes()
@@ -4060,14 +4081,17 @@ impl Workspace {
         &self,
         node: &LayoutNode,
         surface: Surface,
+        projection: &ScreenProjection<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let interactive = projection.is_interactive();
         match node {
             LayoutNode::Slot { id, pane_ids, .. } => {
-                let Some(slot_key) = self.current_layout_key(id.as_str()) else {
-                    return div().into_any_element();
-                };
+                if let Some(slot) = self.render_presented_slot(node, surface, projection, cx) {
+                    return slot;
+                }
+                let slot_key = projection.key().layout_key(id.as_str());
                 let selected = self
                     .selected_model()
                     .and_then(|model| model.selected_pane(node));
@@ -4178,25 +4202,8 @@ impl Workspace {
                     let drag_title = title.clone();
                     let drag_appearance = self.appearance.clone();
                     tabs = tabs.child(
-                        div()
+                        screen_motion::tab_surface(&self.appearance, active)
                             .id(SharedString::from(format!("tab-{slot_key}-{pane_key}")))
-                            .relative()
-                            .flex()
-                            .flex_none()
-                            .items_center()
-                            .gap_2()
-                            .pl_3()
-                            .pr_1()
-                            .bg(rgb(if active {
-                                self.appearance.active
-                            } else {
-                                self.appearance.raised
-                            }))
-                            .text_color(rgb(if active {
-                                self.appearance.text
-                            } else {
-                                self.appearance.secondary
-                            }))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if ready && !GlobalState::is_in_deferred_context(cx) {
                                     if let Some(source) = tab_source {
@@ -4269,13 +4276,8 @@ impl Workspace {
                             )
                             .child(Icon::new(IconName::SquareTerminal).xsmall())
                             .child(
-                                div()
-                                    .id(SharedString::from(format!(
-                                        "drag-tab-{slot_key}-{pane_key}"
-                                    )))
-                                    .max_w(chrome_rems(180.))
-                                    .overflow_hidden()
-                                    .child(title.clone()),
+                                screen_motion::tab_label(title.clone())
+                                    .id(SharedString::from(format!("drag-tab-{slot_key}-{pane_key}"))),
                             )
                             .child(self.render_tab_context_menu(pane.as_str(), cx))
                             .child(
@@ -4449,12 +4451,10 @@ impl Workspace {
                 children,
                 sizes,
             } => {
-                let Some(split_key) = self.current_layout_key(id.as_str()) else {
-                    return div().into_any_element();
-                };
+                let split_key = projection.key().layout_key(id.as_str());
                 let horizontal = *axis == Axis::Horizontal;
                 let bounds_id = split_key.clone();
-                let bounds_source = self.selected_model().map(SourceWorkspace::source_token);
+                let bounds_source = Some(projection.owner());
                 let entity = cx.entity();
                 let mut split = div()
                     .id(SharedString::from(format!("split-{split_key}")))
@@ -4467,6 +4467,9 @@ impl Workspace {
                     .child(
                         canvas(
                             move |bounds, _, cx| {
+                                if !interactive {
+                                    return;
+                                }
                                 entity.update(cx, |this, _| {
                                     if !this.selected_model().is_some_and(|model| {
                                         Some(model.source_token()) == bounds_source
@@ -4498,7 +4501,7 @@ impl Workspace {
                             .min_w_0()
                             .min_h_0()
                             .overflow_hidden()
-                            .child(self.render_node(child, surface, window, cx)),
+                            .child(self.render_node(child, surface, projection, window, cx)),
                     );
                     if index + 1 < children.len() {
                         let node = split_key.clone();
@@ -4514,17 +4517,16 @@ impl Workspace {
                                 .id(SharedString::from(format!("divider-{split_key}-{index}")))
                                 .flex_none()
                                 .bg(rgb(self.appearance.border))
-                                .when(horizontal, |view| {
-                                    view.w(chrome_rems(5.))
-                                        .h_full()
-                                        .cursor(CursorStyle::ResizeColumn)
+                                .when(horizontal, |view| view.w(chrome_rems(5.)).h_full())
+                                .when(!horizontal, |view| view.h(chrome_rems(5.)).w_full())
+                                .when(interactive, |view| {
+                                    view.cursor(if horizontal {
+                                        CursorStyle::ResizeColumn
+                                    } else {
+                                        CursorStyle::ResizeRow
+                                    })
                                 })
-                                .when(!horizontal, |view| {
-                                    view.h(chrome_rems(5.))
-                                        .w_full()
-                                        .cursor(CursorStyle::ResizeRow)
-                                })
-                                .when(surface == Surface::Tiled, |divider| {
+                                .when(interactive && surface == Surface::Tiled, |divider| {
                                     divider.on_mouse_down(
                                         MouseButton::Left,
                                         cx.listener(move |this, event: &MouseDownEvent, _, cx| {
@@ -4556,9 +4558,13 @@ impl Workspace {
     fn render_float(
         &self,
         entry: &splitty_client_core::workspace::FloatingEntry,
+        projection: &ScreenProjection<'_>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        if let Some(group) = self.render_presented_float(entry, projection, window, cx) {
+            return group;
+        }
         let Some(viewport) = self.float_viewport else {
             return div().into_any_element();
         };
@@ -4723,6 +4729,7 @@ impl Workspace {
             .child(div().flex_1().min_h_0().min_w_0().child(self.render_node(
                 &entry.root,
                 Surface::Floating,
+                projection,
                 window,
                 cx,
             )));
@@ -4760,6 +4767,7 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.sample_screen_motion(window, cx);
         let mut messages = Vec::new();
         if !self.status.is_empty() {
             messages.push(self.status.clone());
@@ -4816,6 +4824,7 @@ impl Render for Workspace {
             .font(font(self.appearance.font_family.clone()))
             .text_size(chrome_rems(self.appearance.font_size))
             .capture_key_down(cx.listener(Self::key))
+            .capture_any_mouse_down(cx.listener(Self::preserve_screen_motion_focus))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 this.drawer_edge_hover(event, cx);
                 if this.drag.is_some() && event.dragging() {
@@ -5059,7 +5068,14 @@ impl Render for Workspace {
                     } else {
                         Surface::Tiled
                     };
-                    viewport = viewport.child(self.render_node(root, root_surface, window, cx));
+                    let projection = ScreenProjection::Interactive(model);
+                    viewport = viewport.child(self.render_node(
+                        root,
+                        root_surface,
+                        &projection,
+                        window,
+                        cx,
+                    ));
                     let mut floats: Vec<_> = model.presented_floats().iter().collect();
                     if let Some(order) = model
                         .shown_screen_id()
@@ -5073,12 +5089,48 @@ impl Render for Workspace {
                         });
                     }
                     for entry in floats {
-                        viewport = viewport.child(self.render_float(entry, window, cx));
+                        viewport =
+                            viewport.child(self.render_float(entry, &projection, window, cx));
                     }
                     if let Some(highlight) = self.render_drop_highlight(window, cx) {
                         viewport = viewport.child(highlight);
                     }
-                    main_content = main_content.child(viewport);
+                    let entity = cx.entity();
+                    let mut layers = div()
+                        .id("screen-viewport")
+                        .relative()
+                        .flex_1()
+                        .min_h_0()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(
+                            canvas(
+                                move |bounds, _, cx| {
+                                    entity.update(cx, |this, cx| {
+                                        if this.screen_viewport != Some(bounds) {
+                                            this.screen_viewport = Some(bounds);
+                                            cx.notify();
+                                        }
+                                    });
+                                },
+                                |_, (), _, _| {},
+                            )
+                            .absolute()
+                            .size_full(),
+                        );
+                    if let Some(outgoing) = self.render_outgoing_screen(window, cx) {
+                        layers = layers.child(outgoing);
+                    }
+                    main_content = main_content.child(
+                        layers.child(
+                            viewport
+                                .absolute()
+                                .left_0()
+                                .top(self.screen_offset())
+                                .w_full()
+                                .h_full(),
+                        ),
+                    );
                 }
             } else {
                 main_content =
