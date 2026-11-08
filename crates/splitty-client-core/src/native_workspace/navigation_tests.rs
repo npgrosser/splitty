@@ -82,6 +82,22 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
         .find(|route| route.pane_id != pane_a)
         .unwrap()
         .pane_id;
+    // Focus is worker-owned presentation intent; it carries the exact session,
+    // and an unrelated publication must retain its result.
+    commands
+        .send(Command::new(
+            scope,
+            CommandKind::Focus {
+                screen: split.screen_key(&screen_a),
+                route: split.terminal_token(&pane_a).unwrap(),
+            },
+        ))
+        .await
+        .unwrap();
+    model_where(&mut updates, |model| {
+        model.focused_pane() == Some(pane_a.as_str())
+    })
+    .await;
     commands
         .send(Command::new(
             scope,

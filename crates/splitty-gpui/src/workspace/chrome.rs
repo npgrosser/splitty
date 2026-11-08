@@ -35,6 +35,29 @@ fn selected_slot_matches(
 }
 
 impl GroupTarget {
+    pub(super) fn capture_pane(model: &SourceWorkspace, pane: &str) -> Option<Self> {
+        fn slot<'a>(model: &SourceWorkspace, node: &'a LayoutNode, pane: &str) -> Option<&'a str> {
+            match node {
+                LayoutNode::Slot { id, .. } => {
+                    (model.selected_pane(node) == Some(pane)).then_some(id.as_str())
+                }
+                LayoutNode::Split { children, .. } => {
+                    children.iter().find_map(|child| slot(model, child, pane))
+                }
+            }
+        }
+        let id = model
+            .presentation_root()
+            .and_then(|root| slot(model, root, pane))
+            .or_else(|| {
+                model
+                    .presented_floats()
+                    .iter()
+                    .find_map(|entry| slot(model, &entry.root, pane))
+            })?;
+        Self::capture(model, id, pane)
+    }
+
     fn capture(model: &SourceWorkspace, slot: &str, pane: &str) -> Option<Self> {
         let node = presented_slot_by_id(model, slot)?;
         if !selected_slot_matches(slot, pane, node, model.selected_pane(node)) {
@@ -97,7 +120,7 @@ mod tests {
 }
 
 #[cfg(all(test, feature = "ui-test-support"))]
-mod view_tests {
+pub(super) mod view_tests {
     use super::{Command, Destination, GroupTarget, Workspace};
     use gpui_kit::{
         px, size, AppContext, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
@@ -112,7 +135,9 @@ mod view_tests {
     use tokio::sync::mpsc;
     use uuid::Uuid;
 
-    fn with_view(run: impl FnOnce(&mut VisualTestContext, Entity<Workspace>)) {
+    pub(in crate::workspace) fn with_view(
+        run: impl FnOnce(&mut VisualTestContext, Entity<Workspace>),
+    ) {
         let mut app = TestAppContext::single();
         app.update(gpui_kit::init);
         let content = Rc::new(RefCell::new(None));
@@ -278,7 +303,7 @@ pub(super) enum GroupCommand {
 }
 
 impl Workspace {
-    fn group_command(
+    pub(super) fn group_command(
         &mut self,
         target: &GroupTarget,
         action: GroupCommand,

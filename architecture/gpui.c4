@@ -18,7 +18,7 @@ model {
     }
 
     terminal = component 'terminal' {
-      description 'Native terminal presentation with coherent zoom metrics, cached text shaping, local find editing and highlights, pointer geometry and admitted gesture lifetime, source-aware deliberate links routed through workspace ownership for remote loopback opening, and byte-preserving input bound to an immutable source and terminal route. Focused PTY key context retains Tab input without changing editor traversal. A fixed-geometry passive surface reuses the painter without input, resizing or activity claims. A replacement connection receives fresh emulation before replay; same-connection hidden views remain retained.'
+      description 'Native terminal presentation with coherent zoom metrics, cached text shaping, local find editing and highlights, pointer geometry and admitted gesture lifetime with local context intent and shared clipboard/search actions, source-aware deliberate links routed through workspace ownership for remote loopback opening, and byte-preserving input bound to an immutable source and terminal route. Focused PTY key context retains Tab input without changing editor traversal. A fixed-geometry passive surface reuses the painter without input, resizing or activity claims. A replacement connection receives fresh emulation before replay; same-connection hidden views remain retained.'
       metadata { module 'splitty_gpui::terminal' }
     }
 
@@ -28,7 +28,7 @@ model {
     }
 
     gpui_workspace = component 'gpui_workspace' {
-      description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references and global navigation, one bounded outgoing passive Screen during reversible navigation motion, captured same-source Screen drag and keyboard placement with transient measured insertion feedback and no second order owner, deliberate Hosts connection, live catalog, explicit host update confirmation and Ports controls, retained source-qualified terminal views, local-only appearance and library controls, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools.'
+      description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references and global navigation, one bounded outgoing passive Screen during reversible navigation motion, captured same-source Screen drag and keyboard placement with transient measured insertion feedback and no second order owner, deliberate Hosts connection, live catalog, explicit host update confirmation and Ports controls, retained source-qualified terminal views and one identity-bound terminal context popup with separate retained presentation and live command authority, local-only appearance and library controls, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools.'
       metadata { module 'splitty_gpui::workspace' }
     }
 
@@ -64,7 +64,7 @@ model {
     gpui_app -> terminal 'Show terminal output and forward native input'
     terminal -> terminal_engine 'Borrow native terminal state and encode checked input'
     terminal -> splitty.client_core.external_links 'Validate bounded HTTP(S) targets before explicit platform dispatch'
-    gpui_workspace -> terminal 'Keep source-scoped terminal views, rebind route geometry and subscribe to deliberate remote loopback link gestures'
+    gpui_workspace -> terminal 'Keep source-scoped terminal views, rebind route geometry and subscribe to deliberate remote loopback link gestures and admitted local context intents'
     gpui_workspace -> gpui_appearance 'Convert resolved theme values for native chrome and terminal colors'
     gpui_host_update -> gpui_workspace 'Use the workspace view, captured focus and current destination'
     gpui_host_update -> splitty.client_core.hub 'Construct fixed-local host directory evidence in view tests'

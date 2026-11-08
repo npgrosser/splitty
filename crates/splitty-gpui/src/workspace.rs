@@ -11,6 +11,7 @@ mod shell_profiles;
 #[cfg(test)]
 mod source_routing_tests;
 mod templates;
+mod terminal_menu;
 mod transfer;
 
 use crate::appearance::NativeAppearance;
@@ -58,6 +59,7 @@ use self::screen_motion::{ScreenMotion, ScreenProjection};
 use self::settings::{SettingsEvent, SettingsView};
 use self::shell_profiles::ProfilePicker;
 use self::templates::TemplateDialog;
+use self::terminal_menu::TerminalMenu;
 
 /// The local appearance read has produced either a usable theme or a visible
 /// failure. The window shell may now reveal its first painted frame.
@@ -567,6 +569,7 @@ struct PaneView {
     capture: ResizeCapture,
     terminal: Entity<Terminal>,
     _link_subscription: Subscription,
+    _menu_subscription: Subscription,
     pending_resize: Arc<Mutex<Option<PendingResize>>>,
     marker: bool,
     tail: String,
@@ -790,6 +793,7 @@ pub struct Workspace {
     template_dialog: Option<TemplateDialog>,
     pending_template_apply: Option<(Uuid, Uuid)>,
     tab_context_menu: Option<TabContextMenu>,
+    terminal_menu: Option<TerminalMenu>,
     pending_transfer: Option<PendingTransfer>,
     float_order: HashMap<ScreenKey, Vec<String>>,
     float_viewport: Option<Bounds<Pixels>>,
@@ -995,6 +999,7 @@ impl Workspace {
                 cx.notify();
             }
             if !window.is_window_active() {
+                this.cancel_terminal_menu(window, cx);
                 let changed = this.float_gesture.take().is_some() | this.screen_motion.clear();
                 if changed {
                     cx.notify();
@@ -1102,6 +1107,7 @@ impl Workspace {
                 template_dialog: None,
                 pending_template_apply: None,
                 tab_context_menu: None,
+                terminal_menu: None,
                 pending_transfer: None,
                 float_order: HashMap::new(),
                 float_viewport: None,
@@ -1854,6 +1860,7 @@ impl Workspace {
         screen: ScreenKey,
         generation: u64,
         origin: terminal::LinkOrigin,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
         let key = route.pane_key();
@@ -1906,6 +1913,20 @@ impl Workspace {
                 this.remote_link(link_route.clone(), url.clone(), cx);
             },
         );
+        let menu_route = route.clone();
+        let menu_subscription = cx.subscribe_in(
+            &terminal,
+            window,
+            move |this, terminal, request: &terminal::ContextMenuRequest, window, cx| {
+                this.open_terminal_menu(
+                    menu_route.clone(),
+                    terminal.clone(),
+                    request.clone(),
+                    window,
+                    cx,
+                );
+            },
+        );
         if let Err(error) = terminal.update(cx, |terminal, cx| {
             terminal.set_search_active(false, cx);
             terminal.set_zoom(terminal_scale, cx);
@@ -1920,6 +1941,7 @@ impl Workspace {
                 capture,
                 terminal,
                 _link_subscription: link_subscription,
+                _menu_subscription: menu_subscription,
                 pending_resize,
                 marker: false,
                 tail: String::new(),
@@ -2092,6 +2114,7 @@ impl Workspace {
                 route.screen().clone(),
                 route.generation(),
                 origin,
+                window,
                 cx,
             );
         }
@@ -2200,6 +2223,7 @@ impl Workspace {
         self.drop_target = None;
         self.drawer_drop = None;
         self.model = Some(window_model);
+        self.reconcile_terminal_menu(window, cx);
         self.host_update_reconcile(window, cx);
         self.flush_scheme();
         self.sync_visible(cx);
@@ -2224,6 +2248,7 @@ impl Workspace {
     fn sync_visible(&mut self, cx: &mut Context<Self>) {
         if self.destination != Destination::Screens {
             self.screen_motion.clear();
+            self.terminal_menu = None;
         }
         let mut visible = self.selected_model().map_or_else(Vec::new, |model| {
             model
@@ -2286,7 +2311,20 @@ impl Workspace {
             .selected_model()
             .and_then(SourceWorkspace::focused_pane)
             .and_then(|pane| self.selected_model().map(|model| model.pane_key(pane)))
-            .filter(|pane| self.visible.contains(pane))
+            .filter(|pane| {
+                self.destination == Destination::Screens
+                    && self.pending_template_apply.is_none()
+                    && self.selected_model().is_some_and(|source| {
+                        source.pending_template().is_none()
+                            && source.terminal_token(pane.pane_id()).is_some_and(|route| {
+                                self.model.as_ref().is_some_and(|model| {
+                                    model.shown_key().is_some_and(|screen| {
+                                        model.validate_terminal_focus(&screen, &route).is_ok()
+                                    })
+                                })
+                            })
+                    })
+            })
             .and_then(|pane| {
                 self.panes
                     .get(&pane)
@@ -2364,6 +2402,7 @@ impl Workspace {
             || self.template_dialog.is_some()
             || self.profile_picker.is_some()
             || self.tab_context_menu.is_some()
+            || self.terminal_menu.is_some()
             || self
                 .pending_close
                 .as_ref()
@@ -2478,29 +2517,43 @@ impl Workspace {
         }
     }
     fn focus(&mut self, pane: &str, cx: &mut Context<Self>) {
-        let source = self.current_screen_key().map(|key| key.source_id());
-        if source.is_some_and(|source| {
-            self.model
-                .as_mut()
-                .and_then(|window| window.source_mut(source))
-                .is_some_and(|mut model| model.focus_pane(pane))
-        }) {
-            if let Some(screen) = self.selected_model().and_then(|model| {
-                model
-                    .shown_screen_id()
-                    .map(|screen| model.screen_key(screen))
-            }) {
-                self.send(
-                    Command::Focus {
-                        screen,
-                        pane: pane.to_owned(),
-                    },
-                    cx,
-                );
-            }
-            self.sync_visible(cx);
-            cx.notify();
+        let Some((screen, route)) = self.selected_model().and_then(|model| {
+            Some((
+                model.screen_key(model.shown_screen_id()?),
+                model.terminal_token(pane)?,
+            ))
+        }) else {
+            return;
+        };
+        let Some(model) = self.model.as_mut() else {
+            return;
+        };
+        if model.validate_terminal_focus(&screen, &route).is_err() {
+            return;
         }
+        if model
+            .source(screen.source_id())
+            .and_then(|source| source.focused_pane())
+            == Some(pane)
+        {
+            return;
+        }
+        // Admit the captured worker intent before optimistic presentation. The
+        // same shared validation owns focus when later workspace updates arrive.
+        if let Err(error) = self.commands.try_send(WorkerCommand::new(
+            route.source_token(),
+            Command::Focus {
+                screen: screen.clone(),
+                route: route.clone(),
+            },
+        )) {
+            self.status = format!("Action not sent: {error}");
+            cx.notify();
+            return;
+        }
+        let _ = model.focus_terminal(&screen, &route);
+        self.sync_visible(cx);
+        cx.notify();
     }
     fn focus_captured(
         &mut self,
@@ -2574,6 +2627,12 @@ impl Workspace {
         );
     }
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.terminal_menu.is_some() {
+            // Kit owns the focused popup's keys; unmatched keys never become
+            // workspace shortcuts while its captured action is pending.
+            cx.stop_propagation();
+            return;
+        }
         if self
             .pending_close
             .as_ref()
@@ -3100,6 +3159,7 @@ impl Workspace {
                                 route.screen().clone(),
                                 route.generation(),
                                 origin,
+                                window,
                                 cx,
                             );
                             if let Some(view) = self.panes.get_mut(&pane) {
@@ -3438,7 +3498,16 @@ impl Workspace {
                 self.smoke_editor_reconciles = 0;
                 if let Some(pane) = focused {
                     if let Some(screen) = self.current_screen_key() {
-                        self.send(Command::Focus { screen, pane }, cx);
+                        if let Some(route) = self
+                            .selected_model()
+                            .and_then(|model| model.terminal_token(&pane))
+                        {
+                            self.send_captured(
+                                route.source_token(),
+                                Command::Focus { screen, route },
+                                cx,
+                            );
+                        }
                     }
                 }
                 let Some(editor) = self.rename.as_ref() else {
@@ -5207,6 +5276,7 @@ impl Render for Workspace {
                 )
             })
             .when_some(template_overlay, |view, overlay| view.child(overlay))
+            .children(self.render_terminal_menu(window))
     }
 }
 fn first_selected_slot(model: &SourceWorkspace, node: &LayoutNode) -> Option<(String, String)> {

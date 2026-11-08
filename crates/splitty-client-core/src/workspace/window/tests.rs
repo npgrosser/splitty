@@ -648,3 +648,47 @@ fn remote_screen_placement_changes_only_reference_order_across_offline_refresh_a
     assert!(!window.can_move_screen(&b));
     assert!(window.move_opened_screen(owner, &b, None).is_err());
 }
+
+#[test]
+fn offline_terminal_focus_is_retained_but_never_upgrades_transport_or_stale_binding() {
+    let mut window = WindowWorkspace::new(Uuid::new_v4());
+    let id = remote(&mut window, "me@192.0.2.1");
+    catalog(&mut window, id, &["a"]);
+    let key = open(&mut window, id, "a");
+    let owner = window.source(id).unwrap().source_token();
+    window.source_mut(id).unwrap().apply_snapshot(owner.connection_id(), &json!({
+        "type":"mux.screen_snapshot","screen":{"id":"a","revision":1,
+        "root":{"type":"split","id":"split","axis":"horizontal","sizes":[0.5,0.5],"children":[
+            {"type":"slot","id":"left","paneIds":["p0"],"activePaneId":"p0"},
+            {"type":"slot","id":"right","paneIds":["p1","hidden"],"activePaneId":"p1"}]},
+        "panes":{"p0":{"id":"p0","sessionId":"s0"},"p1":{"id":"p1","sessionId":"s1"},"hidden":{"id":"hidden","sessionId":"s2"}},
+        "sessions":{"s0":{"id":"s0","status":"running"},"s1":{"id":"s1","status":"running"},"s2":{"id":"s2","status":"running"}}}
+    })).unwrap();
+    let route = window.source(id).unwrap().terminal_token("p1").unwrap();
+    let hidden = window.source(id).unwrap().terminal_token("hidden").unwrap();
+    window.source_mut(id).unwrap().focus_pane("p0");
+    window.disconnect(id).unwrap();
+    assert!(window.focus_terminal(&key, &route).unwrap());
+    assert_eq!(window.execution_token(id), None);
+    assert!(!window.accepts_terminal(&route));
+    // A different source publication clones the same worker-owned focus state.
+    let _other = remote(&mut window, "me@192.0.2.2");
+    let published = window.clone();
+    assert_eq!(published.source(id).unwrap().focused_pane(), Some("p1"));
+    assert!(window.focus_terminal(&key, &hidden).is_err());
+    for obsolete in [
+        TerminalToken::new(
+            SourceWorkspace::new(Uuid::new_v4()).source_token(),
+            "p1",
+            "s1",
+        ),
+        TerminalToken::new(owner, "p1", "replaced"),
+    ] {
+        assert!(window.focus_terminal(&key, &obsolete).is_err());
+    }
+    assert_eq!(window.source(id).unwrap().focused_pane(), Some("p1"));
+    window.begin_close(id).unwrap();
+    assert!(window.focus_terminal(&key, &route).is_err());
+    window.finish_close(id).unwrap();
+    assert!(window.focus_terminal(&key, &route).is_err());
+}

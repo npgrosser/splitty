@@ -71,9 +71,9 @@ impl Command {
             ));
         }
         let captured = match &self.kind {
-            CommandKind::Input { route, .. } | CommandKind::ResizePane { route, .. } => {
-                Some(route.source_token())
-            }
+            CommandKind::Input { route, .. }
+            | CommandKind::ResizePane { route, .. }
+            | CommandKind::Focus { route, .. } => Some(route.source_token()),
             CommandKind::RequestClose { plan, .. } => plan.source_token(),
             CommandKind::ApplyTemplate { plan, .. } => Some(plan.source_token()),
             CommandKind::FloatPane { source, .. } | CommandKind::TransferPane { source, .. } => {
@@ -271,7 +271,7 @@ pub enum CommandKind {
     },
     Focus {
         screen: ScreenKey,
-        pane: String,
+        route: TerminalToken,
     },
     Input {
         route: TerminalToken,
@@ -352,8 +352,7 @@ fn validate_command_target(model: &SourceWorkspace, command: &CommandKind) -> st
     match command {
         CommandKind::Split { screen, pane, .. }
         | CommandKind::Tab { screen, pane }
-        | CommandKind::Select { screen, pane }
-        | CommandKind::Focus { screen, pane } => {
+        | CommandKind::Select { screen, pane } => {
             model.validate_shown_key(screen)?;
             if model.screen_for(pane) != Some(screen.screen_id()) {
                 return Err(crate::connection::invalid(
@@ -1359,6 +1358,17 @@ async fn run_service(
                 Next::Tick => {}
                 Next::Command(None) => break,
                 Next::Command(Some(command)) => {
+                    // Focus is retained presentation intent, not a transport command.
+                    // Handle it before live-source admission, without routing to a mux.
+                    if let CommandKind::Focus { screen, route } = &command.kind {
+                        let result = command.validate_source(route.source_token())
+                            .and_then(|()| window.focus_terminal(screen, route));
+                        match result {
+                            Ok(_) => publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,
+                            Err(error) => publish(&updates,rejected_command(command.source,&command.kind,error.to_string()),&stop).await?,
+                        }
+                        continue;
+                    }
                     let expected=if local_command(&command.kind) {Some(owner)} else {command.source.and_then(|captured|window.execution_token(captured.source_id()))};
                     let admission=expected.ok_or_else(||crate::connection::invalid("Command belongs to an unavailable source connection")).and_then(|expected|command.validate_source(expected));
                     if let Err(error) = admission {

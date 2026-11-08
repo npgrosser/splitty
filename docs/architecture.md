@@ -603,6 +603,23 @@ queue admission. Shift starts local selection; lifecycle cancellation settles
 only the captured live terminal. Wheel uses application reports when requested,
 otherwise the existing local history or alternate-screen cursor-key path.
 
+A terminal body context gesture follows that same admitted pointer route: application
+mouse reporting wins, while Shift admits a local popup without mouse bytes. The
+terminal emits intent; Workspace owns one Kit popup captured to the displayed
+Screen, source owner, pane/session, terminal entity and emulation generation.
+Callbacks revalidate those identities. Clipboard and Find reuse keyboard paths;
+split and assessed close reuse captured workspace admission. Dismissal restores
+only the still-current clicked terminal while the popup owns focus.
+
+Retained offline buffers still support Copy and Find. Their exact displayed
+terminal identity admits pure focus through `WindowWorkspace::focus_terminal`;
+the native worker handles this intent before transport dispatch and preserves it
+in later model publications. The UI queues the captured intent before optimistic
+focus. Closing, disposed, replaced and non-displayed targets fail validation.
+This grants no live execution authority: Paste, split and close also require the
+live pane authority captured when the menu opened. No focus or local search
+operation reconnects a host or queues terminal input for replay.
+
 Native terminal search is local to the terminal adapter and view. The adapter
 owns the search handle, checked allocator and tracked navigation anchor; its
 public results contain only owned, viewport-clipped cell spans. A 16 MiB budget

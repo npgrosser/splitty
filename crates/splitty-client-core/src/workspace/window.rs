@@ -308,6 +308,46 @@ impl WindowWorkspace {
         self.source(route.source_token().source_id())
             .is_some_and(|source| source.contains_terminal_binding(route))
     }
+    /// Validate a displayed retained terminal for local presentation intent. This
+    /// deliberately grants no input, transport, or structural command authority.
+    pub fn validate_terminal_focus(
+        &self,
+        screen: &ScreenKey,
+        route: &TerminalToken,
+    ) -> io::Result<()> {
+        let source = self
+            .source(screen.source_id())
+            .ok_or_else(|| invalid("Terminal source is gone"))?;
+        if !matches!(
+            self.source_status(screen.source_id()),
+            Some(SourceStatus::Ready | SourceStatus::Offline)
+        ) || self.shown_key().as_ref() != Some(screen)
+            || source.source_token() != route.source_token()
+            || !source.contains_terminal_binding(route)
+            || source.screen_for(route.pane_id()) != Some(screen.screen_id())
+            || !source
+                .displayed_panes()
+                .iter()
+                .any(|pane| pane == route.pane_id())
+        {
+            return Err(invalid(
+                "Terminal no longer belongs to the displayed source and Screen",
+            ));
+        }
+        Ok(())
+    }
+    /// Pure window presentation state, including retained offline terminals.
+    pub fn focus_terminal(
+        &mut self,
+        screen: &ScreenKey,
+        route: &TerminalToken,
+    ) -> io::Result<bool> {
+        self.validate_terminal_focus(screen, route)?;
+        Ok(self
+            .source_mut_raw(screen.source_id())
+            .expect("validated source")
+            .focus_pane(route.pane_id()))
+    }
     /// Execution additionally requires a ready source and completed attachment.
     pub fn accepts_terminal(&self, route: &TerminalToken) -> bool {
         self.execution_token(route.source_token().source_id()) == Some(route.source_token())

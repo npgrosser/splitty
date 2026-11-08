@@ -624,11 +624,7 @@ impl SourceRuntime {
                 out.changed = true;
                 result
             }
-            CommandKind::Focus { pane, .. } => {
-                model.focus_pane(&pane);
-                out.changed = true;
-                Ok(())
-            }
+            CommandKind::Focus { .. } => unreachable!("focus is owned by the window worker"),
             CommandKind::Input { .. }
             | CommandKind::ResizePane { .. }
             | CommandKind::Visible { .. } => {

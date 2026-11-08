@@ -89,6 +89,10 @@ async fn foreign_source_envelopes_cannot_create_split_select_input_or_enqueue_se
             route: route.clone(),
             bytes: b"printf 'FOREIGN_EFFECT'\n".to_vec(),
         },
+        CommandKind::Focus {
+            screen: model.screen_key(screen),
+            route: route.clone(),
+        },
         CommandKind::UpdateSettings {
             connection: owner.connection_id(),
             request_id: settings_request,
@@ -139,7 +143,7 @@ async fn foreign_source_envelopes_cannot_create_split_select_input_or_enqueue_se
     let mut rejected = 0;
     let mut zoom_rejected = false;
     let mut settings_rejected = false;
-    while rejected < 5
+    while rejected < 6
         || !zoom_rejected
         || !settings_rejected
         || !output.windows(12).any(|part| part == b"SOURCE_ALIVE")

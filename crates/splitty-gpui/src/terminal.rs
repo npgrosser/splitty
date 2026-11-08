@@ -13,6 +13,28 @@ pub(crate) enum LinkEvent {
 
 impl EventEmitter<LinkEvent> for Terminal {}
 
+/// A right-button press already admitted to the terminal's local gesture route.
+#[derive(Clone)]
+pub(crate) struct ContextMenuRequest {
+    position: Point<Pixels>,
+    generation: u64,
+}
+
+impl ContextMenuRequest {
+    pub(crate) fn position(&self) -> Point<Pixels> {
+        self.position
+    }
+}
+
+impl EventEmitter<ContextMenuRequest> for Terminal {}
+
+#[derive(Clone, Copy)]
+pub(crate) enum LocalAction {
+    Copy,
+    Paste,
+    Find,
+}
+
 pub use crate::terminal_engine::ColorConfig as TerminalColors;
 use crate::terminal_engine::{
     Cursor, CursorShape, Engine, MouseAction, MouseButton as EngineMouseButton, MouseInput,
@@ -575,7 +597,7 @@ impl Terminal {
         }
     }
 
-    fn focus_pty(&self, window: &mut Window, cx: &mut App) {
+    pub(crate) fn focus_pty(&self, window: &mut Window, cx: &mut App) {
         self.focus.focus(window, cx);
     }
 
@@ -777,6 +799,43 @@ impl Terminal {
         }
     }
 
+    pub(crate) fn context_menu_is_current(&self, request: &ContextMenuRequest) -> bool {
+        self.generation == request.generation && self.engine.is_some()
+    }
+
+    pub(crate) fn has_selection(&mut self) -> bool {
+        self.engine
+            .as_mut()
+            .and_then(|engine| engine.selection_text().ok().flatten())
+            .is_some_and(|text| !text.is_empty())
+    }
+
+    pub(crate) fn local_action(
+        &mut self,
+        action: LocalAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            LocalAction::Copy => {
+                let result = self.engine.as_mut().map(Engine::selection_text);
+                if let Some(Ok(Some(text))) = result.as_ref() {
+                    cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+                }
+                if let Some(Err(error)) = result {
+                    self.status = format!("Terminal selection: {error:#}");
+                }
+            }
+            LocalAction::Paste => {
+                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
+                    self.paste_text(&text);
+                }
+                cx.notify();
+            }
+            LocalAction::Find => self.open_search(window, cx),
+        }
+    }
+
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = &event.keystroke;
         let find_modifier = if cx.platform_info().is_mac() {
@@ -789,7 +848,7 @@ impl Terminal {
             && !key.modifiers.alt
             && key.key.eq_ignore_ascii_case("f")
         {
-            self.open_search(window, cx);
+            self.local_action(LocalAction::Find, window, cx);
             cx.stop_propagation();
             return;
         }
@@ -803,22 +862,13 @@ impl Terminal {
         if (key.modifiers.control && key.modifiers.shift) || key.modifiers.platform {
             match key.key.as_str() {
                 "c" => {
-                    let result = self.engine.as_mut().map(Engine::selection_text);
-                    if let Some(Ok(Some(text))) = result.as_ref() {
-                        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-                    }
-                    if let Some(Err(error)) = result {
-                        self.status = format!("Terminal selection: {error:#}");
-                    }
+                    self.local_action(LocalAction::Copy, window, cx);
                     cx.stop_propagation();
                     return;
                 }
                 "v" => {
-                    if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                        self.paste_text(&text);
-                    }
+                    self.local_action(LocalAction::Paste, window, cx);
                     cx.stop_propagation();
-                    cx.notify();
                     return;
                 }
                 _ => {}
@@ -1117,6 +1167,14 @@ impl Terminal {
     ) {
         self.focus_pty(window, cx);
         self.pointer_down(event, window, cx.platform_info().is_mac());
+        if event.button == MouseButton::Right
+            && self.pointer.route(MouseButton::Right) == Some(PointerRoute::Local)
+        {
+            cx.emit(ContextMenuRequest {
+                position: event.position,
+                generation: self.generation,
+            });
+        }
         cx.notify();
     }
 
