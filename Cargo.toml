@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/gpui-pre-linux"]
 members = [
     "crates/splitty-core",
     "crates/splitty-server",
@@ -26,3 +27,6 @@ tokio = { version = "1", features = ["full"] }
 async-trait = "0.1"
 rand = "0.8"
 hex = "0.4"
+
+[patch.crates-io]
+gpui-pre-linux = { path = "vendor/gpui-pre-linux" }
