@@ -21,7 +21,7 @@ Implement the shared operation before the UI-free client seam, then integrate th
 
 ## 4. Targeted integration and deferred merge gate
 
-- [ ] 4.1 Run targeted affected mux/protocol, server session/service, client-core order/worker and GPUI Drawer tests plus `cargo test -p splitty-architecture`; run `openspec validate native-screen-reorder --strict` and `openspec validate --specs`. Record exact commands/results and confirm that legacy `reorder_screens`, partial catalog semantics and the other active native checklists remain intact.
+- [x] 4.1 Run targeted affected mux/protocol, server session/service, client-core order/worker and GPUI Drawer tests plus `cargo test -p splitty-architecture`; run `openspec validate native-screen-reorder --strict` and `openspec validate --specs`. Record exact commands/results and confirm that legacy `reorder_screens`, partial catalog semantics and the other active native checklists remain intact.
 - [ ] 4.2 At the later merge checkpoint, run the single full gate from `CLAUDE.md`: `cargo fmt --all --check`, `cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings`, `cargo test --workspace --exclude splitty-gui`, and `openspec validate --specs`. Ensure architecture dependencies are installed with `pnpm install --dir architecture` if needed. If scope touches `crates/splitty-tauri`, also run `cargo clippy -p splitty-gui --all-targets -- -D warnings` and `cargo test -p splitty-gui --lib`; if scope touches `frontend/`, also run its `pnpm check`, `pnpm test` and `pnpm build`. Keep this task unchecked until that gate actually runs; it is deferred during this slice.
 
 Unchanged scenarios copied into modified requirements retain their existing regression coverage. Every new scenario is mapped to task-local tests above; the final checks integrate that evidence rather than substitute for it.
@@ -29,6 +29,7 @@ Unchanged scenarios copied into modified requirements retain their existing regr
 ## Targeted evidence (2026-11-08)
 
 - `cargo test -p splitty-core move_screen`: 3 passed; `cargo test -p splitty-core reorder_screens`: 1 passed, preserving legacy replacement behavior.
+- `cargo test -p splitty-core managed_job_capability_is_advertised_without_changing_the_welcome_envelope`: 1 passed with the exact welcome capability list.
 - `cargo test -p splitty-server move_screen`: 1 passed; `cargo test -p splitty-server relative_screen_placement_matches_native_and_control_decoders`: 1 passed.
 - `cargo test -p splitty-client-core --lib relative_screen_order -- --nocapture`: 2 passed, covering capability admission, post-mutation refresh and sender pressure.
 - `cargo test -p splitty-client-core --lib remote_screen_ -- --nocapture`: 2 passed, including disconnected transport dispatch and reconnect/reference retention.

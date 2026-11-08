@@ -1637,3 +1637,16 @@ Xvfb exited normally. Settled captures show the expected full-width overlay and
 reserved pinned layout without clipping or overlap. The intermediate captures
 had already settled, so the in-process geometry tests, rather than those
 screenshots, establish the transition trajectory.
+
+### Workspace clarity corrections (2026-11-08)
+
+The normal workspace no longer reserves a prototype shortcut/status strip or
+padding above its tab bars. Errors and transient feedback remain visible when
+present. Drawer Screen numbers have a fixed-width index and an explicit gap
+before the name; enabled controls expose pointer and close-button hover feedback.
+A maximized group now shows `Group maximized` beside a labeled, outlined
+`Restore layout` control in the existing tab bar. The production-view test
+`maximized_group_shows_labeled_restore_and_restores_canonical_slots` passes: it
+starts from the maximized canonical projection, clicks the actual restore
+control, observes its captured command and restores the two-slot layout. It
+does not establish compact-window visual acceptance.
