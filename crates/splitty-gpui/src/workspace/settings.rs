@@ -808,8 +808,13 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut nav = div().flex().flex_col().gap_1();
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let narrow = window.viewport_size().width < rems(45.).to_pixels(window.rem_size());
+        let mut nav = div()
+            .flex()
+            .gap_1()
+            .when(narrow, |nav| nav.flex_wrap())
+            .when(!narrow, |nav| nav.flex_col());
         for section in Section::ALL {
             let selected = self.section == section;
             nav = nav.child(
@@ -821,8 +826,7 @@ impl Render for SettingsView {
                     .selected(selected)
                     .ghost()
                     .small()
-                    .w_full()
-                    .justify_start()
+                    .when(!narrow, |button| button.w_full().justify_start())
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.section != section {
                             this.section = section;
@@ -841,8 +845,12 @@ impl Render for SettingsView {
         }
         div()
             .id("settings-view")
+            .when(cfg!(all(test, feature = "ui-test-support")), |view| {
+                view.debug_selector(|| "settings-view".into())
+            })
             .track_focus(&self.focus)
             .flex()
+            .when(narrow, |view| view.flex_col())
             .size_full()
             .min_w_0()
             .min_h_0()
@@ -850,19 +858,24 @@ impl Render for SettingsView {
             .text_color(cx.theme().foreground)
             .child(
                 div()
-                    .w(rems(11.))
+                    .when(cfg!(all(test, feature = "ui-test-support")), |view| {
+                        view.debug_selector(|| "settings-nav".into())
+                    })
+                    .when(narrow, |view| view.w_full().border_b_1().py_2())
+                    .when(!narrow, |view| view.w(rems(11.)).border_r_1().py_4())
                     .flex_none()
-                    .border_r_1()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().sidebar)
                     .text_color(cx.theme().sidebar_foreground)
                     .px_3()
-                    .py_4()
                     .child(nav),
             )
             .child(
                 div()
                     .id("settings-content")
+                    .when(cfg!(all(test, feature = "ui-test-support")), |view| {
+                        view.debug_selector(|| "settings-content".into())
+                    })
                     .flex_1()
                     .min_w_0()
                     .min_h_0()
@@ -880,13 +893,18 @@ impl Render for SettingsView {
                             .child(
                                 div()
                                     .flex()
+                                    .flex_wrap()
                                     .items_start()
                                     .justify_between()
                                     .gap_3()
+                                    .when(cfg!(all(test, feature = "ui-test-support")), |view| {
+                                        view.debug_selector(|| "settings-header".into())
+                                    })
                                     .child(
                                         div()
                                             .flex()
                                             .flex_col()
+                                            .min_w_0()
                                             .gap_1()
                                             .child(
                                                 div()
@@ -903,9 +921,17 @@ impl Render for SettingsView {
                                     )
                                     .child(
                                         Button::new("settings-close")
+                                            .when(
+                                                cfg!(all(test, feature = "ui-test-support")),
+                                                |button| {
+                                                    button
+                                                        .debug_selector(|| "settings-close".into())
+                                                },
+                                            )
                                             .label("Close")
                                             .ghost()
                                             .small()
+                                            .flex_none()
                                             .on_click(cx.listener(|_, _, _, cx| {
                                                 cx.emit(SettingsEvent::Close)
                                             })),

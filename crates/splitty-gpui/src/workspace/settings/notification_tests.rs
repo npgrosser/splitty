@@ -1,8 +1,8 @@
 use super::{SettingsDomain, SettingsField, SettingsValue, WriteState};
 use crate::workspace::{chrome::view_tests::with_view, Command, Update, WorkerCommand, Workspace};
 use gpui_kit::{
-    point, px, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseButton,
-    VisualTestContext,
+    point, px, size, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseButton,
+    ScrollDelta, ScrollEvent, TouchPhase, VisualTestContext,
 };
 use serde_json::json;
 use splitty_client_core::{
@@ -238,6 +238,82 @@ fn notification_switches_and_reset_use_real_local_settings_event_path() {
                 });
             }
         }
+    });
+}
+
+#[test]
+fn narrow_settings_keeps_navigation_close_and_scrolled_controls_accessible() {
+    with_view(|window, view| {
+        let (owner, mut commands) = setup(window, &view);
+        window.simulate_resize(size(px(900.), px(600.)));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let wide_nav = window.debug_bounds("settings-nav").unwrap();
+        let wide_content = window.debug_bounds("settings-content").unwrap();
+        assert_eq!(wide_nav.right(), wide_content.left());
+        assert_eq!(wide_nav.top(), wide_content.top());
+        window.simulate_resize(size(px(560.), px(420.)));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let drawer = window.debug_bounds("drawer-slide").unwrap();
+        let settings = window.debug_bounds("settings-view").unwrap();
+        let nav = window.debug_bounds("settings-nav").unwrap();
+        let content = window.debug_bounds("settings-content").unwrap();
+        let close = window.debug_bounds("settings-close").unwrap();
+        assert_eq!(drawer.size.width, px(200.));
+        assert_eq!(settings.left(), drawer.right());
+        assert_eq!(settings.size.width, px(360.));
+        assert_eq!(nav.right(), settings.right());
+        assert_eq!(content.top(), nav.bottom());
+        assert!(close.left() >= content.left() && close.right() <= content.right());
+        assert!(close.bottom() <= content.bottom());
+        assert!(
+            window
+                .debug_bounds("settings-nav-notifications")
+                .unwrap()
+                .right()
+                <= nav.right()
+        );
+        assert!(commands.try_recv().is_err());
+        click(window, "settings-close", false);
+        window.update(|_, cx| {
+            assert!(view.read(cx).destination != crate::workspace::Destination::Settings);
+        });
+        window.update(|window, cx| {
+            view.update(cx, |workspace, cx| workspace.show_settings(window, cx));
+            window.draw(cx).clear(cx);
+        });
+        while let Ok(command) = commands.try_recv() {
+            assert!(
+                !matches!(command.kind(), Command::UpdateSettings { .. }),
+                "layout and close do not submit settings"
+            );
+        }
+        let position = window.debug_bounds("settings-content").unwrap().center();
+        window.simulate_event(ScrollEvent {
+            position,
+            delta: ScrollDelta::Lines(point(0., -12.)),
+            touch_phase: TouchPhase::Moved,
+            ..Default::default()
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        let crashed = window
+            .debug_bounds("settings-control-notifications.processCrashed")
+            .unwrap();
+        assert!(crashed.top() >= content.top() && crashed.bottom() <= content.bottom());
+        click(
+            window,
+            "settings-control-notifications.processCrashed",
+            true,
+        );
+        request(
+            &mut commands,
+            owner,
+            SettingsField::NotificationProcessCrashed,
+            false,
+        );
+        assert!(
+            commands.try_recv().is_err(),
+            "one explicit settings command"
+        );
     });
 }
 
