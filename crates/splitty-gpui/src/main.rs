@@ -152,6 +152,7 @@ fn main() -> anyhow::Result<()> {
     let application = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     application.run(move |cx| {
         gpui_kit::init(cx);
+        terminal::init(cx);
         gpui_kit::component::theme::Theme::change(
             gpui_kit::component::theme::ThemeMode::Dark,
             None,

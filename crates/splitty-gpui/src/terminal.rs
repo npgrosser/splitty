@@ -1,4 +1,6 @@
 //! Native terminal presentation. The service owns the PTY; Ghostty owns VT state.
+#[cfg(all(test, feature = "ui-test-support"))]
+mod keyboard_tests;
 mod links;
 mod search;
 pub(crate) use links::LinkOrigin;
@@ -25,6 +27,16 @@ const BASE_LINE_HEIGHT: f32 = 21.;
 const DEFAULT_SELECTION_FOREGROUND: u32 = 0xffffff;
 const DEFAULT_SELECTION_BACKGROUND: u32 = 0x345778;
 const MAX_ALTERNATE_WHEEL_KEYS: i32 = 5;
+
+pub(crate) fn init(cx: &mut App) {
+    // Kit's Root binds these keys before raw key handlers run. Only the
+    // focused PTY publishes this context; find fields and overlays retain
+    // ordinary focus traversal.
+    cx.bind_keys([
+        KeyBinding::new("tab", NoAction, Some("TerminalInput")),
+        KeyBinding::new("shift-tab", NoAction, Some("TerminalInput")),
+    ]);
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PointerRoute {
@@ -1757,6 +1769,9 @@ impl Render for Terminal {
             .overflow_hidden()
             .bg(rgb(self.colors.background))
             .track_focus(&self.focus)
+            .when(self.focus.is_focused(window), |terminal| {
+                terminal.key_context("TerminalInput")
+            })
             .on_key_down(cx.listener(Self::key))
             .on_modifiers_changed(cx.listener(Self::on_link_modifiers_changed))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_pointer_down))
