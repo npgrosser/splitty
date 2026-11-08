@@ -383,3 +383,5 @@ Each point names what holds now, the alternative, and where it is recorded.
 - **`native-host-update`, NHU-2** (2026-11-08, provisional, tbd): reuse the local auxiliary API owner for one coalesced backend-version read; ordinary confirmation waits for a valid assigned-backend version rather than guessing the UI build version.
 - **`native-host-update`, NHU-3** (2026-11-08, provisional, tbd): retain at most one pending update confirmation per window; source/attempt and offer changes revoke it, while unrelated metadata changes preserve it.
 - **`native-host-update`, NHU-5** (2026-11-08, provisional, tbd): an unsuccessful dispatched update requires explicit connect-only Retry; uncertainty never replays maintenance or implies rollback.
+
+- **`native-workspace-motion`, NWM-1** (2026-11-08, provisional, tbd): retain at most one outgoing Screen presentation using the same terminal painter with input, resize and activity disabled; no runtime screenshot dependency or second layout model.
