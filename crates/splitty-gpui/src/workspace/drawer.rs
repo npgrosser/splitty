@@ -230,7 +230,9 @@ mod view_tests {
                 )
                 .unwrap();
             window.update(|window, cx| {
-                view.update(cx, |workspace, cx| workspace.reconcile(model, window, cx));
+                view.update(cx, |workspace, cx| {
+                    workspace.reconcile(model.clone(), window, cx)
+                });
                 window.draw(cx).clear(cx);
             });
             assert!(window
@@ -244,6 +246,44 @@ mod view_tests {
                 view.read_with(window, |workspace, _| workspace.current_screen_key()),
                 Some(keys[1].clone())
             );
+
+            model.select(owner, &keys[0]).unwrap();
+            window.update(|window, cx| {
+                cx.set_reduce_motion(true);
+                view.update(cx, |workspace, cx| {
+                    workspace.reconcile(model.clone(), window, cx)
+                });
+                window.draw(cx).clear(cx);
+                cx.set_reduce_motion(false);
+            });
+            assert!(window
+                .debug_bounds("tab-title-pane-a-✳ Live work")
+                .is_some());
+
+            model
+                .source_mut(owner.source_id())
+                .unwrap()
+                .apply_snapshot(
+                    owner.connection_id(),
+                    &json!({"type":"mux.screen_snapshot","screen":{
+                        "id":"a","revision":3,
+                        "root":{"type":"slot","id":"slot-a","paneIds":["pane-a"]},
+                        "panes":{"pane-a":{"id":"pane-a"}},
+                        "sessions":{}
+                    }}),
+                )
+                .unwrap();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| workspace.reconcile(model, window, cx));
+                window.draw(cx).clear(cx);
+            });
+            assert!(window.debug_bounds("tab-title-pane-a-Terminal 1").is_some());
+            assert!(window
+                .debug_bounds("tab-title-pane-a-✳ Live work")
+                .is_none());
+            assert!(window
+                .debug_bounds("drawer-title-label-pane-a-Terminal")
+                .is_some());
         });
     }
 

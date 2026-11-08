@@ -4375,7 +4375,21 @@ impl Workspace {
                             .child(Icon::new(IconName::SquareTerminal).xsmall())
                             .child(
                                 screen_motion::tab_label(title.clone())
-                                    .id(SharedString::from(format!("drag-tab-{slot_key}-{pane_key}"))),
+                                    .id(SharedString::from(format!("drag-tab-{slot_key}-{pane_key}")))
+                                    .tooltip({
+                                        let title = title.clone();
+                                        move |window, cx| {
+                                            gpui_kit::component::tooltip::Tooltip::new(
+                                                title.clone(),
+                                            )
+                                            .build(window, cx)
+                                        }
+                                    })
+                                    .when(cfg!(all(test, feature = "ui-test-support")), |label| {
+                                        label.debug_selector(|| {
+                                            format!("tab-title-{}-{title}", pane.as_str())
+                                        })
+                                    }),
                             )
                             .child(self.render_tab_context_menu(pane.as_str(), cx))
                             .child(
