@@ -8,7 +8,7 @@ See [proposal.md](proposal.md). The native Drawer already groups opened remote r
 
 ## Goals / Non-Goals
 
-**Goals:** Reuse one mapping projection and one submission/result path. Add exact passive navigation and an explicit host-group initiator whose UI lifetime is distinct from transport readiness and popup lifetime.
+**Goals:** Reuse one mapping projection, the existing bounded forwarding controller and result handling. Add exact passive navigation and an explicit host-group initiator whose UI lifetime is distinct from transport readiness and popup lifetime.
 
 **Non-Goals:** A new forwarding policy, a second host directory or sorted row owner, attaching browser intent to the currently selected terminal, new host creation flows, or new protocol fields.
 
@@ -26,7 +26,7 @@ An Up row says Open; other supported states offer ensure-forward-and-open. Both 
 
 Add one bounded current Drawer-popup context with a fresh identity, captured group binding and no transport lease. Establish it from the Kit open-change interaction callback; the popup's content builder only reads context and rows. The pinned Kit DropdownMenu content builder runs while rendering, so it must not mutate workspace state. Item callbacks capture that context identity, validate it and consume it when admitting an action. Dismissal, replacement or group loss clears unsubmitted authority permanently; ordinary reappearance of the same source cannot recreate the old context.
 
-Extend the existing `OpenOrigin` with the admitted Drawer group binding, and keep the existing single `submit_forward`/result implementation with an explicit origin. Admitted intent no longer depends on popup state. It survives popup dismissal, autohide/unpin, Screen selection, Settings/Hosts navigation and ordinary reconnect while the logical group remains. On model reconciliation, revoke it if the last group reference disappears, its source is disposed or its canonical target changes; existing owner reset, Stop, explicit cancel and whole-window close also revoke it. Remove UI authority immediately and send the existing cancellation intent best-effort. A full command queue must still prevent a late browser dispatch. Revocation does not claim an admitted service-owned forward stopped.
+Extend the existing `OpenOrigin` with the admitted Drawer group binding, and keep the existing shared row/link `submit_forward` and result implementation with an explicit origin. Admitted intent no longer depends on popup state. It survives popup dismissal, autohide/unpin, Screen selection, Settings/Hosts navigation and ordinary reconnect while the logical group remains. On model reconciliation, revoke it if the last group reference disappears, its source is disposed or its canonical target changes; existing owner reset, Stop, explicit cancel and whole-window close also revoke it. Remove UI authority immediately and send the existing cancellation intent best-effort. A full command queue must still prevent a late browser dispatch. Revocation does not claim an admitted service-owned forward stopped.
 
 The final result handler validates the retained group origin in addition to its existing exact owner/request/mapping and handle checks. Drawer handles must have no terminal override. Only consuming the verified one-shot handle dispatches its validated URL. Keep errors and unconfirmed outcomes visible from the Drawer, including after its popup closes, without restoring a permanent prototype status bar.
 
@@ -38,7 +38,7 @@ Share a small UI-only `HostGroupTarget` (local owner, source ID, canonical targe
 
 ### Bounded admission remains shared
 
-Retain the existing 64-feedback capacity guard before queue admission or open-origin insertion, same-key pending suppression and Stop supersession. Both current and Drawer entrypoints must use that path. Keep a single feedback table and origin registry; do not add per-popup request queues or unbounded context history.
+Retain the existing 64-feedback capacity guard before queue admission or open-origin insertion, same-key pending suppression and Stop supersession. Current form/row/link entrypoints and the new Drawer entrypoint retain the same capacity and ownership guards; the Drawer reuses row/link submission rather than adding another sender. Keep a single feedback table and origin registry; do not add per-popup request queues or unbounded context history.
 
 ## Architecture impact
 
