@@ -1918,3 +1918,44 @@ Stop for an existing key and recovers capacity after an identified terminal
 result. Ten focused Ports tests, the combined 167 GPUI tests and strict GPUI
 Clippy pass. These later fixes are not in the frozen Activity preview; full
 workspace CI remains deferred.
+
+
+### Native Drawer host and port actions (2026-11-08)
+
+Remote host captions now navigate to their exact current Hosts row. Their Ports
+menus project the same detected, active and saved mappings as Hosts, with at
+most twelve actions, a total known count and honest missing/partial discovery.
+Popup inspection is passive. An ephemeral menu capture is consumed before
+submission; admitted browser intent instead belongs to the retained host group
+and survives ordinary navigation/reconnect until that group is removed. Both
+Up and inactive mappings use the existing controller and verified one-shot
+browser result. No new server operation or forwarding policy was added.
+
+All 179 GPUI tests, strict GPUI and client-core all-target Clippy, 17 architecture
+tests, formatting and strict change validation pass. Production-view input tests
+cover stale cached menu rows, owner replacement, duplicate activation, final
+reference removal before acknowledgement, autohide and keyboard focus. The
+Escape-to-Enter regression failed before the focus fix: the Kit dropdown restored
+its wrapper rather than the actual Button. Cancellation now returns to the
+trigger, while management navigation retains its destination focus.
+
+An owned Linux X11 window verifies two fixture hosts with colliding aliases and
+remote IDs while the local Screen is selected. Inspect/dismiss/reopen and exact
+B management navigation cause no forwarding mutation; deliberate B port selection
+produces one accepted B forward and a successful opener-spy HTTP response from
+B's owned endpoint, with no A forward. Escape then Enter reopens the menu;
+Shift-Tab then Enter activates the host caption. The caption is left aligned,
+the popup fits a 560×420 window, and unpinned autohide/reveal remains usable.
+Normal window close preserves host sessions, followed by complete owned fixture
+cleanup. This uses a private exact-shape SSH shim and opener spy; real OpenSSH,
+external hosts, a real browser and other platforms are separate acceptance.
+
+Frozen source: `fe5d325a83a96420e95027dfd31ee714300d8f44`;
+1221-file source/asset manifest SHA-256:
+`b177a73a76e2da68d76fb5dc284a2b84538e9ec0e598d718fe016cd2caae1e04`.
+GUI binary SHA-256:
+`9bb116ee9595b7bfa9e948d85781f60002d156bda925b9a0be68b7824d768cf3`.
+Actual-window result SHA-256:
+`2b10cd1454d6cd500c3fda07245de41af12460c3d538c97cefd17c305ced9769`.
+The Activity Windows preview is unchanged; full workspace CI remains the deferred
+pre-merge checkpoint.
