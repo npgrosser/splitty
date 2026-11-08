@@ -626,13 +626,36 @@ def run_window(args, geometry, result):
                         click("drawer.b_created_row")
                         opened = created_marker("b-created-opened")
                         capture("create-b-new-screen-opened")
-                        click("drawer.b_created_close")
-                        time.sleep(.4)
+                        created_title = x("getwindowname", window).strip()
+                        assert created["name"] in created_title, created_title
+                        result["createdWindowTitle"] = created_title
+                        # The close action is revealed on hover. Let that
+                        # presentation render before sending the actual click.
+                        x("mousemove", "--window", window,
+                          *point("drawer.b_created_close"))
+                        display.sync()
+                        time.sleep(.35)
+                        capture("create-b-detach-hover-ready")
+                        x("click", 1)
+                        display.sync()
+                        detached_title = wait_until(
+                            lambda: (title if title != created_title else None)
+                            if (title := x("getwindowname", window).strip()) else None,
+                            "B Screen did not detach from the shown window", seconds=8)
+                        assert created["name"] not in detached_title, detached_title
+                        result["detachedWindowTitle"] = detached_title
                         assert_b_catalog_exact()
                         assert pid_live(opened["pid"])
+                        marker(b, "b-after-created-detach",
+                               result["terminalMarkers"]["create-open-b"])
                         capture("create-b-new-screen-detached")
                         click("hosts.toolbar_remote")
                         click("hosts.open_b_created")
+                        reopened_title = wait_until(
+                            lambda: (title if created["name"] in title else None)
+                            if (title := x("getwindowname", window).strip()) else None,
+                            "B Screen did not reopen into the shown window", seconds=8)
+                        result["reopenedWindowTitle"] = reopened_title
                         reopened = created_marker("b-created-reopened")
                         assert reopened == opened
                         assert_b_catalog_exact()
