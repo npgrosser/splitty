@@ -48,16 +48,87 @@ if ($null -eq $p -or $p.StartTime.ToUniversalTime().Ticks -ne {ident["startTicks
 '''
 
 
-def start_windows(exe, arguments):
+STARTUP_CAPTURE_SETUP = r'''
+Add-Type -AssemblyName System.Drawing
+Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public class SplittyStartup {
+  public delegate bool EnumProc(IntPtr h, IntPtr l);
+  [StructLayout(LayoutKind.Sequential)] public struct Rect { public int Left, Top, Right, Bottom; }
+  [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc p, IntPtr l);
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint p);
+  [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out Rect r);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  public static IntPtr VisibleWindow(uint pid) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p);
+      if (p == pid && IsWindowVisible(h)) { found = h; return false; } return true;
+    }, IntPtr.Zero);
+    return found;
+  }
+}
+"@
+'''
+
+STARTUP_CAPTURE = r'''
+$frames = @()
+$firstVisible = $null
+$captureError = $null
+try {
+  while ($timer.ElapsedMilliseconds -lt 10000 -and -not $p.HasExited) {
+    $h = [SplittyStartup]::VisibleWindow($p.Id)
+    if ($h -ne [IntPtr]::Zero) {
+      $firstVisible = $timer.ElapsedMilliseconds
+      foreach ($delay in @(0, 50, 200)) {
+        while ($timer.ElapsedMilliseconds -lt ($firstVisible + $delay)) { Start-Sleep -Milliseconds 1 }
+        $rect = New-Object SplittyStartup+Rect
+        if (-not [SplittyStartup]::GetWindowRect($h, [ref]$rect)) { throw 'startup window vanished' }
+        $width = $rect.Right - $rect.Left
+        $height = $rect.Bottom - $rect.Top
+        if ($width -lt 300 -or $height -lt 200) { throw 'startup window too small' }
+        $foreground = [SplittyStartup]::GetForegroundWindow() -eq $h
+        $bmp = New-Object System.Drawing.Bitmap($width, $height)
+        $graphics = [System.Drawing.Graphics]::FromImage($bmp)
+        $at = $timer.ElapsedMilliseconds
+        $graphics.CopyFromScreen($rect.Left, $rect.Top, 0, 0, $bmp.Size)
+        $graphics.Dispose()
+        $path = $out + '.startup-' + $delay + '.png'
+        $bmp.Save($path, [System.Drawing.Imaging.ImageFormat]::Png)
+        $bmp.Dispose()
+        $frames += @{ atMs=$at; path=$path; foreground=$foreground; width=$width; height=$height }
+      }
+      break
+    }
+    Start-Sleep -Milliseconds 1
+  }
+  if ($null -eq $firstVisible) { throw 'no visible startup window within ten seconds' }
+} catch { $captureError = $_.Exception.Message }
+@{ firstVisibleMs=$firstVisible; frames=$frames; error=$captureError } |
+  ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $startupReport
+'''
+
+
+def start_windows(exe, arguments, capture_startup=False):
     # Start-Process exposes the real Windows PID, creation time, executable and
     # owned log paths. Linux's WSL interop proxy PID is never used for cleanup.
-    script = f'''$ErrorActionPreference = 'Stop'
+    script = "$ErrorActionPreference = 'Stop'\n"
+    if capture_startup:
+        script += STARTUP_CAPTURE_SETUP
+    script += f'''
 $out = Join-Path $env:TEMP ('splitty-preview-' + [Guid]::NewGuid().ToString('N') + '.stdout')
 $err = $out + '.stderr'
+$startupReport = $out + '.startup.json'
+$timer = [System.Diagnostics.Stopwatch]::StartNew()
 $p = Start-Process -FilePath {psquote(exe)} -ArgumentList {psquote(subprocess.list2cmdline(arguments))} -RedirectStandardOutput $out -RedirectStandardError $err -PassThru
 $p.Refresh()
 $null = $p.Handle
-Write-Output ("SPLITTY_JSON " + (@{{ pid=$p.Id; startTicks=$p.StartTime.ToUniversalTime().Ticks; path=$p.Path; stdout=$out; stderr=$err }} | ConvertTo-Json -Compress))
+Write-Output ("SPLITTY_JSON " + (@{{ pid=$p.Id; startTicks=$p.StartTime.ToUniversalTime().Ticks; path=$p.Path; stdout=$out; stderr=$err; startupReport=$startupReport }} | ConvertTo-Json -Compress))
+'''
+    if capture_startup:
+        script += STARTUP_CAPTURE
+    script += '''
 $p.WaitForExit()
 Write-Output ("SPLITTY_EXIT " + $p.ExitCode)
 '''
@@ -77,6 +148,22 @@ Write-Output ("SPLITTY_EXIT " + $p.ExitCode)
         _, stderr = controller.communicate(timeout=3)
         raise RuntimeError(f"Windows controller failed before ownership report: {line} {stderr[-800:]}")
     return json.loads(line.removeprefix("SPLITTY_JSON ")), controller
+
+
+def collect_startup(ident, output, prefix, temp_files):
+    report_path = linux_path(ident["startupReport"])
+    report = json.loads(report_path.read_text(encoding="utf-8-sig"))
+    shutil.copyfile(report_path, output / f"{prefix}-startup.json")
+    temp_files.append(report_path)
+    for index, frame in enumerate(report["frames"]):
+        path = linux_path(frame["path"])
+        shutil.copyfile(path, output / f"{prefix}-startup-{index}.png")
+        temp_files.append(path)
+    if report["error"] or len(report["frames"]) != 3:
+        raise RuntimeError(f"startup capture failed: {report}")
+    if not all(frame["foreground"] for frame in report["frames"]):
+        raise RuntimeError("startup screenshots were obscured; visual evidence is inconclusive")
+    return report
 
 
 def finish_windows(controller, seconds):
@@ -223,6 +310,10 @@ def main():
     parser.add_argument("--backend", type=Path, required=True)
     parser.add_argument("--distro", required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--capture-startup", action="store_true",
+                        help="Capture the first observed visible frame and two following frames")
+    parser.add_argument("--theme", choices=("splitty-dark", "splitty-light"),
+                        help="Seed the isolated backend appearance for startup color review")
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
     args.exe = args.exe.resolve()
@@ -237,6 +328,10 @@ def main():
     config = args.output / "config"
     templates = config / "templates"
     templates.mkdir(parents=True, mode=0o700)
+    if args.theme:
+        (config / "config.toml").write_text(
+            f'[appearance]\ntheme_mode = "fixed"\ntheme = "{args.theme}"\n'
+        )
     (templates / "windows-smoke.yaml").write_text(json.dumps({
         "name": "Windows template proof",
         "panes": {"one": {"dir": "."}},
@@ -258,7 +353,9 @@ def main():
         before = owned_linux_pids(config)
         win_exe = subprocess.check_output(["wslpath", "-w", str(args.exe)], text=True).strip()
         launch_args = command[1:]
-        smoke, smoke_controller = start_windows(win_exe, launch_args + ["--workspace-smoke"])
+        smoke, smoke_controller = start_windows(
+            win_exe, launch_args + ["--workspace-smoke"], args.capture_startup,
+        )
         owned_windows.append(smoke)
         controllers.append(smoke_controller)
         result["smokeWindowsIdentity"] = smoke
@@ -277,6 +374,8 @@ def main():
                 result["stage4ScreenshotError"] = repr(diagnostic_error)
         smoke_exit = finish_windows(smoke_controller, 60)
         result["workspaceSmokeExit"] = smoke_exit
+        if args.capture_startup:
+            result["coldStartup"] = collect_startup(smoke, args.output, "cold", temp_files)
         for name in ("stdout", "stderr"):
             path = linux_path(smoke[name])
             shutil.copyfile(path, args.output / f"workspace.{name}")
@@ -307,7 +406,7 @@ def main():
         if owned_linux_pids(config) - before:
             raise RuntimeError("workspace smoke left an owned WSL process running")
         result["checks"].append("smoke-owned-wsl-backend-and-shells-reaped")
-        app, app_controller = start_windows(win_exe, launch_args)
+        app, app_controller = start_windows(win_exe, launch_args, args.capture_startup)
         owned_windows.append(app)
         controllers.append(app_controller)
         result["windowWindowsIdentity"] = app
@@ -334,6 +433,8 @@ def main():
         result["checks"].append("owned-windows-window-and-template-library-pixel-change")
         window_action("close", app)
         app_exit = finish_windows(app_controller, 15)
+        if args.capture_startup:
+            result["warmStartup"] = collect_startup(app, args.output, "warm", temp_files)
         if app_exit not in (None, 0):
             raise RuntimeError(f"normal Windows close returned {app_exit}")
         result["checks"].append("normal-windows-window-close")

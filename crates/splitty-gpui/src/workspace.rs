@@ -57,6 +57,12 @@ use self::settings::{SettingsEvent, SettingsView};
 use self::shell_profiles::ProfilePicker;
 use self::templates::TemplateDialog;
 
+/// The local appearance read has produced either a usable theme or a visible
+/// failure. The window shell may now reveal its first painted frame.
+pub(crate) struct AppearanceSettled;
+
+impl EventEmitter<AppearanceSettled> for Workspace {}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Destination {
     Screens,
@@ -1206,6 +1212,7 @@ impl Workspace {
         self.settings.update(cx, |view, cx| {
             view.set_snapshot(snapshot.clone(), window, cx)
         });
+        cx.emit(AppearanceSettled);
         cx.notify();
     }
 
@@ -2940,6 +2947,7 @@ impl Workspace {
                         .is_some_and(|model| model.connection_id() == connection)
                     {
                         self.appearance_error = Some(reason);
+                        cx.emit(AppearanceSettled);
                         cx.notify();
                     }
                 }

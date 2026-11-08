@@ -1599,3 +1599,32 @@ Validation used an isolated source snapshot, matching the six changed source
 files byte-for-byte, while independent host-update work continued. This does not
 claim an updated Windows package or a real-window animation run; motion and the
 startup/theme corrections remain follow-up work.
+
+### Windows appearance startup and workspace feedback (2026-11-08)
+
+The Windows workspace now uses the Kit TitleBar with the application's projected
+palette. The initial window stays hidden until the assigned backend supplies
+appearance, reports a matching read failure, or a one-second fallback expires.
+A deferred public GPUI draw prepares the current scene before activation; this
+is not a claim that the GPU has presented while the window is hidden. Subsequent
+theme changes never reactivate the window.
+
+The optimized Windows candidate (SHA-256
+`7715ea25dbab9aed6f955f790788dd1feef1365f7393f326409c1293b087b66b`)
+passed the owned 18-stage workspace smoke using hardware rendering, ordinary
+workspace/template interaction, normal close and owned backend/session cleanup.
+Startup capture was added to the existing harness, with isolated theme seeding
+and three frames beginning at the first observed visible window. Cold and warm
+light-theme captures show the configured palette and matching title bar; the
+first captures also contain transient window compositing, so they do not prove
+absence of every compositor transition. An unavailable-backend run still
+produced a visible fallback window instead of waiting indefinitely.
+
+Drawer feedback uses Kit transitions for overlay translation, pinned workspace
+reservation, hover colors and measured split-drop bounds. Six production-view
+tests and strict targeted GPUI Clippy passed. During a pinned transition the
+retained terminal emitted ten integer-grid resize commands over fifteen sampled
+frames, one pin write and no terminal input. Screen slides and Screen drag
+ordering are separate unfinished increments. The new host update controls have
+seven passing production-view tests; real-window remote maintenance acceptance
+remains open and is not implied by this Windows workspace smoke.

@@ -3,7 +3,7 @@
 model {
   extend splitty.gpui {
     gpui_main = component 'gpui_main' {
-      description 'Application entry point for the native multi-source window and optional fixture probe.'
+      description 'Application entry point for the native multi-source window and optional fixture probe. On Windows, the Kit title bar follows the projected application palette; a hidden startup window waits for accepted appearance, error or bounded timeout and builds its first scene before activation.'
       metadata { module 'splitty_gpui' }
     }
 

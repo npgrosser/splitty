@@ -12,6 +12,8 @@ mod terminal;
 mod terminal_engine;
 mod workspace;
 
+use gpui_kit::component::{ActiveTheme as _, TitleBar};
+use gpui_kit::prelude::*;
 use gpui_kit::*;
 use std::{
     cell::RefCell,
@@ -20,12 +22,89 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc,
     },
+    time::Duration,
 };
 
-struct RootView(AnyView);
+struct RootView {
+    content: AnyView,
+    windows_chrome: bool,
+    waiting_for_appearance: bool,
+    appearance_subscription: Option<Subscription>,
+    reveal_timeout: Option<Task<()>>,
+}
+impl RootView {
+    fn new(
+        content: AnyView,
+        workspace: Option<&Entity<workspace::Workspace>>,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        // Windows applies a hidden window's initial placement on activation.
+        let windows_chrome = cfg!(target_os = "windows") && workspace.is_some();
+        let appearance_subscription = workspace.filter(|_| windows_chrome).map(|workspace| {
+            cx.subscribe_in(
+                workspace,
+                window,
+                |this, _, _: &workspace::AppearanceSettled, window, cx| {
+                    this.reveal(window, cx);
+                },
+            )
+        });
+        let reveal_timeout = windows_chrome.then(|| {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_secs(1)).await;
+                let _ = this.update_in(cx, |this, window, cx| this.reveal(window, cx));
+            })
+        });
+        Self {
+            content,
+            windows_chrome,
+            waiting_for_appearance: windows_chrome,
+            appearance_subscription,
+            reveal_timeout,
+        }
+    }
+
+    fn reveal(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if !self.waiting_for_appearance {
+            return;
+        }
+        self.waiting_for_appearance = false;
+        self.appearance_subscription = None;
+        self.reveal_timeout = None;
+        // A hidden Windows window need not receive paint callbacks. Draw once
+        // after releasing the entity borrow, then show the prepared surface.
+        // Later theme updates must not activate the window again.
+        window.defer(cx, |window, cx| {
+            let arena = window.draw(cx);
+            arena.clear(cx);
+            window.activate_window();
+        });
+        cx.notify();
+    }
+}
 impl Render for RootView {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.0.clone()
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .when(self.windows_chrome, |view| {
+                view.child(
+                    TitleBar::new()
+                        .bg(cx.theme().background)
+                        .border_color(cx.theme().border)
+                        .text_color(cx.theme().foreground)
+                        .child("Splitty"),
+                )
+            })
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .child(self.content.clone()),
+            )
     }
 }
 enum OwnedWorker {
@@ -92,8 +171,11 @@ fn main() -> anyhow::Result<()> {
                         }
                         .into(),
                     ),
+                    appears_transparent: cfg!(target_os = "windows") && !probe,
                     ..Default::default()
                 }),
+                show: !cfg!(target_os = "windows") || probe,
+                focus: !cfg!(target_os = "windows") || probe,
                 ..Default::default()
             },
             cx,
@@ -111,16 +193,16 @@ fn main() -> anyhow::Result<()> {
                         })
                     );
                 }
-                let view: AnyView = if probe {
-                    cx.new(|cx| {
+                let (view, workspace): (AnyView, Option<Entity<workspace::Workspace>>) = if probe {
+                    let view = cx.new(|cx| {
                         let (probe, owned_worker) =
                             app::Probe::new(smoke, web, reported_outcome, screenshot, window, cx);
                         *launched_worker.borrow_mut() = Some(OwnedWorker::Probe(owned_worker));
                         probe
-                    })
-                    .into()
+                    });
+                    (view.into(), None)
                 } else {
-                    cx.new(|cx| {
+                    let workspace = cx.new(|cx| {
                         let (workspace, owned_worker) = workspace::Workspace::new(
                             workspace_smoke,
                             reported_outcome,
@@ -130,10 +212,10 @@ fn main() -> anyhow::Result<()> {
                         );
                         *launched_worker.borrow_mut() = Some(OwnedWorker::Workspace(owned_worker));
                         workspace
-                    })
-                    .into()
+                    });
+                    (workspace.clone().into(), Some(workspace))
                 };
-                cx.new(|_| RootView(view))
+                cx.new(|cx| RootView::new(view, workspace.as_ref(), window, cx))
             },
         );
         if let Err(error) = result {
