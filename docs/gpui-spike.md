@@ -1,5 +1,8 @@
 # Native GPUI development app
 
+For the current branch checkpoint, verified demo and continuation instructions,
+start with [the native UI handoff](native-ui-handoff.md).
+
 The development app opens an isolated workspace with real service-owned terminal
 sessions, local Screens, split panes, tab groups and draggable dividers. Layouts
 come from the shared mux tree; terminal views survive layout updates and Screen
@@ -2097,5 +2100,47 @@ entry, Enter, active-window Blur and Escape, retained input/focus through unrela
 invalid-name and full-queue refusal, and disconnect cancellation. A 200px
 Drawer with a long remote title and Loading status retains a stable select
 hitbox and keeps both text and status outside its fixed action lane; the full
-title remains available as a tooltip. Actual remote-window acceptance and the
-deferred full workspace CI remain separate checkpoints.
+title remains available as a tooltip.
+
+### Completed rename and Windows preview checkpoint (2026-11-08)
+
+The actual-window test exposed one additional ingress bug: `RenameScreen` still
+used the worker's local-owner classification before remote dispatch. The outer
+source validator is now shared with the real-stream regression, which failed
+before the fix and passes after it. Rename uses its captured current execution
+source; local-only orchestration commands retain their existing owner policy.
+
+Frozen functional source `2ab058554ddb7f7f48293d7cc36c77eb17820bcb` passes 268
+client-core tests, 190 GPUI tests, strict Core/GPUI all-target Clippy, 17
+architecture tests, formatting and strict change validation. Its 1268-file
+source/asset manifest is SHA-256
+`a52d7c2f004772768531bbb841aeeb0a88baf5b12f88e416019483d3d50ef229`.
+The Linux GUI is `c1b212a7f4377e9fbc49c280589e4839f2e402246a2b550e08e416ed92123d3e`.
+
+The owned Linux window proves B rename by Enter and Blur while A remains selected
+and accepts input; Escape cancels. Only B's canonical name changes, while Screen,
+pane, session, shell PID and SSH-call inventories remain unchanged. Normal close
+preserves host sessions and owned cleanup completes. No timing workaround was
+needed after the ingress fix. Result SHA-256:
+`b78237904d217d08df097551d530726914e037f06ce3d1b7ecd631e2326b81a1`;
+harness SHA-256:
+`6abcb7d034e15fe82a14d548c6d66db7451ee1ca7cbe275f13002821f541fc9f`.
+
+The separately built native Windows/MSVC release executable is
+`d23d6365aca5c4b2c5664d4439848596b43fe3ef6b0be00f07b2db8e2fe9ca96`.
+The exact packaged executable passes all 18 local workspace smoke stages on an
+RTX 4080 (`software: false`), template-library pixel interaction, normal close,
+owned WSL/Windows cleanup and unrelated sentinel preservation. Windows result
+SHA-256: `a28f0dc2c1c5fa0b069ba271fb132949dad5ead14c1ea64044f51b05d84fd173`.
+All 32 listed package files are independently rehashed; the package metadata
+and checksums are respectively
+`ff71fa7f392318d1c6c6c083007c8fb801f51e24cf4bbb971ca5101dd00f00e0`
+and `f1cdf0ec70c08d34c1e509c935651567ecdc3cdefb23d58441d94f3af3f26568`.
+The static x86_64 WSL backend is reused only after source and all 271 reachable
+resolved-package records match its earlier freeze. Its hash remains
+`75824e34d27ac9d0d160299c78c0ac5f03ffc25e9663ef9ee07aa21e9843f18f`.
+
+Remote workflows have Linux fixture acceptance, not separate Windows remote or
+real-SSH acceptance. The older pre-fix rename candidate remains disabled. Full
+workspace CI is still the explicit later checkpoint; this is a development
+preview rather than a release or a web-client replacement.

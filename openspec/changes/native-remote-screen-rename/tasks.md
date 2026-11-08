@@ -15,6 +15,12 @@
 
 ## 3. Integration verification
 
-- [ ] 3.1 Extend the existing owned remote-screen window smoke fixture with an actual remote rename and canonical observation, including another source selected and normal cleanup; verify exact host naming and preserved selection/sessions. This existing real-process/window check covers platform input/focus and end-to-end catalog observation that in-process fixtures cannot establish.
+- [x] 3.1 Extend the existing owned remote-screen window smoke fixture with an actual remote rename and canonical observation, including another source selected and normal cleanup; verify exact host naming and preserved selection/sessions. This existing real-process/window check covers platform input/focus and end-to-end catalog observation that in-process fixtures cannot establish.
 - [x] 3.2 Run targeted client-core and GPUI tests, strict Clippy for touched crates, formatting, architecture tests and strict OpenSpec change validation; verify all pass and record exact source/evidence in docs/gpui-spike.md.
 - [ ] 3.3 At the deferred pre-merge checkpoint, run the one full check from CLAUDE.md: cargo fmt --all --check; cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings; cargo test --workspace --exclude splitty-gui; openspec validate --specs. Verify the architecture dependencies are installed before the architecture check. Full workspace CI remains deferred during native MVP iteration.
+
+## Integration evidence
+
+Frozen functional source `2ab058554ddb7f7f48293d7cc36c77eb17820bcb` passes 268 client-core tests, 190 GPUI tests, strict touched-crate all-target Clippy, 17 architecture tests, formatting and strict change validation. The actual-window test found that the outer worker still classified RenameScreen as local-only; the real-stream regression now exercises the same private worker admission function, fails before that classification fix and passes after it. Direct driver coverage alone was insufficient.
+
+The owned Linux window test passes unchanged input timing: B Enter and Blur commit canonical names while A remains selected and accepts exact-session input; Escape preserves the previous name. All source/session/process inventories and SSH calls remain unchanged. Normal close preserves remote sessions and the fixture cleans up. Result SHA-256 `b78237904d217d08df097551d530726914e037f06ce3d1b7ecd631e2326b81a1`. A native Windows package from the same source passes the 18-stage hardware workspace smoke; per-remote Windows acceptance and real SSH installation/update remain separate. See `docs/native-ui-handoff.md` and `docs/gpui-spike.md` for the portable checkpoint and artifact provenance.

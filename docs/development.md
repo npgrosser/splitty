@@ -78,6 +78,8 @@ Electron build also requires the frontend dependencies to package shared assets.
 
 The experimental GPUI local workspace has its own isolated service and runbook in
 [`gpui-spike.md`](gpui-spike.md). It is separate from the released desktop apps.
+The [native UI handoff](native-ui-handoff.md) records the current branch checkpoint,
+accepted preview and remaining work for a fresh development session.
 
 The workspace applies an explicit path patch to the pinned Linux platform
 dependency in `vendor/gpui-pre-linux`. Its [patch notes](../vendor/gpui-pre-linux/SPLITTY-PATCH.md)

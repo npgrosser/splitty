@@ -8,6 +8,7 @@ The rules for building live in a few places and hold for work without an OpenSpe
 - `docs/issues/openspec-baseline-findings.md`: known bugs, stale docs and test gaps.
 - `openspec/open-decisions.md`: provisional decisions waiting for the maintainer's review.
 - `roadmap/README.md` (German): order and milestones; the next milestone is listed under "Als Nächstes".
+- `docs/native-ui-handoff.md`: the experimental GPUI branch checkpoint, verified demo and open work; read before continuing native UI changes.
 
 ## Tests
 

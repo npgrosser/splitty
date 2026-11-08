@@ -276,6 +276,7 @@ vulnerabilities privately through
 | [Architecture](docs/architecture.md) | How the server, protocol and UI fit together |
 | [Connections and networking](docs/networking.md) | Visual guides to IPC, SSH, browser gateways, listeners and session lifetime |
 | [Development](docs/development.md) | Building, packaging and releasing |
+| [Native UI checkpoint](docs/native-ui-handoff.md) | Experimental GPUI branch, verified preview, remaining work and continuation on another machine |
 | [Roadmap](roadmap/README.md) | Milestones and what comes next (German) |
 
 ## Building from source
