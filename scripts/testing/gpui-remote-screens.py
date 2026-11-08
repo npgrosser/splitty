@@ -40,8 +40,11 @@ port_fixture_module = helper("outbound_port_fixture", "gpui-outbound-port-fixtur
 performance = helper("performance", "gpui-performance.py")
 pane_drag = helper("pane_drag", "gpui-pane-drag.py")
 
-PHASES = ("setup", "remote-create", "connect", "open", "reorder", "ports", "host-management", "settings-remote", "terminal", "two-hosts", "recovery", "detach", "full")
+PHASES = ("setup", "remote-rename", "remote-create", "connect", "open", "reorder", "ports", "host-management", "settings-remote", "terminal", "two-hosts", "recovery", "detach", "full")
 POINTS = {
+    "remote-rename": ("hosts.toolbar", "hosts.connect_a", "hosts.open_a",
+                      "hosts.toolbar_remote", "ports.host_b_connect", "ports.host_b_open",
+                      "drawer.a_row", "drawer.b_row", "rename.menu_item", "terminal.body"),
     "remote-create": ("hosts.toolbar", "hosts.connect_a", "hosts.open_a",
                       "hosts.toolbar_remote", "ports.host_b_connect", "ports.host_b_open",
                       "drawer.local_row", "drawer.a_row", "drawer.b_row",
@@ -136,7 +139,7 @@ def resume_private_bridge(paused):
 
 
 def run_window(args, geometry, result):
-    if args.phase == "remote-create":
+    if args.phase in ("remote-create", "remote-rename"):
         fixture_tmp = args.output / "t"
         fixture_tmp.mkdir(mode=0o700, exist_ok=False)
         os.environ["SPLITTY_TEST_TMPDIR"] = str(fixture_tmp)
@@ -662,6 +665,111 @@ def run_window(args, geometry, result):
                         assert inventory(a) == before_a
                         capture("create-b-new-screen-reopened-same-session")
                         result["checks"].append("b-created-screen-detach-reopen-reuses-session")
+
+                if args.phase == "remote-rename":
+                    click("hosts.open_a")
+                    marker(a, "rename-open-a", {
+                        "pid": owned.hosts[a]["shell_pid"],
+                        "pane": owned.hosts[a]["pane"],
+                        "session": owned.hosts[a]["session"],
+                    })
+                    click("hosts.toolbar_remote")
+                    click("ports.host_b_connect")
+                    wait_until(lambda: host_bridge_started(b),
+                               "Connect B did not start private bridge", seconds=25)
+                    time.sleep(1.2)
+                    capture("rename-host-b-ready")
+                    click("ports.host_b_open")
+                    time.sleep(.4)
+                    marker(b, "rename-open-b", {
+                        "pid": owned.hosts[b]["shell_pid"],
+                        "pane": owned.hosts[b]["pane"],
+                        "session": owned.hosts[b]["session"],
+                    })
+                    click("drawer.a_row")
+                    a_title = x("getwindowname", window).strip()
+                    assert "Alpha work @" in a_title, a_title
+                    result["aWindowTitle"] = a_title
+                    before_a = screens(a)
+                    before_b = screens(b)
+                    before_a_inventory = inventory(a)
+                    before_b_inventory = inventory(b)
+                    before_local = local_state()
+                    before_local_screens = before_local.get("screens", {})
+                    before_local_active = before_local.get("activeScreenId")
+                    before_ssh = ssh_calls()
+                    before_shells = {
+                        target: set(owned._live_shell_markers(target))
+                        for target in (a, b)
+                    }
+                    b_screen = owned.hosts[b]["screen"]
+
+                    def b_named():
+                        return next((row for row in screens(b) if row["id"] == b_screen), None)
+
+                    def assert_only_b_name(name):
+                        expected = [dict(row) for row in before_b]
+                        for row in expected:
+                            if row["id"] == b_screen:
+                                row["name"] = name
+                        assert screens(b) == expected, (screens(b), expected)
+                        assert screens(a) == before_a, "A Screen metadata changed"
+                        assert inventory(a) == before_a_inventory
+                        assert inventory(b) == before_b_inventory
+                        current_local = local_state()
+                        assert current_local.get("screens", {}) == before_local_screens
+                        assert current_local.get("activeScreenId") == before_local_active
+                        assert ssh_calls() == before_ssh, "rename caused an SSH lifecycle call"
+                        assert all(set(owned._live_shell_markers(target)) == before_shells[target]
+                                   for target in (a, b)), "rename changed shell processes"
+                        assert x("getwindowname", window).strip() == a_title, \
+                            "rename changed the selected A window title"
+
+                    def open_b_rename_menu(label):
+                        x("mousemove", "--window", window, *point("drawer.b_row"))
+                        x("click", 3)
+                        display.sync()
+                        time.sleep(.25)
+                        capture(label)
+                        assert x("getwindowname", window).strip() == a_title, \
+                            "B context menu navigated away from A"
+
+                    open_b_rename_menu("rename-b-menu-a-selected")
+                    if args.stop_after_rename_setup:
+                        key("Escape")
+                        result["checks"].append("remote-rename-menu-geometry-setup-only")
+                    else:
+                        click("rename.menu_item")
+                        capture("rename-b-editor-enter")
+                        fill_text("B renamed by Enter")
+                        key("Return")
+                        wait_until(lambda: (b_named() or {}).get("name")
+                                   == "B renamed by Enter", "B Enter rename not canonical")
+                        assert_only_b_name("B renamed by Enter")
+                        marker(a, "a-after-b-enter-rename", result["terminalMarkers"]["rename-open-a"])
+                        capture("rename-b-enter-confirmed-a-selected")
+                        result["checks"].append("remote-b-enter-rename-only-b-canonical-name")
+
+                        open_b_rename_menu("rename-b-menu-for-escape")
+                        click("rename.menu_item")
+                        fill_text("B cancelled name")
+                        key("Escape")
+                        time.sleep(.35)
+                        assert_only_b_name("B renamed by Enter")
+                        marker(a, "a-after-b-escape", result["terminalMarkers"]["rename-open-a"])
+                        capture("rename-b-escape-preserves-canonical-name")
+                        result["checks"].append("remote-b-escape-cancels-edit")
+
+                        open_b_rename_menu("rename-b-menu-for-blur")
+                        click("rename.menu_item")
+                        fill_text("B renamed by Blur")
+                        click("terminal.body")
+                        wait_until(lambda: (b_named() or {}).get("name")
+                                   == "B renamed by Blur", "B blur rename not canonical")
+                        assert_only_b_name("B renamed by Blur")
+                        marker(a, "a-after-b-blur-rename", result["terminalMarkers"]["rename-open-a"])
+                        capture("rename-b-blur-confirmed-a-terminal")
+                        result["checks"].append("remote-b-blur-rename-only-b-and-a-typing-retained")
 
                 if PHASES.index(args.phase) >= PHASES.index("open"):
                     click("hosts.open_a")
@@ -1525,6 +1633,8 @@ def main():
     parser.add_argument("--setup-only", action="store_true")
     parser.add_argument("--stop-after-create-setup", action="store_true",
                         help="capture connected A/B Drawer geometry, then close normally")
+    parser.add_argument("--stop-after-rename-setup", action="store_true",
+                        help="capture the B Screen context menu while A stays selected")
     parser.add_argument("--phase", choices=PHASES, default="full")
     parser.add_argument("--display", default=":98")
     parser.add_argument("--xvfb", default="Xvfb")
@@ -1538,6 +1648,8 @@ def main():
         args.phase = "setup"
     if args.stop_after_create_setup and args.phase != "remote-create":
         parser.error("--stop-after-create-setup requires --phase remote-create")
+    if args.stop_after_rename_setup and args.phase != "remote-rename":
+        parser.error("--stop-after-rename-setup requires --phase remote-rename")
     geometry = json.loads(args.geometry.read_text()) if args.geometry else {}
     if args.phase != "setup" and not args.geometry:
         parser.error("interaction phases require screenshot-calibrated --geometry JSON")
@@ -1545,7 +1657,7 @@ def main():
         parser.error("reorder phase requires --tesseract for visible Drawer order")
     required = set()
     for phase in PHASES[1:PHASES.index(args.phase) + 1]:
-        if phase in ("reorder", "ports", "host-management", "settings-remote") and args.phase != phase:
+        if phase in ("remote-rename", "reorder", "ports", "host-management", "settings-remote") and args.phase != phase:
             continue
         required.update(POINTS.get(phase, ()))
     required.add("window.confirm_close") if args.phase != "setup" else None
