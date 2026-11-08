@@ -1850,10 +1850,25 @@ impl Workspace {
                 let actions_visible = self.drawer_hovered.as_ref() == Some(&key);
                 let hover_transition =
                     Transition::new(Duration::from_millis(80)).easing(Easing::Ease);
-                let label = entry
-                    .name()
-                    .map(super::hosts::display)
-                    .unwrap_or_else(|| format!("Screen {}", index + 1));
+                let label = entry.name().map(super::hosts::display).unwrap_or_else(|| {
+                    if !remote {
+                        return format!("Screen {}", index + 1);
+                    }
+                    match window_model
+                        .source(key.source_id())
+                        .and_then(SourceWorkspace::remote_screen_creation)
+                        .filter(|creation| creation.screen_id() == key.screen_id())
+                        .map(|creation| creation.status())
+                    {
+                        Some(splitty_client_core::workspace::RemoteScreenCreateStatus::Pending) => {
+                            "Creating Screen…".into()
+                        }
+                        Some(
+                            splitty_client_core::workspace::RemoteScreenCreateStatus::Uncertain,
+                        ) => "Unconfirmed Screen".into(),
+                        _ => "Unnamed Screen".into(),
+                    }
+                });
                 let unread_summary = self.screen_unread_summary(&key);
                 let state = match entry.state() {
                     splitty_client_core::workspace::OpenedScreenState::Ready => None,
@@ -1928,6 +1943,11 @@ impl Workspace {
                             .text_size(chrome_rems(12.5))
                             .child(
                                 div()
+                                    .when(cfg!(all(test, feature = "ui-test-support")), |view| {
+                                        view.debug_selector(|| {
+                                            format!("drawer-screen-label-{key}-{label}")
+                                        })
+                                    })
                                     .w_full()
                                     .min_w_0()
                                     .text_color(transition::<Hsla>(

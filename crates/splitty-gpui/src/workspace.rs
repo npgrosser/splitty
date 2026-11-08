@@ -6,6 +6,7 @@ mod floating;
 mod host_update;
 mod hosts;
 mod ports;
+mod remote_screen_create;
 mod screen_motion;
 mod settings;
 mod shell_profiles;
@@ -37,9 +38,9 @@ use splitty_client_core::notifications::NotificationCenter;
 use splitty_client_core::shell_profiles::ShellProfilesSnapshot;
 use splitty_client_core::workspace::{
     Axis, CloseIdentity, ClosePlan, CloseTarget, FloatingActionOutcome, LayoutKey, LayoutNode,
-    MovePlacement, PaneActionTarget, PaneDrag, PaneKey, ScreenKey, ScreenModel,
-    ScreenTransferOutcome, ScreenTransferTarget, SourceId, SourceToken, SourceWorkspace, TabStep,
-    TerminalToken, WindowWorkspace,
+    MovePlacement, PaneActionTarget, PaneDrag, PaneKey, RemoteScreenCreateRequest, ScreenKey,
+    ScreenModel, ScreenTransferOutcome, ScreenTransferTarget, SourceId, SourceToken,
+    SourceWorkspace, TabStep, TerminalToken, WindowWorkspace,
 };
 use splitty_client_core::zoom::{Zoom, ZoomAction, ZoomOutcome, ZoomResult};
 use std::{
@@ -747,6 +748,10 @@ pub struct Workspace {
     hosts: HostsView,
     ports: PortsView,
     drawer_port_menu: Option<drawer_ports::DrawerPortMenu>,
+    remote_create_enqueues: HashMap<SourceId, RemoteScreenCreateRequest>,
+    remote_create_follow: Option<RemoteScreenCreateRequest>,
+    remote_create_latest: Option<remote_screen_create::RemoteCreateInterest>,
+    remote_create_notice: Option<remote_screen_create::RemoteCreateNotice>,
     settings: Entity<SettingsView>,
     destination: Destination,
     host_connect_trigger: FocusHandle,
@@ -1075,6 +1080,10 @@ impl Workspace {
                 hosts: HostsView::default(),
                 ports: PortsView::default(),
                 drawer_port_menu: None,
+                remote_create_enqueues: HashMap::new(),
+                remote_create_follow: None,
+                remote_create_latest: None,
+                remote_create_notice: None,
                 settings,
                 destination: Destination::Screens,
                 host_connect_trigger: cx.focus_handle(),
@@ -1176,6 +1185,7 @@ impl Workspace {
         )
     }
     fn stop(&mut self) {
+        self.cancel_remote_create_follow();
         self.stopping.store(true, Ordering::Release);
     }
     fn window_scheme(window: &Window) -> ColorScheme {
@@ -1293,6 +1303,7 @@ impl Workspace {
             }
         }
         self.destination = Destination::Settings;
+        self.cancel_remote_create_follow();
         self.wheel_navigation.reset();
         self.sync_visible(cx);
         self.settings.update(cx, |view, cx| view.focus(window, cx));
@@ -1472,9 +1483,17 @@ impl Workspace {
         self.send_captured(source, command, cx);
     }
     fn send_captured(&mut self, source: SourceToken, command: Command, cx: &mut Context<Self>) {
-        if let Err(error) = self.commands.try_send(WorkerCommand::new(source, command)) {
-            self.status = format!("Action not sent: {error}");
-            cx.notify();
+        let changes_screen = matches!(
+            &command,
+            Command::SwitchScreen(_) | Command::CycleScreen { .. } | Command::CreateScreen(_)
+        );
+        match self.commands.try_send(WorkerCommand::new(source, command)) {
+            Ok(()) if changes_screen => self.cancel_remote_create_follow(),
+            Ok(()) => {}
+            Err(error) => {
+                self.status = format!("Action not sent: {error}");
+                cx.notify();
+            }
         }
     }
     fn create_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1805,6 +1824,9 @@ impl Workspace {
     fn submit_close(&mut self, plan: ClosePlan, confirmed: bool, cx: &mut Context<Self>) {
         match admit_close(&self.commands, plan, confirmed) {
             Ok(pending) => {
+                if pending.plan.target == CloseTarget::Window {
+                    self.cancel_remote_create_follow();
+                }
                 self.revoke_close_links(&pending.plan, cx);
                 self.pending_close = Some(pending);
             }
@@ -1841,7 +1863,10 @@ impl Workspace {
                         screen: screen.clone(),
                     },
                 )) {
-                    Ok(()) => self.revoke_screen_links(&screen, cx),
+                    Ok(()) => {
+                        self.cancel_remote_create_follow_for_detach(&screen);
+                        self.revoke_screen_links(&screen, cx);
+                    }
                     Err(error) => {
                         self.status = format!("Detach was not sent: {error}");
                         cx.notify();
@@ -1984,6 +2009,7 @@ impl Workspace {
         self.ports_owner_changed(window_model.local_source().source_token(), window, cx);
         self.revoke_missing_terminal_links(&window_model);
         self.reconcile_drawer_port_menu(&window_model);
+        self.reconcile_remote_create(&window_model);
         self.settings.update(cx, |view, cx| {
             view.set_owner(window_model.local_source().connection_id(), window, cx);
         });
@@ -2973,6 +2999,12 @@ impl Workspace {
             processed += 1;
             match update {
                 Update::Workspace(model) => self.reconcile(*model, window, cx),
+                Update::RemoteScreenCreateRejected {
+                    owner,
+                    source,
+                    request_id,
+                    reason,
+                } => self.remote_create_rejected(owner, source, request_id, reason, cx),
                 Update::HostDirectory(update) => {
                     if self.hosts.accept(update) {
                         cx.notify();
@@ -4889,6 +4921,9 @@ impl Render for Workspace {
         if !self.status.is_empty() {
             messages.push(self.status.clone());
         }
+        if let Some(notice) = &self.remote_create_notice {
+            messages.push(notice.message().to_owned());
+        }
         if self.destination != Destination::Hosts {
             if let Some(notice) = &self.ports.link_notice {
                 messages.push(notice.clone());
@@ -5269,6 +5304,9 @@ impl Render for Workspace {
                 view.child(
                     div()
                         .id("workspace-status")
+                        .when(cfg!(all(test, feature = "ui-test-support")), |status| {
+                            status.debug_selector(|| "workspace-status".into())
+                        })
                         .px_3()
                         .py_1()
                         .flex_none()

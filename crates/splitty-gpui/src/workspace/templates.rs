@@ -644,6 +644,9 @@ impl Workspace {
             },
         )) {
             Ok(()) => {
+                if plan.replacement_impact().is_none() {
+                    self.cancel_remote_create_follow();
+                }
                 self.pending_template_apply = Some((plan.connection_id(), plan.request_id()));
                 // The worker publishes a separate pending projection. Dismiss
                 // the modal now so the intended layout is immediately visible.

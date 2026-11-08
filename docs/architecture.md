@@ -340,6 +340,17 @@ actual Ports trigger focus through element-keyed state: cancelling returns to
 that Button rather than the dropdown wrapper, while management navigation keeps
 its destination focus and autohide returns to the remaining work area.
 
+The native Drawer offers a new remote Screen beside each retained host group's
+Ports action. Its Plus button captures that group's current source token and
+uses the Core's pure availability check; activation queues one local-owner
+creation request that combines leaving host browsing with remote mutation.
+The view keeps only a bounded enqueue latch, a revocable follow permission and
+the latest outcome interest. Accepted navigation or exact Detach revokes follow
+immediately, while canonical pending, missing and rejected results remain
+visible after destination changes. Unnamed remote references use neutral labels
+until a canonical name arrives. Rendering, failed queue admission and result
+projection never select a Screen or submit another mutation.
+
 Native Screen ordering captures the local window owner and stable Screen keys.
 Local placement requires `screen-placement-v1` and `workspace-catalog-v1`, sends
 one relative operation and uses the existing mutation watermark to retain an

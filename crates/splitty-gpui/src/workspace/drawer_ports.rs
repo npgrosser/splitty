@@ -47,12 +47,6 @@ struct PortMenuPresentation {
 }
 
 impl Workspace {
-    fn drawer_host_actions_available(&self) -> bool {
-        !self.hosts_navigation_blocked()
-            && !self.hosts.has_open_form()
-            && !self.ports.has_open_form()
-    }
-
     fn drawer_port_presentation(&self, group: &HostGroupTarget) -> PortMenuPresentation {
         let rows: Vec<_> = self
             .ports
@@ -371,6 +365,7 @@ impl Workspace {
             .drawer_port_menu
             .as_ref()
             .is_some_and(|menu| menu.group == group);
+        let create_action = self.render_remote_create_action(&group, cx);
         div()
             .mx_2()
             .mt_2()
@@ -470,6 +465,7 @@ impl Workspace {
                         }
                     }),
             )
+            .child(create_action)
             .into_any_element()
     }
 }

@@ -516,6 +516,7 @@ impl Workspace {
             return;
         }
         self.destination = Destination::Hosts;
+        self.cancel_remote_create_follow();
         self.refresh_ports(cx);
         self.wheel_navigation.reset();
         self.sync_visible(cx);
@@ -594,11 +595,29 @@ impl Workspace {
                 cx.notify();
                 return;
             }
-            if self.hosts.connect.take().is_some() || self.hosts.alias_editor.take().is_some() {
-                self.hosts.connect_subscription = None;
-                self.hosts.alias_subscription = None;
-                window.close_dialog(cx);
-            }
+        }
+        self.enter_screens_destination(window, cx);
+    }
+
+    pub(super) fn enter_screens_after_remote_create(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.destination == Destination::Hosts {
+            // The local-owner create command releases browsing itself.
+            self.leave_ports(window, cx);
+        }
+        self.enter_screens_destination(window, cx);
+    }
+
+    fn enter_screens_destination(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.destination == Destination::Hosts
+            && (self.hosts.connect.take().is_some() || self.hosts.alias_editor.take().is_some())
+        {
+            self.hosts.connect_subscription = None;
+            self.hosts.alias_subscription = None;
+            window.close_dialog(cx);
         }
         self.destination = Destination::Screens;
         self.sync_visible(cx);
