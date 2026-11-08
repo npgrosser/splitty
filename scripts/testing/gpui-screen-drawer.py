@@ -70,6 +70,11 @@ def main():
     parser.add_argument("--xdotool", default="xdotool")
     parser.add_argument("--geometry", type=Path)
     parser.add_argument("--setup-only", action="store_true")
+    parser.add_argument("--reorder-only", action="store_true",
+                        help="exercise relative Screen drag with a second owned local client")
+    parser.add_argument("--compact-maximize-only", action="store_true",
+                        help="capture a pinned Drawer and group maximize at compact window size")
+    parser.add_argument("--server-binary", type=Path, default=Path("target/release/splitty"))
     args = parser.parse_args()
     if not args.setup_only and not args.geometry:
         parser.error("full acceptance requires screenshot-calibrated --geometry JSON")
@@ -298,6 +303,103 @@ def main():
                 type_text("exit")
                 key("Return")
                 wait_until(lambda: not alive(initial_pid), "setup shell did not exit normally")
+                close_app()
+            elif args.compact_maximize_only:
+                x("windowsize", "--sync", window, 560, 420)
+                display.sync()
+                time.sleep(.25)
+                def compact_capture(label):
+                    path = args.output / f"{label}.png"
+                    pane_drag.save_png(path, display.pixels(window, (0, 0, 560, 420)),
+                                       width=560, height=420)
+                    result["screenshots"].append(str(path))
+                compact_capture("compact-pinned")
+                x("mousemove", "--window", window, 430, 230)
+                x("click", 1)
+                chord("Alt_L", "m")
+                time.sleep(.3)
+                compact_capture("compact-maximized")
+                marker = owned / "compact-terminal.marker"
+                type_text(f"printf '%s\\n' \"$$:$SPLITTY_PANE_ID:$SPLITTY_SESSION_ID\" > {shlex.quote(str(marker))}")
+                key("Return")
+                value = wait_until(lambda: marker.read_text().strip() if marker.exists() else None,
+                                   "compact terminal did not receive keyboard input")
+                shell = shells()[initial_pid]
+                assert value == f"{initial_pid}:{shell['pane']}:{shell['session']}", value
+                chord("Alt_L", "m")
+                time.sleep(.3)
+                compact_capture("compact-restored")
+                result["checks"].append("compact-pinned-drawer-maximize-restore-and-terminal-input")
+                close_app()
+            elif args.reorder_only:
+                server = args.server_binary.resolve(strict=True)
+                sockets = list((config / "run").glob("spike-*.sock"))
+                assert len(sockets) == 1 and stat.S_ISSOCK(sockets[0].lstat().st_mode)
+                cli_env = env.copy()
+                cli_env["SPLITTY_SOCK"] = str(sockets[0])
+                for name in ("Bravo", "Charlie", "Delta"):
+                    subprocess.check_output([str(server), "new-screen", "--name", name],
+                                            env=cli_env, text=True, timeout=15)
+                ordered = wait_until(
+                    lambda: (s if len((s := state())["screenOrder"]) == 4 else None),
+                    "second client Screens did not reach the window")
+                wait_until(
+                    lambda: all(screen["sessions"] and all(session["status"] == "running"
+                        for session in screen["sessions"].values())
+                        for screen in state()["screens"].values()),
+                    "second client Screen sessions did not settle")
+                ids = {screen["name"]: id for id, screen in ordered["screens"].items()}
+                assert set(ids) >= {"Bravo", "Charlie", "Delta"}, ids
+                assert ordered["screenOrder"] == [initial_id, ids["Bravo"], ids["Charlie"], ids["Delta"]]
+                click("drawer.row_initial")
+                wait_until(lambda: state()["activeScreenId"] == initial_id,
+                           "initial Screen was not selected before placement")
+                baseline = state("before-reorder")
+                before_sessions = {id: screen["sessions"] for id, screen in baseline["screens"].items()}
+                capture("before-reorder")
+
+                def drag(from_key, to_key, cancel=False):
+                    start, finish = point(from_key), point(to_key)
+                    x("mousemove", "--window", window, *start)
+                    x("mousedown", 1)
+                    x("mousemove", "--window", window, start[0] + 10, start[1])
+                    x("mousemove", "--window", window, *finish)
+                    display.sync()
+                    time.sleep(.12)
+                    capture("cancel-target" if cancel else "relative-insertion-target")
+                    if cancel:
+                        key("Escape")
+                    x("mouseup", 1)
+                    display.sync()
+
+                drag("drawer.row_charlie", "drawer.before_initial")
+                after = wait_until(
+                    lambda: (s if (s := state())["screenOrder"] ==
+                             [ids["Charlie"], initial_id, ids["Bravo"], ids["Delta"]] else None),
+                    "relative placement did not preserve concurrent Delta")
+                assert after["activeScreenId"] == initial_id, "placement navigated away"
+                assert {id: screen["sessions"] for id, screen in after["screens"].items()} == before_sessions
+                assert alive(initial_pid), "placement replaced the original shell"
+                assert_routes(after)
+                time.sleep(.7)
+                capture("after-reorder")
+                result["checks"].append("relative-drag-retains-concurrent-screen-selection-and-sessions")
+
+                drag("drawer.row_bravo_after", "drawer.before_charlie_after", cancel=True)
+                assert state()["screenOrder"] == after["screenOrder"], "Escape changed Screen order"
+                capture("after-reorder-cancel")
+                result["checks"].append("escape-cancels-drawer-placement")
+
+                marker = owned / "reorder-terminal-output.marker"
+                click("terminal.initial")
+                type_text(f"printf '%s\\n' \"$$:$SPLITTY_PANE_ID:$SPLITTY_SESSION_ID\" > {shlex.quote(str(marker))}")
+                key("Return")
+                output = wait_until(lambda: marker.read_text().strip() if marker.exists() else None,
+                                    "original terminal did not receive output after placement")
+                original_shell = shells()[initial_pid]
+                assert output == f"{initial_pid}:{original_shell['pane']}:{original_shell['session']}"
+                assert state()["activeScreenId"] == initial_id
+                result["checks"].append("terminal-input-and-output-keep-original-session-after-reorder")
                 close_app()
             else:
                 click("drawer.create")

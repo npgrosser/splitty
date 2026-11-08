@@ -301,6 +301,23 @@ The Drawer retains only the captured drag identity and a transient insertion
 marker measured against the current rows. It submits the same relative intent
 as its Move Up/Move Down menu actions; changing order does not navigate.
 
+Drawer wheel navigation uses the web action's gesture gate: an idle gap longer
+than 120 ms or a renewed impulse greater than 1.5 times the previous magnitude
+admits another Screen step. Pixel noise below two pixels does not start a swipe;
+native line events already represent wheel movement. Ordinary selection and
+catalog acknowledgements preserve this gate so residual momentum cannot repeat
+the change. Tab-strip distance handling and terminal scrolling remain separate.
+
+Screen navigation retains at most one outgoing `ScreenModel` projection for a
+200 ms vertical Kit transition. Its terminal surfaces reuse the existing painter
+with recorded geometry and source/route identity, without installing input,
+resize or activity handlers. Only the current Screen owns live views and visible
+routes. Reversal starts from the sampled position; a third Screen replaces the
+outgoing projection, and owner/binding loss, removal, viewport changes, leaving
+Screens or reduced motion discard it. A parent viewport guard preserves current
+terminal focus when a click lands on the outgoing-only region. Layout still comes
+from the canonical model; the animation owns no second mutable layout.
+
 The Drawer uses two window-local Kit transition channels: visible overlay
 translation and pinned content reservation. Revealing an unpinned Drawer never
 reserves workspace width. Explicit pin admission changes the presentation target

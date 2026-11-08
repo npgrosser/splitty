@@ -1625,7 +1625,7 @@ reservation, hover colors and measured split-drop bounds. Six production-view
 tests and strict targeted GPUI Clippy passed. During a pinned transition the
 retained terminal emitted ten integer-grid resize commands over fifteen sampled
 frames, one pin write and no terminal input. Screen slides and Screen drag
-ordering are separate unfinished increments. The new host update controls have
+ordering were not covered by this candidate. The new host update controls have
 seven passing production-view tests; real-window remote maintenance acceptance
 remains open and is not implied by this Windows workspace smoke.
 
@@ -1650,3 +1650,67 @@ A maximized group now shows `Group maximized` beside a labeled, outlined
 starts from the maximized canonical projection, clicks the actual restore
 control, observes its captured command and restores the two-slot layout. It
 does not establish compact-window visual acceptance.
+
+### Relative Screen order and Drawer swipe acceptance (2026-11-08)
+
+Owned Xvfb windows exercised local relative Screen placement with concurrent
+creation and Escape cancellation. Selection, every existing session and the
+original shell PID remained unchanged; a fresh terminal marker after the move
+confirmed input and output still used that pane and session. A second run used
+two private host fixtures: dragging an opened reference changed the Drawer
+order while the host catalog, host-group order and original live terminal
+identity stayed unchanged. Normal window close preserved the private remote
+sessions, and fixture cleanup completed. These use optional phases in the
+existing Drawer and remote-Screen harnesses, not a new process framework.
+
+The optimized native candidate was
+`2f27065632921afb3b6eda21de68a1e04c42bf32c9d2f60207ed23e2a1b5a48f`,
+with matching backend
+`4a3d5de13a10037a2968e7146f2fe04595ba500df6f91001a25414c1ae720078`.
+All 376 source inputs remained unchanged during the build. Windows/macOS
+ordering acceptance is not covered. A separate 560×420 pinned-Drawer run kept
+terminal input and keyboard maximize/restore working, but revealed clipping of
+the labeled restore control. The subsequent compact `Maximized`/`Restore` copy
+fix passes a production-view test that checks its bounds and clicks the control;
+normal widths retain the full labels.
+
+The subsequent Drawer swipe correction follows the web action's 120 ms idle
+and renewed-impulse gate, retaining its state across selection acknowledgements.
+The targeted Drawer suite passes 22 tests, including a production-view stream
+longer than 120 ms that admits only one change until input actually pauses.
+Strict GPUI all-target Clippy passes. The frozen real-window candidate above
+predates this swipe correction.
+
+### Screen motion, terminal Tab and live titles (2026-11-08)
+
+Screen transitions now retain one passive outgoing projection for 200 ms.
+Production-view tests verify current-only input/resize ownership, focus after
+clicking the outgoing region, reversal from the displayed position, bounded
+retention, removal/owner invalidation and reduced motion. A private Xvfb run
+using software rendering captured adjacent red and blue terminal surfaces
+sliding vertically, including reversal and settled content, without clipping or
+overlap. Candidate SHA-256:
+`903def7fbf90d845660739c64ba9f9ce98d9b576a2cc8d5dfd7f426ed7f97f78`.
+This is visual acceptance of a debug candidate, not a hardware-performance or
+Windows timing result.
+
+The terminal's focused key context now suppresses Kit's global Tab traversal
+binding before raw key dispatch. A production Root/Terminal test uses actual
+pointer focus, verifies `\t` and `ESC[Z` reach the PTY for Tab/Shift+Tab, and
+verifies search controls retain traversal without terminal input. Tab context
+menus also reuse the captured-pane close assessment; three view tests cover
+inactive tabs, keyboard activation, obsolete owners and remote close-only menus.
+
+Titles remain server-derived. The existing metadata observer updates canonical
+pane titles and nudges each affected Screen; native snapshot reconciliation
+updates both Drawer and tab text, including hidden Screens. An owned OSC title
+probe on the optimized reorder candidate above verified that full path. A
+production-view test additionally verifies replacement of a hidden Screen's
+label and leading icon without navigating to it. The Drawer matches the web
+non-ASCII prefix rule while also supporting single Unicode emoji; there is no
+second title parser. Shared live/passive tab labels stay on one line with
+ellipsis.
+
+Final integrated validation: all 150 native GPUI tests and all 17 architecture
+checks pass. Strict GPUI all-target Clippy with UI test support passes. The full
+workspace merge gate and real-window Windows/macOS acceptance remain deferred.

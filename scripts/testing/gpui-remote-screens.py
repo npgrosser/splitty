@@ -9,8 +9,10 @@ record visible states; private CLI reads and shell markers prove backend effects
 
 import argparse
 from collections import deque
+import csv
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -38,10 +40,12 @@ port_fixture_module = helper("outbound_port_fixture", "gpui-outbound-port-fixtur
 performance = helper("performance", "gpui-performance.py")
 pane_drag = helper("pane_drag", "gpui-pane-drag.py")
 
-PHASES = ("setup", "connect", "open", "ports", "host-management", "settings-remote", "terminal", "two-hosts", "recovery", "detach", "full")
+PHASES = ("setup", "connect", "open", "reorder", "ports", "host-management", "settings-remote", "terminal", "two-hosts", "recovery", "detach", "full")
 POINTS = {
     "connect": ("hosts.toolbar", "hosts.connect_a"),
     "open": ("hosts.open_a",),
+    "reorder": ("hosts.toolbar_remote", "hosts.open_a_second", "drawer.a_first",
+                "drawer.a_second", "drawer.a_first_before"),
     "ports": ("hosts.toolbar_remote", "ports.host_b_connect", "ports.host_b_open",
               "ports.add", "ports.target", "ports.remote", "ports.local", "ports.label",
               "ports.remember", "ports.forward", "ports.open", "ports.save",
@@ -482,6 +486,74 @@ def run_window(args, geometry, result):
                                          "session": owned.hosts[a]["session"]})
                     capture("remote-a-open")
                     result["checks"].append("open-existing-a-terminal-input-matches-private-session")
+
+                if args.phase == "reorder":
+                    def drawer_word_order(label):
+                        crop = args.output / f"{label}-drawer.png"
+                        pane_drag.save_png(crop, display.pixels(window, (0, 0, 280, 760)), 280, 760)
+                        ocr_env = os.environ.copy()
+                        if args.tesseract_lib:
+                            ocr_env["LD_LIBRARY_PATH"] = str(args.tesseract_lib) + (
+                                ":" + ocr_env["LD_LIBRARY_PATH"] if ocr_env.get("LD_LIBRARY_PATH") else "")
+                        if args.tessdata:
+                            ocr_env["TESSDATA_PREFIX"] = str(args.tessdata)
+                        words = subprocess.check_output(
+                            [str(args.tesseract), str(crop), "stdout", "--psm", "6", "tsv"],
+                            env=ocr_env, text=True, timeout=12, stderr=subprocess.DEVNULL)
+                        rows = list(csv.DictReader(io.StringIO(words), delimiter="\t"))
+                        def top(term):
+                            return min(int(row["top"]) for row in rows
+                                       if term in row["text"].lower())
+                        positions = {term: top(term) for term in ("alpha", "remote")}
+                        result.setdefault("drawerOcr", {})[label] = positions
+                        result["screenshots"].append(str(crop))
+                        return positions
+
+                    host_order_before = local_order()
+                    owned._run([str(owned.binary), "new-screen", "--name", "Remote second"],
+                               owned._host_env(a))
+                    host_order = wait_until(
+                        lambda: (items if len(items := screens(a)) == 2 else None),
+                        "private host A second Screen did not appear")
+                    second = next(item for item in host_order
+                                  if item["id"] != owned.hosts[a]["screen"])
+                    click("hosts.toolbar_remote")
+                    capture("host-a-two-screen-catalog")
+                    click("hosts.open_a_second")
+                    capture("host-a-two-open-references")
+                    before_visual = drawer_word_order("before-remote-reorder")
+                    assert before_visual["alpha"] < before_visual["remote"], before_visual
+                    click("drawer.a_first")
+                    time.sleep(.7)
+                    capture("first-remote-selected-before-reorder")
+                    before = marker(a, "before-remote-reorder",
+                                    {"pid": owned.hosts[a]["shell_pid"],
+                                     "pane": owned.hosts[a]["pane"],
+                                     "session": owned.hosts[a]["session"]})
+                    start = point("drawer.a_second")
+                    finish = point("drawer.a_first_before")
+                    x("mousemove", "--window", window, *start)
+                    x("mousedown", 1)
+                    x("mousemove", "--window", window, start[0] + 10, start[1])
+                    x("mousemove", "--window", window, *finish)
+                    display.sync()
+                    time.sleep(.12)
+                    capture("remote-reference-insertion")
+                    x("mouseup", 1)
+                    display.sync()
+                    time.sleep(.4)
+                    capture("remote-reference-reordered")
+                    after_visual = drawer_word_order("after-remote-reorder")
+                    assert after_visual["remote"] < after_visual["alpha"], after_visual
+                    assert [item["id"] for item in screens(a)] == [item["id"] for item in host_order], (
+                        "window reference drag changed host Screen order")
+                    assert local_order() == host_order_before, "Screen drag changed host group order"
+                    assert marker(a, "after-remote-reorder", before) == before
+                    result["remoteReordered"] = {"moved": second["id"],
+                                                 "anchor": owned.hosts[a]["screen"],
+                                                 "hostOrderUnchanged": True,
+                                                 "localHostOrderUnchanged": True}
+                    result["checks"].append("remote-window-reference-reorder-preserves-host-order-and-terminal")
 
                 if args.phase == "ports":
                     remote = owned.http_port
@@ -1263,15 +1335,20 @@ def main():
     parser.add_argument("--xvfb", default="Xvfb")
     parser.add_argument("--xvfb-lib", type=Path)
     parser.add_argument("--xdotool", default="xdotool")
+    parser.add_argument("--tesseract", type=Path)
+    parser.add_argument("--tesseract-lib", type=Path)
+    parser.add_argument("--tessdata", type=Path)
     args = parser.parse_args()
     if args.setup_only:
         args.phase = "setup"
     geometry = json.loads(args.geometry.read_text()) if args.geometry else {}
     if args.phase != "setup" and not args.geometry:
         parser.error("interaction phases require screenshot-calibrated --geometry JSON")
+    if args.phase == "reorder" and not args.tesseract:
+        parser.error("reorder phase requires --tesseract for visible Drawer order")
     required = set()
     for phase in PHASES[1:PHASES.index(args.phase) + 1]:
-        if phase in ("ports", "host-management", "settings-remote") and args.phase != phase:
+        if phase in ("reorder", "ports", "host-management", "settings-remote") and args.phase != phase:
             continue
         required.update(POINTS.get(phase, ()))
     required.add("window.confirm_close") if args.phase != "setup" else None
