@@ -40,8 +40,13 @@ port_fixture_module = helper("outbound_port_fixture", "gpui-outbound-port-fixtur
 performance = helper("performance", "gpui-performance.py")
 pane_drag = helper("pane_drag", "gpui-pane-drag.py")
 
-PHASES = ("setup", "connect", "open", "reorder", "ports", "host-management", "settings-remote", "terminal", "two-hosts", "recovery", "detach", "full")
+PHASES = ("setup", "remote-create", "connect", "open", "reorder", "ports", "host-management", "settings-remote", "terminal", "two-hosts", "recovery", "detach", "full")
 POINTS = {
+    "remote-create": ("hosts.toolbar", "hosts.connect_a", "hosts.open_a",
+                      "hosts.toolbar_remote", "ports.host_b_connect", "ports.host_b_open",
+                      "drawer.local_row", "drawer.a_row", "drawer.b_row",
+                      "drawer.b_new", "drawer.b_created_row", "drawer.b_created_close",
+                      "hosts.open_b_created"),
     "connect": ("hosts.toolbar", "hosts.connect_a"),
     "open": ("hosts.open_a",),
     "reorder": ("hosts.toolbar_remote", "hosts.open_a_second", "drawer.a_first",
@@ -90,7 +95,51 @@ def pid_live(pid):
     return fixture_module.alive(pid)
 
 
+def pause_private_bridge(owned, target, record):
+    """Pause only the fixture's identified bridge, retaining a pidfd for CONT."""
+    if target not in owned.hosts or record.get("target") != target or not record.get("accepted"):
+        raise RuntimeError("bridge is outside this private fixture")
+    pid, start = record.get("pid"), record.get("start")
+    if type(pid) is not int or not isinstance(start, str):
+        raise RuntimeError("private bridge record has no process identity")
+    host = owned.hosts[target]
+    expected_exe = host["installed"].resolve(strict=True)
+    expected_argv = [str(expected_exe), "remote-bridge", "--transport", "native-v1"]
+    expected_config = f'SPLITTY_CONFIG_DIR={host["config"]}'.encode()
+    pidfd = os.pidfd_open(pid)
+    try:
+        proc = Path(f"/proc/{pid}")
+        argv = [part.decode() for part in (proc / "cmdline").read_bytes().split(b"\0") if part]
+        environment = (proc / "environ").read_bytes().split(b"\0")
+        if (not pid_live(pid) or fixture_module.process_start(pid) != start or
+                (proc / "exe").resolve(strict=True) != expected_exe or
+                argv != expected_argv or expected_config not in environment):
+            raise RuntimeError("private bridge identity changed; refusing pause")
+        paused = {"pidfd": pidfd, "pid": pid, "start": start, "target": target}
+        signal.pidfd_send_signal(pidfd, signal.SIGSTOP)
+        return paused
+    except BaseException:
+        os.close(pidfd)
+        raise
+
+
+def resume_private_bridge(paused):
+    """Release an identified bridge; retain its fd if CONT fails for cleanup."""
+    pidfd = paused.get("pidfd")
+    if pidfd is None:
+        return
+    if (pid_live(paused["pid"]) and
+            fixture_module.process_start(paused["pid"]) == paused["start"]):
+        signal.pidfd_send_signal(pidfd, signal.SIGCONT)
+    os.close(pidfd)
+    paused["pidfd"] = None
+
+
 def run_window(args, geometry, result):
+    if args.phase == "remote-create":
+        fixture_tmp = args.output / "t"
+        fixture_tmp.mkdir(mode=0o700, exist_ok=False)
+        os.environ["SPLITTY_TEST_TMPDIR"] = str(fixture_tmp)
     fixture = (port_fixture_module.OutboundPortFixture if args.phase == "ports"
                else fixture_module.RemoteScreenFixture)(args.server_binary)
     owned = None
@@ -98,6 +147,7 @@ def run_window(args, geometry, result):
     xvfb_start = app_start = None
     app_children = {}
     normal_close = False
+    paused_bridge = None
     try:
         owned = fixture.__enter__()
         result["fixture"] = owned.manifest()
@@ -477,6 +527,118 @@ def run_window(args, geometry, result):
                 assert_host_unchanged(a, baseline[a])
                 assert_host_unchanged(b, baseline[b])
                 result["checks"].append("deliberate-connect-a-preserves-existing-screens")
+
+                if args.phase == "remote-create":
+                    click("hosts.open_a")
+                    marker(a, "create-open-a", {
+                        "pid": owned.hosts[a]["shell_pid"],
+                        "pane": owned.hosts[a]["pane"],
+                        "session": owned.hosts[a]["session"],
+                    })
+                    click("hosts.toolbar_remote")
+                    click("ports.host_b_connect")
+                    wait_until(lambda: host_bridge_started(b),
+                               "Connect B did not start private bridge", seconds=25)
+                    time.sleep(1.2)
+                    capture("create-host-b-ready")
+                    click("ports.host_b_open")
+                    time.sleep(.4)
+                    marker(b, "create-open-b", {
+                        "pid": owned.hosts[b]["shell_pid"],
+                        "pane": owned.hosts[b]["pane"],
+                        "session": owned.hosts[b]["session"],
+                    })
+                    click("drawer.local_row")
+                    capture("create-local-selected-b-ready")
+                    if args.stop_after_create_setup:
+                        result["checks"].append("remote-create-geometry-setup-only")
+                    else:
+                        before_a = inventory(a)
+                        before_b = inventory(b)
+                        before_b_ids = set(before_b)
+                        before_local = set(local_state().get("screens", {}))
+                        names_b = {screen["name"] for screen in screens(b)}
+                        default_name = next(
+                            f"Screen {number}" for number in range(1, 1000)
+                            if f"Screen {number}" not in names_b
+                        )
+                        bridge = bridge_records(b)[-1]
+                        paused_bridge = pause_private_bridge(owned, b, bridge)
+                        result["pausedBridge"] = {
+                            key: paused_bridge[key] for key in ("pid", "start", "target")
+                        }
+                        click("drawer.b_new")
+                        click("drawer.a_row")
+                        marker(a, "a-before-b-confirmation", result["terminalMarkers"]["create-open-a"])
+                        assert inventory(b) == before_b, "B created while its owned bridge was paused"
+                        capture("create-a-selected-before-b-confirmation")
+                        resume_private_bridge(paused_bridge)
+                        paused_bridge = None
+                        result["pausedBridgeReleasedAfterNavigation"] = True
+
+                        def created_b():
+                            catalog = screens(b)
+                            additions = [row for row in catalog if row["id"] not in before_b_ids]
+                            return additions[0] if len(additions) == 1 else None
+
+                        created = wait_until(created_b,
+                                             "B did not create exactly one canonical Screen", seconds=25)
+                        assert created["name"] == default_name, (created, default_name)
+                        assert inventory(a) == before_a
+                        assert set(local_state().get("screens", {})) == before_local
+                        new_screen = created["id"]
+                        new_panes = panes(b, new_screen)
+                        assert len(new_panes) == 1, new_panes
+                        new_pane, new_details = next(iter(new_panes.items()))
+                        new_session = new_details["sessionId"]
+                        assert new_session not in set(before_b[owned.hosts[b]["screen"]].values())
+
+                        def assert_b_catalog_exact():
+                            current = inventory(b)
+                            assert set(current) == before_b_ids | {new_screen}, current
+                            assert all(current[screen] == sessions
+                                       for screen, sessions in before_b.items()), current
+                            assert current[new_screen] == {new_pane: new_session}, current
+
+                        assert_b_catalog_exact()
+                        marker(a, "a-after-b-confirmation", result["terminalMarkers"]["create-open-a"])
+                        capture("create-b-confirmed-a-still-selected")
+                        result["createdScreen"] = {
+                            "target": b, "screen": new_screen, "name": created["name"],
+                            "pane": new_pane, "session": new_session,
+                        }
+                        result["checks"].append(
+                            "b-only-canonical-screen-created-while-a-selection-retained")
+
+                        def created_marker(label):
+                            path = owned.root / f"ui-{label}.tsv"
+                            type_text("printf '%s\\t%s\\t%s\\n' \"$$\" \"$SPLITTY_PANE_ID\" "
+                                      f"\"$SPLITTY_SESSION_ID\" > {shlex.quote(str(path))}")
+                            value = wait_until(lambda: path.read_text().strip()
+                                               if path.exists() else None,
+                                               f"new B Screen marker {label} did not arrive")
+                            pid_text, pane, session = value.split("\t")
+                            pid = int(pid_text)
+                            assert (pane, session) == (new_pane, new_session)
+                            assert pid in owned._live_shell_markers(b)
+                            return {"pid": pid, "pane": pane, "session": session}
+
+                        click("drawer.b_created_row")
+                        opened = created_marker("b-created-opened")
+                        capture("create-b-new-screen-opened")
+                        click("drawer.b_created_close")
+                        time.sleep(.4)
+                        assert_b_catalog_exact()
+                        assert pid_live(opened["pid"])
+                        capture("create-b-new-screen-detached")
+                        click("hosts.toolbar_remote")
+                        click("hosts.open_b_created")
+                        reopened = created_marker("b-created-reopened")
+                        assert reopened == opened
+                        assert_b_catalog_exact()
+                        assert inventory(a) == before_a
+                        capture("create-b-new-screen-reopened-same-session")
+                        result["checks"].append("b-created-screen-detach-reopen-reuses-session")
 
                 if PHASES.index(args.phase) >= PHASES.index("open"):
                     click("hosts.open_a")
@@ -1282,6 +1444,14 @@ def run_window(args, geometry, result):
     finally:
         cleanup_errors = []
 
+        if paused_bridge is not None:
+            try:
+                resume_private_bridge(paused_bridge)
+                result["pausedBridgeReleasedInCleanup"] = True
+            except Exception as error:
+                cleanup_errors.append(f"paused bridge: {error}")
+            paused_bridge = None
+
         def stop_owned(process, started, label):
             if process is None:
                 return
@@ -1330,6 +1500,8 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--geometry", type=Path)
     parser.add_argument("--setup-only", action="store_true")
+    parser.add_argument("--stop-after-create-setup", action="store_true",
+                        help="capture connected A/B Drawer geometry, then close normally")
     parser.add_argument("--phase", choices=PHASES, default="full")
     parser.add_argument("--display", default=":98")
     parser.add_argument("--xvfb", default="Xvfb")
@@ -1341,6 +1513,8 @@ def main():
     args = parser.parse_args()
     if args.setup_only:
         args.phase = "setup"
+    if args.stop_after_create_setup and args.phase != "remote-create":
+        parser.error("--stop-after-create-setup requires --phase remote-create")
     geometry = json.loads(args.geometry.read_text()) if args.geometry else {}
     if args.phase != "setup" and not args.geometry:
         parser.error("interaction phases require screenshot-calibrated --geometry JSON")
