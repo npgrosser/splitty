@@ -1885,5 +1885,12 @@ remote Screen, native key down/up activation, independent domain completion,
 last-good reads and badge policy after authoritative readback. The core slice
 passes 32 scheduler, one field-contract and ten appearance tests; strict
 GPUI/client-core Clippy, formatting, 17 architecture checks and strict change
-validation pass. Owned actual-window acceptance remains separate, as does the
-full merge gate. These changes are not in the frozen Activity preview.
+validation pass. An owned 1200×760 Linux X11 window also passes actual Switch
+and Reset interaction: the complete parsed configuration changes exactly
+`notifications.enabled`, and Reset restores the exact baseline while retaining
+toast, desktop and process preferences. Captures show unclipped controls at that
+size; Escape, trigger-focus/reopen, terminal typing, normal close and cleanup
+pass. The frozen candidate has SHA-256
+`fe46efb4be12be4fefa3d1246df9f7301b7a3ef472a63065948a43cc686c5376`.
+Windows controls and the full merge gate remain separate. These changes are not
+in the frozen Activity preview.
