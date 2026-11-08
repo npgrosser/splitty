@@ -58,6 +58,7 @@ model {
     gpui_main -> gpui_workspace 'Construct the native multi-source workspace window'
     gpui_main -> terminal 'Install focused PTY key context after Kit key bindings'
     gpui_main -> splitty.client_core.native_workspace 'Join the native workspace runtime'
+    gpui_main -> splitty.client_core.client_workspace 'Construct the canonical title model in OS window observation tests'
     gpui_main -> offscreen 'Run an engine child before opening the UI'
     gpui_app -> gpui_document 'Show Markdown and annotation marks'
     gpui_app -> offscreen 'Composite the offscreen engine frame under an overlay'
