@@ -1816,3 +1816,33 @@ candidate has SHA-256
 `834c19f9fbc39689e9da03aadcd31e93214c34493f85bfc6eedd90c48a93dcfc`.
 These additions are not in the frozen Interaction preview; Windows badge
 acceptance and full workspace merge checks remain separate.
+
+### Windows Activity preview (2026-11-08)
+
+The Activity preview freezes source `9252c22`, including the Interaction baseline,
+terminal body context menu, Drawer collapse and spacing, unread activity and full
+live tab-title tooltips. The existing hidden-Screen production-view test now also
+selects that Screen, checks its complete updated tab title and verifies fallback
+labels after a canonical snapshot removes the title. Focused view tests, strict
+GPUI Clippy and formatting pass.
+
+The native MSVC build has SHA-256
+`8f167bc6d37b907c273f344dbe65c12fd6ff9724e8a5b2dad91fda9e42ef9bc7`;
+its matching static Linux x86_64 backend has SHA-256
+`75824e34d27ac9d0d160299c78c0ac5f03ffc25e9663ef9ee07aa21e9843f18f`.
+The owned Windows workspace smoke passes all 18 stages using hardware graphics,
+normal window close and owned backend/shell cleanup while an unrelated sentinel
+survives. A separate owned fake-SSH probe verifies the static self-install
+payload. The package preserves earlier previews in a separate Downloads folder.
+
+An additional Windows Drawer probe verifies selection through distinct terminal
+input logs, rather than the server's active Screen hint: three equal Win32 wheel
+events in 40 ms move exactly one Screen, one event after idle moves again, and
+the reverse direction moves back. This establishes wheel behavior only. That
+probe's normal-close step times out with three running shell workloads and its
+overall result remains failed; targeted termination of its verified owned
+Windows process is followed by complete owned backend/shell cleanup. The
+separate 18-stage smoke supplies normal-close acceptance.
+
+Windows unread-badge and terminal-context-menu interaction acceptance, real-host
+update/install and remote payloads for other architectures remain separate.
