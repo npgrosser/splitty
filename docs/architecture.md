@@ -620,6 +620,23 @@ This grants no live execution authority: Paste, split and close also require the
 live pane authority captured when the menu opened. No focus or local search
 operation reconnects a host or queues terminal input for replay.
 
+The UI-free `NotificationCenter` retains at most 100 small owned notification
+records per window. It borrows the existing charged event only while classifying
+four notification fact types, accepts only the source's current connection token,
+and applies effective notification settings before retention. Titles are bounded
+plain text with window-supplied remote host attribution; bodies, arbitrary JSON
+and transport leases are never retained. The UI supplies the watched pane and
+reads source-qualified count, newest-title and severity projections.
+
+Read/dedup history belongs to the source namespace across a reconnect. Badge
+bindings require the current canonical pane and captured session, independently
+of terminal attachment or command readiness. Reset gaps hide bindings without
+pruning history; fresh exact mapping restores them without replaying events.
+Unknown-at-arrival sessions stay permanently unbound. A complete observation can
+prune a removed or replaced-session pane; source disposal or local-owner
+replacement clears inapplicable records, and the latter also resets settings
+admission. Reading and reconciling this state never sends a server operation.
+
 Native terminal search is local to the terminal adapter and view. The adapter
 owns the search handle, checked allocator and tracked navigation anchor; its
 public results contain only owned, viewport-clipped cell spans. A 16 MiB budget

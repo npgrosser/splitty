@@ -11,6 +11,7 @@ pub mod external_links;
 pub mod hub;
 pub mod local_service;
 pub mod native_workspace;
+pub mod notifications;
 pub mod shell_profiles;
 pub mod templates;
 pub mod workspace;

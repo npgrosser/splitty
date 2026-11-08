@@ -52,6 +52,46 @@ pub struct Output<'a> {
 }
 
 impl Event {
+    /// A bounded real carrier fixture for production-view tests. The returned
+    /// event still owns its frame and JSON charges after both peers are joined.
+    #[cfg(any(test, feature = "ui-test-support"))]
+    #[doc(hidden)]
+    pub async fn ui_test_json(connection_id: Uuid, value: &Value) -> io::Result<Self> {
+        use splitty_transport::{peer::Peer, queue};
+        let ready = wire::Ready {
+            generation: 1,
+            instance: "a".repeat(32),
+            mux_protocol: wire::MUX_PROTOCOL_VERSION,
+            purpose: wire::Purpose::Direct,
+            limits: wire::Limits::default(),
+        };
+        let (left, right) = tokio::io::duplex(4096);
+        let (read_left, write_left) = tokio::io::split(left);
+        let (read_right, write_right) = tokio::io::split(right);
+        let context = queue::Context::default();
+        let left = Peer::start(read_left, write_left, &ready, queue::Context::default());
+        let mut right = Peer::start(read_right, write_right, &ready, context.clone());
+        let result = async {
+            left.sender.json(Kind::Text, value)?;
+            let raw = right
+                .recv()
+                .await
+                .ok_or_else(|| invalid("fixture carrier closed"))?;
+            let json = decode_event_json(&raw, &context.budget)?;
+            Ok(Self {
+                connection_id,
+                raw,
+                json: Some(json),
+                replay: false,
+            })
+        }
+        .await;
+        let (left, right) = tokio::join!(left.finish(), right.finish());
+        left?;
+        right?;
+        result
+    }
+
     pub fn json(&self) -> Option<&Value> {
         self.json.as_ref().map(|value| &value.value)
     }
@@ -68,6 +108,16 @@ impl Event {
             replay: self.replay,
         })
     }
+}
+
+fn decode_event_json(
+    raw: &Incoming,
+    budget: &splitty_transport::budget::ConnectionBudget,
+) -> io::Result<Charged<Value>> {
+    let (_, bytes) = raw.frame.application()?;
+    let lease = codec::reserve_json(bytes, budget, false)?;
+    let value = serde_json::from_slice(bytes).map_err(|_| invalid("invalid session JSON"))?;
+    Ok(lease.charge(value))
 }
 
 #[derive(Clone, Debug)]
@@ -175,10 +225,7 @@ impl Client {
             let mut replay = false;
             let decoded = match raw.frame.kind {
                 Kind::Text => {
-                    let (_, bytes) = raw.frame.application()?;
-                    let lease = codec::reserve_json(bytes, &self.sender().context().budget, false)?;
-                    let value: Value = serde_json::from_slice(bytes)
-                        .map_err(|_| invalid("invalid session JSON"))?;
+                    let value = decode_event_json(&raw, &self.sender().context().budget)?;
                     if value["type"] == "mux.welcome" {
                         self.byte_input =
                             value["capabilities"]
@@ -192,7 +239,7 @@ impl Client {
                     if let Some(session) = value["sessionId"].as_str() {
                         observe_attachment(&mut self.attachments, session, value["type"].as_str());
                     }
-                    Some(lease.charge(value))
+                    Some(value)
                 }
                 Kind::Binary => {
                     let (_, bytes) = raw.frame.application()?;

@@ -590,6 +590,25 @@ impl SourceWorkspace {
     pub fn has_pending_create(&self) -> bool {
         !self.pending_screens.is_empty()
     }
+    /// A missing canonical route is conclusive only after the entire opened
+    /// collection has settled. A scheduled metadata refresh alone does not
+    /// invalidate an existing snapshot. This is not send authority.
+    pub(crate) fn route_observation_complete(&self) -> bool {
+        self.catalog_initialized
+            && !self.reconciling
+            && !self.catalog_dirty
+            && self.catalog_in_flight.is_none()
+            && self.pending_screens.is_empty()
+            && self.pending_transfer.is_none()
+            && self.pending_floating.is_none()
+            && self.pending_template.is_none()
+            && self.catalog.iter().all(|entry| {
+                self.is_missing(entry.id.as_str())
+                    || self.models.get(entry.id.as_str()).is_some_and(|model| {
+                        model.snapshot().is_some() && model.pending_panes.is_empty()
+                    })
+            })
+    }
     pub fn catalog_initialized(&self) -> bool {
         self.catalog_initialized
     }
