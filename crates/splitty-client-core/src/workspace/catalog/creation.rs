@@ -177,11 +177,35 @@ impl SourceWorkspace {
         request: RemoteScreenCreateRequest,
         missing: bool,
     ) -> io::Result<()> {
-        self.create_remote_screen_with(request, |_| Ok(()))?;
+        self.create_remote_screen_with(request.clone(), |_| Ok(()))?;
         if !missing {
             return Ok(());
         }
-        let catalog = serde_json::json!({"type":"mux.workspace_snapshot", "screens": self.live_catalog().unwrap()});
+        self.fixture_remote_creation_missing(&request)
+    }
+
+    #[cfg(any(test, feature = "ui-test-support"))]
+    pub(crate) fn fixture_remote_creation_missing(
+        &mut self,
+        request: &RemoteScreenCreateRequest,
+    ) -> io::Result<()> {
+        let creation = self
+            .remote_creation
+            .as_ref()
+            .filter(|creation| {
+                creation.request_id() == request.request_id()
+                    && creation.request.source() == request.source()
+                    && creation.request.target() == request.target()
+            })
+            .ok_or_else(|| invalid("fixture creation request is no longer current"))?;
+        let screen = creation.screen_id();
+        let entries = self
+            .live_catalog()
+            .ok_or_else(|| invalid("fixture catalog missing"))?
+            .iter()
+            .filter(|entry| entry.id.as_str() != screen)
+            .collect::<Vec<_>>();
+        let catalog = serde_json::json!({"type":"mux.workspace_snapshot", "screens": entries});
         let snapshots = self
             .models
             .values()
@@ -274,10 +298,9 @@ impl SourceWorkspace {
         let Some(creation) = &mut self.remote_creation else {
             return;
         };
-        if !creation.unresolved
-            || creation
-                .mutation
-                .is_some_and(|mutation| mutation > watermark)
+        if creation
+            .mutation
+            .is_some_and(|mutation| mutation > watermark)
         {
             return;
         }
@@ -297,9 +320,13 @@ impl SourceWorkspace {
         {
             return;
         }
-        if let Some(screen) = self.models.get_mut(&creation.ids.screen_id) {
-            screen.pending_panes.remove(&creation.ids.pane_id);
+        if creation.unresolved {
+            if let Some(screen) = self.models.get_mut(&creation.ids.screen_id) {
+                screen.pending_panes.remove(&creation.ids.pane_id);
+            }
         }
+        // This is current observed presence, not a historical mutation receipt.
+        // Keep refreshing it after resolution without restoring follow permission.
         creation.unresolved = false;
         creation.mutation = None;
         if creation.status != RemoteScreenCreateStatus::Rejected {

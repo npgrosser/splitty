@@ -494,3 +494,158 @@ fn remote_creation_live_catalog_bound_and_ui_fixture_use_same_admission() {
         assert_eq!(creation.request_id(), request.request_id());
     }
 }
+
+#[test]
+fn resolved_creation_presence_tracks_later_coherent_state_without_reviving_follow() {
+    let (mut window, request) = ready();
+    let id = request.source().source_id();
+    let ids = admit(&mut window, &request);
+    window
+        .source_mut(id)
+        .unwrap()
+        .remote_creation_uncertain("reply was lost");
+    window
+        .ui_test_remote_creation_settle_missing_fixture(&request)
+        .unwrap();
+    let key = window.source(id).unwrap().screen_key(&ids.screen_id);
+    assert!(window.opened().iter().any(|entry| entry.key() == &key));
+    assert!(!request.is_follow_requested());
+    let mut model = window.source_mut(id).unwrap();
+    observe(&mut model, &["old", &ids.screen_id], Some(&ids));
+    let creation = model.remote_screen_creation().unwrap();
+    assert_eq!(creation.status(), RemoteScreenCreateStatus::Present);
+    assert_eq!(creation.screen_id(), ids.screen_id);
+    assert!(creation.was_uncertain());
+    assert!(!creation.is_unresolved());
+    assert!(model.remote_creation_follow().is_none());
+    observe(&mut model, &["old"], None);
+    assert_eq!(
+        model.remote_screen_creation().unwrap().status(),
+        RemoteScreenCreateStatus::Missing
+    );
+    assert!(model.remote_screen_creation().unwrap().was_uncertain());
+    assert_eq!(model.admission_count(), 1);
+    assert!(!request.is_follow_requested());
+}
+
+#[test]
+fn missing_fixture_observes_existing_reservation_and_rejects_obsolete_request() {
+    let (mut window, request) = ready();
+    window
+        .ui_test_remote_creation_fixture(&request, false)
+        .unwrap();
+    let id = request.source().source_id();
+    let screen = window
+        .source(id)
+        .unwrap()
+        .remote_screen_creation()
+        .unwrap()
+        .screen_id()
+        .to_owned();
+    let key = window.source(id).unwrap().screen_key(&screen);
+    let mut missing = window.clone();
+    missing
+        .ui_test_remote_creation_settle_missing_fixture(&request)
+        .unwrap();
+    assert_eq!(
+        missing
+            .source(id)
+            .unwrap()
+            .remote_screen_creation()
+            .unwrap()
+            .screen_id(),
+        screen
+    );
+    assert_eq!(
+        missing
+            .opened()
+            .into_iter()
+            .find(|entry| entry.key() == &key)
+            .unwrap()
+            .state(),
+        crate::workspace::OpenedScreenState::Missing
+    );
+    let different = RemoteScreenCreateRequest::new(request.target().clone(), request.source());
+    assert!(missing
+        .ui_test_remote_creation_settle_missing_fixture(&different)
+        .is_err());
+    missing.disconnect(id).unwrap();
+    assert!(missing
+        .ui_test_remote_creation_settle_missing_fixture(&request)
+        .is_err());
+}
+
+#[test]
+fn rejected_later_missing_candidate_cannot_revoke_live_present_creation() {
+    let (mut window, request) = ready();
+    let id = request.source().source_id();
+    let key = window.source(id).unwrap().screen_key("unopened");
+    window.open_existing(request.source(), &key).unwrap();
+    window
+        .source_mut(id)
+        .unwrap()
+        .apply_snapshot(
+            request.source().connection_id(),
+            &snapshot("unopened", "other-pane"),
+        )
+        .unwrap();
+    let ids = admit(&mut window, &request);
+    let mut model = window.source_mut(id).unwrap();
+    let mut refresh = super::super::refresh::WorkspaceRefresh::default();
+    refresh.begin(&mut model).unwrap();
+    model.catalog_in_flight = Some(model.mutation);
+    let connection = model.connection_id;
+    let present = catalog(&["old", "unopened", &ids.screen_id]);
+    refresh
+        .apply_catalog(&mut model, connection, &present)
+        .unwrap();
+    for (screen, pane) in [
+        ("old", "old-pane"),
+        ("unopened", "other-pane"),
+        (&ids.screen_id, &ids.pane_id),
+    ] {
+        refresh
+            .apply_snapshot(&mut model, connection, &snapshot(screen, pane))
+            .unwrap();
+    }
+    refresh.test_trailing(&mut model);
+    assert!(
+        refresh
+            .apply_catalog(&mut model, connection, &present)
+            .unwrap()
+            .coherent_refresh
+    );
+    assert_eq!(
+        model.remote_screen_creation().unwrap().status(),
+        RemoteScreenCreateStatus::Present
+    );
+    assert!(request.is_follow_requested());
+
+    refresh.begin(&mut model).unwrap();
+    model.catalog_in_flight = Some(model.mutation);
+    let missing = catalog(&["old", "unopened"]);
+    refresh
+        .apply_catalog(&mut model, connection, &missing)
+        .unwrap();
+    for screen in ["old", "unopened"] {
+        refresh
+            .apply_snapshot(&mut model, connection, &snapshot(screen, "colliding-pane"))
+            .unwrap();
+    }
+    refresh.test_trailing(&mut model);
+    assert!(refresh
+        .apply_catalog(&mut model, connection, &missing)
+        .unwrap()
+        .reconciliation_error
+        .is_some());
+    assert_eq!(
+        model.remote_screen_creation().unwrap().status(),
+        RemoteScreenCreateStatus::Present
+    );
+    assert!(!model.is_missing(&ids.screen_id));
+    assert_eq!(model.admission_count(), 3);
+    assert!(
+        request.is_follow_requested(),
+        "discarded candidate has no effect on shared permission"
+    );
+}

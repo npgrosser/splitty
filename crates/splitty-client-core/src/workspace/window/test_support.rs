@@ -17,6 +17,18 @@ impl WindowWorkspace {
             .fixture_remote_creation(request.clone(), missing)
     }
 
+    /// Observe current absence for an existing exact creation, retaining its IDs.
+    #[doc(hidden)]
+    pub fn ui_test_remote_creation_settle_missing_fixture(
+        &mut self,
+        request: &RemoteScreenCreateRequest,
+    ) -> io::Result<()> {
+        self.validate_remote_creation_owner(request.target(), request.source())?;
+        self.source_mut(request.source().source_id())
+            .ok_or_else(|| invalid("fixture source missing"))?
+            .fixture_remote_creation_missing(request)
+    }
+
     /// Feed bounded discovery through the production observation validator.
     #[doc(hidden)]
     pub fn ui_test_port_observation(

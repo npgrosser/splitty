@@ -229,7 +229,9 @@ candidates do not free current capacity or mutate shared follow permission.
 Connection loss retains unresolved observation intent and unused capacity, clears
 execution/routes/follow, and never resends Create. Current absence releases the
 unused pane reservation but keeps a removable missing reference and historical
-uncertainty; later presence must pass ordinary capacity checks again. Detach removes
+uncertainty; later presence must pass ordinary capacity checks again. Later coherent
+observations update the retained record's current presence without reviving follow
+or erasing historical uncertainty/rejection. Detach removes
 client interest without closing host sessions. Follow remains revocable through
 prepared source effects until final owner/request validation and atomic consumption
 immediately before global selection. Dropping a cloned request or published model
