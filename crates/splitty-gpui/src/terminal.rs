@@ -2,6 +2,14 @@
 mod links;
 mod search;
 pub(crate) use links::LinkOrigin;
+use splitty_client_core::external_links::WebUrl;
+
+#[derive(Clone, Debug)]
+pub(crate) enum LinkEvent {
+    RemoteLoopback(WebUrl),
+}
+
+impl EventEmitter<LinkEvent> for Terminal {}
 
 pub use crate::terminal_engine::ColorConfig as TerminalColors;
 use crate::terminal_engine::{
@@ -1019,7 +1027,9 @@ impl Terminal {
 
     fn on_pointer_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(url) = self.pointer_up(event, window, false) {
-            if let Err(reason) = self.link_origin.activate(&url, |url| cx.open_url(url)) {
+            if self.link_origin == LinkOrigin::Remote && url.is_loopback_or_unspecified() {
+                cx.emit(LinkEvent::RemoteLoopback(url));
+            } else if let Err(reason) = self.link_origin.activate(&url, |url| cx.open_url(url)) {
                 // The workspace paints command_error; status alone is only shown by the probe.
                 self.reject_command(reason.into());
             }

@@ -7,6 +7,9 @@ use crate::{
         HostDirectorySnapshot, HostDirectoryState, HostManagementAction, HostManagementOutcome,
         HostManagementRequest, HostManagementResult, HubClient, HubEvent, HubUpdate,
     },
+    ports::{
+        ForwardOutcome, ForwardRequest, ForwardResult, ForwardSnapshot, PortsClient, PortsEvent,
+    },
     shell_profiles::ShellProfilesSnapshot,
     templates::{TemplateApiRequest, TemplateApiResult},
     workspace::{
@@ -94,6 +97,14 @@ impl Command {
 }
 
 pub enum CommandKind {
+    ManageForward {
+        request_id: uuid::Uuid,
+        request: ForwardRequest,
+    },
+    RefreshForwards,
+    CancelForwardOpen {
+        request_id: uuid::Uuid,
+    },
     ManageHost {
         request_id: uuid::Uuid,
         request: HostManagementRequest,
@@ -265,6 +276,8 @@ pub enum CommandKind {
     },
 }
 pub enum Update {
+    Forwards(Arc<ForwardSnapshot>),
+    Forward(ForwardResult),
     HostManagement(HostManagementResult),
     HostDirectory(HubUpdate),
     TemplateApi(TemplateApiResult),
@@ -347,6 +360,16 @@ fn validate_command_target(model: &SourceWorkspace, command: &CommandKind) -> st
 
 fn rejected_command(source: Option<SourceToken>, command: &CommandKind, reason: String) -> Update {
     match command {
+        CommandKind::ManageForward {
+            request_id,
+            request,
+        } if source.is_some() => Update::Forward(ForwardResult::new(
+            source.expect("captured owner"),
+            *request_id,
+            request,
+            ForwardOutcome::Rejected,
+            Some(reason),
+        )),
         CommandKind::ManageHost {
             request_id,
             request,
@@ -1206,6 +1229,7 @@ async fn run_service(
     let mut window = WindowWorkspace::new(client.connection_id());
     let mut local = source::SourceRuntime::new(client, window.lifecycle_token());
     let mut settings = None::<RuntimeLocalService<'_>>;
+    let mut ports = None::<PortsClient<'_>>;
     let mut hub = None::<RuntimeHub<'_>>;
     let mut remotes = remote::Remotes::new(&service);
     let mut known = None::<Arc<HostDirectorySnapshot>>;
@@ -1215,6 +1239,7 @@ async fn run_service(
         enum Next {
             Settings(std::io::Result<crate::local_service::LocalServiceUpdate>),
             Hub(HubEvent),
+            Ports(PortsEvent),
             Event(std::io::Result<Option<Event>>),
             Remote(remote::Step),
             Command(Option<Command>),
@@ -1224,6 +1249,7 @@ async fn run_service(
             let next = tokio::select! {
                 result = async { match &mut settings { Some(reader)=>reader.next_update().await, None=>std::future::pending().await } } => Next::Settings(result),
                 update = async { match &mut hub { Some(reader)=>reader.next_event().await, None=>std::future::pending().await } } => Next::Hub(update),
+                event = async { match &mut ports { Some(ports)=>ports.next_event().await,None=>std::future::pending().await } } => Next::Ports(event),
                 event = local.client.next_event() => Next::Event(event),
                 remote = remotes.next() => Next::Remote(remote),
                 command = commands.recv() => Next::Command(command),
@@ -1232,6 +1258,11 @@ async fn run_service(
             if stop.load(Ordering::Acquire) { break; }
             let owner = window.lifecycle_token();
             match next {
+                Next::Ports(event) => {
+                    if let Some(ports)=&ports {ports.revalidate(&window);}
+                    let update=match event {PortsEvent::Snapshot(snapshot)=>Update::Forwards(snapshot),PortsEvent::Result(result)=>Update::Forward(*result)};
+                    publish(&updates,update,&stop).await?;
+                }
                 Next::Hub(HubEvent::Management(mut result)) => {
                     if result.owner()==owner {
                         if result.action()==HostManagementAction::Connect && host_connects.apply(&mut result,&mut window,&mut remotes) {
@@ -1297,6 +1328,13 @@ async fn run_service(
                     }
                     let captured = command.source;
                     match command.kind {
+                        CommandKind::ManageForward {request_id,request} => {
+                            let result=ports.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Forwarding service is not ready")).and_then(|ports|ports.enqueue(owner,request_id,request.clone(),&window));
+                            let result=match result {Ok(result)=>result,Err(error) if error.kind()==std::io::ErrorKind::AlreadyExists=>continue,Err(error)=>ForwardResult::new(owner,request_id,&request,ForwardOutcome::Rejected,Some(error.to_string()))};
+                            publish(&updates,Update::Forward(result),&stop).await?;
+                        }
+                        CommandKind::RefreshForwards => {if let Some(ports)=&mut ports {ports.refresh();}}
+                        CommandKind::CancelForwardOpen {request_id} => {if let Some(ports)=&mut ports {ports.cancel_open(request_id);}}
                         CommandKind::ManageHost {request_id,request} => {
                             let result=hub.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Host metadata service is not ready")).and_then(|hub|hub.enqueue(owner,request_id,request.clone()));
                             let result=match result {
@@ -1387,6 +1425,7 @@ async fn run_service(
                             if let Some(reader)=&mut settings { if let Err(error)=reader.settings_changed(event.connection_id) {publish(&updates,Update::AppearanceError {connection:event.connection_id,reason:error.to_string()},&stop).await?;} }
                         }
                         if json["type"]=="hub.changed" {
+                            if let Some(ports)=&mut ports {ports.refresh();}
                             if let Some(reader)=&mut hub {if let Err(error)=reader.refresh(event.connection_id) {publish(&updates,Update::Status(error.to_string()),&stop).await?;} }
                         }
                         let effects=local.event(&mut window,event)?;
@@ -1397,11 +1436,13 @@ async fn run_service(
                                 hub=Some(RuntimeHub::new(&service,local.client.connection_id()));
                                 publish(&updates,Update::HostDirectory(HubUpdate { connection_id:local.client.connection_id(),generation:1,state:HostDirectoryState::Loading {previous:None} }),&stop).await?;
                             } else {publish(&updates,Update::HostDirectory(HubUpdate::unavailable(local.client.connection_id())),&stop).await?;}
+                            ports=Some(PortsClient::new(&service,window.lifecycle_token(),supports_hub));
                             settings=Some(RuntimeLocalService::new(&service,local.client.connection_id(),scheme));
                         }
                     }
                 }
             }
+            if let Some(ports)=&ports {ports.revalidate(&window);}
             let effects=local.reconcile(&mut window)?;
             publish_source_effects(&mut window,effects,&updates,&stop).await?;
             let effects=remotes.reconcile(&mut window)?;
@@ -1409,7 +1450,7 @@ async fn run_service(
         }
         Ok::<(),anyhow::Error>(())
     }.await;
-    let (settings_cleanup, hub_cleanup, client_cleanup, remote_cleanup) = tokio::join!(
+    let (settings_cleanup, hub_cleanup, client_cleanup, remote_cleanup, ports_cleanup) = tokio::join!(
         async {
             match settings.take() {
                 Some(reader) => match reader.finish_with_outcomes().await {
@@ -1439,7 +1480,14 @@ async fn run_service(
                 .await
                 .map_err(anyhow::Error::from)
         },
+        async {
+            match ports.take() {
+                Some(ports) => ports.finish().await.map_err(anyhow::Error::from),
+                None => Ok(()),
+            }
+        },
     );
+    drop(ports);
     drop(settings);
     drop(hub);
     finish_owned_run(
@@ -1448,7 +1496,8 @@ async fn run_service(
         settings_cleanup
             .and(hub_cleanup)
             .and(client_cleanup)
-            .and(remote_cleanup),
+            .and(remote_cleanup)
+            .and(ports_cleanup),
         &cleanup_complete,
         &stop,
     )
@@ -1459,6 +1508,9 @@ fn local_command(kind: &CommandKind) -> bool {
     matches!(
         kind,
         CommandKind::ConnectHost { .. }
+            | CommandKind::ManageForward { .. }
+            | CommandKind::RefreshForwards
+            | CommandKind::CancelForwardOpen { .. }
             | CommandKind::ManageHost { .. }
             | CommandKind::WithdrawHostConnect { .. }
             | CommandKind::ReleaseHostBrowsing
@@ -2430,3 +2482,6 @@ mod windows_startup_tests {
         assert!(worker.shutdown().is_err());
     }
 }
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod ports_tests;

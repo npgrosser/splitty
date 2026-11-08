@@ -526,3 +526,47 @@ async fn confirmed_forget_directory_reconciliation_preserves_open_remote_binding
     service.close().await.unwrap();
     let _ = std::fs::remove_dir_all(path);
 }
+
+#[test]
+fn disconnect_and_rebind_clear_live_port_observations_without_detaching_screens() {
+    let mut window = WindowWorkspace::new(Uuid::new_v4());
+    let id = remote(&mut window, "ports.test");
+    catalog(&mut window, id, &["work"]);
+    let key = open(&mut window, id, "work");
+    let owner = window.source(id).unwrap().source_token();
+    window
+        .source_mut(id)
+        .unwrap()
+        .observe_ports(
+            owner,
+            &json!({"ports":[{"port":3000,"sessionId":"session","process":"node"}]}),
+            &ConnectionBudget::default(),
+        )
+        .unwrap();
+    assert!(window.source(id).unwrap().port_observation().is_some());
+    window.disconnect(id).unwrap();
+    assert!(window.source(id).unwrap().port_observation().is_none());
+    assert_eq!(window.shown_key(), Some(key));
+    window.finish_attempt(id).unwrap();
+    window.retry(id).unwrap();
+    window
+        .bind_remote_parts(id, Uuid::new_v4(), ConnectionBudget::default())
+        .unwrap();
+    let replacement = window.source(id).unwrap().source_token();
+    window.confirm_ready(replacement).unwrap();
+    assert!(!window
+        .source_mut(id)
+        .unwrap()
+        .observe_ports(owner, &json!({"ports":[]}), &ConnectionBudget::default())
+        .unwrap());
+    assert!(window.source(id).unwrap().port_observation().is_none());
+}
+
+/// Reuse the canonical catalog/open/snapshot fixtures for other feature tests.
+/// A repeated target deliberately replaces its connection and retains Screen IDs.
+pub(crate) fn remote_terminal_fixture(
+    window: &mut WindowWorkspace,
+    target: &str,
+) -> (ScreenKey, TerminalToken) {
+    window.ui_test_remote_terminal_fixture(target).unwrap()
+}

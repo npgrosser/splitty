@@ -1,6 +1,8 @@
 //! Service-owned local screens, projected without a second layout tree.
 mod catalog;
 mod identity;
+mod ports;
+pub use ports::{ObservedPort, PortObservation};
 mod window;
 use crate::{
     connection::{invalid, MAX_ATTACHMENTS},
@@ -32,6 +34,8 @@ use std::{
     sync::Arc,
 };
 use uuid::Uuid;
+#[cfg(test)]
+pub(crate) use window::tests::remote_terminal_fixture;
 pub use window::{
     CatalogState, HostActionTarget, HostDiagnostic, HostPresentation, OpenedScreen,
     OpenedScreenState, SourceEdit, SourceStatus, WindowRoute, WindowWorkspace,

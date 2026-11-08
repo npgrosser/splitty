@@ -16,10 +16,12 @@ import os
 from pathlib import Path
 import shlex
 import signal
+import socket
 import stat
 import subprocess
 import time
 import tomllib
+import traceback
 
 HERE = Path(__file__).resolve().parent
 
@@ -32,13 +34,29 @@ def helper(name, filename):
 
 
 fixture_module = helper("remote_screen_fixture", "gpui-remote-screen-fixture.py")
+port_fixture_module = helper("outbound_port_fixture", "gpui-outbound-port-fixture.py")
 performance = helper("performance", "gpui-performance.py")
 pane_drag = helper("pane_drag", "gpui-pane-drag.py")
 
-PHASES = ("setup", "connect", "open", "host-management", "settings-remote", "terminal", "two-hosts", "recovery", "detach", "full")
+PHASES = ("setup", "connect", "open", "ports", "host-management", "settings-remote", "terminal", "two-hosts", "recovery", "detach", "full")
 POINTS = {
     "connect": ("hosts.toolbar", "hosts.connect_a"),
     "open": ("hosts.open_a",),
+    "ports": ("hosts.toolbar_remote", "ports.host_b_connect", "ports.host_b_open",
+              "ports.add", "ports.target", "ports.remote", "ports.local", "ports.label",
+              "ports.remember", "ports.forward", "ports.open", "ports.save",
+              "ports.dialog_title_region",
+              "ports.drawer_b_region",
+              "ports.edit.dialog_title_region", "ports.edit.local", "ports.edit.label",
+              "ports.edit.save", "ports.edit.resume_alt",
+              "ports.b_more",
+              "ports.b_menu_stop", "ports.b_menu_edit", "ports.b_menu_forget",
+              "ports.b_menu_pause_saved",
+              "ports.b_primary", "ports.b_row_status_region",
+              "ports.b_menu_edit_paused", "ports.b_menu_forget_paused",
+              "ports.a_primary", "ports.a_more", "ports.a_menu_stop",
+              "ports.terminal_link", "ports.link_output_region", "ports.scroll_area", "terminal.body",
+              "drawer.a_row", "drawer.b_row"),
     "host-management": ("hosts.toolbar_remote", "hosts.connect_entry", "hosts.dialog_target",
                         "hosts.dialog_alias", "hosts.dialog_submit", "hosts.dialog_title_region", "hosts.open_b",
                         "hosts.b_more", "hosts.b_edit", "hosts.b_alias", "hosts.b_alias_save",
@@ -69,7 +87,8 @@ def pid_live(pid):
 
 
 def run_window(args, geometry, result):
-    fixture = fixture_module.RemoteScreenFixture(args.server_binary)
+    fixture = (port_fixture_module.OutboundPortFixture if args.phase == "ports"
+               else fixture_module.RemoteScreenFixture)(args.server_binary)
     owned = None
     xvfb = app = display = window = None
     xvfb_start = app_start = None
@@ -97,6 +116,8 @@ def run_window(args, geometry, result):
                 document[field] = [row for row in document[field]
                                    if (row["target"] if field == "hosts" else row) == a]
                 path.write_text(json.dumps(document) + "\n")
+        if args.phase == "ports":
+            result["portFixtureSha256"] = fixture_module.sha256(HERE / "gpui-outbound-port-fixture.py")
         if args.phase == "full":
             b = fixture_module.TARGETS[1]
             owned._run([str(owned.binary), "new-screen", "--name", "Disposable B"],
@@ -108,6 +129,39 @@ def run_window(args, geometry, result):
         env.pop("WAYLAND_DISPLAY", None)
         env["DISPLAY"] = args.display
         env["GPUI_BACKEND"] = "x11"
+        if args.phase == "ports":
+            spy_dir = args.output / "opener-spy"
+            spy_dir.mkdir(mode=0o700)
+            opener_log = args.output / "opener.jsonl"
+            opener_log.touch(mode=0o600)
+            spy = spy_dir / "spy.py"
+            spy.write_text(
+                "#!/usr/bin/python3\n"
+                "import json,os,sys,urllib.parse,urllib.request\n"
+                "from pathlib import Path\n"
+                "url=os.environ.get('OPEN_RS_TARGET') or sys.argv[-1]\n"
+                "record={'url':url,'argv':sys.argv[1:]}\n"
+                "parsed=urllib.parse.urlsplit(url)\n"
+                "allowed=json.loads(Path(os.environ['SPLITTY_OWNED_FORWARD_PORTS']).read_text())\n"
+                "if parsed.scheme not in ('http','https') or parsed.hostname!='localhost' or parsed.port not in allowed:\n"
+                " record['error']='URL outside owned forwarding allowlist'\n"
+                "else:\n"
+                " try:\n"
+                "  opener=urllib.request.build_opener(urllib.request.ProxyHandler({}))\n"
+                "  with opener.open(url,timeout=4) as response:\n"
+                "   record['status']=response.status;record['body']=response.read(8192).decode()\n"
+                " except Exception as error:record['error']=repr(error)\n"
+                "with Path(os.environ['SPLITTY_PORT_OPENER_LOG']).open('a') as out:out.write(json.dumps(record)+'\\n')\n"
+                "sys.exit(0)\n")
+            spy.chmod(0o700)
+            for launcher in ("xdg-open", "gio", "gnome-open", "kde-open", "powershell.exe"):
+                (spy_dir / launcher).symlink_to(spy.name)
+            allowed_ports = args.output / "allowed-forward-ports.json"
+            allowed_ports.write_text("[]\n")
+            env["PATH"] = str(spy_dir) + os.pathsep + env.get("PATH", "/usr/bin:/bin")
+            env["BROWSER"] = str(spy)
+            env["SPLITTY_PORT_OPENER_LOG"] = str(opener_log)
+            env["SPLITTY_OWNED_FORWARD_PORTS"] = str(allowed_ports)
         xvfb_env = env.copy()
         if args.xvfb_lib:
             xvfb_env["LD_LIBRARY_PATH"] = str(args.xvfb_lib.resolve()) + (
@@ -164,6 +218,12 @@ def run_window(args, geometry, result):
             x("key", "--clearmodifiers", "BackSpace")
             if value:
                 x("type", "--clearmodifiers", "--delay", 25, value)
+            display.sync()
+
+        def scroll_hosts(down):
+            x("mousemove", "--window", window, *point("ports.scroll_area"))
+            for _ in range(3):
+                x("click", 5 if down else 4)
             display.sync()
 
         def capture(label):
@@ -225,6 +285,43 @@ def run_window(args, geometry, result):
         def ssh_calls():
             path = owned.root / "ssh-calls.jsonl"
             return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+        def forward_calls(target=None):
+            return [call for call in ssh_calls() if call.get("kind") == "forward"
+                    and call.get("accepted") and (target is None or call.get("target") == target)]
+
+        def active_forward(target, local):
+            return next((call for call in reversed(forward_calls(target))
+                         if call.get("local") == local and pid_live(call["pid"])
+                         and fixture_module.process_start(call["pid"]) == call["start"]), None)
+
+        def saved_forward(target, remote):
+            path = owned.local_config / "remote-forwards.json"
+            if not path.exists():
+                return None
+            document = json.loads(path.read_text())
+            assert document.get("version") == 1 and isinstance(document.get("forwards"), list)
+            return next((row for row in document["forwards"]
+                         if row["target"] == target and row["remote"] == remote), None)
+
+        def opened():
+            if args.phase != "ports":
+                return []
+            return [json.loads(line) for line in opener_log.read_text().splitlines()]
+
+        def choose_local_port():
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                return probe.getsockname()[1]
+
+        def forwarded_http(local, target, path="/app?source=owned"):
+            import urllib.request
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(f"http://127.0.0.1:{local}{path}", timeout=4) as response:
+                body = json.loads(response.read())
+            assert body["fixture"] == "splitty-ports-v1" and body["target"] == target
+            assert body["path"] == path and body["pid"] == owned.http[target]["pid"]
+            return body
 
         def host_bridge_started(target):
             calls = ssh_calls()
@@ -385,6 +482,313 @@ def run_window(args, geometry, result):
                                          "session": owned.hosts[a]["session"]})
                     capture("remote-a-open")
                     result["checks"].append("open-existing-a-terminal-input-matches-private-session")
+
+                if args.phase == "ports":
+                    remote = owned.http_port
+                    assert saved_forward(a, remote) is None and saved_forward(b, remote) is None
+                    assert not forward_calls(), "passive detected ports started SSH forwarding"
+                    click("hosts.toolbar_remote")
+                    click("ports.host_b_connect")
+                    wait_until(lambda: host_bridge_started(b), "Connect B did not start private bridge", 25)
+                    wait_until(lambda: b in local_recent(),
+                               "connected B was not reconciled into local Hosts", 25)
+                    drawer_b_before = display.pixels(window, region("ports.drawer_b_region"))
+                    click("ports.host_b_open")
+                    wait_until(lambda: display.pixels(window, region("ports.drawer_b_region"))
+                               != drawer_b_before, "Open B did not add its Drawer route", 25)
+                    click("drawer.b_row")
+                    before_b = marker(b, "ports-open-b", {
+                        "pid": owned.hosts[b]["shell_pid"], "pane": owned.hosts[b]["pane"],
+                        "session": owned.hosts[b]["session"]})
+                    click("hosts.toolbar_remote")
+                    scroll_hosts(True)
+                    capture("ports-detected-private-http")
+                    assert not forward_calls(), "detected port observation invoked forward SSH"
+                    result["checks"].append("passive-two-host-detection-with-no-forward-ssh")
+
+                    def form(target, local, label="", remember=False):
+                        click("ports.add")
+                        wait_region_stable("ports.dialog_title_region", "Add port dialog did not settle")
+                        click("ports.target")
+                        fill_text(target)
+                        click("ports.remote")
+                        fill_text(str(remote))
+                        click("ports.local")
+                        fill_text(str(local))
+                        click("ports.label")
+                        fill_text(label)
+                        if remember:
+                            click("ports.remember")
+
+                    def stop_b():
+                        click("ports.b_more")
+                        click("ports.b_menu_stop")
+
+                    def stop_a():
+                        click("ports.a_more")
+                        capture("ports-a-menu-live")
+                        click("ports.a_menu_stop")
+
+                    local_b = choose_local_port()
+                    hidden_dialog = display.pixels(window, region("ports.dialog_title_region"))
+                    form(b, local_b, "Private Beta app", remember=True)
+                    capture("ports-b-add-form")
+                    click("ports.forward")
+                    wait_until(lambda: active_forward(b, local_b), "B forward did not bind", 25)
+                    wait_until(lambda: saved_forward(b, remote), "remembered B mapping not saved")
+                    saved = saved_forward(b, remote)
+                    assert saved == {"target": b, "remote": remote, "local": local_b,
+                                     "label": "Private Beta app", "enabled": True}, saved
+                    forwarded_http(local_b, b, "/app?source=B")
+                    wait_until(lambda: display.pixels(window, region("ports.dialog_title_region"))
+                               == hidden_dialog, "B Forward form did not close")
+                    capture("ports-b-forwarding-remembered")
+                    result["checks"].append("manual-b-forward-binds-owned-loopback-and-remembers-mapping")
+
+                    initial_forward = active_forward(b, local_b)
+                    click("ports.b_more")
+                    capture("ports-b-menu-saved-and-live")
+                    click("ports.b_menu_edit")
+                    wait_region_stable("ports.edit.dialog_title_region", "Edit port dialog did not settle")
+                    capture("ports-b-edit-form")
+                    click("ports.edit.label")
+                    fill_text("Private Beta renamed")
+                    click("ports.edit.save")
+                    wait_until(lambda: (saved_forward(b, remote) or {}).get("label")
+                               == "Private Beta renamed", "B label edit not saved")
+                    assert active_forward(b, local_b) == initial_forward, "label edit restarted forwarding"
+                    capture("ports-b-label-edited")
+                    click("ports.b_more")
+                    click("ports.b_menu_edit")
+                    wait_region_stable("ports.edit.dialog_title_region", "B clear-label editor did not settle")
+                    click("ports.edit.label")
+                    fill_text("")
+                    key("Return")
+                    wait_until(lambda: (saved_forward(b, remote) or {}).get("label") == "",
+                               "B label clear not saved by Enter")
+                    assert active_forward(b, local_b) == initial_forward
+                    capture("ports-b-label-cleared")
+                    result["checks"].append("edit-save-and-enter-clear-label-without-restarting-forward")
+
+                    click("ports.b_more")
+                    click("ports.b_menu_forget")
+                    wait_until(lambda: saved_forward(b, remote) is None,
+                               "Forget left B mapping in durable preferences")
+                    assert active_forward(b, local_b) == initial_forward
+                    forwarded_http(local_b, b, "/still-live")
+                    capture("ports-b-forgotten-but-live")
+                    stop_b()
+                    wait_until(lambda: active_forward(b, local_b) is None,
+                               "Stop did not end B forward")
+                    assert saved_forward(b, remote) is None
+                    capture("ports-b-stopped-after-forget")
+                    result["checks"].append("forget-and-stop-are-independent-live-and-saved-operations")
+
+                    scroll_hosts(False)
+                    click("ports.a_primary")
+                    forward_a = wait_until(lambda: forward_calls(a)[-1] if forward_calls(a) else None,
+                                           "detected A Forward did not start", 25)
+                    local_a = forward_a["local"]
+                    wait_until(lambda: active_forward(a, local_a), "A forward did not become live")
+                    assert saved_forward(a, remote) is None
+                    forwarded_http(local_a, a, "/app?source=A")
+                    capture("ports-a-detected-forward")
+                    stop_a()
+                    wait_until(lambda: active_forward(a, local_a) is None, "A Stop did not end forward")
+                    result["checks"].append("detected-a-forward-keeps-host-source-and-is-not-remembered")
+
+                    scroll_hosts(True)
+
+                    rival = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                    rival.bind(("127.0.0.1", 0))
+                    rival.listen(1)
+                    busy = rival.getsockname()[1]
+                    try:
+                        calls_before_save = ssh_calls()
+                        detected_status = display.pixels(window, region("ports.b_row_status_region"))
+                        form(b, busy)
+                        click("ports.save")
+                        wait_until(lambda: (saved_forward(b, remote) or {}).get("local") == busy,
+                                   "Save without starting did not persist busy B port")
+                        saved_only = saved_forward(b, remote)
+                        assert saved_only["enabled"] is True and saved_only["label"] == ""
+                        assert ssh_calls() == calls_before_save, "Save without starting invoked SSH"
+                        assert active_forward(b, busy) is None
+                        wait_until(lambda: display.pixels(window, region("ports.b_row_status_region"))
+                                   != detected_status, "saved-only B row did not render", 25)
+                        wait_region_stable("ports.b_row_status_region", "saved-only B row did not settle")
+                        capture("ports-b-saved-without-starting")
+                        saved_status = display.pixels(window, region("ports.b_row_status_region"))
+                        click("ports.b_more")
+                        capture("ports-b-menu-saved-only")
+                        click("ports.b_menu_pause_saved")
+                        wait_until(lambda: (saved_forward(b, remote) or {}).get("enabled") is False,
+                                   "Pause saved port did not persist paused B mapping")
+                        saved_busy = saved_forward(b, remote)
+                        assert saved_busy["local"] == busy and saved_busy["label"] == ""
+                        assert ssh_calls() == calls_before_save, "Pause saved port invoked SSH"
+                        assert active_forward(b, busy) is None
+                        wait_until(lambda: display.pixels(window, region("ports.b_row_status_region"))
+                                   != saved_status, "paused B row did not render", 25)
+                        wait_region_stable("ports.b_row_status_region", "paused B row did not settle")
+                        capture("ports-b-busy-saved-paused")
+                        calls_before_busy = ssh_calls()
+                        before_status = display.pixels(window, region("ports.b_row_status_region"))
+                        click("ports.b_primary")
+                        wait_until(lambda: display.pixels(window, region("ports.b_row_status_region"))
+                                   != before_status, "busy Resume did not update B row", 25)
+                        wait_region_stable("ports.b_row_status_region", "busy B row did not settle")
+                        assert rival.getsockname()[1] == busy and rival.fileno() >= 0
+                        assert ssh_calls() == calls_before_busy, "busy Resume invoked SSH"
+                        assert saved_forward(b, remote) == saved_busy
+                        capture("ports-busy-local-error")
+
+                        scroll_hosts(True)
+                        click("ports.b_more")
+                        capture("ports-b-menu-paused-after-conflict")
+                        click("ports.b_menu_edit_paused")
+                        wait_region_stable("ports.edit.dialog_title_region",
+                                           "failed B Edit dialog did not settle")
+                        capture("ports-b-edit-alternate-form")
+                        alternate = choose_local_port()
+                        click("ports.edit.local")
+                        fill_text(str(alternate))
+                        click("ports.edit.resume_alt")
+                        wait_until(lambda: active_forward(b, alternate),
+                                   "Resume with local port did not bind alternate", 25)
+                        updated = saved_forward(b, remote)
+                        assert updated and updated["local"] == alternate and updated["enabled"]
+                        forwarded_http(alternate, b, "/alternate")
+                        assert rival.getsockname()[1] == busy and rival.fileno() >= 0
+                        capture("ports-b-alternate-local-forward")
+                    finally:
+                        rival.close()
+                    result["checks"].append("busy-owned-local-port-refused-without-touching-rival")
+                    result["checks"].append("explicit-edit-resume-with-alternate-port-restores-b-forwarding")
+                    stop_b()
+                    wait_until(lambda: active_forward(b, alternate) is None,
+                               "alternate B forward did not stop")
+                    wait_until(lambda: (saved_forward(b, remote) or {}).get("enabled") is False,
+                               "Stop did not pause remembered B mapping")
+                    click("ports.b_more")
+                    click("ports.b_menu_forget_paused")
+                    wait_until(lambda: saved_forward(b, remote) is None,
+                               "Forget did not clear paused alternate B mapping")
+
+                    # The remote terminal supplies a real link. The owned SSH
+                    # shim holds readiness so selection can change before Open
+                    # settles; the opener must retain B's immutable source.
+                    click("drawer.b_row")
+                    link = f"http://localhost:{remote}/app?x=1#frag"
+                    link_before = display.pixels(window, region("ports.link_output_region"))
+                    type_text(f"printf '%s\\n' {shlex.quote(link)}")
+                    wait_until(lambda: display.pixels(window, region("ports.link_output_region"))
+                               != link_before, "B terminal did not print development link")
+                    capture("ports-b-remote-terminal-link")
+                    gate = owned.root / "forward-gate.json"
+                    release = owned.root / "forward-gate-release"
+                    entered = owned.root / "forward-gate-entered.json"
+                    gate.write_text(json.dumps({"target": b, "remote": remote}) + "\n")
+                    release.unlink(missing_ok=True)
+                    entered.unlink(missing_ok=True)
+                    assert not any(active_forward(b, call["local"]) for call in forward_calls(b)), (
+                        "B mapping was live before gated terminal Open")
+                    before_open = opened()
+                    x("mousemove", "--window", window, *point("ports.terminal_link"))
+                    x("keydown", "ctrl")
+                    try:
+                        x("click", 1)
+                    finally:
+                        x("keyup", "ctrl")
+                    gate_record = wait_until(lambda: json.loads(entered.read_text())
+                                             if entered.exists() else None,
+                                             "terminal link did not start gated B forward", 25)
+                    assert gate_record["target"] == b and gate_record["remote"] == remote
+                    click("drawer.a_row")
+                    allowed_ports.write_text(json.dumps([gate_record["local"]]) + "\n")
+                    release.touch()
+                    expected_url = f"http://localhost:{gate_record['local']}/app?x=1#frag"
+                    event = wait_until(lambda: opened()[-1] if len(opened()) > len(before_open)
+                                       else None, "gated terminal Open did not reach owned opener", 25)
+                    assert len(opened()) == len(before_open) + 1 and event["url"] == expected_url, event
+                    body = json.loads(event["body"])
+                    assert event["status"] == 200 and body["target"] == b
+                    assert body["path"] == "/app?x=1" and body["pid"] == owned.http[b]["pid"]
+                    capture("ports-b-link-open-after-selecting-a")
+                    result["terminalOpen"] = {"source": b, "original": link,
+                                              "rewritten": expected_url, "opener": event}
+                    result["checks"].append("gated-terminal-link-retains-b-source-and-opens-owned-http")
+
+                    click("hosts.toolbar_remote")
+                    scroll_hosts(True)
+                    stop_b()
+                    wait_until(lambda: active_forward(b, gate_record["local"]) is None,
+                               "B terminal-link forward did not stop")
+                    gate.unlink(missing_ok=True)
+                    release.unlink(missing_ok=True)
+                    entered.unlink(missing_ok=True)
+                    assert saved_forward(b, remote) is None
+                    form_open_local = choose_local_port()
+                    allowed_ports.write_text(json.dumps([form_open_local]) + "\n")
+                    form(b, form_open_local)
+                    click("ports.open")
+                    # The form's Open is also tested through its own UI path.
+                    # A later candidate may require a row-menu Stop calibration.
+                    reopened = wait_until(lambda: forward_calls(b)[-1]
+                                          if forward_calls(b) and forward_calls(b)[-1]["pid"]
+                                          != gate_record["pid"] else None,
+                                          "B form Open did not start a fresh forward", 25)
+                    wait_until(lambda: len(opened()) == len(before_open) + 2,
+                               "B form Open did not dispatch owned opener", 25)
+                    from urllib.parse import urlsplit
+                    form_url = urlsplit(opened()[-1]["url"])
+                    assert (form_url.scheme, form_url.hostname, form_url.port,
+                            form_url.path) in (("http", "localhost", reopened["local"], ""),
+                                               ("http", "localhost", reopened["local"], "/"))
+                    assert json.loads(opened()[-1]["body"])["target"] == b
+                    capture("ports-b-form-open")
+                    stop_b()
+                    wait_until(lambda: active_forward(b, reopened["local"]) is None,
+                               "B form-open forward did not stop")
+                    gate.write_text(json.dumps({"target": b, "remote": remote}) + "\n")
+                    release.unlink(missing_ok=True)
+                    entered.unlink(missing_ok=True)
+                    stale_local = choose_local_port()
+                    stale_opens = opened()
+                    form(b, stale_local)
+                    click("ports.open")
+                    stale = wait_until(lambda: json.loads(entered.read_text())
+                                       if entered.exists() else None,
+                                       "dismissal Open did not enter owned readiness gate", 25)
+                    assert stale["local"] == stale_local and stale["target"] == b
+                    key("Escape")
+                    wait_until(lambda: display.pixels(window, region("ports.dialog_title_region"))
+                               == hidden_dialog, "Escape did not dismiss pending Open dialog")
+                    release.touch()
+                    wait_until(lambda: active_forward(b, stale_local),
+                               "dismissed Open did not settle its owned forward", 20)
+                    assert opened() == stale_opens, "dismissed Open reached the browser spy"
+                    capture("ports-stale-open-dismissed")
+                    result["checks"].append("dismissed-pending-open-never-dispatches-opener")
+                    stop_b()
+                    wait_until(lambda: active_forward(b, stale_local) is None,
+                               "dismissed Open forward did not stop")
+                    gate.unlink(missing_ok=True)
+                    release.unlink(missing_ok=True)
+                    entered.unlink(missing_ok=True)
+                    click("drawer.b_row")
+                    marker(b, "ports-after-forward-work", before_b)
+                    result["checks"].append("form-open-dispatch-and-remote-b-pty-survive-port-work")
+                    assert not any(active_forward(call["target"], call["local"])
+                                   for call in forward_calls()), "owned forward remained live"
+                    assert saved_forward(a, remote) is None and saved_forward(b, remote) is None
+                    result["ports"] = {
+                        "remotePort": remote,
+                        "http": owned.http,
+                        "forwardCalls": forward_calls(),
+                        "openerEvents": opened(),
+                        "savedMappingsAfter": [],
+                    }
 
                 if args.phase == "host-management":
                     assert b not in local_recent() and b not in local_order() and b not in local_catalog(), (
@@ -867,7 +1271,7 @@ def main():
         parser.error("interaction phases require screenshot-calibrated --geometry JSON")
     required = set()
     for phase in PHASES[1:PHASES.index(args.phase) + 1]:
-        if phase in ("host-management", "settings-remote") and args.phase != phase:
+        if phase in ("ports", "host-management", "settings-remote") and args.phase != phase:
             continue
         required.update(POINTS.get(phase, ()))
     required.add("window.confirm_close") if args.phase != "setup" else None
@@ -901,6 +1305,7 @@ def main():
                             and not result.get("cleanupErrors"))
     except Exception as error:
         result["error"] = repr(error)
+        result["traceback"] = traceback.format_exc()
     (args.output / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     print(json.dumps({"passed": result["passed"], "phase": args.phase,
                       "checks": result["checks"], "error": result.get("error"),

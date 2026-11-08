@@ -137,7 +137,7 @@ pub(crate) mod fake_peer {
     ) -> (ApiStream, tokio::task::JoinHandle<()>, std::path::PathBuf) {
         scripted_operations(replies, gate, observed, None).await
     }
-    async fn scripted_operations(
+    pub(crate) async fn scripted_operations(
         replies: Vec<(u16, String, bool)>,
         gate: Option<tokio::sync::oneshot::Receiver<()>>,
         observed: Option<tokio::sync::oneshot::Sender<()>>,

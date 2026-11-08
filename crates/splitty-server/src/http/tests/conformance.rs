@@ -1259,6 +1259,166 @@ async fn framed_host_catalog_and_saved_forward_intents_preserve_passive_and_stop
 }
 
 #[tokio::test]
+async fn framed_manual_forward_preserves_paused_metadata_and_conflicting_listener() {
+    async fn call(
+        peer: &mut splitty_transport::peer::Peer,
+        id: &mut u32,
+        operation: &str,
+        args: Value,
+    ) -> (u16, Value) {
+        *id += 1;
+        framed_call(peer, *id, operation, args);
+        let reply = framed_reply(peer).await;
+        assert_eq!(reply.id, *id);
+        let body = if reply.body.is_empty() {
+            Value::Null
+        } else {
+            serde_json::from_str(&reply.body).unwrap()
+        };
+        (reply.status, body)
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let host = ScriptedHost::new(dir.path());
+    let mut state = state(ADDR, dir.path());
+    Arc::make_mut(&mut state.service).hub = Arc::new(hub(&host, dir.path()));
+    let (mut peer, server) = framed(&state, Role::Main).await;
+    let mut id = 0;
+    let before = call(&mut peer, &mut id, "mux.state", json!({})).await;
+    assert_eq!(before.0, 200);
+    let busy = std::net::TcpListener::bind(("127.0.0.1", 0)).unwrap();
+    let occupied = busy.local_addr().unwrap().port();
+    let key = json!({"target":"vm1","port":5173});
+    let saved = call(
+        &mut peer,
+        &mut id,
+        "forwardPreferences.save",
+        json!({"body":{"target":"vm1","port":5173,"local":occupied,"label":"Frontend"}}),
+    )
+    .await;
+    assert_eq!(saved.0, 200);
+    assert_eq!(saved.1["enabled"], true);
+    let paused = call(&mut peer, &mut id, "forward.stop", json!({"body":key})).await;
+    assert_eq!(paused.0, 204, "stopping a saved-only rule is durable");
+    for (body, label) in [
+        (key.clone(), "Frontend"),
+        (json!({"target":"vm1","port":5173,"label":"API"}), "API"),
+        (json!({"target":"vm1","port":5173,"label":""}), ""),
+    ] {
+        let reply = call(
+            &mut peer,
+            &mut id,
+            "forwardPreferences.save",
+            json!({"body":body}),
+        )
+        .await;
+        assert_eq!(reply.0, 200);
+        assert_eq!(reply.1["local"], occupied);
+        assert_eq!(reply.1["enabled"], false);
+        assert_eq!(reply.1["label"], label);
+    }
+    assert!(
+        host.asked().is_empty(),
+        "metadata edits must not contact SSH"
+    );
+    let conflict = call(&mut peer, &mut id, "forward.open", json!({"body":key})).await;
+    assert_eq!(conflict.0, 409);
+    assert_eq!(conflict.1["code"], "local_port_conflict");
+    assert!(
+        host.asked().is_empty(),
+        "a busy saved port must not start SSH"
+    );
+    let unchanged = call(&mut peer, &mut id, "forwardPreferences.get", json!({})).await;
+    assert_eq!(unchanged.0, 200);
+    assert_eq!(unchanged.1["forwards"][0]["local"], occupied);
+    assert_eq!(unchanged.1["forwards"][0]["enabled"], false);
+
+    let alternate = free_port();
+    let opened = call(
+        &mut peer,
+        &mut id,
+        "forward.open",
+        json!({"body":{"target":"vm1","port":5173,"local":alternate}}),
+    )
+    .await;
+    assert_eq!(opened.0, 200, "{}", opened.1);
+    assert_eq!(opened.1["target"], "vm1");
+    assert_eq!(opened.1["remote"], 5173);
+    assert_eq!(opened.1["local"], alternate);
+    assert_eq!(opened.1["state"], "up");
+    assert_eq!(opened.1["url"], format!("http://localhost:{alternate}"));
+    assert_eq!(
+        tokio::task::spawn_blocking(move || through(alternate))
+            .await
+            .unwrap(),
+        "forwarded 5173"
+    );
+    let resumed = call(&mut peer, &mut id, "forwardPreferences.get", json!({})).await;
+    assert_eq!(resumed.0, 200);
+    assert_eq!(resumed.1["forwards"][0]["local"], alternate);
+    assert_eq!(resumed.1["forwards"][0]["enabled"], true);
+    assert_eq!(resumed.1["forwards"][0]["label"], "");
+    let after = call(&mut peer, &mut id, "mux.state", json!({})).await;
+    assert_eq!(after.0, 200);
+    assert_eq!(after.1, before.1, "manual forwarding leaves Screens alone");
+
+    let forgotten = call(
+        &mut peer,
+        &mut id,
+        "forwardPreferences.forget",
+        json!({"body":key}),
+    )
+    .await;
+    assert_eq!(forgotten.0, 204);
+    assert_eq!(
+        tokio::task::spawn_blocking(move || through(alternate))
+            .await
+            .unwrap(),
+        "forwarded 5173",
+        "Forget keeps the tunnel"
+    );
+    assert!(state.hub.forward_preferences().forwards.is_empty());
+    // Remember is a separate metadata request after a confirmed opening.
+    // Its storage failure must not undo the already usable, unsaved tunnel.
+    let config = dir.path().join("config");
+    let backup = dir.path().join("config-backup");
+    std::fs::rename(&config, &backup).unwrap();
+    std::fs::write(&config, b"owned storage failure fixture").unwrap();
+    let failed_save = call(
+        &mut peer,
+        &mut id,
+        "forwardPreferences.save",
+        json!({"body":key}),
+    )
+    .await;
+    assert_eq!(failed_save.0, 500);
+    assert_eq!(failed_save.1["code"], "storage_failure");
+    let still_live = call(&mut peer, &mut id, "forward.list", json!({})).await;
+    assert_eq!(still_live.0, 200);
+    assert_eq!(still_live.1, json!([opened.1]));
+    assert!(state.hub.forward_preferences().forwards.is_empty());
+    assert_eq!(
+        tokio::task::spawn_blocking(move || through(alternate))
+            .await
+            .unwrap(),
+        "forwarded 5173",
+        "a failed Remember must not undo a confirmed forward"
+    );
+    std::fs::remove_file(&config).unwrap();
+    std::fs::rename(&backup, &config).unwrap();
+    let stopped = call(&mut peer, &mut id, "forward.stop", json!({"body":key})).await;
+    assert_eq!(stopped.0, 204);
+    assert!(!held(alternate));
+    // Accept on the same owned listener to prove neither conflict recovery nor
+    // Stop closed/replaced the competing service's socket.
+    let competing_client = std::net::TcpStream::connect(("127.0.0.1", occupied)).unwrap();
+    let (_, competing_peer) = busy.accept().unwrap();
+    assert_eq!(competing_peer, competing_client.local_addr().unwrap());
+    peer.shutdown().await;
+    server.await.unwrap().unwrap();
+}
+
+#[tokio::test]
 async fn embedded_connector_retains_owner_budget_and_revocation_through_ready() {
     use crate::native::client::Connector;
     use splitty_transport::{

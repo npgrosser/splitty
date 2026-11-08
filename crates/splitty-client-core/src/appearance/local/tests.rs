@@ -32,6 +32,12 @@ use tokio::sync::Notify;
 // production startup may persist home-config migrations. No test here writes
 // settings, changes process-global paths or starts a terminal process.
 pub(crate) fn fixture() -> (Runtime, PathBuf) {
+    fixture_with_connector(Box::new(SshConnector))
+}
+
+pub(crate) fn fixture_with_connector(
+    connector: Box<dyn splitty_server::hub::Connector>,
+) -> (Runtime, PathBuf) {
     let path = std::env::temp_dir().join(format!("splitty-appearance-{}", Uuid::new_v4()));
     let mut config = HomeConfig::default();
     config.appearance.theme_mode = "auto".into();
@@ -47,7 +53,7 @@ pub(crate) fn fixture() -> (Runtime, PathBuf) {
     let store = Arc::new(Store::new());
     let dispatcher = Arc::new(Dispatcher::new(pty.clone()));
     let effects = Arc::new(EffectRunner::new(pty.clone()));
-    let hub = Arc::new(Hub::new(Box::new(SshConnector), path.clone(), None));
+    let hub = Arc::new(Hub::new(connector, path.clone(), None));
     let clients = Arc::new(
         ClientState::new(
             store.clone(),

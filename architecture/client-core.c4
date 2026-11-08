@@ -71,6 +71,31 @@ model {
       metadata { module 'splitty_client_core::hub' }
     }
 
+    client_ports = component 'client_ports' {
+      description 'Explicit local-owner outbound forwarding with bounded independent per-mapping API jobs, independent charged active/saved snapshots, authoritative acknowledgement revisions, and exact-source revocable browser continuations; no tunnel ownership or automatic forwarding.'
+      metadata { module 'splitty_client_core::ports' }
+    }
+    native_workspace -> splitty.server.hub 'Gate the real forwarding service adapter for worker concurrency tests'
+    native_workspace -> splitty.remote.bridge 'Type the fixture connector without opening remote Screen transports'
+    native_workspace -> splitty.remote.handshake 'Type the forbidden fixture handshake and daemon operations'
+    native_workspace -> splitty.remote.install 'Type the forbidden fixture preparation and daemon operations'
+    native_workspace -> splitty.remote.tunnel 'Retain service-owned port reservations in gated forwarding fixtures'
+    native_workspace -> splitty.transport.admission 'Type the forbidden fixture Screen bridge admission'
+    native_workspace -> client_ports 'Compose identified local-owner forwarding commands, passive invalidation and joined cancellation'
+    client_ports -> client_workspace 'Validate immutable source and terminal origins and join connection-owned discovery'
+    client_ports -> api_stream 'Decode bounded existing forwarding contracts and retain independent requests'
+    client_ports -> owned_service 'Own mapping and passive setup/request/cleanup carriers'
+    client_ports -> external_links 'Rewrite admitted HTTP(S) development URLs to verified localhost mappings'
+    client_ports -> splitty.core.native_api 'Use existing LocalHub forwarding operations and response bounds'
+    client_ports -> splitty.remote.ssh 'Validate canonical mapping targets before effects'
+    client_ports -> splitty.transport.budget 'Charge retained replies and bounded admitted request allocations'
+    client_ports -> splitty.transport.codec 'Reserve typed response decoding before allocation'
+    client_ports -> splitty.transport.queue 'Revoke retained stream setup and request contexts during cleanup'
+    client_ports -> splitty.transport.wire 'Validate existing reply envelopes and construct bounded fixture responses'
+    client_ports -> appearance 'Use isolated in-memory service fixtures for forwarding scheduler tests'
+    client_ports -> client_root 'Own fixture service cleanup through the public embedded service seam'
+    client_ports -> hub 'Reuse the bounded scripted native API peer for acknowledgement regression tests'
+
     client_templates = component 'client_templates' {
       description 'Bounded immutable charged template drafts/catalogs and explicit list/load/extract/save/delete jobs; no workspace policy or direct file storage.'
       metadata { module 'splitty_client_core::templates' }

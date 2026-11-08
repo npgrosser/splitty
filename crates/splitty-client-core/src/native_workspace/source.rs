@@ -455,7 +455,10 @@ impl SourceRuntime {
             return Ok(out);
         }
         let result: std::io::Result<()> = match command {
-            CommandKind::ManageHost { .. }
+            CommandKind::ManageForward { .. }
+            | CommandKind::RefreshForwards
+            | CommandKind::CancelForwardOpen { .. }
+            | CommandKind::ManageHost { .. }
             | CommandKind::WithdrawHostConnect { .. }
             | CommandKind::ReleaseHostBrowsing
             | CommandKind::ConnectHost { .. }
@@ -698,6 +701,18 @@ impl SourceRuntime {
                     }
                     out.changed = true;
                     self.welcomed = true;
+                }
+                Some("ports.changed") => {
+                    if let Some(model) = &mut model {
+                        match model.observe_ports(
+                            source,
+                            json,
+                            &self.client.sender().context().budget,
+                        ) {
+                            Ok(accepted) => out.changed |= accepted,
+                            Err(error) => out.push(Update::Status(error.to_string())),
+                        }
+                    }
                 }
                 Some("mux.workspace_snapshot") => {
                     if let Some(model) = &mut model {

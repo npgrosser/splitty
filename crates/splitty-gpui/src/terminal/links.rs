@@ -16,7 +16,7 @@ impl LinkOrigin {
         open: impl FnOnce(&str),
     ) -> Result<(), &'static str> {
         if self == Self::Remote && url.is_loopback_or_unspecified() {
-            return Err("Port forwarding for remote links is not available yet");
+            return Err("Remote loopback link requires workspace forwarding");
         }
         open(url.as_str());
         Ok(())

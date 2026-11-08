@@ -18,7 +18,7 @@ model {
     }
 
     terminal = component 'terminal' {
-      description 'Native terminal presentation with coherent zoom metrics, cached text shaping, local find editing and highlights, pointer geometry and admitted gesture lifetime, source-aware deliberate links, and byte-preserving input bound to an immutable source and terminal route. A replacement connection receives fresh emulation before replay; same-connection hidden views remain retained.'
+      description 'Native terminal presentation with coherent zoom metrics, cached text shaping, local find editing and highlights, pointer geometry and admitted gesture lifetime, source-aware deliberate links routed through workspace ownership for remote loopback opening, and byte-preserving input bound to an immutable source and terminal route. A replacement connection receives fresh emulation before replay; same-connection hidden views remain retained.'
       metadata { module 'splitty_gpui::terminal' }
     }
 
@@ -28,7 +28,7 @@ model {
     }
 
     gpui_workspace = component 'gpui_workspace' {
-      description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references and global navigation, deliberate Hosts connection and live catalog actions, retained source-qualified terminal views, local-only appearance and library controls, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools.'
+      description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references and global navigation, deliberate Hosts connection, live catalog and Ports controls, retained source-qualified terminal views, local-only appearance and library controls, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools.'
       metadata { module 'splitty_gpui::workspace' }
     }
 
@@ -58,12 +58,14 @@ model {
     gpui_app -> terminal 'Show terminal output and forward native input'
     terminal -> terminal_engine 'Borrow native terminal state and encode checked input'
     terminal -> splitty.client_core.external_links 'Validate bounded HTTP(S) targets before explicit platform dispatch'
-    gpui_workspace -> terminal 'Keep one terminal view per source-scoped pane and rebind geometry callbacks when its route or Screen changes'
+    gpui_workspace -> terminal 'Keep source-scoped terminal views, rebind route geometry and subscribe to deliberate remote loopback link gestures'
     gpui_workspace -> gpui_appearance 'Convert resolved theme values for native chrome and terminal colors'
     gpui_workspace -> splitty.client_core.appearance 'Match owner and generation before applying resolved appearance'
     gpui_workspace -> splitty.client_core.local_service 'Present identified local settings mutation outcomes and explicit uncertainty reconciliation in a retained Settings editor'
     gpui_workspace -> splitty.client_core.client_shell_profiles 'Retain owner-bound service choices for the new-tab picker'
     gpui_workspace -> splitty.client_core.hub 'Present fixed-local host observations and retained Connect/name forms, submit validated metadata intents and match identified outcomes'
+    gpui_workspace -> splitty.client_core.client_ports 'Present source-qualified detected, active and saved Ports; submit exact-local forwarding intents and consume revocable browser consent'
+    gpui_workspace -> splitty.client_core.external_links 'Capture validated development URLs before submitting source-qualified forwarding intent'
     gpui_workspace -> splitty.client_core.client_templates 'Review charged template drafts and match identified library replies'
     gpui_appearance -> terminal 'Provide a plain terminal color configuration'
     gpui_appearance -> splitty.client_core.appearance 'Consume charged appearance snapshot values'

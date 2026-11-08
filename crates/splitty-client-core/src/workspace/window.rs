@@ -387,6 +387,7 @@ impl WindowWorkspace {
         };
         workspace.staged = self.staged.clone();
         workspace.ready = false;
+        workspace.clear_port_observation();
         source.workspace = Some(workspace);
         Ok(())
     }
@@ -448,6 +449,7 @@ impl WindowWorkspace {
         source.presentation.retry_available = false;
         if let Some(workspace) = &mut source.workspace {
             workspace.ready = false;
+            workspace.clear_port_observation();
         }
         Ok(())
     }
@@ -513,6 +515,7 @@ impl WindowWorkspace {
         source.presentation.status = SourceStatus::Closing;
         if let Some(workspace) = &mut source.workspace {
             workspace.ready = false;
+            workspace.clear_port_observation();
         }
         Ok(())
     }
@@ -785,5 +788,7 @@ fn busy(message: &str) -> io::Error {
     io::Error::new(io::ErrorKind::WouldBlock, message)
 }
 
+#[cfg(any(test, feature = "ui-test-support"))]
+mod test_support;
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

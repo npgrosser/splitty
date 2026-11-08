@@ -303,6 +303,22 @@ enum HostRow {
         route: Option<(SourceToken, ScreenKey)>,
         opened: bool,
     },
+    PortHeader {
+        target: String,
+        owner: Option<SourceToken>,
+    },
+    Port {
+        row: splitty_client_core::ports::ForwardRow,
+        owner: Option<SourceToken>,
+        feedback: Option<String>,
+        feedback_outcome: Option<splitty_client_core::ports::ForwardOutcome>,
+        pending: bool,
+    },
+    PortPending {
+        key: splitty_client_core::ports::MappingKey,
+        owner: Option<SourceToken>,
+        feedback: String,
+    },
 }
 
 fn admit_host_open(
@@ -435,6 +451,7 @@ impl Workspace {
             return;
         }
         self.destination = Destination::Hosts;
+        self.refresh_ports(cx);
         self.wheel_navigation.reset();
         self.sync_visible(cx);
         self.focus.focus(window, cx);
@@ -446,6 +463,7 @@ impl Workspace {
             return;
         }
         if self.destination == Destination::Hosts {
+            self.leave_ports(window, cx);
             let Some(owner) = self.lifecycle_token() else {
                 return;
             };
@@ -491,6 +509,7 @@ impl Workspace {
     }
 
     fn refresh_hosts_captured(&mut self, source: SourceToken, cx: &mut Context<Self>) {
+        self.refresh_ports(cx);
         if !self.hosts.can_refresh() {
             return;
         }
@@ -571,7 +590,7 @@ impl Workspace {
         let foreground = theme.foreground;
         let border = theme.border;
         let surface = theme.background;
-        let row_height = chrome_rems((self.appearance.font_size * 4.0 + 16.0).max(72.0));
+        let row_height = chrome_rems((self.appearance.font_size * 4.0 + 16.0).max(82.0));
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -607,6 +626,7 @@ impl Workspace {
             }
         };
         let mut rows = Vec::<HostRow>::new();
+        let forward_rows = self.ports.rows(self.model.as_ref());
         let mut entries: Vec<_> = self
             .hosts
             .snapshot()
@@ -625,6 +645,32 @@ impl Workspace {
         temporary.sort();
         temporary.dedup();
         entries.extend(temporary.into_iter().map(|target| (target, None)));
+        let mut known_targets: HashSet<String> =
+            entries.iter().map(|(target, _)| target.clone()).collect();
+        let mut forward_by_target: HashMap<String, Vec<splitty_client_core::ports::ForwardRow>> =
+            HashMap::new();
+        for row in &forward_rows {
+            if known_targets.insert(row.key().target().to_owned()) {
+                entries.push((row.key().target().to_owned(), None));
+            }
+            forward_by_target
+                .entry(row.key().target().to_owned())
+                .or_default()
+                .push(row.clone());
+        }
+        for key in self
+            .ports
+            .feedback
+            .iter()
+            .filter(|(_, feedback)| {
+                feedback.outcome() == splitty_client_core::ports::ForwardOutcome::Pending
+            })
+            .map(|(key, _)| key)
+        {
+            if known_targets.insert(key.target().to_owned()) {
+                entries.push((key.target().to_owned(), None));
+            }
+        }
         for (target, host) in entries {
             let saved = host.is_some();
             let alias = host.as_ref().and_then(|host| host.alias.clone());
@@ -854,13 +900,47 @@ impl Workspace {
                     });
                 }
             }
+            let port_owner = self
+                .ports
+                .can_manage()
+                .then(|| self.lifecycle_token())
+                .flatten();
+            rows.push(HostRow::PortHeader {
+                target: target.clone(),
+                owner: port_owner,
+            });
+            for row in forward_by_target.remove(&target).unwrap_or_default() {
+                let feedback = self.ports.feedback.get(row.key());
+                let pending = self.ports.pending(row.key());
+                rows.push(HostRow::Port {
+                    row,
+                    owner: port_owner,
+                    feedback: feedback.map(super::ports::feedback_text),
+                    feedback_outcome: feedback.map(|value| value.outcome()),
+                    pending,
+                });
+            }
+            for (key, feedback) in self.ports.feedback.iter().filter(|(key, feedback)| {
+                key.target() == target
+                    && feedback.outcome() == splitty_client_core::ports::ForwardOutcome::Pending
+                    && !forward_rows.iter().any(|row| row.key() == *key)
+            }) {
+                rows.push(HostRow::PortPending {
+                    key: key.clone(),
+                    owner: port_owner,
+                    feedback: super::ports::feedback_text(feedback),
+                });
+            }
         }
         let rows = Arc::new(rows);
         let visible_targets: HashSet<&str> = rows
             .iter()
             .filter_map(|row| match row {
                 HostRow::Host { target, .. } => Some(target.as_str()),
-                HostRow::Screen { .. } => None,
+                HostRow::Screen { .. }
+                | HostRow::PortHeader { .. }
+                | HostRow::Port { .. }
+                | HostRow::PortPending { .. } => None,
             })
             .collect();
         let mut detached_feedback: Vec<_> = self
@@ -892,7 +972,86 @@ impl Workspace {
                 )
             })
             .collect();
+        detached_feedback.extend(
+            self.ports
+                .feedback
+                .iter()
+                .filter(|(key, feedback)| {
+                    !forward_rows.iter().any(|row| row.key() == *key)
+                        && matches!(
+                            feedback.outcome(),
+                            splitty_client_core::ports::ForwardOutcome::Partial
+                                | splitty_client_core::ports::ForwardOutcome::Failed
+                                | splitty_client_core::ports::ForwardOutcome::Rejected
+                                | splitty_client_core::ports::ForwardOutcome::Uncertain
+                        )
+                })
+                .map(|(key, feedback)| {
+                    format!(
+                        "{} · port {} · {}",
+                        display(key.target()),
+                        key.remote(),
+                        super::ports::feedback_text(feedback)
+                    )
+                }),
+        );
         detached_feedback.sort();
+        let mut detached_success: Vec<_> = self
+            .ports
+            .feedback
+            .iter()
+            .filter(|(key, feedback)| {
+                feedback.outcome() == splitty_client_core::ports::ForwardOutcome::Succeeded
+                    && !forward_rows.iter().any(|row| row.key() == *key)
+            })
+            .map(|(key, feedback)| {
+                format!(
+                    "{} · port {} · {}",
+                    display(key.target()),
+                    key.remote(),
+                    super::ports::feedback_text(feedback)
+                )
+            })
+            .collect();
+        detached_success.sort();
+        let ports_status = match self.ports.snapshot.as_deref() {
+            None => "Port forwarding state has not loaded".to_owned(),
+            Some(snapshot) if !snapshot.is_available() => {
+                "Port forwarding is unavailable for this local service".to_owned()
+            }
+            Some(snapshot) if snapshot.is_loading() => {
+                "Refreshing active and saved ports…".to_owned()
+            }
+            Some(snapshot)
+                if snapshot.active_error().is_some() || snapshot.saved_error().is_some() =>
+            {
+                format!(
+                    "Ports refresh incomplete: {}{}",
+                    snapshot.active_error().unwrap_or_default(),
+                    snapshot
+                        .saved_error()
+                        .map(|error| format!(" {error}"))
+                        .unwrap_or_default()
+                )
+            }
+            Some(_)
+                if self.model.as_ref().is_some_and(|model| {
+                    model.hosts().any(|host| {
+                        model
+                            .source(host.action_target().source_id())
+                            .is_some_and(|source| source.port_observation().is_none())
+                    })
+                }) =>
+            {
+                "Some hosts have not reported port discovery. Add a port manually.".to_owned()
+            }
+            Some(_) if forward_rows.is_empty() => {
+                "No detected or saved ports. Add a port manually.".to_owned()
+            }
+            Some(_) => {
+                "Ports are shown under each host. Forwarding starts only when requested.".to_owned()
+            }
+        };
         let count = rows.len();
         let list = uniform_list("hosts-list", count, {
             let rows = rows.clone();
@@ -1159,6 +1318,36 @@ impl Workspace {
                             }
                             entry.into_any_element()
                         }
+                        HostRow::PortHeader { target, owner } => {
+                            Self::render_port_header(target, *owner, row_height, weak.clone(), cx)
+                        }
+                        HostRow::Port {
+                            row,
+                            owner,
+                            feedback,
+                            feedback_outcome,
+                            pending,
+                        } => Self::render_port_row(
+                            row,
+                            *owner,
+                            feedback.as_deref().zip(*feedback_outcome),
+                            *pending,
+                            row_height,
+                            weak.clone(),
+                            cx,
+                        ),
+                        HostRow::PortPending {
+                            key,
+                            owner,
+                            feedback,
+                        } => Self::render_pending_port(
+                            key,
+                            *owner,
+                            feedback,
+                            row_height,
+                            weak.clone(),
+                            cx,
+                        ),
                     };
                     views.push(view);
                 }
@@ -1175,6 +1364,7 @@ impl Workspace {
         let weak_back = cx.entity().downgrade();
         let weak_refresh = cx.entity().downgrade();
         let weak_connect = cx.entity().downgrade();
+        let weak_port = cx.entity().downgrade();
         div()
             .id("hosts-view")
             .flex()
@@ -1210,6 +1400,18 @@ impl Workspace {
                     )
                     .child(div().font_weight(FontWeight::BOLD).child("Hosts"))
                     .child(div().flex_1())
+                    .child(
+                        Button::new("hosts-add-port")
+                            .label("Add port…")
+                            .accessibility_label("Add port")
+                            .track_focus(&self.port_trigger)
+                            .small()
+                            .disabled(!self.ports.can_manage())
+                            .on_click(move |_, window, cx| {
+                                let _ = weak_port
+                                    .update(cx, |this, cx| this.open_port_form(None, window, cx));
+                            }),
+                    )
                     .child(
                         Button::new("hosts-connect")
                             .label("Connect…")
@@ -1251,6 +1453,17 @@ impl Workspace {
                         view.child(div().text_color(cx.theme().danger).child(error))
                     }),
             )
+            .child(
+                div()
+                    .px_4()
+                    .py_1()
+                    .text_sm()
+                    .text_color(muted)
+                    .child(ports_status)
+                    .when_some(self.ports.error.clone(), |view, error| {
+                        view.child(div().text_color(cx.theme().danger).child(error))
+                    }),
+            )
             .when(!detached_feedback.is_empty(), |view| {
                 view.child(
                     div()
@@ -1266,6 +1479,19 @@ impl Workspace {
                         .text_sm()
                         .text_color(theme.warning)
                         .children(detached_feedback),
+                )
+            })
+            .when(!detached_success.is_empty(), |view| {
+                view.child(
+                    div()
+                        .id("ports-detached-success")
+                        .px_4()
+                        .py_1()
+                        .flex()
+                        .flex_col()
+                        .text_sm()
+                        .text_color(muted)
+                        .children(detached_success),
                 )
             })
             .child(list)

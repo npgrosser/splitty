@@ -61,6 +61,14 @@ A WSL-side check alone does not establish how a particular Windows networking co
 
 Linux acceptance can finish while this scoped Windows follow-up remains unrun, provided documentation does not claim Windows acceptance. Record the actual backend/opener environments and limitations. Do not invent a proxy, forwarding wire operation or speculative runtime identity protocol. Existing Windows/WSL reverse-sharing restrictions remain unchanged. Exact-source consent and passive mapping verification are shared native correctness requirements; cross-environment collision coverage is additional evidence, not an existing stronger protocol guarantee.
 
+Verification distinguishes mapping identity from endpoint reachability. Deterministic
+client tests reject mismatched acknowledgements, stopped mappings and invalid URLs;
+they do not simulate a Windows endpoint authority that the product does not have.
+The scoped platform probe supplies evidence for the conditional wrong-endpoint
+scenario. A successful routing/collision probe does not constitute native-app or
+OS-browser acceptance, and a reproduced wrong response still requires correction
+or withholding the affected path before claiming that acceptance.
+
 ### 6. Native interaction composition
 
 The task is to find a remote service, identify its mapping/state and either use or manage it. Extend the existing Hosts destination with a consistently aligned Ports region rather than a separate navigation system (NOP-5). Give detected, saved/paused, rebuilding and failed mappings distinct text states. Keep the primary Forward/Open/Resume action visible; a Kit menu holds Stop, Remember/label and Forget as appropriate. Explain that Forget leaves a live forward running.

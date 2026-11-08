@@ -3,6 +3,7 @@ mod chrome;
 mod drawer;
 mod floating;
 mod hosts;
+mod ports;
 mod settings;
 mod shell_profiles;
 #[cfg(test)]
@@ -28,10 +29,10 @@ use splitty_client_core::native_workspace::{
 };
 use splitty_client_core::shell_profiles::ShellProfilesSnapshot;
 use splitty_client_core::workspace::{
-    Axis, ClosePlan, CloseTarget, FloatingActionOutcome, LayoutKey, LayoutNode, MovePlacement,
-    PaneActionTarget, PaneDrag, PaneKey, ScreenKey, ScreenModel, ScreenTransferOutcome,
-    ScreenTransferTarget, SourceId, SourceToken, SourceWorkspace, TabStep, TerminalToken,
-    WindowWorkspace,
+    Axis, CloseIdentity, ClosePlan, CloseTarget, FloatingActionOutcome, LayoutKey, LayoutNode,
+    MovePlacement, PaneActionTarget, PaneDrag, PaneKey, ScreenKey, ScreenModel,
+    ScreenTransferOutcome, ScreenTransferTarget, SourceId, SourceToken, SourceWorkspace, TabStep,
+    TerminalToken, WindowWorkspace,
 };
 use splitty_client_core::zoom::{Zoom, ZoomAction, ZoomOutcome, ZoomResult};
 use std::{
@@ -50,6 +51,7 @@ use uuid::Uuid;
 use self::drawer::{WheelNavigation, WheelTarget};
 use self::floating::{FloatGesture, FloatGestureKind};
 use self::hosts::{HostKey, HostsView};
+use self::ports::PortsView;
 use self::settings::{SettingsEvent, SettingsView};
 use self::shell_profiles::ProfilePicker;
 use self::templates::TemplateDialog;
@@ -546,6 +548,7 @@ struct PaneView {
     route: TerminalToken,
     capture: ResizeCapture,
     terminal: Entity<Terminal>,
+    _link_subscription: Subscription,
     pending_resize: Arc<Mutex<Option<PendingResize>>>,
     marker: bool,
     tail: String,
@@ -710,9 +713,11 @@ pub struct Workspace {
     model: Option<WindowWorkspace>,
     focus: FocusHandle,
     hosts: HostsView,
+    ports: PortsView,
     settings: Entity<SettingsView>,
     destination: Destination,
     host_connect_trigger: FocusHandle,
+    port_trigger: FocusHandle,
     settings_trigger: FocusHandle,
     _settings_subscription: Subscription,
     panes: HashMap<PaneKey, PaneView>,
@@ -1002,9 +1007,11 @@ impl Workspace {
                 model: None,
                 focus: cx.focus_handle(),
                 hosts: HostsView::default(),
+                ports: PortsView::default(),
                 settings,
                 destination: Destination::Screens,
                 host_connect_trigger: cx.focus_handle(),
+                port_trigger: cx.focus_handle(),
                 settings_trigger: cx.focus_handle(),
                 _settings_subscription: settings_subscription,
                 panes: HashMap::new(),
@@ -1680,7 +1687,10 @@ impl Workspace {
     }
     fn submit_close(&mut self, plan: ClosePlan, confirmed: bool, cx: &mut Context<Self>) {
         match admit_close(&self.commands, plan, confirmed) {
-            Ok(pending) => self.pending_close = Some(pending),
+            Ok(pending) => {
+                self.revoke_close_links(&pending.plan, cx);
+                self.pending_close = Some(pending);
+            }
             Err(error) => {
                 self.pending_close = None;
                 self.status = error;
@@ -1708,7 +1718,18 @@ impl Workspace {
             .is_some_and(|model| source != model.local_source().source_id())
         {
             if let Some(owner) = self.lifecycle_token() {
-                self.send_captured(owner, Command::DetachRemoteScreen { screen }, cx);
+                match self.commands.try_send(WorkerCommand::new(
+                    owner,
+                    Command::DetachRemoteScreen {
+                        screen: screen.clone(),
+                    },
+                )) {
+                    Ok(()) => self.revoke_screen_links(&screen, cx),
+                    Err(error) => {
+                        self.status = format!("Detach was not sent: {error}");
+                        cx.notify();
+                    }
+                }
             }
         } else {
             self.request_close_from(
@@ -1791,6 +1812,14 @@ impl Workspace {
         let selection_foreground = self.appearance.selection_foreground;
         let selection_background = self.appearance.selection_background;
         let terminal = cx.new(|cx| Terminal::new(commands, origin, cx));
+        let link_route = route.clone();
+        let link_subscription = cx.subscribe(
+            &terminal,
+            move |this, _, event: &terminal::LinkEvent, cx| {
+                let terminal::LinkEvent::RemoteLoopback(url) = event;
+                this.remote_link(link_route.clone(), url.clone(), cx);
+            },
+        );
         if let Err(error) = terminal.update(cx, |terminal, cx| {
             terminal.set_search_active(false, cx);
             terminal.set_zoom(terminal_scale, cx);
@@ -1804,6 +1833,7 @@ impl Workspace {
                 route,
                 capture,
                 terminal,
+                _link_subscription: link_subscription,
                 pending_resize,
                 marker: false,
                 tail: String::new(),
@@ -1816,6 +1846,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.ports_owner_changed(window_model.local_source().source_token(), window, cx);
+        self.revoke_missing_terminal_links(&window_model);
         self.settings.update(cx, |view, cx| {
             view.set_owner(window_model.local_source().connection_id(), window, cx);
         });
@@ -2746,6 +2778,12 @@ impl Workspace {
                 Update::HostManagement(result) => {
                     self.host_management_result(result, window, cx);
                 }
+                Update::Forwards(snapshot) => {
+                    if self.ports.accept(snapshot) {
+                        cx.notify();
+                    }
+                }
+                Update::Forward(result) => self.forward_result(result, window, cx),
                 Update::TemplateApi(result) => self.template_result(result, window, cx),
                 Update::TemplateApply(result) => self.template_apply_result(result, window, cx),
                 Update::Appearance(snapshot) => self.apply_appearance(&snapshot, window, cx),
@@ -4607,6 +4645,16 @@ impl Render for Workspace {
             )
         } else {
             self.status.clone()
+        };
+        let primary_status = if let Some(notice) = self
+            .ports
+            .link_notice
+            .as_deref()
+            .filter(|_| self.destination == Destination::Screens)
+        {
+            format!("{notice} · {primary_status}")
+        } else {
+            primary_status
         };
         let primary_status = if let Some(message) = zoom_message {
             format!("{message} · {primary_status}")

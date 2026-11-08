@@ -127,6 +127,29 @@ The shared catalog also owns `native_api::directory`, the unchanged merged-host
 response shape. The hub projects its persistence records into this contract;
 native clients do not depend on server storage types.
 
+Outbound forwarding has a separate `client-core::ports` owner. Connection-scoped
+port observations live in `SourceWorkspace`; the Ports controller reads those
+observations and joins them with independently retained active and saved mappings.
+The workspace never depends on that controller. Discovery is optional, and a
+reported empty list differs from a connection that has not reported ports.
+Disconnecting clears discovery authority without removing saved or live forwards.
+The mapping identity is the canonical SSH target and remote port, independently
+of host-directory membership and opened Screens.
+
+The native worker composes Ports with its assigned local `OwnedService`.
+Forwarding uses bounded, individually owned API jobs and a separate passive reader,
+not the host-metadata queue: opening or stopping a tunnel may take substantially
+longer than an ordinary metadata request. Per-mapping ordering preserves a later
+Stop while unrelated mappings, metadata and terminal events can progress.
+Read generations and an acknowledgement revision fence old passive reads: an
+empty list started before Start cannot revoke a newer confirmed opening merely
+because its response arrives later. Settled requests without a browser
+continuation release their consent allocation; published continuations remain
+revocable until consumption or cancellation. Uncertain mutations are reconciled
+through reads without replay. The service remains the sole owner
+of SSH forwarding, saved preferences and restoration. The native client uses the
+existing `forward.*` and `forwardPreferences.*` operations without new wire types.
+
 The development-only `splitty-gpui` window uses `splitty-client-core` as a UI-free
 adapter over one native connection per source and an isolated owned service. The explicit
 `native_workspace` module owns the worker, command/update API and bounded retries
@@ -551,15 +574,27 @@ still contain detected URLs. The adapter does not duplicate the OSC parser. Plai
 grapheme cells, including wide tails; extraction stops without a target when
 16 KiB, 128 rows or 80,000 inspected cells cannot contain the complete line.
 `client-core::external_links` admits and normalizes bounded absolute HTTP(S)
-URLs without I/O. The view previews that actual target, owns the deliberate
-Ctrl/Cmd-click and dispatches only its validated result to the platform browser
-opener. Gesture completion resolves the target again; cached hover cannot
+URLs without I/O. The view previews that actual target and owns the deliberate
+Ctrl/Cmd-click. Gesture completion resolves the target again; cached hover cannot
 authorize a launch. Selection and application mouse reporting retain their
 routes, while an admitted link gesture remains local through cancellation.
 The view observes captured movement at window scope so leaving and returning
 to a terminal element cannot rearm a click that the element did not receive.
 There is no terminal-adapter dependency on client policy, no server-side browser
 effect and no generic editor/file scheme dispatch.
+
+Workspace ownership routes the admitted link. Local and non-loopback web links
+keep direct validated browser opening. A remote loopback link captures its
+terminal/source identity and asks the local Ports controller to open that exact
+mapping. A matching opening acknowledgement and a subsequent passive observation
+of the same up mapping are required before publishing a one-shot browser result.
+The client constructs the localhost URL from the confirmed local port, retaining
+only the original HTTP(S) scheme, path, query and fragment. Stop, replacement,
+cancellation or closure revokes the pending consent; changing an unrelated Screen
+does not redirect it. Final platform dispatch rechecks consent and ownership.
+These checks do not reserve the listener through the browser's later connection.
+Windows uses the existing selected-WSL helper and Windows browser contract;
+WSL-side success alone is not evidence of Windows endpoint reachability.
 
 The terminal view owns a thread-confined Ghostty VT engine behind an owned Rust
 wrapper; the wrapper contains the C interface and hands the view bounded render
@@ -570,8 +605,7 @@ exercises that fixture. Received native frames and decoded messages keep their
 delivery charges through bounded UI queues, and versioned document reads stay
 with their connection generation. The optional CEF fixture owns only offscreen
 pixels and has no service bridge. The embedded composition exists only on Unix;
-the Windows client adapter accepts an owned native stream, while this development
-window's Windows launcher remains unwired. Closing the window joins its worker
+the Windows launcher owns a native stream to its selected WSL helper. Closing the window joins its worker
 after closing its stream and isolated service. See [the spike report](gpui-spike.md)
 for platform evidence; released clients remain unchanged.
 
@@ -963,13 +997,23 @@ The Hosts panel keeps disconnected hosts with last-seen names and pane counts. A
 
 The host caption's tooltip identifies another server version. The existing update dialog handles native updates and positive legacy migration offers, naming both versions and keeper-session behavior. A blocked legacy migration uses `migration_unavailable`, so it cannot fall through to a generic update action. `RemoteSocket.retry({ update: true })` consumes confirmation on one attempt; ordinary retries do not inherit it. Separate desktop launchers preserve the same offer and create a fresh fixed-target provider/helper for a confirmed migration. Pending ordinary opens cannot silently absorb that intent, and stale documents cannot transfer it to a replacement.
 
-The client's half of the ports is one `PortForwarding` per window (`lib/remote/port_forwarding.ts`, pure validation/joining in `lib/remote/ports.ts`, view state in `stores/ports.svelte.ts`). It watches remote connections' `ports.changed`, keeping bounded plain-text process names and at most 256 checked ports; disconnection clears discovery only. The drawer joins discovery, saved preferences and live forwards into one row per target/remote port, including disconnected hosts and services discovery never saw. Paused consent, initial restore errors and an established tunnel rebuilding are distinct states.
+The web client's half of the ports is one `PortForwarding` per window (`lib/remote/port_forwarding.ts`, pure validation/joining in `lib/remote/ports.ts`, view state in `stores/ports.svelte.ts`). It watches remote connections' `ports.changed`, keeping bounded plain-text process names and at most 256 checked ports; disconnection clears discovery only. The drawer joins discovery, saved preferences and live forwards into one row per target/remote port, including disconnected hosts and services discovery never saw. Paused consent, initial restore errors and an established tunnel rebuilding are distinct states.
 
 Inspecting ports never acquires a browsing connection: the caption's ports menu lists a host's forwarded ports with Open and its detected ones with Forward and open, and links to the Hosts panel, where each host lists its forwarded and saved ports before the ones only detected. A row shows one action (Open, Forward, Resume or Retry, `portPrimary`) and keeps the rest in a menu (`portMenu`, `components/chrome/remote_view.ts`). Per-host forms fix their target; the panel's global form supports arbitrary targets. The view components only delegate explicit actions to the existing controller; presentation helpers do not infer tunnel health from the host screen connection or start forwarding.
 
-Both APIs refresh on window start, after mutations, after host readiness, on focus and when the Ports view opens. They poll every five seconds while there is a watched host, active forward, saved rule or open view. Failed reads preserve the last valid state; read generations and per-key mutation ordering prevent stale responses from repainting stopped/forgotten entries or opening old links. Refresh never POSTs or restores enabled rules itself. This also lets another window observe saves, pauses and removals when no live forward exists.
+Both APIs refresh on window start, after mutations, after host readiness, on focus and when the Ports view opens. A supported local change feed replaces polling. Without that capability, the web client polls every five seconds while there is a watched host, active forward, saved rule or open view. Failed reads preserve the last valid state; read generations and per-key mutation ordering prevent stale responses from repainting stopped/forgotten entries or opening old links. Refresh never POSTs or restores enabled rules itself. This also lets another window observe saves, pauses and removals when no live forward exists.
 
 Manual entry accepts target, remote port and optional exact local port. Save without starting sends only preference PUT, even while disconnected. Forward mutates active state with POST; Remember is opt-in and saves the returned actual port afterward, reporting a save failure while leaving the successfully opened tunnel visible. After these mutations, a fresh `cache: no-store` active GET must confirm the same up mapping before publication or navigation. A delayed POST response therefore cannot authorize an old link after that GET observes another window's Stop, remap or dropped tunnel. Only the current key is reconciled, with its generation checked after the final asynchronous read; failed validation closes the pending browser tab without retrying POST. The read is a snapshot, so later independent changes remain possible. Labels use bounded plain text with control/bidi filtering. Stop durably pauses a saved rule; Resume/Retry and an explicitly chosen alternate send explicit POST. Forget removes the saved rule and explains that a live tunnel keeps running until Stop or server exit. A different local port for an active mapping is refused until it is stopped.
+
+The native Hosts destination composes these explicit workflows through
+`client-core::ports`, described under Client connections. Its retained Kit forms
+own input and focus, while the shared client controller owns admitted operations,
+observations and browser consent. The native implementation has no popup-tab
+reservation or polling fallback. Initial reads, explicit refresh, supported
+`hub.changed` notifications and mutation settlement drive passive reconciliation.
+Remember remains separate from Start, and label editing submits metadata only.
+Detection-driven automation and reverse sharing remain separate native parity
+work; the existing web implementations continue to use their current controllers.
 
 A port that appears brings no notice; the host's port lists offer it. `remote.autoForwardPorts` stays off by default; with it, a port that appears after a host's first discovery list after connection or reconnection is forwarded once per connection and process, without a notice. Its automatic requests use `automatic:true`, respect paused saved rules and never silently remap saved-port conflicts. Opening a forward or clicking a link does not implicitly remember it; a link click is explicit consent to resume a paused rule.
 

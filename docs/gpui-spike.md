@@ -230,6 +230,28 @@ to refresh and **Escape** or **Screens** to return to the workspace with termina
 focus restored. Leaving Hosts releases browsing connections, while opened
 Screens retain their independent connection demand.
 
+Ports appear under their host in the same view. Detected suggestions, active
+forwards and saved rules are joined by target and remote port; manual mappings
+remain available without discovery or an open Screen. **Add port** accepts a
+target, remote port, optional exact local port and label. **Forward** starts it;
+opt-in **Remember** saves its actual local port after successful opening.
+**Save** changes metadata without connecting. **Stop** pauses a saved rule;
+**Pause saved port** also handles an inactive saved rule without connecting.
+**Resume** starts it again, and **Forget** removes its saved preference while
+leaving an active tunnel running. Editing a paused rule keeps Enter as metadata
+Save; the separate **Resume with local port** action attempts an alternative
+before updating its saved port. A conflicting local listener is left alone.
+
+Only deliberate **Open** or remote terminal-link activation requests the browser.
+The local worker confirms the exact mapping, and the window rechecks the captured
+source and one-shot opening consent before dispatch. Changing the selected Screen
+does not retarget an opening; closing its originating Screen, dismissing its form,
+or stopping its mapping revokes that continuation. Closing the surface does not
+claim to stop a submitted tunnel. Active/saved refresh failures retain their
+separate last observed values, and uncertain requests are not replayed. Services
+without the native forwarding update capability show an unavailable explanation.
+Reverse sharing and automatic forwarding on discovery remain outside this view.
+
 Workspace shortcuts use **Cmd** on macOS and **Alt** on other hosts as `Mod`:
 
 | Shortcut | Action |
@@ -265,7 +287,9 @@ retained output. Ctrl/Cmd-hover feedback shows the allowed target. Shift keeps l
 selection; ordinary application mouse input is unchanged. Dragging, scrolling,
 changing the target or leaving its cell before release cancels activation.
 Only absolute HTTP(S) targets are accepted; editor and file schemes are not
-generic terminal links. This local preview does not establish remote forwards.
+generic terminal links. Remote loopback links use the originating host's outbound
+mapping and retain their scheme, path, query and fragment at the confirmed local
+address. Local terminal links keep their direct platform-opening behavior.
 The pinned terminal parser discards oversized OSC 8 commands (a 2,048-byte
 fixed capture buffer). Their labels can still be ordinary detected URLs; no
 shortened explicit target is opened.
@@ -1467,3 +1491,70 @@ Host interaction evidence remains scoped to software-rendered Linux X11 windows;
 Windows remote-host interaction, broader remote failures and outbound port controls
 remain separate acceptance work. This increment does not close the wider remote
 workspace matrix.
+
+## Native outbound ports acceptance
+
+The shared controller passes 220 client-core tests. The GPUI suite passes 113
+tests, followed by an additional production-view regression for pausing both an
+inactive saved rule and a failed enabled rule without starting either. Targeted
+all-target Clippy passes for client-core, GPUI and server, together with formatting
+and all 17 architecture checks. In-process service coverage verifies metadata-only
+Save, omitted and cleared labels, durable pause, occupied-port refusal, explicit
+alternate ports, Forget with a live forward, and a Remember storage failure that
+leaves the verified tunnel usable. Runtime tests retain terminal and host-metadata
+progress during gated forwarding and join owned cleanup without replaying requests.
+
+The optimized Linux candidate has SHA-256
+`94e2c7debd7f367b689217626005ffcfa6078227b485e20402744a4b76513386`.
+The `ports` phase of `scripts/testing/gpui-remote-screens.py` passes 15 actual-window
+checks with two private hosts exposing the same remote port. Manual Forward and
+Remember, label edit/clear, Forget, Stop, detected Forward, saved-only Pause,
+occupied-port refusal and explicit alternate-port recovery are checked against
+durable metadata, owned listeners and distinct HTTP responses. Save and Pause
+start no SSH work, and the competing listener survives conflict and recovery.
+
+A gated terminal link keeps its original host after another Screen is selected;
+the emitted localhost URL retains `/app?x=1#frag`, and the intercepted opener's
+HTTP fetch reaches the original host's distinct process with `/app?x=1`.
+Form Open also dispatches once, while dismissing a second gated Open dispatches
+nothing. The original remote terminal PID, pane and session survive the workflow.
+Normal window close preserves the private host sessions, and fixture cleanup
+leaves no owned process. The run records 26 screenshots, including the new Pause
+menu, conflict, alternate-port, link and dismissal states.
+
+This window evidence uses software-rendered X11, the real service/controller,
+an exact-command SSH forwarding shim and an intercepted platform opener.
+The shim binds a real owned loopback listener and relays to the private HTTP
+processes; it does not exercise OpenSSH. A recorded opener plus an HTTP fetch
+does not establish navigation in an installed OS browser. The bounded fixture
+can use `SPLITTY_TEST_TMPDIR` when temporary storage is limited; keep its root
+short enough for the private Unix control socket.
+
+### Windows endpoint follow-up
+
+The Windows native-app forwarding workflow is **unrun** for this increment.
+Its prepared follow-up uses the selected WSL service, two distinguishable remote
+HTTP responses and an independently owned Windows listener: request a forward
+from the native window, record the emitted localhost URL and reached response,
+then attempt a conflicting saved port and explicitly choose an alternative.
+The competing listener must survive, and closing the originating Screen must
+prevent any still-pending browser dispatch. An observed wrong endpoint requires
+correction or withholding the affected path before claiming acceptance.
+
+`scripts/testing/native-outbound-wsl-probe.py` provides a narrower network probe.
+On the observed mirrored WSL network, an IPv4-only WSL loopback HTTP listener
+was reached by Windows `curl.exe` through `localhost` with the default resolver
+and forced IPv4; both returned its distinct identity and requested path/query.
+IPv6-only requests could not reach that listener. With owned Windows IPv4/IPv6
+listeners started first on another port, the WSL bind returned address-in-use;
+requests still reached the Windows listeners, which survived until owned cleanup.
+A separate PowerShell HTTP client timed out for `localhost` while succeeding for
+the IPv4 literal. These are client-specific observations, not a browser result.
+
+This probe starts neither Splitty nor its SSH forward and does not establish the
+native app's `local_port_conflict`, alternative-port or OS-browser behavior.
+It found no successful WSL bind followed by a wrong Windows endpoint in this
+configuration. It does not establish other WSL networking modes or justify a
+new proxy or a blanket Windows opening restriction. The existing desktop
+localhost contract remains in use; shared exact-mapping and source-consent
+tests have a different scope from endpoint reachability.

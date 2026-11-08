@@ -32,6 +32,10 @@ impl WebUrl {
         Some(Self(parsed.into()))
     }
 
+    pub fn port_or_known_default(&self) -> Option<u16> {
+        url::Url::parse(&self.0).ok()?.port_or_known_default()
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }

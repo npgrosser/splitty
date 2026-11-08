@@ -94,7 +94,8 @@ class RemoteScreenFixture(AbstractContextManager):
     def __enter__(self):
         if sys.platform != "linux" or os.uname().machine != "x86_64":
             raise RuntimeError("this fixture requires Linux x86_64")
-        self.root = Path(tempfile.mkdtemp(prefix="snr-", dir="/tmp"))
+        self.root = Path(tempfile.mkdtemp(
+            prefix="snr-", dir=os.environ.get("SPLITTY_TEST_TMPDIR", "/tmp")))
         self.root.chmod(0o700)
         try:
             self._prepare()
