@@ -1338,19 +1338,19 @@ mod tests {
         assert!(
             matches!(stale.updates.as_slice(), [Update::Status(reason)] if reason.contains("previous connection"))
         );
-        source
-            .command(
-                &mut window,
-                Command::new(
-                    token,
-                    CommandKind::RenameScreen {
-                        screen: initial.screen_id.clone(),
-                        connection: token.connection_id(),
-                        name: "Renamed on host".into(),
-                    },
-                ),
-            )
-            .unwrap();
+        let rename = Command::new(
+            token,
+            CommandKind::RenameScreen {
+                screen: initial.screen_id.clone(),
+                connection: token.connection_id(),
+                name: "Renamed on host".into(),
+            },
+        );
+        // The live worker checks this envelope before reaching SourceRuntime.
+        // Exercising only the driver would miss a local-only classification.
+        validate_worker_command_source(&window, &rename)
+            .expect("worker ingress admits the captured remote rename while local is selected");
+        source.command(&mut window, rename).unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
                 source.reconcile(&mut window).unwrap();

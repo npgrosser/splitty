@@ -1389,9 +1389,7 @@ async fn run_service(
                         }
                         continue;
                     }
-                    let expected=if local_command(&command.kind) {Some(owner)} else {command.source.and_then(|captured|window.execution_token(captured.source_id()))};
-                    let admission=expected.ok_or_else(||crate::connection::invalid("Command belongs to an unavailable source connection")).and_then(|expected|command.validate_source(expected));
-                    if let Err(error) = admission {
+                    if let Err(error) = validate_worker_command_source(&window, &command) {
                         publish(&updates,rejected_command(command.source,&command.kind,error.to_string()),&stop).await?;
                         continue;
                     }
@@ -1614,6 +1612,23 @@ async fn run_service(
     .await
 }
 
+fn validate_worker_command_source(
+    window: &WindowWorkspace,
+    command: &Command,
+) -> std::io::Result<()> {
+    let expected = if local_command(&command.kind) {
+        Some(window.lifecycle_token())
+    } else {
+        command
+            .source
+            .and_then(|captured| window.execution_token(captured.source_id()))
+    }
+    .ok_or_else(|| {
+        crate::connection::invalid("Command belongs to an unavailable source connection")
+    })?;
+    command.validate_source(expected)
+}
+
 fn local_command(kind: &CommandKind) -> bool {
     matches!(
         kind,
@@ -1644,7 +1659,6 @@ fn local_command(kind: &CommandKind) -> bool {
             | CommandKind::UpdateSettings { .. }
             | CommandKind::SetDrawerVisibility { .. }
             | CommandKind::CreateScreen(_)
-            | CommandKind::RenameScreen { .. }
             | CommandKind::ProfileTab { .. }
             | CommandKind::NewTerminal { .. }
             | CommandKind::TransferPane { .. }
