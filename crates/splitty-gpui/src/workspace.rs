@@ -12,6 +12,7 @@ mod shell_profiles;
 mod source_routing_tests;
 mod templates;
 mod terminal_menu;
+mod title;
 mod transfer;
 mod unread;
 
@@ -909,7 +910,7 @@ impl Workspace {
         })
     }
 
-    fn new_with_worker(
+    pub(crate) fn new_with_worker(
         smoke: bool,
         outcome: Arc<AtomicBool>,
         window: &mut Window,

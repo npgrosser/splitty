@@ -27,6 +27,8 @@ use std::{
 
 struct RootView {
     content: AnyView,
+    title: String,
+    _title_subscription: Option<Subscription>,
     windows_chrome: bool,
     waiting_for_appearance: bool,
     appearance_subscription: Option<Subscription>,
@@ -36,11 +38,28 @@ impl RootView {
     fn new(
         content: AnyView,
         workspace: Option<&Entity<workspace::Workspace>>,
-        window: &Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
         // Windows applies a hidden window's initial placement on activation.
         let windows_chrome = cfg!(target_os = "windows") && workspace.is_some();
+        let title = workspace.map_or_else(
+            || "Splitty".to_owned(),
+            |workspace| workspace.read(cx).window_title(),
+        );
+        if workspace.is_some() {
+            window.set_window_title(&title);
+        }
+        let title_subscription = workspace.map(|workspace| {
+            cx.observe_in(workspace, window, |this, workspace, window, cx| {
+                let title = workspace.read(cx).window_title();
+                if this.title != title {
+                    window.set_window_title(&title);
+                    this.title = title;
+                    cx.notify();
+                }
+            })
+        });
         let appearance_subscription = workspace.filter(|_| windows_chrome).map(|workspace| {
             cx.subscribe_in(
                 workspace,
@@ -58,6 +77,8 @@ impl RootView {
         });
         Self {
             content,
+            title,
+            _title_subscription: title_subscription,
             windows_chrome,
             waiting_for_appearance: windows_chrome,
             appearance_subscription,
@@ -95,7 +116,23 @@ impl Render for RootView {
                         .bg(cx.theme().background)
                         .border_color(cx.theme().border)
                         .text_color(cx.theme().foreground)
-                        .child("Splitty"),
+                        .child(
+                            div()
+                                .id("window-title")
+                                .flex_1()
+                                .min_w_0()
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .tooltip({
+                                    let title = self.title.clone();
+                                    move |window, cx| {
+                                        gpui_kit::component::tooltip::Tooltip::new(title.clone())
+                                            .build(window, cx)
+                                    }
+                                })
+                                .child(self.title.clone()),
+                        ),
                 )
             })
             .child(
@@ -105,6 +142,62 @@ impl Render for RootView {
                     .min_w_0()
                     .child(self.content.clone()),
             )
+    }
+}
+
+#[cfg(all(test, feature = "ui-test-support"))]
+mod title_tests {
+    use super::RootView;
+    use gpui_kit::{AppContext, TestAppContext};
+    use splitty_client_core::{native_workspace::Worker, workspace::WindowWorkspace};
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::{atomic::AtomicBool, Arc},
+    };
+    use uuid::Uuid;
+
+    #[test]
+    fn root_observes_workspace_title_in_os_window() {
+        let mut app = TestAppContext::single();
+        app.update(gpui_kit::init);
+        let workspace_out = Rc::new(RefCell::new(None));
+        let (_, window) = app.add_window_view({
+            let workspace_out = workspace_out.clone();
+            move |window, cx| {
+                let workspace = cx.new(|cx| {
+                    let (workspace, worker) = super::workspace::Workspace::new_with_worker(
+                        false,
+                        Arc::new(AtomicBool::new(false)),
+                        window,
+                        cx,
+                        |_, _, _| Worker::ui_test_fixture(),
+                    );
+                    worker.shutdown().unwrap();
+                    workspace
+                });
+                *workspace_out.borrow_mut() = Some(workspace.clone());
+                let root = cx.new(|cx| {
+                    RootView::new(workspace.clone().into(), Some(&workspace), window, cx)
+                });
+                gpui_kit::base::Root::new(root, window, cx)
+            }
+        });
+        let workspace = workspace_out.borrow_mut().take().unwrap();
+        assert_eq!(window.window_title().as_deref(), Some("Splitty"));
+        window.update(|window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let mut model = WindowWorkspace::new(Uuid::new_v4());
+                model.ui_test_local_screen_fixture("Work").unwrap();
+                workspace.ui_test_set_title_model(model, cx);
+            });
+            window.draw(cx).clear(cx);
+        });
+        window.run_until_parked();
+        assert_eq!(
+            window.window_title().as_deref(),
+            Some("Work · Terminal · Splitty")
+        );
     }
 }
 enum OwnedWorker {
