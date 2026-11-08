@@ -565,7 +565,9 @@ impl SourceRuntime {
                 connection,
                 name,
             } => {
-                if model.connection_id() == connection {
+                if self.pending_close.is_some() {
+                    Err(std::io::Error::other("A close operation is pending"))
+                } else if model.connection_id() == connection {
                     model.rename_screen(&self.client, &screen, &name)
                 } else {
                     Err(std::io::Error::new(
@@ -1267,7 +1269,7 @@ mod tests {
         let unopened = client.create_screen("Screen 3").unwrap();
         let mut window = WindowWorkspace::new(uuid::Uuid::new_v4());
         let local_key = window
-            .ui_test_screen_order_fixture(&[("local", "Local")], None)
+            .ui_test_screen_order_fixture(&[(&initial.screen_id, "Local")], None)
             .unwrap()
             .remove(0);
         let id = window
@@ -1320,6 +1322,52 @@ mod tests {
         .await
         .unwrap();
         window.select(window.lifecycle_token(), &local_key).unwrap();
+        let stale = source
+            .command(
+                &mut window,
+                Command::new(
+                    token,
+                    CommandKind::RenameScreen {
+                        screen: initial.screen_id.clone(),
+                        connection: uuid::Uuid::new_v4(),
+                        name: "Stale rename".into(),
+                    },
+                ),
+            )
+            .unwrap();
+        assert!(
+            matches!(stale.updates.as_slice(), [Update::Status(reason)] if reason.contains("previous connection"))
+        );
+        source
+            .command(
+                &mut window,
+                Command::new(
+                    token,
+                    CommandKind::RenameScreen {
+                        screen: initial.screen_id.clone(),
+                        connection: token.connection_id(),
+                        name: "Renamed on host".into(),
+                    },
+                ),
+            )
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                source.reconcile(&mut window).unwrap();
+                let event = source.client.next_event().await.unwrap().unwrap();
+                source.event(&mut window, Box::new(event)).unwrap();
+                if window.source(id).unwrap().screens().iter().any(|screen| {
+                    screen.id.as_str() == initial.screen_id
+                        && screen.name.as_deref() == Some("Renamed on host")
+                }) {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(window.shown_key(), Some(local_key.clone()));
+        assert_eq!(window.local_source().screens()[0].name.as_deref(), Some("Local"));
         let blocked = window
             .prepare_remote_screen_creation(&target, token)
             .unwrap();
@@ -1334,6 +1382,22 @@ mod tests {
             catalog_barrier_seen: false,
             failure: None,
         });
+        let closing = source
+            .command(
+                &mut window,
+                Command::new(
+                    token,
+                    CommandKind::RenameScreen {
+                        screen: initial.screen_id.clone(),
+                        connection: token.connection_id(),
+                        name: "Closing rename".into(),
+                    },
+                ),
+            )
+            .unwrap();
+        assert!(
+            matches!(closing.updates.as_slice(), [Update::Status(reason)] if reason.contains("close operation"))
+        );
         let rejected = source
             .command(
                 &mut window,
@@ -1408,6 +1472,7 @@ mod tests {
         })
         .await
         .unwrap();
+        // Renaming the original frees its old suggested name for creation.
         assert_eq!(
             window
                 .source(id)
@@ -1418,7 +1483,7 @@ mod tests {
                 .unwrap()
                 .name
                 .as_deref(),
-            Some("Screen 2")
+            Some("Screen 1")
         );
         assert!(window
             .source(id)

@@ -16,6 +16,43 @@ fn catalog(model: &mut SourceWorkspace, ids: &[&str], active: Option<&str>) -> W
 fn catalog_event(ids: &[&str], active: Option<&str>) -> Value {
     json!({"type":"mux.workspace_snapshot", "screens":ids.iter().map(|id| json!({"id":id,"name":id})).collect::<Vec<_>>(), "activeScreenId":active})
 }
+
+#[test]
+fn remote_rename_requires_an_open_live_reference_and_ready_source() {
+    let mut local = model(&["same"]);
+    assert!(local.validate_screen_rename("same").is_ok());
+    assert!(local.validate_screen_rename("absent").is_err());
+
+    let mut remote = SourceWorkspace::remote(
+        SourceId::initial(Uuid::new_v4()),
+        Uuid::new_v4(),
+        "host.test".into(),
+        ConnectionBudget::default(),
+    );
+    remote.set_catalog_supported(true);
+    catalog(&mut remote, &["same", "unopened"], Some("same"));
+    remote.open_existing("same").unwrap();
+    assert!(remote.validate_screen_rename("same").is_ok());
+    assert!(remote.validate_screen_rename("unopened").is_err());
+    remote.reconciling = true;
+    assert!(remote.validate_screen_rename_target("same").is_ok());
+    assert!(remote.validate_screen_rename("same").is_err());
+    remote.reconciling = false;
+
+    let mut unconfirmed = remote.clone();
+    if let CatalogPolicy::Remote { live, .. } = &mut unconfirmed.policy {
+        *live = None;
+    }
+    assert!(unconfirmed.validate_screen_rename("same").is_err());
+    catalog(&mut remote, &[], None);
+    assert!(remote.is_missing("same"));
+    assert!(remote.validate_screen_rename("same").is_err());
+    remote.detach_reference("same").unwrap();
+    assert!(remote.validate_screen_rename("same").is_err());
+
+    local.ready = false;
+    assert!(local.validate_screen_rename("same").is_err());
+}
 fn snapshot(id: &str, panes: &[&str]) -> Value {
     json!({"type":"mux.screen_snapshot", "screen":{"id":id,"revision":1,
         "root":{"type":"slot","id":format!("slot-{id}"),"paneIds":panes,"activePaneId":panes.first()},

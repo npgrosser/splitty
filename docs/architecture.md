@@ -338,6 +338,14 @@ gestures. Drawer pane rows derive from the canonical layout and capture their
 source execution token before dispatch; they cannot acquire replacement
 authority from a later connection.
 
+The native inline Screen name editor captures the window owner, source token
+and exact Screen key when opened from the Drawer. It survives unrelated
+selection and source updates, but closes when that binding is no longer ready,
+opened or present in the current remote catalog. A valid Enter or blur sends
+the existing `rename_screen` operation to the captured source; Escape cancels
+it. The old name stays visible until the ordered canonical catalog reports a
+new one. A rejected or lost operation is never replayed after reconnect.
+
 Remote Drawer captions navigate passively to the exact current Host row; their
 Ports menus use the same `ForwardSnapshot` mapping projection as Hosts. Navigation
 recomputes the Host or Ports section index from the shared row projection and

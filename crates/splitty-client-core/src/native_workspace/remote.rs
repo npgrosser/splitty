@@ -499,6 +499,7 @@ impl<'a> Remotes<'a> {
         let allowed = matches!(
             &command.kind,
             CommandKind::CreateRemoteScreen { .. }
+                | CommandKind::RenameScreen { .. }
                 | CommandKind::Split { .. }
                 | CommandKind::Tab { .. }
                 | CommandKind::Select { .. }

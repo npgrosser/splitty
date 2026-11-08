@@ -652,9 +652,27 @@ fn refresh_resize_drag(drag: &mut ResizeDrag, model: &SourceWorkspace) -> bool {
     true
 }
 struct RenameEditor {
+    owner: SourceToken,
     screen: ScreenKey,
     source: SourceToken,
     input: Entity<InputState>,
+}
+
+fn rename_binding_current(
+    model: &WindowWorkspace,
+    owner: SourceToken,
+    source: SourceToken,
+    screen: &ScreenKey,
+) -> bool {
+    model.lifecycle_token() == owner
+        && model.execution_token(screen.source_id()) == Some(source)
+        && model.source(screen.source_id()).is_some_and(|current| {
+            current.source_token() == source
+                && current.screen_key(screen.screen_id()) == *screen
+                && current
+                    .validate_screen_rename_target(screen.screen_id())
+                    .is_ok()
+        })
 }
 
 #[derive(Clone, Copy)]
@@ -1553,41 +1571,37 @@ impl Workspace {
     fn start_captured_rename(
         &mut self,
         owner: SourceToken,
+        source: SourceToken,
         screen: &ScreenKey,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.lifecycle_token() != Some(owner)
-            || !self.local_model().is_some_and(|model| {
-                model.source_token() == owner
-                    && model.screen_key(screen.screen_id()) == *screen
-                    && model.screen(screen.screen_id()).is_some()
+        if self.pending_close.is_some()
+            || !self.model.as_ref().is_some_and(|model| {
+                rename_binding_current(model, owner, source, screen)
+                    && model.source(screen.source_id()).is_some_and(|current| {
+                        current.validate_screen_rename(screen.screen_id()).is_ok()
+                    })
             })
         {
             return;
         }
-        self.start_rename(screen.screen_id(), window, cx);
-    }
-
-    fn start_rename(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.wheel_navigation.reset();
         self.tab_context_menu = None;
         self.close_profile_picker(window, cx);
-        let Some((name, source, screen_key)) = self.local_model().and_then(|model| {
-            model
-                .screens()
-                .iter()
-                .find(|info| info.id.as_str() == screen)
-                .map(|info| {
-                    (
-                        info.name.as_deref().unwrap_or("Screen").to_owned(),
-                        model.source_token(),
-                        model.screen_key(screen),
-                    )
-                })
-        }) else {
-            return;
-        };
+        let name = self
+            .model
+            .as_ref()
+            .and_then(|model| model.source(screen.source_id()))
+            .and_then(|current| {
+                current
+                    .screens()
+                    .iter()
+                    .find(|info| info.id.as_str() == screen.screen_id())
+            })
+            .and_then(|info| info.name.as_deref())
+            .unwrap_or("Screen")
+            .to_owned();
         let input = cx.new(|cx| InputState::new(window, cx).default_value(name));
         self.rename_subscription = Some(cx.subscribe_in(
             &input,
@@ -1600,7 +1614,8 @@ impl Workspace {
             },
         ));
         self.rename = Some(RenameEditor {
-            screen: screen_key,
+            owner,
+            screen: screen.clone(),
             source,
             input: input.clone(),
         });
@@ -1610,6 +1625,26 @@ impl Workspace {
         });
         cx.notify();
     }
+
+    fn start_rename(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((owner, source, screen_key)) = self.model.as_ref().and_then(|model| {
+            let local = model.local_source();
+            local
+                .screens()
+                .iter()
+                .any(|info| info.id.as_str() == screen)
+                .then(|| {
+                    (
+                        model.lifecycle_token(),
+                        local.source_token(),
+                        local.screen_key(screen),
+                    )
+                })
+        }) else {
+            return;
+        };
+        self.start_captured_rename(owner, source, &screen_key, window, cx);
+    }
     fn finish_rename(&mut self, save: bool, window: &mut Window, cx: &mut Context<Self>) {
         let Some(editor) = self.rename.take() else {
             return;
@@ -1618,21 +1653,29 @@ impl Workspace {
         if save {
             let name = editor.input.read(cx).value().trim().to_owned();
             if !name.is_empty()
-                && self.local_model().is_some_and(|model| {
-                    model.source_token() == editor.source
-                        && model.screen_key(editor.screen.screen_id()) == editor.screen
-                        && model.screen(editor.screen.screen_id()).is_some()
+                && self.pending_close.is_none()
+                && self.model.as_ref().is_some_and(|model| {
+                    rename_binding_current(model, editor.owner, editor.source, &editor.screen)
                 })
             {
-                self.send_captured(
-                    editor.source,
-                    Command::RenameScreen {
-                        screen: editor.screen.screen_id().to_owned(),
-                        connection: editor.source.connection_id(),
-                        name,
-                    },
-                    cx,
-                );
+                let validation = self
+                    .model
+                    .as_ref()
+                    .and_then(|model| model.source(editor.screen.source_id()))
+                    .expect("checked rename binding")
+                    .validate_screen_rename_input(editor.screen.screen_id(), &name);
+                match validation {
+                    Ok(()) => self.send_captured(
+                        editor.source,
+                        Command::RenameScreen {
+                            screen: editor.screen.screen_id().to_owned(),
+                            connection: editor.source.connection_id(),
+                            name,
+                        },
+                        cx,
+                    ),
+                    Err(error) => self.status = format!("Rename unavailable: {error}"),
+                }
             }
         }
         self.focus_current(window, cx);
@@ -2213,10 +2256,7 @@ impl Workspace {
             .and_then(|pane| self.panes.get(&model.pane_key(pane)))
             .map(|view| view.terminal.entity_id());
         let editor_cancelled = self.rename.as_ref().is_some_and(|editor| {
-            let local = window_model.local_source();
-            local.source_token() != editor.source
-                || local.screen_key(editor.screen.screen_id()) != editor.screen
-                || local.screen(editor.screen.screen_id()).is_none()
+            !rename_binding_current(&window_model, editor.owner, editor.source, &editor.screen)
         });
         let picker_cancelled = self
             .profile_picker

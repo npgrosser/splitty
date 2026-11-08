@@ -366,9 +366,7 @@ impl Client {
 
     pub fn rename_screen(&self, screen_id: &str, name: &str) -> io::Result<()> {
         identifier(screen_id)?;
-        if name.len() > 256 {
-            return Err(invalid("screen name too long"));
-        }
+        validate_rename_name(name)?;
         self.command(name.len(), || {
             json!({"type":"mux.op", "screenId":screen_id, "op":{
                 "type":"rename_screen", "name":name
@@ -624,6 +622,13 @@ impl io::Write for CountBytes {
 pub(crate) fn identifier(id: &str) -> io::Result<()> {
     if id.is_empty() || id.len() > MAX_ID_BYTES {
         return Err(invalid("invalid object identifier"));
+    }
+    Ok(())
+}
+
+pub(crate) fn validate_rename_name(name: &str) -> io::Result<()> {
+    if name.len() > 256 {
+        return Err(invalid("screen name too long"));
     }
     Ok(())
 }

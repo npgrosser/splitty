@@ -2076,3 +2076,28 @@ Integration checks after the patch pass: 267 client-core and 187 GPUI tests,
 8 targeted platform tests plus 2 matching GPUI tests, strict Core/GPUI/platform
 all-target Clippy, 17 architecture tests, formatting and both affected strict
 OpenSpec validations. Full workspace CI remains the later checkpoint.
+
+### Native remote Screen rename, in-process checkpoint (2026-11-08)
+
+The existing inline Drawer editor now captures the window owner, exact source
+connection and Screen key for local and opened remote Screens. Core admission
+requires a ready, canonically present remote reference and the existing bounded
+name; the remote runtime sends the existing `rename_screen` operation through
+that captured source. The old label stays until a catalog observation reports
+the effective name. No new naming store, reconnect replay or wire operation was
+added.
+
+Focused checks pass: 18 Drawer production-view tests, the client-core rename
+admission test, and the in-process remote stream test extended with colliding
+local/remote Screen IDs, stale connection and pending-close refusal, and the
+canonical renamed name. Strict all-target client-core/GPUI Clippy, 17
+architecture tests, formatting, LikeC4 validation and strict OpenSpec change
+validation pass. The view tests exercise a real double-click, context menu/F2
+entry, Enter and Escape, retained input/focus through unrelated reconciliation,
+invalid-name and full-queue refusal, and disconnect cancellation. A 200px
+Drawer with a long remote title and Loading status retains a stable select
+hitbox and keeps both text and status outside its fixed action lane; the full
+title remains available as a tooltip. Blur uses the same retained editor event
+subscription as Enter, but a separate active-window Blur input test has not yet
+been run. Actual remote-window acceptance and the deferred full workspace CI
+remain separate checkpoints.

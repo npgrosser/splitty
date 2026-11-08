@@ -697,6 +697,275 @@ mod view_tests {
         exercise_name_interactions();
     }
 
+    #[test]
+    fn remote_name_editor_keeps_its_source_when_selected_ids_collide() {
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let local = model
+                .ui_test_screen_order_fixture(&[("same", "Local")], None)
+                .unwrap()[0]
+                .clone();
+            let remote = model
+                .ui_test_screen_order_fixture(
+                    &[("same", "A longer live remote screen title")],
+                    Some("vm.test"),
+                )
+                .unwrap()[0]
+                .clone();
+            let owner = model.lifecycle_token();
+            let remote_source = model.execution_token(remote.source_id()).unwrap();
+            assert!(model
+                .source(remote.source_id())
+                .unwrap()
+                .validate_screen_rename(remote.screen_id())
+                .is_ok());
+            assert!(super::super::rename_binding_current(
+                &model,
+                owner,
+                remote_source,
+                &remote
+            ));
+            model.select(owner, &local).unwrap();
+            let (commands, mut receiver) = mpsc::channel(16);
+            window.update(|window, cx| {
+                cx.set_reduce_motion(true);
+                window.resize(size(px(900.), px(620.)));
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.reconcile(model.clone(), window, cx);
+                    workspace.drawer_visible = true;
+                });
+                window.draw(cx).clear(cx);
+            });
+            window.run_until_parked();
+            redraw(window);
+            while receiver.try_recv().is_ok() {}
+            let selector: &'static str =
+                Box::leak(format!("drawer-select-{remote}").into_boxed_str());
+            let bounds = window.debug_bounds(selector).unwrap();
+            let click_point = bounds.center();
+            window.simulate_mouse_move(click_point, None, Modifiers::default());
+            redraw(window);
+            window.update(|_, cx| assert_eq!(view.read(cx).drawer_hovered, Some(remote.clone())));
+            assert_eq!(
+                window.debug_bounds(selector),
+                Some(bounds),
+                "hover keeps the rename/select hitbox stable"
+            );
+            let more_selector: &'static str =
+                Box::leak(format!("drawer-more-{remote}").into_boxed_str());
+            let more = window.debug_bounds(more_selector).unwrap();
+            assert!(
+                bounds.right() < more.origin.x,
+                "the complete title remains available in its tooltip without drawing into the action lane"
+            );
+            let state_selector: &'static str =
+                Box::leak(format!("drawer-state-{remote}-Loading").into_boxed_str());
+            let state = window.debug_bounds(state_selector).unwrap();
+            assert!(
+                state.right() < more.origin.x,
+                "loading status stays outside the action lane"
+            );
+            window.simulate_mouse_down(click_point, MouseButton::Left, Modifiers::default());
+            window.simulate_mouse_up(click_point, MouseButton::Left, Modifiers::default());
+            assert!(matches!(
+                receiver.try_recv().expect("first click selects row").kind(),
+                Command::SwitchScreen(screen) if screen == &remote
+            ));
+            mouse_click(window, click_point, MouseButton::Left, 2);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    let editor = workspace.rename.as_ref().unwrap();
+                    assert_eq!(editor.owner, owner);
+                    assert_eq!(editor.source, remote_source);
+                    assert_eq!(editor.screen, remote);
+                    assert!(editor.input.read(cx).focus_handle(cx).is_focused(window));
+                    workspace.reconcile(model.clone(), window, cx);
+                    let editor = workspace.rename.as_ref().unwrap();
+                    assert!(editor.input.read(cx).focus_handle(cx).is_focused(window));
+                    editor.input.update(cx, |input, cx| {
+                        input.set_value("Renamed Remote", window, cx)
+                    });
+                });
+            });
+            window.simulate_keystrokes("enter");
+            let command = receiver.try_recv().expect("one exact rename");
+            assert_eq!(command.source_token(), Some(remote_source));
+            assert!(matches!(
+                command.kind(),
+                Command::RenameScreen { screen, connection, name }
+                    if screen == "same"
+                        && *connection == remote_source.connection_id()
+                        && name == "Renamed Remote"
+            ));
+            assert!(receiver.try_recv().is_err());
+            window.update(|_, cx| {
+                let workspace = view.read(cx);
+                let model = workspace.model.as_ref().unwrap();
+                assert_eq!(model.shown_key(), Some(local.clone()));
+                assert_eq!(
+                    model.local_source().screens()[0].name.as_deref(),
+                    Some("Local")
+                );
+                assert_eq!(
+                    model.source(remote.source_id()).unwrap().screens()[0]
+                        .name
+                        .as_deref(),
+                    Some("A longer live remote screen title"),
+                    "queue admission does not optimistically change the name"
+                );
+            });
+        });
+    }
+
+    #[test]
+    fn remote_name_editor_refuses_invalid_full_queue_and_lost_connection() {
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let remote = model
+                .ui_test_screen_order_fixture(&[("work", "Original")], Some("vm.test"))
+                .unwrap()[0]
+                .clone();
+            let owner = model.lifecycle_token();
+            let source = model.execution_token(remote.source_id()).unwrap();
+            let (commands, mut receiver) = mpsc::channel(1);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.reconcile(model.clone(), window, cx);
+                    workspace.commands = commands.clone();
+                    workspace.start_captured_rename(owner, source, &remote, window, cx);
+                    workspace
+                        .rename
+                        .as_ref()
+                        .unwrap()
+                        .input
+                        .update(cx, |input, cx| input.set_value("x".repeat(257), window, cx));
+                    workspace.finish_rename(true, window, cx);
+                    assert!(workspace.status.contains("Rename unavailable"));
+                    assert!(workspace.status.contains("screen name too long"));
+                    assert!(workspace.rename.is_none());
+                });
+            });
+            assert!(receiver.try_recv().is_err());
+
+            commands
+                .try_send(super::super::WorkerCommand::new(
+                    owner,
+                    Command::SwitchScreen(remote.clone()),
+                ))
+                .unwrap();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.start_captured_rename(owner, source, &remote, window, cx);
+                    workspace
+                        .rename
+                        .as_ref()
+                        .unwrap()
+                        .input
+                        .update(cx, |input, cx| {
+                            input.set_value("Valid new name", window, cx)
+                        });
+                    workspace.finish_rename(true, window, cx);
+                    assert!(workspace.status.contains("Action not sent"));
+                    assert_eq!(
+                        workspace
+                            .model
+                            .as_ref()
+                            .unwrap()
+                            .source(remote.source_id())
+                            .unwrap()
+                            .screens()[0]
+                            .name
+                            .as_deref(),
+                        Some("Original")
+                    );
+                });
+            });
+            assert!(matches!(
+                receiver.try_recv().unwrap().kind(),
+                Command::SwitchScreen(_)
+            ));
+            assert!(
+                receiver.try_recv().is_err(),
+                "full queue does not replay rename"
+            );
+
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.start_captured_rename(owner, source, &remote, window, cx);
+                    let editor = workspace.rename.as_ref().unwrap();
+                    assert!(editor.input.read(cx).focus_handle(cx).is_focused(window));
+                    model.disconnect(remote.source_id()).unwrap();
+                    workspace.reconcile(model.clone(), window, cx);
+                    assert!(
+                        workspace.rename.is_none(),
+                        "lost source discards exact editor"
+                    );
+                    workspace.start_captured_rename(owner, source, &remote, window, cx);
+                    assert!(
+                        workspace.rename.is_none(),
+                        "old capture cannot revive offline"
+                    );
+                });
+            });
+            assert!(receiver.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn remote_name_context_and_f2_share_editor_and_escape_cancels() {
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let remote = model
+                .ui_test_screen_order_fixture(&[("work", "Work")], Some("vm.test"))
+                .unwrap()[0]
+                .clone();
+            let source = model.execution_token(remote.source_id()).unwrap();
+            let (commands, mut receiver) = mpsc::channel(2);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.reconcile(model, window, cx);
+                    workspace.drawer_visible = true;
+                });
+                window.draw(cx).clear(cx);
+            });
+            while receiver.try_recv().is_ok() {}
+            let selector: &'static str =
+                Box::leak(format!("drawer-select-{remote}").into_boxed_str());
+            let name = window.debug_bounds(selector).unwrap();
+            mouse_click(window, name.center(), MouseButton::Right, 1);
+            window.simulate_keystrokes("down enter");
+            window.update(|window, cx| {
+                let workspace = view.read(cx);
+                let editor = workspace.rename.as_ref().expect("remote menu editor");
+                assert_eq!(editor.screen, remote);
+                assert_eq!(editor.source, source);
+                assert!(editor.input.read(cx).focus_handle(cx).is_focused(window));
+            });
+            window.simulate_keystrokes("escape");
+            assert!(window.update(|_, cx| view.read(cx).rename.is_none()));
+            assert!(receiver.try_recv().is_err());
+
+            for _ in 0..48 {
+                window.simulate_keystrokes("tab f2");
+                if window.update(|_, cx| view.read(cx).rename.is_some()) {
+                    break;
+                }
+            }
+            window.update(|window, cx| {
+                let workspace = view.read(cx);
+                let editor = workspace.rename.as_ref().expect("remote F2 editor");
+                assert_eq!(editor.screen, remote);
+                assert_eq!(editor.source, source);
+                assert!(editor.input.read(cx).focus_handle(cx).is_focused(window));
+            });
+            window.simulate_keystrokes("escape");
+            assert!(window.update(|_, cx| view.read(cx).rename.is_none()));
+            assert!(receiver.try_recv().is_err());
+        });
+    }
+
     fn exercise_name_interactions() {
         with_view(|window, view| {
             let owner = Uuid::new_v4();
@@ -756,7 +1025,7 @@ mod view_tests {
                     );
                     workspace.finish_rename(false, window, cx);
                     workspace.model = Some(WindowWorkspace::new(Uuid::new_v4()));
-                    workspace.start_captured_rename(source, &screen, window, cx);
+                    workspace.start_captured_rename(source, source, &screen, window, cx);
                     assert!(
                         workspace.rename.is_none(),
                         "old owner cannot retarget rename"
@@ -1825,6 +2094,12 @@ impl Workspace {
             for (index, entry) in opened.iter().enumerate() {
                 let key = entry.key().clone();
                 let remote = key.source_id() != window_model.local_source().source_id();
+                let rename_source = window_model
+                    .source(key.source_id())
+                    .map(SourceWorkspace::source_token);
+                let rename_available = window_model
+                    .source(key.source_id())
+                    .is_some_and(|source| source.validate_screen_rename(key.screen_id()).is_ok());
                 if group != Some(key.source_id()) {
                     group = Some(key.source_id());
                     if remote {
@@ -1847,7 +2122,11 @@ impl Workspace {
                     }
                 }
                 let active = shown.as_ref() == Some(&key);
-                let actions_visible = self.drawer_hovered.as_ref() == Some(&key);
+                let editing = self
+                    .rename
+                    .as_ref()
+                    .is_some_and(|editor| editor.screen == key);
+                let actions_visible = self.drawer_hovered.as_ref() == Some(&key) && !editing;
                 let hover_transition =
                     Transition::new(Duration::from_millis(80)).easing(Easing::Ease);
                 let label = entry.name().map(super::hosts::display).unwrap_or_else(|| {
@@ -1880,13 +2159,27 @@ impl Workspace {
                     .source(key.source_id())
                     .and_then(|source| source.screen(key.screen_id()))
                     .and_then(ScreenModel::snapshot);
+                let can_collapse = screen_snapshot.is_some_and(|screen| {
+                    drawer_pane_groups(screen)
+                        .iter()
+                        .map(Vec::len)
+                        .sum::<usize>()
+                        > 1
+                });
+                let trailing_actions = if editing {
+                    0.
+                } else {
+                    27. + if remote { 27. } else { 0. } + if can_collapse { 24. } else { 0. }
+                };
                 let mut row = div()
                     .id(SharedString::from(format!("drawer-screen-{key}")))
                     .flex()
+                    .relative()
                     .items_center()
                     .min_w_0()
                     .h(chrome_rems(30.))
                     .px_2()
+                    .pr(chrome_rems(8. + trailing_actions))
                     .gap(chrome_rems(8.))
                     .child(
                         div()
@@ -1906,12 +2199,14 @@ impl Workspace {
                             })
                             .child(format!("{}", index + 1)),
                     );
-                if !remote
-                    && self
-                        .rename
-                        .as_ref()
-                        .is_some_and(|editor| editor.screen == key)
-                {
+                let mut row_actions = div()
+                    .absolute()
+                    .right_0()
+                    .top_0()
+                    .h_full()
+                    .flex()
+                    .items_center();
+                if editing {
                     if let Some(editor) = &self.rename {
                         row = row.child(div().flex_1().min_w_0().child(Input::new(&editor.input)));
                     }
@@ -1941,6 +2236,7 @@ impl Workspace {
                             .whitespace_nowrap()
                             .font_weight(FontWeight::MEDIUM)
                             .text_size(chrome_rems(12.5))
+                            .tooltip(label.clone())
                             .child(
                                 div()
                                     .when(cfg!(all(test, feature = "ui-test-support")), |view| {
@@ -1968,16 +2264,16 @@ impl Workspace {
                                     .child(label.clone()),
                             )
                             .on_key_down(move |event, window, cx| {
-                                if !remote
-                                    && event.keystroke.key == "f2"
+                                if event.keystroke.key == "f2"
                                     && event.keystroke.modifiers == Modifiers::default()
                                 {
                                     cx.stop_propagation();
                                     window.prevent_default();
-                                    if let Some(owner) = owner {
+                                    if let (Some(owner), Some(source)) = (owner, rename_source) {
                                         let _ = key_weak.update(cx, |this, cx| {
                                             this.start_captured_rename(
                                                 owner,
+                                                source,
                                                 &rename_on_key,
                                                 window,
                                                 cx,
@@ -1991,10 +2287,13 @@ impl Workspace {
                                     if this.lifecycle_token() == owner
                                         && !GlobalState::is_in_deferred_context(cx)
                                     {
-                                        if event.click_count() == 2 && !remote {
-                                            if let Some(owner) = owner {
+                                        if event.click_count() == 2 {
+                                            if let (Some(owner), Some(source)) =
+                                                (owner, rename_source)
+                                            {
                                                 this.start_captured_rename(
                                                     owner,
+                                                    source,
                                                     &rename_on_click,
                                                     window,
                                                     cx,
@@ -2030,20 +2329,22 @@ impl Workspace {
                     let menu_weak = cx.entity().downgrade();
                     let menu_screen = key.clone();
                     let select_button = select_button.context_menu(move |menu, _, _| {
-                        let menu = if remote {
-                            menu
-                        } else {
+                        let menu = if rename_available {
                             let weak = menu_weak.clone();
                             let screen = menu_screen.clone();
                             menu.item(PopupMenuItem::new("Rename Screen…").on_click(
                                 move |_, window, cx| {
-                                    if let Some(owner) = owner {
+                                    if let (Some(owner), Some(source)) = (owner, rename_source) {
                                         let _ = weak.update(cx, |this, cx| {
-                                            this.start_captured_rename(owner, &screen, window, cx);
+                                            this.start_captured_rename(
+                                                owner, source, &screen, window, cx,
+                                            );
                                         });
                                     }
                                 },
                             ))
+                        } else {
+                            menu
                         };
                         screen_move_items(
                             menu,
@@ -2100,21 +2401,22 @@ impl Workspace {
                     );
                 }
                 if let Some(state) = state {
-                    row = row.child(div().flex_none().text_sm().text_color(muted).child(state));
+                    row = row.child(
+                        div()
+                            .when(cfg!(all(test, feature = "ui-test-support")), |label| {
+                                label.debug_selector(|| format!("drawer-state-{key}-{state}"))
+                            })
+                            .flex_none()
+                            .text_sm()
+                            .text_color(muted)
+                            .child(state),
+                    );
                 }
-                if actions_visible
-                    && screen_snapshot.is_some_and(|screen| {
-                        drawer_pane_groups(screen)
-                            .iter()
-                            .map(Vec::len)
-                            .sum::<usize>()
-                            > 1
-                    })
-                {
+                if actions_visible && can_collapse {
                     let collapsed = self.drawer_collapsed.contains(&key);
                     let collapse_key = key.clone();
                     let weak = cx.entity().downgrade();
-                    row = row.child(
+                    row_actions = row_actions.child(
                         Button::new(SharedString::from(format!("drawer-collapse-{key}")))
                             .accessibility_label(if collapsed {
                                 format!("Show panes in {label}")
@@ -2184,9 +2486,12 @@ impl Workspace {
                     let token = window_model
                         .execution_token(key.source_id())
                         .filter(|_| state.is_none());
-                    row = row.child(
+                    row_actions = row_actions.child(
                         Button::new(SharedString::from(format!("drawer-more-{key}")))
                             .accessibility_label(format!("More actions for {label}"))
+                            .when(cfg!(all(test, feature = "ui-test-support")), |button| {
+                                button.debug_selector(|| format!("drawer-more-{key}"))
+                            })
                             .tooltip("More Screen actions")
                             .icon(Icon::new(IconName::Ellipsis))
                             .ghost()
@@ -2232,7 +2537,7 @@ impl Workspace {
                     } else {
                         "Close screen"
                     };
-                    row = row.child(
+                    row_actions = row_actions.child(
                         div()
                             .id(SharedString::from(format!("drawer-close-hover-{key}")))
                             .rounded_md()
@@ -2275,6 +2580,9 @@ impl Workspace {
                                     }),
                             ),
                     );
+                }
+                if actions_visible {
+                    row = row.child(row_actions);
                 }
                 let block_background: Hsla = if active {
                     rgb(self.appearance.active).into()

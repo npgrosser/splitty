@@ -1101,8 +1101,38 @@ impl SourceWorkspace {
         let target = self.catalog[next].id.to_string();
         self.switch_screen(client, &target)
     }
-    pub fn rename_screen(&mut self, client: &Client, id: &str, name: &str) -> io::Result<()> {
+    /// Check that an editor still belongs to this current, canonically present Screen.
+    /// Transient mutation barriers do not discard its input; commit checks them below.
+    pub fn validate_screen_rename_target(&self, id: &str) -> io::Result<()> {
+        if !self.ready {
+            return Err(invalid("source connection is not ready"));
+        }
+        self.require_catalog()?;
+        if !self.catalog.iter().any(|screen| screen.id.as_str() == id) {
+            return Err(invalid("screen is no longer in the workspace"));
+        }
+        if self.kind() == SourceKind::Remote
+            && (self.is_missing(id)
+                || self.screen(id).is_none()
+                || self
+                    .live_catalog()
+                    .is_none_or(|live| !live.iter().any(|screen| screen.id.as_str() == id)))
+        {
+            return Err(invalid("Screen is not present in the live remote catalog"));
+        }
+        Ok(())
+    }
+    /// Check a rename without selecting a Screen or reserving mutation state.
+    pub fn validate_screen_rename(&self, id: &str) -> io::Result<()> {
         self.require_routes_settled()?;
+        self.validate_screen_rename_target(id)
+    }
+    pub fn validate_screen_rename_input(&self, id: &str, name: &str) -> io::Result<()> {
+        self.validate_screen_rename(id)?;
+        crate::connection::validate_rename_name(name)
+    }
+    pub fn rename_screen(&mut self, client: &Client, id: &str, name: &str) -> io::Result<()> {
+        self.validate_screen_rename_input(id, name)?;
         self.check_known(client, id)?;
         let mutation = self.next_mutation()?;
         client.rename_screen(id, name)?;

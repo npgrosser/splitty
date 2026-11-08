@@ -1274,7 +1274,7 @@ interface SetActiveScreenOp {
 
 interface RenameScreenOp {
   type: "rename_screen";
-  screenId: string;
+  /** The enclosing mux.op screenId identifies the Screen. */
   name: string;
 }
 
