@@ -2159,7 +2159,8 @@ impl Workspace {
                                             format!("drawer-title-icon-{pane_id}-{icon}")
                                         })
                                     })
-                                    .text_size(chrome_rems(10.))
+                                    .text_size(chrome_rems(if busy { 12. } else { 10. }))
+                                    .when(busy, |icon| icon.text_color(rgb(self.appearance.text)))
                                     .child(icon.to_string())
                                     .into_any_element()
                             } else {
@@ -2174,10 +2175,33 @@ impl Workspace {
                                     .into_any_element()
                             };
                             group_view = group_view.child(
+                                div().id(SharedString::from(format!("drawer-pane-hover-{key}-{pane_id}")))
+                                .on_hover(move |hovered, _, cx| {
+                                    let _ = hover_weak.update(cx, |this, cx| {
+                                        if this.lifecycle_token() != owner {
+                                            return;
+                                        }
+                                        let identity = (hover_screen.clone(), hover_pane.clone());
+                                        if *hovered {
+                                            if this.drawer_pane_hovered.as_ref() != Some(&identity)
+                                            {
+                                                this.drawer_pane_hovered = Some(identity);
+                                                cx.notify();
+                                            }
+                                        } else if this.drawer_pane_hovered.as_ref()
+                                            == Some(&identity)
+                                        {
+                                            this.drawer_pane_hovered = None;
+                                            cx.notify();
+                                        }
+                                    });
+                                })
+                                .child(
                                 Button::new(SharedString::from(format!(
                                     "drawer-pane-{key}-{pane_id}"
                                 )))
                                 .accessibility_label(format!("Open {title} in {label}"))
+                                .tooltip(title.clone())
                                 .when(cfg!(all(test, feature = "ui-test-support")), |button| {
                                     button.debug_selector(|| format!("drawer-pane-{key}-{pane_id}"))
                                 })
@@ -2188,7 +2212,7 @@ impl Workspace {
                                 .xsmall()
                                 .w_full()
                                 .h(chrome_rems(21.))
-                                .pl(chrome_rems(if stacked { 8. } else { 30. }))
+                                .pl(chrome_rems(if stacked { 0. } else { 30. }))
                                 .justify_start()
                                 .font(font(self.mono_family.clone()))
                                 .text_size(chrome_rems(11.))
@@ -2235,26 +2259,6 @@ impl Workspace {
                                                 .child(pane_label.to_owned()),
                                         ),
                                 )
-                                .on_hover(move |hovered, _, cx| {
-                                    let _ = hover_weak.update(cx, |this, cx| {
-                                        if this.lifecycle_token() != owner {
-                                            return;
-                                        }
-                                        let identity = (hover_screen.clone(), hover_pane.clone());
-                                        if *hovered {
-                                            if this.drawer_pane_hovered.as_ref() != Some(&identity)
-                                            {
-                                                this.drawer_pane_hovered = Some(identity);
-                                                cx.notify();
-                                            }
-                                        } else if this.drawer_pane_hovered.as_ref()
-                                            == Some(&identity)
-                                        {
-                                            this.drawer_pane_hovered = None;
-                                            cx.notify();
-                                        }
-                                    });
-                                })
                                 .on_click(
                                     move |_, window, cx| {
                                         let _ = weak.update(cx, |this, cx| {
@@ -2295,6 +2299,7 @@ impl Workspace {
                                             );
                                         });
                                     },
+                                ),
                                 ),
                             );
                         }
