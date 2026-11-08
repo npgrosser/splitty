@@ -1714,3 +1714,23 @@ ellipsis.
 Final integrated validation: all 150 native GPUI tests and all 17 architecture
 checks pass. Strict GPUI all-target Clippy with UI test support passes. The full
 workspace merge gate and real-window Windows/macOS acceptance remain deferred.
+
+### Windows Interaction preview (2026-11-08)
+
+The Interaction preview packages frozen source commit `c35b1e4` with matching
+Windows and Linux source manifests (1,188 inputs, SHA-256
+`600b5c08296ab30dd1b8a12694340d5a4f8d1b49f5b351d64e1fcfe7df78af75`).
+Both manifests were reverified after compilation. The Windows executable is
+`a35457e66d791c617bd0448b42b3d3ae16b3e341db49d12e543f615be37747b0`;
+its matching static Linux backend is
+`a84e49684f26adf557c63e3c22b64d53b71334b85e8ec5b89cb3c85762c33d83`
+and advertises relative Screen placement. An owned fake-SSH probe verified the
+backend's self-install payload without an override. The archive includes sibling
+shell integration.
+
+The owned Windows smoke passes its 18 workspace stages on a hardware GPU,
+normal close, owned WSL/backend/session cleanup and preservation of an unrelated
+sentinel. This generic smoke does not cover every new drag, swipe, animation or
+Tab input case; their focused evidence is recorded above. Real-host update
+acceptance remains open. The package carries its build manifest, logs, evidence,
+licenses and launchers in a new Downloads folder, preserving prior previews.
