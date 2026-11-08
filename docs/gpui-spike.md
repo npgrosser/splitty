@@ -1894,3 +1894,27 @@ pass. The frozen candidate has SHA-256
 `fe46efb4be12be4fefa3d1246df9f7301b7a3ef472a63065948a43cc686c5376`.
 Windows controls and the full merge gate remain separate. These changes are not
 in the frozen Activity preview.
+
+### Narrow Settings and bounded port feedback (2026-11-08)
+
+The Settings navigation moves above its independently scrollable content in
+narrow windows, with wrapping section buttons and header actions. A production
+view reproduced the previous 560×420 failure: with the default pinned Drawer,
+the fixed side navigation pushed Close beyond the window. The resize test now
+keeps controls inside the viewport, preserves the wide layout, scrolls to the
+fourth notification switch and submits only the deliberate field change.
+
+An owned 560×420 Linux X11 window with a 200-pixel pinned Drawer confirms visible
+navigation and keyboard focus, reachable Close and the final process switch
+with its Reset action after scrolling. Layout/focus/scroll alone make no config
+change; normal close leaves no owned children or display socket. Candidate
+SHA-256: `ad29b99cedebe32f78379a42f240a8b43d614c52fc56796203b78bfc1c0b0d0b`.
+
+Port action admission now checks room in the 64-entry UI feedback table before
+queueing a command or retaining browser consent. The reproducer failed before
+the fix because untracked open IDs could outlive exhausted feedback capacity.
+The fixed test proves refusal without a command or registry growth, permits
+Stop for an existing key and recovers capacity after an identified terminal
+result. Ten focused Ports tests, the combined 167 GPUI tests and strict GPUI
+Clippy pass. These later fixes are not in the frozen Activity preview; full
+workspace CI remains deferred.
