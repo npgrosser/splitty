@@ -1628,3 +1628,12 @@ frames, one pin write and no terminal input. Screen slides and Screen drag
 ordering are separate unfinished increments. The new host update controls have
 seven passing production-view tests; real-window remote maintenance acceptance
 remains open and is not implied by this Windows workspace smoke.
+
+A separate owned X11 window run on optimized candidate
+`a62edcf4868162f15134c860f1d9c0a550e04f1f81f73803e3f3d1a1abc43e4f`
+captured Drawer unpin, overlay close/reveal and pin, then clicked the retained
+terminal and verified a fresh shell-output marker. Both the application and
+Xvfb exited normally. Settled captures show the expected full-width overlay and
+reserved pinned layout without clipping or overlap. The intermediate captures
+had already settled, so the in-process geometry tests, rather than those
+screenshots, establish the transition trajectory.
