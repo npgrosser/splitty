@@ -385,3 +385,6 @@ Each point names what holds now, the alternative, and where it is recorded.
 - **`native-host-update`, NHU-5** (2026-11-08, provisional, tbd): an unsuccessful dispatched update requires explicit connect-only Retry; uncertainty never replays maintenance or implies rollback.
 
 - **`native-workspace-motion`, NWM-1** (2026-11-08, provisional, tbd): retain at most one outgoing Screen presentation using the same terminal painter with input, resize and activity disabled; no runtime screenshot dependency or second layout model.
+
+- **`native-screen-reorder`, NSR-1** (2026-11-08, provisional, tbd): use additive relative `move_screen` with `screen-placement-v1`; native local placement never falls back to the legacy full-list replacement operation.
+- **`native-screen-reorder`, NSR-2** (2026-11-08, provisional, tbd): collapse duplicate order entries only for the moved Screen, preserve all other entries and partial membership, and reject existing but unlisted moved/anchor Screens.
