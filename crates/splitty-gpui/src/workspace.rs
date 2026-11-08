@@ -4764,59 +4764,26 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let modifier = if cx.platform_info().is_mac() {
-            "Cmd"
-        } else {
-            "Alt"
-        };
-        let appearance_message = self
-            .appearance_error
-            .as_ref()
-            .map(|error| format!("Appearance: {error}"))
-            .or_else(|| self.appearance.notice.map(str::to_owned));
-        let profile_message = self
-            .profiles_error
-            .as_ref()
-            .map(|error| format!("Profiles: {error}"));
-        let zoom_message = self
-            .zoom_feedback
-            .as_ref()
-            .map(|(message, _)| message.clone());
-        let extra_lines =
-            usize::from(appearance_message.is_some()) + usize::from(profile_message.is_some());
-        let primary_status = if self.destination == Destination::Hosts {
-            let help = "R refresh · Esc back to Screens";
-            if self.status.is_empty() {
-                help.to_owned()
-            } else {
-                format!("{help} · {}", self.status)
+        let mut messages = Vec::new();
+        if !self.status.is_empty() {
+            messages.push(self.status.clone());
+        }
+        if self.destination == Destination::Screens {
+            if let Some(notice) = &self.ports.link_notice {
+                messages.push(notice.clone());
             }
-        } else if self.status.is_empty() {
-            format!(
-                "{} terminals · {modifier}+T tab · {modifier}+D split · {modifier}+Shift+arrows focus · Ctrl+Shift+C/V copy/paste",
-                self.panes.len(),
-            )
-        } else {
-            self.status.clone()
-        };
-        let primary_status = if let Some(notice) = self
-            .ports
-            .link_notice
-            .as_deref()
-            .filter(|_| self.destination == Destination::Screens)
-        {
-            format!("{notice} · {primary_status}")
-        } else {
-            primary_status
-        };
-        let primary_status = if let Some(message) = zoom_message {
-            format!("{message} · {primary_status}")
-        } else {
-            primary_status
-        };
-        let footer_height =
-            (self.appearance.font_size * (extra_lines + 1) as f32 + 14. + 2. * extra_lines as f32)
-                .max(25. + 16. * extra_lines as f32);
+        }
+        if let Some((message, _)) = &self.zoom_feedback {
+            messages.push(message.clone());
+        }
+        if let Some(error) = &self.appearance_error {
+            messages.push(format!("Appearance: {error}"));
+        } else if let Some(notice) = self.appearance.notice {
+            messages.push(notice.to_owned());
+        }
+        if let Some(error) = &self.profiles_error {
+            messages.push(format!("Profiles: {error}"));
+        }
         let drawer_fraction = transition(
             "drawer-visibility",
             if self.drawer_visible || self.drawer_overlay_open {
@@ -5015,6 +4982,7 @@ impl Render for Workspace {
                         .min_w_0()
                         .overflow_hidden()
                         .p_1()
+                        .pt_0()
                         .child(
                             canvas(
                                 move |bounds, _, cx| {
@@ -5129,47 +5097,27 @@ impl Render for Workspace {
         }
         content = content.child(main_content);
         view.child(content)
-            .child(
-                div()
-                    .h(chrome_rems(footer_height))
-                    .px_3()
-                    .flex_none()
-                    .flex()
-                    .flex_col()
-                    .justify_center()
-                    .text_size(chrome_rems((self.appearance.font_size - 2.).max(11.)))
-                    .text_color(rgb(self.appearance.muted))
-                    .child(
-                        div()
-                            .min_w_0()
-                            .whitespace_nowrap()
-                            .overflow_hidden()
-                            .text_ellipsis()
-                            .child(primary_status),
-                    )
-                    .when_some(appearance_message, |view, message| {
-                        view.child(
+            .when(!messages.is_empty(), |view| {
+                view.child(
+                    div()
+                        .id("workspace-status")
+                        .px_3()
+                        .py_1()
+                        .flex_none()
+                        .flex()
+                        .flex_col()
+                        .text_size(chrome_rems((self.appearance.font_size - 2.).max(11.)))
+                        .text_color(rgb(self.appearance.secondary))
+                        .children(messages.into_iter().map(|message| {
                             div()
                                 .min_w_0()
                                 .whitespace_nowrap()
                                 .overflow_hidden()
                                 .text_ellipsis()
-                                .text_color(rgb(self.appearance.secondary))
-                                .child(message),
-                        )
-                    })
-                    .when_some(profile_message, |view, message| {
-                        view.child(
-                            div()
-                                .min_w_0()
-                                .whitespace_nowrap()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .text_color(rgb(self.appearance.secondary))
-                                .child(message),
-                        )
-                    }),
-            )
+                                .child(message)
+                        })),
+                )
+            })
             .when(drawer_fraction > 0. || reserved_width > 0., |view| {
                 let owner = self.lifecycle_token();
                 let shade =
