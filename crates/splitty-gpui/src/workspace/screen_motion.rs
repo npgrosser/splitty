@@ -465,7 +465,7 @@ impl Workspace {
                             .whitespace_nowrap()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Group maximized"),
+                            .child(chrome::maximized_chrome_copy(compact).0),
                     )
                     .child(
                         div()
@@ -485,7 +485,7 @@ impl Workspace {
                             .bg(cx.theme().input_background())
                             .text_color(cx.theme().button_foreground)
                             .child(Icon::new(IconName::Minimize).small())
-                            .child("Restore layout"),
+                            .child(chrome::maximized_chrome_copy(compact).1),
                     );
             }
         }
