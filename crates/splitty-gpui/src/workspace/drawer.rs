@@ -9,6 +9,15 @@ use gpui_kit::component::{
 };
 use splitty_client_core::workspace::ScreenState;
 
+fn pane_list_transition() -> Transition {
+    Transition::new(Duration::from_millis(150)).easing(Easing::CubicBezier {
+        x1: 0.25,
+        y1: 0.1,
+        x2: 0.25,
+        y2: 1.,
+    })
+}
+
 #[derive(Clone)]
 pub(super) struct ScreenDrag {
     owner: SourceToken,
@@ -720,6 +729,127 @@ mod view_tests {
     #[test]
     fn pane_hover_tracks_whole_screen_and_only_the_pointed_pane() {
         exercise_pane_hover();
+    }
+
+    #[test]
+    fn pane_list_collapse_reverses_from_displayed_height_and_respects_reduced_motion() {
+        with_view(|window, view| {
+            let owner = Uuid::new_v4();
+            let mut model = WindowWorkspace::new(owner);
+            let screen = model.ui_test_local_screen_fixture("Work").unwrap();
+            let source = model.lifecycle_token();
+            model
+                .source_mut(source.source_id())
+                .unwrap()
+                .apply_snapshot(
+                    owner,
+                    &json!({"type":"mux.screen_snapshot","screen":{
+                        "id":"work","revision":2,
+                        "root":{"type":"split","id":"split","axis":"horizontal",
+                            "sizes":[0.5,0.5],"children":[
+                                {"type":"slot","id":"left","paneIds":["p0"]},
+                                {"type":"slot","id":"right","paneIds":["p1"]}
+                            ]},
+                        "panes":{"p0":{"id":"p0"},"p1":{"id":"p1"}},
+                        "sessions":{}
+                    }}),
+                )
+                .unwrap();
+            let (commands, mut receiver) = mpsc::channel(2);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.model = Some(model);
+                    workspace.commands = commands;
+                    workspace.destination = Destination::Screens;
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            let selector: &'static str =
+                Box::leak(format!("drawer-panes-{screen}").into_boxed_str());
+            let height = |window: &mut VisualTestContext| {
+                f32::from(window.debug_bounds(selector).unwrap().size.height)
+            };
+            let full = height(window);
+            assert!(full > 0.);
+            let pane_selector: &'static str =
+                Box::leak(format!("drawer-pane-{screen}-p0").into_boxed_str());
+            let second_pane_selector: &'static str =
+                Box::leak(format!("drawer-pane-{screen}-p1").into_boxed_str());
+            let pane_position = window.debug_bounds(pane_selector).unwrap().center();
+            let row_distance = |window: &mut VisualTestContext| {
+                let first = window.debug_bounds(pane_selector).unwrap();
+                let second = window.debug_bounds(second_pane_selector).unwrap();
+                f32::from(second.origin.y - first.origin.y)
+            };
+            let full_row_distance = row_distance(window);
+            assert!(full_row_distance > 0.);
+
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.drawer_collapsed.insert(screen.clone());
+                    cx.notify();
+                });
+            });
+            redraw(window);
+            assert!((height(window) - full).abs() < 1.);
+            mouse_click(window, pane_position, MouseButton::Left, 1);
+            assert!(
+                receiver.try_recv().is_err(),
+                "a closing pane cannot be selected"
+            );
+            advance(window, Duration::from_millis(50));
+            let midway = height(window);
+            assert!(midway > 0. && midway < full);
+            assert!(
+                (row_distance(window) - full_row_distance).abs() < 1.,
+                "pane groups keep their row positions while the outer list clips"
+            );
+
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.drawer_collapsed.remove(&screen);
+                    cx.notify();
+                });
+            });
+            redraw(window);
+            assert!((height(window) - midway).abs() < 1.);
+            advance(window, Duration::from_millis(150));
+            assert!((height(window) - full).abs() < 1.);
+
+            window.update(|window, cx| {
+                cx.set_reduce_motion(true);
+                view.update(cx, |workspace, cx| {
+                    workspace.drawer_collapsed.insert(screen.clone());
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            assert!(height(window) < 1.);
+            assert!(
+                receiver.try_recv().is_err(),
+                "pane motion sends no commands"
+            );
+
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.drawer_collapsed.clear();
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            let block_selector: &'static str =
+                Box::leak(format!("drawer-block-{screen}").into_boxed_str());
+            let block = window.debug_bounds(block_selector).unwrap();
+            window.simulate_mouse_move(block.center(), None, Modifiers::default());
+            redraw(window);
+            let collapse_selector: &'static str =
+                Box::leak(format!("drawer-collapse-{screen}").into_boxed_str());
+            let collapse_position = window.debug_bounds(collapse_selector).unwrap().center();
+            mouse_click(window, collapse_position, MouseButton::Left, 1);
+            assert!(window.update(|window, cx| view.read(cx).focus.is_focused(window)));
+            assert!(receiver.try_recv().is_err());
+        });
     }
 
     fn exercise_pane_hover() {
@@ -1913,6 +2043,9 @@ impl Workspace {
                             } else {
                                 format!("Hide panes in {label}")
                             })
+                            .when(cfg!(all(test, feature = "ui-test-support")), |button| {
+                                button.debug_selector(|| format!("drawer-collapse-{key}"))
+                            })
                             .ghost()
                             .cursor_pointer()
                             .compact()
@@ -1923,13 +2056,24 @@ impl Workspace {
                             } else {
                                 IconName::ChevronDown
                             }))
-                            .on_click(move |_, _, cx| {
+                            .on_click(move |_, window, cx| {
                                 let _ = weak.update(cx, |this, cx| {
                                     if this.lifecycle_token() != owner {
                                         return;
                                     }
                                     if !this.drawer_collapsed.insert(collapse_key.clone()) {
                                         this.drawer_collapsed.remove(&collapse_key);
+                                    } else {
+                                        if this
+                                            .drawer_pane_hovered
+                                            .as_ref()
+                                            .is_some_and(|(screen, _)| screen == &collapse_key)
+                                        {
+                                            this.drawer_pane_hovered = None;
+                                        }
+                                        if this.destination == Destination::Screens {
+                                            this.focus_current(window, cx);
+                                        }
                                     }
                                     cx.notify();
                                 });
@@ -2109,15 +2253,35 @@ impl Workspace {
                             .bg(rgb(self.appearance.accent)),
                     );
                 }
-                if let Some(screen) =
-                    screen_snapshot.filter(|_| !self.drawer_collapsed.contains(&key))
-                {
+                if let Some(screen) = screen_snapshot {
                     let groups = drawer_pane_groups(screen);
                     let multiple_groups = groups.len() > 1;
                     let pane_source = window_model.execution_token(key.source_id());
+                    let collapsed = self.drawer_collapsed.contains(&key);
+                    let pane_count = groups.iter().map(Vec::len).sum::<usize>();
+                    let pane_height = transition(
+                        format!("drawer-panes-height-{key}"),
+                        if collapsed {
+                            0.
+                        } else {
+                            21. * pane_count as f32
+                        },
+                        pane_list_transition(),
+                        window,
+                        cx,
+                    );
+                    let mut pane_list = div()
+                        .id(SharedString::from(format!("drawer-panes-{key}")))
+                        .when(cfg!(all(test, feature = "ui-test-support")), |list| {
+                            list.debug_selector(|| format!("drawer-panes-{key}"))
+                        })
+                        .flex()
+                        .flex_col()
+                        .h(chrome_rems(pane_height))
+                        .overflow_hidden();
                     for group in groups {
                         let stacked = multiple_groups && group.len() > 1;
-                        let mut group_view = div().flex().flex_col();
+                        let mut group_view = div().flex().flex_col().flex_none();
                         if stacked {
                             group_view = group_view
                                 .ml(chrome_rems(30.))
@@ -2182,7 +2346,7 @@ impl Workspace {
                                             return;
                                         }
                                         let identity = (hover_screen.clone(), hover_pane.clone());
-                                        if *hovered {
+                                        if *hovered && !this.drawer_collapsed.contains(&hover_screen) {
                                             if this.drawer_pane_hovered.as_ref() != Some(&identity)
                                             {
                                                 this.drawer_pane_hovered = Some(identity);
@@ -2205,7 +2369,7 @@ impl Workspace {
                                 .when(cfg!(all(test, feature = "ui-test-support")), |button| {
                                     button.debug_selector(|| format!("drawer-pane-{key}-{pane_id}"))
                                 })
-                                .disabled(pane_source.is_none())
+                                .disabled(collapsed || pane_source.is_none())
                                 .text()
                                 .when(pane_source.is_some(), |button| button.cursor_pointer())
                                 .compact()
@@ -2263,6 +2427,7 @@ impl Workspace {
                                     move |_, window, cx| {
                                         let _ = weak.update(cx, |this, cx| {
                                             if this.lifecycle_token() != owner
+                                                || this.drawer_collapsed.contains(&select_key)
                                                 || !pane_source.is_some_and(|token| {
                                                     this.model.as_ref().is_some_and(|model| {
                                                         model
@@ -2303,8 +2468,9 @@ impl Workspace {
                                 ),
                             );
                         }
-                        block = block.child(group_view);
+                        pane_list = pane_list.child(group_view);
                     }
+                    block = block.child(pane_list);
                 }
                 list = list.child(block);
             }
