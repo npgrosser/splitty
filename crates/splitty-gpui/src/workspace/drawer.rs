@@ -1813,6 +1813,12 @@ impl Workspace {
             }))
             .py_1();
         if let Some(window_model) = &self.model {
+            let mut port_counts = HashMap::new();
+            for row in self.ports.rows(Some(window_model)) {
+                *port_counts
+                    .entry(row.key().target().to_owned())
+                    .or_insert(0) += 1;
+            }
             let shown = window_model.shown_key();
             let opened = window_model.opened();
             let mut group = None;
@@ -1831,24 +1837,13 @@ impl Workspace {
                             })
                             .map(super::hosts::display)
                             .unwrap_or_else(|| "Host".into());
-                        list = list.child(
-                            div()
-                                .mx_2()
-                                .mt_2()
-                                .px_2()
-                                .pt_2()
-                                .pb_1()
-                                .flex()
-                                .items_center()
-                                .gap(chrome_rems(7.))
-                                .border_t_1()
-                                .border_color(rgb(self.appearance.subtle_border))
-                                .text_size(chrome_rems(11.5))
-                                .font_weight(FontWeight::NORMAL)
-                                .text_color(muted)
-                                .child(Icon::new(IconName::Server).size_3())
-                                .child(title),
-                        );
+                        if let Some(group) =
+                            super::hosts::HostGroupTarget::capture(window_model, key.source_id())
+                        {
+                            let count = port_counts.get(group.target()).copied().unwrap_or(0);
+                            list = list
+                                .child(self.render_drawer_host(group, title, count, window, cx));
+                        }
                     }
                 }
                 let active = shown.as_ref() == Some(&key);

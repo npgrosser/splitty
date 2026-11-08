@@ -299,6 +299,18 @@ gestures. Drawer pane rows derive from the canonical layout and capture their
 source execution token before dispatch; they cannot acquire replacement
 authority from a later connection.
 
+Remote Drawer captions navigate passively to the exact current Host row; their
+Ports menus use the same `ForwardSnapshot` mapping projection as Hosts. Navigation
+recomputes the Host or Ports section index from the shared row projection and
+canonical target, including when Hosts is already open. Aliases never route an
+action, and navigating does not connect, browse or create a Screen. The bounded
+menu distinguishes missing discovery from an empty report, keeps at most twelve
+port actions visible and exposes the complete management view. An ephemeral
+popup capture is established by the Kit open interaction, consumed at activation
+and discarded on dismissal or group loss. Cached menu rows must still match the
+current action class and local-port choice before forwarding admission; neither
+rendering nor popup inspection submits a mutation.
+
 Native Screen ordering captures the local window owner and stable Screen keys.
 Local placement requires `screen-placement-v1` and `workspace-catalog-v1`, sends
 one relative operation and uses the existing mutation watermark to retain an

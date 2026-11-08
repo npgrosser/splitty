@@ -1121,6 +1121,7 @@ impl Workspace {
     }
 
     pub(super) fn revoke_screen_links(&mut self, screen: &ScreenKey, cx: &mut Context<Self>) {
+        self.revoke_drawer_port_menu_for_screen(screen);
         let terminals: std::collections::HashSet<_> = self
             .model
             .as_ref()
@@ -1233,7 +1234,8 @@ impl Workspace {
         };
         let key = request.key().clone();
         if let OpenOrigin::Drawer(group) = &origin {
-            if !self.ports.can_manage()
+            if group.owner() != owner
+                || !self.ports.can_manage()
                 || group.target() != key.target()
                 || !self
                     .model

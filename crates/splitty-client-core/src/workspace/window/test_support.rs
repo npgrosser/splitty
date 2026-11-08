@@ -3,6 +3,23 @@ use super::*;
 use serde_json::json;
 
 impl WindowWorkspace {
+    /// Feed bounded discovery through the production observation validator.
+    #[doc(hidden)]
+    pub fn ui_test_port_observation(
+        &mut self,
+        id: SourceId,
+        ports: &[(u16, &str)],
+    ) -> io::Result<()> {
+        let mut source = self
+            .source_mut(id)
+            .ok_or_else(|| invalid("fixture source missing"))?;
+        let owner = source.source_token();
+        source.observe_ports(owner, &json!({"ports": ports.iter().map(|(port, process)|
+            json!({"port":port,"process":process,"sessionId":"fixture-session"})).collect::<Vec<_>>()
+        }), &ConnectionBudget::default())?;
+        Ok(())
+    }
+
     /// Ordered canonical catalogs for production Drawer interaction tests.
     #[doc(hidden)]
     pub fn ui_test_screen_order_fixture(

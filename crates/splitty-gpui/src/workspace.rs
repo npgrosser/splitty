@@ -1,6 +1,7 @@
 //! Native projection of one authoritative local screen; no independent dock tree.
 mod chrome;
 mod drawer;
+mod drawer_ports;
 mod floating;
 mod host_update;
 mod hosts;
@@ -745,6 +746,7 @@ pub struct Workspace {
     focus: FocusHandle,
     hosts: HostsView,
     ports: PortsView,
+    drawer_port_menu: Option<drawer_ports::DrawerPortMenu>,
     settings: Entity<SettingsView>,
     destination: Destination,
     host_connect_trigger: FocusHandle,
@@ -1072,6 +1074,7 @@ impl Workspace {
                 focus: cx.focus_handle(),
                 hosts: HostsView::default(),
                 ports: PortsView::default(),
+                drawer_port_menu: None,
                 settings,
                 destination: Destination::Screens,
                 host_connect_trigger: cx.focus_handle(),
@@ -1980,6 +1983,7 @@ impl Workspace {
         self.prepare_screen_motion(&window_model, window, cx);
         self.ports_owner_changed(window_model.local_source().source_token(), window, cx);
         self.revoke_missing_terminal_links(&window_model);
+        self.reconcile_drawer_port_menu(&window_model);
         self.settings.update(cx, |view, cx| {
             view.set_owner(window_model.local_source().connection_id(), window, cx);
         });
@@ -4885,7 +4889,7 @@ impl Render for Workspace {
         if !self.status.is_empty() {
             messages.push(self.status.clone());
         }
-        if self.destination == Destination::Screens {
+        if self.destination != Destination::Hosts {
             if let Some(notice) = &self.ports.link_notice {
                 messages.push(notice.clone());
             }
