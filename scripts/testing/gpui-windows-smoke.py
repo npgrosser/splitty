@@ -197,7 +197,7 @@ Write-Output ("SPLITTY_JSON " + (@{{ alive=$alive }} | ConvertTo-Json -Compress)
 
 
 def window_action(action, ident):
-    # Validate the process identity on every action. The exact window title is
+    # Validate the process identity on every action. The window context title is
     # only a secondary check; a foreign Windows preview is never targeted.
     script = r'''
 Add-Type -AssemblyName System.Drawing
@@ -218,7 +218,8 @@ public class SplittyWindow {
 '''
     script += windows_identity(ident)
     script += r'''
-if ($p.MainWindowTitle -ne 'Splitty · Windows preview') { throw 'owned process window title mismatch' }
+$title = $p.MainWindowTitle
+if ($title -ne 'Splitty · Windows preview' -and $title -ne 'Splitty' -and -not $title.EndsWith(' · Splitty', [StringComparison]::Ordinal)) { throw 'owned process window title mismatch' }
 $h = $p.MainWindowHandle
 if ($h -eq [IntPtr]::Zero) { throw 'preview has no window handle' }
 if (-not [SplittyWindow]::SetForegroundWindow($h)) { throw 'cannot focus preview' }
