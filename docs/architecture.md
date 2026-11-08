@@ -1248,6 +1248,11 @@ resets. Failed reads retain same-owner last-good evidence, while owner replaceme
 starts without edit authority. Notification mutation acknowledgements validate
 only the notification projection; controls and unread policy receive effective
 values from subsequent authoritative reads, never mutation reply values.
+The retained Settings view receives both observations even while closed, keeps
+completion generations per domain, and presents four notification switches with
+field-specific pending or failure state. Switch and Reset callbacks retain the
+rendered local owner; Reset additionally rechecks that its exact default is still
+available. No optimistic control value changes the notification ledger.
 
 The local presentation snapshot carries metadata, theme choices and a separate
 terminal palette. Named theme resolution exposes the actual source identifier

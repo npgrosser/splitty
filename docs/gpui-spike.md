@@ -1861,3 +1861,29 @@ local/remote identifiers and aliases, plus Root-to-OS title propagation. The
 four-test title filter and strict GPUI Clippy pass. This later source change is
 not included in the frozen Activity preview; Windows title-bar interaction
 acceptance remains separate.
+
+### Native notification controls (2026-11-08)
+
+The native Settings editor adds notification enablement and the three process
+categories. Each control writes only its explicit field on the assigned local
+service, including while a remote Screen is selected. Reset uses the exact
+published service default. Missing reset metadata leaves valid boolean edits
+available; appearance/theme failures do not block notification observation.
+Toast and desktop preferences remain preserved, without offering unsupported
+native delivery controls.
+
+Common editor contracts now live outside appearance. One existing mutation FIFO
+routes acknowledgement, required readback generation and uncertainty release by
+field domain. The retained Settings view observes appearance and notification
+values independently even while closed. Pending controls keep confirmed values;
+authoritative notification readback alone updates the unread ledger. Captured
+owner and Reset-default checks reject obsolete control actions.
+
+All 165 native tests pass, including three added production-view tests using
+actual Switch/Reset input, the local Settings command path while viewing a
+remote Screen, native key down/up activation, independent domain completion,
+last-good reads and badge policy after authoritative readback. The core slice
+passes 32 scheduler, one field-contract and ten appearance tests; strict
+GPUI/client-core Clippy, formatting, 17 architecture checks and strict change
+validation pass. Owned actual-window acceptance remains separate, as does the
+full merge gate. These changes are not in the frozen Activity preview.

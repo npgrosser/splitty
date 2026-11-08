@@ -44,6 +44,9 @@ impl Workspace {
             return;
         }
         self.notification_settings_generation = read.generation();
+        self.settings.update(cx, |settings, cx| {
+            settings.set_notification_read(read.clone(), cx)
+        });
         if let Some(model) = &self.model {
             self.notifications.reconcile(model);
         }

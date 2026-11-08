@@ -404,3 +404,104 @@ fn notification_delivery_uses_retained_offline_source_and_rejects_replaced_epoch
         });
     });
 }
+
+#[test]
+fn notification_control_changes_badges_only_after_authoritative_readback() {
+    use splitty_client_core::{
+        local_service::{SettingsWriteOutcome, SettingsWriteResult},
+        settings::SettingsField,
+    };
+    let rt = Runtime::new().unwrap();
+    with_view(|window, view| {
+        let model = model(Uuid::new_v4());
+        let owner = model.lifecycle_token();
+        let screen = model.local_source().screen_key("work");
+        let mut commands = setup(window, &view, model);
+        deliver(
+            window,
+            &view,
+            Some(event(&rt, owner, "Unread", "s-p1", "error")),
+        );
+        window.update(|window, cx| {
+            view.update(cx, |workspace, cx| workspace.show_settings(window, cx));
+            window.draw(cx).clear(cx);
+        });
+        let click = |window: &mut VisualTestContext, selector: &'static str, switch: bool| {
+            let bounds = window.debug_bounds(selector).unwrap();
+            let position = if switch {
+                gpui_kit::point(bounds.left() + gpui_kit::px(8.), bounds.center().y)
+            } else {
+                bounds.center()
+            };
+            window.simulate_mouse_down(position, gpui_kit::MouseButton::Left, Modifiers::default());
+            window.simulate_mouse_up(position, gpui_kit::MouseButton::Left, Modifiers::default());
+            window.run_until_parked();
+            redraw(window);
+        };
+        click(window, "settings-nav-notifications", false);
+        while commands.try_recv().is_ok() {}
+        for rejected in [true, false] {
+            click(window, "settings-control-notifications.enabled", true);
+            let command = commands.try_recv().expect("native explicit switch intent");
+            let request = match command.kind() {
+                Command::UpdateSettings {
+                    connection,
+                    request_id,
+                    edit,
+                } => {
+                    assert_eq!(*connection, owner.connection_id());
+                    assert_eq!(edit.field(), SettingsField::NotificationEnabled);
+                    *request_id
+                }
+                _ => panic!("expected settings intent"),
+            };
+            window.update(|_, cx| assert_eq!(view.read(cx).notifications.unread_count(&screen), 1));
+            deliver(
+                window,
+                &view,
+                Some(Update::SettingsWrite(SettingsWriteResult::ui_test_fixture(
+                    owner.connection_id(),
+                    request,
+                    SettingsField::NotificationEnabled,
+                    3,
+                    if rejected {
+                        SettingsWriteOutcome::Rejected {
+                            reason: "not saved".into(),
+                        }
+                    } else {
+                        SettingsWriteOutcome::Confirmed
+                    },
+                ))),
+            );
+            window.update(|_, cx| assert_eq!(view.read(cx).notifications.unread_count(&screen), 1));
+            assert!(
+                commands.try_recv().is_err(),
+                "acknowledgement does not replay the change"
+            );
+        }
+        deliver(
+            window,
+            &view,
+            Some(Update::NotificationSettings {
+                owner,
+                read: read(owner, 3, false),
+            }),
+        );
+        window.update(|_, cx| assert_eq!(view.read(cx).notifications.unread_count(&screen), 0));
+        let foreign = WindowWorkspace::new(Uuid::new_v4()).lifecycle_token();
+        deliver(
+            window,
+            &view,
+            Some(Update::NotificationSettings {
+                owner: foreign,
+                read: read(foreign, 99, true),
+            }),
+        );
+        deliver(
+            window,
+            &view,
+            Some(event(&rt, owner, "Still disabled", "s-p1", "error")),
+        );
+        window.update(|_, cx| assert_eq!(view.read(cx).notifications.unread_count(&screen), 0));
+    });
+}

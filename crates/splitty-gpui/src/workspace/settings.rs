@@ -13,9 +13,9 @@ use gpui_kit::component::{
 use gpui_kit::{prelude::*, *};
 use splitty_client_core::appearance::AppearanceSnapshot;
 use splitty_client_core::local_service::{
-    SettingsReconciled, SettingsWriteOutcome, SettingsWriteResult,
+    NotificationSettingsRead, SettingsReconciled, SettingsWriteOutcome, SettingsWriteResult,
 };
-use splitty_client_core::settings::{SettingsEdit, SettingsField, SettingsValue};
+use splitty_client_core::settings::{SettingsDomain, SettingsEdit, SettingsField, SettingsValue};
 use uuid::Uuid;
 
 const APPEARANCE: &[SettingsField] = &[
@@ -30,22 +30,39 @@ const APPEARANCE: &[SettingsField] = &[
 ];
 const TERMINAL: &[SettingsField] = &[SettingsField::TerminalTheme, SettingsField::CloseOnExit];
 const WORKSPACE: &[SettingsField] = &[SettingsField::DrawerPinned, SettingsField::DrawerWidth];
+const NOTIFICATIONS: &[SettingsField] = &[
+    SettingsField::NotificationEnabled,
+    SettingsField::NotificationProcessFinished,
+    SettingsField::NotificationProcessExited,
+    SettingsField::NotificationProcessCrashed,
+];
+
+fn is_switch(field: SettingsField) -> bool {
+    field == SettingsField::DrawerPinned || field.domain() == SettingsDomain::Notifications
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Section {
     Appearance,
     Terminal,
     Workspace,
+    Notifications,
 }
 
 impl Section {
-    const ALL: [Self; 3] = [Self::Appearance, Self::Terminal, Self::Workspace];
+    const ALL: [Self; 4] = [
+        Self::Appearance,
+        Self::Terminal,
+        Self::Workspace,
+        Self::Notifications,
+    ];
 
     fn id(self) -> &'static str {
         match self {
             Self::Appearance => "appearance",
             Self::Terminal => "terminal",
             Self::Workspace => "workspace",
+            Self::Notifications => "notifications",
         }
     }
 
@@ -54,6 +71,7 @@ impl Section {
             Self::Appearance => "Appearance",
             Self::Terminal => "Terminal",
             Self::Workspace => "Workspace",
+            Self::Notifications => "Notifications",
         }
     }
 
@@ -62,6 +80,7 @@ impl Section {
             Self::Appearance => APPEARANCE,
             Self::Terminal => TERMINAL,
             Self::Workspace => WORKSPACE,
+            Self::Notifications => NOTIFICATIONS,
         }
     }
 
@@ -70,6 +89,7 @@ impl Section {
             Self::Appearance => "Interface colors, type and display scale",
             Self::Terminal => "Terminal colors and exit behavior",
             Self::Workspace => "Drawer placement and size",
+            Self::Notifications => "Activity from other terminals",
         }
     }
 }
@@ -107,6 +127,9 @@ pub(super) enum SettingsEvent {
 pub(super) struct SettingsView {
     owner: Option<Uuid>,
     snapshot: Option<Arc<AppearanceSnapshot>>,
+    notification: Option<NotificationSettingsRead>,
+    notification_generation: u64,
+    notification_error: Option<String>,
     section: Section,
     focus: FocusHandle,
     scroll: ScrollHandle,
@@ -133,7 +156,7 @@ impl SettingsView {
         let mut selects = BTreeMap::new();
         let mut subscriptions = Vec::new();
         for field in SettingsField::ALL {
-            if field == SettingsField::DrawerPinned {
+            if is_switch(field) {
                 continue;
             }
             let select = cx.new(|cx| {
@@ -182,6 +205,9 @@ impl SettingsView {
         Self {
             owner: None,
             snapshot: None,
+            notification: None,
+            notification_generation: 0,
+            notification_error: None,
             section: Section::Appearance,
             focus: cx.focus_handle(),
             scroll: ScrollHandle::new(),
@@ -219,14 +245,19 @@ impl SettingsView {
         {
             self.writes.clear();
         }
-        self.writes.retain(|_, state| match state {
-            WriteState::Pending { .. } => true,
-            WriteState::Confirmed { generation } => snapshot.generation() < *generation,
-            WriteState::Rejected { .. } | WriteState::Uncertain { .. } => true,
+        self.writes.retain(|field, state| {
+            if field.domain() != SettingsDomain::Appearance {
+                return true;
+            }
+            match state {
+                WriteState::Pending { .. } => true,
+                WriteState::Confirmed { generation } => snapshot.generation() < *generation,
+                WriteState::Rejected { .. } | WriteState::Uncertain { .. } => true,
+            }
         });
         self.snapshot = Some(snapshot);
         for field in SettingsField::ALL {
-            if field == SettingsField::DrawerPinned {
+            if is_switch(field) {
                 continue;
             }
             let choices = self.options(field);
@@ -240,6 +271,98 @@ impl SettingsView {
             }
         }
         cx.notify();
+    }
+
+    pub(super) fn set_notification_read(
+        &mut self,
+        read: NotificationSettingsRead,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .owner
+            .is_some_and(|owner| owner != read.connection_id())
+            || read.generation() <= self.notification_generation
+        {
+            return;
+        }
+        self.owner = Some(read.connection_id());
+        self.notification_generation = read.generation();
+        match read.result() {
+            Ok(_) => {
+                self.writes.retain(|field, state| {
+                    field.domain() != SettingsDomain::Notifications
+                        || !matches!(state, WriteState::Confirmed { generation } if read.generation() >= *generation)
+                });
+                self.notification_error = None;
+                self.notification = Some(read);
+            }
+            Err(error) => self.notification_error = Some(error.to_owned()),
+        }
+        cx.notify();
+    }
+
+    fn generation(&self, domain: SettingsDomain) -> Option<u64> {
+        match domain {
+            SettingsDomain::Appearance => {
+                self.snapshot.as_ref().map(|snapshot| snapshot.generation())
+            }
+            SettingsDomain::Notifications => self
+                .notification
+                .as_ref()
+                .map(|snapshot| snapshot.generation()),
+        }
+    }
+
+    fn value(&self, field: SettingsField) -> Option<SettingsValue> {
+        match field.domain() {
+            SettingsDomain::Appearance => self.snapshot.as_ref()?.value(field),
+            SettingsDomain::Notifications => self.notification.as_ref()?.value(field),
+        }
+    }
+
+    fn default_value(&self, field: SettingsField) -> Option<SettingsValue> {
+        match field.domain() {
+            SettingsDomain::Appearance => self.snapshot.as_ref()?.metadata()?.default_value(field),
+            SettingsDomain::Notifications => self.notification.as_ref()?.default_value(field),
+        }
+    }
+
+    fn request_captured(
+        &mut self,
+        owner: Option<Uuid>,
+        field: SettingsField,
+        value: SettingsValue,
+        cx: &mut Context<Self>,
+    ) {
+        if owner.is_some() && self.owner == owner {
+            self.request(field, value, cx);
+        }
+    }
+
+    fn reset_captured(
+        &mut self,
+        owner: Option<Uuid>,
+        field: SettingsField,
+        expected: SettingsValue,
+        cx: &mut Context<Self>,
+    ) {
+        if self.default_value(field).as_ref() == Some(&expected) {
+            self.request_captured(owner, field, expected, cx);
+        }
+    }
+
+    fn notification_notice(&self) -> Option<String> {
+        if let Some(error) = &self.notification_error {
+            return Some(format!("Couldn’t refresh notifications: {error}"));
+        }
+        let snapshot = self.notification.as_ref()?;
+        if let Some(error) = snapshot.metadata_error() {
+            return Some(format!("Reset defaults unavailable: {error}"));
+        }
+        NOTIFICATIONS
+            .iter()
+            .any(|field| snapshot.default_value(*field).is_none())
+            .then(|| "Some reset defaults are unavailable".into())
     }
 
     pub(super) fn set_owner(
@@ -258,6 +381,9 @@ impl SettingsView {
     pub(super) fn clear(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.owner = None;
         self.snapshot = None;
+        self.notification = None;
+        self.notification_generation = 0;
+        self.notification_error = None;
         self.writes.clear();
         self.choices.clear();
         for select in self.selects.values() {
@@ -275,11 +401,7 @@ impl SettingsView {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if !self
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.connection_id() == result.connection_id())
-        {
+        if self.owner != Some(result.connection_id()) {
             return;
         }
         let field = result.field();
@@ -291,9 +413,8 @@ impl SettingsView {
         let state = match result.outcome() {
             SettingsWriteOutcome::Confirmed => {
                 if self
-                    .snapshot
-                    .as_ref()
-                    .is_some_and(|snapshot| snapshot.generation() >= result.generation())
+                    .generation(field.domain())
+                    .is_some_and(|generation| generation >= result.generation())
                 {
                     self.writes.remove(&field);
                     cx.notify();
@@ -321,14 +442,13 @@ impl SettingsView {
         reconciliation: &SettingsReconciled,
         cx: &mut Context<Self>,
     ) {
-        if !self
-            .snapshot
-            .as_ref()
-            .is_some_and(|snapshot| snapshot.connection_id() == reconciliation.connection_id())
-        {
+        if self.owner != Some(reconciliation.connection_id()) {
             return;
         }
         for (field, request_id) in reconciliation.requests() {
+            if field.domain() != reconciliation.domain() {
+                continue;
+            }
             if let Some(WriteState::Uncertain {
                 request_id: pending,
                 blocked,
@@ -372,7 +492,9 @@ impl SettingsView {
         let Some(snapshot) = &self.snapshot else {
             return;
         };
-        let value = snapshot.value(field);
+        let Some(value) = snapshot.value(field) else {
+            return;
+        };
         let label = self
             .choices
             .get(&field)
@@ -419,7 +541,7 @@ impl SettingsView {
                     .take(4096)
                     .cloned()
                     .collect::<Vec<_>>();
-                if let SettingsValue::Text(current) = snapshot.value(field) {
+                if let Some(SettingsValue::Text(current)) = snapshot.value(field) {
                     if !current.is_empty()
                         && self.available_fonts.binary_search(&current).is_ok()
                         && !fonts.contains(&current)
@@ -433,7 +555,11 @@ impl SettingsView {
                     .collect();
                 Some(choices)
             }
-            SettingsField::DrawerPinned => None,
+            SettingsField::DrawerPinned
+            | SettingsField::NotificationEnabled
+            | SettingsField::NotificationProcessFinished
+            | SettingsField::NotificationProcessExited
+            | SettingsField::NotificationProcessCrashed => None,
             SettingsField::ThemeMode | SettingsField::ZoomScope | SettingsField::CloseOnExit => {
                 metadata
                     .and_then(|metadata| metadata.choices(field))
@@ -486,17 +612,16 @@ impl SettingsView {
         if !self.enabled(field) {
             return;
         }
-        let Some(snapshot) = &self.snapshot else {
+        let Some(connection_id) = self.owner else {
             return;
         };
-        if snapshot.value(field) == value {
+        if self.value(field).as_ref() == Some(&value) {
             return;
         }
         let Ok(edit) = SettingsEdit::new(field, value.clone()) else {
             return;
         };
         let request_id = Uuid::new_v4();
-        let connection_id = snapshot.connection_id();
         self.writes
             .insert(field, WriteState::Pending { request_id, value });
         cx.emit(SettingsEvent::Update {
@@ -508,6 +633,19 @@ impl SettingsView {
     }
 
     fn enabled(&self, field: SettingsField) -> bool {
+        if matches!(
+            self.writes.get(&field),
+            Some(
+                WriteState::Pending { .. }
+                    | WriteState::Confirmed { .. }
+                    | WriteState::Uncertain { blocked: true, .. }
+            )
+        ) {
+            return false;
+        }
+        if field.domain() == SettingsDomain::Notifications {
+            return self.value(field).is_some();
+        }
         self.snapshot.as_ref().is_some_and(|snapshot| {
             snapshot.metadata().is_some_and(|metadata| {
                 !matches!(
@@ -515,14 +653,7 @@ impl SettingsView {
                     SettingsField::FontFamily | SettingsField::DrawerPinned
                 ) || metadata.default_value(field).is_some()
             })
-        }) && !matches!(
-            self.writes.get(&field),
-            Some(
-                WriteState::Pending { .. }
-                    | WriteState::Confirmed { .. }
-                    | WriteState::Uncertain { blocked: true, .. }
-            )
-        ) && (field == SettingsField::DrawerPinned
+        }) && (is_switch(field)
             || self
                 .choices
                 .get(&field)
@@ -540,6 +671,9 @@ impl SettingsView {
                 Some(format!("Save status unknown: {reason}"))
             }
             None => {
+                if field.domain() == SettingsDomain::Notifications {
+                    return None;
+                }
                 let snapshot = self.snapshot.as_ref()?;
                 if let Some(error) = snapshot.metadata_error() {
                     return Some(format!("Settings options unavailable: {error}"));
@@ -562,13 +696,11 @@ impl SettingsView {
     }
 
     fn render_field(&self, field: SettingsField, cx: &mut Context<Self>) -> Field {
-        let snapshot = self.snapshot.as_ref();
-        let current = snapshot.map(|snapshot| snapshot.value(field));
-        let default = snapshot
-            .and_then(|snapshot| snapshot.metadata())
-            .and_then(|metadata| metadata.default_value(field));
+        let owner = self.owner;
+        let current = self.value(field);
+        let default = self.default_value(field);
         let enabled = self.enabled(field);
-        let disabled_reason = if snapshot.is_none() {
+        let disabled_reason = if current.is_none() {
             Some("Connecting to local settings")
         } else if self.writes.contains_key(&field) {
             None
@@ -577,17 +709,17 @@ impl SettingsView {
         } else {
             None
         };
-        let control: AnyElement = if field == SettingsField::DrawerPinned {
+        let control: AnyElement = if is_switch(field) {
             let checked = matches!(current.as_ref(), Some(SettingsValue::Bool(true)));
             let weak = cx.entity().downgrade();
             Switch::new(field.path())
-                .accessibility_label("Show drawer")
+                .accessibility_label(field_label(field))
                 .checked(checked)
                 .disabled(!enabled)
                 .on_change(move |next, _, cx| {
                     let next = *next;
                     let _ = weak.update(cx, |this, cx| {
-                        this.request(field, SettingsValue::Bool(next), cx);
+                        this.request_captured(owner, field, SettingsValue::Bool(next), cx);
                     });
                 })
                 .into_any_element()
@@ -611,7 +743,7 @@ impl SettingsView {
         let can_reset = enabled
             && default.as_ref().is_some_and(|default| {
                 Some(default) != current.as_ref()
-                    && (field == SettingsField::DrawerPinned
+                    && (is_switch(field)
                         || self.choices.get(&field).is_some_and(|choices| {
                             choices.iter().any(|(_, value)| value == default)
                         }))
@@ -622,12 +754,17 @@ impl SettingsView {
         )))
         .label("Reset")
         .accessibility_label(format!("Reset {}", field_label(field)))
+        .when(cfg!(all(test, feature = "ui-test-support")), |button| {
+            button.debug_selector(|| format!("settings-reset-{}", field.path()))
+        })
         .ghost()
         .small()
         .disabled(!can_reset)
         .on_click(move |_, _, cx| {
             if let Some(default) = default.clone() {
-                let _ = weak.update(cx, |this, cx| this.request(field, default, cx));
+                let _ = weak.update(cx, |this, cx| {
+                    this.reset_captured(owner, field, default, cx)
+                });
             }
         });
         let mut field_view = Field::new()
@@ -639,7 +776,16 @@ impl SettingsView {
                     .items_center()
                     .gap_2()
                     .w_full()
-                    .child(div().flex_1().min_w_0().child(control))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .when(cfg!(all(test, feature = "ui-test-support")), |control| {
+                                control
+                                    .debug_selector(|| format!("settings-control-{}", field.path()))
+                            })
+                            .child(control),
+                    )
                     .child(reset),
             );
         if let Some(status) = self.status(field) {
@@ -669,6 +815,9 @@ impl Render for SettingsView {
             nav = nav.child(
                 Button::new(SharedString::from(format!("settings-nav-{}", section.id())))
                     .label(section.title())
+                    .when(cfg!(all(test, feature = "ui-test-support")), |button| {
+                        button.debug_selector(|| format!("settings-nav-{}", section.id()))
+                    })
                     .selected(selected)
                     .ghost()
                     .small()
@@ -683,6 +832,9 @@ impl Render for SettingsView {
                     })),
             );
         }
+        let notification_notice = (self.section == Section::Notifications)
+            .then(|| self.notification_notice())
+            .flatten();
         let mut form = Form::new();
         for field in self.section.fields() {
             form = form.child(self.render_field(*field, cx));
@@ -759,6 +911,14 @@ impl Render for SettingsView {
                                             })),
                                     ),
                             )
+                            .when_some(notification_notice, |view, notice| {
+                                view.child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(notice),
+                                )
+                            })
                             .child(form),
                     ),
             )
@@ -779,6 +939,10 @@ fn field_label(field: SettingsField) -> &'static str {
         SettingsField::CloseOnExit => "Close on exit",
         SettingsField::DrawerPinned => "Show drawer",
         SettingsField::DrawerWidth => "Drawer width",
+        SettingsField::NotificationEnabled => "Enable notifications",
+        SettingsField::NotificationProcessFinished => "Process finished",
+        SettingsField::NotificationProcessExited => "Process exited",
+        SettingsField::NotificationProcessCrashed => "Process crashed",
     }
 }
 
@@ -796,6 +960,10 @@ fn field_description(field: SettingsField) -> &'static str {
         SettingsField::CloseOnExit => "When a terminal session ends",
         SettingsField::DrawerPinned => "Keep the Screen drawer visible",
         SettingsField::DrawerWidth => "Width of the Screen drawer",
+        SettingsField::NotificationEnabled => "Show activity from other terminals in the drawer",
+        SettingsField::NotificationProcessFinished => "When a process finishes",
+        SettingsField::NotificationProcessExited => "When a terminal session ends normally",
+        SettingsField::NotificationProcessCrashed => "When a terminal session ends with an error",
     }
 }
 
@@ -844,7 +1012,7 @@ mod tests {
     use splitty_client_core::local_service::{
         SettingsReconciled, SettingsWriteOutcome, SettingsWriteResult,
     };
-    use splitty_client_core::settings::{SettingsField, SettingsValue};
+    use splitty_client_core::settings::{SettingsDomain, SettingsField, SettingsValue};
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -878,7 +1046,7 @@ mod tests {
             let state = view.read(cx);
             assert_eq!(
                 state.snapshot.as_ref().unwrap().value(SettingsField::Theme),
-                SettingsValue::Text("splitty-dark".into())
+                Some(SettingsValue::Text("splitty-dark".into()))
             );
             assert!(SettingsField::ALL
                 .iter()
@@ -906,7 +1074,7 @@ mod tests {
             assert!(state.enabled(SettingsField::DrawerPinned));
             assert_eq!(
                 state.snapshot.as_ref().unwrap().value(SettingsField::Theme),
-                SettingsValue::Text("splitty-dark".into())
+                Some(SettingsValue::Text("splitty-dark".into()))
             );
             assert!(state
                 .status(SettingsField::Theme)
@@ -995,7 +1163,7 @@ mod tests {
                 .contains("Service rejected value"));
             assert_eq!(
                 state.snapshot.as_ref().unwrap().value(field),
-                SettingsValue::Text("fixed".into())
+                Some(SettingsValue::Text("fixed".into()))
             );
         });
         let uncertain_request = window.update(|_, cx| {
@@ -1025,14 +1193,23 @@ mod tests {
             assert!(state.status(field).unwrap().contains("Reply lost"));
             assert_eq!(
                 state.snapshot.as_ref().unwrap().value(field),
-                SettingsValue::Text("fixed".into())
+                Some(SettingsValue::Text("fixed".into()))
             );
         });
-        let wrong = SettingsReconciled::ui_test_fixture(owner, 2, vec![(field, request)]);
+        let wrong = SettingsReconciled::ui_test_fixture(
+            owner,
+            2,
+            SettingsDomain::Appearance,
+            vec![(field, request)],
+        );
         window.update(|_, cx| view.update(cx, |view, cx| view.apply_reconciled(&wrong, cx)));
         window.update(|_, cx| assert!(!view.read(cx).enabled(field)));
-        let correct =
-            SettingsReconciled::ui_test_fixture(owner, 2, vec![(field, uncertain_request)]);
+        let correct = SettingsReconciled::ui_test_fixture(
+            owner,
+            2,
+            SettingsDomain::Appearance,
+            vec![(field, uncertain_request)],
+        );
         window.update(|_, cx| view.update(cx, |view, cx| view.apply_reconciled(&correct, cx)));
         window.update(|_, cx| {
             assert!(view.read(cx).enabled(field));
@@ -1040,3 +1217,6 @@ mod tests {
         });
     }
 }
+
+#[cfg(all(test, feature = "ui-test-support"))]
+mod notification_tests;
