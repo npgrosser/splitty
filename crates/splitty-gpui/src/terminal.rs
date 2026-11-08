@@ -155,9 +155,67 @@ struct SearchPaint<'a> {
 }
 
 #[derive(Clone, Copy)]
-struct CursorGeometry {
+struct PaintGeometry {
     bounds: Bounds<Pixels>,
     metrics: TerminalMetrics,
+}
+
+/// A retained terminal's drawing surface, without its input or layout behavior.
+/// The workspace owns its lifetime and placement; rebinding or changing the
+/// terminal's measured geometry invalidates it even if the entity survives.
+#[derive(Clone, IntoElement)]
+pub(crate) struct TerminalPresentation {
+    terminal: Entity<Terminal>,
+    geometry: PaintGeometry,
+    epoch: u64,
+    display_scale: f32,
+}
+
+impl TerminalPresentation {
+    pub(crate) fn bounds(&self) -> Bounds<Pixels> {
+        self.geometry.bounds
+    }
+
+    pub(crate) fn is_valid(&self, cx: &App) -> bool {
+        let terminal = self.terminal.read(cx);
+        terminal.geometry_ready
+            && terminal.engine.is_some()
+            && terminal.presentation_epoch == self.epoch
+    }
+}
+
+impl RenderOnce for TerminalPresentation {
+    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
+        let size = self.geometry.bounds.size;
+        canvas(
+            |_, _, _| {},
+            move |bounds, (), window, cx| {
+                if !self.is_valid(cx) || window.scale_factor() != self.display_scale {
+                    return;
+                }
+                let geometry = PaintGeometry {
+                    // Translation belongs to the outgoing viewport. Its size
+                    // and cell metrics remain those of the last live layout.
+                    bounds: Bounds::new(bounds.origin, self.geometry.bounds.size),
+                    metrics: self.geometry.metrics,
+                };
+                window.with_content_mask(
+                    Some(ContentMask {
+                        bounds: geometry.bounds,
+                    }),
+                    |window| {
+                        self.terminal.update(cx, |terminal, cx| {
+                            // A failed passive paint must not replace live status,
+                            // request a frame, or claim that current output was shown.
+                            let _ = terminal.paint_engine(geometry, false, window, cx);
+                        });
+                    },
+                );
+            },
+        )
+        .w(size.width)
+        .h(size.height)
+    }
 }
 
 /// One desired terminal scale. Cell width becomes authoritative only after a
@@ -373,6 +431,8 @@ pub struct Terminal {
     bounds: Bounds<Pixels>,
     metrics: TerminalMetrics,
     geometry_ready: bool,
+    presentation_epoch: u64,
+    display_scale: f32,
     size_report_pending: bool,
     resized_pixel_cell: Option<(u32, u32)>,
     face: Font,
@@ -390,6 +450,7 @@ pub struct Terminal {
     search: Option<search::SearchUi>,
     search_active: bool,
     row_cache: HashMap<[u64; 2], CachedRow>,
+    paint_sequence: usize,
     colors: TerminalColors,
     selection_foreground: u32,
     selection_background: u32,
@@ -426,6 +487,8 @@ impl Terminal {
             bounds: Bounds::default(),
             metrics: TerminalMetrics::new(1.),
             geometry_ready: false,
+            presentation_epoch: 0,
+            display_scale: 1.,
             size_report_pending: false,
             resized_pixel_cell: None,
             // GPUI font lookup takes concrete family names, not CSS generic families.
@@ -445,6 +508,7 @@ impl Terminal {
             // The standalone probe has no workspace focus coordinator.
             search_active: true,
             row_cache: HashMap::new(),
+            paint_sequence: 0,
             colors: TerminalColors::default(),
             selection_foreground: DEFAULT_SELECTION_FOREGROUND,
             selection_background: DEFAULT_SELECTION_BACKGROUND,
@@ -470,6 +534,33 @@ impl Terminal {
         commands: impl Fn(Command) -> std::result::Result<(), String> + 'static,
     ) {
         self.commands = Box::new(commands);
+        self.invalidate_presentation();
+    }
+
+    /// Capture only already measured geometry; this never lays out the engine
+    /// or claims a visible route. The caller must retain at most its outgoing
+    /// Screen's presentation and release it when that Screen's owner changes.
+    pub(crate) fn presentation(&self, cx: &Context<Self>) -> Option<TerminalPresentation> {
+        (self.geometry_ready
+            && self.engine.is_some()
+            && self.size
+                == self
+                    .metrics
+                    .grid_size(self.bounds.size.width, self.bounds.size.height)
+            && self.resized_pixel_cell == Some(self.metrics.pixel_cell(self.display_scale)))
+        .then(|| TerminalPresentation {
+            terminal: cx.entity(),
+            geometry: PaintGeometry {
+                bounds: self.bounds,
+                metrics: self.metrics,
+            },
+            epoch: self.presentation_epoch,
+            display_scale: self.display_scale,
+        })
+    }
+
+    fn invalidate_presentation(&mut self) {
+        self.presentation_epoch = self.presentation_epoch.wrapping_add(1);
     }
 
     pub fn focus(&self, window: &mut Window, cx: &mut App) {
@@ -506,6 +597,7 @@ impl Terminal {
         self.cancel_pointer();
         self.metrics = metrics;
         self.geometry_ready = false;
+        self.invalidate_presentation();
         self.row_cache.clear();
         self.scroll_remainder = 0.;
         self.scroll_remainder_x = 0.;
@@ -577,6 +669,7 @@ impl Terminal {
     pub fn reset(&mut self, generation: u64, cx: &mut Context<Self>) {
         self.cancel_pointer();
         self.geometry_ready = false;
+        self.invalidate_presentation();
         self.resized_pixel_cell = None;
         self.generation = generation;
         self.frames = 0;
@@ -611,6 +704,7 @@ impl Terminal {
     pub fn invalidate_size_report(&mut self, cx: &mut Context<Self>) {
         self.cancel_pointer();
         self.geometry_ready = false;
+        self.invalidate_presentation();
         self.size_report_pending = true;
         self.content_revision = self.content_revision.wrapping_add(1);
         cx.notify();
@@ -1172,6 +1266,7 @@ impl Terminal {
     }
 
     fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let previous = (self.bounds, self.metrics, self.display_scale);
         self.bounds = bounds;
         let font_id = window.text_system().resolve_font(&self.face);
         if let Ok(advance) = window
@@ -1190,6 +1285,10 @@ impl Terminal {
             .metrics
             .grid_size(bounds.size.width, bounds.size.height);
         let scale = window.scale_factor();
+        self.display_scale = scale;
+        if previous != (self.bounds, self.metrics, self.display_scale) {
+            self.invalidate_presentation();
+        }
         self.links.geometry(links::Geometry {
             origin: (f32::from(bounds.origin.x), f32::from(bounds.origin.y)),
             extent: (f32::from(bounds.size.width), f32::from(bounds.size.height)),
@@ -1275,7 +1374,11 @@ impl Terminal {
         let started = Instant::now();
         self.frames += 1;
         self.last_paint = Some(started);
-        if let Err(error) = self.paint_engine(window, cx) {
+        let geometry = PaintGeometry {
+            bounds: self.bounds,
+            metrics: self.metrics,
+        };
+        if let Err(error) = self.paint_engine(geometry, true, window, cx) {
             self.status = format!("Terminal paint: {error:#}");
         } else {
             self.painted_revision = self.content_revision;
@@ -1290,7 +1393,13 @@ impl Terminal {
         );
     }
 
-    fn paint_engine(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Result<()> {
+    fn paint_engine(
+        &mut self,
+        geometry: PaintGeometry,
+        composition: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Result<()> {
         let Some(engine) = self.engine.as_mut() else {
             return Err(anyhow!("Terminal engine is unavailable"));
         };
@@ -1316,8 +1425,9 @@ impl Terminal {
         let full_dirty = frame.full_dirty;
         let base = frame.background;
         let cursor = frame.cursor;
-        let current_frame = self.frames;
-        window.paint_quad(fill(self.bounds, rgb(base)));
+        self.paint_sequence = self.paint_sequence.wrapping_add(1);
+        let current_frame = self.paint_sequence;
+        window.paint_quad(fill(geometry.bounds, rgb(base)));
         while let Some(mut row) = frame.next_row()? {
             let index = row.index;
             let id = row.id;
@@ -1325,7 +1435,7 @@ impl Terminal {
                 let cached = shape_row(
                     &mut row,
                     &self.face,
-                    self.metrics,
+                    geometry.metrics,
                     base,
                     SelectionColors {
                         foreground: self.selection_foreground,
@@ -1345,8 +1455,8 @@ impl Terminal {
                 paint_cached_row(
                     cached,
                     index,
-                    self.bounds,
-                    self.metrics,
+                    geometry.bounds,
+                    geometry.metrics,
                     SearchPaint {
                         highlights: search_rows
                             .get(&index)
@@ -1365,16 +1475,13 @@ impl Terminal {
             .retain(|_, row| row.last_frame == current_frame);
         paint_cursor(
             cursor,
-            &self.composition,
+            if composition { &self.composition } else { "" },
             SelectionColors {
                 foreground: self.selection_foreground,
                 background: self.selection_background,
             },
             &self.face,
-            CursorGeometry {
-                bounds: self.bounds,
-                metrics: self.metrics,
-            },
+            geometry,
             window,
             cx,
         )?;
@@ -1649,7 +1756,7 @@ fn paint_cursor(
     composition: &str,
     selection: SelectionColors,
     face: &Font,
-    geometry: CursorGeometry,
+    geometry: PaintGeometry,
     window: &mut Window,
     cx: &mut Context<Terminal>,
 ) -> Result<()> {
@@ -1968,6 +2075,241 @@ impl EntityInputHandler for Terminal {
             self.paste_text(&text);
             cx.notify();
         }
+    }
+}
+
+#[cfg(all(test, feature = "ui-test-support"))]
+mod presentation_tests {
+    use super::{links, Command, LinkOrigin, Terminal, TerminalPresentation};
+    use crate::terminal_engine::{LinkHit, LinkKind};
+    use gpui_kit::{
+        div, point, prelude::*, px, size, AppContext, Context, Entity, IntoElement, Modifiers,
+        MouseButton, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
+        VisualTestContext, Window,
+    };
+    use std::{cell::RefCell, rc::Rc};
+
+    struct Fixture {
+        terminal: Entity<Terminal>,
+        presentation: Option<TerminalPresentation>,
+    }
+
+    impl Render for Fixture {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().overflow_hidden().child(
+                if let Some(presentation) = &self.presentation {
+                    div()
+                        .id("outgoing-terminal")
+                        .debug_selector(|| "outgoing-terminal".into())
+                        .absolute()
+                        .left(px(31.))
+                        .top(px(19.))
+                        .child(presentation.clone())
+                        .into_any_element()
+                } else {
+                    self.terminal.clone().into_any_element()
+                },
+            )
+        }
+    }
+
+    fn with_view(
+        run: impl FnOnce(&mut VisualTestContext, Entity<Fixture>, Rc<RefCell<Vec<Command>>>),
+    ) {
+        let mut app = TestAppContext::single();
+        app.update(gpui_kit::init);
+        let commands = Rc::new(RefCell::new(Vec::new()));
+        let content = Rc::new(RefCell::new(None));
+        let (_, window) = app.add_window_view({
+            let content = content.clone();
+            let commands = commands.clone();
+            move |window, cx| {
+                let terminal = cx.new(|cx| {
+                    Terminal::new(
+                        move |command| {
+                            commands.borrow_mut().push(command);
+                            Ok(())
+                        },
+                        LinkOrigin::Local,
+                        cx,
+                    )
+                });
+                terminal.update(cx, |terminal, cx| {
+                    terminal.feed(b"visible output\x1b[?1003h\x1b[?1006h", false, cx);
+                    terminal.focus(window, cx);
+                });
+                let view = cx.new(|_| Fixture {
+                    terminal,
+                    presentation: None,
+                });
+                *content.borrow_mut() = Some(view.clone());
+                gpui_kit::base::Root::new(view, window, cx)
+            }
+        });
+        let view = content.borrow_mut().take().unwrap();
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        run(window, view, commands);
+    }
+
+    fn retain(window: &mut VisualTestContext, view: &Entity<Fixture>) -> TerminalPresentation {
+        window.update(|window, cx| {
+            let terminal = view.read(cx).terminal.clone();
+            let presentation = terminal.update(cx, |terminal, cx| {
+                terminal.presentation(cx).expect("measured terminal")
+            });
+            view.update(cx, |fixture, cx| {
+                fixture.presentation = Some(presentation.clone());
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+            presentation
+        })
+    }
+
+    #[test]
+    fn outgoing_painter_uses_recorded_geometry_without_input_or_size_claims() {
+        with_view(|window, view, commands| {
+            // Establish the positive control through the production input path.
+            let before_input = commands.borrow().len();
+            window.simulate_input("x");
+            assert!(commands.borrow().len() > before_input);
+            let terminal = window.update(|_, cx| view.read(cx).terminal.clone());
+            let baseline = window.update(|_, cx| {
+                let terminal = terminal.read(cx);
+                assert!(terminal.painted_current());
+                (
+                    terminal.bounds,
+                    terminal.metrics,
+                    terminal.size,
+                    terminal.resized_pixel_cell,
+                    terminal.frames,
+                    terminal.painted_revision,
+                    terminal.paint_sequence,
+                )
+            });
+            let command_count = commands.borrow().len();
+            let presentation = retain(window, &view);
+            assert_eq!(presentation.bounds(), baseline.0);
+            let translated = window.debug_bounds("outgoing-terminal").unwrap();
+            assert_eq!(translated.size, baseline.0.size);
+            assert_ne!(translated.origin, baseline.0.origin);
+            // Force a different allocation while the retained canvas keeps its
+            // recorded extent. No terminal layout runs on this path.
+            let handle = window.update(|window, _| window.window_handle());
+            window.simulate_window_resize(handle, size(px(420.), px(260.)));
+            window.update(|window, cx| {
+                terminal.update(cx, |terminal, cx| {
+                    terminal.feed(b"\r\nbackground output", false, cx);
+                    terminal.focus(window, cx);
+                });
+                window.draw(cx).clear(cx);
+            });
+            window.simulate_input("passive");
+            window.simulate_keystrokes("enter up");
+            let position = point(px(45.), px(30.));
+            window.simulate_click(position, Modifiers::default());
+            window.simulate_mouse_move(position, None, Modifiers::default());
+            window.simulate_event(ScrollEvent {
+                position,
+                delta: ScrollDelta::Lines(point(0., -2.)),
+                modifiers: Modifiers::default(),
+                touch_phase: TouchPhase::Moved,
+                source: ScrollSource::Pointer,
+            });
+            window.simulate_click(
+                position,
+                Modifiers {
+                    control: true,
+                    platform: true,
+                    ..Modifiers::default()
+                },
+            );
+            // A leftover capture listener would cancel this sentinel gesture
+            // even though the passive canvas has no element mouse handlers.
+            let cell = links::Cell { col: 0, row: 0 };
+            let target = links::Target::allowed(LinkHit {
+                uri: "https://example.com/".into(),
+                kind: LinkKind::Osc8,
+            })
+            .unwrap();
+            window.update(|_, cx| {
+                terminal.update(cx, |terminal, _| {
+                    terminal.pointer.capture_link();
+                    terminal
+                        .links
+                        .press(cell, target.clone(), (1., 1.), terminal.generation);
+                });
+            });
+            window.simulate_mouse_move(
+                point(px(-20.), px(-20.)),
+                MouseButton::Left,
+                Modifiers::default(),
+            );
+            window.update(|window, cx| {
+                assert!(presentation.is_valid(cx));
+                terminal.update(cx, |terminal, _| {
+                    assert!(terminal
+                        .links
+                        .finish(Some(cell), (1., 1.), terminal.generation, Some(target))
+                        .is_some());
+                    assert_eq!(terminal.bounds, baseline.0);
+                    assert_eq!(terminal.metrics, baseline.1);
+                    assert_eq!(terminal.size, baseline.2);
+                    assert_eq!(terminal.resized_pixel_cell, baseline.3);
+                    assert_eq!(terminal.frames, baseline.4);
+                    assert_eq!(terminal.painted_revision, baseline.5);
+                    assert!(
+                        !terminal.painted_current(),
+                        "passive output is not visible activity"
+                    );
+                    assert!(terminal.paint_sequence > baseline.6, "shared painter ran");
+                    assert!(terminal.focus.is_focused(window));
+                    assert!(terminal.composition.is_empty());
+                });
+            });
+            assert!(window.opened_url().is_none());
+            assert_eq!(commands.borrow().len(), command_count);
+        });
+    }
+
+    #[test]
+    fn outgoing_painter_rejects_obsolete_geometry_and_rebound_entities() {
+        with_view(|window, view, commands| {
+            let terminal = window.update(|_, cx| view.read(cx).terminal.clone());
+            for change in 0..4 {
+                let presentation = retain(window, &view);
+                window.update(|window, cx| {
+                    terminal.update(cx, |terminal, cx| match change {
+                        0 => terminal.set_zoom(1.25, cx),
+                        1 => terminal.invalidate_size_report(cx),
+                        2 => terminal.reset(terminal.generation, cx),
+                        3 => {
+                            let commands = commands.clone();
+                            terminal.replace_commands(move |command| {
+                                commands.borrow_mut().push(command);
+                                Ok(())
+                            });
+                        }
+                        _ => unreachable!(),
+                    });
+                    assert!(!presentation.is_valid(cx));
+                    let sequence = terminal.read(cx).paint_sequence;
+                    let count = commands.borrow().len();
+                    window.draw(cx).clear(cx);
+                    assert_eq!(terminal.read(cx).paint_sequence, sequence);
+                    assert_eq!(commands.borrow().len(), count);
+                    view.update(cx, |fixture, cx| {
+                        fixture.presentation = None;
+                        cx.notify();
+                    });
+                    window.draw(cx).clear(cx);
+                    assert!(
+                        !presentation.is_valid(cx),
+                        "remeasuring cannot revive an old capture"
+                    );
+                });
+            }
+        });
     }
 }
 
