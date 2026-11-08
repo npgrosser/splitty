@@ -177,6 +177,19 @@ for attachment, visibility and size controls; GPUI only submits intents and
 consumes updates. This runtime retries safe control admission, never user input
 or layout mutations. Its `WindowWorkspace` owns the fixed local collection and
 bounds admitted host sources, global selection and aggregate resources.
+
+The bounded command and update channels require fair platform dispatch as well
+as a bounded worker. Linux's pinned GPUI platform is patched at its native event
+boundary: finite batches return to the event loop, and one client-owned weak
+continuation drains buffered XCB events without depending on fd readiness.
+Pending key-repeat normalization survives batch boundaries; XIM handling and
+event order remain platform responsibilities. No second Splitty ingress queue,
+input replay or scheduler policy is added to the terminal/domain model. The
+published external source, license and patch provenance live under
+`vendor/gpui-pre-linux`, outside workspace membership; the application still
+depends on GPUI Kit through its existing seam. Dependency updates must preserve
+the platform regressions and actual multi-source input/observation acceptance.
+
 `SourceWorkspace` is the common connection collection: it holds ordered opened
 Screens, source-local tab/focus choices, pending lifecycle intents and canonical
 candidate admission. Local catalog policy opens every listed Screen and retains

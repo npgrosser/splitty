@@ -79,6 +79,15 @@ Electron build also requires the frontend dependencies to package shared assets.
 The experimental GPUI local workspace has its own isolated service and runbook in
 [`gpui-spike.md`](gpui-spike.md). It is separate from the released desktop apps.
 
+The workspace applies an explicit path patch to the pinned Linux platform
+dependency in `vendor/gpui-pre-linux`. Its [patch notes](../vendor/gpui-pre-linux/SPLITTY-PATCH.md)
+record the published source, Apache-2.0 license and finite event-dispatch patch. Keep that directory when
+building from a checkout; no edits to the Cargo registry cache are needed.
+The patch preserves foreground progress during sustained X11 events while the
+application's bounded command/update queues and captured input routes remain
+unchanged. A dependency upgrade must pass the platform regressions and the
+native multi-source input/window check before this patch can be removed.
+
 ### Native terminal library for GPUI
 
 For the native Windows window with WSL terminals, see the
