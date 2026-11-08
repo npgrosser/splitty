@@ -159,6 +159,17 @@ through reads without replay. The service remains the sole owner
 of SSH forwarding, saved preferences and restoration. The native client uses the
 existing `forward.*` and `forwardPreferences.*` operations without new wire types.
 
+The native Ports view tracks browser origins separately from forwarding feedback.
+Hosts actions belong to that management surface; terminal links retain their
+exact terminal binding; Drawer actions retain the local owner and canonical host
+group. A Drawer group remains valid through remote reconnect and ordinary popup,
+visibility or destination changes, but losing its final opened reference, source
+or owner revokes its pending browser intent. UI authority is removed even when a
+best-effort cancellation command cannot be queued, without claiming the service's
+forward stopped. Result handling still requires the exact pending mapping/request
+and the Core's verified one-shot handle. Settled or duplicate results cannot
+reopen a browser or overwrite an already recorded dispatch outcome.
+
 The development-only `splitty-gpui` window uses `splitty-client-core` as a UI-free
 adapter over one native connection per source and an isolated owned service. The explicit
 `native_workspace` module owns the worker, command/update API and bounded retries

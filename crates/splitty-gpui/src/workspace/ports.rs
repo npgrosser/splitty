@@ -1,4 +1,5 @@
 //! Retained Ports presentation. The local worker owns all forwarding effects.
+use super::hosts::HostGroupTarget;
 use super::*;
 use gpui_kit::component::{
     checkbox::Checkbox,
@@ -56,9 +57,27 @@ impl PortFeedback {
 }
 
 #[derive(Clone)]
-enum OpenOrigin {
+pub(super) enum OpenOrigin {
     Hosts,
     Terminal(TerminalToken),
+    Drawer(HostGroupTarget),
+}
+
+impl OpenOrigin {
+    fn notice_label(&self) -> Option<&'static str> {
+        match self {
+            Self::Hosts => None,
+            Self::Terminal(_) => Some("Development link"),
+            Self::Drawer(_) => Some("Port opening"),
+        }
+    }
+    fn closed_notice(&self) -> Option<&'static str> {
+        match self {
+            Self::Hosts => None,
+            Self::Terminal(_) => Some("Development link closed before it opened"),
+            Self::Drawer(_) => Some("Port opening canceled because its host group closed"),
+        }
+    }
 }
 
 impl PortsView {
@@ -162,7 +181,14 @@ impl PortsView {
             return None;
         }
         let id = feedback.request_id;
-        self.open_requests.remove(&id);
+        if self
+            .open_requests
+            .remove(&id)
+            .is_some_and(|origin| origin.notice_label().is_some())
+        {
+            self.link_notice =
+                Some("Browser opening canceled by Stop; the port action is pending".into());
+        }
         Some(id)
     }
 }
@@ -432,7 +458,7 @@ impl Workspace {
                             ForwardRequest::start(primary_key.clone(), primary_local, false, None)
                         };
                         match request {
-                            Ok(request) => this.submit_forward(request, None, cx),
+                            Ok(request) => this.submit_forward(request, OpenOrigin::Hosts, cx),
                             Err(error) => {
                                 this.ports.error = Some(error.to_string());
                                 cx.notify();
@@ -489,7 +515,7 @@ impl Workspace {
                                     {
                                         this.submit_forward(
                                             ForwardRequest::stop(key.clone()),
-                                            None,
+                                            OpenOrigin::Hosts,
                                             cx,
                                         );
                                     }
@@ -510,7 +536,9 @@ impl Workspace {
                                             row.local(),
                                             None,
                                         ) {
-                                            Ok(request) => this.submit_forward(request, None, cx),
+                                            Ok(request) => {
+                                                this.submit_forward(request, OpenOrigin::Hosts, cx)
+                                            }
                                             Err(error) => {
                                                 this.ports.error = Some(error.to_string());
                                                 cx.notify();
@@ -549,7 +577,7 @@ impl Workspace {
                                         {
                                             this.submit_forward(
                                                 ForwardRequest::forget(key.clone()),
-                                                None,
+                                                OpenOrigin::Hosts,
                                                 cx,
                                             );
                                         }
@@ -621,7 +649,11 @@ impl Workspace {
                 .on_click(move |_, _, cx| {
                     let _ = weak.update(cx, |this, cx| {
                         if this.ports.owner == owner && this.lifecycle_token() == owner {
-                            this.submit_forward(ForwardRequest::stop(stop_key.clone()), None, cx);
+                            this.submit_forward(
+                                ForwardRequest::stop(stop_key.clone()),
+                                OpenOrigin::Hosts,
+                                cx,
+                            );
                         }
                     });
                 }),
@@ -1070,18 +1102,21 @@ impl Workspace {
             .iter()
             .filter_map(|(id, origin)| match origin {
                 OpenOrigin::Terminal(terminal) if !model.accepts_terminal(terminal) => Some(*id),
+                OpenOrigin::Drawer(group) if !group.is_current(model) => Some(*id),
                 _ => None,
             })
             .collect();
         for id in stale {
-            self.ports.open_requests.remove(&id);
+            let origin = self.ports.open_requests.remove(&id);
             if let Some(owner) = self.ports.owner {
                 let _ = self.commands.try_send(WorkerCommand::new(
                     owner,
                     Command::CancelForwardOpen { request_id: id },
                 ));
             }
-            self.ports.link_notice = Some("Development link closed before it opened".into());
+            if let Some(notice) = origin.as_ref().and_then(OpenOrigin::closed_notice) {
+                self.ports.link_notice = Some(notice.into());
+            }
         }
     }
 
@@ -1100,18 +1135,31 @@ impl Workspace {
             .iter()
             .filter_map(|(id, origin)| match origin {
                 OpenOrigin::Terminal(terminal) if terminals.contains(terminal) => Some(*id),
+                OpenOrigin::Drawer(group)
+                    if group.source_id() == screen.source_id()
+                        && self.model.as_ref().is_some_and(|model| {
+                            model.opened().iter().all(|entry| {
+                                entry.key().source_id() != group.source_id()
+                                    || entry.key() == screen
+                            })
+                        }) =>
+                {
+                    Some(*id)
+                }
                 _ => None,
             })
             .collect();
         for id in stale {
-            self.ports.open_requests.remove(&id);
+            let origin = self.ports.open_requests.remove(&id);
             if let Some(owner) = self.ports.owner {
                 let _ = self.commands.try_send(WorkerCommand::new(
                     owner,
                     Command::CancelForwardOpen { request_id: id },
                 ));
             }
-            self.ports.link_notice = Some("Development link closed before it opened".into());
+            if let Some(notice) = origin.as_ref().and_then(OpenOrigin::closed_notice) {
+                self.ports.link_notice = Some(notice.into());
+            }
             cx.notify();
         }
     }
@@ -1139,14 +1187,16 @@ impl Workspace {
                 .collect()
         };
         for id in stale {
-            self.ports.open_requests.remove(&id);
+            let origin = self.ports.open_requests.remove(&id);
             if let Some(owner) = self.ports.owner {
                 let _ = self.commands.try_send(WorkerCommand::new(
                     owner,
                     Command::CancelForwardOpen { request_id: id },
                 ));
             }
-            self.ports.link_notice = Some("Development link closed before it opened".into());
+            if let Some(notice) = origin.as_ref().and_then(OpenOrigin::closed_notice) {
+                self.ports.link_notice = Some(notice.into());
+            }
             cx.notify();
         }
     }
@@ -1171,7 +1221,7 @@ impl Workspace {
     pub(super) fn submit_forward(
         &mut self,
         request: ForwardRequest,
-        origin: Option<TerminalToken>,
+        origin: OpenOrigin,
         cx: &mut Context<Self>,
     ) {
         let Some(owner) = self
@@ -1182,8 +1232,22 @@ impl Workspace {
             return;
         };
         let key = request.key().clone();
+        if let OpenOrigin::Drawer(group) = &origin {
+            if !self.ports.can_manage()
+                || group.target() != key.target()
+                || !self
+                    .model
+                    .as_ref()
+                    .is_some_and(|model| group.is_current(model))
+            {
+                self.ports.link_notice =
+                    Some("Port opening is no longer available for this host group".into());
+                cx.notify();
+                return;
+            }
+        }
         if self.ports.pending(&key) && request.action() != ForwardAction::Stop {
-            if origin.is_some() {
+            if origin.notice_label().is_some() {
                 self.ports.link_notice = Some(format!(
                     "Port {} on {} already has an action pending",
                     key.remote(),
@@ -1195,7 +1259,7 @@ impl Workspace {
         }
         if !self.ports.can_record(&key) {
             let message = "Too many port actions are pending; wait for one to finish".to_owned();
-            if origin.is_some() {
+            if origin.notice_label().is_some() {
                 self.ports.link_notice = Some(message.clone());
             }
             self.ports.error = Some(message);
@@ -1203,7 +1267,7 @@ impl Workspace {
             return;
         }
         let action = request.action();
-        let from_terminal = origin.is_some();
+        let notice_label = origin.notice_label();
         let superseded = (action == ForwardAction::Stop)
             .then(|| {
                 self.ports
@@ -1247,10 +1311,7 @@ impl Workspace {
                     }
                 }
                 if action == ForwardAction::Open {
-                    self.ports.open_requests.insert(
-                        request_id,
-                        origin.map_or(OpenOrigin::Hosts, OpenOrigin::Terminal),
-                    );
+                    self.ports.open_requests.insert(request_id, origin);
                 }
                 self.ports.record(
                     key.clone(),
@@ -1265,9 +1326,9 @@ impl Workspace {
                     },
                 );
                 self.ports.error = None;
-                if from_terminal {
+                if let Some(label) = notice_label {
                     self.ports.link_notice = Some(format!(
-                        "Opening development link on {}:{}…",
+                        "{label} pending on {}:{}…",
                         key.target(),
                         key.remote()
                     ));
@@ -1275,7 +1336,7 @@ impl Workspace {
             }
             Err(error) => {
                 let message = format!("Port action was not sent: {error}");
-                if from_terminal {
+                if notice_label.is_some() {
                     self.ports.link_notice = Some(message.clone());
                 }
                 self.ports.error = Some(message);
@@ -1301,6 +1362,7 @@ impl Workspace {
                 feedback.owner == owner
                     && feedback.request_id == id
                     && feedback.action == result.action()
+                    && feedback.outcome == ForwardOutcome::Pending
             });
         if !current || !tracked {
             if let Some(handle) = result.eligible_open() {
@@ -1317,6 +1379,14 @@ impl Workspace {
             let valid_origin = match self.ports.open_requests.get(&id) {
                 Some(OpenOrigin::Hosts) => {
                     self.destination == Destination::Hosts && handle.terminal().is_none()
+                }
+                Some(OpenOrigin::Drawer(group)) => {
+                    handle.terminal().is_none()
+                        && group.target() == result.key().target()
+                        && self
+                            .model
+                            .as_ref()
+                            .is_some_and(|model| group.is_current(model))
                 }
                 Some(OpenOrigin::Terminal(terminal)) => {
                     handle.terminal() == Some(terminal)
@@ -1344,20 +1414,19 @@ impl Workspace {
             }
         }
         self.ports.open_requests.remove(&id);
-        if matches!(origin, Some(OpenOrigin::Terminal(_))) {
+        if let Some(label) = origin.as_ref().and_then(OpenOrigin::notice_label) {
             self.ports.link_notice = if opened {
                 None
             } else {
                 Some(match result.outcome() {
                     ForwardOutcome::Succeeded | ForwardOutcome::Partial => {
-                        "Development link could not be opened after verification".into()
+                        format!("{label} could not be verified for browser opening")
                     }
-                    ForwardOutcome::Failed | ForwardOutcome::Rejected => format!(
-                        "Development link failed: {}",
-                        result.reason().unwrap_or("Try again")
-                    ),
+                    ForwardOutcome::Failed | ForwardOutcome::Rejected => {
+                        format!("{label} failed: {}", result.reason().unwrap_or("Try again"))
+                    }
                     ForwardOutcome::Uncertain => format!(
-                        "Development link status unknown: {}",
+                        "{label} status unknown: {}",
                         result.reason().unwrap_or("Refresh Ports to inspect")
                     ),
                     ForwardOutcome::Pending => unreachable!(),
@@ -1429,7 +1498,7 @@ impl Workspace {
         let Ok(request) = ForwardRequest::open_link(key, terminal.clone(), url) else {
             return;
         };
-        self.submit_forward(request, Some(terminal), cx);
+        self.submit_forward(request, OpenOrigin::Terminal(terminal), cx);
     }
 }
 
@@ -1437,7 +1506,8 @@ impl Workspace {
 mod tests {
     use super::{
         CloseTarget, Command, Destination, ForwardAction, ForwardOutcome, ForwardRequest,
-        ForwardResult, ForwardSnapshot, ForwardState, MappingKey, PortFeedback, WebUrl, Workspace,
+        ForwardResult, ForwardSnapshot, ForwardState, MappingKey, OpenOrigin, PortFeedback, WebUrl,
+        Workspace,
     };
     use gpui_kit::{
         px, size, AppContext, Entity, Focusable, Modifiers, TestAppContext, VisualTestContext,
@@ -1451,7 +1521,7 @@ mod tests {
     use tokio::sync::mpsc;
     use uuid::Uuid;
 
-    fn with_view(run: impl FnOnce(&mut VisualTestContext, Entity<Workspace>)) {
+    pub(super) fn with_view(run: impl FnOnce(&mut VisualTestContext, Entity<Workspace>)) {
         let mut app = TestAppContext::single();
         app.update(gpui_kit::init);
         let content = Rc::new(RefCell::new(None));
@@ -1502,14 +1572,14 @@ mod tests {
                         }
                     }
                     let existing_key = MappingKey::new("vm1", 3001).unwrap();
-                    workspace.submit_forward(ForwardRequest::stop(existing_key.clone()), None, cx);
+                    workspace.submit_forward(ForwardRequest::stop(existing_key.clone()), OpenOrigin::Hosts, cx);
                     assert!(matches!(receiver.try_recv().unwrap().kind(), Command::ManageForward { request, .. }
                         if request.action() == ForwardAction::Stop && request.key() == &existing_key));
                     assert_eq!(workspace.ports.feedback.len(), super::PortsView::MAX_FEEDBACK);
                     let new_key = MappingKey::new("vm1", 4000).unwrap();
                     workspace.submit_forward(
                         ForwardRequest::open(new_key.clone(), None, false, None).unwrap(),
-                        None,
+                        OpenOrigin::Hosts,
                         cx,
                     );
                     assert_eq!(workspace.ports.feedback.len(), super::PortsView::MAX_FEEDBACK);
@@ -1537,7 +1607,7 @@ mod tests {
                     assert_eq!(workspace.ports.feedback[&old_key].outcome, ForwardOutcome::Failed);
                     workspace.submit_forward(
                         ForwardRequest::open(new_key.clone(), None, false, None).unwrap(),
-                        None,
+                        OpenOrigin::Hosts,
                         cx,
                     );
                     assert_eq!(workspace.ports.feedback.len(), super::PortsView::MAX_FEEDBACK);
@@ -1732,7 +1802,11 @@ mod tests {
             let key = open_request.key().clone();
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
-                    workspace.submit_forward(ForwardRequest::stop(key.clone()), None, cx);
+                    workspace.submit_forward(
+                        ForwardRequest::stop(key.clone()),
+                        OpenOrigin::Hosts,
+                        cx,
+                    );
                     assert!(workspace.ports.form.as_ref().unwrap().pending.is_none());
                     assert!(workspace
                         .ports
@@ -2200,3 +2274,6 @@ mod tests {
         });
     }
 }
+
+#[cfg(all(test, feature = "ui-test-support"))]
+mod drawer_tests;
