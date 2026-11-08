@@ -418,6 +418,16 @@ async fn pending_failed_hub_read_does_not_block_settings_or_terminal_output() {
     drop(pending);
     seen.await.unwrap();
 
+    let build = tokio::time::timeout(Duration::from_secs(5), settings.next_update())
+        .await
+        .unwrap()
+        .unwrap();
+    let crate::local_service::LocalServiceUpdate::BackendVersion { connection, result } = build
+    else {
+        panic!("assigned backend read must progress independently of the hub");
+    };
+    assert_eq!(connection, owner);
+    assert_eq!(result.unwrap().as_str(), "test");
     let setting = tokio::time::timeout(Duration::from_secs(5), settings.next_update())
         .await
         .unwrap()

@@ -4,6 +4,111 @@ use serde_json::json;
 
 impl WindowWorkspace {
     #[doc(hidden)]
+    pub fn ui_test_host_update_fixture(
+        &mut self,
+        target: &str,
+        legacy: bool,
+    ) -> io::Result<HostActionTarget> {
+        self.ui_test_remote_terminal_fixture(target)?;
+        let id = self
+            .source_for_target(target)
+            .ok_or_else(|| invalid("host update fixture source missing"))?;
+        let action = self
+            .host(id)
+            .ok_or_else(|| invalid("host update fixture host missing"))?
+            .action_target()
+            .clone();
+        let budget = ConnectionBudget::default();
+        let offer = if legacy {
+            let migration = serde_json::from_value(json!({
+                "available": true,
+                "fromVersion": "0.1.0",
+                "toVersion": "0.2.4",
+                "sessions": 3
+            }))
+            .map_err(io::Error::other)?;
+            let offer =
+                host_update::from_failure(Some("0.1.0".into()), Some(true), None, Some(migration))?
+                    .ok_or_else(|| invalid("legacy update fixture missing offer"))?;
+            let lease = budget
+                .reserve(offer.retained_bytes(), false)
+                .map_err(io::Error::other)?;
+            Arc::new(lease.charge(offer))
+        } else {
+            let backend = "0.2.4".to_owned();
+            let lease = budget
+                .reserve(backend.len(), false)
+                .map_err(io::Error::other)?;
+            self.set_backend_version(
+                self.lifecycle_token().connection_id(),
+                Ok(Arc::new(lease.charge(backend))),
+            );
+            HostUpdateOffer::from_ready(
+                &json!({
+                    "update": {"available": true, "keepsSessions": true},
+                    "daemon": {"version": "0.2.3", "keepsSessions": true}
+                }),
+                &budget,
+            )?
+            .ok_or_else(|| invalid("ordinary update fixture missing offer"))?
+        };
+        self.host_mut(&action)
+            .ok_or_else(|| invalid("host update fixture host changed"))?
+            .update_offer = Some(offer);
+        Ok(action)
+    }
+
+    #[doc(hidden)]
+    pub fn ui_test_host_update_plan(
+        &self,
+        request_id: Uuid,
+        action: &HostActionTarget,
+    ) -> io::Result<Arc<HostUpdatePlan>> {
+        let offer = self
+            .host(action.source_id())
+            .filter(|host| host.action_target() == action)
+            .and_then(|host| host.update_offer.clone())
+            .ok_or_else(|| invalid("host update fixture offer missing"))?;
+        Ok(Arc::new(HostUpdatePlan::new(
+            request_id,
+            action.clone(),
+            offer,
+            self.backend_version(),
+            &ConnectionBudget::default(),
+        )?))
+    }
+
+    #[doc(hidden)]
+    pub fn ui_test_revoke_host_update_offer(
+        &mut self,
+        action: &HostActionTarget,
+    ) -> io::Result<()> {
+        self.host_mut(action)
+            .ok_or_else(|| invalid("host update fixture host changed"))?
+            .update_offer = None;
+        Ok(())
+    }
+
+    #[doc(hidden)]
+    pub fn ui_test_fail_backend_version(&mut self) {
+        self.set_backend_version(
+            self.lifecycle_token().connection_id(),
+            Err(io::Error::other("fixture backend version unavailable")),
+        );
+    }
+
+    #[doc(hidden)]
+    pub fn ui_test_host_update_catalog_failed(
+        &mut self,
+        action: &HostActionTarget,
+    ) -> io::Result<()> {
+        self.host_mut(action)
+            .ok_or_else(|| invalid("host update fixture host changed"))?
+            .catalog = CatalogState::Failed;
+        Ok(())
+    }
+
+    #[doc(hidden)]
     pub fn ui_test_local_screen_fixture(&mut self, name: &str) -> io::Result<ScreenKey> {
         let owner = self.lifecycle_token();
         {

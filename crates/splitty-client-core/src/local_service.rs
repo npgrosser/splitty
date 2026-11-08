@@ -15,6 +15,10 @@ mod settings;
 pub use settings::{SettingsReconciled, SettingsWriteOutcome, SettingsWriteResult};
 
 pub enum LocalServiceUpdate {
+    BackendVersion {
+        connection: Uuid,
+        result: io::Result<Arc<splitty_transport::budget::Charged<String>>>,
+    },
     SettingsWrite(SettingsWriteResult),
     SettingsReconciled(SettingsReconciled),
     Template(crate::templates::TemplateApiResult),
@@ -47,6 +51,7 @@ const MAX_QUEUED_ZOOM: usize = 32;
 const MAX_QUEUED_SETTINGS: usize = 16;
 #[derive(Clone)]
 enum Job {
+    BackendVersion,
     Settings(Uuid, SettingsEdit, u64),
     Read(Feature, u64),
     Zoom(Uuid, ZoomAction),
@@ -82,6 +87,8 @@ pub struct LocalServiceClient {
     connection_id: Uuid,
     generations: [u64; 2],
     dirty: [bool; 2],
+    build_dirty: bool,
+    build_pending: bool,
     next: Feature,
     scheme: ColorScheme,
 }
@@ -110,6 +117,8 @@ impl LocalServiceClient {
             connection_id,
             generations: [1; 2],
             dirty: [true; 2],
+            build_dirty: false,
+            build_pending: false,
             next: Feature::Appearance,
             scheme,
         }
@@ -120,6 +129,13 @@ impl LocalServiceClient {
                 io::ErrorKind::InvalidInput,
                 "local settings source changed",
             ));
+        }
+        Ok(())
+    }
+    pub fn refresh_backend_version(&mut self, owner: Uuid) -> io::Result<()> {
+        self.check_owner(owner)?;
+        if !self.build_pending {
+            self.build_dirty = true;
         }
         Ok(())
     }
@@ -302,7 +318,11 @@ impl LocalServiceClient {
                 } else {
                     None
                 };
-                let job = if self.template.is_some()
+                let job = if self.build_dirty {
+                    self.build_dirty = false;
+                    self.build_pending = true;
+                    Job::BackendVersion
+                } else if self.template.is_some()
                     && (!self.last_template
                         || (self.zoom.is_empty()
                             && self.settings.is_empty()
@@ -396,6 +416,13 @@ impl LocalServiceClient {
                     };
                     let mut home_read = false;
                     let result = match job.clone() {
+                        Job::BackendVersion => LocalServiceUpdate::BackendVersion {
+                            connection,
+                            result: tokio::select! { biased;
+                                _ = cancel.notified() => Err(cancelled()),
+                                result = read_backend_version(&mut client) => result,
+                            },
+                        },
                         Job::Settings(id, edit, generation) => LocalServiceUpdate::SettingsWrite(
                             settings::execute(
                                 &mut client,
@@ -452,6 +479,9 @@ impl LocalServiceClient {
             self.client = Some(client);
             self.last_template = matches!(job, Job::Template(..));
             match job {
+                Job::BackendVersion => {
+                    self.build_pending = false;
+                }
                 Job::Settings(id, edit, _) => {
                     self.active_settings = None;
                     self.prefer_write = false;
@@ -561,3 +591,29 @@ mod zoom;
 
 #[cfg(all(test, unix))]
 mod zoom_tests;
+
+async fn read_backend_version(
+    client: &mut Client,
+) -> io::Result<Arc<splitty_transport::budget::Charged<String>>> {
+    #[derive(serde::Deserialize)]
+    struct Build {
+        version: String,
+    }
+    let reply = client
+        .request(
+            splitty_core::native_api::Operation::BuildGet,
+            serde_json::Map::new(),
+        )
+        .await?;
+    let parsed = decode::<Build>(client, &reply)?;
+    if parsed.version.is_empty()
+        || parsed.version.len() > 64
+        || parsed.version.chars().any(char::is_control)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Invalid backend build version",
+        ));
+    }
+    Ok(Arc::new(parsed.map(|build| build.version)))
+}

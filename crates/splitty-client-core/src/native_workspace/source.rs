@@ -463,6 +463,10 @@ impl SourceRuntime {
             | CommandKind::ReleaseHostBrowsing
             | CommandKind::ConnectHost { .. }
             | CommandKind::RetryHost { .. }
+            | CommandKind::RequestHostUpdate { .. }
+            | CommandKind::ConfirmHostUpdate { .. }
+            | CommandKind::DismissHostUpdate { .. }
+            | CommandKind::RefreshBackendVersion
             | CommandKind::CancelHost { .. }
             | CommandKind::ReleaseHostBrowse { .. }
             | CommandKind::OpenRemoteScreen { .. }

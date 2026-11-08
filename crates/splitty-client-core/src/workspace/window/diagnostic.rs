@@ -1,5 +1,8 @@
 //! Client-owned decoding of a hub diagnostic carried inside transport Closed.
-use super::HostDiagnostic;
+use super::{
+    host_update::{self, Availability, Migration},
+    HostDiagnostic,
+};
 use serde::{Deserialize, Deserializer};
 use splitty_transport::{
     budget::{Charged, ConnectionBudget},
@@ -31,8 +34,11 @@ struct RemoteError {
     hint: Option<String>,
     #[serde(rename = "retryable")]
     _retryable: bool,
-    // Other documented remote.error fields are not needed to present the
-    // diagnostic. Serde skips them without retaining a second JSON tree.
+    version: Option<String>,
+    #[serde(rename = "keepsSessions")]
+    keeps_sessions: Option<bool>,
+    update: Option<Availability>,
+    migration: Option<Migration>,
 }
 
 fn invalid() -> io::Error {
@@ -78,7 +84,19 @@ impl HostDiagnostic {
             {
                 return Err(invalid());
             }
-            let retained = size_of::<Self>()
+            let update_offer = host_update::from_failure(
+                parsed.version,
+                parsed.keeps_sessions,
+                parsed.update,
+                parsed.migration,
+            )?;
+            if update_offer.is_some() && parsed.code != "incompatible" {
+                return Err(invalid());
+            }
+            let retained = update_offer
+                .as_ref()
+                .map_or(0, |offer| offer.retained_bytes())
+                + size_of::<Self>()
                 + parsed.code.capacity()
                 + parsed.message.capacity()
                 + parsed.hint.as_ref().map_or(0, String::capacity);
@@ -87,6 +105,7 @@ impl HostDiagnostic {
                 message: parsed.message,
                 hint: parsed.hint,
                 retryable: closed.retryable,
+                update_offer,
             }));
         }
 
@@ -108,6 +127,7 @@ impl HostDiagnostic {
             message: copied,
             hint: None,
             retryable,
+            update_offer: None,
         }))
     }
 }
@@ -123,6 +143,45 @@ mod tests {
             code: wire::CloseCode::BackendLost,
             message: message.into(),
             retryable,
+        }
+    }
+
+    #[test]
+    fn ordinary_and_legacy_offers_are_typed_and_charged() {
+        use serde_json::json;
+        let budget = ConnectionBudget::default();
+        let base = json!({"type":"remote.error","code":"incompatible","message":"update available","retryable":false,"version":"0.1.0","keepsSessions":true});
+        for migration in [false, true] {
+            let mut value = base.clone();
+            if migration {
+                value["migration"] = json!({"available":true,"fromVersion":"0.1.0","toVersion":"0.2.0","sessions":3});
+            } else {
+                value["update"] = json!({"available":true,"keepsSessions":true});
+            }
+            let diagnostic =
+                HostDiagnostic::from_closed(&closed(value.to_string(), false), &budget).unwrap();
+            let offer = diagnostic.update_offer.as_ref().unwrap();
+            assert_eq!(offer.from_version(), "0.1.0");
+            assert_eq!(offer.legacy_sessions(), migration.then_some(3));
+            assert_eq!(offer.to_version(), migration.then_some("0.2.0"));
+            assert!(budget.used() > 0);
+            drop(diagnostic);
+            assert_eq!(budget.used(), 0);
+            for (field, replacement) in [
+                ("keepsSessions", json!(false)),
+                ("version", json!("changed")),
+            ] {
+                let mut invalid = value.clone();
+                invalid[field] = replacement;
+                if field == "version" && !migration {
+                    invalid[field] = json!("x".repeat(65));
+                }
+                assert!(
+                    HostDiagnostic::from_closed(&closed(invalid.to_string(), false), &budget)
+                        .is_err()
+                );
+                assert_eq!(budget.used(), 0);
+            }
         }
     }
 

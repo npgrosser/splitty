@@ -7,7 +7,7 @@ model {
       metadata { module 'splitty_client_core::api_stream' }
     }
     owned_service = component 'owned_service' {
-      description 'Explicit validated WSL child arguments or Unix embedded startup; one owned backend with separate session/API streams and joined observed cleanup.'
+      description 'Explicit validated WSL child arguments or Unix embedded startup; one owned backend with separate session/API streams, explicit one-attempt host update intent and joined observed cleanup.'
       metadata { module 'splitty_client_core::owned_service' }
     }
     api_stream -> splitty.core.native_api 'Validate operation role and arguments against the shared contract'
@@ -38,6 +38,7 @@ model {
     native_workspace -> splitty.transport.wire 'Validate host readiness and preserve charged transport close reasons'
     native_workspace -> splitty.core.theme 'Verify independent appearance delivery during a pending hub read'
     local_service -> api_stream 'Keep one auxiliary stream and retained jobs across cancellation'
+    local_service -> splitty.transport.budget 'Retain bounded assigned-backend version metadata'
     local_service -> splitty.core.native_api 'Use shared home settings, metadata and theme operation authority'
     appearance -> api_stream 'Read existing appearance and theme contracts on either platform'
     appearance -> splitty.core.native_api 'Use fixed typed home and theme operations'
@@ -62,7 +63,7 @@ model {
     }
 
     local_service = component 'local_service' {
-      description 'One owned auxiliary API stream with fair appearance/profile reads, bounded single-field settings FIFO and cross-path field exclusion, identified zoom/Drawer/template jobs, charged replies, explicit uncertainty reconciliation without replay and joined cancellation cleanup.'
+      description 'One owned auxiliary API stream with coalesced owner-bound backend-version reads and fair appearance/profile reads, bounded single-field settings FIFO and cross-path field exclusion, identified zoom/Drawer/template jobs, charged replies, explicit uncertainty reconciliation without replay and joined cancellation cleanup.'
       metadata { module 'splitty_client_core::local_service' }
     }
 
@@ -122,12 +123,12 @@ model {
     }
 
     client_workspace = component 'client_workspace' {
-      description 'Source-qualified view keys and immutable execution tokens; common local all-catalog or remote explicit-open SourceWorkspace collections, WindowWorkspace global selection and aggregate admission, canonical tiled/floating Screen projections, bounded coherent cross-Screen route collection, captured transfer, floating action and exact tab placement settlement, ordered relative Screen and captured group navigation, captured template replacement with separate pending presentation and full-scope close impact assessment.'
+      description 'Source-qualified view keys and immutable execution tokens; common local all-catalog or remote explicit-open SourceWorkspace collections, WindowWorkspace global selection and aggregate admission, bounded host-update offers and captured confirmation facts, canonical tiled/floating Screen projections, bounded coherent cross-Screen route collection, captured transfer, floating action and exact tab placement settlement, ordered relative Screen and captured group navigation, captured template replacement with separate pending presentation and full-scope close impact assessment.'
       metadata { module 'splitty_client_core::workspace' }
     }
 
     native_workspace = component 'native_workspace' {
-      description 'Native workspace runtime: one owned local service and ordered connection, immutable source command admission before effects, source-scoped charged events and attachment delivery, worker-owned WindowWorkspace with one common SourceRuntime for session commands, observations and controls, ordered model-before-delivery effects, identified host metadata preparation with request-scoped and global browse withdrawal, identified transfer, floating and zoom outcomes, checked placement and close settlement including channel-owned startup consent, independent settings outcomes, verified shutdown and retained attachment and visibility controls.'
+      description 'Native workspace runtime: one owned local service and ordered connection, immutable source command admission before effects, source-scoped charged events and attachment delivery, worker-owned WindowWorkspace with one common SourceRuntime for session commands, observations and controls, ordered model-before-delivery effects, identified host metadata preparation with request-scoped and global browse withdrawal, one-use host-update confirmation and cleanup-before-replacement with unconfirmed outcomes and connect-only reconciliation, identified transfer, floating and zoom outcomes, checked placement and close settlement including channel-owned startup consent, independent settings outcomes, verified shutdown and retained attachment and visibility controls.'
       metadata { module 'splitty_client_core::native_workspace' }
     }
 

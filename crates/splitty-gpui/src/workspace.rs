@@ -2,6 +2,7 @@
 mod chrome;
 mod drawer;
 mod floating;
+mod host_update;
 mod hosts;
 mod ports;
 mod settings;
@@ -2159,6 +2160,7 @@ impl Workspace {
         }
         self.drop_target = None;
         self.model = Some(window_model);
+        self.host_update_reconcile(window, cx);
         self.flush_scheme();
         self.sync_visible(cx);
         if self.destination == Destination::Screens
@@ -2846,6 +2848,14 @@ impl Workspace {
                 Update::HostManagement(result) => {
                     self.host_management_result(result, window, cx);
                 }
+                Update::HostUpdatePrepared(plan) => {
+                    self.host_update_prepared(plan, window, cx);
+                }
+                Update::HostUpdateRejected {
+                    owner,
+                    request_id,
+                    reason,
+                } => self.host_update_rejected(owner, request_id, reason, window, cx),
                 Update::Forwards(snapshot) => {
                     if self.ports.accept(snapshot) {
                         cx.notify();

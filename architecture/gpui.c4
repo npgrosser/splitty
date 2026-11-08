@@ -28,8 +28,13 @@ model {
     }
 
     gpui_workspace = component 'gpui_workspace' {
-      description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references and global navigation, deliberate Hosts connection, live catalog and Ports controls, retained source-qualified terminal views, local-only appearance and library controls, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools.'
+      description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references and global navigation, deliberate Hosts connection, live catalog, explicit host update confirmation and Ports controls, retained source-qualified terminal views, local-only appearance and library controls, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools.'
       metadata { module 'splitty_gpui::workspace' }
+    }
+
+    gpui_host_update = component 'gpui_host_update' {
+      description 'Retain a captured host update request and worker-prepared plan, render the Kit confirmation with exact target and versions, and revoke stale or dismissed prompts without deciding backend update policy.'
+      metadata { module 'splitty_gpui::workspace::host_update' }
     }
 
     gpui_appearance = component 'gpui_appearance' {
@@ -60,6 +65,10 @@ model {
     terminal -> splitty.client_core.external_links 'Validate bounded HTTP(S) targets before explicit platform dispatch'
     gpui_workspace -> terminal 'Keep source-scoped terminal views, rebind route geometry and subscribe to deliberate remote loopback link gestures'
     gpui_workspace -> gpui_appearance 'Convert resolved theme values for native chrome and terminal colors'
+    gpui_host_update -> gpui_workspace 'Use the workspace view, captured focus and current destination'
+    gpui_host_update -> splitty.client_core.hub 'Construct fixed-local host directory evidence in view tests'
+    gpui_host_update -> splitty.client_core.client_workspace 'Read current typed offer and validate the prepared plan against the current source attempt'
+    gpui_host_update -> splitty.client_core.native_workspace 'Send owner-bound request, confirm or dismiss intents; consume prepared or rejected replies'
     gpui_workspace -> splitty.client_core.appearance 'Match owner and generation before applying resolved appearance'
     gpui_workspace -> splitty.client_core.local_service 'Present identified local settings mutation outcomes and explicit uncertainty reconciliation in a retained Settings editor'
     gpui_workspace -> splitty.client_core.client_shell_profiles 'Retain owner-bound service choices for the new-tab picker'

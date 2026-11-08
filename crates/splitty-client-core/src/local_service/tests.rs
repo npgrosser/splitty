@@ -215,3 +215,34 @@ async fn malformed_profile_json_is_charged_and_rejected() {
     service.close().await.unwrap();
     assert!(!path.exists());
 }
+
+#[tokio::test]
+async fn backend_version_is_owner_bound_coalesced_and_independent_of_settings() {
+    let (service, path) = fixture();
+    let api = Connector::default()
+        .embedded(service.state.clone(), Role::Main)
+        .await
+        .unwrap();
+    let owner = Uuid::new_v4();
+    let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+    assert!(reader.refresh_backend_version(Uuid::new_v4()).is_err());
+    reader.refresh_backend_version(owner).unwrap();
+    reader.refresh_backend_version(owner).unwrap();
+    let LocalServiceUpdate::BackendVersion { connection, result } = next(&mut reader).await else {
+        panic!("missing requested build");
+    };
+    assert_eq!(connection, owner);
+    assert_eq!(result.unwrap().as_str(), service.state.version);
+    assert!(!reader.build_dirty && !reader.build_pending);
+    assert!(matches!(
+        next(&mut reader).await,
+        LocalServiceUpdate::Appearance(_)
+    ));
+    assert!(matches!(
+        next(&mut reader).await,
+        LocalServiceUpdate::ShellProfiles(_)
+    ));
+    reader.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}

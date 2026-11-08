@@ -153,6 +153,49 @@ async fn next(client: &mut LocalServiceClient) -> LocalServiceUpdate {
 }
 
 #[tokio::test]
+async fn backend_build_read_rejects_malformed_replies_and_refreshes_explicitly() {
+    for body in [
+        "{}".to_owned(),
+        "{broken".into(),
+        serde_json::json!({"version":"x".repeat(65)}).to_string(),
+    ] {
+        let (client, server, path) = scripted(vec![
+            Exchange {
+                operation: "build.get",
+                status: 200,
+                uncertain: false,
+                body,
+            },
+            Exchange {
+                operation: "build.get",
+                status: 200,
+                uncertain: false,
+                body: r#"{"version":"assigned-backend"}"#.into(),
+            },
+        ])
+        .await;
+        let owner = Uuid::new_v4();
+        let mut reader = LocalServiceClient::new(client, owner, ColorScheme::Dark);
+        reader.refresh_backend_version(owner).unwrap();
+        let LocalServiceUpdate::BackendVersion { connection, result } = next(&mut reader).await
+        else {
+            panic!("build read missing")
+        };
+        assert_eq!(connection, owner);
+        assert!(result.is_err());
+        assert!(!reader.build_dirty && !reader.build_pending);
+        reader.refresh_backend_version(owner).unwrap();
+        let LocalServiceUpdate::BackendVersion { result, .. } = next(&mut reader).await else {
+            panic!("explicit refresh missing")
+        };
+        assert_eq!(result.unwrap().as_str(), "assigned-backend");
+        reader.finish().await.unwrap();
+        server.await.unwrap();
+        std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[tokio::test]
 async fn uncertain_write_is_not_retried_and_later_intent_reads_again() {
     let exchanges = vec![
         Exchange {

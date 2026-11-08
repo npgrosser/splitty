@@ -144,14 +144,15 @@ impl OwnedService {
     pub async fn host_stream(
         &self,
         target: SshTarget,
+        update: bool,
         context: queue::Context,
         progress: impl FnMut(Charged<wire::Progress>),
     ) -> io::Result<Client> {
         match self {
             #[cfg(not(target_os = "windows"))]
-            Self::Embedded(service) => service.host_stream(target, context, progress).await,
+            Self::Embedded(service) => service.host_stream(target, update, context, progress).await,
             Self::Owned(owner) => owner
-                .open_context(Some(target), false, context, progress)
+                .open_context(Some(target), update, context, progress)
                 .await
                 .map(Client::from_owned),
         }

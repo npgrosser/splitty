@@ -6,7 +6,10 @@ use super::{
 };
 use crate::{
     owned_service::OwnedService,
-    workspace::{CatalogState, HostActionTarget, HostDiagnostic, SourceId},
+    workspace::{
+        CatalogState, HostActionTarget, HostDiagnostic, HostUpdateOffer, HostUpdatePlan,
+        HostUpdateState, SourceId,
+    },
     Client,
 };
 use splitty_remote::ssh::SshTarget;
@@ -28,6 +31,7 @@ type Closing = Pin<Box<dyn Future<Output = io::Result<()>> + Send>>;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod tests;
+mod update;
 
 pub(super) enum Step {
     Prepared(HostActionTarget),
@@ -37,6 +41,9 @@ pub(super) enum Step {
 }
 struct Host<'a> {
     action: HostActionTarget,
+    offer: Option<Arc<Charged<HostUpdateOffer>>>,
+    update_pending: bool,
+    update_dispatched: bool,
     context: queue::Context,
     setup: Option<Setup<'a>>,
     // A completed setup still owns its returned Client until the worker handles
@@ -62,6 +69,13 @@ struct Host<'a> {
 }
 impl<'a> Host<'a> {
     fn new(service: &'a OwnedService, action: HostActionTarget) -> io::Result<Self> {
+        Self::with_update(service, action, false)
+    }
+    fn with_update(
+        service: &'a OwnedService,
+        action: HostActionTarget,
+        update: bool,
+    ) -> io::Result<Self> {
         let context = queue::Context::default();
         let progress = Arc::new(Mutex::new(None));
         let target = SshTarget::parse(action.target()).map_err(io::Error::other)?;
@@ -69,7 +83,7 @@ impl<'a> Host<'a> {
         let setup_context = context.clone();
         let setup = Box::pin(async move {
             service
-                .host_stream(target, setup_context, move |value| {
+                .host_stream(target, update, setup_context, move |value| {
                     // One latest charged value, no queue or publication from callback.
                     *callbacks.lock().unwrap_or_else(|error| error.into_inner()) = Some(value);
                 })
@@ -77,6 +91,9 @@ impl<'a> Host<'a> {
         });
         Ok(Self {
             action,
+            offer: None,
+            update_pending: false,
+            update_dispatched: update,
             context,
             setup: Some(setup),
             prepared: None,
@@ -148,13 +165,28 @@ impl<'a> Host<'a> {
         Poll::Pending
     }
     fn close_source(&mut self) {
-        if !self.cancelled && self.was_ready && self.recovery_deadline.is_none() {
+        if !self.cancelled
+            && !self.update_pending
+            && !self.update_dispatched
+            && self.was_ready
+            && self.recovery_deadline.is_none()
+        {
             self.recovery_deadline = Some(Instant::now() + Duration::from_secs(120));
+        }
+        if self
+            .failure
+            .as_ref()
+            .is_some_and(|error| error.kind() == io::ErrorKind::InvalidData)
+        {
+            self.offer = None;
         }
         self.context.close();
         self.prelude_deadline = None;
         self.observation_deadline = None;
         if let Some(mut source) = self.source.take() {
+            if source.welcomed {
+                self.offer = None;
+            }
             self.close_rejected = source.reject_pending_close_on_loss();
             self.reason = source.client.closed_reason();
             self.closing = Some(Box::pin(source.client.finish()));
@@ -197,6 +229,7 @@ impl<'a> Host<'a> {
             Some("remote.ready")
                 if !self.remote_ready && json["target"].as_str() == Some(self.action.target()) =>
             {
+                self.offer = HostUpdateOffer::from_ready(json, &self.context.budget)?;
                 self.remote_ready = true;
                 self.was_ready = true;
                 Ok(false)
@@ -224,6 +257,7 @@ impl<'a> Host<'a> {
 pub(super) struct Remotes<'a> {
     service: &'a OwnedService,
     hosts: Vec<Host<'a>>,
+    update_plan: Option<Arc<HostUpdatePlan>>,
     cursor: usize,
     cleanup_error: Option<io::Error>,
 }
@@ -232,6 +266,7 @@ impl<'a> Remotes<'a> {
         Self {
             service,
             hosts: Vec::new(),
+            update_plan: None,
             cursor: 0,
             cleanup_error: None,
         }
@@ -357,9 +392,12 @@ impl<'a> Remotes<'a> {
             ));
         }
         let host = &mut self.hosts[index];
+        let updating = host.update_pending || host.update_dispatched;
         host.cancelled = true;
+        host.update_pending = false;
+        host.offer = None;
         host.close_source();
-        if !has_references(window, action.source_id()) {
+        if !has_references(window, action.source_id()) && !updating {
             window.host_mut(action).expect("validated host").browsing = false;
             host.dispose = true;
             window.begin_close(action.source_id())?;
@@ -705,15 +743,48 @@ impl<'a> Remotes<'a> {
                     let retryable = diagnostic
                         .as_ref()
                         .is_ok_and(|value| host.retryable(Some(value)));
+                    if diagnostic.is_err() {
+                        host.offer = None;
+                    }
                     let diagnostic = diagnostic
                         .or_else(|error| plain_diagnostic(&host.context.budget, &error))
                         .ok();
+                    if let Some(offer) = diagnostic
+                        .as_ref()
+                        .and_then(|value| value.update_offer.as_ref())
+                    {
+                        host.offer = host
+                            .context
+                            .budget
+                            .reserve(offer.retained_bytes(), false)
+                            .ok()
+                            .map(|lease| Arc::new(lease.charge(offer.clone())));
+                    }
+                    if host.cancelled
+                        || host.update_dispatched
+                        || host
+                            .cleanup_error
+                            .as_ref()
+                            .is_some_and(|error| error.kind() == io::ErrorKind::InvalidData)
+                    {
+                        host.offer = None;
+                    }
                     if let Some(state) = window.host_mut(&action) {
+                        state.update_offer = host.offer.clone();
+                        state.update_state = if host.update_dispatched {
+                            HostUpdateState::Unconfirmed
+                        } else if host.update_pending {
+                            HostUpdateState::Closing
+                        } else {
+                            HostUpdateState::Idle
+                        };
                         state.diagnostic = diagnostic;
                         state.progress = None;
                     }
                     let now = Instant::now();
                     if !host.cancelled
+                        && !host.update_pending
+                        && !host.update_dispatched
                         && host.was_ready
                         && retryable
                         && host
@@ -738,11 +809,69 @@ impl<'a> Remotes<'a> {
     pub fn reconcile(&mut self, window: &mut WindowWorkspace) -> anyhow::Result<SourceEffects> {
         self.remove_unused(window);
         let mut out = SourceEffects::default();
+        if self
+            .update_plan
+            .as_ref()
+            .is_some_and(|plan| !window.accepts_host_update_plan(plan))
+        {
+            let plan = self.update_plan.take().expect("invalidated update plan");
+            out.updates.push(Update::HostUpdateRejected {
+                owner: plan.owner(),
+                request_id: plan.request_id(),
+                reason: "Host update confirmation is no longer current".into(),
+            });
+        }
         for host in &mut self.hosts {
             if host.cancelled {
                 continue;
             }
             let id = host.action.source_id();
+            if host.update_pending
+                && host.setup.is_none()
+                && host.prepared.is_none()
+                && host.closing.is_none()
+                && !host.closed_due
+            {
+                if host.cleanup_error.is_some()
+                    || host.action.local_owner() != window.lifecycle_token()
+                {
+                    host.update_pending = false;
+                    if let Some(state) = window.host_mut(&host.action) {
+                        state.update_state = HostUpdateState::Idle;
+                    }
+                    out.changed = true;
+                    continue;
+                }
+                if let Some(state) = window.host_mut(&host.action) {
+                    state.update_state = HostUpdateState::Idle;
+                }
+                match window.retry(id) {
+                    Ok(()) => {
+                        let action = window
+                            .host(id)
+                            .expect("admitted update")
+                            .action_target()
+                            .clone();
+                        *host = Host::with_update(self.service, action, true)?;
+                        window
+                            .host_mut(&host.action)
+                            .expect("update host")
+                            .update_state = HostUpdateState::Updating;
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::WouldBlock => {
+                        if let Some(state) = window.host_mut(&host.action) {
+                            state.update_state = HostUpdateState::Closing;
+                        }
+                    }
+                    Err(error) => {
+                        host.update_pending = false;
+                        host.failure = Some(error);
+                        host.closed_due = true;
+                    }
+                }
+                out.changed = true;
+                continue;
+            }
             let now = Instant::now();
             if host
                 .recovery_deadline
@@ -906,9 +1035,20 @@ fn host_event(
             )
         })?;
         if !host.observe_prelude(json)? {
+            if host.remote_ready {
+                if let Some(state) = window.host_mut(&host.action) {
+                    state.update_offer = host.offer.clone();
+                }
+                out.changed = true;
+            }
             return Ok(out);
         }
         window.confirm_ready(host.source.as_ref().expect("validated source").owner())?;
+        host.update_dispatched = false;
+        window
+            .host_mut(&host.action)
+            .expect("ready host")
+            .update_state = HostUpdateState::Idle;
         host.recovery_deadline = None;
         host.retry_at = None;
         host.retry_delay = Duration::from_secs(1);
@@ -1010,5 +1150,6 @@ fn plain_diagnostic(
         message: text.0,
         hint: None,
         retryable: false,
+        update_offer: None,
     })))
 }

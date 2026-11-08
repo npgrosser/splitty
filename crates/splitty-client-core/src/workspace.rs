@@ -37,8 +37,9 @@ use uuid::Uuid;
 #[cfg(test)]
 pub(crate) use window::tests::remote_terminal_fixture;
 pub use window::{
-    CatalogState, HostActionTarget, HostDiagnostic, HostPresentation, OpenedScreen,
-    OpenedScreenState, SourceEdit, SourceStatus, WindowRoute, WindowWorkspace,
+    CatalogState, HostActionTarget, HostDiagnostic, HostPresentation, HostUpdateOffer,
+    HostUpdatePlan, HostUpdateState, OpenedScreen, OpenedScreenState, SourceEdit, SourceStatus,
+    WindowRoute, WindowWorkspace,
 };
 
 #[derive(Clone, Debug, PartialEq, Eq)]

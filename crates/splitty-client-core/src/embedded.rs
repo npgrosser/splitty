@@ -94,6 +94,7 @@ impl EmbeddedService {
     pub async fn host_stream(
         &self,
         target: SshTarget,
+        update: bool,
         context: queue::Context,
         progress: impl FnMut(Charged<wire::Progress>),
     ) -> io::Result<Client> {
@@ -105,7 +106,7 @@ impl EmbeddedService {
             .host_admitted(
                 runtime.state.clone(),
                 target,
-                false,
+                update,
                 self.connector.admit_context(context)?,
                 progress,
             )

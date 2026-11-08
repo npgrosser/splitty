@@ -2095,7 +2095,8 @@ interface RemoteError {
   protocol?: number;
   /** For `incompatible`: its sessions outlive it, so an update ends none. */
   keepsSessions?: boolean;
-  /** For `incompatible`: the daemon's screens, as in `remote.ready`, which an update would end unless it keeps them. */
+  /** For `incompatible`: the last observed screen directory, as in `remote.ready`.
+   * Current maintenance eligibility never permits deliberately ending sessions. */
   screens?: { id: string; name?: string; panes: number }[];
   /** Positive, native-verified offer; needs a new explicit confirmation.
    * Conditional host proof tokens never become renderer-selected authority.

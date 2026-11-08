@@ -671,12 +671,17 @@ async fn application_prelude_requires_exact_target_then_catalog_capability() {
         io::ErrorKind::InvalidData
     );
     assert_eq!(
-        host.observe_prelude(&serde_json::json!({"type":"remote.ready","target":"other.test"}))
+        host.observe_prelude(&offer_ready("other.test"))
             .unwrap_err()
             .kind(),
         io::ErrorKind::InvalidData
     );
     assert!(!host.was_ready);
+    assert!(host.offer.is_none());
+    let mut malformed_offer = offer_ready("prelude.test");
+    malformed_offer["daemon"]["version"] = serde_json::json!("x".repeat(65));
+    assert!(host.observe_prelude(&malformed_offer).is_err());
+    assert!(host.offer.is_none());
     assert!(!host
         .observe_prelude(&serde_json::json!({"type":"remote.progress"}))
         .unwrap());
@@ -815,6 +820,352 @@ async fn late_success_cancel_and_admission_failure_remain_identified() {
     assert_eq!(blocked.outcome(), HostManagementOutcome::Rejected);
     assert!(blocked.reason().unwrap().contains("metadata was saved"));
     assert_eq!(blocked.request_id(), next_id);
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
+
+fn offer_ready(target: &str) -> serde_json::Value {
+    serde_json::json!({"type":"remote.ready","target":target,"daemon":{"version":"0.1.0","keepsSessions":true},"update":{"available":true,"keepsSessions":true}})
+}
+fn settle_offer(host: &mut Host<'_>, window: &mut WindowWorkspace) {
+    host.setup = None;
+    host.observe_prelude(&offer_ready(host.action.target()))
+        .unwrap();
+    host.failure = Some(
+        host.observe_prelude(&serde_json::json!({"type":"mux.welcome","capabilities":[]}))
+            .unwrap_err(),
+    );
+    window.disconnect(host.action.source_id()).unwrap();
+    host.closed_due = true;
+    let budget = &host.context.budget;
+    let version = budget
+        .reserve(64, false)
+        .unwrap()
+        .charge("0.2.0".to_owned());
+    window.set_backend_version(
+        window.lifecycle_token().connection_id(),
+        Ok(Arc::new(version)),
+    );
+}
+#[tokio::test]
+async fn capability_failure_preserves_offer_and_confirmation_is_revocable() {
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let local = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let mut host = admitted(&service, &mut window, "update.test");
+    let action = host.action.clone();
+    settle_offer(&mut host, &mut window);
+    let mut remotes = Remotes::new(&service);
+    remotes.hosts.push(host);
+    let step = next(&mut remotes).await;
+    remotes.handle(&mut window, step);
+    assert!(window
+        .host(action.source_id())
+        .unwrap()
+        .is_update_available());
+    let first = remotes
+        .request_update(&window, uuid::Uuid::new_v4(), &action)
+        .unwrap();
+    assert_eq!(first.to_version(), "0.2.0");
+    assert!(window.accepts_host_update_plan(&first));
+    remotes.dismiss_update(first.request_id());
+    assert!(remotes.confirm_update(&mut window, &first).is_err());
+    let current = remotes
+        .request_update(&window, uuid::Uuid::new_v4(), &action)
+        .unwrap();
+    assert!(!WindowWorkspace::new(uuid::Uuid::new_v4()).accepts_host_update_plan(&current));
+    assert!(!window.set_backend_version(uuid::Uuid::new_v4(), Err(io::Error::other("old owner"))));
+    assert!(window.accepts_host_update_plan(&current));
+    // New requests supersede old captured plans; late dismissals cannot revoke
+    // the newer dialog. A backend-read failure revokes ordinary confirmation.
+    let superseding = remotes
+        .request_update(&window, uuid::Uuid::new_v4(), &action)
+        .unwrap();
+    assert!(remotes.confirm_update(&mut window, &current).is_err());
+    remotes.dismiss_update(current.request_id());
+    assert!(window.accepts_host_update_plan(&superseding));
+    window.set_backend_version(
+        window.lifecycle_token().connection_id(),
+        Err(io::Error::other("read failed")),
+    );
+    assert!(!window.accepts_host_update_plan(&superseding));
+    assert!(remotes
+        .request_update(&window, uuid::Uuid::new_v4(), &action)
+        .is_err());
+    let version = remotes.hosts[0]
+        .context
+        .budget
+        .reserve(64, false)
+        .unwrap()
+        .charge("0.2.0".to_owned());
+    window.set_backend_version(
+        window.lifecycle_token().connection_id(),
+        Ok(Arc::new(version)),
+    );
+    let current = remotes
+        .request_update(&window, uuid::Uuid::new_v4(), &action)
+        .unwrap();
+    window
+        .set_host_order(window.lifecycle_token(), &["update.test".into()])
+        .unwrap();
+    assert!(window.accepts_host_update_plan(&current));
+    remotes.confirm_update(&mut window, &current).unwrap();
+    assert!(remotes.confirm_update(&mut window, &current).is_err());
+    assert!(remotes.hosts[0].update_pending);
+    remotes.cancel(&mut window, &action).unwrap();
+    let step = next(&mut remotes).await;
+    remotes.handle(&mut window, step);
+    remotes.reconcile(&mut window).unwrap();
+    assert!(!remotes.hosts[0].update_dispatched);
+    assert!(remotes.hosts[0].setup.is_none());
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[tokio::test]
+async fn update_waits_for_cleanup_and_failed_dispatch_never_replays() {
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let local = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let mut host = admitted(&service, &mut window, "update.test");
+    let action = host.action.clone();
+    settle_offer(&mut host, &mut window);
+    let mut remotes = Remotes::new(&service);
+    remotes.hosts.push(host);
+    let step = next(&mut remotes).await;
+    remotes.handle(&mut window, step);
+    let plan = remotes
+        .request_update(&window, uuid::Uuid::new_v4(), &action)
+        .unwrap();
+    let (complete, gate) = oneshot::channel();
+    remotes.hosts[0].closing = Some(Box::pin(async move {
+        gate.await.unwrap();
+        Ok(())
+    }));
+    remotes.confirm_update(&mut window, &plan).unwrap();
+    remotes.reconcile(&mut window).unwrap();
+    assert!(!remotes.hosts[0].update_dispatched);
+    assert!(poll_once(&mut remotes).await.is_none());
+    complete.send(()).unwrap();
+    let step = next(&mut remotes).await;
+    remotes.handle(&mut window, step);
+    remotes.reconcile(&mut window).unwrap();
+    assert!(remotes.hosts[0].update_dispatched);
+    assert_eq!(
+        window
+            .host(action.source_id())
+            .unwrap()
+            .action_target()
+            .attempt(),
+        action.attempt() + 1
+    );
+    assert!(remotes.confirm_update(&mut window, &plan).is_err());
+    // Exercise the production prepared/closed state transitions without SSH.
+    remotes.hosts[0].setup = Some(Box::pin(async {
+        Err(io::Error::new(
+            io::ErrorKind::ConnectionReset,
+            "update response lost",
+        ))
+    }));
+    let step = next(&mut remotes).await;
+    remotes.handle(&mut window, step);
+    let step = next(&mut remotes).await;
+    remotes.handle(&mut window, step);
+    assert_eq!(
+        window.host(action.source_id()).unwrap().update_state(),
+        HostUpdateState::Unconfirmed
+    );
+    assert!(remotes.hosts[0].retry_at.is_none());
+    assert!(!window
+        .host(action.source_id())
+        .unwrap()
+        .is_update_available());
+    let next_action = window
+        .host(action.source_id())
+        .unwrap()
+        .action_target()
+        .clone();
+    remotes.retry(&mut window, &next_action).unwrap();
+    assert!(!remotes.hosts[0].update_dispatched);
+    remotes.hosts[0].setup = Some(Box::pin(async {
+        Err(io::Error::new(io::ErrorKind::Interrupted, "test done"))
+    }));
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[tokio::test]
+async fn update_cleanup_failure_and_lost_demand_never_dispatch() {
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    for lose_demand in [false, true] {
+        let (service, path) = service();
+        let local = service.connect().await.unwrap();
+        let mut window = WindowWorkspace::new(local.connection_id());
+        let mut host = admitted(&service, &mut window, "update.test");
+        let action = host.action.clone();
+        settle_offer(&mut host, &mut window);
+        let mut remotes = Remotes::new(&service);
+        remotes.hosts.push(host);
+        let step = next(&mut remotes).await;
+        remotes.handle(&mut window, step);
+        let plan = remotes
+            .request_update(&window, uuid::Uuid::new_v4(), &action)
+            .unwrap();
+        let (complete, gate) = oneshot::channel();
+        remotes.hosts[0].closing = Some(Box::pin(async move {
+            gate.await.unwrap();
+            if lose_demand {
+                Ok(())
+            } else {
+                Err(io::Error::other("cleanup failed"))
+            }
+        }));
+        remotes.confirm_update(&mut window, &plan).unwrap();
+        if lose_demand {
+            remotes.release_browse(&mut window, &action).unwrap();
+        }
+        remotes.reconcile(&mut window).unwrap();
+        assert!(poll_once(&mut remotes).await.is_none());
+        complete.send(()).unwrap();
+        let step = next(&mut remotes).await;
+        remotes.handle(&mut window, step);
+        remotes.reconcile(&mut window).unwrap();
+        assert!(remotes
+            .hosts
+            .iter()
+            .all(|host| !host.update_dispatched && host.setup.is_none()));
+        let result = remotes.finish(&mut window).await;
+        assert_eq!(result.is_ok(), lose_demand);
+        local.finish().await.unwrap();
+        service.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(path);
+    }
+}
+
+#[tokio::test]
+async fn cancellation_after_update_dispatch_retains_late_client_cleanup() {
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let local = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let mut host = admitted(&service, &mut window, "update.test");
+    let action = host.action.clone();
+    settle_offer(&mut host, &mut window);
+    let mut remotes = Remotes::new(&service);
+    remotes.hosts.push(host);
+    let step = next(&mut remotes).await;
+    remotes.handle(&mut window, step);
+    let plan = remotes
+        .request_update(&window, uuid::Uuid::new_v4(), &action)
+        .unwrap();
+    remotes.confirm_update(&mut window, &plan).unwrap();
+    let step = next(&mut remotes).await;
+    remotes.handle(&mut window, step);
+    remotes.reconcile(&mut window).unwrap();
+    assert!(remotes.hosts[0].update_dispatched);
+    let late = service.connect().await.unwrap();
+    let (deliver, gate) = oneshot::channel();
+    remotes.hosts[0].setup = Some(Box::pin(async move {
+        gate.await.unwrap();
+        Ok(late)
+    }));
+    let action = remotes.hosts[0].action.clone();
+    assert!(poll_once(&mut remotes).await.is_none());
+    remotes.cancel(&mut window, &action).unwrap();
+    assert!(remotes.hosts[0].context.is_closed());
+    assert!(poll_once(&mut remotes).await.is_none());
+    deliver.send(()).unwrap();
+    let step = next(&mut remotes).await;
+    remotes.handle(&mut window, step);
+    assert!(window.source(action.source_id()).is_none());
+    assert!(remotes.hosts[0].closing.is_some());
+    let step = next(&mut remotes).await;
+    remotes.handle(&mut window, step);
+    remotes.reconcile(&mut window).unwrap();
+    assert_eq!(
+        window.host(action.source_id()).unwrap().update_state(),
+        HostUpdateState::Unconfirmed
+    );
+    assert!(remotes.hosts[0].setup.is_none());
+    assert!(remotes.hosts[0].retry_at.is_none());
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[tokio::test]
+async fn connected_update_revokes_execution_but_preserves_hidden_screen_references() {
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let local = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let (key, terminal) = window
+        .ui_test_remote_terminal_fixture("update.test")
+        .unwrap();
+    let (other, _) = window
+        .ui_test_remote_terminal_fixture("other.test")
+        .unwrap();
+    let other_owner = window.execution_token(other.source_id());
+    let action = window
+        .host(key.source_id())
+        .unwrap()
+        .action_target()
+        .clone();
+    let mut host = Host::new(&service, action.clone()).unwrap();
+    host.setup = None;
+    host.offer =
+        HostUpdateOffer::from_ready(&offer_ready(action.target()), &host.context.budget).unwrap();
+    window.host_mut(&action).unwrap().update_offer = host.offer.clone();
+    let version = host
+        .context
+        .budget
+        .reserve(64, false)
+        .unwrap()
+        .charge("0.2.0".to_owned());
+    window.set_backend_version(
+        window.lifecycle_token().connection_id(),
+        Ok(Arc::new(version)),
+    );
+    let old_owner = window.execution_token(key.source_id()).unwrap();
+    let mut source = SourceRuntime::new(service.connect().await.unwrap(), old_owner);
+    source.welcomed = true;
+    host.source = Some(source);
+    let mut remotes = Remotes::new(&service);
+    remotes.hosts.push(host);
+    let plan = remotes
+        .request_update(&window, uuid::Uuid::new_v4(), &action)
+        .unwrap();
+    remotes.confirm_update(&mut window, &plan).unwrap();
+    assert!(window.execution_token(key.source_id()).is_none());
+    assert_eq!(window.execution_token(other.source_id()), other_owner);
+    assert!(has_references(&window, key.source_id()));
+    remotes.release_browse(&mut window, &action).unwrap();
+    assert!(
+        !remotes.hosts[0].dispose,
+        "hidden Screen references retain update demand"
+    );
+    let step = next(&mut remotes).await;
+    remotes.handle(&mut window, step);
+    remotes.reconcile(&mut window).unwrap();
+    assert!(remotes.hosts[0].update_dispatched);
+    assert!(has_references(&window, key.source_id()));
+    assert_eq!(window.execution_token(other.source_id()), other_owner);
+    assert_ne!(
+        window.host(key.source_id()).unwrap().action_target(),
+        &action
+    );
+    assert!(!window.accepts_host_update_plan(&plan));
+    assert_eq!(terminal.source_token(), old_owner);
+    remotes.hosts[0].setup = Some(Box::pin(async { Err(io::Error::other("test ended")) }));
     remotes.finish(&mut window).await.unwrap();
     local.finish().await.unwrap();
     service.close().await.unwrap();

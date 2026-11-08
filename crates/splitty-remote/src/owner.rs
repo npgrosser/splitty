@@ -615,6 +615,64 @@ mod tests {
             Peer::start(br, bw, &ready, queue::Context::default()),
         )
     }
+    #[tokio::test]
+    async fn host_open_carries_only_its_explicit_update_and_keeps_cancellation_owned() {
+        let (physical, mut helper) = peers();
+        let (_exit, exited) = watch::channel(true);
+        let owner = Arc::new(Owner {
+            sender: physical.sender.clone(),
+            mux: 1,
+            pid: None,
+            routes: Arc::new(Mutex::new(Routes::default())),
+            assignment: admission::Assignment::new(
+                admission::Backend::new(),
+                admission::Domain::new(),
+            ),
+            exited,
+            completion: Arc::new(Mutex::new(Some(Ok(())))),
+        });
+        for update in [false, true, false] {
+            let context = queue::Context::default();
+            let pending_context = context.clone();
+            let opening_owner = owner.clone();
+            let opening = tokio::spawn(async move {
+                opening_owner
+                    .open_context(
+                        Some(SshTarget::parse("update.test").unwrap()),
+                        update,
+                        pending_context,
+                        |_| {},
+                    )
+                    .await
+            });
+            let message = helper.recv().await.unwrap();
+            assert_eq!(message.frame.kind, Kind::Text);
+            let command: serde_json::Value =
+                serde_json::from_slice(message.frame.application().unwrap().1).unwrap();
+            assert_eq!(command["target"], "update.test");
+            assert_eq!(command["update"], update);
+            let id = u32::try_from(command["id"].as_u64().unwrap()).unwrap();
+            drop(message);
+            context.close();
+            // The fixed-target helper acknowledges cleanup; cancellation itself
+            // must not discard the retained route/capacity before this boundary.
+            let route = owner.routes.lock().unwrap().streams.remove(&id).unwrap();
+            route.context.close();
+            route.released.send_replace(true);
+            drop(route);
+            assert!(opening.await.unwrap().is_err());
+            // Drain preparation bytes already admitted to the outer peer.
+            while matches!(
+                tokio::time::timeout(Duration::from_millis(10), helper.recv()).await,
+                Ok(Some(_))
+            ) {}
+            assert!(!owner.is_closed());
+        }
+        drop(owner);
+        physical.shutdown().await;
+        helper.shutdown().await;
+    }
+
     #[tokio::test(start_paused = true)]
     async fn missing_stream_cleanup_escalates_but_retains_capacity_until_helper_exit() {
         for drop_connection in [false, true] {

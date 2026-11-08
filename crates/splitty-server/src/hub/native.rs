@@ -251,6 +251,63 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_update_rechecks_policy_and_confirms_a_fresh_daemon() {
+        let dir = tempfile::tempdir().unwrap();
+        for (version, keeps, replacement, stops, expected_stops, success) in [
+            ("0.0.1", true, VERSION, true, 1, true),
+            (VERSION, true, VERSION, true, 0, true),
+            ("99.0.0", true, VERSION, true, 0, false),
+            ("unparseable", true, VERSION, true, 0, false),
+            ("0.0.1", false, VERSION, true, 0, false),
+            ("0.0.1", true, "0.0.1", true, 0, false),
+            ("0.0.1", true, VERSION, false, 1, false),
+        ] {
+            let host = ScriptedHost::new(dir.path()).with_server_version(replacement);
+            let host = if keeps {
+                host.with_keeping_daemon(version, PROTOCOL_VERSION)
+            } else {
+                host.with_daemon(version, PROTOCOL_VERSION)
+            };
+            let host = if stops { host } else { host.not_stopping() };
+            let hub = Hub::new(Box::new(host.clone()), dir.path().join("config"), None);
+            let (reports, _received) = tokio::sync::mpsc::channel(16);
+            let result = hub
+                .reach(
+                    SshTarget::parse("vm").unwrap(),
+                    true,
+                    reports,
+                    &Default::default(),
+                )
+                .await;
+            assert_eq!(
+                result.is_ok(),
+                success,
+                "{version}/{keeps}/{replacement}/{stops}"
+            );
+            let calls = host.asked();
+            assert_eq!(
+                calls.iter().filter(|call| *call == "stop").count(),
+                expected_stops
+            );
+            assert!(!calls.iter().any(|call| call == "migrate"));
+            if let Ok(reached) = result {
+                assert_eq!(
+                    reached.daemon.version,
+                    if expected_stops == 1 {
+                        VERSION
+                    } else {
+                        version
+                    }
+                );
+                assert_eq!(calls.last().unwrap(), "bridge");
+                let _ = reached.bridge.finish().await;
+            } else {
+                assert!(!calls.iter().any(|call| call == "bridge"));
+            }
+        }
+    }
+
+    #[tokio::test]
     async fn legacy_connect_only_offers_migration_and_explicit_update_hands_over_once() {
         let dir = tempfile::tempdir().unwrap();
         let host = ScriptedHost::new(dir.path()).with_legacy_daemon(Some(legacy_ready()));

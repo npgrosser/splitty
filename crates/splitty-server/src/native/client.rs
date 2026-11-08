@@ -705,7 +705,7 @@ mod tests {
 
         let mut second = connector
             .host_admitted(
-                state,
+                state.clone(),
                 splitty_remote::ssh::SshTarget::parse("vm2").unwrap(),
                 false,
                 connector.admit_context(queue::Context::default()).unwrap(),
@@ -726,6 +726,33 @@ mod tests {
                 .is_some()
         );
         second.finish().await.unwrap();
+        // The same admitted embedded adapter forwards an explicit update, then
+        // returns to connect-only behavior for the next independent intent.
+        for update in [true, false] {
+            let context = queue::Context::default();
+            let client = connector
+                .host_admitted(
+                    state.clone(),
+                    splitty_remote::ssh::SshTarget::parse("vm1").unwrap(),
+                    update,
+                    connector.admit_context(context.clone()).unwrap(),
+                    |_| {},
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                client.ready.purpose,
+                wire::Purpose::Host {
+                    target: "vm1".into()
+                }
+            );
+            assert_eq!(
+                host.asked().iter().filter(|call| *call == "stop").count(),
+                1
+            );
+            client.finish().await.unwrap();
+            assert!(context.is_closed());
+        }
         runtime.close().await.unwrap();
     }
 

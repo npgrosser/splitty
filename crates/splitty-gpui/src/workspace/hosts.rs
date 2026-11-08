@@ -11,7 +11,9 @@ use splitty_client_core::hub::{
     HostDirectoryState, HostManagementAction, HostManagementOutcome, HostManagementResult,
     HubUpdate,
 };
-use splitty_client_core::workspace::{CatalogState, HostActionTarget, SourceStatus};
+use splitty_client_core::workspace::{
+    CatalogState, HostActionTarget, HostUpdatePlan, HostUpdateState, SourceStatus,
+};
 use std::{
     collections::{HashMap, HashSet},
     time::{SystemTime, UNIX_EPOCH},
@@ -43,6 +45,14 @@ struct HostMutation {
     reason: Option<String>,
 }
 
+pub(super) struct HostUpdatePrompt {
+    pub(super) request_id: Uuid,
+    pub(super) target: HostActionTarget,
+    pub(super) trigger: FocusHandle,
+    pub(super) plan: Option<Arc<HostUpdatePlan>>,
+    pub(super) error: Option<String>,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum HostKey {
     Back,
@@ -67,13 +77,14 @@ pub(super) struct HostsView {
     owner: Option<Uuid>,
     generation: u64,
     state: HostDirectoryState,
-    command_error: Option<String>,
+    pub(super) command_error: Option<String>,
     scroll: UniformListScrollHandle,
     connect: Option<HostConnectForm>,
     connect_subscription: Option<Subscription>,
     alias_editor: Option<HostAliasEditor>,
     alias_subscription: Option<Subscription>,
     mutations: HashMap<String, HostMutation>,
+    pub(super) update_prompt: Option<HostUpdatePrompt>,
 }
 
 impl Default for HostsView {
@@ -89,6 +100,7 @@ impl Default for HostsView {
             alias_editor: None,
             alias_subscription: None,
             mutations: HashMap::new(),
+            update_prompt: None,
         }
     }
 }
@@ -97,7 +109,7 @@ impl HostsView {
     const MAX_MUTATIONS: usize = 32;
 
     pub(super) fn has_open_form(&self) -> bool {
-        self.connect.is_some() || self.alias_editor.is_some()
+        self.connect.is_some() || self.alias_editor.is_some() || self.update_prompt.is_some()
     }
     pub(super) fn set_owner(&mut self, owner: Uuid) {
         if self.owner == Some(owner) {
@@ -113,6 +125,7 @@ impl HostsView {
         self.alias_editor = None;
         self.alias_subscription = None;
         self.mutations.clear();
+        self.update_prompt = None;
     }
 
     pub(super) fn accept(&mut self, update: HubUpdate) -> bool {
@@ -289,6 +302,9 @@ enum HostRow {
         state: String,
         detail: String,
         action: Option<HostAction>,
+        update: Option<HostActionTarget>,
+        update_blocked: bool,
+        refresh_backend: bool,
         saved: bool,
         alias: Option<String>,
         feedback: Option<String>,
@@ -463,6 +479,14 @@ impl Workspace {
             return;
         }
         if self.destination == Destination::Hosts {
+            if let Some(request_id) = self
+                .hosts
+                .update_prompt
+                .as_ref()
+                .map(|prompt| prompt.request_id)
+            {
+                self.dismiss_host_update(request_id, window, cx);
+            }
             self.leave_ports(window, cx);
             let Some(owner) = self.lifecycle_token() else {
                 return;
@@ -699,13 +723,36 @@ impl Workspace {
                 }
                 _ => None,
             };
-            let state = match presentation.map(|host| host.status()) {
-                None => "Not connected",
-                Some(SourceStatus::Connecting) => "Connecting…",
-                Some(SourceStatus::Reconnecting) => "Reconnecting…",
-                Some(SourceStatus::Ready) => "Connected",
-                Some(SourceStatus::Offline) => "Offline",
-                Some(SourceStatus::Closing) => "Closing…",
+            let update = presentation
+                .filter(|host| host.is_update_available())
+                .map(|host| host.action_target().clone());
+            let update_blocked = update.as_ref().is_some_and(|_| {
+                presentation
+                    .and_then(|host| host.update_offer())
+                    .is_some_and(|offer| offer.to_version().is_none())
+                    && self
+                        .model
+                        .as_ref()
+                        .and_then(WindowWorkspace::backend_version)
+                        .is_none()
+            }) || self.hosts.update_prompt.is_some();
+            let refresh_backend = update_blocked
+                && self
+                    .model
+                    .as_ref()
+                    .is_some_and(WindowWorkspace::backend_version_failed);
+            let state = match presentation.map(|host| host.update_state()) {
+                Some(HostUpdateState::Closing) => "Closing for update…",
+                Some(HostUpdateState::Updating) => "Updating…",
+                Some(HostUpdateState::Unconfirmed) => "Update unconfirmed · Retry to inspect",
+                _ => match presentation.map(|host| host.status()) {
+                    None => "Not connected",
+                    Some(SourceStatus::Connecting) => "Connecting…",
+                    Some(SourceStatus::Reconnecting) => "Reconnecting…",
+                    Some(SourceStatus::Ready) => "Connected",
+                    Some(SourceStatus::Offline) => "Offline",
+                    Some(SourceStatus::Closing) => "Closing…",
+                },
             }
             .to_owned();
             let mut detail = presentation
@@ -741,6 +788,28 @@ impl Workspace {
             if !saved && presentation.is_some() {
                 detail = format!("Current connection work · {detail}");
             }
+            if presentation
+                .filter(|host| host.is_update_available())
+                .and_then(|host| host.update_offer())
+                .is_some_and(|offer| offer.to_version().is_none())
+                && self
+                    .model
+                    .as_ref()
+                    .and_then(WindowWorkspace::backend_version)
+                    .is_none()
+            {
+                detail.push_str(
+                    if self
+                        .model
+                        .as_ref()
+                        .is_some_and(WindowWorkspace::backend_version_failed)
+                    {
+                        " · Backend version unavailable; refresh it to update"
+                    } else {
+                        " · Reading backend version before update"
+                    },
+                );
+            }
             let feedback =
                 self.hosts
                     .mutations
@@ -772,6 +841,9 @@ impl Workspace {
                 state,
                 detail,
                 action,
+                update,
+                update_blocked,
+                refresh_backend,
                 saved,
                 alias,
                 feedback,
@@ -1056,7 +1128,7 @@ impl Workspace {
         let list = uniform_list("hosts-list", count, {
             let rows = rows.clone();
             let weak = cx.entity().downgrade();
-            move |range, _, cx| {
+            move |range, window, cx| {
                 let muted = cx.theme().muted_foreground;
                 let border = cx.theme().border;
                 let mut views = Vec::with_capacity(range.len());
@@ -1068,6 +1140,9 @@ impl Workspace {
                             state,
                             detail,
                             action,
+                            update,
+                            update_blocked,
+                            refresh_backend,
                             saved,
                             alias,
                             feedback,
@@ -1163,6 +1238,66 @@ impl Workspace {
                                         move |_, _, cx| {
                                             let _ = weak.update(cx, |this, cx| {
                                                 this.host_action(action.clone(), cx)
+                                            });
+                                        },
+                                    ),
+                                );
+                            }
+                            if let Some(update_target) = update {
+                                let trigger = window
+                                    .use_keyed_state(
+                                        SharedString::from(format!("host-update-focus-{target}")),
+                                        cx,
+                                        |_, cx| cx.focus_handle().tab_stop(true),
+                                    )
+                                    .read(cx)
+                                    .clone();
+                                let update_target = update_target.clone();
+                                let update_weak = weak.clone();
+                                let update_focus = trigger.clone();
+                                entry = entry.child(
+                                    Button::new(SharedString::from(format!(
+                                        "host-update-{target}"
+                                    )))
+                                    .debug_selector({
+                                        let target = target.clone();
+                                        move || format!("host-update-{target}")
+                                    })
+                                    .small()
+                                    .label("Update…")
+                                    .track_focus(&trigger)
+                                    .disabled(*update_blocked)
+                                    .on_click(
+                                        move |_, window, cx| {
+                                            let _ = update_weak.update(cx, |this, cx| {
+                                                this.request_host_update(
+                                                    update_target.clone(),
+                                                    update_focus.clone(),
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        },
+                                    ),
+                                );
+                            }
+                            if *refresh_backend {
+                                let refresh_weak = weak.clone();
+                                entry = entry.child(
+                                    Button::new(SharedString::from(format!(
+                                        "host-backend-refresh-{target}"
+                                    )))
+                                    .debug_selector({
+                                        let target = target.clone();
+                                        move || format!("host-backend-refresh-{target}")
+                                    })
+                                    .small()
+                                    .ghost()
+                                    .label("Refresh version")
+                                    .on_click(
+                                        move |_, _, cx| {
+                                            let _ = refresh_weak.update(cx, |this, cx| {
+                                                this.refresh_backend_version(cx)
                                             });
                                         },
                                     ),

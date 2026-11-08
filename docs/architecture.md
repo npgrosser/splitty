@@ -179,6 +179,19 @@ most 10 seconds within one fixed 120-second interval, including preparation and
 cleanup. Typed nonretryable or malformed failures stop recovery. A replaced
 Client receives fresh execution tokens and reobserves only explicit references;
 input, layout mutations and uncertain close operations are never replayed.
+Host updates retain bounded semantic offers in the host presentation, including
+an accepted `remote.ready` offer followed by a missing workspace capability.
+The local auxiliary API reads `build.get` for the assigned backend version;
+the UI executable's version is not a replacement authority. One worker-owned
+confirmation captures the local owner, exact host/source/attempt and accepted
+offer. Dismissal, replacement or changed offer facts revoke it; unrelated display
+metadata does not. The worker consumes confirmation once, revokes old execution
+authority and awaits retained connection cleanup before dispatching one explicit
+update-enabled host open. Existing references survive for fresh observation.
+Connect, Retry and recovery always remain connect-only. Failed or cancelled
+update dispatch is unconfirmed, never evidence of rollback; explicit Retry
+observes effective state without replaying maintenance.
+
 The normal window-close assessment includes only local work. Accepted shutdown
 revokes host demand and joins every retained host, local and API stream before
 closing the owned service; published cleanup failures remain final failures.
@@ -996,6 +1009,15 @@ The host directory combines open and connected hosts with recent hosts and the l
 The Hosts panel keeps disconnected hosts with last-seen names and pane counts. A host with open screens starts unfolded, any other folded; unfolding a disconnected host connects and refreshes the directory without a placeholder screen, and folding it, or closing the panel, releases that browsing interest and closes the connection if no screen remains open. Expanded state never causes connections on reload. The connected directory is the latest welcome plus changes observed in this window, not a continuously polled cross-client list. Opening a cached or available screen attaches to its existing id; a missing one is reported rather than recreated. New screen in a host's caption or panel entry deliberately creates one; the general picker, and a host picked under the arrow next to New screen, retain the reopen offer. In the desktop app the panel and that menu also open a host in a remote window, through the host picker of `App.svelte` started with that target.
 
 The host caption's tooltip identifies another server version. The existing update dialog handles native updates and positive legacy migration offers, naming both versions and keeper-session behavior. A blocked legacy migration uses `migration_unavailable`, so it cannot fall through to a generic update action. `RemoteSocket.retry({ update: true })` consumes confirmation on one attempt; ordinary retries do not inherit it. Separate desktop launchers preserve the same offer and create a fresh fixed-target provider/helper for a confirmed migration. Pending ordinary opens cannot silently absorb that intent, and stale documents cannot transfer it to a replacement.
+
+The experimental GPUI workspace presents the same backend-owned update
+eligibility through the UI-free host offer and confirmation model described
+under Client connections. Confirmation is host-scoped: fresh discovery and the
+existing instance-bound stop or verified legacy migration decide whether a
+replacement remains safe. There is no receipt reserving the originally observed
+daemon. An equal-version build lacking a newer workspace capability remains
+ineligible under the strict precedence policy and needs an explicit backend
+remedy; the native client does not infer eligibility from capability failure.
 
 The web client's half of the ports is one `PortForwarding` per window (`lib/remote/port_forwarding.ts`, pure validation/joining in `lib/remote/ports.ts`, view state in `stores/ports.svelte.ts`). It watches remote connections' `ports.changed`, keeping bounded plain-text process names and at most 256 checked ports; disconnection clears discovery only. The drawer joins discovery, saved preferences and live forwards into one row per target/remote port, including disconnected hosts and services discovery never saw. Paused consent, initial restore errors and an established tunnel rebuilding are distinct states.
 

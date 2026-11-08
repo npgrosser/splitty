@@ -9,7 +9,9 @@ use splitty_transport::{
 
 mod diagnostic;
 mod host;
+mod host_update;
 pub use host::{CatalogState, HostActionTarget, HostDiagnostic, HostPresentation};
+pub use host_update::{HostUpdateOffer, HostUpdatePlan, HostUpdateState};
 
 pub const MAX_REMOTE_SOURCES: usize = 8;
 pub const MAX_PENDING_REMOTE_OPENS: usize = 4;
@@ -89,6 +91,8 @@ pub struct WindowWorkspace {
     selected: Option<ScreenKey>,
     host_order: Vec<String>,
     next_open_order: u64,
+    backend_version: Option<Arc<splitty_transport::budget::Charged<String>>>,
+    backend_version_failed: bool,
     staged: Arc<Budget>,
 }
 impl WindowWorkspace {
@@ -101,7 +105,44 @@ impl WindowWorkspace {
             remotes: Vec::new(),
             host_order: Vec::new(),
             next_open_order: 0,
+            backend_version: None,
+            backend_version_failed: false,
         }
+    }
+    pub fn accepts_host_update_plan(&self, plan: &HostUpdatePlan) -> bool {
+        plan.owner() == self.lifecycle_token()
+            && self.host(plan.target().source_id()).is_some_and(|host| {
+                host.is_update_available()
+                    && host.update_offer().is_some_and(|offer| {
+                        plan.matches(host.action_target(), offer, self.backend_version())
+                    })
+            })
+    }
+    pub fn backend_version(&self) -> Option<&str> {
+        self.backend_version.as_deref().map(|value| value.as_str())
+    }
+    pub fn backend_version_failed(&self) -> bool {
+        self.backend_version_failed
+    }
+    pub(crate) fn set_backend_version(
+        &mut self,
+        owner: Uuid,
+        result: io::Result<Arc<splitty_transport::budget::Charged<String>>>,
+    ) -> bool {
+        if owner != self.lifecycle_token().connection_id() {
+            return false;
+        }
+        match result {
+            Ok(value) => {
+                self.backend_version = Some(value);
+                self.backend_version_failed = false;
+            }
+            Err(_) => {
+                self.backend_version = None;
+                self.backend_version_failed = true;
+            }
+        }
+        true
     }
     pub fn local_source(&self) -> &SourceWorkspace {
         &self.local
@@ -337,6 +378,8 @@ impl WindowWorkspace {
                 catalog_error: None,
                 browsing: true,
                 retry_available: false,
+                update_offer: None,
+                update_state: HostUpdateState::Idle,
             },
             workspace: None,
             opening: true,
@@ -503,6 +546,8 @@ impl WindowWorkspace {
             SourceStatus::Connecting
         };
         source.presentation.retry_available = false;
+        source.presentation.update_offer = None;
+        source.presentation.update_state = HostUpdateState::Idle;
         source.opening = true;
         Ok(())
     }

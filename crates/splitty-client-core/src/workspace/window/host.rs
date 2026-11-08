@@ -40,6 +40,7 @@ pub struct HostDiagnostic {
     pub(crate) message: String,
     pub(crate) hint: Option<String>,
     pub(crate) retryable: bool,
+    pub(crate) update_offer: Option<HostUpdateOffer>,
 }
 impl HostDiagnostic {
     pub fn code(&self) -> Option<&str> {
@@ -68,8 +69,21 @@ pub struct HostPresentation {
     pub(crate) catalog_error: Option<Arc<Charged<HostDiagnostic>>>,
     pub(crate) browsing: bool,
     pub(crate) retry_available: bool,
+    pub(crate) update_offer: Option<Arc<Charged<HostUpdateOffer>>>,
+    pub(crate) update_state: HostUpdateState,
 }
 impl HostPresentation {
+    pub fn update_offer(&self) -> Option<&HostUpdateOffer> {
+        self.update_offer.as_deref().map(|offer| &offer.value)
+    }
+    pub fn update_state(&self) -> HostUpdateState {
+        self.update_state
+    }
+    pub fn is_update_available(&self) -> bool {
+        self.update_offer.is_some()
+            && self.update_state == HostUpdateState::Idle
+            && (self.status == SourceStatus::Ready || self.can_retry())
+    }
     pub fn action_target(&self) -> &HostActionTarget {
         &self.action
     }
@@ -92,7 +106,9 @@ impl HostPresentation {
         self.browsing
     }
     pub fn can_retry(&self) -> bool {
-        self.status == SourceStatus::Offline && self.retry_available
+        self.status == SourceStatus::Offline
+            && self.retry_available
+            && self.update_state != HostUpdateState::Closing
     }
     /// Retry only the bounded observation on the existing healthy connection.
     /// This never reconnects SSH or replaces the source attempt.
@@ -100,9 +116,10 @@ impl HostPresentation {
         self.status == SourceStatus::Ready && self.catalog == CatalogState::Failed
     }
     pub fn can_cancel(&self) -> bool {
-        matches!(
-            self.status,
-            SourceStatus::Connecting | SourceStatus::Reconnecting
-        )
+        self.update_state == HostUpdateState::Closing
+            || matches!(
+                self.status,
+                SourceStatus::Connecting | SourceStatus::Reconnecting
+            )
     }
 }

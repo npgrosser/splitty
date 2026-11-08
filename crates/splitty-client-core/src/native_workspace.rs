@@ -14,8 +14,8 @@ use crate::{
     templates::{TemplateApiRequest, TemplateApiResult},
     workspace::{
         Axis, ClosePlan, CloseTarget, FloatBounds, FloatingActionOutcome, FloatingActionResult,
-        FloatingTarget, HostActionTarget, MovePlacement, PaneActionTarget, PaneDrag,
-        PlacementOutcome, ScreenKey, ScreenTransferOutcome, ScreenTransferResult,
+        FloatingTarget, HostActionTarget, HostUpdatePlan, MovePlacement, PaneActionTarget,
+        PaneDrag, PlacementOutcome, ScreenKey, ScreenTransferOutcome, ScreenTransferResult,
         ScreenTransferTarget, SourceToken, SourceWorkspace, TabStep, TemplateApplyChoice,
         TemplateApplyOutcome, TemplateApplyPlan, TemplateApplyResult, TerminalToken,
         WindowWorkspace, WorkspaceRefresh,
@@ -97,6 +97,17 @@ impl Command {
 }
 
 pub enum CommandKind {
+    RequestHostUpdate {
+        request_id: uuid::Uuid,
+        target: HostActionTarget,
+    },
+    ConfirmHostUpdate {
+        plan: Arc<HostUpdatePlan>,
+    },
+    DismissHostUpdate {
+        request_id: uuid::Uuid,
+    },
+    RefreshBackendVersion,
     ManageForward {
         request_id: uuid::Uuid,
         request: ForwardRequest,
@@ -276,6 +287,12 @@ pub enum CommandKind {
     },
 }
 pub enum Update {
+    HostUpdatePrepared(Arc<HostUpdatePlan>),
+    HostUpdateRejected {
+        owner: SourceToken,
+        request_id: uuid::Uuid,
+        reason: String,
+    },
     Forwards(Arc<ForwardSnapshot>),
     Forward(ForwardResult),
     HostManagement(HostManagementResult),
@@ -360,6 +377,16 @@ fn validate_command_target(model: &SourceWorkspace, command: &CommandKind) -> st
 
 fn rejected_command(source: Option<SourceToken>, command: &CommandKind, reason: String) -> Update {
     match command {
+        CommandKind::RequestHostUpdate { request_id, target } => Update::HostUpdateRejected {
+            owner: target.local_owner(),
+            request_id: *request_id,
+            reason,
+        },
+        CommandKind::ConfirmHostUpdate { plan } => Update::HostUpdateRejected {
+            owner: plan.owner(),
+            request_id: plan.request_id(),
+            reason,
+        },
         CommandKind::ManageForward {
             request_id,
             request,
@@ -642,6 +669,18 @@ impl<'a> RuntimeLocalService<'a> {
         }
     }
 
+    fn refresh_backend_version(&mut self, connection: uuid::Uuid) -> std::io::Result<()> {
+        if connection != self.connection {
+            return Err(crate::connection::invalid("Backend owner changed"));
+        }
+        match &mut self.reader {
+            Some(reader) => reader.refresh_backend_version(connection),
+            None => {
+                self.dirty = true;
+                Ok(())
+            }
+        }
+    }
     fn settings_changed(&mut self, connection: uuid::Uuid) -> std::io::Result<()> {
         if connection != self.connection {
             return Ok(());
@@ -680,6 +719,7 @@ impl<'a> RuntimeLocalService<'a> {
             match result {
                 Ok(mut reader) => {
                     reader.set_scheme(self.connection, self.scheme)?;
+                    reader.refresh_backend_version(self.connection)?;
                     if self.settings_dirty {
                         reader.refresh_settings(self.connection)?;
                         self.settings_dirty = false;
@@ -1286,6 +1326,10 @@ async fn run_service(
                     use crate::local_service::LocalServiceUpdate;
                     let connection = local.client.connection_id();
                     let update = match result {
+                        Ok(LocalServiceUpdate::BackendVersion { connection, result }) => {
+                            window.set_backend_version(connection, result);
+                            Update::Workspace(Box::new(window.clone()))
+                        },
                         Ok(LocalServiceUpdate::SettingsWrite(result)) => Update::SettingsWrite(result),
                         Ok(LocalServiceUpdate::SettingsReconciled(result)) => Update::SettingsReconciled(result),
                         Ok(LocalServiceUpdate::Zoom(result)) => Update::Zoom(result),
@@ -1296,6 +1340,8 @@ async fn run_service(
                         Ok(LocalServiceUpdate::ShellProfiles(Ok(snapshot))) => Update::ShellProfiles(snapshot),
                         Ok(LocalServiceUpdate::ShellProfiles(Err(error))) => Update::ShellProfilesError { connection, reason:error.to_string() },
                         Err(error) => {
+                            window.set_backend_version(connection, Err(std::io::Error::other("Backend version unavailable")));
+                            publish(&updates, Update::Workspace(Box::new(window.clone())), &stop).await?;
                             publish(&updates, Update::ShellProfilesError { connection,reason:error.to_string() }, &stop).await?;
                             Update::AppearanceError { connection,reason:error.to_string() }
                         }
@@ -1328,6 +1374,25 @@ async fn run_service(
                     }
                     let captured = command.source;
                     match command.kind {
+                        CommandKind::RequestHostUpdate {request_id,target} => {
+                            let update = match remotes.request_update(&window,request_id,&target) {
+                                Ok(plan) => Update::HostUpdatePrepared(plan),
+                                Err(error) => Update::HostUpdateRejected {owner, request_id, reason:error.to_string()},
+                            };
+                            publish(&updates,update,&stop).await?;
+                        }
+                        CommandKind::ConfirmHostUpdate {plan} => {
+                            match remotes.confirm_update(&mut window,&plan) {
+                                Ok(()) => publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,
+                                Err(error) => publish(&updates,Update::HostUpdateRejected {owner,request_id:plan.request_id(),reason:error.to_string()},&stop).await?,
+                            }
+                        }
+                        CommandKind::DismissHostUpdate {request_id} => remotes.dismiss_update(request_id),
+                        CommandKind::RefreshBackendVersion => {
+                            if let Some(settings) = &mut settings {
+                                if let Err(error) = settings.refresh_backend_version(owner.connection_id()) { publish(&updates,Update::Status(error.to_string()),&stop).await?; }
+                            }
+                        }
                         CommandKind::ManageForward {request_id,request} => {
                             let result=ports.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Forwarding service is not ready")).and_then(|ports|ports.enqueue(owner,request_id,request.clone(),&window));
                             let result=match result {Ok(result)=>result,Err(error) if error.kind()==std::io::ErrorKind::AlreadyExists=>continue,Err(error)=>ForwardResult::new(owner,request_id,&request,ForwardOutcome::Rejected,Some(error.to_string()))};
@@ -1508,6 +1573,10 @@ fn local_command(kind: &CommandKind) -> bool {
     matches!(
         kind,
         CommandKind::ConnectHost { .. }
+            | CommandKind::RequestHostUpdate { .. }
+            | CommandKind::ConfirmHostUpdate { .. }
+            | CommandKind::DismissHostUpdate { .. }
+            | CommandKind::RefreshBackendVersion
             | CommandKind::ManageForward { .. }
             | CommandKind::RefreshForwards
             | CommandKind::CancelForwardOpen { .. }
