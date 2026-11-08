@@ -207,6 +207,7 @@ impl Workspace {
         &self,
         slot: &str,
         selected: Option<&str>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let remote = self.is_remote_selected();
@@ -234,36 +235,68 @@ impl Workspace {
                 target.clone(),
                 GroupCommand::NewTab,
             ));
-        let picker_slot = slot.to_owned();
-        let picker_target = target.clone();
         if !remote {
-            actions = actions.child(
-                Button::new(SharedString::from(format!("group-profile-{slot}")))
-                    .accessibility_label("Choose shell profile for this group")
-                    .tooltip("Choose shell profile")
-                    .icon(Icon::new(IconName::ChevronDown))
-                    .ghost()
-                    .compact()
-                    .small()
-                    .disabled(target.is_none())
-                    .on_click(move |_, window, cx| {
-                        if let Some(target) = &picker_target {
+            let trigger_selector = format!("shell-profile-trigger-{slot}");
+            let trigger_focus = window
+                .use_keyed_state(
+                    SharedString::from(format!("group-profile-trigger-focus-{slot}")),
+                    cx,
+                    |_, cx| cx.focus_handle().tab_stop(true),
+                )
+                .read(cx)
+                .clone();
+            let button = Button::new(SharedString::from(format!("group-profile-{slot}")))
+                .debug_selector(move || trigger_selector.clone())
+                .track_focus(&trigger_focus)
+                .accessibility_label("Choose shell profile for this group")
+                .tooltip("Choose shell profile")
+                .icon(Icon::new(IconName::ChevronDown))
+                .ghost()
+                .compact()
+                .small()
+                .disabled(target.is_none());
+            if let Some(picker_target) = target {
+                let picker_slot = slot.to_owned();
+                let close_focus = trigger_focus.clone();
+                let open = self.profile_picker_open_for(slot);
+                let content = self.profile_picker_content(slot, window, cx);
+                actions = actions.child(
+                    Popover::new(SharedString::from(format!("group-profile-popover-{slot}")))
+                        .anchor(Anchor::TopLeft)
+                        .open(open)
+                        .trigger(button)
+                        .on_open_change(move |open, window, cx| {
                             let _ = weak.update(cx, |this, cx| {
-                                if this
-                                    .selected_model()
-                                    .is_some_and(|model| target.valid_for(model))
-                                {
-                                    this.toggle_profile_picker(
+                                if *open {
+                                    if this
+                                        .selected_model()
+                                        .is_some_and(|model| picker_target.valid_for(model))
+                                    {
+                                        this.toggle_profile_picker(
+                                            &picker_slot,
+                                            &picker_target.pane.pane_id,
+                                            window,
+                                            cx,
+                                        );
+                                    }
+                                } else {
+                                    if this.dismiss_profile_picker(
                                         &picker_slot,
-                                        &target.pane.pane_id,
-                                        window,
+                                        &picker_target.pane,
                                         cx,
-                                    );
+                                    ) {
+                                        close_focus.focus(window, cx);
+                                    }
                                 }
                             });
-                        }
-                    }),
-            );
+                        })
+                        .content(move |_, _, _| {
+                            content.unwrap_or_else(|| div().into_any_element())
+                        }),
+                );
+            } else {
+                actions = actions.child(button);
+            }
         }
         actions.into_any_element()
     }

@@ -631,6 +631,13 @@ struct RenameEditor {
     input: Entity<InputState>,
 }
 
+#[derive(Clone, Copy)]
+struct PendingDrawerPin {
+    owner: SourceToken,
+    request_id: Uuid,
+    desired: bool,
+}
+
 #[derive(Clone)]
 struct TransferMenu {
     source: PaneActionTarget,
@@ -742,6 +749,7 @@ pub struct Workspace {
     appearance_error: Option<String>,
     appearance_generation: u64,
     drawer_visible: bool,
+    drawer_authoritative_pinned: bool,
     drawer_width: i32,
     drawer_edge_reveal: bool,
     drawer_overlay_open: bool,
@@ -752,7 +760,8 @@ pub struct Workspace {
     drawer_edge_task: Option<Task<()>>,
     drawer_collapsed: HashSet<ScreenKey>,
     drawer_hovered: Option<ScreenKey>,
-    drawer_pending: Option<(Uuid, Uuid)>,
+    drawer_pane_hovered: Option<(ScreenKey, String)>,
+    drawer_pending: Option<PendingDrawerPin>,
     wheel_navigation: WheelNavigation,
     pending_zoom: HashSet<Uuid>,
     zoom_feedback: Option<(String, Instant)>,
@@ -1036,6 +1045,7 @@ impl Workspace {
                 appearance_error: None,
                 appearance_generation: 0,
                 drawer_visible: true,
+                drawer_authoritative_pinned: true,
                 drawer_width: 200,
                 drawer_edge_reveal: true,
                 drawer_overlay_open: false,
@@ -1046,6 +1056,7 @@ impl Workspace {
                 drawer_edge_task: None,
                 drawer_collapsed: HashSet::new(),
                 drawer_hovered: None,
+                drawer_pane_hovered: None,
                 drawer_pending: None,
                 wheel_navigation: WheelNavigation::default(),
                 pending_zoom: HashSet::new(),
@@ -1150,10 +1161,16 @@ impl Workspace {
             &self.mono_family,
         );
         self.apply_zoom(next.zoom, window, cx);
-        if self.drawer_visible != snapshot.drawer().pinned {
-            self.wheel_navigation.reset();
+        self.drawer_authoritative_pinned = snapshot.drawer().pinned;
+        // A read already in flight can arrive after the click but before its
+        // identified write result. Keep the submitted presentation until that
+        // result settles; the local reader starts later reads after the write.
+        if self.drawer_pending.is_none() {
+            if self.drawer_visible != self.drawer_authoritative_pinned {
+                self.wheel_navigation.reset();
+            }
+            self.drawer_visible = self.drawer_authoritative_pinned;
         }
-        self.drawer_visible = snapshot.drawer().pinned;
         self.drawer_width = snapshot.drawer().sidebar_width.clamp(150, 400);
         self.drawer_edge_reveal = snapshot.drawer().edge_reveal;
         if self.drawer_visible {
@@ -1228,6 +1245,15 @@ impl Workspace {
         cx.notify();
     }
 
+    fn present_drawer_pin(&mut self, pinned: bool) {
+        self.drawer_visible = pinned;
+        self.drawer_overlay_open = !pinned;
+        self.drawer_slide = if pinned { 0. } else { 1. };
+        self.drawer_slide_generation = self.drawer_slide_generation.wrapping_add(1);
+        self.drawer_slide_task = None;
+        self.wheel_navigation.reset();
+    }
+
     fn toggle_drawer(&mut self, cx: &mut Context<Self>) {
         let Some(model) = self.local_model() else {
             return;
@@ -1236,20 +1262,27 @@ impl Workspace {
             return;
         }
         let connection = model.connection_id();
+        let owner = model.source_token();
+        let desired = !self.drawer_visible;
         let request_id = Uuid::new_v4();
         if self
             .commands
             .try_send(WorkerCommand::new(
-                model.source_token(),
+                owner,
                 Command::SetDrawerVisibility {
                     connection,
                     request_id,
-                    pinned: !self.drawer_visible,
+                    pinned: desired,
                 },
             ))
             .is_ok()
         {
-            self.drawer_pending = Some((connection, request_id));
+            self.drawer_pending = Some(PendingDrawerPin {
+                owner,
+                request_id,
+                desired,
+            });
+            self.present_drawer_pin(desired);
         } else {
             self.status = "Could not send Drawer visibility change".into();
         }
@@ -1257,27 +1290,27 @@ impl Workspace {
     }
 
     fn apply_drawer_visibility(&mut self, result: DrawerVisibilityResult, cx: &mut Context<Self>) {
-        if self.drawer_pending != Some((result.connection_id, result.request_id))
-            || !self
-                .local_model()
-                .is_some_and(|model| model.connection_id() == result.connection_id)
+        let Some(pending) = self.drawer_pending else {
+            return;
+        };
+        if pending.owner.connection_id() != result.connection_id
+            || pending.request_id != result.request_id
+            || self.lifecycle_token() != Some(pending.owner)
         {
             return;
         }
         self.drawer_pending = None;
         match result.outcome {
             DrawerVisibilityOutcome::Confirmed(pinned) => {
-                self.drawer_visible = pinned;
-                self.drawer_overlay_open = !pinned;
-                self.drawer_slide = if pinned { 0. } else { 1. };
-                self.drawer_slide_generation = self.drawer_slide_generation.wrapping_add(1);
-                self.drawer_slide_task = None;
-                self.wheel_navigation.reset();
+                self.drawer_authoritative_pinned = pinned;
+                self.present_drawer_pin(pinned);
             }
             DrawerVisibilityOutcome::Rejected { reason } => {
+                self.present_drawer_pin(self.drawer_authoritative_pinned);
                 self.status = format!("Drawer update rejected: {reason}")
             }
             DrawerVisibilityOutcome::Uncertain { reason } => {
+                self.present_drawer_pin(self.drawer_authoritative_pinned);
                 self.status = format!("Drawer update uncertain: {reason}")
             }
         }
@@ -1433,6 +1466,25 @@ impl Workspace {
             }
         }
     }
+    fn start_captured_rename(
+        &mut self,
+        owner: SourceToken,
+        screen: &ScreenKey,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.lifecycle_token() != Some(owner)
+            || !self.local_model().is_some_and(|model| {
+                model.source_token() == owner
+                    && model.screen_key(screen.screen_id()) == *screen
+                    && model.screen(screen.screen_id()).is_some()
+            })
+        {
+            return;
+        }
+        self.start_rename(screen.screen_id(), window, cx);
+    }
+
     fn start_rename(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.wheel_navigation.reset();
         self.transfer_menu = None;
@@ -1874,6 +1926,20 @@ impl Workspace {
             self.drawer_hovered = None;
         }
         if self
+            .drawer_pane_hovered
+            .as_ref()
+            .is_some_and(|(screen, pane)| {
+                !opened_keys.contains(screen)
+                    || window_model
+                        .source(screen.source_id())
+                        .and_then(|source| source.screen(screen.screen_id()))
+                        .and_then(ScreenModel::snapshot)
+                        .is_none_or(|snapshot| !snapshot.panes.keys().any(|id| id.as_str() == pane))
+            })
+        {
+            self.drawer_pane_hovered = None;
+        }
+        if self
             .local_model()
             .is_some_and(|old| old.source_token() != window_model.local_source().source_token())
         {
@@ -1885,6 +1951,7 @@ impl Workspace {
             self.apply_zoom(Zoom::from_values(1.0, "window"), window, cx);
             self.appearance_generation = 0;
             self.drawer_visible = true;
+            self.drawer_authoritative_pinned = true;
             self.drawer_width = 200;
             self.drawer_edge_reveal = true;
             self.drawer_overlay_open = false;
@@ -1895,6 +1962,7 @@ impl Workspace {
             self.drawer_edge_task = None;
             self.drawer_collapsed.clear();
             self.drawer_hovered = None;
+            self.drawer_pane_hovered = None;
             self.drawer_pending = None;
             self.wheel_navigation.reset();
             self.appearance_error = None;
@@ -3891,6 +3959,7 @@ impl Workspace {
         &self,
         node: &LayoutNode,
         surface: Surface,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         match node {
@@ -4151,7 +4220,7 @@ impl Workspace {
                     .h(chrome_rems((self.appearance.font_size + 19.).max(32.)))
                     .bg(rgb(self.appearance.raised))
                     .child(tabs)
-                    .child(self.render_group_new_tab_actions(id.as_str(), selected, cx))
+                    .child(self.render_group_new_tab_actions(id.as_str(), selected, window, cx))
                     .child(div().flex_1().min_w_0())
                     .child(self.render_group_actions(id.as_str(), selected, surface, cx));
                 let focused = self
@@ -4351,7 +4420,7 @@ impl Workspace {
                             .min_w_0()
                             .min_h_0()
                             .overflow_hidden()
-                            .child(self.render_node(child, surface, cx)),
+                            .child(self.render_node(child, surface, window, cx)),
                     );
                     if index + 1 < children.len() {
                         let node = split_key.clone();
@@ -4409,6 +4478,7 @@ impl Workspace {
     fn render_float(
         &self,
         entry: &splitty_client_core::workspace::FloatingEntry,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let Some(viewport) = self.float_viewport else {
@@ -4575,6 +4645,7 @@ impl Workspace {
             .child(div().flex_1().min_h_0().min_w_0().child(self.render_node(
                 &entry.root,
                 Surface::Floating,
+                window,
                 cx,
             )));
         group = group.child(
@@ -4664,7 +4735,6 @@ impl Render for Workspace {
         let footer_height =
             (self.appearance.font_size * (extra_lines + 1) as f32 + 14. + 2. * extra_lines as f32)
                 .max(25. + 16. * extra_lines as f32);
-        let picker_overlay = self.profile_picker_overlay(window, cx);
         let template_overlay = self.template_overlay(window, cx);
         let toolbar_source = self.lifecycle_token();
         let view = div()
@@ -4915,7 +4985,7 @@ impl Render for Workspace {
                     } else {
                         Surface::Tiled
                     };
-                    viewport = viewport.child(self.render_node(root, root_surface, cx));
+                    viewport = viewport.child(self.render_node(root, root_surface, window, cx));
                     let mut floats: Vec<_> = model.presented_floats().iter().collect();
                     if let Some(order) = model
                         .shown_screen_id()
@@ -4929,7 +4999,7 @@ impl Render for Workspace {
                         });
                     }
                     for entry in floats {
-                        viewport = viewport.child(self.render_float(entry, cx));
+                        viewport = viewport.child(self.render_float(entry, window, cx));
                     }
                     main_content = main_content.child(viewport);
                 }
@@ -5019,7 +5089,6 @@ impl Render for Workspace {
                         .child(self.render_drawer(cx)),
                 )
             })
-            .when_some(picker_overlay, |view, picker| view.child(picker))
             .when_some(template_overlay, |view, overlay| view.child(overlay))
     }
 }

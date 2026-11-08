@@ -6,6 +6,143 @@ struct ProfileSource {
     slot: LayoutKey,
 }
 
+#[cfg(all(test, feature = "ui-test-support"))]
+mod view_tests {
+    use super::{Destination, Workspace};
+    use gpui_kit::{
+        px, size, AppContext, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
+        TestAppContext, VisualTestContext,
+    };
+    use splitty_client_core::{native_workspace::Worker, workspace::WindowWorkspace};
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::{atomic::AtomicBool, Arc},
+    };
+    use uuid::Uuid;
+
+    fn with_view(run: impl FnOnce(&mut VisualTestContext, Entity<Workspace>)) {
+        let mut app = TestAppContext::single();
+        app.update(gpui_kit::init);
+        let content = Rc::new(RefCell::new(None));
+        let (_, window) = app.add_window_view({
+            let content = content.clone();
+            move |window, cx| {
+                let view = cx.new(|cx| {
+                    let (workspace, worker) = Workspace::new_with_worker(
+                        false,
+                        Arc::new(AtomicBool::new(false)),
+                        window,
+                        cx,
+                        |_, _, _| Worker::ui_test_fixture(),
+                    );
+                    worker.shutdown().unwrap();
+                    workspace
+                });
+                *content.borrow_mut() = Some(view.clone());
+                gpui_kit::base::Root::new(view, window, cx)
+            }
+        });
+        run(window, content.borrow_mut().take().unwrap());
+    }
+
+    fn click(window: &mut VisualTestContext, position: gpui_kit::Point<gpui_kit::Pixels>) {
+        window.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position,
+            click_count: 1,
+            modifiers: Modifiers::default(),
+            first_mouse: false,
+        });
+        window.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position,
+            click_count: 1,
+            modifiers: Modifiers::default(),
+        });
+    }
+
+    #[test]
+    fn picker_follows_its_group_arrow_and_stays_inside_window() {
+        with_view(|window, view| {
+            let connection = Uuid::new_v4();
+            let mut model = WindowWorkspace::new(connection);
+            model.ui_test_local_screen_fixture("Work").unwrap();
+            let owner = model.lifecycle_token();
+            model
+                .source_mut(owner.source_id())
+                .unwrap()
+                .apply_snapshot(
+                    connection,
+                    &serde_json::json!({"type":"mux.screen_snapshot","screen":{
+                        "id":"work","revision":2,
+                        "root":{"type":"split","id":"split","axis":"horizontal",
+                            "sizes":[1,1],"children":[
+                                {"type":"slot","id":"left","paneIds":["p0"],"activePaneId":"p0"},
+                                {"type":"slot","id":"right","paneIds":["p1"],"activePaneId":"p1"}
+                            ]},
+                        "panes":{"p0":{"id":"p0","sessionId":"s0"},
+                                 "p1":{"id":"p1","sessionId":"s1"}},
+                        "sessions":{"s0":{"id":"s0","status":"running"},
+                                    "s1":{"id":"s1","status":"running"}}
+                    }}),
+                )
+                .unwrap();
+            model
+                .source_mut(owner.source_id())
+                .unwrap()
+                .observe_spawn(connection, "p0", "s0");
+            model
+                .source_mut(owner.source_id())
+                .unwrap()
+                .observe_spawn(connection, "p1", "s1");
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.model = Some(model);
+                    workspace.destination = Destination::Screens;
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            window.simulate_resize(size(px(900.), px(500.)));
+            window.update(|window, cx| window.draw(cx).clear(cx));
+            let left_arrow = window.debug_bounds("shell-profile-trigger-left").unwrap();
+            click(window, left_arrow.center());
+            let open_focus = window.update(|window, cx| window.focused(cx));
+            window.update(|_, cx| assert!(view.read(cx).profile_picker.is_some()));
+            window.update(|window, cx| window.draw(cx).clear(cx));
+            let left_menu = window.debug_bounds("shell-profile-picker").unwrap();
+            let left_delta = (f32::from(left_menu.left()) - f32::from(left_arrow.left())).abs();
+            assert!(left_delta <= 1., "left arrow/menu delta: {left_delta}");
+            assert!(left_menu.top() >= left_arrow.bottom());
+
+            window.simulate_keystrokes("escape");
+            let after_focus = window.update(|window, cx| window.focused(cx));
+            assert!(
+                after_focus.is_some(),
+                "Escape must return focus to the arrow"
+            );
+            assert_ne!(after_focus, open_focus, "the popup must release focus");
+            window.update(|_, cx| assert!(view.read(cx).profile_picker.is_none()));
+            window.simulate_keystrokes("enter");
+            window.update(|_, cx| assert!(view.read(cx).profile_picker.is_some()));
+            window.simulate_keystrokes("escape");
+            window.update(|_, cx| assert!(view.read(cx).profile_picker.is_none()));
+            window.simulate_resize(size(px(520.), px(380.)));
+            window.update(|window, cx| window.draw(cx).clear(cx));
+            let right_arrow = window.debug_bounds("shell-profile-trigger-right").unwrap();
+            click(window, right_arrow.center());
+            window.update(|_, cx| assert!(view.read(cx).profile_picker.is_some()));
+            window.update(|window, cx| window.draw(cx).clear(cx));
+            let right_menu = window.debug_bounds("shell-profile-picker").unwrap();
+            assert!(right_arrow.left() > px(250.));
+            assert!(right_menu.right() <= px(512.));
+            assert!(right_menu.left() <= right_arrow.left());
+            assert!(right_menu.top() >= right_arrow.bottom());
+        });
+    }
+}
+
 pub(super) struct ProfilePicker {
     source: ProfileSource,
     selected: Option<String>,
@@ -109,6 +246,32 @@ impl Workspace {
         }
     }
 
+    pub(super) fn profile_picker_open_for(&self, slot: &str) -> bool {
+        self.profile_picker
+            .as_ref()
+            .is_some_and(|picker| picker.source.slot.node_id() == slot)
+    }
+
+    pub(super) fn dismiss_profile_picker(
+        &mut self,
+        slot: &str,
+        target: &PaneActionTarget,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.profile_picker.as_ref().is_some_and(|picker| {
+            picker.source.slot.node_id() == slot
+                && picker.source.slot.screen().screen_id() == target.screen_id.as_str()
+                && picker.source.route.source_token() == target.source_token()
+                && picker.source.route.pane_id() == target.pane_id.as_str()
+                && picker.source.route.session_id() == target.session_id.as_str()
+        }) {
+            self.profile_picker = None;
+            cx.notify();
+            return true;
+        }
+        false
+    }
+
     pub(super) fn toggle_profile_picker(
         &mut self,
         slot: &str,
@@ -170,7 +333,6 @@ impl Workspace {
             selected,
             scroll: ScrollHandle::new(),
         });
-        self.focus.focus(window, cx);
         cx.notify();
     }
 
@@ -209,7 +371,8 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         match key.key.to_ascii_lowercase().as_str() {
-            "escape" => self.close_profile_picker(window, cx),
+            // The anchored popover owns Escape so it can restore focus to its trigger.
+            "escape" => return,
             "up" => self.move_profile_choice(false, cx),
             "down" => self.move_profile_choice(true, cx),
             "enter" | "return" => {
@@ -262,12 +425,16 @@ impl Workspace {
         self.close_profile_picker(window, cx);
     }
 
-    pub(super) fn profile_picker_overlay(
+    pub(super) fn profile_picker_content(
         &self,
+        slot: &str,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let picker = self.profile_picker.as_ref()?;
+        if picker.source.slot.node_id() != slot {
+            return None;
+        }
         let colors = &self.appearance;
         let mut entries = div()
             .id("shell-profile-list")
@@ -340,11 +507,9 @@ impl Workspace {
         }
         let menu = div()
             .id("shell-profile-picker")
-            .absolute()
-            .top(chrome_rems((self.appearance.font_size + 34.).max(47.)))
-            .right(chrome_rems(12.))
+            .debug_selector(|| "shell-profile-picker".into())
             .w(chrome_rems(360.))
-            .max_w(relative(0.9))
+            .max_w(px((f32::from(window.viewport_size().width) - 16.).max(0.)))
             .p_2()
             .border_1()
             .border_color(rgb(colors.border))
@@ -369,26 +534,7 @@ impl Workspace {
                 )
             })
             .child(entries);
-        Some(
-            div()
-                .absolute()
-                .size_full()
-                .child(
-                    div()
-                        .id("shell-profile-dismiss")
-                        .absolute()
-                        .size_full()
-                        .bg(rgba(0x00000044))
-                        .on_any_mouse_down(cx.listener(|this, _, window, cx| {
-                            cx.stop_propagation();
-                            this.close_profile_picker(window, cx);
-                        }))
-                        .on_mouse_move(|_, _, cx| cx.stop_propagation())
-                        .on_scroll(|_, _, cx| cx.stop_propagation()),
-                )
-                .child(menu)
-                .into_any_element(),
-        )
+        Some(menu.into_any_element())
     }
 }
 

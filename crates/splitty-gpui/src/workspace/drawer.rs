@@ -4,7 +4,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
-    menu::{DropdownMenu, PopupMenuItem},
+    menu::{ContextMenuExt, DropdownMenu, PopupMenuItem},
     Disableable, Icon, Sizable,
 };
 use splitty_client_core::workspace::ScreenState;
@@ -13,6 +13,343 @@ use splitty_client_core::workspace::ScreenState;
 pub(super) enum WheelTarget {
     Screens,
     Slot { screen: String, slot: String },
+}
+
+#[cfg(all(test, feature = "ui-test-support"))]
+mod view_tests {
+    use super::{Command, Destination, Workspace};
+    use gpui_kit::{
+        point, px, AppContext, Entity, Focusable, Modifiers, MouseButton, MouseDownEvent,
+        MouseUpEvent, Pixels, Point, TestAppContext, VisualTestContext,
+    };
+    use splitty_client_core::{
+        appearance::{
+            test_support::{settings_snapshot_with_pin, Availability},
+            DrawerVisibilityOutcome, DrawerVisibilityResult,
+        },
+        native_workspace::Worker,
+        workspace::WindowWorkspace,
+    };
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::{atomic::AtomicBool, Arc},
+    };
+    use tokio::sync::mpsc;
+    use uuid::Uuid;
+
+    fn with_view(run: impl FnOnce(&mut VisualTestContext, Entity<Workspace>)) {
+        let mut app = TestAppContext::single();
+        app.update(gpui_kit::init);
+        let content = Rc::new(RefCell::new(None));
+        let (_, window) = app.add_window_view({
+            let content = content.clone();
+            move |window, cx| {
+                let view = cx.new(|cx| {
+                    let (workspace, worker) = Workspace::new_with_worker(
+                        false,
+                        Arc::new(AtomicBool::new(false)),
+                        window,
+                        cx,
+                        |_, _, _| Worker::ui_test_fixture(),
+                    );
+                    worker.shutdown().unwrap();
+                    workspace
+                });
+                *content.borrow_mut() = Some(view.clone());
+                gpui_kit::base::Root::new(view, window, cx)
+            }
+        });
+        let view = content.borrow_mut().take().unwrap();
+        run(window, view);
+    }
+
+    fn mouse_click(
+        window: &mut VisualTestContext,
+        position: Point<Pixels>,
+        button: MouseButton,
+        count: usize,
+    ) {
+        window.simulate_event(MouseDownEvent {
+            button,
+            position,
+            click_count: count,
+            modifiers: Modifiers::default(),
+            first_mouse: false,
+        });
+        window.simulate_event(MouseUpEvent {
+            button,
+            position,
+            click_count: count,
+            modifiers: Modifiers::default(),
+        });
+    }
+
+    #[test]
+    fn name_double_click_f2_and_context_menu_enter_exact_local_rename_editor() {
+        exercise_name_interactions();
+    }
+
+    fn exercise_name_interactions() {
+        with_view(|window, view| {
+            let owner = Uuid::new_v4();
+            let mut model = WindowWorkspace::new(owner);
+            let screen = model.ui_test_local_screen_fixture("Work").unwrap();
+            let source = model.lifecycle_token();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, _| {
+                    workspace.model = Some(model);
+                    workspace.destination = Destination::Screens;
+                });
+                window.draw(cx).clear(cx);
+            });
+            let selector: &'static str =
+                Box::leak(format!("drawer-select-{screen}").into_boxed_str());
+            let name = window
+                .debug_bounds(selector)
+                .expect("Screen name is rendered");
+            mouse_click(window, name.center(), MouseButton::Left, 1);
+            mouse_click(window, name.center(), MouseButton::Left, 2);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    let editor = workspace.rename.as_ref().expect("double-click editor");
+                    assert_eq!(editor.screen, screen);
+                    assert_eq!(editor.source, source);
+                    assert!(editor.input.read(cx).focus_handle(cx).is_focused(window));
+                    workspace.finish_rename(false, window, cx);
+                });
+                window.draw(cx).clear(cx);
+            });
+
+            // Keyboard navigation must reach the same focused name control.
+            for _ in 0..32 {
+                window.simulate_keystrokes("tab f2");
+                if window.update(|_, cx| view.read(cx).rename.is_some()) {
+                    break;
+                }
+            }
+            assert!(window.update(|_, cx| view.read(cx).rename.is_some()));
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.finish_rename(false, window, cx)
+                });
+                window.draw(cx).clear(cx);
+            });
+
+            let name = window
+                .debug_bounds(selector)
+                .expect("Screen name is rendered");
+            mouse_click(window, name.center(), MouseButton::Right, 1);
+            window.simulate_keystrokes("down enter");
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    assert_eq!(
+                        workspace.rename.as_ref().expect("menu editor").screen,
+                        screen
+                    );
+                    workspace.finish_rename(false, window, cx);
+                    workspace.model = Some(WindowWorkspace::new(Uuid::new_v4()));
+                    workspace.start_captured_rename(source, &screen, window, cx);
+                    assert!(
+                        workspace.rename.is_none(),
+                        "old owner cannot retarget rename"
+                    );
+                });
+            });
+        });
+    }
+
+    #[test]
+    fn pane_hover_tracks_whole_screen_and_only_the_pointed_pane() {
+        exercise_pane_hover();
+    }
+
+    fn exercise_pane_hover() {
+        with_view(|window, view| {
+            let owner = Uuid::new_v4();
+            let mut model = WindowWorkspace::new(owner);
+            let screen = model.ui_test_local_screen_fixture("Work").unwrap();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, _| {
+                    workspace.model = Some(model);
+                    workspace.destination = Destination::Screens;
+                });
+                window.draw(cx).clear(cx);
+            });
+            let block_selector: &'static str =
+                Box::leak(format!("drawer-block-{screen}").into_boxed_str());
+            let pane_selector: &'static str =
+                Box::leak(format!("drawer-pane-{screen}-p0").into_boxed_str());
+            let block = window.debug_bounds(block_selector).unwrap();
+            let pane = window.debug_bounds(pane_selector).unwrap();
+            window.simulate_mouse_move(pane.center(), None, Modifiers::default());
+            window.update(|_, cx| {
+                let workspace = view.read(cx);
+                assert_eq!(workspace.drawer_hovered, Some(screen.clone()));
+                assert_eq!(
+                    workspace.drawer_pane_hovered,
+                    Some((screen.clone(), "p0".into()))
+                );
+            });
+            window.simulate_mouse_move(
+                point(block.origin.x + px(4.), block.origin.y + px(8.)),
+                None,
+                Modifiers::default(),
+            );
+            window.update(|_, cx| {
+                let workspace = view.read(cx);
+                assert_eq!(workspace.drawer_hovered, Some(screen.clone()));
+                assert!(workspace.drawer_pane_hovered.is_none());
+            });
+            window.simulate_mouse_move(point(px(600.), px(500.)), None, Modifiers::default());
+            window.update(|_, cx| {
+                let workspace = view.read(cx);
+                assert!(workspace.drawer_hovered.is_none());
+                assert!(workspace.drawer_pane_hovered.is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn pin_click_presents_immediately_and_stale_read_cannot_override_pending_intent() {
+        exercise_pin_reconciliation();
+    }
+
+    fn exercise_pin_reconciliation() {
+        with_view(|window, view| {
+            let owner = Uuid::new_v4();
+            let (commands, mut receiver) = mpsc::channel(4);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.model = Some(WindowWorkspace::new(owner));
+                    workspace.apply_appearance(
+                        &settings_snapshot_with_pin(owner, 1, Availability::Full, false),
+                        window,
+                        cx,
+                    );
+                    workspace.drawer_overlay_open = true;
+                    workspace.drawer_slide = 1.;
+                });
+                window.draw(cx).clear(cx);
+            });
+            let pin = window
+                .debug_bounds("drawer-pin")
+                .expect("Pin button is rendered");
+            window.simulate_click(pin.center(), Modifiers::default());
+            let sent = receiver.try_recv().expect("pin request admitted");
+            let request_id = match sent.kind() {
+                Command::SetDrawerVisibility {
+                    request_id,
+                    pinned: true,
+                    ..
+                } => *request_id,
+                _ => panic!("unexpected pin command"),
+            };
+            window.update(|_, cx| {
+                let workspace = view.read(cx);
+                assert!(workspace.drawer_visible);
+                assert!(!workspace.drawer_overlay_open);
+                assert_eq!(workspace.drawer_pending.unwrap().request_id, request_id);
+                assert!(workspace.drawer_pending.unwrap().desired);
+            });
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.apply_appearance(
+                        &settings_snapshot_with_pin(owner, 2, Availability::Full, false),
+                        window,
+                        cx,
+                    );
+                    assert!(workspace.drawer_visible, "old read cannot undo the click");
+                    workspace.apply_drawer_visibility(
+                        DrawerVisibilityResult {
+                            connection_id: owner,
+                            request_id: Uuid::new_v4(),
+                            outcome: DrawerVisibilityOutcome::Rejected {
+                                reason: "old".into(),
+                            },
+                        },
+                        cx,
+                    );
+                    assert!(
+                        workspace.drawer_visible,
+                        "foreign request cannot settle pin"
+                    );
+                    workspace.apply_drawer_visibility(
+                        DrawerVisibilityResult {
+                            connection_id: owner,
+                            request_id,
+                            outcome: DrawerVisibilityOutcome::Rejected {
+                                reason: "denied".into(),
+                            },
+                        },
+                        cx,
+                    );
+                    assert!(!workspace.drawer_visible, "rejection restores latest read");
+                    assert!(workspace.drawer_overlay_open);
+                    assert!(workspace.drawer_pending.is_none());
+                    assert!(workspace.status.contains("denied"));
+                });
+            });
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.toggle_drawer(cx);
+                    assert!(workspace.drawer_visible);
+                });
+            });
+            let sent = receiver.try_recv().expect("retry pin request admitted");
+            let retry_id = match sent.kind() {
+                Command::SetDrawerVisibility {
+                    request_id,
+                    pinned: true,
+                    ..
+                } => *request_id,
+                _ => panic!("unexpected retry command"),
+            };
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.apply_drawer_visibility(
+                        DrawerVisibilityResult {
+                            connection_id: owner,
+                            request_id: retry_id,
+                            outcome: DrawerVisibilityOutcome::Confirmed(true),
+                        },
+                        cx,
+                    );
+                    assert!(workspace.drawer_visible);
+                    assert!(workspace.drawer_pending.is_none());
+                    assert!(workspace.drawer_authoritative_pinned);
+                    workspace.toggle_drawer(cx);
+                    assert!(!workspace.drawer_visible);
+                });
+            });
+            let sent = receiver.try_recv().expect("unpin request admitted");
+            let unpin_id = match sent.kind() {
+                Command::SetDrawerVisibility {
+                    request_id,
+                    pinned: false,
+                    ..
+                } => *request_id,
+                _ => panic!("unexpected unpin command"),
+            };
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.apply_drawer_visibility(
+                        DrawerVisibilityResult {
+                            connection_id: owner,
+                            request_id: unpin_id,
+                            outcome: DrawerVisibilityOutcome::Rejected {
+                                reason: "denied again".into(),
+                            },
+                        },
+                        cx,
+                    );
+                    assert!(workspace.drawer_visible, "rollback uses confirmed baseline");
+                    assert!(workspace.drawer_pending.is_none());
+                });
+            });
+        });
+    }
 }
 
 #[derive(Default)]
@@ -250,6 +587,12 @@ impl Workspace {
 
     pub(super) fn render_drawer(&self, cx: &mut Context<Self>) -> AnyElement {
         let owner = self.lifecycle_token();
+        let pin_label = match self.drawer_pending {
+            Some(pending) if pending.desired => "Pinning drawer…",
+            Some(_) => "Unpinning drawer…",
+            None if self.drawer_visible => "Unpin drawer",
+            None => "Pin drawer",
+        };
         let muted = cx.theme().muted_foreground;
         let mut list = div()
             .id("drawer-screen-list")
@@ -346,10 +689,16 @@ impl Workspace {
                 } else {
                     let select = key.clone();
                     let weak = cx.entity().downgrade();
-                    row = row.child(
+                    let rename_on_click = key.clone();
+                    let rename_on_key = key.clone();
+                    let key_weak = cx.entity().downgrade();
+                    let select_button =
                         Button::new(SharedString::from(format!("drawer-select-{key}")))
                             .accessibility_label(format!("Select {label}"))
-                            .ghost()
+                            .when(cfg!(all(test, feature = "ui-test-support")), |button| {
+                                button.debug_selector(|| format!("drawer-select-{key}"))
+                            })
+                            .text()
                             .compact()
                             .small()
                             .flex_1()
@@ -364,7 +713,7 @@ impl Workspace {
                                 div()
                                     .w_full()
                                     .min_w_0()
-                                    .text_color(rgb(if active {
+                                    .text_color(rgb(if active || actions_visible {
                                         self.appearance.text
                                     } else {
                                         self.appearance.secondary
@@ -374,17 +723,65 @@ impl Workspace {
                                     .whitespace_nowrap()
                                     .child(label.clone()),
                             )
-                            .on_click(move |_, window, cx| {
+                            .on_key_down(move |event, window, cx| {
+                                if !remote
+                                    && event.keystroke.key == "f2"
+                                    && event.keystroke.modifiers == Modifiers::default()
+                                {
+                                    cx.stop_propagation();
+                                    window.prevent_default();
+                                    if let Some(owner) = owner {
+                                        let _ = key_weak.update(cx, |this, cx| {
+                                            this.start_captured_rename(
+                                                owner,
+                                                &rename_on_key,
+                                                window,
+                                                cx,
+                                            );
+                                        });
+                                    }
+                                }
+                            })
+                            .on_click(move |event, window, cx| {
                                 let _ = weak.update(cx, |this, cx| {
                                     if this.lifecycle_token() == owner
                                         && !GlobalState::is_in_deferred_context(cx)
                                     {
-                                        this.switch_screen_key(select.clone(), window, cx);
-                                        this.focus_current(window, cx);
+                                        if event.click_count() == 2 && !remote {
+                                            if let Some(owner) = owner {
+                                                this.start_captured_rename(
+                                                    owner,
+                                                    &rename_on_click,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                        } else if event.standard_click() {
+                                            this.switch_screen_key(select.clone(), window, cx);
+                                            this.focus_current(window, cx);
+                                        }
                                     }
                                 });
-                            }),
-                    );
+                            });
+                    if remote {
+                        row = row.child(select_button);
+                    } else {
+                        let menu_weak = cx.entity().downgrade();
+                        let menu_screen = key.clone();
+                        row = row.child(select_button.context_menu(move |menu, _, _| {
+                            let weak = menu_weak.clone();
+                            let screen = menu_screen.clone();
+                            menu.item(PopupMenuItem::new("Rename Screen…").on_click(
+                                move |_, window, cx| {
+                                    if let Some(owner) = owner {
+                                        let _ = weak.update(cx, |this, cx| {
+                                            this.start_captured_rename(owner, &screen, window, cx);
+                                        });
+                                    }
+                                },
+                            ))
+                        }));
+                    }
                 }
                 if let Some(state) = state {
                     row = row.child(div().flex_none().text_sm().text_color(muted).child(state));
@@ -426,40 +823,6 @@ impl Workspace {
                                         this.drawer_collapsed.remove(&collapse_key);
                                     }
                                     cx.notify();
-                                });
-                            }),
-                    );
-                }
-                if actions_visible
-                    && !remote
-                    && self
-                        .rename
-                        .as_ref()
-                        .is_none_or(|editor| editor.screen != key)
-                {
-                    let rename = key.clone();
-                    let weak = cx.entity().downgrade();
-                    row = row.child(
-                        Button::new(SharedString::from(format!("drawer-rename-{key}")))
-                            .accessibility_label(format!("Rename {label}"))
-                            .ghost()
-                            .compact()
-                            .xsmall()
-                            .w(chrome_rems(27.))
-                            .tooltip(format!("Rename {label}"))
-                            .icon(Icon::new(IconName::Pencil))
-                            .on_click(move |_, window, cx| {
-                                let _ = weak.update(cx, |this, cx| {
-                                    if this.lifecycle_token() == owner
-                                        && this.model.as_ref().is_some_and(|model| {
-                                            model
-                                                .local_source()
-                                                .screen(rename.screen_id())
-                                                .is_some()
-                                        })
-                                    {
-                                        this.start_rename(rename.screen_id(), window, cx);
-                                    }
                                 });
                             }),
                     );
@@ -539,16 +902,22 @@ impl Workspace {
                             }),
                     );
                 }
+                let block_background: gpui_kit::Fill = if active {
+                    rgb(self.appearance.active).into()
+                } else if actions_visible {
+                    cx.theme().list_hover.into()
+                } else {
+                    rgb(self.appearance.raised).into()
+                };
                 let mut block = div()
                     .id(SharedString::from(format!("drawer-block-{key}")))
+                    .when(cfg!(all(test, feature = "ui-test-support")), |block| {
+                        block.debug_selector(|| format!("drawer-block-{key}"))
+                    })
                     .mx_2()
                     .my_0p5()
                     .rounded_md()
-                    .bg(rgb(if active {
-                        self.appearance.active
-                    } else {
-                        self.appearance.raised
-                    }))
+                    .bg(block_background)
                     .on_hover({
                         let hover_key = key.clone();
                         cx.listener(move |this, hovered: &bool, _, cx| {
@@ -587,6 +956,13 @@ impl Workspace {
                             let pane_key = pane_id.to_owned();
                             let select_key = key.clone();
                             let weak = cx.entity().downgrade();
+                            let hover_weak = cx.entity().downgrade();
+                            let hover_screen = key.clone();
+                            let hover_pane = pane_key.clone();
+                            let pane_hovered = self
+                                .drawer_pane_hovered
+                                .as_ref()
+                                .is_some_and(|(screen, pane)| screen == &key && pane == pane_id);
                             let title = pane.title.as_deref().unwrap_or("Terminal");
                             let title = super::hosts::display(title);
                             let (leading_icon, pane_label) = split_title_icon(&title);
@@ -619,8 +995,11 @@ impl Workspace {
                                     "drawer-pane-{key}-{pane_id}"
                                 )))
                                 .accessibility_label(format!("Open {title} in {label}"))
+                                .when(cfg!(all(test, feature = "ui-test-support")), |button| {
+                                    button.debug_selector(|| format!("drawer-pane-{key}-{pane_id}"))
+                                })
                                 .disabled(pane_source.is_none())
-                                .ghost()
+                                .text()
                                 .compact()
                                 .xsmall()
                                 .w_full()
@@ -636,11 +1015,13 @@ impl Workspace {
                                         .flex()
                                         .items_center()
                                         .gap(chrome_rems(7.))
-                                        .text_color(if busy {
-                                            rgb(self.appearance.text)
+                                        .text_color(rgb(if pane_hovered {
+                                            self.appearance.text
+                                        } else if busy || is_viewer {
+                                            self.appearance.secondary
                                         } else {
-                                            muted.into()
-                                        })
+                                            self.appearance.muted
+                                        }))
                                         .child(
                                             div()
                                                 .w(chrome_rems(12.))
@@ -660,6 +1041,26 @@ impl Workspace {
                                                 .child(pane_label.to_owned()),
                                         ),
                                 )
+                                .on_hover(move |hovered, _, cx| {
+                                    let _ = hover_weak.update(cx, |this, cx| {
+                                        if this.lifecycle_token() != owner {
+                                            return;
+                                        }
+                                        let identity = (hover_screen.clone(), hover_pane.clone());
+                                        if *hovered {
+                                            if this.drawer_pane_hovered.as_ref() != Some(&identity)
+                                            {
+                                                this.drawer_pane_hovered = Some(identity);
+                                                cx.notify();
+                                            }
+                                        } else if this.drawer_pane_hovered.as_ref()
+                                            == Some(&identity)
+                                        {
+                                            this.drawer_pane_hovered = None;
+                                            cx.notify();
+                                        }
+                                    });
+                                })
                                 .on_click(
                                     move |_, window, cx| {
                                         let _ = weak.update(cx, |this, cx| {
@@ -859,16 +1260,11 @@ impl Workspace {
                     )
                     .child(
                         Button::new("drawer-pin")
-                            .accessibility_label(if self.drawer_visible {
-                                "Unpin drawer"
-                            } else {
-                                "Pin drawer"
+                            .when(cfg!(all(test, feature = "ui-test-support")), |button| {
+                                button.debug_selector(|| "drawer-pin".into())
                             })
-                            .tooltip(if self.drawer_visible {
-                                "Unpin drawer"
-                            } else {
-                                "Pin drawer"
-                            })
+                            .accessibility_label(pin_label)
+                            .tooltip(pin_label)
                             .selected(self.drawer_visible)
                             .disabled(self.drawer_pending.is_some() || owner.is_none())
                             .ghost()

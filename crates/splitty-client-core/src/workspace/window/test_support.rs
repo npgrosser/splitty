@@ -1,8 +1,39 @@
-//! In-memory canonical remote Screen fixture for selected-backend view tests.
+//! In-memory canonical Screen fixtures for selected-backend view tests.
 use super::*;
 use serde_json::json;
 
 impl WindowWorkspace {
+    #[doc(hidden)]
+    pub fn ui_test_local_screen_fixture(&mut self, name: &str) -> io::Result<ScreenKey> {
+        let owner = self.lifecycle_token();
+        {
+            let mut source = self
+                .source_mut(owner.source_id())
+                .ok_or_else(|| invalid("local fixture source missing"))?;
+            source.set_catalog_supported(true);
+            source.mark_catalog_dirty();
+            source.flush_catalog_request(|| Ok(()))?;
+            source.apply_catalog(
+                owner.connection_id(),
+                &json!({
+                    "type": "mux.workspace_snapshot",
+                    "screens": [{"id": "work", "name": name}],
+                    "activeScreenId": "work"
+                }),
+            )?;
+            source.apply_snapshot(
+                owner.connection_id(),
+                &json!({"type":"mux.screen_snapshot","screen":{
+                    "id":"work","revision":1,
+                    "root":{"type":"slot","id":"slot","paneIds":["p0"],"activePaneId":"p0"},
+                    "panes":{"p0":{"id":"p0"}},
+                    "sessions":{}
+                }}),
+            )?;
+        }
+        Ok(self.local_source().screen_key("work"))
+    }
+
     #[doc(hidden)]
     pub fn ui_test_remote_terminal_fixture(
         &mut self,

@@ -18,10 +18,24 @@ pub fn settings_snapshot(
     generation: u64,
     availability: Availability,
 ) -> Arc<AppearanceSnapshot> {
+    settings_snapshot_with_pin(connection_id, generation, availability, true)
+}
+
+/// Keep the charged settings shape while varying the authoritative Drawer pin.
+pub fn settings_snapshot_with_pin(
+    connection_id: Uuid,
+    generation: u64,
+    availability: Availability,
+    pinned: bool,
+) -> Arc<AppearanceSnapshot> {
     let budget = ConnectionBudget::default();
+    let drawer = DrawerSettings {
+        pinned,
+        ..DrawerSettings::default()
+    };
     let settings = HomePresentation {
         appearance: AppearanceSettings::default(),
-        drawer: DrawerSettings::default(),
+        drawer,
         terminal: serde_json::from_value(serde_json::json!({
             "theme": "default", "closeOnExit": "graceful"
         }))
