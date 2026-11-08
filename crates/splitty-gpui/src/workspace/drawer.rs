@@ -103,6 +103,7 @@ mod view_tests {
         MouseUpEvent, Pixels, Point, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase,
         VisualTestContext,
     };
+    use serde_json::json;
     use splitty_client_core::{
         appearance::{
             test_support::{settings_snapshot_with_pin, Availability},
@@ -169,6 +170,72 @@ mod view_tests {
 
     fn redraw(window: &mut VisualTestContext) {
         window.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    #[test]
+    fn hidden_screen_title_snapshot_updates_drawer_label_and_leading_icon() {
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let keys = model
+                .ui_test_screen_order_fixture(&[("a", "A"), ("b", "B")], None)
+                .unwrap();
+            let owner = model.lifecycle_token();
+            for (screen, title, revision) in [("a", "Old title", 1), ("b", "Other", 1)] {
+                let pane = format!("pane-{screen}");
+                let mut snapshot = json!({"type":"mux.screen_snapshot","screen":{
+                    "id":screen,"revision":revision,
+                    "root":{"type":"slot","id":format!("slot-{screen}"),"paneIds":[pane.clone()]},
+                    "panes":{},
+                    "sessions":{}
+                }});
+                snapshot["screen"]["panes"][pane.as_str()] = json!({"id":pane,"title":title});
+                model
+                    .source_mut(owner.source_id())
+                    .unwrap()
+                    .apply_snapshot(owner.connection_id(), &snapshot)
+                    .unwrap();
+            }
+            model.select(owner, &keys[1]).unwrap();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.reconcile(model.clone(), window, cx)
+                });
+                window.draw(cx).clear(cx);
+            });
+            assert!(window
+                .debug_bounds("drawer-title-label-pane-a-Old title")
+                .is_some());
+            assert!(window.debug_bounds("drawer-title-icon-pane-a-✳").is_none());
+
+            model
+                .source_mut(owner.source_id())
+                .unwrap()
+                .apply_snapshot(
+                    owner.connection_id(),
+                    &json!({"type":"mux.screen_snapshot","screen":{
+                        "id":"a","revision":2,
+                        "root":{"type":"slot","id":"slot-a","paneIds":["pane-a"]},
+                        "panes":{"pane-a":{"id":"pane-a","title":"✳ Live work"}},
+                        "sessions":{}
+                    }}),
+                )
+                .unwrap();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| workspace.reconcile(model, window, cx));
+                window.draw(cx).clear(cx);
+            });
+            assert!(window
+                .debug_bounds("drawer-title-label-pane-a-Old title")
+                .is_none());
+            assert!(window
+                .debug_bounds("drawer-title-label-pane-a-Live work")
+                .is_some());
+            assert!(window.debug_bounds("drawer-title-icon-pane-a-✳").is_some());
+            assert_eq!(
+                view.read_with(window, |workspace, _| workspace.current_screen_key()),
+                Some(keys[1].clone())
+            );
+        });
     }
 
     #[test]
@@ -1339,7 +1406,8 @@ fn split_title_icon(title: &str) -> (Option<char>, &str) {
     let Some(first) = chars.next() else {
         return (None, title);
     };
-    if !first.is_ascii() && !first.is_alphanumeric() && chars.next() == Some(' ') {
+    // A leading non-ASCII character followed by a plain space is an icon.
+    if !first.is_ascii() && !first.is_whitespace() && chars.next() == Some(' ') {
         (Some(first), &title[first.len_utf8() + 1..])
     } else {
         (None, title)
@@ -2086,6 +2154,11 @@ impl Workspace {
                                 Icon::new(IconName::FileText).size_3().into_any_element()
                             } else if let Some(icon) = leading_icon {
                                 div()
+                                    .when(cfg!(all(test, feature = "ui-test-support")), |view| {
+                                        view.debug_selector(|| {
+                                            format!("drawer-title-icon-{pane_id}-{icon}")
+                                        })
+                                    })
                                     .text_size(chrome_rems(10.))
                                     .child(icon.to_string())
                                     .into_any_element()
@@ -2151,6 +2224,9 @@ impl Workspace {
                                         )
                                         .child(
                                             div()
+                                                .when(cfg!(all(test, feature = "ui-test-support")), |view| {
+                                                    view.debug_selector(|| format!("drawer-title-label-{pane_id}-{pane_label}"))
+                                                })
                                                 .flex_1()
                                                 .min_w_0()
                                                 .overflow_hidden()
@@ -2751,6 +2827,8 @@ mod tests {
     #[test]
     fn leading_pane_icon_requires_a_separate_non_ascii_symbol() {
         assert_eq!(split_title_icon("⚡ Build"), (Some('⚡'), "Build"));
+        assert_eq!(split_title_icon("Ä offen"), (Some('Ä'), "offen"));
+        assert_eq!(split_title_icon("🙂 Running"), (Some('🙂'), "Running"));
         assert_eq!(split_title_icon("Terminal"), (None, "Terminal"));
         assert_eq!(split_title_icon("Änderung"), (None, "Änderung"));
         assert_eq!(split_title_icon("⚡Build"), (None, "⚡Build"));
