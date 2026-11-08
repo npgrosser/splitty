@@ -1819,6 +1819,7 @@ impl Workspace {
                     .name()
                     .map(super::hosts::display)
                     .unwrap_or_else(|| format!("Screen {}", index + 1));
+                let unread_summary = self.screen_unread_summary(&key);
                 let state = match entry.state() {
                     splitty_client_core::workspace::OpenedScreenState::Ready => None,
                     splitty_client_core::workspace::OpenedScreenState::Loading => Some("Loading"),
@@ -1872,7 +1873,10 @@ impl Workspace {
                     let key_weak = cx.entity().downgrade();
                     let select_button =
                         Button::new(SharedString::from(format!("drawer-select-{key}")))
-                            .accessibility_label(format!("Select {label}"))
+                            .accessibility_label(match &unread_summary {
+                                Some(summary) => format!("Select {label}, {summary}"),
+                                None => format!("Select {label}"),
+                            })
                             .when(cfg!(all(test, feature = "ui-test-support")), |button| {
                                 button.debug_selector(|| format!("drawer-select-{key}"))
                             })
@@ -2019,6 +2023,25 @@ impl Workspace {
                                 )
                             })
                             .child(select_button),
+                    );
+                }
+                if let Some(summary) = unread_summary {
+                    let count = self.notifications.unread_count(&key);
+                    row = row.child(
+                        div()
+                            .id(SharedString::from(format!("drawer-unread-{key}")))
+                            .when(cfg!(all(test, feature = "ui-test-support")), |badge| {
+                                badge.debug_selector(|| format!("drawer-unread-{key}-{count}"))
+                            })
+                            .flex_none()
+                            .text_size(chrome_rems(10.))
+                            .font(font(self.mono_family.clone()))
+                            .text_color(cx.theme().primary)
+                            .tooltip(move |window, cx| {
+                                gpui_kit::component::tooltip::Tooltip::new(summary.clone())
+                                    .build(window, cx)
+                            })
+                            .child(count.to_string()),
                     );
                 }
                 if let Some(state) = state {
@@ -2308,6 +2331,10 @@ impl Workspace {
                             let title = pane.title.as_deref().unwrap_or("Terminal");
                             let title = super::hosts::display(title);
                             let (leading_icon, pane_label) = split_title_icon(&title);
+                            let unread_severity =
+                                window_model.source(key.source_id()).and_then(|source| {
+                                    self.notifications.severity(&source.pane_key(pane_id))
+                                });
                             let is_viewer = pane.viewer.is_some();
                             let busy = pane
                                 .session_id
@@ -2364,8 +2391,14 @@ impl Workspace {
                                 Button::new(SharedString::from(format!(
                                     "drawer-pane-{key}-{pane_id}"
                                 )))
-                                .accessibility_label(format!("Open {title} in {label}"))
-                                .tooltip(title.clone())
+                                .accessibility_label(match unread_severity {
+                                    Some(severity) => format!("Open {title} in {label}, unread {} notification", super::unread::severity_label(severity)),
+                                    None => format!("Open {title} in {label}"),
+                                })
+                                .tooltip(match unread_severity {
+                                    Some(severity) => format!("{title}\nUnread {} notification", super::unread::severity_label(severity)),
+                                    None => title.clone(),
+                                })
                                 .when(cfg!(all(test, feature = "ui-test-support")), |button| {
                                     button.debug_selector(|| format!("drawer-pane-{key}-{pane_id}"))
                                 })
@@ -2421,7 +2454,18 @@ impl Workspace {
                                                 .whitespace_nowrap()
                                                 .text_ellipsis()
                                                 .child(pane_label.to_owned()),
-                                        ),
+                                        )
+                                        .when_some(unread_severity, |view, severity| view.child(
+                                            div()
+                                                .id(SharedString::from(format!("drawer-pane-unread-{key}-{pane_id}")))
+                                                .when(cfg!(all(test, feature = "ui-test-support")), |badge| {
+                                                    badge.debug_selector(|| format!("drawer-pane-unread-{key}-{pane_id}-{}", super::unread::severity_label(severity)))
+                                                })
+                                                .flex_none()
+                                                .size(chrome_rems(6.))
+                                                .rounded_full()
+                                                .bg(super::unread::severity_color(severity, cx))
+                                        )),
                                 )
                                 .on_click(
                                     move |_, window, cx| {

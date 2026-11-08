@@ -40,7 +40,7 @@ The GPUI `Workspace` retains the ledger value and passes a watched-pane observat
 
 ## Architecture impact
 
-- `architecture/client-core.c4`: add `splitty.client_core.client_notifications` for `splitty_client_core::notifications`; add `client_root -> client_notifications`, `client_notifications -> client_workspace` for exact source route resolution, and `client_notifications -> splitty.core.config` for the existing settings type. `local_service -> client_notifications` describes independent notification settings reads and latest-generation delivery. No server component changes.
+- `architecture/client-core.c4`: add `splitty.client_core.client_notifications` for `splitty_client_core::notifications`; add `client_notifications -> connection`, `client_notifications -> client_workspace` for exact source route resolution, and `client_notifications -> splitty.core.config` for the existing settings type. The existing `local_service -> splitty.core.config` relationship includes independent notification settings reads; the DTO stays with the existing local scheduler, so there is no artificial ledger dependency. No server component changes.
 - `architecture/gpui.c4`: add `gpui_workspace -> splitty.client_core.client_notifications` for owned unread state and source-scoped Drawer queries. Existing `gpui_workspace -> splitty.client_core.native_workspace` remains the charged event delivery path.
 - `docs/architecture.md`, native client section: describe the window-owned, UI-free notification ledger, separate local settings read, watched-pane input, and immediate release of charged events. Preserve the existing web-client notification account as a parallel implementation.
 

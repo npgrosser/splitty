@@ -13,6 +13,7 @@ mod source_routing_tests;
 mod templates;
 mod terminal_menu;
 mod transfer;
+mod unread;
 
 use crate::appearance::NativeAppearance;
 use crate::terminal::{self, Terminal};
@@ -30,6 +31,7 @@ use splitty_client_core::appearance::{
 use splitty_client_core::native_workspace::{
     Command as WorkerCommand, CommandKind as Command, Update, Worker,
 };
+use splitty_client_core::notifications::NotificationCenter;
 use splitty_client_core::shell_profiles::ShellProfilesSnapshot;
 use splitty_client_core::workspace::{
     Axis, CloseIdentity, ClosePlan, CloseTarget, FloatingActionOutcome, LayoutKey, LayoutNode,
@@ -806,6 +808,12 @@ pub struct Workspace {
     scheme_pending: bool,
     _appearance_subscription: Subscription,
     _activation_subscription: Subscription,
+    _notification_visibility_subscription: Subscription,
+    notifications: NotificationCenter,
+    notification_settings_generation: u64,
+    notification_settings_error: Option<String>,
+    notification_window_active: bool,
+    notification_window_visible: bool,
     _drawer_bounds_subscription: Subscription,
     ui_family: String,
     mono_family: String,
@@ -994,6 +1002,8 @@ impl Workspace {
             this.flush_scheme();
         });
         let activation_subscription = cx.observe_window_activation(window, |this, window, cx| {
+            this.notification_window_active = window.is_window_active();
+            this.refresh_notification_watch(cx);
             if !window.is_window_active() && this.drawer_drop.take().is_some() {
                 cx.stop_active_drag(window);
                 cx.notify();
@@ -1006,6 +1016,11 @@ impl Workspace {
                 }
             }
         });
+        let notification_visibility_subscription =
+            cx.observe_window_visibility(window, |this, _, window, cx| {
+                this.notification_window_visible = window.is_visible();
+                this.refresh_notification_watch(cx);
+            });
         let drawer_bounds_subscription = cx.observe_window_bounds(window, |this, window, cx| {
             if this.drawer_drop.take().is_some() {
                 cx.stop_active_drag(window);
@@ -1120,6 +1135,12 @@ impl Workspace {
                 scheme_pending: false,
                 _appearance_subscription: appearance_subscription,
                 _activation_subscription: activation_subscription,
+                _notification_visibility_subscription: notification_visibility_subscription,
+                notifications: NotificationCenter::default(),
+                notification_settings_generation: 0,
+                notification_settings_error: None,
+                notification_window_active: window.is_window_active(),
+                notification_window_visible: window.is_visible(),
                 _drawer_bounds_subscription: drawer_bounds_subscription,
                 ui_family,
                 mono_family,
@@ -1954,6 +1975,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.notifications.reconcile(&window_model);
         self.prepare_screen_motion(&window_model, window, cx);
         self.ports_owner_changed(window_model.local_source().source_token(), window, cx);
         self.revoke_missing_terminal_links(&window_model);
@@ -2007,6 +2029,8 @@ impl Workspace {
                 .set_owner(window_model.local_source().connection_id());
             self.apply_zoom(Zoom::from_values(1.0, "window"), window, cx);
             self.appearance_generation = 0;
+            self.notification_settings_generation = 0;
+            self.notification_settings_error = None;
             self.drawer_visible = true;
             self.drawer_authoritative_pinned = true;
             self.drawer_width = 200;
@@ -2305,6 +2329,7 @@ impl Workspace {
         }
         self.sync_search_owner(cx);
         self.flush_visible(cx);
+        self.refresh_notification_watch(cx);
     }
     fn sync_search_owner(&mut self, cx: &mut Context<Self>) {
         let next = self
@@ -3128,7 +3153,11 @@ impl Workspace {
                         });
                     }
                 }
+                Update::NotificationSettings { owner, read } => {
+                    self.apply_notification_settings(owner, read, cx);
+                }
                 Update::Event { source, event } => {
+                    self.observe_notification(source, &event, cx);
                     if event.connection_id != source.connection_id()
                         || self.execution_token(source.source_id()) != Some(source)
                     {
@@ -4856,6 +4885,9 @@ impl Render for Workspace {
         }
         if let Some(error) = &self.profiles_error {
             messages.push(format!("Profiles: {error}"));
+        }
+        if let Some(error) = &self.notification_settings_error {
+            messages.push(format!("Notifications: {error}"));
         }
         let drawer_fraction = transition(
             "drawer-visibility",

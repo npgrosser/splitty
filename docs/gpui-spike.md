@@ -1775,10 +1775,37 @@ close assessment, gesture ownership, failed admission and 15 obsolete-action
 cases. Shared model/worker tests cover retained focus and source rejection.
 After integration with Drawer motion, all 156 GPUI tests and all 17 architecture
 checks pass. Strict GPUI/client-core Clippy and strict change validation pass.
-Real-window context-menu acceptance remains separate; these actions are not in
-the frozen Interaction preview.
+A private Linux X11 window also passes center and lower-right menu placement,
+Escape dismissal, terminal typing after dismissal and pointer activation of Find.
+The captured menu remains inside the window, and normal shutdown leaves no owned
+children. The frozen candidate has SHA-256
+`32bcf139c7e99af235dff8f957214184c8333e6acdad72356bcd382b9a1d7d89`.
+These actions are not in the frozen Interaction preview.
 
 The additional Windows Drawer wheel probe remained inconclusive because the
 synthetic input setup could not establish its starting visible selection. The
 server's active Screen field does not represent each native window's selection.
 All owned probe processes were cleaned up; the delivered preview was unchanged.
+
+### Native unread activity projection (2026-11-08)
+
+The native Drawer shows a per-Screen unread count with newest-title summary and
+a per-pane severity dot. Its policy lives in the UI-free client core: at most
+100 bounded records, source-scoped deduplication, exact captured session binding
+and read history across reconnects without requiring notification replay.
+Current-token facts can arrive after command readiness is revoked; stale-token
+facts cannot update the ledger. Fresh canonical mapping restores a retained
+binding, while conclusive removal or session replacement prunes it.
+
+An independent settings read on the existing auxiliary stream gates admission.
+It starts closed, keeps the last good switches after failure and purges disabled
+categories on successful refresh. Actual window activation and visibility, plus
+active-pane selection, determine what is watched and read. Read-state changes
+produce no server command or settings write.
+
+Seven shared-policy tests and three production-view integration tests cover
+source collisions, offline delivery, stale owners, reconnects, bounds, settings
+refresh and failure, focus/visibility return, deliberate pane activation and
+count/severity projection. All 159 native tests and touched-crate strict Clippy
+pass. Real-window badge acceptance remains separate. These additions are not in
+the frozen Interaction preview; full workspace merge checks remain deferred.

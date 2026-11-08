@@ -395,10 +395,10 @@ Dropping the task drops its sole receiver and releases queued delivery leases.
 
 The same native runtime owns one auxiliary API-only local-service stream. After
 publishing the session owner, it polls stream setup and separately charged
-appearance/theme and shell-profile reads alongside terminal events and commands.
+appearance/theme, shell-profile and notification-settings reads alongside terminal events and commands.
 Each feature has its own generation, dirty flag and result. Same-service settings
-events refresh both; owner-checked OS preference changes refresh appearance only.
-Alternating dirty reads prevents one feature from starving the other, and
+events refresh all three; owner-checked OS preference changes refresh appearance only.
+Round-robin dirty reads prevent one feature from starving the others, and
 superseded results cannot replace a newer choice. The same owned client admits
 up to 32 queued zoom intents beside its active job and alternates ready reads
 and writes. Every intent reads current settings, calculates one bounded zoom
@@ -626,7 +626,17 @@ four notification fact types, accepts only the source's current connection token
 and applies effective notification settings before retention. Titles are bounded
 plain text with window-supplied remote host attribution; bodies, arbitrary JSON
 and transport leases are never retained. The UI supplies the watched pane and
-reads source-qualified count, newest-title and severity projections.
+reads source-qualified count, newest-title and severity projections. The GPUI
+window supplies actual focus and visibility observations, marks its displayed
+active pane read on return or activation, and projects count/title summaries and
+severity dots in the Drawer. Pure read-state changes send no workspace command.
+
+Notification switches use an independent coalesced `home.get` job on the same
+auxiliary stream and budget. The worker stamps its local owner; the view accepts
+only the matching connection and newest read generation. Admission starts only
+after a valid read, retains the last good switches on failure and purges disabled
+categories on successful refresh, without writing settings or depending on theme
+resolution.
 
 Read/dedup history belongs to the source namespace across a reconnect. Badge
 bindings require the current canonical pane and captured session, independently

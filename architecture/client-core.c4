@@ -63,7 +63,7 @@ model {
     }
 
     local_service = component 'local_service' {
-      description 'One owned auxiliary API stream with coalesced owner-bound backend-version reads and fair appearance/profile reads, bounded single-field settings FIFO and cross-path field exclusion, identified zoom/Drawer/template jobs, charged replies, explicit uncertainty reconciliation without replay and joined cancellation cleanup.'
+      description 'One owned auxiliary API stream with coalesced owner-bound backend-version reads and fair appearance/profile/notification reads, bounded single-field settings FIFO and cross-path field exclusion, identified zoom/Drawer/template jobs, charged replies, explicit uncertainty reconciliation without replay and joined cancellation cleanup.'
       metadata { module 'splitty_client_core::local_service' }
     }
 
@@ -185,7 +185,7 @@ model {
     local_service -> splitty.server.service 'Use the real embedded API role in tests'
     local_service -> connection 'Verify settings broadcasts alongside real session delivery in tests'
     local_service -> splitty.core.shell_profiles 'Construct typed profile fixtures'
-    local_service -> splitty.core.config 'Build isolated settings reply fixtures'
+    local_service -> splitty.core.config 'Read typed notification switches and build isolated settings reply fixtures'
     local_service -> splitty.core.theme 'Supply valid theme replies during reconciliation tests'
     local_service -> splitty.core.daemon 'Describe an owned fake native endpoint in tests'
     local_service -> splitty.core.protocol 'Use the current handshake version in fake-peer tests'
