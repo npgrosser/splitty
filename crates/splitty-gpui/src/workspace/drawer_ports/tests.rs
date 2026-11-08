@@ -91,7 +91,7 @@ fn real_kit_popup_inspection_escape_and_keyboard_choice_keep_exact_host() {
         press(window, "escape");
         window.update(|_, cx| assert!(view.read(cx).drawer_port_menu.is_none()));
         assert!(receiver.try_recv().is_err(), "dismissal is passive");
-        click(window, trigger);
+        press(window, "enter");
         window
             .update(|_, cx| assert_ne!(view.read(cx).drawer_port_menu.as_ref().unwrap().id, first));
         press(window, "down");
@@ -149,11 +149,30 @@ fn unpinned_drawer_stays_revealed_for_popup_then_resumes_autohide() {
 }
 
 #[test]
-fn caption_pointer_navigates_without_connect_or_forward() {
+fn caption_pointer_and_keyboard_navigate_without_connect_or_forward() {
     with_view(|window, view| {
         let (group, mut receiver) = setup(window, &view);
         let selector = format!("drawer-host-{}", group.source_id());
         click(window, selector.clone());
+        window.update(|_, cx| assert!(view.read(cx).destination == Destination::Hosts));
+        while let Ok(command) = receiver.try_recv() {
+            assert!(matches!(
+                command.kind(),
+                Command::RefreshForwards | Command::Visible { .. }
+            ));
+        }
+        window.update(|_, cx| {
+            view.update(cx, |workspace, cx| {
+                workspace.destination = Destination::Screens;
+                cx.notify();
+            })
+        });
+        draw(window);
+        click(window, format!("drawer-ports-{}", group.source_id()));
+        press(window, "escape");
+        window.update(|window, cx| window.focus_prev(cx));
+        draw(window);
+        press(window, "enter");
         window.update(|_, cx| assert!(view.read(cx).destination == Destination::Hosts));
         while let Ok(command) = receiver.try_recv() {
             assert!(matches!(

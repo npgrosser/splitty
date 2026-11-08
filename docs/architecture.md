@@ -309,7 +309,10 @@ port actions visible and exposes the complete management view. An ephemeral
 popup capture is established by the Kit open interaction, consumed at activation
 and discarded on dismissal or group loss. Cached menu rows must still match the
 current action class and local-port choice before forwarding admission; neither
-rendering nor popup inspection submits a mutation.
+rendering nor popup inspection submits a mutation. The Drawer retains the
+actual Ports trigger focus through element-keyed state: cancelling returns to
+that Button rather than the dropdown wrapper, while management navigation keeps
+its destination focus and autohide returns to the remaining work area.
 
 Native Screen ordering captures the local window owner and stable Screen keys.
 Local placement requires `screen-placement-v1` and `workspace-catalog-v1`, sends

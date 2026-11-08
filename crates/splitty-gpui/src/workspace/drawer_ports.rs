@@ -143,9 +143,15 @@ impl Workspace {
         &mut self,
         group: &HostGroupTarget,
         open: bool,
+        trigger: &FocusHandle,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let cancelled = !open
+            && self
+                .drawer_port_menu
+                .as_ref()
+                .is_some_and(|menu| &menu.group == group);
         if open {
             self.drawer_port_menu = self
                 .model
@@ -166,6 +172,7 @@ impl Workspace {
         // Leaving the Drawer for its popup suppresses the normal hover-close.
         // On dismissal, resume autohide if the pointer has already left it.
         if !open
+            && self.drawer_port_menu.is_none()
             && self.drawer_overlay_open
             && window.mouse_position().x
                 > chrome_rems(self.drawer_width as f32).to_pixels(window.rem_size())
@@ -176,6 +183,16 @@ impl Workspace {
             } else {
                 self.focus.focus(window, cx);
             }
+        } else if cancelled
+            && (self.drawer_visible || self.drawer_overlay_open)
+            && self
+                .model
+                .as_ref()
+                .is_some_and(|model| group.is_current(model))
+        {
+            // Kit restores its dropdown wrapper, which has no Button key context.
+            // Return to the actual trigger so Enter/Space can open it again.
+            trigger.focus(window, cx);
         }
         cx.notify();
     }
@@ -261,6 +278,7 @@ impl Workspace {
         group: &HostGroupTarget,
         window: &mut Window,
         weak: WeakEntity<Self>,
+        trigger: FocusHandle,
     ) -> PopupMenu {
         let Some(capture) = self
             .drawer_port_menu
@@ -282,12 +300,26 @@ impl Workspace {
         for entry in presentation.entries {
             let weak = weak.clone();
             let capture = capture.clone();
+            let trigger = trigger.clone();
             menu = menu.item(
                 PopupMenuItem::new(entry.label)
                     .disabled(entry.disabled)
-                    .on_click(move |_, _, cx| {
+                    .on_click(move |_, window, cx| {
                         let _ = weak.update(cx, |this, cx| {
-                            this.choose_drawer_port(&capture, &entry.choice, cx)
+                            let current = this
+                                .drawer_port_menu
+                                .as_ref()
+                                .is_some_and(|menu| menu.id == capture.id);
+                            this.choose_drawer_port(&capture, &entry.choice, cx);
+                            if current
+                                && (this.drawer_visible || this.drawer_overlay_open)
+                                && this
+                                    .model
+                                    .as_ref()
+                                    .is_some_and(|model| capture.group.is_current(model))
+                            {
+                                trigger.focus(window, cx);
+                            }
                         });
                     }),
             );
@@ -317,10 +349,19 @@ impl Workspace {
         group: HostGroupTarget,
         title: String,
         count: usize,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let source = group.source_id();
+        let trigger_focus = window
+            .use_keyed_state(
+                SharedString::from(format!("drawer-ports-focus-{source}")),
+                cx,
+                |_, cx| cx.focus_handle().tab_stop(true),
+            )
+            .read(cx)
+            .clone();
+        let builder_focus = trigger_focus.clone();
         let caption_group = group.clone();
         let builder_group = group.clone();
         let weak = cx.entity().downgrade();
@@ -347,15 +388,37 @@ impl Workspace {
                         "Show host {}",
                         super::hosts::display(group.target())
                     ))
-                    .label(title)
-                    .icon(Icon::new(IconName::Server).size_3())
+                    .tooltip(format!(
+                        "Show host {}",
+                        super::hosts::display(group.target())
+                    ))
                     .ghost()
                     .compact()
                     .small()
                     .flex_1()
                     .min_w_0()
-                    .text_size(chrome_rems(11.5))
-                    .font_weight(FontWeight::NORMAL)
+                    .px_2()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .items_center()
+                            .gap(chrome_rems(7.))
+                            .text_size(chrome_rems(11.5))
+                            .font_weight(FontWeight::NORMAL)
+                            .child(Icon::new(IconName::Server).size_3())
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_w_0()
+                                    .whitespace_nowrap()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(title),
+                            ),
+                    )
                     .disabled(!available)
                     .on_click(move |_, window, cx| {
                         let _ = weak.update(cx, |this, cx| {
@@ -365,6 +428,7 @@ impl Workspace {
             )
             .child(
                 Button::new(SharedString::from(format!("drawer-ports-{source}")))
+                    .track_focus(&trigger_focus)
                     .debug_selector(move || format!("drawer-ports-{source}"))
                     .accessibility_label(format!(
                         "Ports for {}: {count} known",
@@ -385,6 +449,7 @@ impl Workspace {
                                 &builder_group,
                                 window,
                                 menu_weak.clone(),
+                                builder_focus.clone(),
                             )
                         } else {
                             menu
@@ -394,7 +459,13 @@ impl Workspace {
                         let weak = cx.entity().downgrade();
                         move |open, window, cx| {
                             let _ = weak.update(cx, |this, cx| {
-                                this.drawer_port_menu_change(&group, *open, window, cx)
+                                this.drawer_port_menu_change(
+                                    &group,
+                                    *open,
+                                    &trigger_focus,
+                                    window,
+                                    cx,
+                                )
                             });
                         }
                     }),
