@@ -8,6 +8,10 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`native-notification-badges` NB-1** (2026-11-08, provisional, tbd): keep at most 100 read/dedup records across a reconnect of the same source namespace; hide old badges until fresh canonical mapping under the current token proves the captured source, pane and session without requiring notification replay. Keep records through empty/incomplete reset snapshots; clear on source removal or local-service replacement. Keying all history to a connection generation would lose read decisions.
+- **`native-notification-badges` NB-2** (2026-11-08, provisional, tbd): read notification switches independently of appearance, fail closed until the first valid read, retain last-good switches on failure and purge disabled categories on refresh; folding switches into the appearance snapshot would couple them to theme-read success.
+- **`native-notification-badges` NB-3** (2026-11-08, provisional, tbd): associate a session event only with a route proven at arrival and leave unknown-session events permanently unbadged; revalidate both captured pane and session, never PaneKey alone, when a Screen changes or a connection returns. Prune only on conclusive current-model removal/replacement or source disposal. Deliberate reuse of both pane and session IDs has no distinct PTY incarnation on the wire and is outside decorative badge scope.
+
 - **`native-floating-groups` NFG-1** (2026-11-07, provisional, tbd): Dock returns the complete group to the first tiled slot; a destination picker remains a later option over the same operation.
 - **`native-floating-groups` NFG-2** (2026-11-07, provisional, tbd): native floats keep local stacking and a reachable clamped display rectangle; viewport changes do not automatically write canonical bounds.
 - **`native-floating-groups` NFG-3** (2026-11-07, provisional, tbd): create/manipulate supported floating tab groups, keeping split/divider/tab placement root-only while defensively displaying existing nested floating roots.
