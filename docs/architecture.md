@@ -279,6 +279,14 @@ gestures. Drawer pane rows derive from the canonical layout and capture their
 source execution token before dispatch; they cannot acquire replacement
 authority from a later connection.
 
+The Drawer uses two window-local Kit transition channels: visible overlay
+translation and pinned content reservation. Revealing an unpinned Drawer never
+reserves workspace width. Explicit pin admission changes the presentation target
+immediately; the identified `home.update` outcome and latest accepted appearance
+remain persistence authority. The selected `WindowWorkspace` Screen alone owns
+visible terminal routes, size reporting and input. Split-drop feedback animates
+the existing measured target bounds without submitting a layout operation.
+
 New chrome uses the pinned GPUI Kit styled controls where their controlled
 interfaces fit. The toolkit's complete DockArea owns its own PaneTree, so it is
 not used for the canonical mux projection. Existing web interactions are evidence

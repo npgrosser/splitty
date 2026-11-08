@@ -16,7 +16,7 @@ use crate::appearance::NativeAppearance;
 use crate::terminal::{self, Terminal};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::input::{Input, InputEvent, InputState};
-use gpui_kit::base::{GlobalState, Popover, Theme};
+use gpui_kit::base::{transition, Easing, GlobalState, Popover, Theme, Transition};
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     ActiveTheme as _, Disableable, Icon, Sizable, WindowExt as _,
@@ -102,6 +102,15 @@ enum Shortcut {
 
 fn chrome_rems(base_px: f32) -> Rems {
     rems(base_px / 16.)
+}
+
+fn drawer_transition() -> Transition {
+    Transition::new(Duration::from_millis(220)).easing(Easing::CubicBezier {
+        x1: 0.25,
+        y1: 0.1,
+        x2: 0.25,
+        y2: 1.,
+    })
 }
 
 fn tab_header_pixels(font_size: f32, window_scale: f32) -> Pixels {
@@ -738,6 +747,8 @@ pub struct Workspace {
     tab_scrolls: HashMap<LayoutKey, TabScroll>,
     drawer_scroll: ScrollHandle,
     drop_target: Option<DropTarget>,
+    drop_motion_generation: u64,
+    drop_motion_duration: Duration,
     drag: Option<ResizeDrag>,
     visible: Vec<PaneKey>,
     visible_screen: Option<ScreenKey>,
@@ -754,9 +765,6 @@ pub struct Workspace {
     drawer_width: i32,
     drawer_edge_reveal: bool,
     drawer_overlay_open: bool,
-    drawer_slide: f32,
-    drawer_slide_generation: u64,
-    drawer_slide_task: Option<Task<()>>,
     drawer_edge_last: Option<(Point<Pixels>, Instant)>,
     drawer_edge_task: Option<Task<()>>,
     drawer_collapsed: HashSet<ScreenKey>,
@@ -1034,6 +1042,8 @@ impl Workspace {
                 tab_scrolls: HashMap::new(),
                 drawer_scroll: ScrollHandle::new(),
                 drop_target: None,
+                drop_motion_generation: 0,
+                drop_motion_duration: Duration::from_millis(70),
                 drag: None,
                 visible: Vec::new(),
                 visible_screen: None,
@@ -1050,9 +1060,6 @@ impl Workspace {
                 drawer_width: 200,
                 drawer_edge_reveal: true,
                 drawer_overlay_open: false,
-                drawer_slide: 0.,
-                drawer_slide_generation: 0,
-                drawer_slide_task: None,
                 drawer_edge_last: None,
                 drawer_edge_task: None,
                 drawer_collapsed: HashSet::new(),
@@ -1176,9 +1183,6 @@ impl Workspace {
         self.drawer_edge_reveal = snapshot.drawer().edge_reveal;
         if self.drawer_visible {
             self.drawer_overlay_open = false;
-            self.drawer_slide = 0.;
-            self.drawer_slide_generation = self.drawer_slide_generation.wrapping_add(1);
-            self.drawer_slide_task = None;
         }
         next.apply_component_theme(snapshot.scheme(), cx);
         let mut failure = None;
@@ -1249,9 +1253,6 @@ impl Workspace {
     fn present_drawer_pin(&mut self, pinned: bool) {
         self.drawer_visible = pinned;
         self.drawer_overlay_open = !pinned;
-        self.drawer_slide = if pinned { 0. } else { 1. };
-        self.drawer_slide_generation = self.drawer_slide_generation.wrapping_add(1);
-        self.drawer_slide_task = None;
         self.wheel_navigation.reset();
     }
 
@@ -1956,9 +1957,6 @@ impl Workspace {
             self.drawer_width = 200;
             self.drawer_edge_reveal = true;
             self.drawer_overlay_open = false;
-            self.drawer_slide = 0.;
-            self.drawer_slide_generation = self.drawer_slide_generation.wrapping_add(1);
-            self.drawer_slide_task = None;
             self.drawer_edge_last = None;
             self.drawer_edge_task = None;
             self.drawer_collapsed.clear();
@@ -3515,7 +3513,30 @@ impl Workspace {
         } else {
             None
         };
+        self.set_drop_target(target, cx);
+    }
+
+    fn set_drop_target(&mut self, target: Option<DropTarget>, cx: &mut Context<Self>) {
         if self.drop_target != target {
+            let previous_body = match &self.drop_target {
+                Some(DropTarget::Body { slot, .. }) => Some(slot),
+                _ => None,
+            };
+            let next_body = match &target {
+                Some(DropTarget::Body { slot, .. }) => Some(slot),
+                _ => None,
+            };
+            if next_body.is_some() && previous_body.is_none() {
+                self.drop_motion_generation = self.drop_motion_generation.wrapping_add(1);
+            }
+            self.drop_motion_duration = if previous_body
+                .zip(next_body)
+                .is_some_and(|(old, new)| old != new)
+            {
+                Duration::from_millis(300)
+            } else {
+                Duration::from_millis(70)
+            };
             self.drop_target = target;
             cx.notify();
         }
@@ -3965,6 +3986,50 @@ impl Workspace {
         );
         cx.notify();
     }
+    fn render_drop_highlight(
+        &self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let (Some(DropTarget::Body { slot, placement }), Some(viewport)) =
+            (&self.drop_target, self.float_viewport)
+        else {
+            return None;
+        };
+        let bounds = self.slot_bounds.get(slot)?;
+        let local = drop_highlight(*bounds, *placement);
+        let target = Bounds {
+            origin: point(
+                bounds.origin.x + local.origin.x - viewport.origin.x,
+                bounds.origin.y + local.origin.y - viewport.origin.y,
+            ),
+            size: local.size,
+        };
+        let bounds = transition(
+            format!("drop-highlight-{}", self.drop_motion_generation),
+            target,
+            Transition::new(self.drop_motion_duration).easing(Easing::EaseOut),
+            window,
+            cx,
+        );
+        Some(
+            div()
+                .id("workspace-drop-highlight")
+                .when(cfg!(all(test, feature = "ui-test-support")), |highlight| {
+                    highlight.debug_selector(|| "workspace-drop-highlight".into())
+                })
+                .absolute()
+                .left(bounds.origin.x)
+                .top(bounds.origin.y)
+                .w(bounds.size.width)
+                .h(bounds.size.height)
+                .border_2()
+                .border_color(rgb(self.appearance.accent))
+                .bg(rgba((self.appearance.accent << 8) | 0x44))
+                .into_any_element(),
+        )
+    }
+
     fn render_node(
         &self,
         node: &LayoutNode,
@@ -4337,25 +4402,6 @@ impl Workspace {
                 } else {
                     None
                 } {
-                    Some(DropTarget::Body {
-                        slot: target,
-                        placement,
-                    }) if target == &slot_key => {
-                        if let Some(bounds) = self.slot_bounds.get(target) {
-                            let highlight = drop_highlight(*bounds, *placement);
-                            slot = slot.child(
-                                div()
-                                    .absolute()
-                                    .left(highlight.origin.x)
-                                    .top(highlight.origin.y)
-                                    .w(highlight.size.width)
-                                    .h(highlight.size.height)
-                                    .border_2()
-                                    .border_color(rgb(self.appearance.accent))
-                                    .bg(rgba((self.appearance.accent << 8) | 0x44)),
-                            );
-                        }
-                    }
                     Some(DropTarget::Header {
                         slot: target,
                         marker_x,
@@ -4745,6 +4791,28 @@ impl Render for Workspace {
         let footer_height =
             (self.appearance.font_size * (extra_lines + 1) as f32 + 14. + 2. * extra_lines as f32)
                 .max(25. + 16. * extra_lines as f32);
+        let drawer_fraction = transition(
+            "drawer-visibility",
+            if self.drawer_visible || self.drawer_overlay_open {
+                1.
+            } else {
+                0.
+            },
+            drawer_transition(),
+            window,
+            cx,
+        );
+        let reserved_width = transition(
+            "drawer-reserved-width",
+            if self.drawer_visible {
+                self.drawer_width as f32
+            } else {
+                0.
+            },
+            drawer_transition(),
+            window,
+            cx,
+        );
         let template_overlay = self.template_overlay(window, cx);
         let toolbar_source = self.lifecycle_token();
         let view = div()
@@ -4790,10 +4858,13 @@ impl Render for Workspace {
                 }),
             );
         let mut content = div().flex().flex_1().min_h_0().min_w_0();
-        if self.drawer_visible {
-            content = content.child(self.render_drawer(cx));
-        }
-        let mut main_content = div().flex().flex_col().flex_1().min_w_0().min_h_0();
+        let mut main_content = div()
+            .flex()
+            .flex_col()
+            .flex_1()
+            .min_w_0()
+            .min_h_0()
+            .ml(chrome_rems(reserved_width));
         if self.destination == Destination::Settings {
             main_content = main_content.child(self.settings.clone());
         } else if self.destination == Destination::Hosts {
@@ -4909,6 +4980,9 @@ impl Render for Workspace {
                     let weak_down = entity.downgrade();
                     let mut viewport = div()
                         .id("workspace-viewport")
+                        .when(cfg!(all(test, feature = "ui-test-support")), |viewport| {
+                            viewport.debug_selector(|| "workspace-viewport".into())
+                        })
                         .relative()
                         .flex_1()
                         .min_h_0()
@@ -5011,6 +5085,9 @@ impl Render for Workspace {
                     for entry in floats {
                         viewport = viewport.child(self.render_float(entry, window, cx));
                     }
+                    if let Some(highlight) = self.render_drop_highlight(window, cx) {
+                        viewport = viewport.child(highlight);
+                    }
                     main_content = main_content.child(viewport);
                 }
             } else {
@@ -5067,36 +5144,44 @@ impl Render for Workspace {
                         )
                     }),
             )
-            .when(self.drawer_slide > 0. || self.drawer_overlay_open, |view| {
+            .when(drawer_fraction > 0. || reserved_width > 0., |view| {
                 let owner = self.lifecycle_token();
-                let shade = (self.drawer_slide * 68.).round() as u32;
-                view.child(
-                    div()
-                        .id("drawer-backdrop")
-                        .absolute()
-                        .inset_0()
-                        .bg(rgba((self.appearance.overlay << 8) | shade))
-                        .occlude()
-                        .on_scroll(cx.listener(|_, _, _, cx| cx.stop_propagation()))
-                        .on_click(cx.listener(move |this, _, _, cx| {
-                            if this.lifecycle_token() == owner
-                                && !GlobalState::is_in_deferred_context(cx)
-                            {
-                                this.close_drawer_overlay(cx);
-                            }
-                        })),
-                )
+                let shade =
+                    (drawer_fraction * (1. - reserved_width / self.drawer_width as f32) * 68.)
+                        .round()
+                        .clamp(0., 68.) as u32;
+                view.when(shade > 0, |view| {
+                    view.child(
+                        div()
+                            .id("drawer-backdrop")
+                            .absolute()
+                            .inset_0()
+                            .bg(rgba((self.appearance.overlay << 8) | shade))
+                            .occlude()
+                            .on_scroll(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                            .on_click(cx.listener(move |this, _, _, cx| {
+                                if this.lifecycle_token() == owner
+                                    && !GlobalState::is_in_deferred_context(cx)
+                                {
+                                    this.close_drawer_overlay(cx);
+                                }
+                            })),
+                    )
+                })
                 .child(
                     div()
                         .id("drawer-slide")
+                        .when(cfg!(all(test, feature = "ui-test-support")), |drawer| {
+                            drawer.debug_selector(|| "drawer-slide".into())
+                        })
                         .absolute()
                         .top_0()
                         .left(chrome_rems(
-                            (self.drawer_slide - 1.) * self.drawer_width as f32,
+                            (drawer_fraction - 1.) * self.drawer_width as f32,
                         ))
                         .h_full()
                         .occlude()
-                        .child(self.render_drawer(cx)),
+                        .child(self.render_drawer(window, cx)),
                 )
             })
             .when_some(template_overlay, |view, overlay| view.child(overlay))

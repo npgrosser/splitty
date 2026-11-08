@@ -4,13 +4,13 @@ Use targeted checks during implementation. The full gate in 4.2 remains deferred
 
 ## 1. Drawer and workspace motion
 
-- [ ] 1.1 Replace the Drawer overlay timer with a Kit transition channel and add a separate pinned workspace inset channel. Verify in an existing GPUI production-view in-process test that unpinned reveal leaves the viewport width unchanged, admitted pin moves both surfaces, rejected pin returns from the displayed position, repeated toggles do not add settings commands, and reduced motion settles immediately.
-- [ ] 1.2 Update the native workspace motion note in `docs/architecture.md` for the two Drawer presentation channels; verify it states that only the existing settings command changes persistence and that the terminal route remains selected by the workspace model.
+- [x] 1.1 Replace the Drawer overlay timer with a Kit transition channel and add a separate pinned workspace inset channel. Verify in an existing GPUI production-view in-process test that unpinned reveal leaves the viewport width unchanged, admitted pin moves both surfaces, rejected pin returns from the displayed position, repeated toggles do not add settings commands, and reduced motion settles immediately.
+- [x] 1.2 Update the native workspace motion note in `docs/architecture.md` for the two Drawer presentation channels; verify it states that only the existing settings command changes persistence and that the terminal route remains selected by the workspace model.
 
 ## 2. Hover and split-drop feedback
 
-- [ ] 2.1 Animate Screen-block and terminal-text hover colors over 80 ms using stable Kit transition identities. Extend the existing Drawer production-view in-process test to verify whole-block hover, pane-only text hover, pointer departure and reduced motion without creating an action.
-- [ ] 2.2 Animate native split-drop highlight bounds using the existing measured target rectangles: 70 ms for a within-group selection and 300 ms for the viewport anchor when those target classes exist. Extend the existing drag production-view in-process test to verify both target classes, rapid target changes and cancellation submit no additional layout command; do not apply Dockview timings to unrelated Screen navigation.
+- [x] 2.1 Animate Screen-block and terminal-text hover colors over 80 ms using stable Kit transition identities. Extend the existing Drawer production-view in-process test to verify whole-block hover, pane-only text hover, pointer departure and reduced motion without creating an action.
+- [x] 2.2 Animate native split-drop highlight bounds using the existing measured target rectangles: 70 ms for a within-group selection and 300 ms for the viewport anchor when those target classes exist. Extend the existing drag production-view in-process test to verify both target classes, rapid target changes and cancellation submit no additional layout command; do not apply Dockview timings to unrelated Screen navigation.
 
 ## 3. Vertical Screen motion
 
@@ -23,3 +23,9 @@ Use targeted checks during implementation. The full gate in 4.2 remains deferred
 
 - [ ] 4.1 Run targeted GPUI terminal and workspace in-process tests plus the owned motion smoke, and verify Drawer pin, drag and Screen transitions preserve the existing command counts and reduced-motion path.
 - [ ] 4.2 Run `cargo fmt --all --check`, `cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings`, `cargo test --workspace --exclude splitty-gui`, and `openspec validate --specs` once before merge; verify all pass. Install architecture dependencies with `pnpm install --dir architecture` first if absent.
+
+## Drawer and drop validation (2026-11-08)
+
+- Targeted production Drawer UI integration suite: 6 passed, including pin rollback, intermediate geometry, rapid drop reversal, reduced motion and unchanged command admission. Strict GPUI all-target Clippy with `ui-test-support` passed.
+- The retained terminal resized ten times over fifteen sampled 16 ms frames during the pinned inset transition; the test observed one pin write and no terminal input. Existing integer-grid checks suffice; no additional PTY debounce was introduced.
+- The optimized candidate passed the owned Windows 18-stage workspace and normal-close smoke. Dedicated actual-window motion inspection remains separate, as do all Screen-slide tasks.

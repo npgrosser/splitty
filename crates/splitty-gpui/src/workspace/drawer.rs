@@ -17,7 +17,7 @@ pub(super) enum WheelTarget {
 
 #[cfg(all(test, feature = "ui-test-support"))]
 mod view_tests {
-    use super::{Command, Destination, Workspace};
+    use super::{Command, Destination, DropTarget, Workspace};
     use gpui_kit::{
         point, px, AppContext, Entity, Focusable, Modifiers, MouseButton, MouseDownEvent,
         MouseUpEvent, Pixels, Point, TestAppContext, VisualTestContext,
@@ -28,12 +28,13 @@ mod view_tests {
             DrawerVisibilityOutcome, DrawerVisibilityResult,
         },
         native_workspace::Worker,
-        workspace::WindowWorkspace,
+        workspace::{MovePlacement, WindowWorkspace},
     };
     use std::{
         cell::RefCell,
         rc::Rc,
         sync::{atomic::AtomicBool, Arc},
+        time::Duration,
     };
     use tokio::sync::mpsc;
     use uuid::Uuid;
@@ -83,6 +84,15 @@ mod view_tests {
             click_count: count,
             modifiers: Modifiers::default(),
         });
+    }
+
+    fn redraw(window: &mut VisualTestContext) {
+        window.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    fn advance(window: &mut VisualTestContext, duration: Duration) {
+        window.executor().advance_clock(duration);
+        redraw(window);
     }
 
     #[test]
@@ -169,8 +179,10 @@ mod view_tests {
             let owner = Uuid::new_v4();
             let mut model = WindowWorkspace::new(owner);
             let screen = model.ui_test_local_screen_fixture("Work").unwrap();
+            let (commands, mut receiver) = mpsc::channel(2);
             window.update(|window, cx| {
                 view.update(cx, |workspace, _| {
+                    workspace.commands = commands;
                     workspace.model = Some(model);
                     workspace.destination = Destination::Screens;
                 });
@@ -207,6 +219,19 @@ mod view_tests {
                 assert!(workspace.drawer_hovered.is_none());
                 assert!(workspace.drawer_pane_hovered.is_none());
             });
+            window.update(|window, cx| {
+                cx.set_reduce_motion(true);
+                window.draw(cx).clear(cx);
+            });
+            window.simulate_mouse_move(pane.center(), None, Modifiers::default());
+            window.update(|_, cx| {
+                let workspace = view.read(cx);
+                assert_eq!(workspace.drawer_hovered, Some(screen));
+            });
+            assert!(
+                receiver.try_recv().is_err(),
+                "hover only changes presentation"
+            );
         });
     }
 
@@ -229,7 +254,6 @@ mod view_tests {
                         cx,
                     );
                     workspace.drawer_overlay_open = true;
-                    workspace.drawer_slide = 1.;
                 });
                 window.draw(cx).clear(cx);
             });
@@ -348,6 +372,304 @@ mod view_tests {
                     assert!(workspace.drawer_pending.is_none());
                 });
             });
+        });
+    }
+
+    #[test]
+    fn drawer_overlay_and_pinned_inset_reverse_without_extra_settings_writes() {
+        with_view(|window, view| {
+            let owner = Uuid::new_v4();
+            let mut model = WindowWorkspace::new(owner);
+            model.ui_test_local_screen_fixture("Work").unwrap();
+            let (commands, mut receiver) = mpsc::channel(4);
+            window.update(|window, cx| {
+                cx.set_reduce_motion(true);
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.model = Some(model);
+                    workspace.apply_appearance(
+                        &settings_snapshot_with_pin(owner, 1, Availability::Full, false),
+                        window,
+                        cx,
+                    );
+                });
+                window.draw(cx).clear(cx);
+                cx.set_reduce_motion(false);
+                window.draw(cx).clear(cx);
+            });
+            let base = window
+                .debug_bounds("workspace-viewport")
+                .expect("workspace viewport");
+            let base_x = f32::from(base.origin.x);
+            let base_width = f32::from(base.size.width);
+
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.toggle_drawer_overlay(cx);
+                })
+            });
+            redraw(window);
+            advance(window, Duration::from_millis(110));
+            let slide = window.debug_bounds("drawer-slide").expect("sliding Drawer");
+            let slide_x = f32::from(slide.origin.x);
+            assert!(
+                slide_x > -200. && slide_x < 0.,
+                "overlay moves through viewport"
+            );
+            let unchanged = window.debug_bounds("workspace-viewport").unwrap();
+            assert!((f32::from(unchanged.origin.x) - base_x).abs() < 1.);
+            assert!((f32::from(unchanged.size.width) - base_width).abs() < 1.);
+            advance(window, Duration::from_millis(180));
+
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.toggle_drawer(cx);
+                    workspace.toggle_drawer(cx);
+                })
+            });
+            let sent = receiver.try_recv().expect("one admitted pin write");
+            let request_id = match sent.kind() {
+                Command::SetDrawerVisibility {
+                    request_id,
+                    pinned: true,
+                    ..
+                } => *request_id,
+                _ => panic!("unexpected Drawer command"),
+            };
+            assert!(
+                receiver.try_recv().is_err(),
+                "pending toggle cannot repeat write"
+            );
+            redraw(window);
+            let start = f32::from(window.debug_bounds("workspace-viewport").unwrap().origin.x);
+            assert!((start - base_x).abs() < 1.);
+            advance(window, Duration::from_millis(110));
+            let middle = f32::from(window.debug_bounds("workspace-viewport").unwrap().origin.x);
+            assert!(middle > base_x && middle < base_x + 200.);
+
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.apply_drawer_visibility(
+                        DrawerVisibilityResult {
+                            connection_id: owner,
+                            request_id,
+                            outcome: DrawerVisibilityOutcome::Rejected {
+                                reason: "denied".into(),
+                            },
+                        },
+                        cx,
+                    );
+                })
+            });
+            redraw(window);
+            let reversal = f32::from(window.debug_bounds("workspace-viewport").unwrap().origin.x);
+            assert!(
+                (reversal - middle).abs() < 1.,
+                "reversal begins at displayed inset"
+            );
+            advance(window, Duration::from_millis(250));
+            let restored = f32::from(window.debug_bounds("workspace-viewport").unwrap().origin.x);
+            assert!((restored - base_x).abs() < 1.);
+
+            window.update(|window, cx| {
+                cx.set_reduce_motion(true);
+                view.update(cx, |workspace, cx| workspace.toggle_drawer(cx));
+                window.draw(cx).clear(cx);
+            });
+            let settled = f32::from(window.debug_bounds("workspace-viewport").unwrap().origin.x);
+            assert!(
+                (settled - base_x - 200.).abs() < 1.,
+                "reduced motion settles immediately"
+            );
+            assert!(matches!(
+                receiver.try_recv().unwrap().kind(),
+                Command::SetDrawerVisibility { pinned: true, .. }
+            ));
+            assert!(receiver.try_recv().is_err());
+        });
+    }
+
+    #[test]
+    fn split_drop_rect_moves_within_and_between_measured_slots_without_ops() {
+        with_view(|window, view| {
+            let owner = Uuid::new_v4();
+            let mut model = WindowWorkspace::new(owner);
+            let screen = model.ui_test_local_screen_fixture("Work").unwrap();
+            let source = model.lifecycle_token();
+            model
+                .source_mut(source.source_id())
+                .unwrap()
+                .apply_snapshot(
+                    owner,
+                    &serde_json::json!({"type":"mux.screen_snapshot","screen":{
+                        "id":"work","revision":2,
+                        "root":{"type":"split","id":"split","axis":"horizontal",
+                            "sizes":[0.5,0.5],"children":[
+                                {"type":"slot","id":"left","paneIds":["p0"],"activePaneId":"p0"},
+                                {"type":"slot","id":"right","paneIds":["p1"],"activePaneId":"p1"}
+                            ]},
+                        "panes":{"p0":{"id":"p0"},"p1":{"id":"p1"}},
+                        "sessions":{}
+                    }}),
+                )
+                .unwrap();
+            let (commands, mut receiver) = mpsc::channel(2);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.model = Some(model);
+                    workspace.commands = commands;
+                    workspace.destination = Destination::Screens;
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            let left = screen.layout_key("left");
+            let right = screen.layout_key("right");
+            let (left_bounds, right_bounds) = window.update(|_, cx| {
+                let workspace = view.read(cx);
+                (
+                    *workspace.slot_bounds.get(&left).expect("left measured"),
+                    *workspace.slot_bounds.get(&right).expect("right measured"),
+                )
+            });
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.set_drop_target(
+                        Some(DropTarget::Body {
+                            slot: left.clone(),
+                            placement: MovePlacement::Tab,
+                        }),
+                        cx,
+                    );
+                })
+            });
+            redraw(window);
+            let whole = window
+                .debug_bounds("workspace-drop-highlight")
+                .expect("whole slot");
+            assert!((f32::from(whole.size.width) - f32::from(left_bounds.size.width)).abs() < 1.);
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.set_drop_target(
+                        Some(DropTarget::Body {
+                            slot: left.clone(),
+                            placement: MovePlacement::Left,
+                        }),
+                        cx,
+                    );
+                    assert_eq!(workspace.drop_motion_duration, Duration::from_millis(70));
+                })
+            });
+            redraw(window);
+            advance(window, Duration::from_millis(35));
+            let half = window.debug_bounds("workspace-drop-highlight").unwrap();
+            assert!(half.size.width < whole.size.width);
+            assert!(f32::from(half.size.width) > f32::from(whole.size.width) / 2.);
+
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.set_drop_target(
+                        Some(DropTarget::Body {
+                            slot: right.clone(),
+                            placement: MovePlacement::Tab,
+                        }),
+                        cx,
+                    );
+                    assert_eq!(workspace.drop_motion_duration, Duration::from_millis(300));
+                })
+            });
+            redraw(window);
+            advance(window, Duration::from_millis(150));
+            let moving = window.debug_bounds("workspace-drop-highlight").unwrap();
+            assert!(moving.origin.x > left_bounds.origin.x);
+            assert!(moving.origin.x < right_bounds.origin.x);
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.set_drop_target(
+                        Some(DropTarget::Body {
+                            slot: left.clone(),
+                            placement: MovePlacement::Right,
+                        }),
+                        cx,
+                    );
+                });
+            });
+            redraw(window);
+            let reversed = window.debug_bounds("workspace-drop-highlight").unwrap();
+            assert!(
+                (f32::from(reversed.origin.x) - f32::from(moving.origin.x)).abs() < 1.,
+                "rapid target reversal starts at the displayed rectangle"
+            );
+            advance(window, Duration::from_millis(150));
+            let returning = window.debug_bounds("workspace-drop-highlight").unwrap();
+            assert!(returning.origin.x < moving.origin.x);
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.set_drop_target(None, cx);
+                })
+            });
+            redraw(window);
+            assert!(window.debug_bounds("workspace-drop-highlight").is_none());
+            assert!(
+                receiver.try_recv().is_err(),
+                "preview and cancel submit no layout op"
+            );
+        });
+    }
+
+    #[test]
+    fn pinned_inset_reports_only_changed_terminal_grid_sizes() {
+        with_view(|window, view| {
+            let owner = Uuid::new_v4();
+            let mut model = WindowWorkspace::new(owner);
+            model
+                .ui_test_remote_terminal_fixture("me@192.0.2.7")
+                .expect("in-memory attached remote terminal");
+            let (commands, mut receiver) = mpsc::channel(256);
+            window.update(|window, cx| {
+                cx.set_reduce_motion(true);
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.reconcile(model, window, cx);
+                    workspace.apply_appearance(
+                        &settings_snapshot_with_pin(owner, 1, Availability::Full, false),
+                        window,
+                        cx,
+                    );
+                });
+                window.draw(cx).clear(cx);
+                cx.set_reduce_motion(false);
+                window.draw(cx).clear(cx);
+            });
+            assert!(!window.update(|_, cx| view.read(cx).panes.is_empty()));
+            while receiver.try_recv().is_ok() {}
+
+            window.update(|_, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.toggle_drawer(cx);
+                })
+            });
+            redraw(window);
+            for _ in 0..15 {
+                advance(window, Duration::from_millis(16));
+            }
+            let mut pin_writes = 0;
+            let mut resizes = 0;
+            while let Ok(command) = receiver.try_recv() {
+                match command.kind() {
+                    Command::SetDrawerVisibility { .. } => pin_writes += 1,
+                    Command::ResizePane { .. } => resizes += 1,
+                    Command::Input { .. } => panic!("presentation sent terminal input"),
+                    _ => {}
+                }
+            }
+            assert_eq!(pin_writes, 1);
+            eprintln!("Drawer inset motion: {resizes} ResizePane commands in 15 frames");
+            assert!(resizes > 0, "animated grid width is reported");
+            assert!(
+                resizes <= 32,
+                "one 220 ms transition stays bounded by frame samples"
+            );
         });
     }
 }
@@ -502,38 +824,8 @@ impl Workspace {
             return;
         }
         self.drawer_overlay_open = open;
-        self.drawer_slide_generation = self.drawer_slide_generation.wrapping_add(1);
-        self.drawer_slide_task = None;
-        let generation = self.drawer_slide_generation;
-        let start = self.drawer_slide;
-        let end = if open { 1. } else { 0. };
         self.wheel_navigation.reset();
         cx.notify();
-        self.drawer_slide_task = Some(cx.spawn(async move |this, cx| {
-            let started = Instant::now();
-            let duration = Duration::from_secs_f32(0.22 * (end - start).abs().max(0.05));
-            loop {
-                let elapsed = started.elapsed().as_secs_f32() / duration.as_secs_f32();
-                let fraction = elapsed.clamp(0., 1.);
-                let eased = 1. - (1. - fraction).powi(3);
-                let done = this
-                    .update(cx, |this, cx| {
-                        if this.drawer_slide_generation != generation {
-                            return true;
-                        }
-                        this.drawer_slide = start + (end - start) * eased;
-                        cx.notify();
-                        fraction >= 1.
-                    })
-                    .unwrap_or(true);
-                if done {
-                    break;
-                }
-                cx.background_executor()
-                    .timer(Duration::from_millis(16))
-                    .await;
-            }
-        }));
     }
 
     pub(super) fn toggle_drawer_overlay(&mut self, cx: &mut Context<Self>) {
@@ -585,7 +877,7 @@ impl Workspace {
         }));
     }
 
-    pub(super) fn render_drawer(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_drawer(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let owner = self.lifecycle_token();
         let pin_label = match self.drawer_pending {
             Some(pending) if pending.desired => "Pinning drawer…",
@@ -642,6 +934,8 @@ impl Workspace {
                 }
                 let active = shown.as_ref() == Some(&key);
                 let actions_visible = self.drawer_hovered.as_ref() == Some(&key);
+                let hover_transition =
+                    Transition::new(Duration::from_millis(80)).easing(Easing::Ease);
                 let label = entry
                     .name()
                     .map(super::hosts::display)
@@ -713,11 +1007,18 @@ impl Workspace {
                                 div()
                                     .w_full()
                                     .min_w_0()
-                                    .text_color(rgb(if active || actions_visible {
-                                        self.appearance.text
-                                    } else {
-                                        self.appearance.secondary
-                                    }))
+                                    .text_color(transition::<Hsla>(
+                                        format!("drawer-screen-text-{key}"),
+                                        rgb(if active || actions_visible {
+                                            self.appearance.text
+                                        } else {
+                                            self.appearance.secondary
+                                        })
+                                        .into(),
+                                        hover_transition.clone(),
+                                        window,
+                                        cx,
+                                    ))
                                     .overflow_hidden()
                                     .text_ellipsis()
                                     .whitespace_nowrap()
@@ -902,13 +1203,20 @@ impl Workspace {
                             }),
                     );
                 }
-                let block_background: gpui_kit::Fill = if active {
+                let block_background: Hsla = if active {
                     rgb(self.appearance.active).into()
                 } else if actions_visible {
-                    cx.theme().list_hover.into()
+                    cx.theme().list_hover
                 } else {
                     rgb(self.appearance.raised).into()
                 };
+                let block_background = transition(
+                    format!("drawer-screen-background-{key}"),
+                    block_background,
+                    hover_transition.clone(),
+                    window,
+                    cx,
+                );
                 let mut block = div()
                     .id(SharedString::from(format!("drawer-block-{key}")))
                     .when(cfg!(all(test, feature = "ui-test-support")), |block| {
@@ -1015,13 +1323,20 @@ impl Workspace {
                                         .flex()
                                         .items_center()
                                         .gap(chrome_rems(7.))
-                                        .text_color(rgb(if pane_hovered {
-                                            self.appearance.text
-                                        } else if busy || is_viewer {
-                                            self.appearance.secondary
-                                        } else {
-                                            self.appearance.muted
-                                        }))
+                                        .text_color(transition::<Hsla>(
+                                            format!("drawer-pane-text-{key}-{pane_id}"),
+                                            rgb(if pane_hovered {
+                                                self.appearance.text
+                                            } else if busy || is_viewer {
+                                                self.appearance.secondary
+                                            } else {
+                                                self.appearance.muted
+                                            })
+                                            .into(),
+                                            hover_transition.clone(),
+                                            window,
+                                            cx,
+                                        ))
                                         .child(
                                             div()
                                                 .w(chrome_rems(12.))
