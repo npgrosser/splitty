@@ -308,6 +308,10 @@ pub enum Update {
     Zoom(ZoomResult),
     SettingsWrite(crate::local_service::SettingsWriteResult),
     SettingsReconciled(crate::local_service::SettingsReconciled),
+    NotificationSettings {
+        owner: SourceToken,
+        read: crate::local_service::NotificationSettingsRead,
+    },
     DrawerVisibility(DrawerVisibilityResult),
     ShellProfiles(Arc<ShellProfilesSnapshot>),
     ShellProfilesError {
@@ -1335,6 +1339,7 @@ async fn run_service(
                         },
                         Ok(LocalServiceUpdate::SettingsWrite(result)) => Update::SettingsWrite(result),
                         Ok(LocalServiceUpdate::SettingsReconciled(result)) => Update::SettingsReconciled(result),
+                        Ok(LocalServiceUpdate::NotificationSettings(read)) => Update::NotificationSettings {owner:local.owner(),read},
                         Ok(LocalServiceUpdate::Zoom(result)) => Update::Zoom(result),
                         Ok(LocalServiceUpdate::DrawerVisibility(result)) => Update::DrawerVisibility(result),
                         Ok(LocalServiceUpdate::Template(result)) => Update::TemplateApi(result),

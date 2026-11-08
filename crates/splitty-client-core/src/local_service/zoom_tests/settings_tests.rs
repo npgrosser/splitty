@@ -26,7 +26,7 @@ fn appearance_exchanges() -> Vec<Exchange> {
 }
 async fn loaded(api: Client, owner: Uuid) -> LocalServiceClient {
     let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
-    client.dirty = [true, false];
+    client.dirty = [true, false, false];
     assert!(matches!(
         next(&mut client).await,
         LocalServiceUpdate::Appearance(Ok(_))
@@ -84,7 +84,8 @@ async fn admission_is_local_bounded_field_exclusive_and_close_discards_unsent() 
 async fn fifo_writes_release_fields_and_never_publish_optimistic_values() {
     let mut exchanges = appearance_exchanges();
     exchanges.push(exchange("home.update", home(1.0)));
-    exchanges.extend(appearance_exchanges());
+    // Same-service refresh also schedules an independent notification read.
+    exchanges.push(exchange("home.get", home(1.0)));
     exchanges.push(exchange("home.update", home(1.0)));
     let (api, task, dir) = scripted(exchanges).await;
     let owner = Uuid::new_v4();
@@ -298,9 +299,11 @@ async fn uncertain_write_stays_uncertain_and_queued_old_read_cannot_publish() {
     let mut lost_reply = exchange("home.update", home(1.0));
     lost_reply.uncertain = true;
     exchanges.push(lost_reply);
+    exchanges.push(exchange("home.get", home(1.0)));
     exchanges.extend(appearance_exchanges());
     let mut latest = appearance_exchanges();
     latest[0].body = home(1.5);
+    exchanges.push(exchange("home.get", home(1.0)));
     exchanges.extend(latest);
     let (api, task, dir) = scripted(exchanges).await;
     let owner = Uuid::new_v4();

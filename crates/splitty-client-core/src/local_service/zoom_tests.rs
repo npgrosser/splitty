@@ -71,12 +71,32 @@ async fn scripted_tail(
             .unwrap();
         let mut peer = Peer::start(read, write, &ready, context);
         for exchange in exchanges {
-            let message = peer.recv().await.expect("expected request");
-            assert_eq!(message.frame.kind, wire::Kind::Request);
-            let request = message
-                .frame
-                .decode_charged::<wire::Request>(&peer.sender.context().budget)
-                .unwrap();
+            let request = loop {
+                let message = peer.recv().await.expect("expected request");
+                assert_eq!(message.frame.kind, wire::Kind::Request);
+                let request = message
+                    .frame
+                    .decode_charged::<wire::Request>(&peer.sender.context().budget)
+                    .unwrap();
+                if request.operation == "home.get" && exchange.operation != "home.get" {
+                    // An independent notification read can occur between
+                    // scripted appearance and mutation requests.
+                    peer.sender
+                        .json(
+                            wire::Kind::Reply,
+                            &wire::Reply {
+                                id: request.id,
+                                status: 200,
+                                content_type: wire::ContentType::Json,
+                                body: home(1.0),
+                                uncertain: false,
+                            },
+                        )
+                        .unwrap();
+                    continue;
+                }
+                break request;
+            };
             assert_eq!(request.operation, exchange.operation);
             if request.operation == "home.update" {
                 // No unrelated appearance or home fields are echoed back.
@@ -147,9 +167,65 @@ async fn scripted_tail(
     (client.into(), task, dir)
 }
 async fn next(client: &mut LocalServiceClient) -> LocalServiceUpdate {
-    tokio::time::timeout(Duration::from_secs(5), client.next_update())
-        .await
-        .unwrap()
+    loop {
+        let update = tokio::time::timeout(Duration::from_secs(5), client.next_update())
+            .await
+            .unwrap();
+        if !matches!(update, LocalServiceUpdate::NotificationSettings(_)) {
+            return update;
+        }
+    }
+}
+
+#[tokio::test]
+async fn notification_settings_read_reports_invalid_home_without_replacing_a_later_valid_read() {
+    let (api, task, dir) = scripted(vec![
+        Exchange {
+            operation: "home.get",
+            status: 200,
+            uncertain: false,
+            body: home(1.0),
+        },
+        Exchange {
+            operation: "home.get",
+            status: 200,
+            uncertain: false,
+            body: "{\"notifications\":{\"enabled\":true}}".into(),
+        },
+        Exchange {
+            operation: "home.get",
+            status: 200,
+            uncertain: false,
+            body: home(1.0),
+        },
+    ])
+    .await;
+    let owner = Uuid::new_v4();
+    let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+    reader.dirty = [false, false, true];
+    let LocalServiceUpdate::NotificationSettings(first) = reader.next_update().await else {
+        panic!("initial notification settings read missing");
+    };
+    assert_eq!(first.connection_id(), owner);
+    assert_eq!(first.generation(), 1);
+    assert!(first.result().unwrap().process_finished);
+    reader.refresh_settings(owner).unwrap();
+    reader.dirty = [false, false, true];
+    let LocalServiceUpdate::NotificationSettings(invalid) = reader.next_update().await else {
+        panic!("invalid notification settings outcome missing");
+    };
+    assert_eq!(invalid.generation(), 2);
+    assert!(invalid.result().is_err());
+    reader.refresh_settings(owner).unwrap();
+    reader.dirty = [false, false, true];
+    let LocalServiceUpdate::NotificationSettings(recovered) = reader.next_update().await else {
+        panic!("recovered notification settings outcome missing");
+    };
+    assert_eq!(recovered.generation(), 3);
+    assert!(recovered.result().unwrap().enabled);
+    reader.finish().await.unwrap();
+    task.await.unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]
@@ -241,7 +317,7 @@ async fn uncertain_write_is_not_retried_and_later_intent_reads_again() {
     let owner = Uuid::new_v4();
     let budget = api.sender().context().budget.clone();
     let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
-    client.dirty = [false; 2];
+    client.dirty = [false; 3];
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
     client.enqueue_zoom(owner, first, ZoomAction::In).unwrap();
@@ -292,7 +368,7 @@ async fn rejected_and_malformed_write_replies_are_distinct() {
         .await;
         let owner = Uuid::new_v4();
         let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
-        client.dirty = [false; 2];
+        client.dirty = [false; 3];
         client
             .enqueue_zoom(owner, Uuid::new_v4(), ZoomAction::In)
             .unwrap();
@@ -417,6 +493,12 @@ async fn uncertain_outcome_refresh_has_newer_generation_without_broadcast() {
             operation: "home.get",
             status: 200,
             uncertain: false,
+            body: home(1.0),
+        },
+        Exchange {
+            operation: "home.get",
+            status: 200,
+            uncertain: false,
             body: home(1.1),
         },
         Exchange {
@@ -494,7 +576,7 @@ async fn lost_mutation_reply_is_uncertain_and_pending_write_cancellation_joins()
         let budget = api.sender().context().budget.clone();
         let owner = Uuid::new_v4();
         let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
-        client.dirty = [false; 2];
+        client.dirty = [false; 3];
         client
             .enqueue_zoom(owner, Uuid::new_v4(), ZoomAction::In)
             .unwrap();
@@ -569,7 +651,7 @@ async fn drawer_visibility_confirms_only_service_value_and_refreshes_without_rep
     let request = Uuid::new_v4();
     let budget = api.sender().context().budget.clone();
     let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
-    client.dirty = [false; 2];
+    client.dirty = [false; 3];
     client
         .enqueue_drawer_visibility(owner, request, true)
         .unwrap();
@@ -636,7 +718,7 @@ async fn drawer_visibility_admits_one_and_distinguishes_failure_from_uncertainty
         let owner = Uuid::new_v4();
         let request = Uuid::new_v4();
         let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
-        client.dirty = [false; 2];
+        client.dirty = [false; 3];
         assert!(client
             .enqueue_drawer_visibility(Uuid::new_v4(), request, true)
             .is_err());
@@ -690,7 +772,7 @@ async fn drawer_visibility_shutdown_joins_pending_write() {
     let budget = api.sender().context().budget.clone();
     let owner = Uuid::new_v4();
     let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
-    client.dirty = [false; 2];
+    client.dirty = [false; 3];
     client
         .enqueue_drawer_visibility(owner, Uuid::new_v4(), false)
         .unwrap();

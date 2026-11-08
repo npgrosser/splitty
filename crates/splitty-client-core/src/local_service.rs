@@ -13,6 +13,8 @@ use uuid::Uuid;
 
 mod settings;
 pub use settings::{SettingsReconciled, SettingsWriteOutcome, SettingsWriteResult};
+mod notification_settings;
+pub use notification_settings::NotificationSettingsRead;
 
 pub enum LocalServiceUpdate {
     BackendVersion {
@@ -26,24 +28,28 @@ pub enum LocalServiceUpdate {
     DrawerVisibility(DrawerVisibilityResult),
     Appearance(io::Result<Arc<AppearanceSnapshot>>),
     ShellProfiles(io::Result<Arc<ShellProfilesSnapshot>>),
+    NotificationSettings(NotificationSettingsRead),
 }
 
 #[derive(Clone, Copy)]
 enum Feature {
     Appearance,
     Profiles,
+    Notifications,
 }
 impl Feature {
     fn index(self) -> usize {
         match self {
             Self::Appearance => 0,
             Self::Profiles => 1,
+            Self::Notifications => 2,
         }
     }
-    fn other(self) -> Self {
+    fn next(self) -> Self {
         match self {
             Self::Appearance => Self::Profiles,
-            Self::Profiles => Self::Appearance,
+            Self::Profiles => Self::Notifications,
+            Self::Notifications => Self::Appearance,
         }
     }
 }
@@ -85,8 +91,8 @@ pub struct LocalServiceClient {
     prefer_write: bool,
     cancel: Arc<Notify>,
     connection_id: Uuid,
-    generations: [u64; 2],
-    dirty: [bool; 2],
+    generations: [u64; 3],
+    dirty: [bool; 3],
     build_dirty: bool,
     build_pending: bool,
     next: Feature,
@@ -115,8 +121,8 @@ impl LocalServiceClient {
             prefer_write: false,
             cancel: Arc::new(Notify::new()),
             connection_id,
-            generations: [1; 2],
-            dirty: [true; 2],
+            generations: [1; 3],
+            dirty: [true; 3],
             build_dirty: false,
             build_pending: false,
             next: Feature::Appearance,
@@ -144,10 +150,11 @@ impl LocalServiceClient {
         let generations = [
             increment(self.generations[0])?,
             increment(self.generations[1])?,
+            increment(self.generations[2])?,
         ];
         self.terminal_generation = increment(self.terminal_generation)?;
         self.generations = generations;
-        self.dirty = [true; 2];
+        self.dirty = [true; 3];
         Ok(())
     }
     pub fn set_scheme(&mut self, owner: Uuid, scheme: ColorScheme) -> io::Result<()> {
@@ -311,13 +318,15 @@ impl LocalServiceClient {
         }
         loop {
             if self.pending.is_none() {
-                let feature = if self.dirty[self.next.index()] {
-                    Some(self.next)
-                } else if self.dirty[self.next.other().index()] {
-                    Some(self.next.other())
-                } else {
-                    None
-                };
+                let feature = (0..3)
+                    .map(|step| {
+                        let mut candidate = self.next;
+                        for _ in 0..step {
+                            candidate = candidate.next();
+                        }
+                        candidate
+                    })
+                    .find(|candidate| self.dirty[candidate.index()]);
                 let job = if self.build_dirty {
                     self.build_dirty = false;
                     self.build_pending = true;
@@ -456,6 +465,16 @@ impl LocalServiceClient {
                                 result = crate::shell_profiles::read(&mut client, connection, generation) => result.map(Arc::new),
                             })
                         }
+                        Job::Read(Feature::Notifications, generation) => {
+                            LocalServiceUpdate::NotificationSettings(NotificationSettingsRead::new(
+                                connection,
+                                generation,
+                                tokio::select! { biased;
+                                    _ = cancel.notified() => Err(cancelled()),
+                                    result = notification_settings::read(&mut client) => result,
+                                },
+                            ))
+                        }
                         Job::Zoom(id, action) => LocalServiceUpdate::Zoom(
                             zoom::execute(&mut client, connection, id, action, &cancel).await,
                         ),
@@ -502,7 +521,7 @@ impl LocalServiceClient {
                     self.active_template = None;
                 }
                 Job::Read(feature, generation) => {
-                    self.next = feature.other();
+                    self.next = feature.next();
                     self.prefer_write = true;
                     if generation != self.generations[feature.index()] {
                         continue;

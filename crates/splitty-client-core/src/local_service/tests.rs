@@ -73,6 +73,12 @@ async fn feature_generations_are_fair_and_os_changes_do_not_reload_profiles() {
     assert_eq!(snapshot.state().default_profile_id, "chosen");
     assert!(budget.used() > 0);
     drop(snapshot);
+    let LocalServiceUpdate::NotificationSettings(read) = next(&mut reader).await else {
+        panic!("notification settings were starved");
+    };
+    assert_eq!(read.connection_id(), owner);
+    assert_eq!(read.generation(), 2);
+    assert!(read.result().unwrap().enabled);
     let LocalServiceUpdate::Appearance(result) = next(&mut reader).await else {
         panic!("appearance missing");
     };
@@ -121,13 +127,16 @@ async fn profile_limits_are_atomic_and_failure_does_not_poison_appearance() {
         }
         *service.state.shell_profiles.write().unwrap() = invalid;
         reader.refresh_settings(owner).unwrap();
-        let a = next(&mut reader).await;
-        let b = next(&mut reader).await;
-        let updates = [a, b];
+        let updates = [
+            next(&mut reader).await,
+            next(&mut reader).await,
+            next(&mut reader).await,
+        ];
         assert!(updates
             .iter()
             .any(|update| matches!(update, LocalServiceUpdate::Appearance(Ok(_)))));
         assert!(updates.iter().any(|update| matches!(update, LocalServiceUpdate::ShellProfiles(Err(error)) if error.kind() == io::ErrorKind::InvalidData)));
+        assert!(updates.iter().any(|update| matches!(update, LocalServiceUpdate::NotificationSettings(read) if read.result().is_ok())));
         drop(updates);
         assert_eq!(
             first.state().profiles[0].name,
@@ -143,15 +152,18 @@ async fn profile_limits_are_atomic_and_failure_does_not_poison_appearance() {
     *service.state.shell_profiles.write().unwrap() = profiles();
     service.state.config.write().unwrap().appearance.font_family = "x".repeat(4097);
     reader.refresh_settings(owner).unwrap();
-    let a = next(&mut reader).await;
-    let b = next(&mut reader).await;
-    let updates = [a, b];
+    let updates = [
+        next(&mut reader).await,
+        next(&mut reader).await,
+        next(&mut reader).await,
+    ];
     assert!(updates
         .iter()
         .any(|update| matches!(update, LocalServiceUpdate::Appearance(Err(_)))));
     assert!(updates
         .iter()
         .any(|update| matches!(update, LocalServiceUpdate::ShellProfiles(Ok(_)))));
+    assert!(updates.iter().any(|update| matches!(update, LocalServiceUpdate::NotificationSettings(read) if read.result().is_ok())));
     drop(updates);
     drop(first);
     reader.finish().await.unwrap();
@@ -171,18 +183,31 @@ async fn cancelled_profile_read_retains_client_and_shutdown_releases_allocations
     let budget = api.sender().context().budget.clone();
     let owner = Uuid::new_v4();
     let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
-    assert!(matches!(
-        next(&mut reader).await,
-        LocalServiceUpdate::Appearance(Ok(_))
-    ));
+    loop {
+        if matches!(
+            next(&mut reader).await,
+            LocalServiceUpdate::Appearance(Ok(_))
+        ) {
+            break;
+        }
+    }
     begin(&mut reader).await;
     assert!(reader.pending.is_some());
     reader.refresh_settings(owner).unwrap();
-    // The stale profile result is suppressed; fresh appearance has priority.
-    assert!(matches!(
-        next(&mut reader).await,
-        LocalServiceUpdate::Appearance(Ok(_))
-    ));
+    // The stale profile result is suppressed while all three fresh reads run.
+    let mut saw_appearance = false;
+    let mut saw_notifications = false;
+    for _ in 0..3 {
+        match next(&mut reader).await {
+            LocalServiceUpdate::Appearance(Ok(_)) => saw_appearance = true,
+            LocalServiceUpdate::NotificationSettings(read) => {
+                assert!(read.result().is_ok());
+                saw_notifications = true;
+            }
+            _ => {}
+        }
+    }
+    assert!(saw_appearance && saw_notifications);
     begin(&mut reader).await;
     tokio::time::timeout(Duration::from_secs(5), reader.finish())
         .await
@@ -245,4 +270,47 @@ async fn backend_version_is_owner_bound_coalesced_and_independent_of_settings() 
     reader.finish().await.unwrap();
     service.close().await.unwrap();
     let _ = std::fs::remove_dir_all(path);
+}
+
+#[tokio::test]
+async fn notification_settings_read_is_owned_coalesced_and_refreshes_independently() {
+    let (service, path) = fixture();
+    let api = Connector::default()
+        .embedded(service.state.clone(), Role::Main)
+        .await
+        .unwrap();
+    let budget = api.sender().context().budget.clone();
+    let owner = Uuid::new_v4();
+    let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+    let initial = loop {
+        if let LocalServiceUpdate::NotificationSettings(read) = next(&mut reader).await {
+            break read;
+        }
+    };
+    assert_eq!(initial.connection_id(), owner);
+    assert_eq!(initial.generation(), 1);
+    assert!(initial.result().unwrap().enabled);
+    assert!(!initial.result().unwrap().process_exited);
+
+    {
+        let mut config = service.state.config.write().unwrap();
+        config.notifications.enabled = false;
+        config.notifications.process_crashed = false;
+    }
+    assert!(reader.refresh_settings(Uuid::new_v4()).is_err());
+    reader.refresh_settings(owner).unwrap();
+    reader.refresh_settings(owner).unwrap();
+    let refreshed = loop {
+        if let LocalServiceUpdate::NotificationSettings(read) = next(&mut reader).await {
+            break read;
+        }
+    };
+    assert_eq!(refreshed.connection_id(), owner);
+    assert_eq!(refreshed.generation(), 3);
+    assert!(!refreshed.result().unwrap().enabled);
+    assert!(!refreshed.result().unwrap().process_crashed);
+    reader.finish().await.unwrap();
+    assert_eq!(budget.used(), 0);
+    service.close().await.unwrap();
+    assert!(!path.exists());
 }
