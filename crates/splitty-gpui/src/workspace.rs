@@ -2141,7 +2141,7 @@ impl Workspace {
             self.rename_subscription = None;
         }
         if old_screen != new_screen || catalog_changed {
-            self.wheel_navigation.reset();
+            self.wheel_navigation.screen_changed();
             let mut group = None;
             let mut row = 0;
             for entry in window_model.opened() {

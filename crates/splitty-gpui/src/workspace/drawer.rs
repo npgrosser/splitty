@@ -100,7 +100,8 @@ mod view_tests {
     use super::{Command, Destination, DropTarget, Workspace};
     use gpui_kit::{
         point, px, size, AppContext, Entity, Focusable, Modifiers, MouseButton, MouseDownEvent,
-        MouseUpEvent, Pixels, Point, TestAppContext, VisualTestContext,
+        MouseUpEvent, Pixels, Point, ScrollDelta, ScrollEvent, TestAppContext, TouchPhase,
+        VisualTestContext,
     };
     use splitty_client_core::{
         appearance::{
@@ -168,6 +169,78 @@ mod view_tests {
 
     fn redraw(window: &mut VisualTestContext) {
         window.update(|window, cx| window.draw(cx).clear(cx));
+    }
+
+    #[test]
+    fn drawer_wheel_keeps_one_swipe_across_selection_updates_until_idle() {
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let keys = model
+                .ui_test_screen_order_fixture(&[("a", "A"), ("b", "B"), ("c", "C")], None)
+                .unwrap();
+            let owner = model.lifecycle_token();
+            model.select(owner, &keys[0]).unwrap();
+            let (commands, mut receiver) = mpsc::channel(16);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.reconcile(model.clone(), window, cx);
+                });
+                window.draw(cx).clear(cx);
+            });
+            while receiver.try_recv().is_ok() {}
+            let selector: &'static str =
+                Box::leak(format!("drawer-select-{}", keys[0]).into_boxed_str());
+            let position = window.debug_bounds(selector).unwrap().center();
+            let scroll = |window: &mut VisualTestContext| {
+                window.simulate_event(ScrollEvent {
+                    position,
+                    delta: ScrollDelta::Lines(point(0., -3.)),
+                    touch_phase: TouchPhase::Moved,
+                    ..Default::default()
+                });
+            };
+            scroll(window);
+            assert!(matches!(
+                receiver.try_recv().unwrap().kind(),
+                Command::CycleScreen {
+                    step: splitty_client_core::workspace::TabStep::Next
+                }
+            ));
+            model.select(owner, &keys[1]).unwrap();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| workspace.reconcile(model, window, cx))
+            });
+            while let Ok(command) = receiver.try_recv() {
+                assert!(
+                    matches!(command.kind(), Command::Visible { .. }),
+                    "selection only updates visible routing"
+                );
+            }
+            for _ in 0..10 {
+                advance(window, Duration::from_millis(20));
+                scroll(window);
+            }
+            assert!(
+                receiver.try_recv().is_err(),
+                "selection acknowledgement and momentum cannot repeat the swipe"
+            );
+            advance(window, Duration::from_millis(120));
+            scroll(window);
+            assert!(
+                receiver.try_recv().is_err(),
+                "idle threshold is strict and follows the last event"
+            );
+            advance(window, Duration::from_millis(121));
+            scroll(window);
+            assert!(matches!(
+                receiver.try_recv().unwrap().kind(),
+                Command::CycleScreen {
+                    step: splitty_client_core::workspace::TabStep::Next
+                }
+            ));
+            assert!(receiver.try_recv().is_err(), "one command per new swipe");
+        });
     }
 
     fn advance(window: &mut VisualTestContext, duration: Duration) {
@@ -1086,44 +1159,91 @@ mod view_tests {
 pub(super) struct WheelNavigation {
     target: Option<WheelTarget>,
     pixels: f32,
+    screen_switched: bool,
+    screen_last_scroll: Option<(Instant, f32)>,
 }
 
 impl WheelNavigation {
     pub(super) fn reset(&mut self) {
-        self.target = None;
-        self.pixels = 0.;
+        *self = Self::default();
     }
 
-    fn admit(&mut self, target: WheelTarget, event: &ScrollEvent, blocked: bool) -> i32 {
+    pub(super) fn screen_changed(&mut self) {
+        // A navigation acknowledgement must not turn its remaining momentum
+        // into another gesture. Tab distance still belongs to its old group.
+        if self.target != Some(WheelTarget::Screens) {
+            self.reset();
+        }
+    }
+
+    fn admit(
+        &mut self,
+        target: WheelTarget,
+        event: &ScrollEvent,
+        blocked: bool,
+        now: Instant,
+    ) -> i32 {
         if blocked {
             self.reset();
             return 0;
         }
-        self.steps(target, event)
+        self.steps(target, event, now)
     }
 
-    /// Returns bounded relative steps. A phase-less pixel stream still advances
-    /// as distance accrues; a real boundary discards the prior partial step.
-    fn steps(&mut self, target: WheelTarget, event: &ScrollEvent) -> i32 {
-        if !Self::vertical(event) {
-            self.reset();
-            return 0;
-        }
+    /// Drawer gestures follow the web swipe gate. Tabs retain their separate
+    /// distance-based scrolling; terminal content never uses this recognizer.
+    fn steps(&mut self, target: WheelTarget, event: &ScrollEvent, now: Instant) -> i32 {
         let (x, y) = match event.delta {
             ScrollDelta::Lines(delta) => (delta.x, delta.y),
             ScrollDelta::Pixels(delta) => (f32::from(delta.x), f32::from(delta.y)),
         };
+        if event.touch_phase == TouchPhase::Cancelled {
+            self.reset();
+            return 0;
+        }
+        if target == WheelTarget::Screens
+            && event.touch_phase == TouchPhase::Ended
+            && x == 0.
+            && y == 0.
+        {
+            // Trackpad momentum may continue after finger contact ends.
+            return 0;
+        }
+        if !Self::vertical(event) {
+            self.reset();
+            return 0;
+        }
         if !x.is_finite() || !y.is_finite() || x.abs() >= y.abs() || y == 0. {
             self.reset();
             return 0;
         }
-        if self.target.as_ref() != Some(&target) || event.touch_phase == TouchPhase::Started {
-            self.pixels = 0.;
-        }
-        self.target = Some(target);
-        if event.touch_phase == TouchPhase::Cancelled {
+        if self.target.as_ref() != Some(&target) {
             self.reset();
-            return 0;
+        }
+        self.target = Some(target.clone());
+        if target == WheelTarget::Screens {
+            let magnitude = y.abs();
+            if self
+                .screen_last_scroll
+                .is_some_and(|(last, last_magnitude)| {
+                    now.saturating_duration_since(last) > Duration::from_millis(120)
+                        || (self.screen_switched && magnitude > last_magnitude * 1.5)
+                })
+            {
+                self.screen_switched = false;
+            }
+            self.screen_last_scroll = Some((now, magnitude));
+            // DOM wheel deltas use pixels in the web action. Native line events
+            // already represent wheel movement and need no pixel noise floor.
+            let below_threshold = matches!(event.delta, ScrollDelta::Pixels(_)) && magnitude < 2.;
+            if self.screen_switched || below_threshold {
+                return 0;
+            }
+            self.screen_switched = true;
+            return if y > 0. { 1 } else { -1 };
+        }
+        if event.touch_phase == TouchPhase::Started {
+            self.pixels = 0.;
         }
         let result = match event.delta {
             // The line value is an OS scroll setting, not a detent count.
@@ -2378,14 +2498,20 @@ impl Workspace {
                 || GlobalState::is_in_deferred_context(cx)
                 || cx.has_active_drag();
         if blocked {
-            self.wheel_navigation.admit(target, event, true);
+            self.wheel_navigation
+                .admit(target, event, true, cx.background_executor().now());
             if WheelNavigation::vertical(event) {
                 cx.stop_propagation();
             }
             return;
         }
         let vertical = WheelNavigation::vertical(event);
-        let steps = self.wheel_navigation.admit(target.clone(), event, false);
+        let steps = self.wheel_navigation.admit(
+            target.clone(),
+            event,
+            false,
+            cx.background_executor().now(),
+        );
         if vertical {
             cx.stop_propagation();
         }
@@ -2439,98 +2565,153 @@ mod tests {
             ..Default::default()
         }
     }
+    fn tab_target() -> WheelTarget {
+        WheelTarget::Slot {
+            screen: "s".into(),
+            slot: "tabs".into(),
+        }
+    }
+
     #[test]
-    fn line_steps_are_discrete_and_bounded() {
+    fn tab_line_steps_are_discrete_and_bounded() {
         assert_eq!(wheel_step(1), TabStep::Previous);
         assert_eq!(wheel_step(-1), TabStep::Next);
         let mut wheel = WheelNavigation::default();
-        let down = event(ScrollDelta::Lines(point(0., 1.)), TouchPhase::Moved);
-        assert_eq!(wheel.steps(WheelTarget::Screens, &down), 1);
-        assert_eq!(wheel.steps(WheelTarget::Screens, &down), 1);
-        assert_eq!(
-            wheel.steps(
-                WheelTarget::Screens,
-                &event(ScrollDelta::Lines(point(0., -8.)), TouchPhase::Moved)
-            ),
-            -1
-        );
-        assert_eq!(
-            wheel.steps(
-                WheelTarget::Screens,
-                &event(ScrollDelta::Lines(point(0., 3.)), TouchPhase::Moved)
-            ),
-            1
-        );
-        assert_eq!(
-            wheel.steps(
-                WheelTarget::Screens,
-                &event(ScrollDelta::Lines(point(0., -0.5)), TouchPhase::Moved)
-            ),
-            -1
-        );
+        for y in [1., 1., -8., 3., -0.5] {
+            let event = event(ScrollDelta::Lines(point(0., y)), TouchPhase::Moved);
+            assert_eq!(
+                wheel.steps(tab_target(), &event, Instant::now()),
+                if y > 0. { 1 } else { -1 }
+            );
+        }
     }
+
     #[test]
-    fn pixels_accumulate_and_reset_on_target_or_phase() {
+    fn tab_pixels_accumulate_and_reset_on_target_or_phase() {
         let mut wheel = WheelNavigation::default();
-        let part = event(
+        let mut part = event(
             ScrollDelta::Pixels(point(px(0.), px(25.))),
             TouchPhase::Moved,
         );
-        assert_eq!(wheel.steps(WheelTarget::Screens, &part), 0);
-        assert_eq!(wheel.steps(WheelTarget::Screens, &part), 1);
-        assert_eq!(
-            wheel.steps(
-                WheelTarget::Slot {
-                    screen: "s".into(),
-                    slot: "g".into()
-                },
-                &part
-            ),
-            0
-        );
-        assert_eq!(
-            wheel.steps(
-                WheelTarget::Screens,
-                &event(
-                    ScrollDelta::Pixels(point(px(0.), px(25.))),
-                    TouchPhase::Started
-                )
-            ),
-            0
-        );
-        assert_eq!(
-            wheel.steps(
-                WheelTarget::Screens,
-                &event(
-                    ScrollDelta::Pixels(point(px(0.), px(25.))),
-                    TouchPhase::Cancelled
-                )
-            ),
-            0
-        );
-        assert_eq!(wheel.steps(WheelTarget::Screens, &part), 0);
+        let now = Instant::now();
+        assert_eq!(wheel.steps(tab_target(), &part, now), 0);
+        assert_eq!(wheel.steps(tab_target(), &part, now), 1);
+        let other = WheelTarget::Slot {
+            screen: "s".into(),
+            slot: "other".into(),
+        };
+        assert_eq!(wheel.steps(other, &part, now), 0);
+        part.touch_phase = TouchPhase::Started;
+        assert_eq!(wheel.steps(tab_target(), &part, now), 0);
+        part.touch_phase = TouchPhase::Cancelled;
+        assert_eq!(wheel.steps(tab_target(), &part, now), 0);
+        part.touch_phase = TouchPhase::Moved;
+        assert_eq!(wheel.steps(tab_target(), &part, now), 0);
+        wheel.screen_changed();
+        assert_eq!(wheel.steps(tab_target(), &part, now), 0);
     }
+
+    #[test]
+    fn drawer_swipe_waits_for_idle_after_last_event_even_after_screen_changes() {
+        let mut wheel = WheelNavigation::default();
+        let down = event(ScrollDelta::Lines(point(0., -3.)), TouchPhase::Moved);
+        let start = Instant::now();
+        assert_eq!(wheel.steps(WheelTarget::Screens, &down, start), -1);
+        for ms in (20..=300).step_by(20) {
+            wheel.screen_changed();
+            assert_eq!(
+                wheel.steps(
+                    WheelTarget::Screens,
+                    &down,
+                    start + Duration::from_millis(ms)
+                ),
+                0
+            );
+        }
+        assert_eq!(
+            wheel.steps(
+                WheelTarget::Screens,
+                &down,
+                start + Duration::from_millis(420)
+            ),
+            0
+        );
+        assert_eq!(
+            wheel.steps(
+                WheelTarget::Screens,
+                &down,
+                start + Duration::from_millis(541)
+            ),
+            -1
+        );
+    }
+
+    #[test]
+    fn drawer_swipe_matches_web_noise_floor_and_renewed_impulse() {
+        let mut wheel = WheelNavigation::default();
+        let start = Instant::now();
+        for (ms, y, expected) in [
+            (0, -1., 0),
+            (10, -2., -1),
+            (20, -2., 0),
+            (30, -1., 0),
+            (40, -4., -1),
+            (50, -3., 0),
+            (60, 3., 0),
+            (181, 3., 1),
+        ] {
+            let event = event(ScrollDelta::Pixels(point(px(0.), px(y))), TouchPhase::Moved);
+            assert_eq!(
+                wheel.steps(
+                    WheelTarget::Screens,
+                    &event,
+                    start + Duration::from_millis(ms)
+                ),
+                expected,
+                "sample at {ms}ms"
+            );
+        }
+    }
+
+    #[test]
+    fn drawer_contact_end_does_not_rearm_momentum_but_cancel_or_target_change_does() {
+        let mut wheel = WheelNavigation::default();
+        let now = Instant::now();
+        let swipe = event(
+            ScrollDelta::Pixels(point(px(0.), px(20.))),
+            TouchPhase::Moved,
+        );
+        assert_eq!(wheel.steps(WheelTarget::Screens, &swipe, now), 1);
+        let mut end = event(
+            ScrollDelta::Pixels(point(px(0.), px(0.))),
+            TouchPhase::Ended,
+        );
+        assert_eq!(wheel.steps(WheelTarget::Screens, &end, now), 0);
+        assert_eq!(wheel.steps(WheelTarget::Screens, &swipe, now), 0);
+        end.touch_phase = TouchPhase::Cancelled;
+        assert_eq!(wheel.steps(WheelTarget::Screens, &end, now), 0);
+        assert_eq!(wheel.steps(WheelTarget::Screens, &swipe, now), 1);
+        assert_eq!(wheel.steps(tab_target(), &swipe, now), 0);
+        assert_eq!(wheel.steps(WheelTarget::Screens, &swipe, now), 1);
+    }
+
     #[test]
     fn horizontal_has_priority() {
         let mut wheel = WheelNavigation::default();
-        assert_eq!(
-            wheel.steps(
-                WheelTarget::Screens,
-                &event(
-                    ScrollDelta::Pixels(point(px(60.), px(20.))),
-                    TouchPhase::Moved
-                )
-            ),
-            0
+        let horizontal = event(
+            ScrollDelta::Pixels(point(px(60.), px(20.))),
+            TouchPhase::Moved,
         );
         assert_eq!(
-            wheel.steps(
-                WheelTarget::Screens,
-                &event(
-                    ScrollDelta::Pixels(point(px(0.), px(48.))),
-                    TouchPhase::Ended
-                )
-            ),
+            wheel.steps(WheelTarget::Screens, &horizontal, Instant::now()),
+            0
+        );
+        let vertical = event(
+            ScrollDelta::Pixels(point(px(0.), px(48.))),
+            TouchPhase::Ended,
+        );
+        assert_eq!(
+            wheel.steps(WheelTarget::Screens, &vertical, Instant::now()),
             1
         );
     }
@@ -2542,9 +2723,12 @@ mod tests {
             ScrollDelta::Pixels(point(px(0.), px(30.))),
             TouchPhase::Moved,
         );
-        assert_eq!(wheel.admit(WheelTarget::Screens, &part, false), 0);
-        assert_eq!(wheel.admit(WheelTarget::Screens, &part, true), 0);
-        assert_eq!(wheel.admit(WheelTarget::Screens, &part, false), 0);
+        let now = Instant::now();
+        assert_eq!(wheel.admit(tab_target(), &part, false, now), 0);
+        assert_eq!(wheel.admit(tab_target(), &part, true, now), 0);
+        assert_eq!(wheel.admit(tab_target(), &part, false, now), 0);
+        assert_eq!(wheel.admit(WheelTarget::Screens, &part, true, now), 0);
+        assert_eq!(wheel.admit(WheelTarget::Screens, &part, false, now), 1);
     }
 
     #[test]
