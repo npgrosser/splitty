@@ -31,7 +31,7 @@ impl Catalog {
     }
 }
 impl WorkspaceRefresh {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "ui-test-support"))]
     pub(super) fn test_trailing(&mut self, model: &mut SourceWorkspace) {
         let batch = self.batch.as_mut().expect("test active collection");
         batch.closing = true;
@@ -155,6 +155,7 @@ impl WorkspaceRefresh {
         // Reconciliation remains unresolved, but quiescent. Another nudge can
         // restart reads; output and assessed whole-window close remain available.
         model.reconciling = true;
+        model.remote_creation_uncertain(&reason);
         WorkspaceDelta {
             snapshot_changed: true,
             transfer: model.finish_transfer(Some(reason.clone())),
@@ -340,10 +341,17 @@ impl WorkspaceRefresh {
             .values()
             .flat_map(|m| m.pending_panes.iter().map(String::as_str))
             .collect();
+        let converted_creation = model.remote_creation.as_ref().filter(|creation| {
+            creation.is_unresolved()
+                && !model.remote_creation_newer_than(creation.screen_id(), batch.generation)
+                && (creation.screen_id() == id
+                    || batch.snapshots.contains_key(creation.screen_id()))
+        });
         let unresolved = pending
             .iter()
             .filter(|pane| {
-                !panes.contains_key(**pane)
+                !converted_creation.is_some_and(|creation| creation.initial_pane_id() == **pane)
+                    && !panes.contains_key(**pane)
                     && !batch
                         .snapshots
                         .values()
@@ -467,6 +475,10 @@ fn commit(
             }
         }
     }
+    // Resolve the reservation in this private, complete candidate before checking
+    // capacity: another client may already have replaced the initial pane.
+    // This changes only candidate state, never the shared follow permission.
+    next.settle_remote_creation(batch.generation);
     if let Some((id, screen)) = next.models.iter().next() {
         next.check_candidate(id, screen)?;
     }
@@ -483,6 +495,12 @@ fn commit(
     delta.snapshot_changed = true;
     delta.coherent_refresh = true;
     *model = next;
+    if model
+        .remote_screen_creation()
+        .is_some_and(|creation| creation.status() == creation::RemoteScreenCreateStatus::Missing)
+    {
+        model.cancel_remote_creation_follow();
+    }
     Ok(delta)
 }
 

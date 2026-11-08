@@ -1,6 +1,7 @@
 //! Common source catalog policy, canonical Screen collection and admission.
 use super::*;
 use crate::connection::identifier;
+pub(super) mod creation;
 pub(super) mod floating;
 mod order;
 mod placement;
@@ -71,6 +72,7 @@ pub struct SourceWorkspace {
     models: HashMap<String, ScreenModel>,
     shown: Option<String>,
     pending_screens: HashMap<String, PendingScreen>,
+    remote_creation: Option<creation::RemoteScreenCreation>,
     activate_created: Option<String>,
     catalog_supported: bool,
     screen_placement_supported: bool,
@@ -325,6 +327,7 @@ impl SourceWorkspace {
             models: HashMap::new(),
             shown: None,
             pending_screens: HashMap::new(),
+            remote_creation: None,
             activate_created: None,
             catalog_supported: false,
             screen_placement_supported: false,
@@ -437,6 +440,14 @@ impl SourceWorkspace {
         let previous = self.route_map();
         self.catalog.retain(|entry| entry.id.as_str() != id);
         self.models.remove(id);
+        if self
+            .remote_creation
+            .as_ref()
+            .is_some_and(|creation| creation.screen_id() == id)
+        {
+            self.cancel_remote_creation_follow();
+            self.remote_creation = None;
+        }
         if let CatalogPolicy::Remote { missing, .. } = &mut self.policy {
             missing.remove(id);
         }
@@ -473,6 +484,7 @@ impl SourceWorkspace {
     }
     pub(super) fn cancel_navigation_follow(&mut self) {
         self.activate_created = None;
+        self.cancel_remote_creation_follow();
         self.cancel_placement_focus();
         if let Some(screen) = self.shown.as_ref().and_then(|id| self.models.get_mut(id)) {
             screen.pending_move = None;
@@ -589,6 +601,10 @@ impl SourceWorkspace {
     }
     pub fn has_pending_create(&self) -> bool {
         !self.pending_screens.is_empty()
+            || self
+                .remote_creation
+                .as_ref()
+                .is_some_and(|creation| creation.is_unresolved())
     }
     /// A missing canonical route is conclusive only after the entire opened
     /// collection has settled. A scheduled metadata refresh alone does not
@@ -598,7 +614,7 @@ impl SourceWorkspace {
             && !self.reconciling
             && !self.catalog_dirty
             && self.catalog_in_flight.is_none()
-            && self.pending_screens.is_empty()
+            && !self.has_pending_create()
             && self.pending_transfer.is_none()
             && self.pending_floating.is_none()
             && self.pending_template.is_none()
@@ -760,8 +776,10 @@ impl SourceWorkspace {
             catalog.push(info);
         }
         if self.kind() == SourceKind::Remote {
-            return self
-                .apply_remote_catalog(remote_lease.expect("remote catalog lease").charge(catalog));
+            return self.apply_remote_catalog(
+                remote_lease.expect("remote catalog lease").charge(catalog),
+                watermark,
+            );
         }
         let mut reserved: HashSet<&str> = ids.iter().map(String::as_str).collect();
         reserved.extend(
@@ -837,9 +855,15 @@ impl SourceWorkspace {
     fn apply_remote_catalog(
         &mut self,
         catalog: Charged<Vec<ScreenInfo>>,
+        watermark: u64,
     ) -> io::Result<WorkspaceDelta> {
         let previous = self.route_map();
         let old_shown = self.shown.clone();
+        let newer_creation = self
+            .remote_creation
+            .as_ref()
+            .filter(|creation| self.remote_creation_newer_than(creation.screen_id(), watermark))
+            .map(|creation| creation.screen_id().to_owned());
         let CatalogPolicy::Remote { live, missing, .. } = &mut self.policy else {
             unreachable!()
         };
@@ -856,7 +880,7 @@ impl SourceWorkspace {
                         self.tab_selection_supported,
                     )
                 });
-            } else {
+            } else if newer_creation.as_deref() != Some(id) {
                 missing.insert(id.to_owned());
                 self.models.remove(id);
             }
@@ -893,6 +917,14 @@ impl SourceWorkspace {
         let Some(id) = event["screen"]["id"].as_str() else {
             return Err(invalid("screen snapshot missing ID"));
         };
+        // A submitted creation gets route authority only from the complete collector.
+        if self
+            .remote_creation
+            .as_ref()
+            .is_some_and(|creation| creation.is_unresolved() && creation.screen_id() == id)
+        {
+            return Ok(WorkspaceDelta::default());
+        }
         let Some(existing) = self.models.get(id) else {
             return Ok(WorkspaceDelta::default());
         };
@@ -914,6 +946,13 @@ impl SourceWorkspace {
         let Some(id) = self.screen_for(pane).map(str::to_owned) else {
             return WorkspaceDelta::default();
         };
+        if self
+            .remote_creation
+            .as_ref()
+            .is_some_and(|creation| creation.is_unresolved() && creation.screen_id() == id)
+        {
+            return WorkspaceDelta::default();
+        }
         self.models
             .get_mut(&id)
             .map(|screen| screen.observe_spawn(connection, pane, session))
@@ -935,6 +974,8 @@ impl SourceWorkspace {
     }
     pub fn reset_connection(&mut self, connection: Uuid) -> WorkspaceDelta {
         let removed = self.routes();
+        self.remote_creation_lost();
+        let remote_creation = self.remote_creation.take();
         let source = self.source_id;
         let policy = self.policy.clone();
         let opened = self.catalog.clone();
@@ -946,6 +987,7 @@ impl SourceWorkspace {
             CatalogPolicy::Local => Self::new(connection),
             CatalogPolicy::Remote { target, budget, .. } => {
                 let mut next = Self::remote(source, connection, target, budget);
+                next.remote_creation = remote_creation;
                 next.catalog = opened;
                 next.shown = shown;
                 // Reuse the canonical model's existing reset boundary: it
@@ -1249,7 +1291,8 @@ impl SourceWorkspace {
             .collect()
     }
     pub(super) fn admission_count(&self) -> usize {
-        let current = self.models.values().map(screen_admission).sum();
+        let current = self.models.values().map(screen_admission).sum::<usize>()
+            + self.remote_creation_reservation();
         self.template_reserved_admission()
             .map_or(current, |(screen, panes)| {
                 let other: usize = self
@@ -1299,6 +1342,17 @@ impl SourceWorkspace {
                 if !sessions.insert(session.as_str()) {
                     return Err(invalid("session route belongs to another screen"));
                 }
+            }
+        }
+        if self
+            .remote_creation
+            .as_ref()
+            .is_some_and(|creation| creation.is_unresolved())
+        {
+            let reserved = self.remote_creation.as_ref().expect("checked creation");
+            // Pending and canonical IDs were collected together above; do not count both.
+            if !panes.contains(reserved.initial_pane_id()) {
+                count += 1;
             }
         }
         if let Some((target, reserved)) = self.template_reserved_admission() {

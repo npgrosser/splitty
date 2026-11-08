@@ -3,6 +3,20 @@ use super::*;
 use serde_json::json;
 
 impl WindowWorkspace {
+    /// Reserve through production admission; optionally settle current absence
+    /// through the same coherent collector, without a transport mutation.
+    #[doc(hidden)]
+    pub fn ui_test_remote_creation_fixture(
+        &mut self,
+        request: &RemoteScreenCreateRequest,
+        missing: bool,
+    ) -> io::Result<()> {
+        self.validate_remote_screen_creation(request.target(), request.source())?;
+        self.source_mut(request.source().source_id())
+            .ok_or_else(|| invalid("fixture source missing"))?
+            .fixture_remote_creation(request.clone(), missing)
+    }
+
     /// Feed bounded discovery through the production observation validator.
     #[doc(hidden)]
     pub fn ui_test_port_observation(

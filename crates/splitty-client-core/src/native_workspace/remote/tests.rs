@@ -1171,3 +1171,61 @@ async fn connected_update_revokes_execution_but_preserves_hidden_screen_referenc
     service.close().await.unwrap();
     let _ = std::fs::remove_dir_all(path);
 }
+
+#[tokio::test]
+async fn remote_creation_navigation_withdraws_browsing_even_when_exact_connection_is_unavailable() {
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let client = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(client.connection_id());
+    let owner = window.lifecycle_token();
+    let mut local = SourceRuntime::new(client, owner);
+    let (key, _) = window
+        .ui_test_remote_terminal_fixture("create.test")
+        .unwrap();
+    let action = window
+        .host(key.source_id())
+        .unwrap()
+        .action_target()
+        .clone();
+    let request = window
+        .prepare_remote_screen_creation(&action, window.execution_token(key.source_id()).unwrap())
+        .unwrap();
+    let mut host = Host::new(&service, action.clone()).unwrap();
+    host.setup = None; // A lost setup has no executable Client; never poll SSH.
+    let mut remotes = Remotes::new(&service);
+    remotes.hosts.push(host);
+    let mut connects = HostConnects::default();
+    let pending = uuid::Uuid::new_v4();
+    connects.insert(pending, owner);
+    assert!(window.host(key.source_id()).unwrap().is_browsing());
+    let result = create_remote_screen(
+        &mut window,
+        &mut local,
+        &mut remotes,
+        &mut connects,
+        request.clone(),
+    );
+    assert!(result.changed);
+    assert!(
+        matches!(result.updates.as_slice(), [Update::RemoteScreenCreateRejected { request_id, owner: captured, .. }] if *request_id == request.request_id() && *captured == owner)
+    );
+    assert!(!window.host(key.source_id()).unwrap().is_browsing());
+    assert!(connects.withdraw(pending).is_none());
+    assert!(!request.is_follow_requested());
+    assert!(window
+        .source(key.source_id())
+        .unwrap()
+        .remote_screen_creation()
+        .is_none());
+    assert!(remotes.hosts[0].setup.is_none());
+    assert_eq!(
+        window.opened().len(),
+        1,
+        "existing reference keeps host demand"
+    );
+    remotes.finish(&mut window).await.unwrap();
+    local.client.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}

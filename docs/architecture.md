@@ -212,6 +212,30 @@ Connect, Retry and recovery always remain connect-only. Failed or cancelled
 update dispatch is unconfirmed, never evidence of rollback; explicit Retry
 observes effective state without replaying maintenance.
 
+Explicit creation in an already opened ready remote host group uses one captured
+`RemoteScreenCreateRequest`: fixed local owner, exact host/source/attempt, explicit
+remote execution token and revocable selection permission. The local-owner command
+composes Screens navigation with browsing withdrawal; only then does the common
+SourceRuntime admit the remote mutation. A full UI queue preserves the destination,
+and later navigation can revoke the shared permission without another queued command.
+The collection reserves one reference and initial pane before sending the existing
+`create_screen` once. Omitting name and launch fields delegates naming and defaults
+to the host, including its unopened Screens. No speculative layout/session is exposed.
+One bounded pending-or-latest record per host retains the requested IDs and mutation
+watermark. The ordinary collector confirms current presence or absence only after
+its catalog/snapshot/trailing-catalog fence. A complete candidate converts the
+reservation using actual canonical content even if the first pane changed; invalid
+candidates do not free current capacity or mutate shared follow permission.
+Connection loss retains unresolved observation intent and unused capacity, clears
+execution/routes/follow, and never resends Create. Current absence releases the
+unused pane reservation but keeps a removable missing reference and historical
+uncertainty; later presence must pass ordinary capacity checks again. Detach removes
+client interest without closing host sessions. Follow remains revocable through
+prepared source effects until final owner/request validation and atomic consumption
+immediately before global selection. Dropping a cloned request or published model
+does not revoke a live counterpart. A newer creation or explicit selection supersedes
+older follows globally; accepted shutdown revokes them before stream cleanup.
+
 The normal window-close assessment includes only local work. Accepted shutdown
 revokes host demand and joins every retained host, local and API stream before
 closing the owned service; published cleanup failures remain final failures.

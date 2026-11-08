@@ -8,6 +8,9 @@ use crate::{
     connection::{invalid, MAX_ATTACHMENTS},
     Client, ScreenIds,
 };
+pub use catalog::creation::{
+    RemoteScreenCreateRequest, RemoteScreenCreateStatus, RemoteScreenCreation,
+};
 pub use catalog::floating::{FloatingActionOutcome, FloatingActionResult, FloatingTarget};
 pub(crate) use catalog::refresh::WorkspaceRefresh;
 pub use catalog::templates::{

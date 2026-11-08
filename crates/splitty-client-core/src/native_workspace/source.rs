@@ -2,7 +2,7 @@
 //! Canonical models stay in WindowWorkspace; this owns only one Client's controls.
 use super::*;
 use crate::{
-    workspace::{SourceId, SourceKind, WorkspaceDelta},
+    workspace::{RemoteScreenCreateRequest, SourceId, SourceKind, WorkspaceDelta},
     Client,
 };
 use std::io;
@@ -13,6 +13,7 @@ pub(super) struct SourceEffects {
     pub changed: bool,
     pub close_window: bool,
     pub select_created: Option<ScreenKey>,
+    pub follow_remote_creation: Option<RemoteScreenCreateRequest>,
     pub updates: Vec<Update>,
 }
 impl SourceEffects {
@@ -72,6 +73,9 @@ impl SourceRuntime {
     pub fn withdraw_visibility(&mut self) {
         self.desired_visible.clear();
     }
+    pub fn has_pending_close(&self) -> bool {
+        self.pending_close.is_some()
+    }
     pub fn cancel_created_follow(&mut self) {
         self.select_created = None;
     }
@@ -122,6 +126,56 @@ impl SourceRuntime {
         command: Command,
     ) -> anyhow::Result<SourceEffects> {
         let mut out = SourceEffects::default();
+        if let CommandKind::CreateRemoteScreen { request } = &command.kind {
+            // Identity precedes bounded deduplication; a retained UUID never
+            // upgrades an old owner/attempt to the current connection.
+            let identity = command.validate_source(self.owner).and_then(|()| {
+                window.validate_remote_creation_owner(request.target(), request.source())
+            });
+            if identity.is_ok()
+                && window
+                    .source(self.id())
+                    .is_some_and(|model| model.remote_creation_is_request(request))
+            {
+                out.changed = true;
+                return Ok(out);
+            }
+            let validation = identity.and_then(|()| {
+                if self.pending_close.is_some() {
+                    return Err(crate::connection::invalid("A close operation is pending"));
+                }
+                window.validate_remote_screen_creation(request.target(), request.source())
+            });
+            if let Err(error) = validation {
+                request.cancel_follow();
+                out.push(rejected_command(
+                    command.source,
+                    &command.kind,
+                    error.to_string(),
+                ));
+                return Ok(out);
+            }
+            // A new deliberate navigation supersedes prior creation follows across all sources.
+            window.cancel_remote_creation_follow();
+            let mut model = window.source_mut(self.id()).expect("validated source");
+            match model.create_remote_screen(&self.client, request.clone()) {
+                Ok(()) => {
+                    if let Err(error) = self.workspace_refresh.begin(&mut model) {
+                        model.remote_creation_uncertain(&error.to_string());
+                    }
+                    out.changed = true;
+                }
+                Err(error) => {
+                    request.cancel_follow();
+                    out.push(rejected_command(
+                        command.source,
+                        &command.kind,
+                        error.to_string(),
+                    ));
+                }
+            }
+            return Ok(out);
+        }
         let shown_action = matches!(
             &command.kind,
             CommandKind::Split { .. }
@@ -208,6 +262,12 @@ impl SourceRuntime {
                 return Ok(out);
             }
             _ => {}
+        }
+        if matches!(
+            &command.kind,
+            CommandKind::CreateScreen(_) | CommandKind::ApplyTemplate { .. }
+        ) {
+            window.cancel_remote_creation_follow();
         }
         let mut close_window = false;
         let mut model = Some(
@@ -352,6 +412,8 @@ impl SourceRuntime {
                 }
             }
             if close_window {
+                drop(model);
+                window.cancel_remote_creation_follow();
                 out.close_window = true;
                 return Ok(out);
             }
@@ -455,7 +517,8 @@ impl SourceRuntime {
             return Ok(out);
         }
         let result: std::io::Result<()> = match command {
-            CommandKind::ManageForward { .. }
+            CommandKind::CreateRemoteScreen { .. }
+            | CommandKind::ManageForward { .. }
             | CommandKind::RefreshForwards
             | CommandKind::CancelForwardOpen { .. }
             | CommandKind::ManageHost { .. }
@@ -874,6 +937,7 @@ impl SourceRuntime {
                             model.observe_transfer_failure(event.connection_id, json);
                             model.observe_floating_failure(event.connection_id, json);
                             model.observe_template_failure(event.connection_id, json);
+                            model.observe_remote_creation_failure(event.connection_id, json);
                         }
                         if let Some(close) = &mut self.pending_close {
                             close.observe_failure(json);
@@ -1006,6 +1070,9 @@ impl SourceRuntime {
         // The original native accounting stays alive until UI consumption.
         out.push(Update::Event { source, event });
 
+        if let Some(model) = &model {
+            out.follow_remote_creation = model.remote_creation_follow();
+        }
         if let Some(created) = &self.select_created {
             let source = model.as_ref().expect("runtime source");
             if source
@@ -1188,6 +1255,219 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn remote_creation_real_stream_confirms_canonical_name_and_late_cancel_prevents_selection(
+    ) {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let service = crate::EmbeddedService::from_runtime(runtime);
+        let client = service.connect().await.unwrap();
+        let initial = client.create_screen("Screen 1").unwrap();
+        let unopened = client.create_screen("Screen 3").unwrap();
+        let mut window = WindowWorkspace::new(uuid::Uuid::new_v4());
+        let local_key = window
+            .ui_test_screen_order_fixture(&[("local", "Local")], None)
+            .unwrap()
+            .remove(0);
+        let id = window
+            .admit_remote(window.lifecycle_token(), "create.test")
+            .unwrap();
+        window.test_bind_remote_client(id, &client);
+        let token = window.source(id).unwrap().source_token();
+        window.confirm_ready(token).unwrap();
+        let target = window.host(id).unwrap().action_target().clone();
+        let mut source = SourceRuntime::new(client, token);
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                source.reconcile(&mut window).unwrap();
+                let event = source.client.next_event().await.unwrap().unwrap();
+                source.event(&mut window, Box::new(event)).unwrap();
+                if window
+                    .source(id)
+                    .unwrap()
+                    .live_catalog()
+                    .is_some_and(|catalog| catalog.len() == 2)
+                    && !source.observation_pending(&window)
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        window.host_mut(&target).unwrap().catalog = crate::workspace::CatalogState::Ready;
+        let old = window.source(id).unwrap().screen_key(&initial.screen_id);
+        window.open_existing(token, &old).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                source.reconcile(&mut window).unwrap();
+                let event = source.client.next_event().await.unwrap().unwrap();
+                source.event(&mut window, Box::new(event)).unwrap();
+                if window
+                    .source(id)
+                    .unwrap()
+                    .screen(&initial.screen_id)
+                    .unwrap()
+                    .snapshot()
+                    .is_some()
+                    && !source.observation_pending(&window)
+                {
+                    break;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        window.select(window.lifecycle_token(), &local_key).unwrap();
+        let blocked = window
+            .prepare_remote_screen_creation(&target, token)
+            .unwrap();
+        source.pending_close = Some(PendingClose {
+            source: Some(token),
+            request_id: 8,
+            target: CloseTarget::Pane {
+                screen: initial.screen_id.clone(),
+                pane: initial.pane_id.clone(),
+            },
+            barrier_generation: 0,
+            catalog_barrier_seen: false,
+            failure: None,
+        });
+        let rejected = source
+            .command(
+                &mut window,
+                Command::new(
+                    token,
+                    CommandKind::CreateRemoteScreen {
+                        request: blocked.clone(),
+                    },
+                ),
+            )
+            .unwrap();
+        assert!(matches!(
+            rejected.updates.as_slice(),
+            [Update::RemoteScreenCreateRejected { .. }]
+        ));
+        assert!(window
+            .source(id)
+            .unwrap()
+            .remote_screen_creation()
+            .is_none());
+        source.pending_close = None;
+        let request = window
+            .prepare_remote_screen_creation(&target, token)
+            .unwrap();
+        let result = source
+            .command(
+                &mut window,
+                Command::new(
+                    token,
+                    CommandKind::CreateRemoteScreen {
+                        request: request.clone(),
+                    },
+                ),
+            )
+            .unwrap();
+        assert!(result.changed);
+        assert!(result.updates.is_empty());
+        let duplicate = source
+            .command(
+                &mut window,
+                Command::new(
+                    token,
+                    CommandKind::CreateRemoteScreen {
+                        request: request.clone(),
+                    },
+                ),
+            )
+            .unwrap();
+        assert!(duplicate.updates.is_empty());
+        assert!(request.is_follow_requested());
+        let created = window
+            .source(id)
+            .unwrap()
+            .remote_screen_creation()
+            .unwrap()
+            .screen_id()
+            .to_owned();
+        assert!(window
+            .source(id)
+            .unwrap()
+            .screen(&unopened.screen_id)
+            .is_none());
+        let effects = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                source.reconcile(&mut window).unwrap();
+                let event = source.client.next_event().await.unwrap().unwrap();
+                let effects = source.event(&mut window, Box::new(event)).unwrap();
+                if effects.follow_remote_creation.is_some() {
+                    break effects;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            window
+                .source(id)
+                .unwrap()
+                .screens()
+                .iter()
+                .find(|screen| screen.id.as_str() == created)
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("Screen 2")
+        );
+        assert!(window
+            .source(id)
+            .unwrap()
+            .screen(&created)
+            .unwrap()
+            .snapshot()
+            .unwrap()
+            .panes
+            .values()
+            .any(|pane| pane.session_id.is_some()));
+        request.cancel_follow(); // Between event preparation and publication, as destination navigation can do.
+        let (updates, mut receive) = mpsc::channel(16);
+        publish_source_effects(&mut window, effects, &updates, &AtomicBool::new(false))
+            .await
+            .unwrap();
+        while receive.try_recv().is_ok() {}
+        assert_eq!(window.shown_key(), Some(local_key));
+        let key = window.source(id).unwrap().screen_key(&created);
+        window.detach(window.lifecycle_token(), &key).unwrap();
+        source.reconcile(&mut window).unwrap();
+        source.client.request_workspace().unwrap();
+        let catalog = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                let event = source.client.next_event().await.unwrap().unwrap();
+                if event
+                    .json()
+                    .is_some_and(|value| value["type"] == "mux.workspace_snapshot")
+                {
+                    break event;
+                }
+            }
+        })
+        .await
+        .unwrap();
+        let screens = catalog.json().unwrap()["screens"].as_array().unwrap();
+        assert_eq!(
+            screens.len(),
+            3,
+            "reconciliation never repeats creation or closes detached host work"
+        );
+        assert!(screens.iter().any(|screen| screen["id"] == created));
+        drop(catalog);
+        source.client.finish().await.unwrap();
+        service.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
     async fn connection_loss_rejects_pending_close_once_with_original_owner_and_request() {
         let (runtime, path) = crate::appearance::local::tests::fixture();
         let service = crate::EmbeddedService::from_runtime(runtime);
@@ -1217,6 +1497,51 @@ mod tests {
             _ => panic!("close loss must reject the original assessment"),
         }
         assert!(source.reject_pending_close_on_loss().is_none());
+        let mut window = WindowWorkspace::new(owner.connection_id());
+        let (remote, _) = window
+            .ui_test_remote_terminal_fixture("close.test")
+            .unwrap();
+        let target = window
+            .host(remote.source_id())
+            .unwrap()
+            .action_target()
+            .clone();
+        let request = window
+            .prepare_remote_screen_creation(
+                &target,
+                window.execution_token(remote.source_id()).unwrap(),
+            )
+            .unwrap();
+        window
+            .ui_test_remote_creation_fixture(&request, false)
+            .unwrap();
+        let plan = window
+            .local_source()
+            .assess_close(42, CloseTarget::Window)
+            .unwrap();
+        let approved = source
+            .command(
+                &mut window,
+                Command::new(
+                    owner,
+                    CommandKind::RequestClose {
+                        plan,
+                        confirmed: true,
+                    },
+                ),
+            )
+            .unwrap();
+        assert!(
+            approved.close_window,
+            "remote pending creation cannot block local assessed shutdown"
+        );
+        assert!(!request.is_follow_requested());
+        assert!(window
+            .source(remote.source_id())
+            .unwrap()
+            .remote_screen_creation()
+            .unwrap()
+            .is_unresolved());
         source.client.finish().await.unwrap();
         service.close().await.unwrap();
         let _ = std::fs::remove_dir_all(path);

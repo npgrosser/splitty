@@ -9,7 +9,7 @@ The experimental native workspace SHALL provide passive inspection of the assign
 
 The experimental native workspace SHALL also provide explicit target entry, display-name editing and removal from its saved host list through its assigned local service. A display name SHALL NOT change the SSH target. Removing host metadata SHALL preserve open Screens, sessions and independently owned forwards. Current connection work MAY remain visible separately from the saved directory.
 
-Beyond passive inspection, the experimental native workspace SHALL support deliberate connection of a known directory target and explicit opening of existing Screens as specified below. Passive reads, cached observations and remote active-Screen hints SHALL NOT acquire that connection or open-reference demand. Its native subset does not yet create remote Screens, persist open references or expose forwarding controls. Explicit target entry and metadata editing follow the separate native host-management requirements.
+Beyond passive inspection, the experimental native workspace SHALL support deliberate connection of a known directory target and explicit opening of existing Screens as specified below. Passive reads, cached observations and remote active-Screen hints SHALL NOT acquire that connection or open-reference demand. This increment does not create remote Screens, persist open references or expose forwarding controls; the narrow already-open ready-group creation exception is specified by successor `native-remote-screen-create`. Explicit target entry and metadata editing follow the separate native host-management requirements.
 
 #### Scenario: Native host metadata
 - **WHEN** a native main window reads or edits its saved host metadata without requesting a connection
@@ -77,7 +77,7 @@ The experimental native workspace SHALL distinguish cached/handshake observation
 - **AND** other sources and the passive directory remain usable
 
 ### Requirement: Native Explicit Remote Screen References
-The experimental native workspace SHALL open only the existing remote Screens the user selects from a live catalog. It SHALL keep those references distinct from directory entries and local Screens, and navigate in local-first host-group order. Missing Screens SHALL be reported without recreation. Stopping and restarting this experimental workspace SHALL not restore or write remote open references in this increment.
+The experimental native workspace SHALL open existing remote Screens only when the user selects them from a live catalog; the explicit new-reference exception follows Native Explicit Remote Screen Creation. It SHALL keep those references distinct from directory entries and local Screens, and navigate in local-first host-group order. Missing Screens SHALL be reported without recreation. Stopping and restarting this experimental workspace SHALL not restore or write remote open references in this increment.
 
 #### Scenario: Open an existing Screen beside local work
 - **WHEN** a user opens one live Screen on a host with several Screens
@@ -117,7 +117,7 @@ Supported native terminal and layout actions SHALL operate on the owning remote 
 - **AND** remote settings or hub messages cannot redirect the local request or refresh owner
 
 #### Scenario: Unsupported remote actions
-- **WHEN** a queued action requests a local profile/template, new or recreated remote Screen, or a transfer outside the supported remote scope
+- **WHEN** a queued action requests a local profile/template, a recreated remote Screen, a new remote Screen outside Native Explicit Remote Screen Creation, or a transfer outside the supported remote scope
 - **THEN** it is rejected before mutation or capacity-consuming creation, even if its control is no longer visible
 - **AND** a remote loopback URL click is explained as unavailable until forwarding is supported and does not open an unrelated local service
 

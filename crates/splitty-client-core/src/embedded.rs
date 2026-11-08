@@ -509,6 +509,48 @@ mod tests {
         let closed = kind(&mut client, "mux.workspace_snapshot").await;
         assert_eq!(closed.json().unwrap()["screens"], json!([]));
         assert!(closed.json().unwrap()["activeScreenId"].is_null());
+        // Two actual clients submit default creations without sharing a name
+        // reservation. The server's application order assigns unique gaps.
+        let named = ScreenIds::new();
+        client.create_screen_with_ids(&named, "Screen 2").unwrap();
+        client.request_workspace().unwrap();
+        kind(&mut client, "mux.workspace_snapshot").await;
+        let mut other = service.connect().await.unwrap();
+        kind(&mut other, "mux.welcome").await;
+        let first = ScreenIds::new();
+        let second = ScreenIds::new();
+        client.create_default_screen_with_ids(&first).unwrap();
+        other.create_default_screen_with_ids(&second).unwrap();
+        let names = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                other.request_workspace().unwrap();
+                let event = kind(&mut other, "mux.workspace_snapshot").await;
+                let entries = event.json().unwrap()["screens"].as_array().unwrap();
+                if entries.len() == 3 {
+                    assert_eq!(
+                        entries
+                            .iter()
+                            .find(|entry| entry["id"] == named.screen_id)
+                            .unwrap()["name"],
+                        "Screen 2"
+                    );
+                    break entries
+                        .iter()
+                        .filter(|entry| {
+                            entry["id"] == first.screen_id || entry["id"] == second.screen_id
+                        })
+                        .map(|entry| entry["name"].as_str().unwrap().to_owned())
+                        .collect::<std::collections::BTreeSet<_>>();
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            names,
+            ["Screen 1".into(), "Screen 3".into()].into_iter().collect()
+        );
+        other.finish().await.unwrap();
         client.finish().await.unwrap();
         service.close().await.unwrap();
     }

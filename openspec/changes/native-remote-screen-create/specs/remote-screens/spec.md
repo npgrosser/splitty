@@ -39,6 +39,11 @@ The experimental native workspace SHALL support explicit creation within an alre
 - **THEN** the captured creation submits no operation and reports unavailability without connecting, retrying or using another source
 - **AND** rendering, inspection and dismissal create no Screen or attachment
 
+#### Scenario: Creation navigation is admitted as one intent
+- **WHEN** creation is activated while Hosts or Settings is displayed
+- **THEN** successful UI enqueue enters Screens and the accepted current-owner worker intent releases browsing demand, even if remote creation admission is subsequently refused
+- **AND** failed enqueue preserves the previous destination, while later destination departure revokes that request's follow even when the worker queue is full
+
 #### Scenario: Duplicate creation or exhausted admission
 - **WHEN** a creation is unresolved for that host or aggregate Screen/pane admission is exhausted
 - **THEN** another creation is refused before mutation, while unrelated admitted work can progress

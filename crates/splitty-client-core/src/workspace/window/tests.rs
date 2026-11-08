@@ -325,6 +325,10 @@ fn aggregate_screen_allowance_rejects_open_without_partial_reference() {
     catalog(&mut window, local, &names[..names.len() - 1]);
     open(&mut window, id, "extra");
     assert_eq!(window.opened().len(), catalog::MAX_LOCAL_SCREENS);
+    let action = window.host(id).unwrap().action_target().clone();
+    assert!(window
+        .prepare_remote_screen_creation(&action, window.execution_token(id).unwrap())
+        .is_err());
 }
 
 #[test]
@@ -691,4 +695,73 @@ fn offline_terminal_focus_is_retained_but_never_upgrades_transport_or_stale_bind
     assert!(window.focus_terminal(&key, &route).is_err());
     window.finish_close(id).unwrap();
     assert!(window.focus_terminal(&key, &route).is_err());
+}
+
+// Reuse real in-process session Clients as a remote source without an SSH setup.
+// Transport-purpose enforcement has its own real adapter rejection coverage.
+#[cfg(not(target_os = "windows"))]
+impl WindowWorkspace {
+    pub(crate) fn test_bind_remote_client(&mut self, id: SourceId, client: &Client) {
+        self.bind_remote_parts(id, client.connection_id(), client.sender().context().budget)
+            .unwrap();
+    }
+}
+
+#[test]
+fn remote_creation_admission_uses_exact_current_source_and_aggregate_capacity() {
+    let mut window = WindowWorkspace::new(Uuid::new_v4());
+    let first = remote(&mut window, "one.test");
+    let second = remote(&mut window, "two.test");
+    catalog(&mut window, first, &["same"]);
+    catalog(&mut window, second, &["same"]);
+    let first_key = open(&mut window, first, "same");
+    let second_key = open(&mut window, second, "same");
+    snapshot(&mut window, first, "same", MAX_ATTACHMENTS).unwrap();
+    let action = window.host(second).unwrap().action_target().clone();
+    let token = window.execution_token(second).unwrap();
+    assert!(window
+        .prepare_remote_screen_creation(&action, token)
+        .is_err());
+    window.disconnect(first).unwrap();
+    assert!(
+        window
+            .prepare_remote_screen_creation(&action, token)
+            .is_err(),
+        "offline retained models still own capacity"
+    );
+    window.detach(window.lifecycle_token(), &first_key).unwrap();
+    snapshot(&mut window, second, "same", 1).unwrap();
+    assert!(window
+        .prepare_remote_screen_creation(&action, token)
+        .is_ok());
+    let replacement = Uuid::new_v4();
+    // Same logical host/attempt, different execution: a callback cannot upgrade.
+    window
+        .source_mut(second)
+        .unwrap()
+        .reset_connection(replacement);
+    let current = window.execution_token(second).unwrap();
+    assert_ne!(token, current);
+    assert!(window
+        .prepare_remote_screen_creation(&action, token)
+        .is_err());
+    catalog(&mut window, second, &["same"]);
+    snapshot(&mut window, second, "same", 1).unwrap();
+    assert!(window
+        .prepare_remote_screen_creation(&action, current)
+        .is_ok());
+    window
+        .detach(window.lifecycle_token(), &second_key)
+        .unwrap();
+    assert!(
+        window
+            .prepare_remote_screen_creation(&action, current)
+            .is_err(),
+        "metadata alone is not an opened group"
+    );
+    open(&mut window, second, "same");
+    window.begin_close(second).unwrap();
+    assert!(window
+        .prepare_remote_screen_creation(&action, current)
+        .is_err());
 }

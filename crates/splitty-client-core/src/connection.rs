@@ -301,14 +301,23 @@ impl Client {
     /// Submit a screen creation with IDs reserved by the caller. A later
     /// catalog or screen refresh is separate from mutation admission.
     pub fn create_screen_with_ids(&self, ids: &ScreenIds, name: &str) -> io::Result<()> {
-        if name.len() > 256 {
+        self.submit_create_screen(ids, Some(name))
+    }
+
+    /// Use the owning service's atomic default naming and launch settings.
+    pub(crate) fn create_default_screen_with_ids(&self, ids: &ScreenIds) -> io::Result<()> {
+        self.submit_create_screen(ids, None)
+    }
+
+    fn submit_create_screen(&self, ids: &ScreenIds, name: Option<&str>) -> io::Result<()> {
+        if name.is_some_and(|name| name.len() > 256) {
             return Err(invalid("screen name too long"));
         }
         identifier(&ids.screen_id)?;
         identifier(&ids.pane_id)?;
-        self.command(name.len(), || json!({"type":"mux.op", "screenId":"", "op":{
-            "type":"create_screen", "screenId":ids.screen_id, "newPaneId":ids.pane_id, "name":name
-        }}))
+        self.command(name.map_or(0, str::len), || {
+            create_screen_message(ids, name)
+        })
     }
 
     pub(crate) fn submit_screen_transfer(
@@ -664,10 +673,31 @@ fn observe_attachment(
     }
 }
 
+fn create_screen_message(ids: &ScreenIds, name: Option<&str>) -> Value {
+    let mut op = json!({"type":"create_screen", "screenId":ids.screen_id, "newPaneId":ids.pane_id});
+    if let Some(name) = name {
+        op["name"] = json!(name);
+    }
+    json!({"type":"mux.op", "screenId":"", "op":op})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use splitty_transport::budget::ConnectionBudget;
+
+    #[test]
+    fn remote_creation_default_wire_has_only_existing_ids_and_named_local_call_stays_compatible() {
+        let ids = ScreenIds {
+            screen_id: "screen".into(),
+            pane_id: "pane".into(),
+        };
+        let expected = json!({"type":"mux.op","screenId":"","op":{"type":"create_screen","screenId":"screen","newPaneId":"pane"}});
+        assert_eq!(create_screen_message(&ids, None), expected);
+        let mut named = expected;
+        named["op"]["name"] = json!("Local name");
+        assert_eq!(create_screen_message(&ids, Some("Local name")), named);
+    }
 
     #[test]
     fn byte_input_requires_capability_without_breaking_legacy_text_or_splitting_paste() {

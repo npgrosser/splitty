@@ -498,7 +498,8 @@ impl<'a> Remotes<'a> {
             .ok_or_else(|| crate::connection::invalid("Remote source is gone"))?;
         let allowed = matches!(
             &command.kind,
-            CommandKind::Split { .. }
+            CommandKind::CreateRemoteScreen { .. }
+                | CommandKind::Split { .. }
                 | CommandKind::Tab { .. }
                 | CommandKind::Select { .. }
                 | CommandKind::Focus { .. }
@@ -1098,6 +1099,10 @@ fn merge_scoped(
     effects: SourceEffects,
 ) {
     out.changed |= effects.changed;
+    out.select_created = effects.select_created.or(out.select_created.take());
+    out.follow_remote_creation = effects
+        .follow_remote_creation
+        .or(out.follow_remote_creation.take());
     if let Some(reason) = effects.observation_error {
         host.observation_deadline = None;
         if let Some(state) = window.host_mut(&host.action) {

@@ -137,6 +137,9 @@ pub enum CommandKind {
     ReleaseHostBrowse {
         target: HostActionTarget,
     },
+    CreateRemoteScreen {
+        request: crate::workspace::RemoteScreenCreateRequest,
+    },
     OpenRemoteScreen {
         screen: ScreenKey,
     },
@@ -291,6 +294,12 @@ pub enum CommandKind {
     },
 }
 pub enum Update {
+    RemoteScreenCreateRejected {
+        owner: SourceToken,
+        source: SourceToken,
+        request_id: uuid::Uuid,
+        reason: String,
+    },
     HostUpdatePrepared(Arc<HostUpdatePlan>),
     HostUpdateRejected {
         owner: SourceToken,
@@ -384,6 +393,12 @@ fn validate_command_target(model: &SourceWorkspace, command: &CommandKind) -> st
 
 fn rejected_command(source: Option<SourceToken>, command: &CommandKind, reason: String) -> Update {
     match command {
+        CommandKind::CreateRemoteScreen { request } => Update::RemoteScreenCreateRejected {
+            owner: request.target().local_owner(),
+            source: request.source(),
+            request_id: request.request_id(),
+            reason,
+        },
         CommandKind::RequestHostUpdate { request_id, target } => Update::HostUpdateRejected {
             owner: target.local_owner(),
             request_id: *request_id,
@@ -1490,6 +1505,10 @@ async fn run_service(
                             match result {Ok(())=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
                         }
                         CommandKind::RetryHost { .. } | CommandKind::CancelHost { .. } | CommandKind::ReleaseHostBrowse { .. } => unreachable!("host lifecycle is dispatched before moving command"),
+                        CommandKind::CreateRemoteScreen { request } => {
+                            let effects = create_remote_screen(&mut window, &mut local, &mut remotes, &mut host_connects, request);
+                            publish_source_effects(&mut window, effects, &updates, &stop).await?;
+                        }
                         CommandKind::OpenRemoteScreen { screen } => {
                             match remotes.open(&mut window,captured.expect("ready source capture"),&screen) {Ok(())=>{local.cancel_created_follow();remotes.cancel_created_follow();publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;},Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
                         }
@@ -1599,6 +1618,7 @@ fn local_command(kind: &CommandKind) -> bool {
     matches!(
         kind,
         CommandKind::ConnectHost { .. }
+            | CommandKind::CreateRemoteScreen { .. }
             | CommandKind::RequestHostUpdate { .. }
             | CommandKind::ConfirmHostUpdate { .. }
             | CommandKind::DismissHostUpdate { .. }
@@ -1687,12 +1707,60 @@ fn adjacent_screen(window: &WindowWorkspace, step: TabStep) -> Option<ScreenKey>
     opened.get(next).map(|entry| entry.key().clone())
 }
 
+// One accepted local-owner Screens navigation cannot leave browsing demand
+// behind merely because subsequent remote mutation admission is refused.
+fn create_remote_screen(
+    window: &mut WindowWorkspace,
+    local: &mut source::SourceRuntime,
+    remotes: &mut remote::Remotes<'_>,
+    host_connects: &mut HostConnects,
+    request: crate::workspace::RemoteScreenCreateRequest,
+) -> source::SourceEffects {
+    host_connects.clear();
+    remotes.release_all_browse(window);
+    local.cancel_created_follow();
+    remotes.cancel_created_follow();
+    let token = request.source();
+    let command = Command::new(
+        token,
+        CommandKind::CreateRemoteScreen {
+            request: request.clone(),
+        },
+    );
+    let result = if local.has_pending_close() {
+        Err(anyhow::anyhow!("A window close is pending"))
+    } else {
+        remotes.command(window, command)
+    };
+    match result {
+        Ok(mut effects) => {
+            effects.changed = true;
+            effects
+        }
+        Err(error) => {
+            request.cancel_follow();
+            source::SourceEffects {
+                changed: true,
+                updates: vec![rejected_command(
+                    Some(token),
+                    &CommandKind::CreateRemoteScreen { request },
+                    error.to_string(),
+                )],
+                ..source::SourceEffects::default()
+            }
+        }
+    }
+}
+
 async fn publish_source_effects(
     window: &mut WindowWorkspace,
     mut effects: source::SourceEffects,
     updates: &mpsc::Sender<Update>,
     stop: &AtomicBool,
 ) -> anyhow::Result<bool> {
+    if let Some(request) = effects.follow_remote_creation {
+        effects.changed |= window.follow_remote_creation(&request)?;
+    }
     if let Some(key) = effects.select_created {
         window.select(window.lifecycle_token(), &key)?;
         effects.changed = true;

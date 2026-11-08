@@ -1225,9 +1225,10 @@ interface CreateScreenOp {
   type: "create_screen";
   /** Client-set screen ID. Server generates one if omitted. */
   screenId?: string;
+  /** Omitted: the host assigns its first unused Screen N atomically. */
   name?: string;
   /** Client-set ID for the initial pane. Server generates one if omitted. */
-  newPanelId?: string;
+  newPaneId?: string;
   /** Explicit profile, otherwise use the backend default. */
   shellProfileId?: string;
   ownership?: OwnershipMode;

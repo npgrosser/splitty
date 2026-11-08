@@ -147,6 +147,102 @@ impl WindowWorkspace {
     pub fn local_source(&self) -> &SourceWorkspace {
         &self.local
     }
+    pub(crate) fn validate_remote_creation_owner(
+        &self,
+        target: &HostActionTarget,
+        source: SourceToken,
+    ) -> io::Result<()> {
+        self.check_owner(target.local_owner())?;
+        if self
+            .host(target.source_id())
+            .is_none_or(|host| host.action_target() != target)
+            || source.source_id() != target.source_id()
+            || self.execution_token(target.source_id()) != Some(source)
+        {
+            return Err(invalid(
+                "Screen creation belongs to an unavailable host connection",
+            ));
+        }
+        Ok(())
+    }
+    /// Validate a ready opened host independently of the window's selected source.
+    pub fn validate_remote_screen_creation(
+        &self,
+        target: &HostActionTarget,
+        source: SourceToken,
+    ) -> io::Result<()> {
+        self.validate_remote_creation_owner(target, source)?;
+        if self
+            .host(target.source_id())
+            .is_none_or(|host| host.catalog_state() != CatalogState::Ready)
+        {
+            return Err(invalid("Host catalog is not ready for Screen creation"));
+        }
+        let model = self
+            .source(target.source_id())
+            .ok_or_else(|| invalid("Remote source is gone"))?;
+        model.remote_creation_available()?;
+        let screens: usize = std::iter::once(&self.local)
+            .chain(
+                self.remotes
+                    .iter()
+                    .filter_map(|entry| entry.workspace.as_ref()),
+            )
+            .map(SourceWorkspace::screen_count)
+            .sum();
+        let panes: usize = std::iter::once(&self.local)
+            .chain(
+                self.remotes
+                    .iter()
+                    .filter_map(|entry| entry.workspace.as_ref()),
+            )
+            .map(SourceWorkspace::admission_count)
+            .sum();
+        if screens >= catalog::MAX_LOCAL_SCREENS || panes >= MAX_ATTACHMENTS {
+            return Err(busy("Window Screen or pane capacity exhausted"));
+        }
+        Ok(())
+    }
+    /// Capture one deliberate action; availability checks alone do not allocate intent.
+    pub fn prepare_remote_screen_creation(
+        &self,
+        target: &HostActionTarget,
+        source: SourceToken,
+    ) -> io::Result<RemoteScreenCreateRequest> {
+        self.validate_remote_screen_creation(target, source)?;
+        Ok(RemoteScreenCreateRequest::new(target.clone(), source))
+    }
+    /// Consume revocable navigation only at the final selection boundary, with no await.
+    pub(crate) fn follow_remote_creation(
+        &mut self,
+        request: &RemoteScreenCreateRequest,
+    ) -> io::Result<bool> {
+        if self.check_owner(request.target().local_owner()).is_err()
+            || self.execution_token(request.target().source_id()) != Some(request.source())
+            || self
+                .host(request.target().source_id())
+                .is_none_or(|host| host.action_target() != request.target())
+        {
+            return Ok(false);
+        }
+        let Some(key) = self
+            .source(request.target().source_id())
+            .and_then(|source| source.consume_remote_creation_follow(request))
+        else {
+            return Ok(false);
+        };
+        self.select(self.lifecycle_token(), &key)?;
+        Ok(true)
+    }
+    pub(crate) fn cancel_remote_creation_follow(&self) {
+        for source in std::iter::once(&self.local).chain(
+            self.remotes
+                .iter()
+                .filter_map(|entry| entry.workspace.as_ref()),
+        ) {
+            source.cancel_remote_creation_follow();
+        }
+    }
     pub fn source(&self, id: SourceId) -> Option<&SourceWorkspace> {
         if id == self.local.source_id() {
             Some(&self.local)
@@ -438,7 +534,7 @@ impl WindowWorkspace {
         }
         self.bind_remote_parts(id, client.connection_id(), client.sender().context().budget)
     }
-    fn bind_remote_parts(
+    pub(super) fn bind_remote_parts(
         &mut self,
         id: SourceId,
         connection: Uuid,
@@ -532,6 +628,7 @@ impl WindowWorkspace {
         source.presentation.retry_available = false;
         if let Some(workspace) = &mut source.workspace {
             workspace.ready = false;
+            workspace.remote_creation_lost();
             workspace.clear_port_observation();
         }
         Ok(())
@@ -600,6 +697,7 @@ impl WindowWorkspace {
         source.presentation.status = SourceStatus::Closing;
         if let Some(workspace) = &mut source.workspace {
             workspace.ready = false;
+            workspace.remote_creation_lost();
             workspace.clear_port_observation();
         }
         Ok(())
@@ -635,6 +733,7 @@ impl WindowWorkspace {
         }) {
             return Err(invalid("Screen reference is no longer open"));
         }
+        self.cancel_remote_creation_follow();
         if let Some(previous) = self.selected.as_ref().map(ScreenKey::source_id) {
             if let Some(source) = self.source_mut_raw(previous) {
                 source.cancel_navigation_follow();
