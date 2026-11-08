@@ -2,8 +2,8 @@
 
 ## 1. Shared editor contracts
 
-- [ ] 1.1 Extract existing common field/edit/value/metadata/limit types into the UI-free settings module, retain terminal presentation preferences under appearance and update real imports without changing the existing twelve fields. Verify existing local-service settings unit/in-process tests and GPUI compilation retain behavior.
-- [ ] 1.2 Add the settings component and actual dependencies to `architecture/client-core.c4` and `architecture/gpui.c4`, and document the contract boundary in `docs/architecture.md`. Verify all architecture checks pass with no forwarding-only or artificial dependency edge.
+- [x] 1.1 Extract existing common field/edit/value/metadata/limit types into the UI-free settings module, retain terminal presentation preferences under appearance and update real imports without changing the existing twelve fields. Verify existing local-service settings unit/in-process tests and GPUI compilation retain behavior.
+- [x] 1.2 Add the settings component and actual dependencies to `architecture/client-core.c4` and `architecture/gpui.c4`, and document the contract boundary in `docs/architecture.md`. Verify all architecture checks pass with no forwarding-only or artificial dependency edge.
 
 ## 2. Independent notification edits
 
