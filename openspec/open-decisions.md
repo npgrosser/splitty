@@ -379,3 +379,7 @@ Each point names what holds now, the alternative, and where it is recorded.
 - **`native-outbound-ports`, NOP-3 (2026-11-08, provisional, tbd):** browser consent is separately revocable; closing its initiating surface does not implicitly stop an admitted service-owned forward.
 - **`native-outbound-ports`, NOP-4 (2026-11-08, provisional, tbd):** reuse the existing desktop localhost opening contract; run bounded Windows/WSL endpoint/collision probes and fix or withhold demonstrably mismatched paths, without blanket disabling for missing evidence or adding a proxy protocol.
 - **`native-outbound-ports`, NOP-5 (2026-11-08, provisional, tbd):** Ports extends the existing Hosts destination and completes explicit outbound workflows; reverse sharing and detection-driven automation remain separate parity work.
+
+- **`native-host-update`, NHU-2** (2026-11-08, provisional, tbd): reuse the local auxiliary API owner for one coalesced backend-version read; ordinary confirmation waits for a valid assigned-backend version rather than guessing the UI build version.
+- **`native-host-update`, NHU-3** (2026-11-08, provisional, tbd): retain at most one pending update confirmation per window; source/attempt and offer changes revoke it, while unrelated metadata changes preserve it.
+- **`native-host-update`, NHU-5** (2026-11-08, provisional, tbd): an unsuccessful dispatched update requires explicit connect-only Retry; uncertainty never replays maintenance or implies rollback.
