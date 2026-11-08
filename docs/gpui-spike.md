@@ -213,10 +213,22 @@ remains the only layout model.
 
 **Hosts** shows known targets and aliases with their cached Screen names, pane
 counts and last observation. It distinguishes an observed empty list from a host
-with no Screen observation. These rows are informational; opening the view or
-using **Refresh** does not connect to a host. A failed refresh keeps the last
-valid directory and offers **Retry**. Use **R** to refresh and **Escape** or
-**Screens** to return to the local workspace with terminal focus restored.
+with no Screen observation. Opening the view or using **Refresh** does not
+connect. Use a row's **Connect**, then **Open** for a Screen, or enter a new SSH
+target in the **Connect** dialog. An optional display name keeps the target in
+the directory independently of recent connection history. Confirmed names label
+the Hosts list and Drawer groups without changing their SSH targets. The row menu
+edits or clears that name and removes saved host metadata; removal keeps opened
+Screens, terminal sessions and forwards running.
+
+Current connection work remains visible separately from saved directory entries.
+A failed unnamed attempt does not create a saved host. Cancelling the Connect
+dialog withdraws its connection request; already submitted metadata may still
+be saved. An uncertain metadata result is refreshed without automatic resubmission.
+A failed refresh keeps the last valid directory and offers **Retry**. Use **R**
+to refresh and **Escape** or **Screens** to return to the workspace with terminal
+focus restored. Leaving Hosts releases browsing connections, while opened
+Screens retain their independent connection demand.
 
 Workspace shortcuts use **Cmd** on macOS and **Alt** on other hosts as `Mod`:
 
@@ -1413,3 +1425,37 @@ Its narrow startup check verifies hardware graphics, the exact owned backend,
 normal GUI exit code 0 after a close request, and no surviving owned Linux
 process. This check does not establish Windows terminal interaction or Settings
 acceptance; the functional evidence above remains scoped to Linux windows.
+
+
+## Native host management acceptance
+
+The native Hosts surface now accepts typed SSH targets and optional display names,
+edits or clears names, and removes saved host metadata while retaining opened
+remote work. The local worker owns metadata preparation and connection continuation;
+leaving Hosts or cancelling a pending form withdraws browsing intent. Confirmed
+names label both Hosts and Drawer groups. Current connection work remains distinct
+from saved directory entries, including after removal.
+
+The increment passes 196 client-core tests, 105 GPUI tests with the selected
+backend's UI test support, strict all-target Clippy for both changed crates,
+formatting and 17 architecture checks. Existing server metadata and forwarding
+conformance tests pass. Regression coverage includes lost acknowledgements,
+partial server failure, cancelled preparation, immutable menu owners, saturated
+cancellation queues, concurrent metadata writers, actual field typing, small-window
+form bounds, keyboard focus return and visible uncertainty after a row disappears.
+
+The optimized Linux candidate has SHA-256
+`8f77bd4d54a15fc1d27a6e90217f0786f21c95e118bc1663f49eee2939d9d586`.
+The existing remote-window harness's `host-management` phase passes ten checks:
+passive inspection, explicit connection and original-session input, invalid target
+submission without SSH, Enter/Escape focus handling, typed entry of an absent host,
+name edit/clear, removal with open work, explicit re-add and normal window close.
+It reads the private fixture's durable preferences, recents, order and catalog;
+rendered screenshots confirm the Hosts and Drawer projections. Fresh shell markers
+after removal and re-add retain the same PID, pane and session. Metadata edits
+start no additional SSH process, remote configuration and inventories remain
+unchanged, and all owned fixture processes are cleaned up.
+
+This is functional software-rendered Linux X11 evidence. Windows host interaction,
+broader remote failure cases and outbound port controls remain separate acceptance
+work; this increment does not close the wider remote workspace matrix.

@@ -17,7 +17,7 @@ use gpui_kit::base::input::{Input, InputEvent, InputState};
 use gpui_kit::base::{GlobalState, Popover, Theme};
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
-    ActiveTheme as _, Disableable, Icon, Sizable,
+    ActiveTheme as _, Disableable, Icon, Sizable, WindowExt as _,
 };
 use gpui_kit::{prelude::*, *};
 use splitty_client_core::appearance::{
@@ -712,6 +712,7 @@ pub struct Workspace {
     hosts: HostsView,
     settings: Entity<SettingsView>,
     destination: Destination,
+    host_connect_trigger: FocusHandle,
     settings_trigger: FocusHandle,
     _settings_subscription: Subscription,
     panes: HashMap<PaneKey, PaneView>,
@@ -856,10 +857,26 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> (Self, Worker) {
+        Self::new_with_worker(smoke, outcome, window, cx, |receiver, sender, scheme| {
+            Worker::start_with_backend(receiver, sender, scheme, backend)
+        })
+    }
+
+    fn new_with_worker(
+        smoke: bool,
+        outcome: Arc<AtomicBool>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        start_worker: impl FnOnce(
+            mpsc::Receiver<WorkerCommand>,
+            mpsc::Sender<Update>,
+            ColorScheme,
+        ) -> Worker,
+    ) -> (Self, Worker) {
         let (commands, receiver) = mpsc::channel(64);
         let (sender, mut updates) = mpsc::channel(64);
         let initial_scheme = Self::window_scheme(window);
-        let worker = Worker::start_with_backend(receiver, sender, initial_scheme, backend);
+        let worker = start_worker(receiver, sender, initial_scheme);
         let stopping = worker.stop.clone();
         let poll = cx.spawn_in(window, async move |this, cx| {
             let maintenance = Duration::from_millis(16);
@@ -987,6 +1004,7 @@ impl Workspace {
                 hosts: HostsView::default(),
                 settings,
                 destination: Destination::Screens,
+                host_connect_trigger: cx.focus_handle(),
                 settings_trigger: cx.focus_handle(),
                 _settings_subscription: settings_subscription,
                 panes: HashMap::new(),
@@ -1827,6 +1845,9 @@ impl Workspace {
             .local_model()
             .is_some_and(|old| old.source_token() != window_model.local_source().source_token())
         {
+            if self.hosts.has_open_form() {
+                window.close_dialog(cx);
+            }
             self.hosts
                 .set_owner(window_model.local_source().connection_id());
             self.apply_zoom(Zoom::from_values(1.0, "window"), window, cx);
@@ -2506,6 +2527,9 @@ impl Workspace {
             return;
         }
         if self.destination == Destination::Hosts {
+            if self.host_alias_key(&event.keystroke, window, cx) {
+                return;
+            }
             if let Some(action) = HostKey::from_keystroke(&event.keystroke) {
                 cx.stop_propagation();
                 match action {
@@ -2718,6 +2742,9 @@ impl Workspace {
                     if self.hosts.accept(update) {
                         cx.notify();
                     }
+                }
+                Update::HostManagement(result) => {
+                    self.host_management_result(result, window, cx);
                 }
                 Update::TemplateApi(result) => self.template_result(result, window, cx),
                 Update::TemplateApply(result) => self.template_apply_result(result, window, cx),

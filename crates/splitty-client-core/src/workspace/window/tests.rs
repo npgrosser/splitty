@@ -460,3 +460,69 @@ fn reconnect_keeps_valid_tab_and_focus_choices_but_revokes_routes_and_old_revisi
         }
     }
 }
+
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn confirmed_forget_directory_reconciliation_preserves_open_remote_bindings() {
+    use crate::hub::{
+        HostDirectoryState, HostManagementOutcome, HostManagementRequest, HubClient, HubEvent,
+    };
+    let (runtime, path) = crate::appearance::local::tests::fixture();
+    let state = runtime.state.clone();
+    state
+        .hub
+        .update_host_preference(json!({"target":"open.test","alias":"Open work"}))
+        .unwrap();
+    state
+        .hub
+        .set_host_order(json!({"order":["open.test"]}))
+        .unwrap();
+    let service: crate::owned_service::OwnedService =
+        crate::EmbeddedService::from_runtime(runtime).into();
+    let local = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let owner = window.lifecycle_token();
+    let id = remote(&mut window, "open.test");
+    catalog(&mut window, id, &["keep"]);
+    let key = open(&mut window, id, "keep");
+    snapshot(&mut window, id, "keep", 1).unwrap();
+    let route = window.routes()[0].terminal().clone();
+    let action = window.host(id).unwrap().action_target().clone();
+    let mut hub = HubClient::new(service.api_stream().await.unwrap(), owner.connection_id());
+    hub.enqueue(
+        owner,
+        Uuid::new_v4(),
+        HostManagementRequest::forget("open.test").unwrap(),
+    )
+    .unwrap();
+    let HubEvent::Management(result) = hub.next_event().await else {
+        panic!("metadata ack")
+    };
+    assert_eq!(result.outcome(), HostManagementOutcome::Applied);
+    loop {
+        if let HostDirectoryState::Ready(snapshot) = hub.next_update().await.state {
+            assert!(snapshot.directory().hosts.is_empty());
+            assert!(snapshot.directory().order.is_empty());
+            window
+                .set_host_order(owner, &snapshot.directory().order)
+                .unwrap();
+            break;
+        }
+    }
+    assert_eq!(window.shown_key(), Some(key));
+    assert_eq!(window.host(id).unwrap().action_target(), &action);
+    assert_eq!(window.routes()[0].terminal(), &route);
+    assert!(window.host(id).unwrap().is_browsing());
+    assert!(state
+        .hub
+        .update_catalog(json!({"target":"open.test","screens":[{"id":"keep","panes":1}]}))
+        .is_err());
+    assert!(
+        state.hub.directory().hosts.is_empty(),
+        "live observations cannot resurrect forgotten metadata"
+    );
+    hub.finish().await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}

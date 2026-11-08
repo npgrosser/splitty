@@ -3,7 +3,10 @@ mod remote;
 mod source;
 use crate::{
     appearance::{AppearanceSnapshot, ColorScheme, DrawerVisibilityResult},
-    hub::{HostDirectorySnapshot, HostDirectoryState, HubClient, HubUpdate},
+    hub::{
+        HostDirectorySnapshot, HostDirectoryState, HostManagementAction, HostManagementOutcome,
+        HostManagementRequest, HostManagementResult, HubClient, HubEvent, HubUpdate,
+    },
     shell_profiles::ShellProfilesSnapshot,
     templates::{TemplateApiRequest, TemplateApiResult},
     workspace::{
@@ -91,6 +94,15 @@ impl Command {
 }
 
 pub enum CommandKind {
+    ManageHost {
+        request_id: uuid::Uuid,
+        request: HostManagementRequest,
+    },
+    WithdrawHostConnect {
+        request_id: uuid::Uuid,
+    },
+    ReleaseHostBrowsing,
+
     ConnectHost {
         target: String,
     },
@@ -253,6 +265,7 @@ pub enum CommandKind {
     },
 }
 pub enum Update {
+    HostManagement(HostManagementResult),
     HostDirectory(HubUpdate),
     TemplateApi(TemplateApiResult),
     TemplateApply(TemplateApplyResult),
@@ -334,6 +347,16 @@ fn validate_command_target(model: &SourceWorkspace, command: &CommandKind) -> st
 
 fn rejected_command(source: Option<SourceToken>, command: &CommandKind, reason: String) -> Update {
     match command {
+        CommandKind::ManageHost {
+            request_id,
+            request,
+        } if source.is_some() => Update::HostManagement(HostManagementResult::new(
+            source.expect("captured owner"),
+            *request_id,
+            request,
+            HostManagementOutcome::Rejected,
+            Some(reason),
+        )),
         CommandKind::RequestClose { plan, .. } => Update::CloseRejected {
             source,
             request_id: plan.request_id,
@@ -688,6 +711,7 @@ struct RuntimeHub<'a> {
     setup_loading_due: bool,
     reader: Option<HubClient>,
     previous: Option<Arc<HostDirectorySnapshot>>,
+    admitted: std::collections::VecDeque<uuid::Uuid>,
 }
 impl<'a> RuntimeHub<'a> {
     fn new(service: &'a crate::owned_service::OwnedService, connection: uuid::Uuid) -> Self {
@@ -704,6 +728,7 @@ impl<'a> RuntimeHub<'a> {
             setup_loading_due: false,
             reader: None,
             previous: None,
+            admitted: std::collections::VecDeque::new(),
         }
     }
     fn refresh(&mut self, owner: uuid::Uuid) -> std::io::Result<()> {
@@ -715,17 +740,8 @@ impl<'a> RuntimeHub<'a> {
         }
         if let Some(reader) = &mut self.reader {
             self.previous = reader.last_good().cloned();
-            if reader.is_broken() {
-                self.generation = self
-                    .generation
-                    .checked_add(1)
-                    .ok_or_else(|| std::io::Error::other("hub generation exhausted"))?;
-                self.reopen = true;
-                self.dirty = true;
-            } else {
-                reader.refresh(owner)?;
-                self.generation = reader.generation();
-            }
+            reader.refresh(owner)?;
+            self.generation = reader.generation();
         } else {
             self.generation = self
                 .generation
@@ -736,7 +752,38 @@ impl<'a> RuntimeHub<'a> {
         }
         Ok(())
     }
+    fn enqueue(
+        &mut self,
+        owner: SourceToken,
+        id: uuid::Uuid,
+        request: HostManagementRequest,
+    ) -> std::io::Result<HostManagementResult> {
+        if self.admitted.contains(&id) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "Host request was already admitted",
+            ));
+        }
+        let result = self
+            .reader
+            .as_mut()
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "Host metadata service is not ready",
+                )
+            })?
+            .enqueue(owner, id, request)?;
+        Ok(result)
+    }
+    #[cfg(test)]
     async fn next_update(&mut self) -> HubUpdate {
+        match self.next_event().await {
+            HubEvent::Directory(update) => update,
+            HubEvent::Management(_) => panic!("unexpected mutation update"),
+        }
+    }
+    async fn next_event(&mut self) -> HubEvent {
         loop {
             if self.reopen {
                 self.reopen = false;
@@ -752,23 +799,34 @@ impl<'a> RuntimeHub<'a> {
                     self.dirty = false;
                     let reason = format!("Host directory stream cleanup failed: {error}");
                     self.cleanup_error = Some(error);
-                    return HubUpdate {
+                    return HubEvent::Directory(HubUpdate {
                         connection_id: self.connection,
                         generation: self.generation,
                         state: HostDirectoryState::Failed {
                             previous: self.previous.clone(),
                             reason,
                         },
-                    };
+                    });
                 }
             }
             if let Some(reader) = &mut self.reader {
-                let update = reader.next_update().await;
+                let update = reader.next_event().await;
+                self.generation = reader.generation();
+                if let HubEvent::Management(result) = &update {
+                    if self.admitted.len() == 256 {
+                        self.admitted.pop_front();
+                    }
+                    self.admitted.push_back(result.request_id());
+                }
                 if reader.take_reopen_due() {
                     self.reopen = true;
                     self.dirty = true;
                 }
-                if let HostDirectoryState::Ready(snapshot) = &update.state {
+                if let HubEvent::Directory(HubUpdate {
+                    state: HostDirectoryState::Ready(snapshot),
+                    ..
+                }) = &update
+                {
                     self.previous = Some(snapshot.clone());
                 }
                 return update;
@@ -786,13 +844,13 @@ impl<'a> RuntimeHub<'a> {
             }
             if self.setup_loading_due {
                 self.setup_loading_due = false;
-                return HubUpdate {
+                return HubEvent::Directory(HubUpdate {
                     connection_id: self.connection,
                     generation: self.generation,
                     state: HostDirectoryState::Loading {
                         previous: self.previous.clone(),
                     },
-                };
+                });
             }
             let result = self.setup.as_mut().expect("hub setup retained").await;
             self.setup = None;
@@ -809,14 +867,14 @@ impl<'a> RuntimeHub<'a> {
                 }
                 Err(_) if self.dirty => continue,
                 Err(_) => {
-                    return HubUpdate {
+                    return HubEvent::Directory(HubUpdate {
                         connection_id: self.connection,
                         generation: self.generation,
                         state: HostDirectoryState::Failed {
                             previous: self.previous.clone(),
                             reason: "Host directory API unavailable".into(),
                         },
-                    }
+                    });
                 }
             }
         }
@@ -943,6 +1001,16 @@ async fn finish_owned_run(
     }
 }
 impl Worker {
+    #[cfg(feature = "ui-test-support")]
+    #[doc(hidden)]
+    pub fn ui_test_fixture() -> Self {
+        Self {
+            stop: Arc::new(AtomicBool::new(false)),
+            cleanup_complete: Arc::new(AtomicBool::new(true)),
+            finished: Arc::new(AtomicBool::new(true)),
+            thread: None,
+        }
+    }
     pub fn start(commands: mpsc::Receiver<Command>, updates: mpsc::Sender<Update>) -> Self {
         Self::start_with_scheme(commands, updates, ColorScheme::Dark)
     }
@@ -1049,6 +1117,76 @@ async fn run(
     run_service(service, commands, updates, stop, cleanup_complete, scheme).await
 }
 
+/// Pending metadata and recent source admissions share one request identity.
+/// Only an actual admitted Connect can acquire browse demand.
+#[derive(Default)]
+struct HostConnects {
+    pending: HashMap<uuid::Uuid, SourceToken>,
+    started: std::collections::VecDeque<(uuid::Uuid, HostActionTarget)>,
+}
+impl HostConnects {
+    fn insert(&mut self, id: uuid::Uuid, owner: SourceToken) {
+        self.pending.insert(id, owner);
+    }
+    fn complete(&mut self, result: &HostManagementResult) -> bool {
+        self.pending.remove(&result.request_id()) == Some(result.owner())
+            && result.outcome() == HostManagementOutcome::Applied
+    }
+    fn apply(
+        &mut self,
+        result: &mut HostManagementResult,
+        window: &mut WindowWorkspace,
+        remotes: &mut remote::Remotes<'_>,
+    ) -> bool {
+        if result.owner() != window.lifecycle_token() || !self.complete(result) {
+            return false;
+        }
+        let already_browsing = window
+            .hosts()
+            .any(|host| host.action_target().target() == result.target() && host.is_browsing());
+        match remotes.connect_explicit(window, result.owner(), result.target()) {
+            Ok(()) => {
+                if !already_browsing {
+                    if let Some(action) = window
+                        .hosts()
+                        .find(|host| host.action_target().target() == result.target())
+                        .map(|host| host.action_target().clone())
+                    {
+                        self.started(result.request_id(), action);
+                    }
+                }
+                true
+            }
+            Err(error) => {
+                result.connection_failed(error.to_string());
+                false
+            }
+        }
+    }
+    fn started(&mut self, id: uuid::Uuid, action: HostActionTarget) {
+        self.retain_other_targets(action.target());
+        if self.started.len() == 16 {
+            self.started.pop_front();
+        }
+        self.started.push_back((id, action));
+    }
+    fn retain_other_targets(&mut self, target: &str) {
+        self.started.retain(|(_, action)| action.target() != target);
+    }
+    fn withdraw(&mut self, id: uuid::Uuid) -> Option<HostActionTarget> {
+        self.pending.remove(&id);
+        let index = self
+            .started
+            .iter()
+            .position(|(request, _)| *request == id)?;
+        self.started.remove(index).map(|(_, action)| action)
+    }
+    fn clear(&mut self) {
+        self.pending.clear();
+        self.started.clear();
+    }
+}
+
 async fn run_service(
     service: impl Into<crate::owned_service::OwnedService>,
     mut commands: mpsc::Receiver<Command>,
@@ -1071,11 +1209,12 @@ async fn run_service(
     let mut hub = None::<RuntimeHub<'_>>;
     let mut remotes = remote::Remotes::new(&service);
     let mut known = None::<Arc<HostDirectorySnapshot>>;
+    let mut host_connects = HostConnects::default();
     let result = async {
         let mut tick = tokio::time::interval(Duration::from_millis(16));
         enum Next {
             Settings(std::io::Result<crate::local_service::LocalServiceUpdate>),
-            Hub(HubUpdate),
+            Hub(HubEvent),
             Event(std::io::Result<Option<Event>>),
             Remote(remote::Step),
             Command(Option<Command>),
@@ -1084,7 +1223,7 @@ async fn run_service(
         loop {
             let next = tokio::select! {
                 result = async { match &mut settings { Some(reader)=>reader.next_update().await, None=>std::future::pending().await } } => Next::Settings(result),
-                update = async { match &mut hub { Some(reader)=>reader.next_update().await, None=>std::future::pending().await } } => Next::Hub(update),
+                update = async { match &mut hub { Some(reader)=>reader.next_event().await, None=>std::future::pending().await } } => Next::Hub(update),
                 event = local.client.next_event() => Next::Event(event),
                 remote = remotes.next() => Next::Remote(remote),
                 command = commands.recv() => Next::Command(command),
@@ -1093,7 +1232,15 @@ async fn run_service(
             if stop.load(Ordering::Acquire) { break; }
             let owner = window.lifecycle_token();
             match next {
-                Next::Hub(update) => {
+                Next::Hub(HubEvent::Management(mut result)) => {
+                    if result.owner()==owner {
+                        if result.action()==HostManagementAction::Connect && host_connects.apply(&mut result,&mut window,&mut remotes) {
+                            publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;
+                        }
+                        publish(&updates,Update::HostManagement(result),&stop).await?;
+                    }
+                }
+                Next::Hub(HubEvent::Directory(update)) => {
                     if update.connection_id == local.client.connection_id() {
                         let snapshot=match &update.state {HostDirectoryState::Ready(snapshot)=>Some(snapshot.clone()),HostDirectoryState::Loading {previous}|HostDirectoryState::Failed {previous,..}=>previous.clone(),HostDirectoryState::Unavailable=>None};
                         if let Some(snapshot)=snapshot.filter(|snapshot|known.as_ref().is_none_or(|old|snapshot.generation()>=old.generation())) {
@@ -1150,6 +1297,24 @@ async fn run_service(
                     }
                     let captured = command.source;
                     match command.kind {
+                        CommandKind::ManageHost {request_id,request} => {
+                            let result=hub.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Host metadata service is not ready")).and_then(|hub|hub.enqueue(owner,request_id,request.clone()));
+                            let result=match result {
+                                Ok(result)=>{if request.action()==HostManagementAction::Connect {host_connects.insert(request_id,owner);} result},
+                                Err(error) if error.kind()==std::io::ErrorKind::AlreadyExists=>continue,
+                                Err(error)=>HostManagementResult::new(owner,request_id,&request,HostManagementOutcome::Rejected,Some(error.to_string())),
+                            };
+                            publish(&updates,Update::HostManagement(result),&stop).await?;
+                        }
+                        CommandKind::WithdrawHostConnect {request_id} => {
+                            if let Some(action)=host_connects.withdraw(request_id) { let _=remotes.release_browse(&mut window,&action); }
+                            publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;
+                        }
+                        CommandKind::ReleaseHostBrowsing => {
+                            host_connects.clear();
+                            remotes.release_all_browse(&mut window);
+                            publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;
+                        }
                         CommandKind::RefreshHostDirectory { connection } => {
                             if let Some(reader)=&mut hub {
                                 if let Err(error)=reader.refresh(connection) { publish(&updates,Update::Status(error.to_string()),&stop).await?; }
@@ -1191,6 +1356,7 @@ async fn run_service(
                             }
                         }
                         CommandKind::ConnectHost { target } => {
+                            host_connects.retain_other_targets(&target);
                             let result=known.as_deref().ok_or_else(||crate::connection::invalid("Host directory has not been read")).and_then(|known|remotes.connect(&mut window,owner,&target,known));
                             match result {Ok(())=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
                         }
@@ -1293,6 +1459,9 @@ fn local_command(kind: &CommandKind) -> bool {
     matches!(
         kind,
         CommandKind::ConnectHost { .. }
+            | CommandKind::ManageHost { .. }
+            | CommandKind::WithdrawHostConnect { .. }
+            | CommandKind::ReleaseHostBrowsing
             | CommandKind::RetryHost { .. }
             | CommandKind::CancelHost { .. }
             | CommandKind::ReleaseHostBrowse { .. }

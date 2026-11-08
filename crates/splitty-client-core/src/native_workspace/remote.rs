@@ -268,6 +268,15 @@ impl<'a> Remotes<'a> {
                 "Host is not in this window's accepted directory",
             ));
         }
+        self.connect_explicit(window, owner, target)
+    }
+    /// Called only after confirmed local metadata preparation for an entered target.
+    pub(super) fn connect_explicit(
+        &mut self,
+        window: &mut WindowWorkspace,
+        owner: SourceToken,
+        target: &str,
+    ) -> io::Result<()> {
         let id = window.admit_remote(owner, target)?;
         let action = window
             .host(id)
@@ -312,6 +321,16 @@ impl<'a> Remotes<'a> {
         };
         state.diagnostic = plain_diagnostic(&host.context.budget, error).ok();
         true
+    }
+    pub fn release_all_browse(&mut self, window: &mut WindowWorkspace) {
+        let actions: Vec<_> = window
+            .hosts()
+            .filter(|host| host.is_browsing())
+            .map(|host| host.action_target().clone())
+            .collect();
+        for action in actions {
+            let _ = self.release_browse(window, &action);
+        }
     }
     pub fn release_browse(
         &mut self,

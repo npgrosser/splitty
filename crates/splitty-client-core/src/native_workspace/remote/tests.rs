@@ -708,3 +708,115 @@ async fn application_prelude_requires_exact_target_then_catalog_capability() {
     service.close().await.unwrap();
     let _ = std::fs::remove_dir_all(path);
 }
+
+#[tokio::test]
+async fn explicit_metadata_continuations_withdraw_exact_demand_and_keep_failed_unlisted_work() {
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (runtime, path) = crate::appearance::local::tests::fixture();
+    let hub_state = runtime.state.hub.clone();
+    let service: OwnedService = crate::EmbeddedService::from_runtime(runtime).into();
+    let local = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let owner = window.lifecycle_token();
+    let mut remotes = Remotes::new(&service);
+    let mut requests = HostConnects::default();
+    let request = HostManagementRequest::connect("entered.test", None).unwrap();
+    let id = uuid::Uuid::new_v4();
+    let mut success =
+        HostManagementResult::new(owner, id, &request, HostManagementOutcome::Applied, None);
+    requests.insert(id, owner);
+    assert!(requests.withdraw(id).is_none());
+    assert!(!requests.apply(&mut success, &mut window, &mut remotes));
+    assert!(window.hosts().next().is_none());
+    // Confirmed preparation may still persist after withdrawal; it is not an
+    // offline saved target and cannot manufacture connection demand.
+    hub_state
+        .update_host_preference(serde_json::json!({"target":"entered.test","hidden":false}))
+        .unwrap();
+    assert!(hub_state.directory().hosts.is_empty());
+    requests.insert(id, owner);
+    assert!(requests.apply(&mut success, &mut window, &mut remotes));
+    let action = remotes.hosts[0].action.clone();
+    remotes.hosts[0].setup = Some(Box::pin(async {
+        Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "entered target failed",
+        ))
+    }));
+    let step = next(&mut remotes).await;
+    remotes.handle(&mut window, step);
+    let step = next(&mut remotes).await;
+    remotes.handle(&mut window, step);
+    assert!(window.host(action.source_id()).unwrap().can_retry());
+    assert!(hub_state.directory().hosts.is_empty());
+    assert_eq!(
+        window.hosts().next().unwrap().action_target().target(),
+        "entered.test"
+    );
+    // A separate explicit request must not acquire ownership of an already
+    // browsed target, so cancelling its form preserves existing demand.
+    let other = uuid::Uuid::new_v4();
+    requests.insert(other, owner);
+    let mut second =
+        HostManagementResult::new(owner, other, &request, HostManagementOutcome::Applied, None);
+    assert!(requests.apply(&mut second, &mut window, &mut remotes));
+    assert!(requests.withdraw(other).is_none());
+    assert!(window.host(action.source_id()).unwrap().is_browsing());
+    // An attempt replacement makes the old form's cancellation powerless.
+    remotes.retry(&mut window, &action).unwrap();
+    remotes.hosts[0].setup = Some(Box::pin(async {
+        Err(io::Error::new(io::ErrorKind::Interrupted, "test end"))
+    }));
+    let old = requests.withdraw(id).unwrap();
+    assert!(remotes.release_browse(&mut window, &old).is_err());
+    assert!(window.host(action.source_id()).unwrap().is_browsing());
+    remotes.release_all_browse(&mut window);
+    assert!(!window.host(action.source_id()).unwrap().is_browsing());
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[tokio::test]
+async fn late_success_cancel_and_admission_failure_remain_identified() {
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let local = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let owner = window.lifecycle_token();
+    let mut remotes = Remotes::new(&service);
+    let mut requests = HostConnects::default();
+    let id = uuid::Uuid::new_v4();
+    let request = HostManagementRequest::connect("late.test", None).unwrap();
+    let mut success =
+        HostManagementResult::new(owner, id, &request, HostManagementOutcome::Applied, None);
+    requests.insert(id, owner);
+    assert!(requests.apply(&mut success, &mut window, &mut remotes));
+    // Cancelling after source admission but before UI delivery still withdraws it.
+    let action = requests.withdraw(id).unwrap();
+    remotes.hosts[0].setup = Some(Box::pin(async {
+        Err(io::Error::new(io::ErrorKind::Interrupted, "test end"))
+    }));
+    remotes.release_browse(&mut window, &action).unwrap();
+    assert!(!window.host(action.source_id()).unwrap().is_browsing());
+    assert!(remotes.hosts[0].context.is_closed());
+    // The same target cannot restart while its previous owned attempt closes.
+    let next_id = uuid::Uuid::new_v4();
+    requests.insert(next_id, owner);
+    let mut blocked = HostManagementResult::new(
+        owner,
+        next_id,
+        &request,
+        HostManagementOutcome::Applied,
+        None,
+    );
+    assert!(!requests.apply(&mut blocked, &mut window, &mut remotes));
+    assert_eq!(blocked.outcome(), HostManagementOutcome::Rejected);
+    assert!(blocked.reason().unwrap().contains("metadata was saved"));
+    assert_eq!(blocked.request_id(), next_id);
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}

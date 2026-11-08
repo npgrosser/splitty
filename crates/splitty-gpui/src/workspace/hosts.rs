@@ -1,12 +1,47 @@
-//! Passive, owner-bound host directory presentation. No row is an attach target.
+//! Owner-bound host directory and retained local host administration.
 
 use super::*;
 use gpui_kit::base::Selectable as _;
-use gpui_kit::component::{ActiveTheme as _, Disableable};
+use gpui_kit::component::{
+    menu::{DropdownMenu, PopupMenuItem},
+    ActiveTheme as _, Disableable,
+};
 use gpui_kit::UniformListScrollHandle;
-use splitty_client_core::hub::{HostDirectoryState, HubUpdate};
+use splitty_client_core::hub::{
+    HostDirectoryState, HostManagementAction, HostManagementOutcome, HostManagementResult,
+    HubUpdate,
+};
 use splitty_client_core::workspace::{CatalogState, HostActionTarget, SourceStatus};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{HashMap, HashSet},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+mod editor;
+
+struct HostConnectForm {
+    owner: SourceToken,
+    target: Entity<InputState>,
+    alias: Entity<InputState>,
+    selected: usize,
+    pending: Option<(Uuid, String)>,
+    error: Option<String>,
+}
+
+struct HostAliasEditor {
+    owner: SourceToken,
+    target: String,
+    input: Entity<InputState>,
+    error: Option<String>,
+}
+
+struct HostMutation {
+    owner: SourceToken,
+    request_id: Uuid,
+    action: HostManagementAction,
+    outcome: HostManagementOutcome,
+    reason: Option<String>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) enum HostKey {
@@ -34,6 +69,11 @@ pub(super) struct HostsView {
     state: HostDirectoryState,
     command_error: Option<String>,
     scroll: UniformListScrollHandle,
+    connect: Option<HostConnectForm>,
+    connect_subscription: Option<Subscription>,
+    alias_editor: Option<HostAliasEditor>,
+    alias_subscription: Option<Subscription>,
+    mutations: HashMap<String, HostMutation>,
 }
 
 impl Default for HostsView {
@@ -44,11 +84,21 @@ impl Default for HostsView {
             state: HostDirectoryState::Unavailable,
             command_error: None,
             scroll: UniformListScrollHandle::new(),
+            connect: None,
+            connect_subscription: None,
+            alias_editor: None,
+            alias_subscription: None,
+            mutations: HashMap::new(),
         }
     }
 }
 
 impl HostsView {
+    const MAX_MUTATIONS: usize = 32;
+
+    pub(super) fn has_open_form(&self) -> bool {
+        self.connect.is_some() || self.alias_editor.is_some()
+    }
     pub(super) fn set_owner(&mut self, owner: Uuid) {
         if self.owner == Some(owner) {
             return;
@@ -58,6 +108,11 @@ impl HostsView {
         self.state = HostDirectoryState::Unavailable;
         self.command_error = None;
         self.scroll = UniformListScrollHandle::new();
+        self.connect = None;
+        self.connect_subscription = None;
+        self.alias_editor = None;
+        self.alias_subscription = None;
+        self.mutations.clear();
     }
 
     pub(super) fn accept(&mut self, update: HubUpdate) -> bool {
@@ -65,8 +120,13 @@ impl HostsView {
             return false;
         }
         self.generation = update.generation;
+        let authoritative = matches!(&update.state, HostDirectoryState::Ready(_));
         self.state = update.state;
         self.command_error = None;
+        if authoritative {
+            self.mutations
+                .retain(|_, mutation| mutation.outcome != HostManagementOutcome::Applied);
+        }
         true
     }
 
@@ -79,12 +139,48 @@ impl HostsView {
         }
     }
 
+    pub(super) fn accepted_alias(&self, owner: SourceToken, target: &str) -> Option<&str> {
+        if self.owner != Some(owner.connection_id()) {
+            return None;
+        }
+        self.snapshot()
+            .filter(|snapshot| snapshot.connection_id() == owner.connection_id())?
+            .directory()
+            .hosts
+            .iter()
+            .find(|host| host.target == target)
+            .and_then(|host| host.alias.as_deref())
+    }
+
     fn can_refresh(&self) -> bool {
         self.owner.is_some()
             && !matches!(
                 self.state,
                 HostDirectoryState::Unavailable | HostDirectoryState::Loading { .. }
             )
+    }
+
+    fn can_record_mutation(&self, target: &str) -> bool {
+        self.mutations.contains_key(target)
+            || self.mutations.len() < Self::MAX_MUTATIONS
+            || self
+                .mutations
+                .values()
+                .any(|mutation| mutation.outcome != HostManagementOutcome::Pending)
+    }
+
+    fn record_mutation(&mut self, target: String, mutation: HostMutation) {
+        if !self.mutations.contains_key(&target) && self.mutations.len() >= Self::MAX_MUTATIONS {
+            if let Some(oldest_terminal) = self
+                .mutations
+                .iter()
+                .find(|(_, mutation)| mutation.outcome != HostManagementOutcome::Pending)
+                .map(|(target, _)| target.clone())
+            {
+                self.mutations.remove(&oldest_terminal);
+            }
+        }
+        self.mutations.insert(target, mutation);
     }
 }
 
@@ -193,6 +289,11 @@ enum HostRow {
         state: String,
         detail: String,
         action: Option<HostAction>,
+        saved: bool,
+        alias: Option<String>,
+        feedback: Option<String>,
+        mutation_pending: bool,
+        owner: Option<SourceToken>,
     },
     Screen {
         target: String,
@@ -223,6 +324,29 @@ fn admit_host_open(
         ))
         .map_err(|error| error.to_string())?;
     Ok(true)
+}
+
+fn admit_withdraw_host_connect(
+    commands: &mpsc::Sender<WorkerCommand>,
+    owner: SourceToken,
+    request_id: Uuid,
+) -> Result<(), String> {
+    commands
+        .try_send(WorkerCommand::new(
+            owner,
+            Command::WithdrawHostConnect { request_id },
+        ))
+        .map_err(|error| error.to_string())
+}
+
+fn invoke_host_menu_for_owner(
+    captured: SourceToken,
+    current: Option<SourceToken>,
+    action: impl FnOnce(),
+) {
+    if current == Some(captured) {
+        action();
+    }
 }
 
 impl Workspace {
@@ -321,26 +445,22 @@ impl Workspace {
         if self.destination == Destination::Screens {
             return;
         }
-        let browsing = self
-            .model
-            .as_ref()
-            .map(|model| {
-                model
-                    .hosts()
-                    .filter(|host| host.is_browsing())
-                    .map(|host| host.action_target().clone())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        for target in browsing {
-            let owner = target.local_owner();
-            if let Err(error) = self.commands.try_send(WorkerCommand::new(
-                owner,
-                Command::ReleaseHostBrowse { target },
-            )) {
+        if self.destination == Destination::Hosts {
+            let Some(owner) = self.lifecycle_token() else {
+                return;
+            };
+            if let Err(error) = self
+                .commands
+                .try_send(WorkerCommand::new(owner, Command::ReleaseHostBrowsing))
+            {
                 self.hosts.command_error = Some(format!("Could not leave host browsing: {error}"));
                 cx.notify();
                 return;
+            }
+            if self.hosts.connect.take().is_some() || self.hosts.alias_editor.take().is_some() {
+                self.hosts.connect_subscription = None;
+                self.hosts.alias_subscription = None;
+                window.close_dialog(cx);
             }
         }
         self.destination = Destination::Screens;
@@ -451,7 +571,7 @@ impl Workspace {
         let foreground = theme.foreground;
         let border = theme.border;
         let surface = theme.background;
-        let row_height = chrome_rems((self.appearance.font_size * 3.0 + 16.0).max(64.0));
+        let row_height = chrome_rems((self.appearance.font_size * 4.0 + 16.0).max(72.0));
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -487,98 +607,208 @@ impl Workspace {
             }
         };
         let mut rows = Vec::<HostRow>::new();
-        if let Some(snapshot) = self.hosts.snapshot() {
-            for host in &snapshot.directory().hosts {
-                let target = host.target.clone();
-                let title = display(host.alias.as_deref().unwrap_or(&target));
-                let assigned = self
-                    .model
-                    .as_ref()
-                    .and_then(|model| model.source_for_target(&target));
-                let presentation = assigned.and_then(|id| self.model.as_ref()?.host(id));
-                let action = match presentation {
-                    None => self.lifecycle_token().map(|owner| HostAction::Connect {
-                        owner,
-                        target: target.clone(),
-                    }),
-                    Some(host) if host.can_retry() => {
-                        Some(HostAction::Retry(host.action_target().clone()))
-                    }
-                    Some(host) if host.can_retry_catalog() => {
-                        Some(HostAction::RetryCatalog(host.action_target().clone()))
-                    }
-                    Some(host) if host.can_cancel() => {
-                        Some(HostAction::Cancel(host.action_target().clone()))
-                    }
-                    Some(host) if host.status() == SourceStatus::Ready && host.is_browsing() => {
-                        Some(HostAction::Release(host.action_target().clone()))
-                    }
-                    _ => None,
-                };
-                let state = match presentation.map(|host| host.status()) {
-                    None => "Not connected",
-                    Some(SourceStatus::Connecting) => "Connecting…",
-                    Some(SourceStatus::Reconnecting) => "Reconnecting…",
-                    Some(SourceStatus::Ready) => "Connected",
-                    Some(SourceStatus::Offline) => "Offline",
-                    Some(SourceStatus::Closing) => "Closing…",
-                }
-                .to_owned();
-                let detail = presentation
-                    .and_then(|host| {
-                        host.diagnostic()
-                            .map(|diagnostic| {
-                                let mut message = display(diagnostic.message());
-                                if let Some(hint) = diagnostic.hint() {
-                                    message.push_str(" · ");
-                                    message.push_str(&display(hint));
-                                }
-                                message
-                            })
-                            .or_else(|| host.progress().map(|progress| display(&progress.message)))
-                    })
-                    .or_else(|| {
-                        host.last_seen
-                            .map(|seen| format!("Last observed {}", age(seen, now)))
-                    })
-                    .unwrap_or_else(|| "Reachability has not been checked".into());
-                rows.push(HostRow::Host {
+        let mut entries: Vec<_> = self
+            .hosts
+            .snapshot()
+            .into_iter()
+            .flat_map(|snapshot| &snapshot.directory().hosts)
+            .map(|host| (host.target.clone(), Some(host.clone())))
+            .collect();
+        let mut temporary: Vec<String> = self
+            .model
+            .as_ref()
+            .into_iter()
+            .flat_map(WindowWorkspace::hosts)
+            .map(|host| host.action_target().target().to_owned())
+            .filter(|target| !entries.iter().any(|(known, _)| known == target))
+            .collect();
+        temporary.sort();
+        temporary.dedup();
+        entries.extend(temporary.into_iter().map(|target| (target, None)));
+        for (target, host) in entries {
+            let saved = host.is_some();
+            let alias = host.as_ref().and_then(|host| host.alias.clone());
+            let title = display(alias.as_deref().unwrap_or(&target));
+            let assigned = self
+                .model
+                .as_ref()
+                .and_then(|model| model.source_for_target(&target));
+            let presentation = assigned.and_then(|id| self.model.as_ref()?.host(id));
+            let action = match presentation {
+                None if saved => self.lifecycle_token().map(|owner| HostAction::Connect {
+                    owner,
                     target: target.clone(),
-                    title,
-                    state,
-                    detail,
-                    action,
-                });
-                let source = assigned.and_then(|id| self.model.as_ref()?.source(id));
-                let live = source
-                    .filter(|_| {
-                        presentation.is_some_and(|host| {
-                            host.status() == SourceStatus::Ready
-                                && host.catalog_state() == CatalogState::Ready
+                }),
+                Some(host) if host.can_retry() => {
+                    Some(HostAction::Retry(host.action_target().clone()))
+                }
+                Some(host) if host.can_retry_catalog() => {
+                    Some(HostAction::RetryCatalog(host.action_target().clone()))
+                }
+                Some(host) if host.can_cancel() => {
+                    Some(HostAction::Cancel(host.action_target().clone()))
+                }
+                Some(host) if host.status() == SourceStatus::Ready && host.is_browsing() => {
+                    Some(HostAction::Release(host.action_target().clone()))
+                }
+                _ => None,
+            };
+            let state = match presentation.map(|host| host.status()) {
+                None => "Not connected",
+                Some(SourceStatus::Connecting) => "Connecting…",
+                Some(SourceStatus::Reconnecting) => "Reconnecting…",
+                Some(SourceStatus::Ready) => "Connected",
+                Some(SourceStatus::Offline) => "Offline",
+                Some(SourceStatus::Closing) => "Closing…",
+            }
+            .to_owned();
+            let mut detail = presentation
+                .and_then(|host| {
+                    host.diagnostic()
+                        .map(|diagnostic| {
+                            let mut message = display(diagnostic.message());
+                            if let Some(hint) = diagnostic.hint() {
+                                message.push_str(" · ");
+                                message.push_str(&display(hint));
+                            }
+                            message
                         })
-                    })
-                    .and_then(SourceWorkspace::live_catalog);
-                if let Some(live) = live {
-                    if live.is_empty() {
-                        rows.push(HostRow::Screen {
-                            target: target.clone(),
-                            id: "empty-live".into(),
-                            label: "No live Screens".into(),
-                            detail: "This host reported an empty catalog".into(),
-                            route: None,
-                            opened: false,
-                        });
+                        .or_else(|| host.progress().map(|progress| display(&progress.message)))
+                })
+                .or_else(|| {
+                    presentation
+                        .filter(|host| host.status() == SourceStatus::Ready)
+                        .map(|_| "Live connection".to_owned())
+                })
+                .or_else(|| {
+                    host.as_ref()
+                        .and_then(|host| host.last_seen)
+                        .map(|seen| format!("Last observed {}", age(seen, now)))
+                })
+                .unwrap_or_else(|| {
+                    if saved {
+                        "Reachability has not been checked".into()
+                    } else {
+                        "Not saved in the host list".into()
                     }
-                    for screen in live {
-                        let Some(source) = source else {
-                            continue;
-                        };
-                        let key = source.screen_key(screen.id.as_str());
-                        let opened = self.model.as_ref().is_some_and(|model| {
-                            model.opened().iter().any(|entry| entry.key() == &key)
-                        });
+                });
+            if !saved && presentation.is_some() {
+                detail = format!("Current connection work · {detail}");
+            }
+            let feedback =
+                self.hosts
+                    .mutations
+                    .get(&target)
+                    .map(|mutation| match mutation.outcome {
+                        HostManagementOutcome::Pending => match mutation.action {
+                            HostManagementAction::SetAlias => "Saving display name…".to_owned(),
+                            HostManagementAction::Forget => "Removing from list…".to_owned(),
+                            HostManagementAction::Connect => "Preparing connection…".to_owned(),
+                        },
+                        HostManagementOutcome::Applied => {
+                            "Change confirmed · refreshing list".to_owned()
+                        }
+                        HostManagementOutcome::Rejected => format!(
+                            "Action rejected: {}",
+                            mutation.reason.as_deref().unwrap_or("Unknown error")
+                        ),
+                        HostManagementOutcome::Uncertain => format!(
+                            "Change status unknown: {}",
+                            mutation
+                                .reason
+                                .as_deref()
+                                .unwrap_or("Refresh to inspect current values")
+                        ),
+                    });
+            rows.push(HostRow::Host {
+                target: target.clone(),
+                title,
+                state,
+                detail,
+                action,
+                saved,
+                alias,
+                feedback,
+                mutation_pending: self
+                    .hosts
+                    .mutations
+                    .get(&target)
+                    .is_some_and(|mutation| mutation.outcome == HostManagementOutcome::Pending),
+                owner: self.lifecycle_token(),
+            });
+            let source = assigned.and_then(|id| self.model.as_ref()?.source(id));
+            let live = source
+                .filter(|_| {
+                    presentation.is_some_and(|host| {
+                        host.status() == SourceStatus::Ready
+                            && host.catalog_state() == CatalogState::Ready
+                    })
+                })
+                .and_then(SourceWorkspace::live_catalog);
+            if let Some(live) = live {
+                if live.is_empty() {
+                    rows.push(HostRow::Screen {
+                        target: target.clone(),
+                        id: "empty-live".into(),
+                        label: "No live Screens".into(),
+                        detail: "This host reported an empty catalog".into(),
+                        route: None,
+                        opened: false,
+                    });
+                }
+                for screen in live {
+                    let Some(source) = source else {
+                        continue;
+                    };
+                    let key = source.screen_key(screen.id.as_str());
+                    let opened = self.model.as_ref().is_some_and(|model| {
+                        model.opened().iter().any(|entry| entry.key() == &key)
+                    });
+                    let count = source
+                        .screen(screen.id.as_str())
+                        .and_then(ScreenModel::snapshot)
+                        .map(|screen| screen.panes.len());
+                    rows.push(HostRow::Screen {
+                        target: target.clone(),
+                        id: screen.id.to_string(),
+                        label: display(screen.name.as_deref().unwrap_or(screen.id.as_str())),
+                        detail: count.map_or_else(
+                            || "Live Screen · pane count unknown".into(),
+                            |n| format!("Live Screen · {n} panes"),
+                        ),
+                        route: self
+                            .execution_token(key.source_id())
+                            .map(|source| (source, key)),
+                        opened,
+                    });
+                }
+            } else if let Some(host_state) =
+                presentation.filter(|host| host.status() == SourceStatus::Ready)
+            {
+                let detail = host_state
+                    .catalog_error()
+                    .map(|error| display(error.message()))
+                    .unwrap_or_else(|| match host_state.catalog_state() {
+                        CatalogState::Unrequested | CatalogState::Loading => {
+                            "Reading live catalog…".into()
+                        }
+                        CatalogState::Ready => "Live catalog is unavailable".into(),
+                        CatalogState::Failed => "Live catalog failed · retry the catalog".into(),
+                    });
+                rows.push(HostRow::Screen {
+                    target: target.clone(),
+                    id: "catalog-status".into(),
+                    label: "Live Screens unavailable".into(),
+                    detail,
+                    route: None,
+                    opened: false,
+                });
+            }
+            if live.is_none() {
+                if let Some(observed) = source.and_then(SourceWorkspace::live_catalog) {
+                    for screen in observed {
                         let count = source
-                            .screen(screen.id.as_str())
+                            .and_then(|source| source.screen(screen.id.as_str()))
                             .and_then(ScreenModel::snapshot)
                             .map(|screen| screen.panes.len());
                         rows.push(HostRow::Screen {
@@ -586,91 +816,83 @@ impl Workspace {
                             id: screen.id.to_string(),
                             label: display(screen.name.as_deref().unwrap_or(screen.id.as_str())),
                             detail: count.map_or_else(
-                                || "Live Screen · pane count unknown".into(),
-                                |n| format!("Live Screen · {n} panes"),
+                                || "Last observed · pane count unknown".into(),
+                                |n| format!("Last observed · {n} panes"),
                             ),
-                            route: self
-                                .execution_token(key.source_id())
-                                .map(|source| (source, key)),
-                            opened,
+                            route: None,
+                            opened: false,
                         });
                     }
-                } else if let Some(host_state) =
-                    presentation.filter(|host| host.status() == SourceStatus::Ready)
-                {
-                    let detail = host_state
-                        .catalog_error()
-                        .map(|error| display(error.message()))
-                        .unwrap_or_else(|| match host_state.catalog_state() {
-                            CatalogState::Unrequested | CatalogState::Loading => {
-                                "Reading live catalog…".into()
-                            }
-                            CatalogState::Ready => "Live catalog is unavailable".into(),
-                            CatalogState::Failed => {
-                                "Live catalog failed · retry the catalog".into()
-                            }
-                        });
-                    rows.push(HostRow::Screen {
-                        target: target.clone(),
-                        id: "catalog-status".into(),
-                        label: "Live Screens unavailable".into(),
-                        detail,
-                        route: None,
-                        opened: false,
-                    });
-                }
-                if live.is_none() {
-                    if let Some(observed) = source.and_then(SourceWorkspace::live_catalog) {
-                        for screen in observed {
-                            let count = source
-                                .and_then(|source| source.screen(screen.id.as_str()))
-                                .and_then(ScreenModel::snapshot)
-                                .map(|screen| screen.panes.len());
-                            rows.push(HostRow::Screen {
-                                target: target.clone(),
-                                id: screen.id.to_string(),
-                                label: display(
-                                    screen.name.as_deref().unwrap_or(screen.id.as_str()),
-                                ),
-                                detail: count.map_or_else(
-                                    || "Last observed · pane count unknown".into(),
-                                    |n| format!("Last observed · {n} panes"),
-                                ),
-                                route: None,
-                                opened: false,
-                            });
-                        }
-                    } else {
-                        for screen in &host.screens {
-                            rows.push(HostRow::Screen {
-                                target: target.clone(),
-                                id: screen.id.clone(),
-                                label: display(screen.name.as_deref().unwrap_or(&screen.id)),
-                                detail: format!("Last observed · {} panes", screen.panes),
-                                route: None,
-                                opened: false,
-                            });
-                        }
-                    }
-                    if host.screens.is_empty() && presentation.is_none() {
-                        let detail = match observation(host.last_seen, 0) {
-                            Observation::Empty => "Last observation had no Screens",
-                            Observation::Unknown => "No Screen observation yet",
-                            Observation::Cached => unreachable!(),
-                        };
+                } else {
+                    for screen in host.as_ref().into_iter().flat_map(|host| &host.screens) {
                         rows.push(HostRow::Screen {
                             target: target.clone(),
-                            id: "unknown".into(),
-                            label: detail.into(),
-                            detail: "Connect to browse live Screens".into(),
+                            id: screen.id.clone(),
+                            label: display(screen.name.as_deref().unwrap_or(&screen.id)),
+                            detail: format!("Last observed · {} panes", screen.panes),
                             route: None,
                             opened: false,
                         });
                     }
                 }
+                if host.as_ref().is_some_and(|host| host.screens.is_empty())
+                    && presentation.is_none()
+                {
+                    let detail = match observation(host.as_ref().and_then(|host| host.last_seen), 0)
+                    {
+                        Observation::Empty => "Last observation had no Screens",
+                        Observation::Unknown => "No Screen observation yet",
+                        Observation::Cached => unreachable!(),
+                    };
+                    rows.push(HostRow::Screen {
+                        target: target.clone(),
+                        id: "unknown".into(),
+                        label: detail.into(),
+                        detail: "Connect to browse live Screens".into(),
+                        route: None,
+                        opened: false,
+                    });
+                }
             }
         }
         let rows = Arc::new(rows);
+        let visible_targets: HashSet<&str> = rows
+            .iter()
+            .filter_map(|row| match row {
+                HostRow::Host { target, .. } => Some(target.as_str()),
+                HostRow::Screen { .. } => None,
+            })
+            .collect();
+        let mut detached_feedback: Vec<_> = self
+            .hosts
+            .mutations
+            .iter()
+            .filter(|(target, mutation)| {
+                !visible_targets.contains(target.as_str())
+                    && matches!(
+                        mutation.outcome,
+                        HostManagementOutcome::Rejected | HostManagementOutcome::Uncertain
+                    )
+            })
+            .map(|(target, mutation)| {
+                format!(
+                    "{} · {}: {}",
+                    display(target),
+                    if mutation.outcome == HostManagementOutcome::Uncertain {
+                        "Change status unknown"
+                    } else {
+                        "Action rejected"
+                    },
+                    display(
+                        mutation
+                            .reason
+                            .as_deref()
+                            .unwrap_or("Refresh to inspect current values")
+                    )
+                )
+            })
+            .collect();
+        detached_feedback.sort();
         let count = rows.len();
         let list = uniform_list("hosts-list", count, {
             let rows = rows.clone();
@@ -687,6 +909,11 @@ impl Workspace {
                             state,
                             detail,
                             action,
+                            saved,
+                            alias,
+                            feedback,
+                            mutation_pending,
+                            owner,
                         } => {
                             let mut entry = div()
                                 .id(SharedString::from(format!(
@@ -734,7 +961,18 @@ impl Workspace {
                                                 .text_ellipsis()
                                                 .whitespace_nowrap()
                                                 .child(detail.clone()),
-                                        ),
+                                        )
+                                        .when_some(feedback.clone(), |view, feedback| {
+                                            view.child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(cx.theme().warning)
+                                                    .overflow_hidden()
+                                                    .text_ellipsis()
+                                                    .whitespace_nowrap()
+                                                    .child(feedback),
+                                            )
+                                        }),
                                 )
                                 .child(
                                     div()
@@ -767,6 +1005,76 @@ impl Workspace {
                                             let _ = weak.update(cx, |this, cx| {
                                                 this.host_action(action.clone(), cx)
                                             });
+                                        },
+                                    ),
+                                );
+                            }
+                            if *saved {
+                                let owner = *owner;
+                                let edit_target = target.clone();
+                                let edit_alias = alias.clone();
+                                let forget_target = target.clone();
+                                let edit_weak = weak.clone();
+                                let forget_weak = weak.clone();
+                                entry = entry.child(
+                                    Button::new(SharedString::from(format!(
+                                        "host-more:{}:{target}",
+                                        target.len()
+                                    )))
+                                    .accessibility_label(format!("More for host {target}"))
+                                    .icon(Icon::new(IconName::Ellipsis))
+                                    .ghost()
+                                    .compact()
+                                    .small()
+                                    .disabled(*mutation_pending || owner.is_none())
+                                    .dropdown_menu(
+                                        move |menu, _, _| {
+                                            let edit_target = edit_target.clone();
+                                            let forget_target = forget_target.clone();
+                                            let edit_alias = edit_alias.clone();
+                                            let edit_weak = edit_weak.clone();
+                                            let forget_weak = forget_weak.clone();
+                                            let Some(owner) = owner else {
+                                                return menu;
+                                            };
+                                            menu.item(
+                                                PopupMenuItem::new("Change display name…")
+                                                    .on_click(move |_, window, cx| {
+                                                        let _ = edit_weak.update(cx, |this, cx| {
+                                                            invoke_host_menu_for_owner(
+                                                                owner,
+                                                                this.lifecycle_token(),
+                                                                || {
+                                                                    this.edit_host_alias(
+                                                                        &edit_target,
+                                                                        edit_alias.as_deref(),
+                                                                        window,
+                                                                        cx,
+                                                                    )
+                                                                },
+                                                            );
+                                                        });
+                                                    }),
+                                            )
+                                            .item(
+                                                PopupMenuItem::new("Remove from list").on_click(
+                                                    move |_, _, cx| {
+                                                        let _ =
+                                                            forget_weak.update(cx, |this, cx| {
+                                                                invoke_host_menu_for_owner(
+                                                                    owner,
+                                                                    this.lifecycle_token(),
+                                                                    || {
+                                                                        this.forget_host(
+                                                                            &forget_target,
+                                                                            cx,
+                                                                        )
+                                                                    },
+                                                                );
+                                                            });
+                                                    },
+                                                ),
+                                            )
                                         },
                                     ),
                                 );
@@ -866,6 +1174,7 @@ impl Workspace {
         let source = self.local_model().map(SourceWorkspace::source_token);
         let weak_back = cx.entity().downgrade();
         let weak_refresh = cx.entity().downgrade();
+        let weak_connect = cx.entity().downgrade();
         div()
             .id("hosts-view")
             .flex()
@@ -902,6 +1211,18 @@ impl Workspace {
                     .child(div().font_weight(FontWeight::BOLD).child("Hosts"))
                     .child(div().flex_1())
                     .child(
+                        Button::new("hosts-connect")
+                            .label("Connect…")
+                            .accessibility_label("Connect to host")
+                            .track_focus(&self.host_connect_trigger)
+                            .small()
+                            .disabled(source.is_none())
+                            .on_click(move |_, window, cx| {
+                                let _ = weak_connect
+                                    .update(cx, |this, cx| this.open_host_connect(window, cx));
+                            }),
+                    )
+                    .child(
                         Button::new("hosts-refresh")
                             .label(if failed { "Retry" } else { "Refresh" })
                             .accessibility_label(if failed {
@@ -930,6 +1251,23 @@ impl Workspace {
                         view.child(div().text_color(cx.theme().danger).child(error))
                     }),
             )
+            .when(!detached_feedback.is_empty(), |view| {
+                view.child(
+                    div()
+                        .id("hosts-detached-feedback")
+                        .when(cfg!(all(test, feature = "ui-test-support")), |view| {
+                            view.debug_selector(|| "hosts-detached-feedback".into())
+                        })
+                        .px_4()
+                        .py_2()
+                        .flex()
+                        .flex_col()
+                        .gap_1()
+                        .text_sm()
+                        .text_color(theme.warning)
+                        .children(detached_feedback),
+                )
+            })
             .child(list)
             .into_any_element()
     }
@@ -938,8 +1276,9 @@ impl Workspace {
 #[cfg(test)]
 mod tests {
     use super::{
-        admit_host_open, age, display, failure_status, observation, HostDirectoryState, HostsView,
-        HubUpdate, Observation,
+        admit_host_open, admit_withdraw_host_connect, age, display, failure_status,
+        invoke_host_menu_for_owner, observation, HostDirectoryState, HostsView, HubUpdate,
+        Observation,
     };
     use splitty_client_core::{native_workspace::CommandKind, workspace::SourceWorkspace};
     use tokio::sync::mpsc;
@@ -965,6 +1304,32 @@ mod tests {
         assert!(matches!(
             queued.kind(),
             CommandKind::OpenRemoteScreen { screen: queued_screen } if queued_screen == &screen
+        ));
+        assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn retained_host_menu_and_cancel_do_not_cross_owner_or_full_queue() {
+        let mut source = SourceWorkspace::new(Uuid::new_v4());
+        let captured = source.source_token();
+        source.reset_connection(Uuid::new_v4());
+        let current = source.source_token();
+        let mut invoked = false;
+        invoke_host_menu_for_owner(captured, Some(current), || invoked = true);
+        assert!(!invoked);
+        invoke_host_menu_for_owner(captured, Some(captured), || invoked = true);
+        assert!(invoked);
+
+        let (commands, mut receiver) = mpsc::channel(1);
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+        admit_withdraw_host_connect(&commands, captured, first).unwrap();
+        assert!(admit_withdraw_host_connect(&commands, captured, second).is_err());
+        let queued = receiver.try_recv().unwrap();
+        assert_eq!(queued.source_token(), Some(captured));
+        assert!(matches!(
+            queued.kind(),
+            CommandKind::WithdrawHostConnect { request_id } if *request_id == first
         ));
         assert!(receiver.try_recv().is_err());
     }
@@ -1015,6 +1380,104 @@ mod tests {
             generation: 6,
             state: HostDirectoryState::Loading { previous: None },
         }));
+    }
+
+    #[cfg(feature = "ui-test-support")]
+    #[test]
+    fn authoritative_ready_settles_applied_even_when_another_writer_changes_alias() {
+        use super::{HostManagementAction, HostManagementOutcome, HostMutation};
+        use splitty_client_core::hub::HostDirectorySnapshot;
+        use std::sync::Arc;
+
+        let owner = Uuid::new_v4();
+        let token = SourceWorkspace::new(owner).source_token();
+        let mut view = HostsView::default();
+        view.set_owner(owner);
+        let previous =
+            Arc::new(HostDirectorySnapshot::ui_test_fixture(owner, 1, &["beta.example"]).unwrap());
+        assert!(view.accept(HubUpdate {
+            connection_id: owner,
+            generation: 1,
+            state: HostDirectoryState::Ready(previous.clone()),
+        }));
+        view.record_mutation(
+            "beta.example".into(),
+            HostMutation {
+                owner: token,
+                request_id: Uuid::new_v4(),
+                action: HostManagementAction::SetAlias,
+                outcome: HostManagementOutcome::Applied,
+                reason: None,
+            },
+        );
+        view.record_mutation(
+            "other.example".into(),
+            HostMutation {
+                owner: token,
+                request_id: Uuid::new_v4(),
+                action: HostManagementAction::Forget,
+                outcome: HostManagementOutcome::Uncertain,
+                reason: Some("reply lost".into()),
+            },
+        );
+        assert!(view.accept(HubUpdate {
+            connection_id: owner,
+            generation: 2,
+            state: HostDirectoryState::Loading {
+                previous: Some(previous),
+            },
+        }));
+        assert!(view.mutations.contains_key("beta.example"));
+        assert!(view.accept(HubUpdate {
+            connection_id: owner,
+            generation: 2,
+            state: HostDirectoryState::Ready(Arc::new(
+                HostDirectorySnapshot::ui_test_fixture(owner, 2, &["beta.example"]).unwrap(),
+            )),
+        }));
+        assert!(!view.mutations.contains_key("beta.example"));
+        assert_eq!(
+            view.mutations["other.example"].outcome,
+            HostManagementOutcome::Uncertain
+        );
+    }
+
+    #[cfg(feature = "ui-test-support")]
+    #[test]
+    fn accepted_alias_is_owner_bound_and_clears_with_authoritative_directory() {
+        use splitty_client_core::hub::HostDirectorySnapshot;
+        use std::sync::Arc;
+
+        let owner = Uuid::new_v4();
+        let token = SourceWorkspace::new(owner).source_token();
+        let stale = SourceWorkspace::new(Uuid::new_v4()).source_token();
+        let mut view = HostsView::default();
+        view.set_owner(owner);
+        assert!(view.accept(HubUpdate {
+            connection_id: owner,
+            generation: 1,
+            state: HostDirectoryState::Ready(Arc::new(
+                HostDirectorySnapshot::ui_test_fixture_with_aliases(
+                    owner,
+                    1,
+                    &[("beta.example", Some("Beta work"))],
+                )
+                .unwrap(),
+            )),
+        }));
+        assert_eq!(
+            view.accepted_alias(token, "beta.example"),
+            Some("Beta work")
+        );
+        assert_eq!(view.accepted_alias(stale, "beta.example"), None);
+        assert!(view.accept(HubUpdate {
+            connection_id: owner,
+            generation: 2,
+            state: HostDirectoryState::Ready(Arc::new(
+                HostDirectorySnapshot::ui_test_fixture(owner, 2, &["beta.example"]).unwrap(),
+            )),
+        }));
+        assert_eq!(view.accepted_alias(token, "beta.example"), None);
     }
 
     #[test]

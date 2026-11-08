@@ -353,13 +353,13 @@ presentation after its outcome. The view disables
 overlapping toggles and retains confirmed state on rejection or uncertainty;
 no ambiguous write is replayed. These preferences remain local-service-owned.
 
-Passive host inspection uses a third stream, independent of both ordered session
-delivery and the settings scheduler. `RuntimeHub` opens a local API stream only
+Host inspection and metadata management share a third stream, independent of
+both ordered session delivery and the settings scheduler. `RuntimeHub` opens a local API stream only
 after `hub-host-decisions-v1` readiness; embedded and owned adapters use the same
 main-service authority without a remote target or update intent. Initial readiness,
 ordered `hub.changed` events and explicit Refresh/Retry trigger `HubClient` reads.
-One retained request and a dirty generation coalesce invalidations across
-cancelled receive branches. Errors wait for another trigger; a broken stream is
+One retained API request and a dirty generation coalesce invalidations across
+cancelled receive branches. Directory errors wait for another trigger; a broken stream is
 joined before reopening. A missing capability reports unavailable without polling
 or a second directory merge in the client.
 
@@ -374,8 +374,30 @@ same-generation completion follows Loading, while an older or different-owner
 result cannot replace current presentation. A connection replacement drops the
 old view state instead of carrying its observations to another service.
 
-Hub setup, reads and stream cleanup remain owned across cancellation. Shutdown
-revokes setup, joins pending work and finishes the hub stream alongside settings
+Typed host management uses the same hub stream with a bounded FIFO of 16 pending
+actions, excluding overlapping actions on the same exact target. Validated
+requests distinguish explicit Connect, display-name change/clear and metadata
+removal; omitted Connect names preserve an existing alias. Identified outcomes
+carry the full local execution token and remain separate from directory read
+generations, so `hub.changed` cannot invalidate a valid write acknowledgement.
+Uncertain replies and potentially partial server failures trigger passive
+reconciliation without repeating the mutation. Recent admitted request identities
+are retained across stream replacement with bounded storage.
+
+Explicit Connect first reveals the entered target through existing local host
+preferences. Only a confirmed preparation acknowledgement allows the worker to
+acquire browse demand through the shared remote admission path; directory-row
+Connect still requires an accepted known target. Worker-owned request withdrawal
+handles cancellation racing preparation or admission, while leaving Hosts releases
+all browse demand. Open references keep their sources alive independently.
+Metadata removal never detaches Screens or stops sessions or forwards. GPUI owns
+retained input, focus and rendering, combining confirmed directory rows with
+current connection work without claiming the latter is saved metadata. Revealing
+an already connected unnamed target need not recreate a recent entry until a
+fresh handshake; an explicit display name can keep it discoverable independently.
+
+Hub setup, reads, submitted writes and stream cleanup remain owned across cancellation. Shutdown
+discards unsent writes, revokes setup, joins pending work and finishes the hub stream alongside settings
 and session cleanup before closing the service. A previous stream-cleanup failure
 remains a failure of final shutdown even after it was displayed. Closing Hosts
 alone leaves the local workspace and its terminals alive.

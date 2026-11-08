@@ -35,10 +35,14 @@ fixture_module = helper("remote_screen_fixture", "gpui-remote-screen-fixture.py"
 performance = helper("performance", "gpui-performance.py")
 pane_drag = helper("pane_drag", "gpui-pane-drag.py")
 
-PHASES = ("setup", "connect", "open", "settings-remote", "terminal", "two-hosts", "recovery", "detach", "full")
+PHASES = ("setup", "connect", "open", "host-management", "settings-remote", "terminal", "two-hosts", "recovery", "detach", "full")
 POINTS = {
     "connect": ("hosts.toolbar", "hosts.connect_a"),
     "open": ("hosts.open_a",),
+    "host-management": ("hosts.toolbar_remote", "hosts.connect_entry", "hosts.dialog_target",
+                        "hosts.dialog_alias", "hosts.dialog_submit", "hosts.dialog_title_region", "hosts.open_b",
+                        "hosts.b_more", "hosts.b_edit", "hosts.b_alias", "hosts.b_alias_save",
+                        "hosts.b_remove", "drawer.b_row"),
     "settings-remote": ("drawer.settings", "settings.theme.select", "settings.theme.option",
                         "terminal.body"),
     "terminal": ("drawer.local_row", "drawer.a_row"),
@@ -82,6 +86,17 @@ def run_window(args, geometry, result):
                                      "separateSessions": [host_a["session"], host_b["session"]]}
         with (owned.local_config / "config.toml").open("a") as local_config:
             local_config.write("\n[drawer]\npinned = true\nsidebar_width = 280\n")
+        if args.phase == "host-management":
+            # B remains an owned, reachable fixture host, but is not saved in
+            # the local directory. Entering it must use the real Connect form.
+            a = fixture_module.TARGETS[0]
+            for filename, field in (("recent-hosts.json", "hosts"),
+                                    ("remote-host-order.json", "order")):
+                path = owned.local_config / filename
+                document = json.loads(path.read_text())
+                document[field] = [row for row in document[field]
+                                   if (row["target"] if field == "hosts" else row) == a]
+                path.write_text(json.dumps(document) + "\n")
         if args.phase == "full":
             b = fixture_module.TARGETS[1]
             owned._run([str(owned.binary), "new-screen", "--name", "Disposable B"],
@@ -109,6 +124,25 @@ def run_window(args, geometry, result):
                 raise ValueError(f"geometry {name} must be [x, y]")
             return value
 
+        def region(name):
+            value = geometry[name]
+            if (not isinstance(value, list) or len(value) != 4 or
+                    not all(type(component) is int and component >= 0 for component in value) or
+                    value[2] == 0 or value[3] == 0):
+                raise ValueError(f"geometry {name} must be [x, y, width, height]")
+            return tuple(value)
+
+        def wait_region_stable(name, description):
+            previous = None
+            repeats = 0
+            def stable():
+                nonlocal previous, repeats
+                current = display.pixels(window, region(name))
+                repeats = repeats + 1 if current == previous else 0
+                previous = current
+                return repeats >= 3
+            wait_until(stable, description, seconds=5)
+
         def click(name):
             x("mousemove", "--window", window, *point(name))
             x("click", 1)
@@ -123,6 +157,13 @@ def run_window(args, geometry, result):
         def type_text(value):
             x("type", "--clearmodifiers", "--delay", 25, value)
             display.type_key("Return")
+            display.sync()
+
+        def fill_text(value):
+            x("key", "--clearmodifiers", "ctrl+a")
+            x("key", "--clearmodifiers", "BackSpace")
+            if value:
+                x("type", "--clearmodifiers", "--delay", 25, value)
             display.sync()
 
         def capture(label):
@@ -143,6 +184,32 @@ def run_window(args, geometry, result):
             except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 return None
             return json.loads(body)
+
+        def local_metadata(filename, field):
+            # The embedded control socket intentionally exposes only pane APIs.
+            # These are the local hub's authoritative, atomically replaced
+            # metadata files; Screenshots show the corresponding UI projection.
+            path = owned.local_config / filename
+            if not path.exists():
+                return {}
+            value = json.loads(path.read_text())
+            assert value.get("version") == 1 and isinstance(value.get(field), list), value
+            return {entry["target"]: entry for entry in value[field]}
+
+        def local_recent():
+            return local_metadata("recent-hosts.json", "hosts")
+
+        def local_catalog():
+            return local_metadata("remote-catalog.json", "hosts")
+
+        def local_preferences():
+            return local_metadata("remote-host-preferences.json", "hosts")
+
+        def local_order():
+            path = owned.local_config / "remote-host-order.json"
+            value = json.loads(path.read_text())
+            assert value.get("version") == 1 and isinstance(value.get("order"), list), value
+            return value["order"]
 
         def screens(target):
             return owned._json_cli(target, "list-screens", "--json")
@@ -318,6 +385,150 @@ def run_window(args, geometry, result):
                                          "session": owned.hosts[a]["session"]})
                     capture("remote-a-open")
                     result["checks"].append("open-existing-a-terminal-input-matches-private-session")
+
+                if args.phase == "host-management":
+                    assert b not in local_recent() and b not in local_order() and b not in local_catalog(), (
+                        "unsaved B appeared in initial local host metadata")
+                    assert b not in local_preferences(), "unsaved B had an initial preference"
+                    before_invalid = ssh_calls()
+                    click("hosts.toolbar_remote")
+                    capture("host-management-b-absent")
+                    dialog_hidden_pixels = display.pixels(window, region("hosts.dialog_title_region"))
+                    click("hosts.connect_entry")
+                    assert display.pixels(window, region("hosts.dialog_title_region")) != dialog_hidden_pixels, (
+                        "Connect dialog did not become visible")
+                    wait_region_stable("hosts.dialog_title_region", "Connect dialog did not settle")
+                    capture("host-management-connect-dialog")
+                    click("hosts.dialog_target")
+                    fill_text("bad target!")
+                    key("Return")
+                    capture("host-management-invalid-target")
+                    assert ssh_calls() == before_invalid, "invalid target invoked SSH"
+                    assert b not in local_recent() and b not in local_preferences(), (
+                        "invalid target changed local host metadata")
+                    key("Escape")
+                    wait_until(lambda: display.pixels(window, region("hosts.dialog_title_region"))
+                               == dialog_hidden_pixels,
+                               "Escape did not dismiss invalid Connect dialog")
+                    capture("host-management-escape-dismissed")
+                    key("Return")
+                    wait_until(lambda: display.pixels(window, region("hosts.dialog_title_region"))
+                               != dialog_hidden_pixels,
+                               "Return did not reopen Connect after Escape focus return")
+                    wait_region_stable("hosts.dialog_title_region", "reopened Connect dialog did not settle")
+                    capture("host-management-focus-return-reopened")
+                    result["checks"].append(
+                        "invalid-target-enter-no-ssh-escape-dismisses-and-return-reopens")
+
+                    click("hosts.dialog_target")
+                    fill_text(b)
+                    click("hosts.dialog_submit")
+                    wait_until(lambda: host_bridge_started(b),
+                               "entered private B target did not start native bridge", seconds=25)
+                    wait_until(lambda: b in local_recent(),
+                               "entered B target was not recorded after ready connection")
+                    wait_until(lambda: display.pixels(window, region("hosts.dialog_title_region"))
+                               == dialog_hidden_pixels,
+                               "Connect dialog did not close after confirmed B preparation")
+                    capture("host-management-entered-b-connected")
+                    click("hosts.open_b")
+                    before_b = marker(b, "host-management-open-b",
+                                      {"pid": owned.hosts[b]["shell_pid"],
+                                       "pane": owned.hosts[b]["pane"],
+                                       "session": owned.hosts[b]["session"]})
+                    routes_before = {target: inventory(target) for target in fixture_module.TARGETS}
+                    shells_before = {target: sorted(owned._live_shell_markers(target))
+                                     for target in fixture_module.TARGETS}
+                    remote_config_before = {target: (owned.hosts[target]["config"] / "config.toml").read_bytes()
+                                            for target in fixture_module.TARGETS}
+                    before_metadata_ssh = ssh_calls()
+                    result["checks"].append("entered-absent-owned-target-opens-original-remote-session")
+
+                    click("hosts.toolbar_remote")
+                    click("hosts.b_more")
+                    click("hosts.b_edit")
+                    assert display.pixels(window, region("hosts.dialog_title_region")) != dialog_hidden_pixels, (
+                        "B alias editor did not open")
+                    wait_region_stable("hosts.dialog_title_region", "B alias editor did not settle")
+                    capture("host-management-alias-editor")
+                    click("hosts.b_alias")
+                    fill_text("Private Beta")
+                    key("Return")
+                    wait_until(lambda: local_preferences().get(b, {}).get("alias") == "Private Beta"
+                               and b in local_recent(),
+                               "B alias did not reconcile in authoritative local metadata")
+                    wait_until(lambda: display.pixels(window, region("hosts.dialog_title_region"))
+                               == dialog_hidden_pixels, "B alias editor did not close after Save")
+                    capture("host-management-alias-saved")
+                    assert ssh_calls() == before_metadata_ssh, "alias edit invoked SSH"
+                    click("hosts.b_more")
+                    click("hosts.b_edit")
+                    assert display.pixels(window, region("hosts.dialog_title_region")) != dialog_hidden_pixels, (
+                        "B clear editor did not open")
+                    wait_region_stable("hosts.dialog_title_region", "B clear editor did not settle")
+                    click("hosts.b_alias")
+                    fill_text("")
+                    click("hosts.b_alias_save")
+                    wait_until(lambda: local_preferences().get(b, {}).get("alias") is None
+                               and b in local_preferences()
+                               and b in local_recent(),
+                               "B alias clear did not reconcile in authoritative local metadata")
+                    wait_until(lambda: display.pixels(window, region("hosts.dialog_title_region"))
+                               == dialog_hidden_pixels, "B alias editor did not close after clear")
+                    capture("host-management-alias-cleared")
+                    assert ssh_calls() == before_metadata_ssh, "alias clear invoked SSH"
+                    result["checks"].append("display-name-edit-and-clear-are-passive-local-metadata")
+
+                    click("hosts.b_more")
+                    click("hosts.b_remove")
+                    wait_until(lambda: local_preferences().get(b, {}).get("hidden") is True
+                               and b not in local_recent() and b not in local_order()
+                               and b not in local_catalog(),
+                               "Remove did not hide B in authoritative local metadata")
+                    forgotten_preference = local_preferences()[b]
+                    capture("host-management-b-forgotten-with-open-work")
+                    assert ssh_calls() == before_metadata_ssh, "Remove invoked SSH"
+                    assert {target: inventory(target) for target in fixture_module.TARGETS} == routes_before
+                    assert {target: sorted(owned._live_shell_markers(target))
+                            for target in fixture_module.TARGETS} == shells_before
+                    click("drawer.b_row")
+                    marker(b, "host-management-after-remove", before_b)
+                    capture("host-management-b-terminal-after-remove")
+                    result["checks"].append("remove-hides-metadata-and-preserves-open-remote-pty")
+
+                    click("hosts.toolbar_remote")
+                    click("hosts.connect_entry")
+                    assert display.pixels(window, region("hosts.dialog_title_region")) != dialog_hidden_pixels, (
+                        "B re-add dialog did not open")
+                    wait_region_stable("hosts.dialog_title_region", "B re-add dialog did not settle")
+                    click("hosts.dialog_target")
+                    fill_text(b)
+                    click("hosts.dialog_alias")
+                    fill_text("Restored Beta")
+                    click("hosts.dialog_submit")
+                    wait_until(lambda: local_preferences().get(b, {}).get("alias") == "Restored Beta"
+                               and local_preferences()[b].get("hidden") is not True,
+                               "explicit B re-add did not persist its display name")
+                    wait_until(lambda: display.pixels(window, region("hosts.dialog_title_region"))
+                               == dialog_hidden_pixels,
+                               "Connect dialog did not close after confirmed B re-add")
+                    capture("host-management-b-readded")
+                    click("drawer.b_row")
+                    marker(b, "host-management-after-readd", before_b)
+                    assert {target: inventory(target) for target in fixture_module.TARGETS} == routes_before
+                    assert {target: sorted(owned._live_shell_markers(target))
+                            for target in fixture_module.TARGETS} == shells_before
+                    assert all((owned.hosts[target]["config"] / "config.toml").read_bytes()
+                               == remote_config_before[target] for target in fixture_module.TARGETS)
+                    result["hostManagement"] = {
+                        "target": b, "aliasEdit": "Private Beta",
+                        "forgottenPreference": forgotten_preference,
+                        "readdedPreference": local_preferences().get(b),
+                        "remoteRoutes": routes_before, "remoteShellPids": shells_before,
+                        "remoteConfigSha256": {target: hashlib.sha256(data).hexdigest()
+                                               for target, data in remote_config_before.items()},
+                    }
+                    result["checks"].append("explicit-readd-preserves-remote-session-and-target-identity")
 
                 if args.phase == "settings-remote":
                     local_path = owned.local_config / "config.toml"
@@ -656,7 +867,7 @@ def main():
         parser.error("interaction phases require screenshot-calibrated --geometry JSON")
     required = set()
     for phase in PHASES[1:PHASES.index(args.phase) + 1]:
-        if phase == "settings-remote" and args.phase != phase:
+        if phase in ("host-management", "settings-remote") and args.phase != phase:
             continue
         required.update(POINTS.get(phase, ()))
     required.add("window.confirm_close") if args.phase != "setup" else None

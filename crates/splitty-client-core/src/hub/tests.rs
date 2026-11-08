@@ -135,6 +135,14 @@ pub(crate) mod fake_peer {
         gate: Option<tokio::sync::oneshot::Receiver<()>>,
         observed: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> (ApiStream, tokio::task::JoinHandle<()>, std::path::PathBuf) {
+        scripted_operations(replies, gate, observed, None).await
+    }
+    async fn scripted_operations(
+        replies: Vec<(u16, String, bool)>,
+        gate: Option<tokio::sync::oneshot::Receiver<()>>,
+        observed: Option<tokio::sync::oneshot::Sender<()>>,
+        operations: Option<Vec<(&'static str, serde_json::Value)>>,
+    ) -> (ApiStream, tokio::task::JoinHandle<()>, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!("hub-read-{}", Uuid::new_v4().simple()));
         std::fs::create_dir(&dir).unwrap();
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -175,14 +183,21 @@ pub(crate) mod fake_peer {
             let mut peer = Peer::start(read, write, &ready, context);
             let mut gate = gate;
             let mut observed = observed;
+            let mut operations = operations.map(|ops| ops.into_iter());
             for (status, body, uncertain) in replies {
                 let incoming = peer.recv().await.expect("one passive request");
                 let request = incoming
                     .frame
                     .decode_charged::<wire::Request>(&peer.sender.context().budget)
                     .unwrap();
-                assert_eq!(request.operation, "remote.directory.get");
-                assert!(request.args.is_empty());
+                if let Some(operations) = &mut operations {
+                    let (operation, args) = operations.next().expect("expected operation");
+                    assert_eq!(request.operation, operation);
+                    assert_eq!(serde_json::to_value(&request.args).unwrap(), args);
+                } else {
+                    assert_eq!(request.operation, "remote.directory.get");
+                    assert!(request.args.is_empty());
+                }
                 if let Some(sender) = observed.take() {
                     sender.send(()).unwrap();
                 }
@@ -211,6 +226,316 @@ pub(crate) mod fake_peer {
         });
         let api = Connector::default().local(&info).await.unwrap();
         (api.into(), task, dir)
+    }
+
+    fn owner() -> SourceToken {
+        crate::workspace::SourceWorkspace::new(Uuid::new_v4()).source_token()
+    }
+    async fn management(client: &mut HubClient) -> HostManagementResult {
+        match tokio::time::timeout(Duration::from_secs(5), client.next_event())
+            .await
+            .unwrap()
+        {
+            HubEvent::Management(result) => result,
+            _ => panic!("expected identified mutation result"),
+        }
+    }
+    #[tokio::test]
+    async fn metadata_outcomes_validate_identity_and_refresh_without_replay() {
+        use HostManagementOutcome::*;
+        for (status, body, uncertain, expected) in [
+            (200, r#"{"target":"vm1","alias":"Build"}"#, false, Applied),
+            (
+                200,
+                r#"{"target":"other","alias":"Build"}"#,
+                false,
+                Uncertain,
+            ),
+            (200, r#"{"target":"vm1","alias":"Wrong"}"#, false, Uncertain),
+            (
+                200,
+                r#"{"target":"vm1","alias":"Build","hidden":true}"#,
+                false,
+                Uncertain,
+            ),
+            (400, r#"{"error":"bad request"}"#, false, Rejected),
+            (500, r#"{"error":"write failed"}"#, false, Uncertain),
+            (200, r#"{"target":"vm1","alias":"Build"}"#, true, Uncertain),
+        ] {
+            let (api, task, dir) = scripted_operations(
+                vec![
+                    (status, body.into(), uncertain),
+                    (200, serde_json::to_string(&sample()).unwrap(), false),
+                ],
+                None,
+                None,
+                Some(vec![
+                    (
+                        "hostPreferences.update",
+                        serde_json::json!({"body":{"target":"vm1","alias":"Build","hidden":false}}),
+                    ),
+                    ("remote.directory.get", serde_json::json!({})),
+                ]),
+            )
+            .await;
+            let owner = owner();
+            let id = Uuid::new_v4();
+            let mut client = HubClient::new(api, owner.connection_id());
+            let admitted = client
+                .enqueue(
+                    owner,
+                    id,
+                    HostManagementRequest::connect("vm1", Some("Build")).unwrap(),
+                )
+                .unwrap();
+            assert_eq!(admitted.outcome(), Pending);
+            let result = management(&mut client).await;
+            assert_eq!(result.outcome(), expected);
+            assert_eq!(result.owner(), owner);
+            assert_eq!(result.request_id(), id);
+            assert_eq!(result.target(), "vm1");
+            assert!(matches!(
+                next(&mut client).await.state,
+                HostDirectoryState::Loading { .. }
+            ));
+            assert!(matches!(
+                next(&mut client).await.state,
+                HostDirectoryState::Ready(_)
+            ));
+            client.finish().await.unwrap();
+            task.await.unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+    #[tokio::test]
+    async fn changed_during_write_does_not_discard_acknowledgement() {
+        let (send, wait) = tokio::sync::oneshot::channel();
+        let (observed, received) = tokio::sync::oneshot::channel();
+        let (api, task, dir) = scripted_operations(
+            vec![
+                (200, r#"{"target":"vm1"}"#.into(), false),
+                (200, serde_json::to_string(&sample()).unwrap(), false),
+            ],
+            Some(wait),
+            Some(observed),
+            Some(vec![
+                (
+                    "hostPreferences.update",
+                    serde_json::json!({"body":{"target":"vm1","alias":null}}),
+                ),
+                ("remote.directory.get", serde_json::json!({})),
+            ]),
+        )
+        .await;
+        let owner = owner();
+        let mut client = HubClient::new(api, owner.connection_id());
+        client
+            .enqueue(
+                owner,
+                Uuid::new_v4(),
+                HostManagementRequest::set_alias("vm1", "").unwrap(),
+            )
+            .unwrap();
+        let mut pending = Box::pin(client.next_event());
+        tokio::select! { _=&mut pending=>panic!("reply gate"), _=received=>{} }
+        drop(pending);
+        client.refresh(owner.connection_id()).unwrap();
+        client.refresh(owner.connection_id()).unwrap();
+        send.send(()).unwrap();
+        assert_eq!(
+            management(&mut client).await.outcome(),
+            HostManagementOutcome::Applied
+        );
+        assert!(matches!(
+            next(&mut client).await.state,
+            HostDirectoryState::Loading { .. }
+        ));
+        assert!(matches!(
+            next(&mut client).await.state,
+            HostDirectoryState::Ready(_)
+        ));
+        client.finish().await.unwrap();
+        task.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn admission_is_bounded_exact_and_finish_discards_unsent_writes() {
+        let (api, task, dir) = scripted(vec![]).await;
+        let owner = owner();
+        let mut client = HubClient::new(api, owner.connection_id());
+        let id = Uuid::new_v4();
+        let first = HostManagementRequest::forget("vm0").unwrap();
+        assert!(client
+            .enqueue(
+                crate::workspace::SourceWorkspace::new(Uuid::new_v4()).source_token(),
+                id,
+                first.clone()
+            )
+            .is_err());
+        client.enqueue(owner, id, first.clone()).unwrap();
+        assert!(client
+            .enqueue(
+                owner,
+                id,
+                HostManagementRequest::forget("different").unwrap()
+            )
+            .is_err());
+        assert!(client.enqueue(owner, Uuid::new_v4(), first).is_err());
+        for n in 1..16 {
+            client
+                .enqueue(
+                    owner,
+                    Uuid::new_v4(),
+                    HostManagementRequest::forget(&format!("vm{n}")).unwrap(),
+                )
+                .unwrap();
+        }
+        assert!(client
+            .enqueue(
+                owner,
+                Uuid::new_v4(),
+                HostManagementRequest::forget("overflow").unwrap()
+            )
+            .is_err());
+        client.finish().await.unwrap();
+        task.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn lost_mutation_reply_rejects_unsent_queue_then_requests_reopen() {
+        let (api, task, dir) = scripted_operations(
+            vec![(0, String::new(), false)],
+            None,
+            None,
+            Some(vec![(
+                "host.forget",
+                serde_json::json!({"body":{"target":"vm1"}}),
+            )]),
+        )
+        .await;
+        let owner = owner();
+        let mut client = HubClient::new(api, owner.connection_id());
+        for target in ["vm1", "vm2"] {
+            client
+                .enqueue(
+                    owner,
+                    Uuid::new_v4(),
+                    HostManagementRequest::forget(target).unwrap(),
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            management(&mut client).await.outcome(),
+            HostManagementOutcome::Uncertain
+        );
+        assert_eq!(
+            management(&mut client).await.outcome(),
+            HostManagementOutcome::Rejected
+        );
+        assert!(matches!(
+            next(&mut client).await.state,
+            HostDirectoryState::Loading { .. }
+        ));
+        assert!(client.take_reopen_due());
+        let _ = client.finish().await;
+        task.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn mutation_supersedes_old_read_and_yields_to_reconciliation_between_writes() {
+        let directory = serde_json::to_string(&sample()).unwrap();
+        let (api, task, dir) = scripted_operations(
+            vec![
+                (200, directory.clone(), false),
+                (204, String::new(), false),
+                (200, directory.clone(), false),
+                (204, String::new(), false),
+                (200, directory, false),
+            ],
+            None,
+            None,
+            Some(vec![
+                ("remote.directory.get", serde_json::json!({})),
+                ("host.forget", serde_json::json!({"body":{"target":"vm1"}})),
+                ("remote.directory.get", serde_json::json!({})),
+                ("host.forget", serde_json::json!({"body":{"target":"vm2"}})),
+                ("remote.directory.get", serde_json::json!({})),
+            ]),
+        )
+        .await;
+        let owner = owner();
+        let mut client = HubClient::new(api, owner.connection_id());
+        assert!(matches!(
+            next(&mut client).await.state,
+            HostDirectoryState::Loading { .. }
+        ));
+        for target in ["vm1", "vm2"] {
+            client
+                .enqueue(
+                    owner,
+                    Uuid::new_v4(),
+                    HostManagementRequest::forget(target).unwrap(),
+                )
+                .unwrap();
+        }
+        // No old Ready event can appear between admission and the first ack.
+        assert_eq!(management(&mut client).await.target(), "vm1");
+        assert!(matches!(
+            next(&mut client).await.state,
+            HostDirectoryState::Loading { .. }
+        ));
+        assert!(matches!(
+            next(&mut client).await.state,
+            HostDirectoryState::Ready(_)
+        ));
+        assert_eq!(management(&mut client).await.target(), "vm2");
+        assert!(matches!(
+            next(&mut client).await.state,
+            HostDirectoryState::Loading { .. }
+        ));
+        assert!(matches!(
+            next(&mut client).await.state,
+            HostDirectoryState::Ready(_)
+        ));
+        client.finish().await.unwrap();
+        task.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[tokio::test]
+    async fn shutdown_joins_submitted_metadata_and_drops_queued_followup() {
+        let (release, gate) = tokio::sync::oneshot::channel();
+        let (observed, received) = tokio::sync::oneshot::channel();
+        let (api, task, dir) = scripted_operations(
+            vec![(204, String::new(), false)],
+            Some(gate),
+            Some(observed),
+            Some(vec![(
+                "host.forget",
+                serde_json::json!({"body":{"target":"vm1"}}),
+            )]),
+        )
+        .await;
+        let owner = owner();
+        let mut client = HubClient::new(api, owner.connection_id());
+        for target in ["vm1", "vm2"] {
+            client
+                .enqueue(
+                    owner,
+                    Uuid::new_v4(),
+                    HostManagementRequest::forget(target).unwrap(),
+                )
+                .unwrap();
+        }
+        let mut update = Box::pin(client.next_event());
+        tokio::select! {_=&mut update=>panic!("reply gate"),_=received=>{}}
+        drop(update);
+        let mut closing = Box::pin(client.finish());
+        tokio::select! {_=&mut closing=>panic!("must join admitted mutation"),_=tokio::time::sleep(Duration::from_millis(20))=>{}}
+        release.send(()).unwrap();
+        closing.await.unwrap();
+        task.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     async fn next(client: &mut HubClient) -> HubUpdate {

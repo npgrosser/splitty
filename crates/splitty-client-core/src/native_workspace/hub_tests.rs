@@ -491,3 +491,152 @@ async fn pending_failed_hub_read_does_not_block_settings_or_terminal_output() {
     std::fs::remove_dir_all(dir).unwrap();
     assert!(!path.exists());
 }
+
+#[test]
+fn entered_connections_require_live_identified_success_and_withdrawal_is_selective() {
+    let owner = SourceWorkspace::new(Uuid::new_v4()).source_token();
+    let foreign = SourceWorkspace::new(Uuid::new_v4()).source_token();
+    let request = HostManagementRequest::connect("new.test", None).unwrap();
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    let mut demand = HostConnects::default();
+    demand.insert(first, owner);
+    demand.insert(second, owner);
+    demand.withdraw(first);
+    let result = |id, token, outcome| HostManagementResult::new(token, id, &request, outcome, None);
+    assert!(!demand.complete(&result(first, owner, HostManagementOutcome::Applied)));
+    assert!(demand.complete(&result(second, owner, HostManagementOutcome::Applied)));
+    assert!(!demand.complete(&result(second, owner, HostManagementOutcome::Applied)));
+    for outcome in [
+        HostManagementOutcome::Rejected,
+        HostManagementOutcome::Uncertain,
+    ] {
+        demand.insert(first, owner);
+        assert!(!demand.complete(&result(first, owner, outcome)));
+    }
+    demand.insert(first, owner);
+    assert!(!demand.complete(&result(first, foreign, HostManagementOutcome::Applied)));
+    demand.insert(first, owner);
+    demand.insert(second, owner);
+    demand.clear();
+    assert!(!demand.complete(&result(first, owner, HostManagementOutcome::Applied)));
+    assert!(!demand.complete(&result(second, owner, HostManagementOutcome::Applied)));
+    assert!(local_command(&CommandKind::ManageHost {
+        request_id: first,
+        request: request.clone()
+    }));
+    assert!(local_command(&CommandKind::ReleaseHostBrowsing));
+    let Update::HostManagement(rejected) = rejected_command(
+        Some(foreign),
+        &CommandKind::ManageHost {
+            request_id: first,
+            request,
+        },
+        "owner changed".into(),
+    ) else {
+        panic!("identified stale-owner result")
+    };
+    assert_eq!(rejected.owner(), foreign);
+    assert_eq!(rejected.request_id(), first);
+    assert_eq!(rejected.outcome(), HostManagementOutcome::Rejected);
+}
+
+#[tokio::test]
+async fn worker_metadata_acknowledgements_survive_hub_changes_and_reconcile_alias_and_forget() {
+    if !splitty_core::pty::testing::pty_available() {
+        return;
+    }
+    let (runtime, path) = crate::appearance::local::tests::fixture();
+    let state = runtime.state.clone();
+    state
+        .hub
+        .update_host_preference(json!({"target":"managed.test","alias":"Original"}))
+        .unwrap();
+    let service =
+        crate::owned_service::OwnedService::from(crate::EmbeddedService::from_runtime(runtime));
+    let (commands, receiver) = mpsc::channel(64);
+    let (sender, mut updates) = mpsc::channel(128);
+    let stop = Arc::new(AtomicBool::new(false));
+    let cleanup = Arc::new(AtomicBool::new(false));
+    let worker = tokio::spawn(run_service(
+        service,
+        receiver,
+        sender,
+        stop.clone(),
+        cleanup.clone(),
+        ColorScheme::Dark,
+    ));
+    let initial = directory(&mut updates).await;
+    let owner = SourceWorkspace::new(initial.connection_id).source_token();
+    let mut previous = None;
+    for request in [
+        HostManagementRequest::set_alias("managed.test", "New name").unwrap(),
+        HostManagementRequest::set_alias("managed.test", "").unwrap(),
+        HostManagementRequest::forget("managed.test").unwrap(),
+    ] {
+        let id = Uuid::new_v4();
+        commands
+            .send(Command::new(
+                owner,
+                CommandKind::ManageHost {
+                    request_id: id,
+                    request: request.clone(),
+                },
+            ))
+            .await
+            .unwrap();
+        let mut applied = false;
+        let mut pending = false;
+        let mut refreshed = false;
+        while !applied || !refreshed {
+            match next(&mut updates).await {
+                Update::HostManagement(result) if result.request_id() == id => {
+                    assert_eq!(result.owner(), owner);
+                    assert_eq!(result.target(), "managed.test");
+                    match result.outcome() {
+                        HostManagementOutcome::Pending => pending = true,
+                        HostManagementOutcome::Applied => {
+                            assert!(pending);
+                            applied = true;
+                        }
+                        other => panic!("unexpected outcome {other:?}: {:?}", result.reason()),
+                    }
+                }
+                Update::HostDirectory(update) if applied => {
+                    if let HostDirectoryState::Ready(snapshot) = update.state {
+                        let row = snapshot
+                            .directory()
+                            .hosts
+                            .iter()
+                            .find(|host| host.target == "managed.test");
+                        if request.action() == HostManagementAction::Forget || previous.is_some() {
+                            assert!(row.is_none());
+                        } else {
+                            assert_eq!(row.unwrap().alias.as_deref(), Some("New name"));
+                        }
+                        refreshed = true;
+                    }
+                }
+                Update::Workspace(window) => {
+                    assert!(window.hosts().next().is_none(), "metadata never dials")
+                }
+                _ => {}
+            }
+        }
+        previous = Some(id);
+    }
+    assert!(state
+        .hub
+        .host_preferences()
+        .hosts
+        .iter()
+        .any(|host| host.target == "managed.test" && host.hidden));
+    stop.store(true, Ordering::Release);
+    tokio::time::timeout(Duration::from_secs(10), worker)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert!(cleanup.load(Ordering::Acquire));
+    let _ = std::fs::remove_dir_all(path);
+}

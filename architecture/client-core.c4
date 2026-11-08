@@ -29,7 +29,7 @@ model {
     owned_service -> splitty.transport.queue 'Cancel startup while retaining its cleanup future'
     owned_service -> splitty.core.protocol 'Verify the helper mux version'
     native_workspace -> owned_service 'Open and join local and deliberately requested host streams through existing service ownership'
-    native_workspace -> hub 'Poll passive host directory updates independently of terminal and settings streams'
+    native_workspace -> hub 'Schedule owner-bound host metadata jobs and passive directory updates independently of terminal and settings streams'
     native_workspace -> api_stream 'Retain local hub API setup through cancellation'
     native_workspace -> splitty.transport.queue 'Revoke retained host and local API setup before joining owned cleanup'
     native_workspace -> splitty.transport.budget 'Retain charged host progress and diagnostics across source publication'
@@ -67,7 +67,7 @@ model {
     }
 
     hub = component 'hub' {
-      description 'Passive owner-bound host-directory reads on a separate local API stream; charged last-good snapshots, coalesced generations, explicit loading/failure state and joined cleanup.'
+      description 'One local API stream for passive owner-bound host-directory reads and bounded typed metadata writes; charged last-good snapshots, coalesced generations, separate identified outcomes without replay and joined cleanup.'
       metadata { module 'splitty_client_core::hub' }
     }
 
@@ -102,7 +102,7 @@ model {
     }
 
     native_workspace = component 'native_workspace' {
-      description 'Native workspace runtime: one owned local service and ordered connection, immutable source command admission before effects, source-scoped charged events and attachment delivery, worker-owned WindowWorkspace with one common SourceRuntime for session commands, observations and controls, ordered model-before-delivery effects, identified transfer, floating and zoom outcomes, checked placement and close settlement including channel-owned startup consent, independent settings outcomes, verified shutdown and retained attachment and visibility controls.'
+      description 'Native workspace runtime: one owned local service and ordered connection, immutable source command admission before effects, source-scoped charged events and attachment delivery, worker-owned WindowWorkspace with one common SourceRuntime for session commands, observations and controls, ordered model-before-delivery effects, identified host metadata preparation with request-scoped and global browse withdrawal, identified transfer, floating and zoom outcomes, checked placement and close settlement including channel-owned startup consent, independent settings outcomes, verified shutdown and retained attachment and visibility controls.'
       metadata { module 'splitty_client_core::native_workspace' }
     }
 
@@ -134,9 +134,11 @@ model {
     local_service -> client_zoom 'Resolve queued zoom intents against current settings'
     native_workspace -> client_zoom 'Carry identified zoom intents and independent outcomes'
     local_service -> appearance 'Read appearance independently and reuse in-memory fixtures'
-    hub -> api_stream 'Retain one independent directory-only request'
-    hub -> splitty.core.native_api 'Decode the shared directory response and fixed read operation'
+    hub -> api_stream 'Serialize retained directory reads and bounded metadata jobs on one owned stream'
+    hub -> client_workspace 'Capture immutable local execution tokens in host metadata requests and outcomes'
+    hub -> splitty.core.native_api 'Use the shared directory and existing host metadata operations'
     hub -> splitty.remote.ssh 'Validate canonical target identities without opening SSH'
+    hub -> splitty.remote.hosts 'Validate typed host preference acknowledgements against the submitted metadata intent'
     hub -> splitty.transport.budget 'Retain charged snapshots and admit validation scratch'
     hub -> splitty.transport.wire 'Exercise bounded native directory replies in tests'
     hub -> splitty.core.daemon 'Describe an owned fake native endpoint in directory tests'
@@ -195,6 +197,8 @@ model {
     client_workspace -> splitty.transport.wire 'Bound one workspace collection by the transport frame ceiling'
     client_workspace -> splitty.core.pty 'Gate real-service tests on PTY availability'
     client_workspace -> appearance 'Reuse an isolated in-memory service for launch inheritance tests'
+    client_workspace -> hub 'Verify confirmed metadata removal preserves open model bindings in an isolated integration test'
+    client_workspace -> owned_service 'Own and close the isolated service fixture used by the metadata removal regression'
     client_workspace -> client_shell_profiles 'Bound explicit launch profile identifiers'
     native_workspace -> local_service 'Poll fair owner-bound settings without consuming terminal events'
     native_workspace -> client_shell_profiles 'Publish charged choices and bound admitted launch fallback notices'

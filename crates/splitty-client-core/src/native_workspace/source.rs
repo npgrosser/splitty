@@ -455,7 +455,10 @@ impl SourceRuntime {
             return Ok(out);
         }
         let result: std::io::Result<()> = match command {
-            CommandKind::ConnectHost { .. }
+            CommandKind::ManageHost { .. }
+            | CommandKind::WithdrawHostConnect { .. }
+            | CommandKind::ReleaseHostBrowsing
+            | CommandKind::ConnectHost { .. }
             | CommandKind::RetryHost { .. }
             | CommandKind::CancelHost { .. }
             | CommandKind::ReleaseHostBrowse { .. }

@@ -1,11 +1,29 @@
-//! Passive, owner-bound reads of the assigned local service's host directory.
+//! Owner-bound host directory reads and identified local metadata mutations.
 use crate::api_stream::{decode, ApiStream};
 use splitty_core::native_api::{directory::Directory, Operation};
 use splitty_remote::ssh::SshTarget;
 use splitty_transport::budget::Charged;
-use std::{collections::HashSet, future::Future, io, pin::Pin, sync::Arc};
+use std::{
+    collections::{HashSet, VecDeque},
+    future::Future,
+    io,
+    pin::Pin,
+    sync::Arc,
+};
 use tokio::sync::Notify;
 use uuid::Uuid;
+
+mod management;
+use crate::workspace::SourceToken;
+pub use management::{
+    HostManagementAction, HostManagementOutcome, HostManagementRequest, HostManagementResult,
+};
+
+pub(crate) enum HubEvent {
+    Directory(HubUpdate),
+    Management(HostManagementResult),
+}
+type WritePending = Pin<Box<dyn Future<Output = (ApiStream, HostManagementResult, bool)> + Send>>;
 
 #[derive(Debug)]
 pub struct HostDirectorySnapshot {
@@ -14,6 +32,51 @@ pub struct HostDirectorySnapshot {
     directory: Charged<Directory>,
 }
 impl HostDirectorySnapshot {
+    #[cfg(feature = "ui-test-support")]
+    #[doc(hidden)]
+    pub fn ui_test_fixture(
+        connection_id: Uuid,
+        generation: u64,
+        targets: &[&str],
+    ) -> io::Result<Self> {
+        let entries: Vec<_> = targets.iter().map(|target| (*target, None)).collect();
+        Self::ui_test_fixture_with_aliases(connection_id, generation, &entries)
+    }
+
+    #[cfg(feature = "ui-test-support")]
+    #[doc(hidden)]
+    pub fn ui_test_fixture_with_aliases(
+        connection_id: Uuid,
+        generation: u64,
+        entries: &[(&str, Option<&str>)],
+    ) -> io::Result<Self> {
+        let directory = Directory::new(
+            Vec::new(),
+            entries
+                .iter()
+                .map(|(target, alias)| {
+                    let mut host = splitty_core::native_api::directory::DirectoryHost::new(*target);
+                    host.alias = alias.map(str::to_owned);
+                    host
+                })
+                .collect(),
+        );
+        let budget = splitty_transport::budget::ConnectionBudget::default();
+        validate(&directory, &budget)?;
+        let bytes = serde_json::to_vec(&directory).map_err(io::Error::other)?;
+        if bytes.len() > splitty_core::native_api::MAX_API_BODY {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "host directory fixture exceeds native limit",
+            ));
+        }
+        let lease = splitty_transport::codec::reserve_json_typed(&bytes, &budget, false)?;
+        Ok(Self {
+            connection_id,
+            generation,
+            directory: lease.charge(directory),
+        })
+    }
     pub fn connection_id(&self) -> Uuid {
         self.connection_id
     }
@@ -59,8 +122,8 @@ impl HubUpdate {
 type Pending =
     Pin<Box<dyn Future<Output = (ApiStream, io::Result<HostDirectorySnapshot>, bool)> + Send>>;
 
-/// One API stream, one retained read and one last-good snapshot. No host
-/// connection or mutation operation is exposed by this seam.
+/// One API stream serializes bounded metadata writes and coalesced directory reads.
+/// SSH connection demand remains in the workspace worker.
 pub struct HubClient {
     owner: Uuid,
     generation: u64,
@@ -73,6 +136,11 @@ pub struct HubClient {
     broken: bool,
     reopen_due: bool,
     cancel: Arc<Notify>,
+    writes: VecDeque<management::Job>,
+    writing: Option<WritePending>,
+    active_write: Option<(Uuid, String)>,
+    write_due: bool,
+    management_owner: Option<SourceToken>,
 }
 impl HubClient {
     #[cfg(test)]
@@ -97,6 +165,11 @@ impl HubClient {
             broken: false,
             reopen_due: false,
             cancel: Arc::new(Notify::new()),
+            writes: VecDeque::new(),
+            writing: None,
+            active_write: None,
+            write_due: true,
+            management_owner: None,
         }
     }
     pub fn connection_id(&self) -> Uuid {
@@ -128,9 +201,118 @@ impl HubClient {
         self.dirty = true;
         Ok(())
     }
+    pub(crate) fn enqueue(
+        &mut self,
+        owner: SourceToken,
+        id: Uuid,
+        request: HostManagementRequest,
+    ) -> io::Result<HostManagementResult> {
+        if owner.connection_id() != self.owner
+            || self
+                .management_owner
+                .is_some_and(|expected| expected != owner)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Host metadata owner changed",
+            ));
+        }
+        if self.broken {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Host metadata stream unavailable",
+            ));
+        }
+        if self.writes.len() + usize::from(self.active_write.is_some()) >= 16 {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Host metadata queue is full",
+            ));
+        }
+        if self
+            .active_write
+            .as_ref()
+            .is_some_and(|(active, _)| *active == id)
+            || self.writes.iter().any(|job| job.id == id)
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "Host request is already pending",
+            ));
+        }
+        if self
+            .active_write
+            .as_ref()
+            .is_some_and(|(_, target)| target == request.target())
+            || self
+                .writes
+                .iter()
+                .any(|job| job.request.target() == request.target())
+        {
+            return Err(io::Error::new(
+                io::ErrorKind::WouldBlock,
+                "Another action for this host is pending",
+            ));
+        }
+        self.refresh(self.owner)?;
+        self.management_owner = Some(owner);
+        let job = management::Job { owner, id, request };
+        let result = job.result(HostManagementOutcome::Pending, None);
+        self.writes.push_back(job);
+        Ok(result)
+    }
+    #[cfg(test)]
     pub async fn next_update(&mut self) -> HubUpdate {
+        match self.next_event().await {
+            HubEvent::Directory(update) => update,
+            HubEvent::Management(_) => panic!("unexpected metadata update"),
+        }
+    }
+    pub(crate) async fn next_event(&mut self) -> HubEvent {
         loop {
+            if self.writing.is_none()
+                && self.pending.is_none()
+                && !self.writes.is_empty()
+                && (self.write_due || !self.dirty || self.broken)
+            {
+                let job = self.writes.pop_front().expect("queued write");
+                if self.broken {
+                    return HubEvent::Management(job.result(
+                        HostManagementOutcome::Rejected,
+                        Some("Host metadata stream unavailable; action was not submitted".into()),
+                    ));
+                }
+                self.active_write = Some((job.id, job.request.target().into()));
+                let mut client = self.client.take().expect("hub stream retained");
+                self.writing = Some(Box::pin(async move {
+                    let (result, broken) = management::write(&mut client, &job).await;
+                    (client, result, broken)
+                }));
+            }
+            if let Some(writing) = &mut self.writing {
+                let (client, result, broken) = writing.await;
+                self.writing = None;
+                self.active_write = None;
+                self.client = Some(client);
+                self.broken = broken;
+                self.refresh(self.owner).expect("same owner refresh");
+                self.write_due = false;
+                return HubEvent::Management(result);
+            }
             if self.pending.is_none() {
+                if !self.dirty {
+                    std::future::pending::<()>().await;
+                }
+                if self.broken {
+                    self.reopen_due = true;
+                    return HubEvent::Directory(HubUpdate {
+                        connection_id: self.owner,
+                        generation: self.generation,
+                        state: HostDirectoryState::Loading {
+                            previous: self.last_good.clone(),
+                        },
+                    });
+                }
                 if !self.dirty {
                     std::future::pending::<()>().await;
                 }
@@ -155,30 +337,31 @@ impl HubClient {
             }
             if self.loading_due {
                 self.loading_due = false;
-                return HubUpdate {
+                return HubEvent::Directory(HubUpdate {
                     connection_id: self.owner,
                     generation: self.pending_generation,
                     state: HostDirectoryState::Loading {
                         previous: self.last_good.clone(),
                     },
-                };
+                });
             }
             let (client, result, broken) = self.pending.as_mut().expect("hub read started").await;
             self.pending = None;
+            self.write_due = true;
             self.client = Some(client);
             self.broken = broken;
             if self.pending_generation != self.generation {
-                if broken {
+                if broken && self.writes.is_empty() {
                     // A refresh arrived during EOF. The old stream cannot
                     // service it; the runtime must close and reopen once.
                     self.reopen_due = true;
-                    return HubUpdate {
+                    return HubEvent::Directory(HubUpdate {
                         connection_id: self.owner,
                         generation: self.generation,
                         state: HostDirectoryState::Loading {
                             previous: self.last_good.clone(),
                         },
-                    };
+                    });
                 }
                 continue;
             }
@@ -193,14 +376,19 @@ impl HubClient {
                     reason: classify(&error),
                 },
             };
-            return HubUpdate {
+            return HubEvent::Directory(HubUpdate {
                 connection_id: self.owner,
                 generation: self.generation,
                 state,
-            };
+            });
         }
     }
     pub async fn finish(mut self) -> io::Result<()> {
+        self.writes.clear();
+        if let Some(writing) = self.writing.take() {
+            let (client, _, _) = writing.await;
+            self.client = Some(client);
+        }
         if let Some(pending) = self.pending.take() {
             self.cancel.notify_one();
             let (client, _, _) = pending.await;

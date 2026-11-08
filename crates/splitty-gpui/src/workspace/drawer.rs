@@ -268,12 +268,15 @@ impl Workspace {
                 if group != Some(key.source_id()) {
                     group = Some(key.source_id());
                     if remote {
-                        let title = {
-                            window_model
-                                .source_target(key.source_id())
-                                .map(super::hosts::display)
-                                .unwrap_or_else(|| "Host".into())
-                        };
+                        let title = window_model
+                            .source_target(key.source_id())
+                            .map(|target| {
+                                owner
+                                    .and_then(|owner| self.hosts.accepted_alias(owner, target))
+                                    .unwrap_or(target)
+                            })
+                            .map(super::hosts::display)
+                            .unwrap_or_else(|| "Host".into());
                         list = list.child(
                             div()
                                 .mx_2()
