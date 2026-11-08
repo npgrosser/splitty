@@ -79,6 +79,161 @@ mod tests {
     }
 }
 
+#[cfg(all(test, feature = "ui-test-support"))]
+mod view_tests {
+    use super::{Command, Destination, GroupTarget, Workspace};
+    use gpui_kit::{
+        AppContext, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, TestAppContext,
+        VisualTestContext,
+    };
+    use splitty_client_core::{native_workspace::Worker, workspace::WindowWorkspace};
+    use std::{
+        cell::RefCell,
+        rc::Rc,
+        sync::{atomic::AtomicBool, Arc},
+    };
+    use tokio::sync::mpsc;
+    use uuid::Uuid;
+
+    fn with_view(run: impl FnOnce(&mut VisualTestContext, Entity<Workspace>)) {
+        let mut app = TestAppContext::single();
+        app.update(gpui_kit::init);
+        let content = Rc::new(RefCell::new(None));
+        let (_, window) = app.add_window_view({
+            let content = content.clone();
+            move |window, cx| {
+                let view = cx.new(|cx| {
+                    let (workspace, worker) = Workspace::new_with_worker(
+                        false,
+                        Arc::new(AtomicBool::new(false)),
+                        window,
+                        cx,
+                        |_, _, _| Worker::ui_test_fixture(),
+                    );
+                    worker.shutdown().unwrap();
+                    workspace
+                });
+                *content.borrow_mut() = Some(view.clone());
+                gpui_kit::base::Root::new(view, window, cx)
+            }
+        });
+        let view = content.borrow_mut().take().unwrap();
+        run(window, view);
+    }
+
+    fn click(window: &mut VisualTestContext, selector: &'static str) {
+        let center = window.debug_bounds(selector).expect(selector).center();
+        window.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position: center,
+            click_count: 1,
+            modifiers: Modifiers::default(),
+            first_mouse: false,
+        });
+        window.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position: center,
+            click_count: 1,
+            modifiers: Modifiers::default(),
+        });
+    }
+
+    #[test]
+    fn maximized_group_shows_labeled_restore_and_restores_canonical_slots() {
+        with_view(|window, view| {
+            let owner = Uuid::new_v4();
+            let mut model = WindowWorkspace::new(owner);
+            model.ui_test_local_screen_fixture("Work").unwrap();
+            let source = model.lifecycle_token();
+            model
+                .source_mut(source.source_id())
+                .unwrap()
+                .apply_snapshot(
+                    owner,
+                    &serde_json::json!({"type":"mux.screen_snapshot","screen":{
+                        "id":"work","revision":2,
+                        "root":{"type":"split","id":"split","axis":"horizontal",
+                            "sizes":[0.5,0.5],"children":[
+                                {"type":"slot","id":"left","paneIds":["p0"],"activePaneId":"p0"},
+                                {"type":"slot","id":"right","paneIds":["p1"],"activePaneId":"p1"}
+                            ]},
+                        "panes":{"p0":{"id":"p0","sessionId":"s0"},
+                            "p1":{"id":"p1","sessionId":"s1"}},
+                        "sessions":{"s0":{"id":"s0","status":"running"},
+                            "s1":{"id":"s1","status":"running"}}
+                    }}),
+                )
+                .unwrap();
+            let (commands, mut receiver) = mpsc::channel(32);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.model = Some(model);
+                    workspace.commands = commands;
+                    workspace.destination = Destination::Screens;
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    let model = workspace.model.as_mut().unwrap();
+                    assert!(model
+                        .source_mut(source.source_id())
+                        .unwrap()
+                        .set_maximized_slot(Some("left"), Some("p0")));
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            assert!(window.debug_bounds("group-maximized-state").is_some());
+            assert!(window.debug_bounds("group-restore-button").is_some());
+            window.update(|_, cx| {
+                let workspace = view.read(cx);
+                let source = workspace.model.as_ref().unwrap().local_source();
+                assert_eq!(source.presentation_root().unwrap().id().as_str(), "left");
+                assert_eq!(source.snapshot().unwrap().root.id().as_str(), "split");
+                assert!(GroupTarget::capture(source, "left", "p0").is_some());
+                assert_eq!(
+                    workspace.execution_token(source.source_id()),
+                    Some(source.source_token())
+                );
+            });
+            click(window, "group-restore-button");
+            let sent = loop {
+                let sent = receiver.try_recv().expect("restore sent");
+                if matches!(sent.kind(), Command::SetMaximized { .. }) {
+                    break sent;
+                }
+            };
+            assert!(matches!(
+                sent.kind(),
+                Command::SetMaximized {
+                    slot: None,
+                    pane: None,
+                    ..
+                }
+            ));
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    let model = workspace.model.as_mut().unwrap();
+                    assert!(model
+                        .source_mut(source.source_id())
+                        .unwrap()
+                        .set_maximized_slot(None, None));
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            assert!(window.debug_bounds("group-maximized-state").is_none());
+            window.update(|_, cx| {
+                let workspace = view.read(cx);
+                let source = workspace.model.as_ref().unwrap().local_source();
+                assert_eq!(source.presentation_root().unwrap().id().as_str(), "split");
+            });
+        });
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum GroupCommand {
     NewTab,
@@ -185,7 +340,9 @@ impl Workspace {
         target: Option<GroupTarget>,
         action: GroupCommand,
     ) -> AnyElement {
+        let selector = id.clone();
         Button::new(SharedString::from(id))
+            .debug_selector(move || selector.clone())
             .accessibility_label(label)
             .tooltip(label)
             .icon(Icon::new(icon))
@@ -342,137 +499,168 @@ impl Workspace {
                 let menu_target = target.clone();
                 let menu_weak = cx.entity().downgrade();
                 let focus_weak = cx.entity().downgrade();
-                return actions
+                actions = actions.child(
+                    Button::new(SharedString::from(format!("group-more-{slot}")))
+                        .accessibility_label("More group actions")
+                        .tooltip(if maximized {
+                            "Split or float this group"
+                        } else {
+                            "Split, float or maximize this group"
+                        })
+                        .icon(Icon::new(IconName::Ellipsis))
+                        .ghost()
+                        .compact()
+                        .small()
+                        .dropdown_menu(move |mut menu, _, _| {
+                            for (label, icon, disabled, command) in [
+                                (
+                                    "Split right",
+                                    IconName::SquareSplitHorizontal,
+                                    menu_target.is_none(),
+                                    GroupCommand::Split(Axis::Horizontal),
+                                ),
+                                (
+                                    "Split below",
+                                    IconName::SquareSplitVertical,
+                                    menu_target.is_none(),
+                                    GroupCommand::Split(Axis::Vertical),
+                                ),
+                                (
+                                    "Float tab",
+                                    IconName::PanelsTopLeft,
+                                    !can_float,
+                                    GroupCommand::Float,
+                                ),
+                                (
+                                    "Maximize group",
+                                    IconName::Maximize,
+                                    menu_target.is_none(),
+                                    GroupCommand::Maximize,
+                                ),
+                            ] {
+                                if maximized && matches!(command, GroupCommand::Maximize) {
+                                    continue;
+                                }
+                                let target = menu_target.clone();
+                                let weak = menu_weak.clone();
+                                menu = menu.item(
+                                    PopupMenuItem::new(label)
+                                        .icon(Icon::new(icon))
+                                        .disabled(disabled)
+                                        .on_click(move |_, window, cx| {
+                                            if let Some(target) = &target {
+                                                let _ = weak.update(cx, |this, cx| {
+                                                    this.group_command(
+                                                        target,
+                                                        command.clone(),
+                                                        window,
+                                                        cx,
+                                                    )
+                                                });
+                                            }
+                                        }),
+                                );
+                            }
+                            menu
+                        })
+                        .on_open_change(move |open, window, cx| {
+                            let _ = focus_weak.update(cx, |this, cx| {
+                                this.wheel_navigation.reset();
+                                if *open {
+                                    this.drop_target = None;
+                                } else {
+                                    this.focus_current(window, cx);
+                                }
+                                cx.notify();
+                            });
+                        }),
+                );
+            } else {
+                for (suffix, label, icon, action) in [
+                    (
+                        "split-right",
+                        "Split this group right",
+                        IconName::SquareSplitHorizontal,
+                        GroupCommand::Split(Axis::Horizontal),
+                    ),
+                    (
+                        "split-below",
+                        "Split this group below",
+                        IconName::SquareSplitVertical,
+                        GroupCommand::Split(Axis::Vertical),
+                    ),
+                ] {
+                    actions = actions.child(Self::group_button(
+                        cx.entity().downgrade(),
+                        format!("group-{suffix}-{slot}"),
+                        label,
+                        icon,
+                        target.is_none(),
+                        target.clone(),
+                        action,
+                    ));
+                }
+                if !remote {
+                    actions = actions.child(Self::group_button(
+                        cx.entity().downgrade(),
+                        format!("group-float-{slot}"),
+                        "Float this tab",
+                        IconName::PanelsTopLeft,
+                        !can_float,
+                        target.clone(),
+                        GroupCommand::Float,
+                    ));
+                }
+                if !remote && !maximized {
+                    actions = actions.child(Self::group_button(
+                        cx.entity().downgrade(),
+                        format!("group-maximize-{slot}"),
+                        "Maximize this group",
+                        IconName::Maximize,
+                        target.is_none(),
+                        target.clone(),
+                        GroupCommand::Maximize,
+                    ));
+                }
+            }
+            if maximized && !remote {
+                let restore_target = target.clone();
+                let weak = cx.entity().downgrade();
+                actions = actions
                     .child(
-                        Button::new(SharedString::from(format!("group-more-{slot}")))
-                            .accessibility_label("More group actions")
-                            .tooltip("Split, float or maximize this group")
-                            .icon(Icon::new(IconName::Ellipsis))
-                            .ghost()
+                        div()
+                            .id(SharedString::from(format!("group-maximized-state-{slot}")))
+                            .debug_selector(|| "group-maximized-state".into())
+                            .flex_none()
+                            .whitespace_nowrap()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child("Group maximized"),
+                    )
+                    .child(
+                        Button::new(SharedString::from(format!("group-restore-{slot}")))
+                            .debug_selector(|| "group-restore-button".into())
+                            .label("Restore layout")
+                            .accessibility_label("Restore layout")
+                            .tooltip("Restore all groups")
+                            .icon(Icon::new(IconName::Minimize))
+                            .outline()
                             .compact()
                             .small()
-                            .dropdown_menu(move |mut menu, _, _| {
-                                for (label, icon, disabled, command) in [
-                                    (
-                                        "Split right",
-                                        IconName::SquareSplitHorizontal,
-                                        menu_target.is_none(),
-                                        GroupCommand::Split(Axis::Horizontal),
-                                    ),
-                                    (
-                                        "Split below",
-                                        IconName::SquareSplitVertical,
-                                        menu_target.is_none(),
-                                        GroupCommand::Split(Axis::Vertical),
-                                    ),
-                                    (
-                                        "Float tab",
-                                        IconName::PanelsTopLeft,
-                                        !can_float,
-                                        GroupCommand::Float,
-                                    ),
-                                    (
-                                        if maximized {
-                                            "Restore group"
-                                        } else {
-                                            "Maximize group"
-                                        },
-                                        if maximized {
-                                            IconName::Minimize
-                                        } else {
-                                            IconName::Maximize
-                                        },
-                                        menu_target.is_none(),
-                                        GroupCommand::Maximize,
-                                    ),
-                                ] {
-                                    let target = menu_target.clone();
-                                    let weak = menu_weak.clone();
-                                    menu = menu.item(
-                                        PopupMenuItem::new(label)
-                                            .icon(Icon::new(icon))
-                                            .disabled(disabled)
-                                            .on_click(move |_, window, cx| {
-                                                if let Some(target) = &target {
-                                                    let _ = weak.update(cx, |this, cx| {
-                                                        this.group_command(
-                                                            target,
-                                                            command.clone(),
-                                                            window,
-                                                            cx,
-                                                        )
-                                                    });
-                                                }
-                                            }),
-                                    );
+                            .disabled(restore_target.is_none())
+                            .on_click(move |_, window, cx| {
+                                if let Some(target) = &restore_target {
+                                    let _ = weak.update(cx, |this, cx| {
+                                        this.group_command(
+                                            target,
+                                            GroupCommand::Maximize,
+                                            window,
+                                            cx,
+                                        )
+                                    });
                                 }
-                                menu
-                            })
-                            .on_open_change(move |open, window, cx| {
-                                let _ = focus_weak.update(cx, |this, cx| {
-                                    this.wheel_navigation.reset();
-                                    if *open {
-                                        this.drop_target = None;
-                                    } else {
-                                        this.focus_current(window, cx);
-                                    }
-                                    cx.notify();
-                                });
                             }),
-                    )
-                    .into_any_element();
-            }
-            for (suffix, label, icon, action) in [
-                (
-                    "split-right",
-                    "Split this group right",
-                    IconName::SquareSplitHorizontal,
-                    GroupCommand::Split(Axis::Horizontal),
-                ),
-                (
-                    "split-below",
-                    "Split this group below",
-                    IconName::SquareSplitVertical,
-                    GroupCommand::Split(Axis::Vertical),
-                ),
-            ] {
-                actions = actions.child(Self::group_button(
-                    cx.entity().downgrade(),
-                    format!("group-{suffix}-{slot}"),
-                    label,
-                    icon,
-                    target.is_none(),
-                    target.clone(),
-                    action,
-                ));
-            }
-            if !remote {
-                actions = actions.child(Self::group_button(
-                    cx.entity().downgrade(),
-                    format!("group-float-{slot}"),
-                    "Float this tab",
-                    IconName::PanelsTopLeft,
-                    !can_float,
-                    target.clone(),
-                    GroupCommand::Float,
-                ));
-                actions = actions.child(Self::group_button(
-                    cx.entity().downgrade(),
-                    format!("group-maximize-{slot}"),
-                    if maximized {
-                        "Restore this group"
-                    } else {
-                        "Maximize this group"
-                    },
-                    if maximized {
-                        IconName::Minimize
-                    } else {
-                        IconName::Maximize
-                    },
-                    target.is_none(),
-                    target,
-                    GroupCommand::Maximize,
-                ));
+                    );
             }
         }
         actions.into_any_element()
