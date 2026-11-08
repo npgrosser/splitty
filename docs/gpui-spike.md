@@ -1581,3 +1581,21 @@ configuration. It does not establish other WSL networking modes or justify a
 new proxy or a blanket Windows opening restriction. The existing desktop
 localhost contract remains in use; shared exact-mapping and source-consent
 tests have a different scope from endpoint reachability.
+
+## Drawer interaction and shell-menu corrections (2026-11-08)
+
+Local Screen names enter the existing rename editor by double-click, F2 or
+context menu; the hover pencil is removed. Hover covers the complete Screen
+block, while individual terminal rows brighten only their text. An admitted pin
+action changes presentation immediately. Identified write results and accepted
+settings observations retain the confirmed baseline for rejection rollback.
+
+The shell picker is anchored to its group's arrow with the existing Kit Popover.
+Four production-view UI integration tests pass: three cover Drawer interactions
+and pin rollback, and one uses actual arrow clicks at two window widths, checks
+popup geometry, then verifies Escape dismissal and Enter reopening from restored
+arrow focus. Strict GPUI Clippy with UI test support and formatting checks pass.
+Validation used an isolated source snapshot, matching the six changed source
+files byte-for-byte, while independent host-update work continued. This does not
+claim an updated Windows package or a real-window animation run; motion and the
+startup/theme corrections remain follow-up work.
