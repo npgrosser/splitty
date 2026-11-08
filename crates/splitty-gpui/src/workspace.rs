@@ -655,7 +655,7 @@ struct PendingDrawerPin {
 }
 
 #[derive(Clone)]
-struct TransferMenu {
+struct TabContextMenu {
     source: PaneActionTarget,
     selected: usize,
     scroll: ScrollHandle,
@@ -787,7 +787,7 @@ pub struct Workspace {
     profile_picker: Option<ProfilePicker>,
     template_dialog: Option<TemplateDialog>,
     pending_template_apply: Option<(Uuid, Uuid)>,
-    transfer_menu: Option<TransferMenu>,
+    tab_context_menu: Option<TabContextMenu>,
     pending_transfer: Option<PendingTransfer>,
     float_order: HashMap<ScreenKey, Vec<String>>,
     float_viewport: Option<Bounds<Pixels>>,
@@ -1094,7 +1094,7 @@ impl Workspace {
                 profile_picker: None,
                 template_dialog: None,
                 pending_template_apply: None,
-                transfer_menu: None,
+                tab_context_menu: None,
                 pending_transfer: None,
                 float_order: HashMap::new(),
                 float_viewport: None,
@@ -1237,7 +1237,7 @@ impl Workspace {
             || self.rename.is_some()
             || self.template_dialog.is_some()
             || self.profile_picker.is_some()
-            || self.transfer_menu.is_some()
+            || self.tab_context_menu.is_some()
             || self.pending_template_apply.is_some()
             || self.drag.is_some()
             || self.float_gesture.is_some()
@@ -1476,7 +1476,7 @@ impl Workspace {
             return;
         }
         self.float_gesture = None;
-        self.transfer_menu = None;
+        self.tab_context_menu = None;
         if self.rename.is_some() {
             self.finish_rename(true, window, cx);
         }
@@ -1511,7 +1511,7 @@ impl Workspace {
 
     fn start_rename(&mut self, screen: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.wheel_navigation.reset();
-        self.transfer_menu = None;
+        self.tab_context_menu = None;
         self.close_profile_picker(window, cx);
         let Some((name, source, screen_key)) = self.local_model().and_then(|model| {
             model
@@ -1595,7 +1595,7 @@ impl Workspace {
     ) {
         self.wheel_navigation.reset();
         self.float_gesture = None;
-        self.transfer_menu = None;
+        self.tab_context_menu = None;
         self.close_profile_picker(window, cx);
         self.dismiss_templates(window, cx);
         if target == CloseTarget::Window
@@ -1998,7 +1998,7 @@ impl Workspace {
             self.profile_picker = None;
             self.template_dialog = None;
             self.pending_template_apply = None;
-            self.transfer_menu = None;
+            self.tab_context_menu = None;
             self.pending_transfer = None;
             self.pending_float = None;
             self.float_order.clear();
@@ -2126,15 +2126,15 @@ impl Workspace {
             .profile_picker
             .as_ref()
             .is_some_and(|picker| !picker.valid_for(model));
-        let transfer_cancelled = self.transfer_menu.as_ref().is_some_and(|menu| {
-            model.validate_pane_action(&menu.source).is_err()
-                || !model.can_transfer_pane(&menu.source)
-        });
+        let transfer_cancelled = self
+            .tab_context_menu
+            .as_ref()
+            .is_some_and(|menu| model.validate_pane_action(&menu.source).is_err());
         if picker_cancelled {
             self.profile_picker = None;
         }
         if transfer_cancelled {
-            self.transfer_menu = None;
+            self.tab_context_menu = None;
         }
         if editor_cancelled {
             self.rename = None;
@@ -2342,7 +2342,7 @@ impl Workspace {
         if self.rename.is_some()
             || self.template_dialog.is_some()
             || self.profile_picker.is_some()
-            || self.transfer_menu.is_some()
+            || self.tab_context_menu.is_some()
             || self
                 .pending_close
                 .as_ref()
@@ -2590,8 +2590,8 @@ impl Workspace {
             cx.stop_propagation();
             return;
         }
-        if self.transfer_menu.is_some() {
-            self.transfer_menu_key(&event.keystroke, cx);
+        if self.tab_context_menu.is_some() {
+            self.tab_context_menu_key(&event.keystroke, window, cx);
             return;
         }
         if let Some(action) = zoom_shortcut(&event.keystroke, cx.platform_info().is_mac()) {
@@ -4226,13 +4226,12 @@ impl Workspace {
                                     }
                                 },
                             ))
-                            .when(!remote, |view| {
-                                view.on_mouse_down(
+                            .on_mouse_down(
                                     MouseButton::Right,
                                     cx.listener(move |this, _, window, cx| {
                                         cx.stop_propagation();
                                         if let Some(source) = tab_source {
-                                            this.open_transfer_menu_captured(
+                                            this.open_tab_context_menu_captured(
                                                 source,
                                                 &right_screen,
                                                 &right_click,
@@ -4242,7 +4241,6 @@ impl Workspace {
                                         }
                                     }),
                                 )
-                            })
                             .when_some(
                                 (!remote
                                     && ready
@@ -4279,9 +4277,7 @@ impl Workspace {
                                     .overflow_hidden()
                                     .child(title.clone()),
                             )
-                            .when(!remote, |view| {
-                                view.child(self.render_transfer_menu(pane.as_str(), cx))
-                            })
+                            .child(self.render_tab_context_menu(pane.as_str(), cx))
                             .child(
                                 Button::new(SharedString::from(format!(
                                     "close-{slot_key}-{pane_key}"

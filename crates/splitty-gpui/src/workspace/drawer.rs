@@ -2340,7 +2340,7 @@ impl Workspace {
                 if !hovered
                     && this.drawer_overlay_open
                     && this.rename.is_none()
-                    && this.transfer_menu.is_none()
+                    && this.tab_context_menu.is_none()
                     && this.profile_picker.is_none()
                     && this.template_dialog.is_none()
                     && this
@@ -2484,7 +2484,7 @@ impl Workspace {
                 || self.rename.is_some()
                 || self.template_dialog.is_some()
                 || self.profile_picker.is_some()
-                || self.transfer_menu.is_some()
+                || self.tab_context_menu.is_some()
                 || self.pending_template_apply.is_some()
                 || self.search_owner.as_ref().is_some_and(|(_, terminal)| {
                     terminal.read(cx).search_input_focused(window, cx)

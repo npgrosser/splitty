@@ -152,7 +152,7 @@ impl Workspace {
         self.drag = None;
         self.float_gesture = None;
         self.drop_target = None;
-        self.transfer_menu = None;
+        self.tab_context_menu = None;
         self.profile_picker = None;
         for pane in &self.visible {
             if let Some(view) = self.panes.get(pane) {

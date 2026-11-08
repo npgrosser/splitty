@@ -279,7 +279,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.transfer_menu = None;
+        self.tab_context_menu = None;
         if self
             .profile_picker
             .as_ref()

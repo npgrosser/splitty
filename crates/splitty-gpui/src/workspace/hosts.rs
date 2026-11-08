@@ -455,7 +455,7 @@ impl Workspace {
         self.rename.is_some()
             || self.template_dialog.is_some()
             || self.profile_picker.is_some()
-            || self.transfer_menu.is_some()
+            || self.tab_context_menu.is_some()
             || self.pending_template_apply.is_some()
             || self.pending_close.is_some()
             || self.drag.is_some()
