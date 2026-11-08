@@ -392,3 +392,7 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 - **`native-screen-reorder`, NSR-1** (2026-11-08, provisional, tbd): use additive relative `move_screen` with `screen-placement-v1`; native local placement never falls back to the legacy full-list replacement operation.
 - **`native-screen-reorder`, NSR-2** (2026-11-08, provisional, tbd): collapse duplicate order entries only for the moved Screen, preserve all other entries and partial membership, and reject existing but unlisted moved/anchor Screens.
+
+- **NC-1, 2026-11-08 (provisional, tbd), native-notification-controls:** Move shared native editor contracts out of appearance; use two observation domains with one bounded settings writer. See [design](changes/native-notification-controls/design.md).
+- **NC-2, 2026-11-08 (provisional, tbd), native-notification-controls:** Valid notification booleans permit compatible edits without metadata; Reset requires exact service defaults, independently from appearance/theme failure. See [design](changes/native-notification-controls/design.md).
+- **NC-3, 2026-11-08 (provisional, tbd), native-notification-controls:** Keep acknowledgement/readback/uncertainty generations and deferred updates domain-specific, without mutation replay. See [design](changes/native-notification-controls/design.md).
