@@ -28,7 +28,7 @@ model {
     }
 
     gpui_workspace = component 'gpui_workspace' {
-      description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references and global navigation, deliberate Hosts connection, live catalog, explicit host update confirmation and Ports controls, retained source-qualified terminal views, local-only appearance and library controls, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools.'
+      description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references and global navigation, captured same-source Screen drag and keyboard placement with transient measured insertion feedback and no second order owner, deliberate Hosts connection, live catalog, explicit host update confirmation and Ports controls, retained source-qualified terminal views, local-only appearance and library controls, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools.'
       metadata { module 'splitty_gpui::workspace' }
     }
 

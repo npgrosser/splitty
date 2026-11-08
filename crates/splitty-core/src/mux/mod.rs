@@ -70,6 +70,12 @@ pub enum MuxError {
     #[error("screen {0} not found")]
     ScreenNotFound(ScreenId),
 
+    #[error("screen {0} is absent from the current order")]
+    ScreenNotOrdered(ScreenId),
+
+    #[error("beforeScreenId must be a string or null")]
+    InvalidScreenPlacementAnchor,
+
     #[error("screen {0} already exists")]
     ScreenExists(ScreenId),
 

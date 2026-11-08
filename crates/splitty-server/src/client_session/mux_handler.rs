@@ -13,7 +13,7 @@ use serde_json::Value;
 
 use splitty_core::ids::*;
 use splitty_core::mux::effect_runner::{EffectRunner, EnvContext};
-use splitty_core::mux::{Effect, Op, ScreenOp, Store};
+use splitty_core::mux::{Effect, MuxError, Op, ScreenOp, Store};
 use splitty_core::protocol::ServerEvent;
 
 use super::codec;
@@ -357,6 +357,19 @@ impl MuxHandler {
                     .unwrap_or_default();
                 dispatch(Op::ReorderScreens {
                     screen_order: order,
+                })
+            }
+            "move_screen" => {
+                let before_screen_id = match msg.op.get("beforeScreenId") {
+                    None | Some(Value::Null) => Ok(None),
+                    Some(Value::String(id)) => Ok(Some(ScreenId::from(id.as_str()))),
+                    Some(_) => Err(MuxError::InvalidScreenPlacementAnchor),
+                };
+                before_screen_id.and_then(|before_screen_id| {
+                    dispatch(Op::MoveScreen {
+                        screen_id: screen_id.clone(),
+                        before_screen_id,
+                    })
                 })
             }
             _ => {
@@ -1004,6 +1017,124 @@ mod tests {
         handler.handle_value(serde_json::json!({"type":"mux.op", "screenId":"screen-1", "op":{"type":"set_active_screen"}})).await;
         assert!(others.lock().expect("recorder").is_empty());
         assert!(sent.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn move_screen_uses_current_order_with_screenless_nudge_and_strict_anchor() {
+        let store = layout_store();
+        let others = Default::default();
+        let (handler, mut sent) = window(&store, "placement-sender", &others);
+        handler.send_welcome().await;
+        let welcome = next_text(&mut sent);
+        assert!(welcome["capabilities"]
+            .as_array()
+            .unwrap()
+            .contains(&serde_json::json!("screen-placement-v1")));
+
+        store
+            .dispatch(Op::CreateScreen {
+                name: None,
+                screen_id: Some(ScreenId::from("concurrent")),
+                new_pane_id: None,
+                shell_profile_id: None,
+            })
+            .expect("concurrent Screen");
+        let before_screens = store.get_workspace_state().screens;
+        handler
+            .handle_value(serde_json::json!({"type":"mux.op","screenId":"screen-2","op":{"type":"move_screen","beforeScreenId":"screen-1"}}))
+            .await;
+        let nudges = std::mem::take(&mut *others.lock().unwrap());
+        assert_eq!(nudges.len(), 1);
+        assert_eq!(nudges[0]["type"], "mux.nudge");
+        assert_eq!(nudges[0]["reason"], "mux_op");
+        assert!(nudges[0]["screenId"].is_null());
+        assert!(sent.try_recv().is_err(), "success has no sender reply");
+        assert!(
+            handler
+                .try_handle(r#"{"type":"mux.workspace_resync"}"#)
+                .await
+        );
+        let snapshot = next_text(&mut sent);
+        assert_eq!(snapshot["type"], "mux.workspace_snapshot");
+        assert_eq!(snapshot["screens"][0]["id"], "screen-2");
+        assert_eq!(snapshot["screens"][1]["id"], "screen-1");
+        assert_eq!(snapshot["screens"][2]["id"], "concurrent");
+        assert_eq!(
+            serde_json::to_value(store.get_workspace_state().screens).unwrap(),
+            serde_json::to_value(before_screens).unwrap()
+        );
+
+        handler
+            .handle_value(serde_json::json!({"type":"mux.op","screenId":"screen-2","op":{"type":"move_screen","beforeScreenId":"screen-1"}}))
+            .await;
+        assert!(
+            others.lock().unwrap().is_empty(),
+            "unchanged order has no nudge"
+        );
+        assert!(sent.try_recv().is_err());
+
+        for (screen, op, expected) in [
+            (
+                "screen-2",
+                serde_json::json!({"type":"move_screen","beforeScreenId":null}),
+                vec!["screen-1", "concurrent", "screen-2"],
+            ),
+            (
+                "screen-1",
+                serde_json::json!({"type":"move_screen"}),
+                vec!["concurrent", "screen-2", "screen-1"],
+            ),
+        ] {
+            handler
+                .handle_value(serde_json::json!({"type":"mux.op","screenId":screen,"op":op}))
+                .await;
+            let nudges = std::mem::take(&mut *others.lock().unwrap());
+            assert_eq!(nudges.len(), 1);
+            assert!(nudges[0]["screenId"].is_null());
+            assert_eq!(
+                store
+                    .get_workspace_state()
+                    .screen_order
+                    .iter()
+                    .map(ScreenId::as_str)
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(sent.try_recv().is_err());
+        }
+
+        let stable = serde_json::to_value(store.get_workspace_state()).unwrap();
+        for anchor in [
+            serde_json::json!(false),
+            serde_json::json!(17),
+            serde_json::json!([]),
+            serde_json::json!({}),
+            serde_json::json!("missing"),
+        ] {
+            handler
+                .handle_value(serde_json::json!({"type":"mux.op","screenId":"screen-1","op":{"type":"move_screen","beforeScreenId":anchor}}))
+                .await;
+            let failed = next_text(&mut sent);
+            assert_eq!(failed["type"], "mux.op_failed");
+            assert_eq!(failed["op"], "move_screen");
+            assert_eq!(failed["screenId"], "screen-1");
+            assert!(others.lock().unwrap().is_empty());
+            assert_eq!(
+                serde_json::to_value(store.get_workspace_state()).unwrap(),
+                stable
+            );
+        }
+        handler
+            .handle_value(serde_json::json!({"type":"mux.op","screenId":"missing","op":{"type":"move_screen","beforeScreenId":null}}))
+            .await;
+        let failed = next_text(&mut sent);
+        assert_eq!(failed["op"], "move_screen");
+        assert_eq!(failed["screenId"], "missing");
+        assert!(others.lock().unwrap().is_empty());
+        assert_eq!(
+            serde_json::to_value(store.get_workspace_state()).unwrap(),
+            stable
+        );
     }
 
     #[tokio::test]

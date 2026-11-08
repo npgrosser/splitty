@@ -49,7 +49,7 @@ use std::{
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use self::drawer::{WheelNavigation, WheelTarget};
+use self::drawer::{ScreenDrop, WheelNavigation, WheelTarget};
 use self::floating::{FloatGesture, FloatGestureKind};
 use self::hosts::{HostKey, HostsView};
 use self::ports::PortsView;
@@ -776,6 +776,7 @@ pub struct Workspace {
     drawer_collapsed: HashSet<ScreenKey>,
     drawer_hovered: Option<ScreenKey>,
     drawer_pane_hovered: Option<(ScreenKey, String)>,
+    drawer_drop: Option<ScreenDrop>,
     drawer_pending: Option<PendingDrawerPin>,
     wheel_navigation: WheelNavigation,
     pending_zoom: HashSet<Uuid>,
@@ -797,6 +798,7 @@ pub struct Workspace {
     scheme_pending: bool,
     _appearance_subscription: Subscription,
     _activation_subscription: Subscription,
+    _drawer_bounds_subscription: Subscription,
     ui_family: String,
     mono_family: String,
     rename: Option<RenameEditor>,
@@ -984,7 +986,17 @@ impl Workspace {
             this.flush_scheme();
         });
         let activation_subscription = cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() && this.drawer_drop.take().is_some() {
+                cx.stop_active_drag(window);
+                cx.notify();
+            }
             if !window.is_window_active() && this.float_gesture.take().is_some() {
+                cx.notify();
+            }
+        });
+        let drawer_bounds_subscription = cx.observe_window_bounds(window, |this, window, cx| {
+            if this.drawer_drop.take().is_some() {
+                cx.stop_active_drag(window);
                 cx.notify();
             }
         });
@@ -1071,6 +1083,7 @@ impl Workspace {
                 drawer_collapsed: HashSet::new(),
                 drawer_hovered: None,
                 drawer_pane_hovered: None,
+                drawer_drop: None,
                 drawer_pending: None,
                 wheel_navigation: WheelNavigation::default(),
                 pending_zoom: HashSet::new(),
@@ -1092,6 +1105,7 @@ impl Workspace {
                 scheme_pending: false,
                 _appearance_subscription: appearance_subscription,
                 _activation_subscription: activation_subscription,
+                _drawer_bounds_subscription: drawer_bounds_subscription,
                 ui_family,
                 mono_family,
                 rename: None,
@@ -1186,6 +1200,7 @@ impl Workspace {
             self.drawer_visible = self.drawer_authoritative_pinned;
         }
         self.drawer_width = snapshot.drawer().sidebar_width.clamp(150, 400);
+        self.drawer_drop = None;
         self.drawer_edge_reveal = snapshot.drawer().edge_reveal;
         if self.drawer_visible {
             self.drawer_overlay_open = false;
@@ -1969,6 +1984,7 @@ impl Workspace {
             self.drawer_collapsed.clear();
             self.drawer_hovered = None;
             self.drawer_pane_hovered = None;
+            self.drawer_drop = None;
             self.drawer_pending = None;
             self.wheel_navigation.reset();
             self.appearance_error = None;
@@ -2164,6 +2180,7 @@ impl Workspace {
             self.float_gesture = None;
         }
         self.drop_target = None;
+        self.drawer_drop = None;
         self.model = Some(window_model);
         self.host_update_reconcile(window, cx);
         self.flush_scheme();
@@ -2601,6 +2618,7 @@ impl Workspace {
         if event.keystroke.key == "escape" && cx.has_active_drag() {
             cx.stop_active_drag(window);
             self.drop_target = None;
+            self.drawer_drop = None;
             cx.stop_propagation();
             cx.notify();
             return;

@@ -472,6 +472,7 @@ impl SourceRuntime {
             | CommandKind::OpenRemoteScreen { .. }
             | CommandKind::DetachRemoteScreen { .. }
             | CommandKind::SwitchScreen(_)
+            | CommandKind::MoveScreen { .. }
             | CommandKind::CycleScreen { .. }
             | CommandKind::RefreshHostDirectory { .. }
             | CommandKind::TemplateApi { .. }
@@ -696,6 +697,13 @@ impl SourceRuntime {
                             })
                         });
                     workspace.set_catalog_supported(supports_catalog);
+                    workspace.set_screen_placement_supported(
+                        json["capabilities"].as_array().is_some_and(|caps| {
+                            caps.iter().any(|cap| {
+                                cap == splitty_core::protocol::SCREEN_PLACEMENT_CAPABILITY
+                            })
+                        }),
+                    );
                     if supports_catalog {
                         workspace.mark_catalog_dirty();
                     } else {

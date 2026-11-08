@@ -3,6 +3,58 @@ use super::*;
 use serde_json::json;
 
 impl WindowWorkspace {
+    /// Ordered canonical catalogs for production Drawer interaction tests.
+    #[doc(hidden)]
+    pub fn ui_test_screen_order_fixture(
+        &mut self,
+        screens: &[(&str, &str)],
+        remote_target: Option<&str>,
+    ) -> io::Result<Vec<ScreenKey>> {
+        let id = if let Some(target) = remote_target {
+            let id = self.admit_remote(self.lifecycle_token(), target)?;
+            self.bind_remote_parts(id, Uuid::new_v4(), ConnectionBudget::default())?;
+            let owner = self
+                .source(id)
+                .ok_or_else(|| invalid("fixture source missing"))?
+                .source_token();
+            self.confirm_ready(owner)?;
+            id
+        } else {
+            self.lifecycle_token().source_id()
+        };
+        let owner = {
+            let mut source = self
+                .source_mut(id)
+                .ok_or_else(|| invalid("fixture source missing"))?;
+            source.set_catalog_supported(true);
+            source.set_screen_placement_supported(true);
+            source.mark_catalog_dirty();
+            source.flush_catalog_request(|| Ok(()))?;
+            let owner = source.source_token();
+            source.apply_catalog(owner.connection_id(), &json!({
+                "type":"mux.workspace_snapshot",
+                "screens":screens.iter().map(|(id,name)|json!({"id":id,"name":name})).collect::<Vec<_>>(),
+                "activeScreenId":screens.first().map(|(id,_)|id)
+            }))?;
+            owner
+        };
+        if let Some(action) = self.host(id).map(|host| host.action_target().clone()) {
+            self.host_mut(&action)
+                .ok_or_else(|| invalid("fixture host missing"))?
+                .catalog = CatalogState::Ready;
+        }
+        let keys = screens
+            .iter()
+            .map(|(screen, _)| self.source(id).expect("fixture source").screen_key(screen))
+            .collect::<Vec<_>>();
+        if remote_target.is_some() {
+            for key in &keys {
+                self.open_existing(owner, key)?;
+            }
+        }
+        Ok(keys)
+    }
+
     #[doc(hidden)]
     pub fn ui_test_host_update_fixture(
         &mut self,

@@ -960,6 +960,175 @@ async fn native_mutations_are_visible_to_cli_without_exposing_scratchpads() {
 }
 
 #[tokio::test]
+async fn relative_screen_placement_matches_native_and_control_decoders() {
+    let native_dir = tempfile::tempdir().expect("native dir");
+    let control_dir = tempfile::tempdir().expect("control dir");
+    let native_state = state(ADDR, native_dir.path());
+    let control_state = state(ADDR, control_dir.path());
+    for service in [&native_state, &control_state] {
+        for id in ["A", "B", "C"] {
+            service
+                .mux_store
+                .dispatch(Op::CreateScreen {
+                    name: None,
+                    screen_id: Some(ScreenId::from(id)),
+                    new_pane_id: None,
+                    shell_profile_id: None,
+                })
+                .expect("seed Screen");
+        }
+    }
+    let mut observer =
+        crate::client_session::connect(native_state.client_state.clone()).expect("observer");
+    let welcome = observer.output.recv().await.expect("welcome");
+    let crate::client_session::Message::Text(welcome) = welcome.value else {
+        panic!("welcome must be text")
+    };
+    let welcome: Value = serde_json::from_str(&welcome).expect("welcome JSON");
+    assert!(welcome["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!("screen-placement-v1")));
+    while observer.output.try_recv().is_ok() {}
+
+    let request = json!({"screenId":"C","op":{"type":"move_screen","beforeScreenId":"A"}});
+    assert_eq!(
+        native(
+            &native_state,
+            Operation::MuxOp,
+            json!({"body":request.clone()})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let control = crate::http::build_control_router(control_state.clone());
+    assert_eq!(
+        exchange(&control, api("POST", "/api/mux/op", Some(&request)))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let order = |service: &AppState| {
+        service
+            .mux_store
+            .get_workspace_state()
+            .screen_order
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(order(&native_state), vec!["C", "A", "B"]);
+    assert_eq!(order(&native_state), order(&control_state));
+    async fn next_kind(observer: &mut crate::client_session::Connection, kind: &str) -> Value {
+        loop {
+            let event = tokio::time::timeout(WAIT, observer.output.recv())
+                .await
+                .expect("event within test bound")
+                .expect("connected output");
+            let crate::client_session::Message::Text(text) = event.value else {
+                continue;
+            };
+            let value: Value = serde_json::from_str(&text).expect("event JSON");
+            if value["type"] == kind {
+                return value;
+            }
+        }
+    }
+    let nudge = next_kind(&mut observer, "mux.nudge").await;
+    assert!(nudge["screenId"].is_null());
+
+    observer
+        .input
+        .send(crate::client_session::Message::Text(
+            json!({"type":"mux.workspace_resync"}).to_string(),
+        ))
+        .expect("catalog request");
+    let catalog = next_kind(&mut observer, "mux.workspace_snapshot").await;
+    assert_eq!(catalog["screens"][0]["id"], "C");
+    assert_eq!(catalog["screens"][1]["id"], "A");
+    assert_eq!(catalog["screens"][2]["id"], "B");
+
+    for (request, expected) in [
+        (
+            json!({"screenId":"C","op":{"type":"move_screen","beforeScreenId":null}}),
+            vec!["A", "B", "C"],
+        ),
+        (
+            json!({"screenId":"A","op":{"type":"move_screen"}}),
+            vec!["B", "C", "A"],
+        ),
+    ] {
+        assert_eq!(
+            native(
+                &native_state,
+                Operation::MuxOp,
+                json!({"body":request.clone()})
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            exchange(&control, api("POST", "/api/mux/op", Some(&request)))
+                .await
+                .0,
+            StatusCode::OK
+        );
+        assert_eq!(order(&native_state), expected);
+        assert_eq!(order(&native_state), order(&control_state));
+        assert!(next_kind(&mut observer, "mux.nudge").await["screenId"].is_null());
+    }
+
+    let unchanged = json!({"screenId":"C","op":{"type":"move_screen","beforeScreenId":"A"}});
+    assert_eq!(
+        native(&native_state, Operation::MuxOp, json!({"body":unchanged}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    while let Ok(event) = observer.output.try_recv() {
+        if let crate::client_session::Message::Text(text) = event.value {
+            let value: Value = serde_json::from_str(&text).expect("event JSON");
+            assert_ne!(value["type"], "mux.nudge", "no-op has no change nudge");
+        }
+    }
+    let before = serde_json::to_value(native_state.mux_store.get_workspace_state()).unwrap();
+    for anchor in [
+        json!(true),
+        json!(17),
+        json!([]),
+        json!({}),
+        json!("missing"),
+    ] {
+        let bad = json!({"screenId":"A","op":{"type":"move_screen","beforeScreenId":anchor}});
+        assert_eq!(
+            native(&native_state, Operation::MuxOp, json!({"body":bad.clone()}))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            exchange(&control, api("POST", "/api/mux/op", Some(&bad)))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            serde_json::to_value(native_state.mux_store.get_workspace_state()).unwrap(),
+            before
+        );
+        while let Ok(event) = observer.output.try_recv() {
+            if let crate::client_session::Message::Text(text) = event.value {
+                let value: Value = serde_json::from_str(&text).expect("event JSON");
+                assert_ne!(value["type"], "mux.nudge", "reject has no change nudge");
+            }
+        }
+    }
+    observer.shutdown().await;
+}
+
+#[tokio::test]
 async fn immediate_native_drop_and_independent_closes_release_only_their_client() {
     let dir = tempfile::tempdir().expect("dir");
     let state = state(ADDR, dir.path());

@@ -87,6 +87,12 @@ pub enum Op {
     /// Reorder screens.
     ReorderScreens { screen_order: Vec<ScreenId> },
 
+    /// Place one currently ordered Screen before another, or at the current end.
+    MoveScreen {
+        screen_id: ScreenId,
+        before_screen_id: Option<ScreenId>,
+    },
+
     /// Move a pane and its session to another screen, or to a new one,
     /// without touching the session's process.
     MovePaneToScreen {

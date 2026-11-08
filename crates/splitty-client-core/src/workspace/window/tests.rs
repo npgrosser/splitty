@@ -570,3 +570,81 @@ pub(crate) fn remote_terminal_fixture(
 ) -> (ScreenKey, TerminalToken) {
     window.ui_test_remote_terminal_fixture(target).unwrap()
 }
+
+#[test]
+fn remote_screen_placement_changes_only_reference_order_across_offline_refresh_and_reconnect() {
+    let mut window = WindowWorkspace::new(Uuid::new_v4());
+    let owner = window.lifecycle_token();
+    catalog(&mut window, owner.source_id(), &["local"]);
+    let id = remote(&mut window, "order.test");
+    catalog(&mut window, id, &["a", "b", "c"]);
+    let a = open(&mut window, id, "a");
+    let b = open(&mut window, id, "b");
+    let c = open(&mut window, id, "c");
+    snapshot(&mut window, id, "a", 1).unwrap();
+    window.select(owner, &a).unwrap();
+    let token = window.source(id).unwrap().terminal_token("p0").unwrap();
+    let route_generation = window.source(id).unwrap().route_generation();
+    let browse = window.host(id).unwrap().is_browsing();
+    assert!(window.move_opened_screen(owner, &c, Some(&a)).unwrap());
+    let order = |window: &WindowWorkspace| {
+        window
+            .opened()
+            .into_iter()
+            .map(|entry| entry.key().clone())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(&order(&window)[1..], &[c.clone(), a.clone(), b.clone()]);
+    assert_eq!(window.shown_key(), Some(a.clone()));
+    assert_eq!(window.source(id).unwrap().terminal_token("p0"), Some(token));
+    assert_eq!(
+        window.source(id).unwrap().route_generation(),
+        route_generation
+    );
+    assert_eq!(
+        window
+            .source(id)
+            .unwrap()
+            .live_catalog()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    assert_eq!(window.host(id).unwrap().is_browsing(), browse);
+    catalog(&mut window, id, &["a", "c", "d"]); // b is missing but still arranged.
+    assert!(window.source(id).unwrap().is_missing("b"));
+    window.disconnect(id).unwrap();
+    window.finish_attempt(id).unwrap();
+    assert!(window.can_move_screen(&b));
+    assert!(window.move_opened_screen(owner, &b, Some(&c)).unwrap());
+    assert_eq!(window.source_status(id), Some(SourceStatus::Offline));
+    assert_eq!(window.shown_key(), Some(a.clone()));
+    let arranged = order(&window);
+    window.retry(id).unwrap();
+    window
+        .bind_remote_parts(id, Uuid::new_v4(), ConnectionBudget::default())
+        .unwrap();
+    window
+        .confirm_ready(window.source(id).unwrap().source_token())
+        .unwrap();
+    catalog(&mut window, id, &["d", "c", "a", "b"]);
+    assert_eq!(order(&window), arranged);
+    let d = open(&mut window, id, "d");
+    assert_eq!(order(&window).last(), Some(&d));
+    assert_eq!(window.shown_key(), Some(d.clone())); // explicit open alone selects.
+    let stable = order(&window);
+    let local = window.local_source().screen_key("local");
+    assert!(window
+        .validate_screen_move(owner, &b, Some(&local))
+        .is_err());
+    let stale = WindowWorkspace::new(Uuid::new_v4()).lifecycle_token();
+    assert!(window.move_opened_screen(stale, &b, None).is_err());
+    assert_eq!(order(&window), stable);
+    window.detach(owner, &c).unwrap();
+    assert!(window.move_opened_screen(owner, &b, Some(&c)).is_err());
+    window.begin_close(id).unwrap();
+    assert!(!window.can_move_screen(&b));
+    assert!(window.move_opened_screen(owner, &b, None).is_err());
+}

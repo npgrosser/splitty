@@ -338,6 +338,19 @@ impl Client {
         })
     }
 
+    /// Submit relative Screen order once; the source owns ordered catalog refresh.
+    pub fn move_screen(&self, screen_id: &str, before: Option<&str>) -> io::Result<()> {
+        identifier(screen_id)?;
+        if let Some(before) = before {
+            identifier(before)?;
+        }
+        self.command(before.map_or(0, str::len), || {
+            json!({"type":"mux.op", "screenId":screen_id, "op":{
+                "type":"move_screen", "beforeScreenId":before
+            }})
+        })
+    }
+
     /// Send a typed mux operation and request the authoritative result. The
     /// origin of a successful operation does not receive a mutation nudge.
     pub fn screen_op(&self, screen_id: &str, op: &ScreenOp) -> io::Result<()> {

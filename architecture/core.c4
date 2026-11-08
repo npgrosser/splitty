@@ -62,7 +62,7 @@ model {
     // The mux: pure model, and the effect runner at its edge
 
     mux = component 'mux' {
-      description 'The workspace model: state, exact tab placement with stable layout identities and server-current proportions, shared finite/positive float bounds, sibling-preserving removal across tiled and floating trees, ops, validation, the pure reducer (state, op) -> (state, effects), the grid projection, shared session-free template projection and the store. Managed-job launch, ownership, result and never-respawn records live with the layout. Trusted session metadata updates and omitted screen naming remain pure. No I/O.'
+      description 'The workspace model: state, atomic relative Screen placement against current ordered membership without changing legacy replacement order, exact tab placement with stable layout identities and server-current proportions, shared finite/positive float bounds, sibling-preserving removal across tiled and floating trees, ops, validation, the pure reducer (state, op) -> (state, effects), the grid projection, shared session-free template projection and the store. Managed-job launch, ownership, result and never-respawn records live with the layout. Trusted session metadata updates and omitted screen naming remain pure. No I/O.'
       metadata {
         module 'splitty_core::mux'
         spec 'workspace-model'
@@ -88,7 +88,7 @@ model {
     }
 
     protocol = component 'protocol' {
-      description 'The session protocol (create, attach, text and charged byte-preserving input, output, resize, close, image and chunked file uploads with destination selection and cancellation, activity, idle, hide, size) with its dispatcher, the message types of both protocols, the notification engine and weak typed-event fanout to individually bounded senders, the stores of pasted images and uploaded files (owner-only files in the cache directory), and the arbiter of the PTY size of sessions several connections show (sizing: reports, activity, the size policy, an idle tick).'
+      description 'The session protocol (create, attach, text and charged byte-preserving input, output, resize, close, image and chunked file uploads with destination selection and cancellation, activity, idle, hide, size) with its dispatcher, the message types of both protocols including the screen-placement-v1 welcome capability, the notification engine and weak typed-event fanout to individually bounded senders, the stores of pasted images and uploaded files (owner-only files in the cache directory), and the arbiter of the PTY size of sessions several connections show (sizing: reports, activity, the size policy, an idle tick).'
       metadata {
         module 'splitty_core::protocol'
         spec 'terminal-sessions'

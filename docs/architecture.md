@@ -21,6 +21,15 @@ Op → Validate → Reduce (pure) → new State + Effects
 
 The Reducer is a pure function: `(ScreenState, Op) → (ScreenState, []Effect)`. Effects (`SpawnSession`, `KillSession`) are executed separately by the EffectRunner (`mux::effect_runner`) — no I/O inside the Reducer.
 
+`move_screen` places one ordered Screen before another or at the current end.
+The reducer resolves both identities against current state, collapses only
+duplicates of the moved Screen, and preserves other order entries, Screen
+documents, active identity and sessions, with no process effects. A missing or
+unlisted identity rejects atomically. Legacy `reorder_screens` retains its full
+replacement and partial-order behavior. Both session and control entry points
+use the same operation; a changed order nudges other clients without a Screen
+identifier, while an unchanged order produces no nudge.
+
 Floating geometry uses viewport units. `mux::FloatBounds::is_valid` is the shared
 domain rule for direct float/move operations and template projection: every
 component must be finite and width/height positive. Negative origins and sizes
@@ -278,6 +287,19 @@ keeps its own wheel route. Editing, modal and drag ownership gates chrome
 gestures. Drawer pane rows derive from the canonical layout and capture their
 source execution token before dispatch; they cannot acquire replacement
 authority from a later connection.
+
+Native Screen ordering captures the local window owner and stable Screen keys.
+Local placement requires `screen-placement-v1` and `workspace-catalog-v1`, sends
+one relative operation and uses the existing mutation watermark to retain an
+ordered catalog refresh through sender pressure. An earlier in-flight catalog
+is followed by a post-operation read; no failed or uncertain move is replayed.
+Remote placement changes only the source's opened-reference list, including
+offline or missing entries, without remote commands or new browsing demand.
+Live host catalog refresh and reconnect preserve that window order. Neither path
+changes selection or terminal bindings, and neither adds restart persistence.
+The Drawer retains only the captured drag identity and a transient insertion
+marker measured against the current rows. It submits the same relative intent
+as its Move Up/Move Down menu actions; changing order does not navigate.
 
 The Drawer uses two window-local Kit transition channels: visible overlay
 translation and pinned content reservation. Revealing an unpinned Drawer never

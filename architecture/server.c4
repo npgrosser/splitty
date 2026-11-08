@@ -23,7 +23,7 @@ model {
     }
 
     service = component 'service' {
-      description 'Transport-independent UI operations: an explicit native operation catalog, fixed backend and local-hub roles, request validation, size limits and cancellation policy. Owns unattended mux session metadata and close-on-exit observation through trusted reducer operations. Browser credentials and owner/grant administration are excluded.'
+      description 'Transport-independent UI operations: an explicit native operation catalog, fixed backend and local-hub roles, request validation, size limits and cancellation policy. Its mux control entry point decodes strict relative Screen placement and dispatches the shared reducer against current order, publishing a screenless nudge only when that order changes. Owns unattended mux session metadata and close-on-exit observation through trusted reducer operations. Browser credentials and owner/grant administration are excluded.'
       metadata { module 'splitty_server::service' spec 'control-api' }
     }
     native = component 'native' {
@@ -32,7 +32,7 @@ model {
     }
 
     client_session = component 'client_session' {
-      description 'Common client connections: independent per-connection identity and cleanup, binary output frames and JSON codec, the per-connection mux handler (welcome, resync, ops and their effects), typed broadcasts through per-client notification queues that drain after welcome, and ports.changed: the listening ports of the sessions after each welcome and on change, scanned every 2 seconds while clients are connected. Ephemeral editor requests target one registered attached client, expire and cancel on disconnect; never authorize desktop launches. File offers go to every registered attached client; the first to accept reads the file in chunks, the others drop it; offers expire and end on disconnect. Waits for a review live in memory, at most 16 and one per viewer pane; the first answer of a window settles one.'
+      description 'Common client connections: independent per-connection identity and cleanup, binary output frames and JSON codec, the per-connection mux handler (welcome with screen-placement-v1, ordered workspace resync, strict relative Screen placement and other ops with their effects), typed broadcasts through per-client notification queues that drain after welcome, and ports.changed: the listening ports of the sessions after each welcome and on change, scanned every 2 seconds while clients are connected. Ephemeral editor requests target one registered attached client, expire and cancel on disconnect; never authorize desktop launches. File offers go to every registered attached client; the first to accept reads the file in chunks, the others drop it; offers expire and end on disconnect. Waits for a review live in memory, at most 16 and one per viewer pane; the first answer of a window settles one.'
       metadata {
         module 'splitty_server::client_session'
         spec 'mux-protocol'

@@ -1066,3 +1066,117 @@ mod service {
         service.close().await.unwrap();
     }
 }
+
+#[test]
+fn relative_screen_order_keeps_selection_and_waits_for_post_mutation_catalog() {
+    let mut workspace = model(&["a", "b", "c"]);
+    workspace.set_screen_placement_supported(true);
+    let connection = workspace.connection_id();
+    workspace
+        .apply_snapshot(connection, &terminal_snapshot("a", "p", "s", false))
+        .unwrap();
+    let token = workspace.terminal_token("p").unwrap();
+    let route_generation = workspace.route_generation();
+    workspace.mark_catalog_dirty();
+    workspace.flush_catalog_request(|| Ok(())).unwrap();
+    let before_mutation = workspace.mutation_generation();
+    assert!(workspace
+        .move_screen_with("c", Some("a"), || Ok(()))
+        .unwrap());
+    assert_eq!(workspace.mutation_generation(), before_mutation + 1);
+    assert_eq!(
+        workspace.catalog_request_generation(),
+        Some(before_mutation)
+    );
+    assert_eq!(
+        workspace
+            .screens()
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["a", "b", "c"]
+    );
+    workspace
+        .apply_catalog(connection, &catalog_event(&["a", "b", "c"], Some("c")))
+        .unwrap();
+    assert_eq!(workspace.shown_screen_id(), Some("a"));
+    assert!(workspace
+        .flush_catalog_request(|| Err(io::ErrorKind::WouldBlock.into()))
+        .is_err());
+    assert_eq!(workspace.catalog_request_generation(), None);
+    workspace.flush_catalog_request(|| Ok(())).unwrap();
+    assert_eq!(
+        workspace.catalog_request_generation(),
+        Some(before_mutation + 1)
+    );
+    // An independently created Screen remains in the observed result.
+    workspace
+        .apply_catalog(connection, &catalog_event(&["c", "a", "b", "d"], Some("c")))
+        .unwrap();
+    assert_eq!(
+        workspace
+            .screens()
+            .iter()
+            .map(|entry| entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["c", "a", "b", "d"]
+    );
+    assert_eq!(workspace.shown_screen_id(), Some("a"));
+    assert_eq!(workspace.terminal_token("p"), Some(token));
+    assert_eq!(workspace.route_generation(), route_generation);
+    let generation = workspace.mutation_generation();
+    assert!(!workspace
+        .move_screen_with("c", Some("a"), || panic!(
+            "unchanged order sends no operation"
+        ))
+        .unwrap());
+    assert!(!workspace
+        .move_screen_with("a", Some("a"), || panic!("self anchor sends no operation"))
+        .unwrap());
+    assert!(!workspace
+        .move_screen_with("d", None, || panic!("already last sends no operation"))
+        .unwrap());
+    assert!(workspace
+        .move_screen_with("d", Some("gone"), || panic!(
+            "removed anchor sends no operation"
+        ))
+        .is_err());
+    assert!(workspace
+        .move_screen_with("d", Some("a"), || Err(io::ErrorKind::WouldBlock.into()))
+        .is_err());
+    assert_eq!(workspace.mutation_generation(), generation);
+    let mut refreshed = false;
+    workspace
+        .flush_catalog_request(|| {
+            refreshed = true;
+            Ok(())
+        })
+        .unwrap();
+    assert!(
+        !refreshed,
+        "failed admission does not reserve a post-operation read"
+    );
+}
+
+#[test]
+fn relative_screen_order_requires_both_capabilities_without_legacy_fallback() {
+    let mut workspace = model(&["a", "b"]);
+    assert!(workspace
+        .move_screen_with("b", Some("a"), || panic!("missing placement capability"))
+        .is_err());
+    workspace.set_screen_placement_supported(true);
+    workspace.set_catalog_supported(false);
+    assert!(workspace
+        .move_screen_with("b", Some("a"), || panic!("missing catalog capability"))
+        .is_err());
+    workspace.set_catalog_supported(true);
+    workspace.ready = false;
+    assert!(workspace
+        .move_screen_with("b", Some("a"), || panic!("disconnected local source"))
+        .is_err());
+    workspace.reset_connection(Uuid::new_v4());
+    assert!(
+        !workspace.screen_placement_supported,
+        "new connection must advertise its own support"
+    );
+}

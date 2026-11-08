@@ -606,6 +606,51 @@ impl WindowWorkspace {
         self.selected = Some(key.clone());
         Ok(())
     }
+
+    pub fn can_move_screen(&self, screen: &ScreenKey) -> bool {
+        self.source_status(screen.source_id()) != Some(SourceStatus::Closing)
+            && self
+                .source(screen.source_id())
+                .is_some_and(|source| source.can_move_screen(screen.screen_id()))
+    }
+
+    /// A captured relative placement may survive a remote reconnect, but never
+    /// a replaced local owner, disposed source, or removed reference/anchor.
+    pub fn validate_screen_move(
+        &self,
+        owner: SourceToken,
+        screen: &ScreenKey,
+        before: Option<&ScreenKey>,
+    ) -> io::Result<bool> {
+        self.check_owner(owner)?;
+        if !self.can_move_screen(screen)
+            || before.is_some_and(|key| key.source_id() != screen.source_id())
+        {
+            return Err(invalid(
+                "Screen placement is unavailable or crosses source groups",
+            ));
+        }
+        let source = self
+            .source(screen.source_id())
+            .ok_or_else(|| invalid("Screen source is gone"))?;
+        let (from, to) =
+            source.screen_move_positions(screen.screen_id(), before.map(ScreenKey::screen_id))?;
+        Ok(from != to)
+    }
+
+    pub(crate) fn move_opened_screen(
+        &mut self,
+        owner: SourceToken,
+        screen: &ScreenKey,
+        before: Option<&ScreenKey>,
+    ) -> io::Result<bool> {
+        if !self.validate_screen_move(owner, screen, before)? {
+            return Ok(false);
+        }
+        self.source_mut_raw(screen.source_id())
+            .ok_or_else(|| invalid("Screen source is gone"))?
+            .move_opened_screen(screen.screen_id(), before.map(ScreenKey::screen_id))
+    }
     pub fn cycle(&mut self, owner: SourceToken, step: TabStep) -> io::Result<bool> {
         self.check_owner(owner)?;
         let Some(current) = self.shown_key() else {

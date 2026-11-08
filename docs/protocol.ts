@@ -899,7 +899,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "hub-host-decisions-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1" and "viewer-annotations-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1" and "viewer-annotations-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -1277,6 +1277,27 @@ interface RenameScreenOp {
   name: string;
 }
 
+/** Legacy replacement order: unknown IDs are filtered; omitted Screens stay omitted. */
+interface ReorderScreensOp {
+  type: "reorder_screens";
+  screenOrder: string[];
+}
+
+/**
+ * Relative placement (requires "screen-placement-v1" and an ordered catalog).
+ * The enclosing mux.op screenId, or the control API body's screenId, names the
+ * moved Screen. beforeScreenId names an existing ordered anchor; omission or
+ * null places the Screen at the current end. Other entries, including legacy
+ * duplicates and omitted Screen records, remain as they are. Only duplicate
+ * entries of the moved Screen collapse. Invalid identities or a non-string,
+ * non-null anchor reject atomically. No pane, session or active Screen changes.
+ * A changed order nudges other clients without a screenId; a no-op does not.
+ */
+interface MoveScreenOp {
+  type: "move_screen";
+  beforeScreenId?: string | null;
+}
+
 /**
  * Move a pane with its running session from the envelope's screen to another
  * screen of the same server, or to a new one placed right after the source.
@@ -1474,6 +1495,8 @@ type Operation =
   | CloseScreenOp
   | SetActiveScreenOp
   | RenameScreenOp
+  | ReorderScreensOp
+  | MoveScreenOp
   | MovePaneToScreenOp
   | SetScratchpadOp
   | OpenViewerOp

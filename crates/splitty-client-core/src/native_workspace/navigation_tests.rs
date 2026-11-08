@@ -233,9 +233,144 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
         ))
         .await
         .unwrap();
-    model_where(&mut updates, |model| {
+    let navigated = model_where(&mut updates, |model| {
         model.shown_screen_id() != Some(screen_a.as_str())
     })
     .await;
+    let selected_before = navigated.shown_screen_id().unwrap().to_owned();
+    commands
+        .send(Command::new(
+            scope,
+            CommandKind::MoveScreen {
+                screen: navigated.screen_key(&screen_c),
+                before: Some(navigated.screen_key(&screen_a)),
+            },
+        ))
+        .await
+        .unwrap();
+    let moved = model_where(&mut updates, |model| {
+        model
+            .screens()
+            .first()
+            .is_some_and(|entry| entry.id.as_str() == screen_c)
+    })
+    .await;
+    assert_eq!(moved.shown_screen_id(), Some(selected_before.as_str()));
+    for (pane, session) in &sessions {
+        assert_eq!(moved.session_for(pane), Some(session.as_str()));
+    }
+    commands
+        .send(Command::new(
+            SourceWorkspace::new(uuid::Uuid::new_v4()).source_token(),
+            CommandKind::MoveScreen {
+                screen: moved.screen_key(&screen_a),
+                before: None,
+            },
+        ))
+        .await
+        .unwrap();
+    rejected(&mut updates, "source connection").await;
+    // Creation reaches the same ordered worker before placement captured from
+    // the previous catalog; relative placement must not lose the fourth Screen.
+    commands
+        .send(Command::new(
+            scope,
+            CommandKind::CreateScreen("Fourth".into()),
+        ))
+        .await
+        .unwrap();
+    commands
+        .send(Command::new(
+            scope,
+            CommandKind::MoveScreen {
+                screen: moved.screen_key(&screen_a),
+                before: None,
+            },
+        ))
+        .await
+        .unwrap();
+    let final_model = model_where(&mut updates, |model| {
+        model.screens().len() == 4
+            && model
+                .screens()
+                .last()
+                .is_some_and(|entry| entry.id.as_str() == screen_a)
+    })
+    .await;
+    assert_eq!(final_model.screens()[0].id.as_str(), screen_c);
+    assert_eq!(final_model.screens()[2].name.as_deref(), Some("Fourth"));
+    assert_eq!(
+        final_model.shown_screen_id(),
+        Some(final_model.screens()[2].id.as_str())
+    );
+    for (pane, session) in &sessions {
+        assert_eq!(final_model.session_for(pane), Some(session.as_str()));
+    }
+    let route = final_model.terminal_token(&pane_a).unwrap();
+    commands
+        .send(Command::new(
+            scope,
+            CommandKind::Input {
+                route: route.clone(),
+                bytes: b"printf 'ORDER_%s\\n' OUTPUT_OK\r".to_vec(),
+            },
+        ))
+        .await
+        .unwrap();
+    let mut output = Vec::new();
+    loop {
+        if let Update::Event { event, .. } = next(&mut updates).await {
+            if let Some(chunk) = event.output() {
+                if chunk.session_id == route.session_id() {
+                    output.extend_from_slice(chunk.bytes);
+                    if output
+                        .windows(b"ORDER_OUTPUT_OK".len())
+                        .any(|bytes| bytes == b"ORDER_OUTPUT_OK")
+                    {
+                        break;
+                    }
+                    assert!(output.len() < 65536, "bounded terminal evidence");
+                }
+            }
+        }
+    }
     worker.shutdown().unwrap();
+}
+
+#[tokio::test]
+async fn remote_screen_order_dispatch_requires_no_live_transport() {
+    let (runtime, path) = crate::appearance::local::tests::fixture();
+    let service =
+        crate::owned_service::OwnedService::from(crate::EmbeddedService::from_runtime(runtime));
+    let client = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(client.connection_id());
+    let owner = window.lifecycle_token();
+    let keys = window
+        .ui_test_screen_order_fixture(&[("a", "A"), ("b", "B")], Some("offline-order.test"))
+        .unwrap();
+    let id = keys[0].source_id();
+    window.disconnect(id).unwrap();
+    window.finish_attempt(id).unwrap();
+    client.sender().close();
+    assert!(client.request_workspace().is_err());
+    let local = source::SourceRuntime::new(client, owner);
+    let selected = window.shown_key();
+    assert!(move_window_screen(&mut window, &local, owner, &keys[1], Some(&keys[0])).unwrap());
+    assert_eq!(
+        window
+            .opened()
+            .iter()
+            .map(|entry| entry.key().screen_id())
+            .collect::<Vec<_>>(),
+        ["b", "a"]
+    );
+    assert_eq!(window.shown_key(), selected);
+    assert_eq!(
+        window.source_status(id),
+        Some(crate::workspace::SourceStatus::Offline)
+    );
+    assert!(!move_window_screen(&mut window, &local, owner, &keys[1], Some(&keys[0])).unwrap());
+    local.client.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
 }

@@ -195,6 +195,10 @@ pub enum CommandKind {
     },
     CreateScreen(String),
     SwitchScreen(ScreenKey),
+    MoveScreen {
+        screen: ScreenKey,
+        before: Option<ScreenKey>,
+    },
     CycleScreen {
         step: TabStep,
     },
@@ -1450,6 +1454,13 @@ async fn run_service(
                                 Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?,
                             }
                         }
+                        CommandKind::MoveScreen {screen,before} => {
+                            match move_window_screen(&mut window,&local,captured.expect("admitted local owner"),&screen,before.as_ref()) {
+                                Ok(true)=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,
+                                Ok(false)=>{},
+                                Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?,
+                            }
+                        }
                         CommandKind::CycleScreen { step } => {
                             if let Some(key)=adjacent_screen(&window,step) {
                                 match select_window_screen(&mut window,&mut local,&mut remotes,&key) {
@@ -1588,6 +1599,7 @@ fn local_command(kind: &CommandKind) -> bool {
             | CommandKind::ReleaseHostBrowse { .. }
             | CommandKind::DetachRemoteScreen { .. }
             | CommandKind::SwitchScreen(_)
+            | CommandKind::MoveScreen { .. }
             | CommandKind::CycleScreen { .. }
             | CommandKind::RefreshHostDirectory { .. }
             | CommandKind::TemplateApi { .. }
@@ -1623,6 +1635,30 @@ fn select_window_screen(
     remotes.cancel_created_follow();
     local.withdraw_visibility();
     Ok(())
+}
+
+fn move_window_screen(
+    window: &mut WindowWorkspace,
+    local: &source::SourceRuntime,
+    owner: SourceToken,
+    screen: &ScreenKey,
+    before: Option<&ScreenKey>,
+) -> std::io::Result<bool> {
+    if !window.validate_screen_move(owner, screen, before)? {
+        return Ok(false);
+    }
+    if screen.source_id() == local.id() {
+        window
+            .source_mut(local.id())
+            .ok_or_else(|| crate::connection::invalid("Local source is gone"))?
+            .move_screen(
+                &local.client,
+                screen.screen_id(),
+                before.map(ScreenKey::screen_id),
+            )
+    } else {
+        window.move_opened_screen(owner, screen, before)
+    }
 }
 
 fn adjacent_screen(window: &WindowWorkspace, step: TabStep) -> Option<ScreenKey> {

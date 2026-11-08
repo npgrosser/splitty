@@ -283,6 +283,31 @@ pub fn reduce_workspace(
             Ok((state, vec![]))
         }
 
+        Op::MoveScreen {
+            screen_id,
+            before_screen_id,
+        } => {
+            for id in std::iter::once(&screen_id).chain(before_screen_id.as_ref()) {
+                if !state.screens.contains_key(id) {
+                    return Err(MuxError::ScreenNotFound(id.clone()));
+                }
+                if !state.screen_order.contains(id) {
+                    return Err(MuxError::ScreenNotOrdered(id.clone()));
+                }
+            }
+            if before_screen_id.as_ref() == Some(&screen_id) {
+                return Ok((state, vec![]));
+            }
+            state.screen_order.retain(|id| id != &screen_id);
+            let index = before_screen_id
+                .as_ref()
+                .and_then(|before| state.screen_order.iter().position(|id| id == before));
+            state
+                .screen_order
+                .insert(index.unwrap_or(state.screen_order.len()), screen_id);
+            Ok((state, vec![]))
+        }
+
         Op::MovePaneToScreen {
             screen_id,
             pane_id,

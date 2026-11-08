@@ -623,4 +623,165 @@ mod tests {
         assert_eq!(infos[1].id, ScreenId::from("A"));
         assert_eq!(infos[2].id, ScreenId::from("B"));
     }
+
+    #[test]
+    fn move_screen_uses_current_order_and_preserves_screen_content_and_sessions() {
+        let store = Store::new();
+        for name in ["A", "B", "C", "D"] {
+            store
+                .dispatch(Op::CreateScreen {
+                    name: Some(name.into()),
+                    screen_id: Some(ScreenId::from(name)),
+                    new_pane_id: Some(PaneId::from(format!("pane-{name}").as_str())),
+                    shell_profile_id: None,
+                })
+                .expect("create screen");
+        }
+        store
+            .dispatch(Op::SetActiveScreen {
+                screen_id: ScreenId::from("B"),
+            })
+            .expect("active B");
+        let unchanged = store.get_workspace_state();
+        let place = |moved: &str, before: Option<&str>| {
+            let effects = store
+                .dispatch(Op::MoveScreen {
+                    screen_id: ScreenId::from(moved),
+                    before_screen_id: before.map(ScreenId::from),
+                })
+                .expect("relative placement");
+            assert!(effects.is_empty());
+            let current = store.get_workspace_state();
+            let mut expected = unchanged.clone();
+            expected.screen_order = current.screen_order.clone();
+            assert_eq!(
+                serde_json::to_value(current).unwrap(),
+                serde_json::to_value(expected).unwrap(),
+                "placement changes only order, not active Screen, revision, pane or session"
+            );
+        };
+        // A stale client observed A,B,C; D was appended before its move.
+        place("C", Some("A"));
+        assert_eq!(
+            store.get_workspace_state().screen_order,
+            ids(&["C", "A", "B", "D"])
+        );
+        place("C", Some("B"));
+        assert_eq!(
+            store.get_workspace_state().screen_order,
+            ids(&["A", "C", "B", "D"])
+        );
+        place("A", None);
+        assert_eq!(
+            store.get_workspace_state().screen_order,
+            ids(&["C", "B", "D", "A"])
+        );
+        place("D", Some("A"));
+        assert_eq!(
+            store.get_workspace_state().screen_order,
+            ids(&["C", "B", "D", "A"])
+        );
+        place("B", Some("B"));
+        assert_eq!(
+            store.get_workspace_state().screen_order,
+            ids(&["C", "B", "D", "A"])
+        );
+    }
+
+    #[test]
+    fn move_screen_rejects_missing_or_unlisted_identity_atomically() {
+        let source = Store::new();
+        for name in ["A", "B", "C", "X"] {
+            source
+                .dispatch(Op::CreateScreen {
+                    name: None,
+                    screen_id: Some(ScreenId::from(name)),
+                    new_pane_id: None,
+                    shell_profile_id: None,
+                })
+                .expect("create screen");
+        }
+        let mut state = source.get_workspace_state();
+        state.screen_order = ids(&["B", "B", "A", "A", "C"]);
+        let store = Store::with_state(state);
+        let before = serde_json::to_value(store.get_workspace_state()).unwrap();
+        let changes = store.changes();
+        for (moved, anchor, missing) in [
+            ("gone", None, true),
+            ("X", None, false),
+            ("A", Some("gone"), true),
+            ("A", Some("X"), false),
+        ] {
+            let error = store
+                .dispatch(Op::MoveScreen {
+                    screen_id: ScreenId::from(moved),
+                    before_screen_id: anchor.map(ScreenId::from),
+                })
+                .expect_err("invalid placement");
+            assert_eq!(
+                matches!(error, MuxError::ScreenNotFound(_)),
+                missing,
+                "missing and unordered identities have distinct errors"
+            );
+            assert_eq!(
+                serde_json::to_value(store.get_workspace_state()).unwrap(),
+                before
+            );
+            assert!(!changes.has_changed().unwrap());
+        }
+        let effects = store
+            .dispatch(Op::MoveScreen {
+                screen_id: ScreenId::from("A"),
+                before_screen_id: Some(ScreenId::from("B")),
+            })
+            .expect("valid placement");
+        assert!(effects.is_empty());
+        assert_eq!(
+            store.get_workspace_state().screen_order,
+            ids(&["A", "B", "B", "C"])
+        );
+        assert!(store
+            .get_workspace_state()
+            .screens
+            .contains_key(&ScreenId::from("X")));
+    }
+
+    #[test]
+    fn move_screen_preserves_legacy_partial_order_after_an_unrelated_reorder() {
+        let store = Store::new();
+        for name in ["A", "B", "C", "D"] {
+            store
+                .dispatch(Op::CreateScreen {
+                    name: None,
+                    screen_id: Some(ScreenId::from(name)),
+                    new_pane_id: None,
+                    shell_profile_id: None,
+                })
+                .expect("create Screen");
+        }
+        store
+            .dispatch(Op::ReorderScreens {
+                screen_order: ids(&["C", "absent", "A"]),
+            })
+            .expect("legacy replacement order");
+        assert_eq!(store.get_workspace_state().screen_order, ids(&["C", "A"]));
+        let before = store.get_workspace_state();
+        store
+            .dispatch(Op::MoveScreen {
+                screen_id: ScreenId::from("A"),
+                before_screen_id: Some(ScreenId::from("C")),
+            })
+            .expect("relative placement after unrelated reorder");
+        let mut expected = before;
+        expected.screen_order = ids(&["A", "C"]);
+        assert_eq!(
+            serde_json::to_value(store.get_workspace_state()).unwrap(),
+            serde_json::to_value(expected).unwrap(),
+            "legacy omitted Screens and all records remain unchanged"
+        );
+    }
+
+    fn ids(values: &[&str]) -> Vec<ScreenId> {
+        values.iter().map(|value| ScreenId::from(*value)).collect()
+    }
 }

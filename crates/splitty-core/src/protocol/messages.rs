@@ -42,6 +42,7 @@ pub const MSG_MUX_OP: &str = "mux.op";
 pub const MSG_MUX_RESYNC: &str = "mux.resync";
 pub const MSG_MUX_WORKSPACE_RESYNC: &str = "mux.workspace_resync";
 pub const WORKSPACE_CATALOG_CAPABILITY: &str = "workspace-catalog-v1";
+pub const SCREEN_PLACEMENT_CAPABILITY: &str = "screen-placement-v1";
 
 /// One chunk of a viewer pane's document (`viewer-panes`, Reading A Document).
 pub const MSG_VIEWER_READ: &str = "viewer.read";
@@ -669,6 +670,7 @@ impl ServerEvent {
                 "viewer-annotations-v1".into(),
                 crate::mux::TEMPLATE_CAPABILITY.into(),
                 WORKSPACE_CATALOG_CAPABILITY.into(),
+                SCREEN_PLACEMENT_CAPABILITY.into(),
             ],
             server_mode,
         }
@@ -830,7 +832,8 @@ mod tests {
                 "viewer-v1",
                 "viewer-annotations-v1",
                 "server-templates-v1",
-                "workspace-catalog-v1"
+                "workspace-catalog-v1",
+                "screen-placement-v1"
             ])
         );
         assert_eq!(wire["type"], "mux.welcome");

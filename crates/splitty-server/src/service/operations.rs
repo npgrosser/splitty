@@ -707,14 +707,20 @@ pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Repl
         };
     }
     let mut screen_id = ScreenId::from(req.screen_id.as_str());
-    let op_type = req.op.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    let op_type = req
+        .op
+        .get("type")
+        .and_then(|t| t.as_str())
+        .unwrap_or("")
+        .to_owned();
 
     // The target of a pane moved to another screen, nudged with its source.
     let mut moved_to = None;
     // The pane an `open_viewer` showed its document in, and whether it existed.
     let mut viewer = None;
+    let mut screen_order_changed = false;
     // Workspace-level ops vs screen-level ops
-    let result = match op_type {
+    let result = match op_type.as_str() {
         "move_pane_to_screen" => {
             let field = |name: &str| req.op.get(name).and_then(|v| v.as_str());
             let (Some(pane_id), Some(target)) = (field("paneId"), field("targetScreenId")) else {
@@ -801,6 +807,28 @@ pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Repl
                 })
                 .unwrap_or_default(),
         }),
+        "move_screen" => {
+            let before_screen_id = match req.op.get("beforeScreenId") {
+                None | Some(Value::Null) => Ok(None),
+                Some(Value::String(id)) => Ok(Some(ScreenId::from(id.as_str()))),
+                Some(_) => Err(mux::MuxError::InvalidScreenPlacementAnchor),
+            };
+            before_screen_id.and_then(|before_screen_id| {
+                state
+                    .mux_store
+                    .dispatch_inspect(
+                        mux::Op::MoveScreen {
+                            screen_id: screen_id.clone(),
+                            before_screen_id,
+                        },
+                        |before, after| before.screen_order != after.screen_order,
+                    )
+                    .map(|(effects, changed)| {
+                        screen_order_changed = changed;
+                        effects
+                    })
+            })
+        }
         _ => {
             // A shell whose pane moved still names its old screen
             // ($SPLITTY_SCREEN_ID): the op follows the pane.
@@ -897,11 +925,22 @@ pub(crate) async fn post_mux_op(state: &ServiceState, req: MuxOpRequest) -> Repl
                     Some(target.to_string()),
                 ));
             }
-            batch.push(splitty_core::protocol::ServerEvent::mux_nudge(
-                "cli_op".into(),
-                Some(screen_id.to_string()),
-            ));
-            state.client_state.broadcast_events(&batch, None);
+            if op_type == "move_screen" {
+                if screen_order_changed {
+                    batch.push(splitty_core::protocol::ServerEvent::mux_nudge(
+                        "cli_op".into(),
+                        None,
+                    ));
+                }
+            } else {
+                batch.push(splitty_core::protocol::ServerEvent::mux_nudge(
+                    "cli_op".into(),
+                    Some(screen_id.to_string()),
+                ));
+            }
+            if !batch.is_empty() {
+                state.client_state.broadcast_events(&batch, None);
+            }
             if let Some(failed) = outcomes.iter().find(|o| o.result.is_err()) {
                 let mut value = json!({"ok":false,"code":"spawn_failed","error":failed.result.as_ref().err().map(ToString::to_string),"screenId":screen_id});
                 if let splitty_core::mux::Effect::SpawnSession {

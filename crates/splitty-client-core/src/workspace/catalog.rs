@@ -2,6 +2,7 @@
 use super::*;
 use crate::connection::identifier;
 pub(super) mod floating;
+mod order;
 mod placement;
 pub(super) mod templates;
 use floating::PendingFloating;
@@ -72,6 +73,7 @@ pub struct SourceWorkspace {
     pending_screens: HashMap<String, PendingScreen>,
     activate_created: Option<String>,
     catalog_supported: bool,
+    screen_placement_supported: bool,
     tab_selection_supported: bool,
     tab_placement_supported: bool,
     pending_placement: Option<PendingTabPlacement>,
@@ -325,6 +327,7 @@ impl SourceWorkspace {
             pending_screens: HashMap::new(),
             activate_created: None,
             catalog_supported: false,
+            screen_placement_supported: false,
             tab_selection_supported: false,
             tab_placement_supported: false,
             pending_placement: None,
