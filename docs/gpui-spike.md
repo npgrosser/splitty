@@ -1807,5 +1807,12 @@ Seven shared-policy tests and three production-view integration tests cover
 source collisions, offline delivery, stale owners, reconnects, bounds, settings
 refresh and failure, focus/visibility return, deliberate pane activation and
 count/severity projection. All 159 native tests and touched-crate strict Clippy
-pass. Real-window badge acceptance remains separate. These additions are not in
-the frozen Interaction preview; full workspace merge checks remain deferred.
+pass. A private Linux X11 window with two owned shells also verifies the
+server-to-Drawer path: a delayed OSC 133 command-end marker in the first shell
+produces two admitted process activity facts while Screen 2 is displayed. The
+Drawer shows count 2 and its pane severity dot; returning to Screen 1 clears
+both. Normal close leaves no owned child or display process. The frozen GPUI
+candidate has SHA-256
+`834c19f9fbc39689e9da03aadcd31e93214c34493f85bfc6eedd90c48a93dcfc`.
+These additions are not in the frozen Interaction preview; Windows badge
+acceptance and full workspace merge checks remain separate.
