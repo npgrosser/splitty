@@ -1456,6 +1456,14 @@ after removal and re-add retain the same PID, pane and session. Metadata edits
 start no additional SSH process, remote configuration and inventories remain
 unchanged, and all owned fixture processes are cleaned up.
 
-This is functional software-rendered Linux X11 evidence. Windows host interaction,
-broader remote failure cases and outbound port controls remain separate acceptance
-work; this increment does not close the wider remote workspace matrix.
+A Windows preview built from the matching implementation sources has executable
+SHA-256 `d6272de8d3455efe703ab31e436c0b9d3f633c86f2e4048711a74f734712a544`.
+Its integrated local workspace smoke reaches stage 18 with distinct actual WSL
+session markers, tab/split/Screen actions, hidden output and preserved editor
+focus. Native hardware graphics is reported. A separate owned startup/close check
+also exits normally; both runs leave no owned Windows or WSL process alive.
+
+Host interaction evidence remains scoped to software-rendered Linux X11 windows;
+Windows remote-host interaction, broader remote failures and outbound port controls
+remain separate acceptance work. This increment does not close the wider remote
+workspace matrix.
