@@ -1367,7 +1367,10 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(window.shown_key(), Some(local_key.clone()));
-        assert_eq!(window.local_source().screens()[0].name.as_deref(), Some("Local"));
+        assert_eq!(
+            window.local_source().screens()[0].name.as_deref(),
+            Some("Local")
+        );
         let blocked = window
             .prepare_remote_screen_creation(&target, token)
             .unwrap();

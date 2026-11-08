@@ -2093,11 +2093,9 @@ local/remote Screen IDs, stale connection and pending-close refusal, and the
 canonical renamed name. Strict all-target client-core/GPUI Clippy, 17
 architecture tests, formatting, LikeC4 validation and strict OpenSpec change
 validation pass. The view tests exercise a real double-click, context menu/F2
-entry, Enter and Escape, retained input/focus through unrelated reconciliation,
+entry, Enter, active-window Blur and Escape, retained input/focus through unrelated reconciliation,
 invalid-name and full-queue refusal, and disconnect cancellation. A 200px
 Drawer with a long remote title and Loading status retains a stable select
 hitbox and keeps both text and status outside its fixed action lane; the full
-title remains available as a tooltip. Blur uses the same retained editor event
-subscription as Enter, but a separate active-window Blur input test has not yet
-been run. Actual remote-window acceptance and the deferred full workspace CI
-remain separate checkpoints.
+title remains available as a tooltip. Actual remote-window acceptance and the
+deferred full workspace CI remain separate checkpoints.

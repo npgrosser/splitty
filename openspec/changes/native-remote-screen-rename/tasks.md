@@ -9,7 +9,7 @@
 ## 2. Captured inline rename editor
 
 - [x] 2.1 Capture window owner, source token and ScreenKey in the existing rename editor and revalidate its captured source on activation, reconciliation and commit; extend GPUI in-process production-view tests to preserve input/focus through unrelated selection/output updates and reject replaced, removed, missing, unconfirmed or closing targets without replay.
-- [ ] 2.2 Enable the same Drawer input and double-click/F2/context entrypoints for eligible remote rows while preserving local entrypoints; extend the existing GPUI in-process Drawer interaction test with real pointer/keyboard input, colliding remote/local Screen IDs, Enter/Blur commit and Escape cancellation, verifying exact source dispatch and unchanged selection. (Implementation and Enter/Escape tests pass; active-window Blur input test remains.)
+- [x] 2.2 Enable the same Drawer input and double-click/F2/context entrypoints for eligible remote rows while preserving local entrypoints; extend the existing GPUI in-process Drawer interaction test with real pointer/keyboard input, colliding remote/local Screen IDs, Enter/Blur commit and Escape cancellation, verifying exact source dispatch and unchanged selection.
 - [x] 2.3 Preserve canonical name adoption and existing bounded validation/refusal feedback; extend in-process tests for invalid names, full command admission, canonical refresh and connection loss to prove no optimistic rename or duplicate/replayed operation.
 - [x] 2.4 Update the existing GPUI workspace architecture description/relationships and docs/architecture.md editor identity account; verify they describe captured source ownership and canonical names without introducing another model or dependency.
 

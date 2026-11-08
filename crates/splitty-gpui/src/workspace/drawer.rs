@@ -931,6 +931,8 @@ mod view_tests {
                 window.draw(cx).clear(cx);
             });
             while receiver.try_recv().is_ok() {}
+            window.update(|window, _| window.activate_window());
+            window.run_until_parked();
             let selector: &'static str =
                 Box::leak(format!("drawer-select-{remote}").into_boxed_str());
             let name = window.debug_bounds(selector).unwrap();
@@ -953,6 +955,8 @@ mod view_tests {
                     break;
                 }
             }
+            redraw(window);
+            window.run_until_parked();
             window.update(|window, cx| {
                 let workspace = view.read(cx);
                 let editor = workspace.rename.as_ref().expect("remote F2 editor");
@@ -960,8 +964,24 @@ mod view_tests {
                 assert_eq!(editor.source, source);
                 assert!(editor.input.read(cx).focus_handle(cx).is_focused(window));
             });
-            window.simulate_keystrokes("escape");
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace
+                        .rename
+                        .as_ref()
+                        .unwrap()
+                        .input
+                        .update(cx, |input, cx| input.set_value("From Blur", window, cx));
+                });
+                window.blur(cx);
+            });
+            window.run_until_parked();
             assert!(window.update(|_, cx| view.read(cx).rename.is_none()));
+            let sent = receiver.try_recv().expect("blur submits one rename");
+            assert_eq!(sent.source_token(), Some(source));
+            assert!(
+                matches!(sent.kind(), Command::RenameScreen { name, .. } if name == "From Blur")
+            );
             assert!(receiver.try_recv().is_err());
         });
     }
