@@ -1846,3 +1846,18 @@ separate 18-stage smoke supplies normal-close acceptance.
 
 Windows unread-badge and terminal-context-menu interaction acceptance, real-host
 update/install and remote payloads for other architectures remain separate.
+
+### Native window context title (2026-11-08)
+
+The OS window title and existing Windows Kit title bar now follow the selected
+Screen, focused pane title and accepted remote host alias. The projection reads
+the current source-qualified workspace model; the shell observes presentation
+changes and only updates the OS title when the resulting text changes. Control
+characters are rendered as plain replacement characters, and long title-bar
+text uses ellipsis with a full tooltip. Probe windows retain their own title.
+
+Three focused tests verify metadata and Screen rename, pane focus, colliding
+local/remote identifiers and aliases, plus Root-to-OS title propagation. The
+four-test title filter and strict GPUI Clippy pass. This later source change is
+not included in the frozen Activity preview; Windows title-bar interaction
+acceptance remains separate.

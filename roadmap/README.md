@@ -147,7 +147,7 @@ Ideen und Features, nicht fest eingeplant, aber vorsortiert. Ausgearbeitete Vorh
 | 117 | [Diffs reviewen](../openspec/changes/review-diffs/proposal.md) | Draft | 105 + 111 |
 | 118 | [HTML mit Skripten in einer Sandbox](../openspec/changes/viewer-sandboxed-html/proposal.md) | Draft | 105 |
 | 119 | [Web-View für Dev-Server](../openspec/changes/viewer-webview/proposal.md) | Draft | 105 + Milestone 7 |
-| 120 | [Native UI mit GPUI](../openspec/changes/native-ui-gpui/proposal.md) | Entwicklungszweig: lokaler/Remote-Workspace, Drawer, Settings, Hosts und ausgehende Ports unter Linux geprüft; Windows-Vorschau startet nativ | Animationen, Drawer-Details, Screen-Reihenfolge, Host-Updates sowie Plattform- und Cutover-Prüfungen offen |
+| 120 | [Native UI mit GPUI](../openspec/changes/native-ui-gpui/proposal.md) | Entwicklungszweig: lokaler/Remote-Workspace, Drawer und Animationen, Screen-Reihenfolge, Settings, Hosts, ausgehende Ports und Aktivitätsanzeigen unter Linux geprüft; native Windows-Activity-Vorschau mit Hardwaregrafik und Drawer-Radnavigation geprüft | Settings-Parität, weitere Menüaktionen, tatsächliche Host-Updates sowie verbleibende Plattform- und Cutover-Prüfungen offen |
 
 **101** macht mehrere gleichzeitige Clients am selben Screen verlässlich. Verbinden können sie sich schon heute (Single-Attach wurde im März 2026 entfernt); es fehlen Layout-Sync für alle Ops, Reihenfolge und Input-Routing. Geteilte Output-Streams (`fix-pty-reader`) und die Resize-Policy (`pty-size-policy`: kleinste Größe der aktiven Clients, sichtbare Markierung, Übernahme) sind erledigt.
 
