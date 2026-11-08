@@ -138,6 +138,14 @@ impl PortsView {
         }
         self.feedback.insert(key, feedback);
     }
+    fn can_record(&self, key: &MappingKey) -> bool {
+        self.feedback.contains_key(key)
+            || self.feedback.len() < Self::MAX_FEEDBACK
+            || self
+                .feedback
+                .values()
+                .any(|feedback| feedback.outcome != ForwardOutcome::Pending)
+    }
     pub(super) fn pending(&self, key: &MappingKey) -> bool {
         self.feedback
             .get(key)
@@ -946,6 +954,12 @@ impl Workspace {
             cx.notify();
             return;
         }
+        if !self.ports.can_record(&key) {
+            self.ports.form.as_mut().expect("form").error =
+                Some("Too many port actions are pending; wait for one to finish".into());
+            cx.notify();
+            return;
+        }
         let id = Uuid::new_v4();
         let owner = form.owner;
         match self.commands.try_send(WorkerCommand::new(
@@ -1173,6 +1187,15 @@ impl Workspace {
                 ));
                 cx.notify();
             }
+            return;
+        }
+        if !self.ports.can_record(&key) {
+            let message = "Too many port actions are pending; wait for one to finish".to_owned();
+            if origin.is_some() {
+                self.ports.link_notice = Some(message.clone());
+            }
+            self.ports.error = Some(message);
+            cx.notify();
             return;
         }
         let action = request.action();
@@ -1410,7 +1433,7 @@ impl Workspace {
 mod tests {
     use super::{
         CloseTarget, Command, Destination, ForwardAction, ForwardOutcome, ForwardRequest,
-        ForwardResult, ForwardSnapshot, ForwardState, PortFeedback, WebUrl, Workspace,
+        ForwardResult, ForwardSnapshot, ForwardState, MappingKey, PortFeedback, WebUrl, Workspace,
     };
     use gpui_kit::{
         px, size, AppContext, Entity, Focusable, Modifiers, TestAppContext, VisualTestContext,
@@ -1448,6 +1471,80 @@ mod tests {
         });
         let view = content.borrow_mut().take().unwrap();
         run(window, view);
+    }
+
+    #[test]
+    fn full_pending_feedback_rejects_untracked_open_until_terminal_result_frees_capacity() {
+        with_view(|window, view| {
+            let (commands, mut receiver) = mpsc::channel(4);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.model = Some(WindowWorkspace::new(Uuid::new_v4()));
+                    let owner = workspace.model.as_ref().unwrap().lifecycle_token();
+                    workspace.ports.set_owner(owner);
+                    workspace.destination = Destination::Hosts;
+                    let mut first = None;
+                    for port in 3000..3000 + super::PortsView::MAX_FEEDBACK as u16 {
+                        let key = MappingKey::new("vm1", port).unwrap();
+                        let id = Uuid::new_v4();
+                        workspace.ports.record(key.clone(), PortFeedback {
+                            owner, request_id: id, action: ForwardAction::Save,
+                            outcome: ForwardOutcome::Pending, reason: None,
+                            browser_opened: None, settle_after: 0,
+                        });
+                        if first.is_none() {
+                            first = Some((key, id));
+                        }
+                    }
+                    let existing_key = MappingKey::new("vm1", 3001).unwrap();
+                    workspace.submit_forward(ForwardRequest::stop(existing_key.clone()), None, cx);
+                    assert!(matches!(receiver.try_recv().unwrap().kind(), Command::ManageForward { request, .. }
+                        if request.action() == ForwardAction::Stop && request.key() == &existing_key));
+                    assert_eq!(workspace.ports.feedback.len(), super::PortsView::MAX_FEEDBACK);
+                    let new_key = MappingKey::new("vm1", 4000).unwrap();
+                    workspace.submit_forward(
+                        ForwardRequest::open(new_key.clone(), None, false, None).unwrap(),
+                        None,
+                        cx,
+                    );
+                    assert_eq!(workspace.ports.feedback.len(), super::PortsView::MAX_FEEDBACK);
+                    assert!(workspace.ports.open_requests.is_empty());
+                    assert!(receiver.try_recv().is_err(), "capacity rejection sends no command");
+
+                    workspace.open_port_form(None, window, cx);
+                    let form = workspace.ports.form.as_ref().unwrap();
+                    form.target.update(cx, |input, cx| input.set_value("vm1", window, cx));
+                    form.remote.update(cx, |input, cx| input.set_value("4000", window, cx));
+                    workspace.submit_port_form(ForwardAction::Open, window, cx);
+                    assert!(workspace.ports.form.as_ref().unwrap().error.as_deref().unwrap().contains("pending"));
+                    assert!(workspace.ports.open_requests.is_empty());
+                    assert!(receiver.try_recv().is_err(), "form capacity rejection sends no command");
+
+                    let (old_key, old_id) = first.unwrap();
+                    let old_request = ForwardRequest::save(old_key.clone(), None, None).unwrap();
+                    workspace.forward_result(
+                        ForwardResult::ui_test_fixture(
+                            owner, old_id, &old_request, ForwardOutcome::Failed,
+                            Some("fixture failure".into()), None,
+                        ).unwrap(),
+                        window, cx,
+                    );
+                    assert_eq!(workspace.ports.feedback[&old_key].outcome, ForwardOutcome::Failed);
+                    workspace.submit_forward(
+                        ForwardRequest::open(new_key.clone(), None, false, None).unwrap(),
+                        None,
+                        cx,
+                    );
+                    assert_eq!(workspace.ports.feedback.len(), super::PortsView::MAX_FEEDBACK);
+                    assert!(!workspace.ports.feedback.contains_key(&old_key));
+                    assert!(workspace.ports.feedback.contains_key(&new_key));
+                    assert_eq!(workspace.ports.open_requests.len(), 1);
+                    assert!(matches!(receiver.try_recv().unwrap().kind(), Command::ManageForward { request, .. }
+                        if request.action() == ForwardAction::Open && request.key() == &new_key));
+                });
+            });
+        });
     }
 
     #[test]
