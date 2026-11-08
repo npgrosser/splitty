@@ -98,6 +98,12 @@ choose a default distribution, discover a daemon or open a TCP listener. A local
 preview package includes a launcher with those paths already filled in; keep its
 matching backend at that WSL path. This is an evaluation build, not an installer.
 
+Preview bundles are immutable snapshots. Create both the Downloads package and
+its owned WSL runtime/configuration directory exclusively; refuse an existing
+destination and choose a new name. Do not merge new binaries, metadata or evidence
+into an older preview. Verify the frozen source and every packaged file before
+marking the new bundle ready.
+
 Add `--workspace-smoke` for the real-window workflow described below. Normal
 shutdown joins the two native streams and the owned helper. Failed or forced
 helper cleanup is reported as an error; it is never treated as proof that Linux
@@ -1959,3 +1965,28 @@ Actual-window result SHA-256:
 `2b10cd1454d6cd500c3fda07245de41af12460c3d538c97cefd17c305ced9769`.
 The Activity Windows preview is unchanged; full workspace CI remains the deferred
 pre-merge checkpoint.
+
+
+### Windows Drawer snapshot (2026-11-08)
+
+A separate Windows Drawer preview freezes source `a33d0b6` with 1221 source/asset
+files, including 183 generated frontend assets. Its native Rust/MSVC executable
+is SHA-256 `bbe5fa8f11786c0d3bc95f35eb46a16e47cbe13b6c8c1ff5a04922426fa1e055`;
+the source manifest is
+`a38ff17eb373a38453f283e45c668f9220d70daad5e69ed7235bdfec4ae3c127`.
+The Activity static Linux backend and self-install payload are reused only after
+verifying unchanged server/core/remote/transport and shell-integration sources.
+The package has its own new WSL runtime and configuration; earlier demo settings
+are not reused.
+
+The packaged executable and exact backend path pass the real Windows 18-stage
+workspace probe, hardware rendering on an RTX 4080, template-library pixel
+interaction, normal close and owned WSL process cleanup while an unrelated
+sentinel remains. The secondary smoke title assertion now accepts the live
+Screen/pane title; PID, process start time and executable path still establish
+ownership. The actual-window result SHA-256 is
+`f578672afd92f15f52bf68a2a79ec247f959534f2b932aa888b4ec882b7f6051`.
+All 39 checksum-listed package files were independently verified. Drawer quick
+ports and notification controls retain their separate Linux input acceptance;
+individual Windows interactions for those additions remain unverified. Remote
+Screen creation is not part of this frozen preview.
