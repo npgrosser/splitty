@@ -11,6 +11,14 @@ pub(super) fn compact_group_actions(width: Option<Pixels>, window_scale: f32) ->
     width.is_none_or(|width| f32::from(width) < 400. * window_scale)
 }
 
+pub(super) fn maximized_chrome_copy(compact: bool) -> (&'static str, &'static str) {
+    if compact {
+        ("Maximized", "Restore")
+    } else {
+        ("Group maximized", "Restore layout")
+    }
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct GroupTarget {
     slot: String,
@@ -53,7 +61,7 @@ impl GroupTarget {
 
 #[cfg(test)]
 mod tests {
-    use super::{compact_group_actions, selected_slot_matches};
+    use super::{compact_group_actions, maximized_chrome_copy, selected_slot_matches};
     use gpui_kit::px;
     use splitty_client_core::workspace::LayoutNode;
 
@@ -77,14 +85,23 @@ mod tests {
         assert!(compact_group_actions(Some(px(500.)), 1.5));
         assert!(!compact_group_actions(Some(px(800.)), 1.5));
     }
+
+    #[test]
+    fn maximized_copy_keeps_the_action_visible_in_compact_chrome() {
+        assert_eq!(maximized_chrome_copy(true), ("Maximized", "Restore"));
+        assert_eq!(
+            maximized_chrome_copy(false),
+            ("Group maximized", "Restore layout")
+        );
+    }
 }
 
 #[cfg(all(test, feature = "ui-test-support"))]
 mod view_tests {
     use super::{Command, Destination, GroupTarget, Workspace};
     use gpui_kit::{
-        AppContext, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, TestAppContext,
-        VisualTestContext,
+        px, size, AppContext, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent,
+        TestAppContext, VisualTestContext,
     };
     use splitty_client_core::{native_workspace::Worker, workspace::WindowWorkspace};
     use std::{
@@ -174,6 +191,7 @@ mod view_tests {
                 });
                 window.draw(cx).clear(cx);
             });
+            window.simulate_resize(size(px(560.), px(420.)));
             window.update(|window, cx| {
                 view.update(cx, |workspace, cx| {
                     let model = workspace.model.as_mut().unwrap();
@@ -184,9 +202,26 @@ mod view_tests {
                     cx.notify();
                 });
                 window.draw(cx).clear(cx);
+                window.draw(cx).clear(cx);
             });
             assert!(window.debug_bounds("group-maximized-state").is_some());
-            assert!(window.debug_bounds("group-restore-button").is_some());
+            let restore = window
+                .debug_bounds("group-restore-button")
+                .expect("visible compact restore control");
+            let viewport = window
+                .debug_bounds("workspace-viewport")
+                .expect("terminal viewport");
+            assert!(
+                f32::from(viewport.size.width) < 400.,
+                "compact viewport width: {}",
+                f32::from(viewport.size.width)
+            );
+            assert!(f32::from(restore.origin.x) >= f32::from(viewport.origin.x) - 1.);
+            assert!(
+                f32::from(restore.origin.x + restore.size.width)
+                    <= f32::from(viewport.origin.x + viewport.size.width) + 1.,
+                "Restore remains inside the compact viewport"
+            );
             window.update(|_, cx| {
                 let workspace = view.read(cx);
                 let source = workspace.model.as_ref().unwrap().local_source();
@@ -626,6 +661,7 @@ impl Workspace {
             if maximized && !remote {
                 let restore_target = target.clone();
                 let weak = cx.entity().downgrade();
+                let (state_text, restore_label) = maximized_chrome_copy(compact);
                 actions = actions
                     .child(
                         div()
@@ -635,14 +671,14 @@ impl Workspace {
                             .whitespace_nowrap()
                             .text_xs()
                             .text_color(cx.theme().muted_foreground)
-                            .child("Group maximized"),
+                            .child(state_text),
                     )
                     .child(
                         Button::new(SharedString::from(format!("group-restore-{slot}")))
                             .debug_selector(|| "group-restore-button".into())
-                            .label("Restore layout")
+                            .label(restore_label)
                             .accessibility_label("Restore layout")
-                            .tooltip("Restore all groups")
+                            .tooltip("Restore layout")
                             .icon(Icon::new(IconName::Minimize))
                             .outline()
                             .compact()
