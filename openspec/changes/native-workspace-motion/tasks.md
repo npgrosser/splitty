@@ -6,6 +6,7 @@ Use targeted checks during implementation. The full gate in 4.2 remains deferred
 
 - [x] 1.1 Replace the Drawer overlay timer with a Kit transition channel and add a separate pinned workspace inset channel. Verify in an existing GPUI production-view in-process test that unpinned reveal leaves the viewport width unchanged, admitted pin moves both surfaces, rejected pin returns from the displayed position, repeated toggles do not add settings commands, and reduced motion settles immediately.
 - [x] 1.2 Update the native workspace motion note in `docs/architecture.md` for the two Drawer presentation channels; verify it states that only the existing settings command changes persistence and that the terminal route remains selected by the workspace model.
+- [x] 1.3 Animate per-Screen pane-list collapse over 150 ms with stable Kit identity, reversal and reduced motion. Keep row geometry fixed while clipping, disable collapsed pane activation and preserve editor/terminal focus. Extend the existing production-view test for intermediate multi-group row separation, reversal, disabled clicks and zero commands; run the targeted Drawer suite and strict GPUI Clippy.
 
 ## 2. Hover and split-drop feedback
 

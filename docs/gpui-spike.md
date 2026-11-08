@@ -1734,3 +1734,22 @@ sentinel. This generic smoke does not cover every new drag, swipe, animation or
 Tab input case; their focused evidence is recorded above. Real-host update
 acceptance remains open. The package carries its build manifest, logs, evidence,
 licenses and launchers in a new Downloads folder, preserving prior previews.
+
+A separate owned Windows probe launches that packaged executable with a private
+configuration and its matching backend. After pointer focus, a five-second raw
+PTY reader receives byte `09` from Windows Tab input. Normal window close then
+completes with no owned WSL processes remaining. This proves the terminal Tab
+fix through the Windows input path; Drawer wheel bursts remain a separate
+platform acceptance check.
+
+### Drawer pane-list feedback (2026-11-08)
+
+Pane lists now collapse and reveal over 150 ms through a per-Screen Kit
+transition. Reversal starts at the displayed height; reduced motion settles
+immediately. Groups retain fixed row geometry while the outer list clips, and
+collapsed pane buttons cannot activate or participate in Tab traversal.
+The 15 production-view Drawer tests and strict GPUI all-target Clippy pass,
+including intermediate spacing between two groups and no commands from motion.
+Pane spacing, running title-icon emphasis and full-title tooltips also follow
+the web presentation. These later Drawer changes are not in the frozen
+Interaction preview.
