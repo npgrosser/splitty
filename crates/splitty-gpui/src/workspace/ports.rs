@@ -63,6 +63,10 @@ enum OpenOrigin {
 
 impl PortsView {
     const MAX_FEEDBACK: usize = 64;
+    pub(super) fn has_open_form(&self) -> bool {
+        self.form.is_some()
+    }
+
     pub(super) fn can_manage(&self) -> bool {
         self.owner.is_some()
             && self

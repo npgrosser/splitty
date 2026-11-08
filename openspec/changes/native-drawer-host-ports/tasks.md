@@ -2,8 +2,8 @@
 
 ## 1. Exact passive host navigation
 
-- [ ] 1.1 Add a small captured host-group target with current local owner, source ID and canonical target, valid while the same group has an opened reference. Extend existing Hosts unit/production-view tests for colliding aliases, offline/reconnect readiness independence, wrong local owner, last-reference removal and source/target replacement.
-- [ ] 1.2 Extract the existing HostRow projection narrowly and add exact Host/Ports section navigation through its current row identity and existing scroll handle, including when Hosts is already open. Extend existing production-view in-process tests for reorder, colliding aliases, form/modal guards, target disappearance and passive-only commands; verify no Connect/BrowseHost, screen creation or forwarding mutation is submitted.
+- [x] 1.1 Add a small captured host-group target with current local owner, source ID and canonical target, valid while the same group has an opened reference. Extend existing Hosts unit/production-view tests for colliding aliases, offline/reconnect readiness independence, wrong local owner, last-reference removal and source/target replacement.
+- [x] 1.2 Extract the existing HostRow projection narrowly and add exact Host/Ports section navigation through its current row identity and existing scroll handle, including when Hosts is already open. Extend existing production-view in-process tests for reorder, colliding aliases, form/modal guards, target disappearance and passive-only commands; verify no Connect/BrowseHost, screen creation or forwarding mutation is submitted.
 - [ ] 1.3 Turn the existing Drawer host caption into an accessible Kit action using that captured target. Extend Drawer production-view UI integration tests for pointer and keyboard navigation to the intended host while another source is selected, and stale-owner/group rejection without effects.
 
 ## 2. Drawer port projection and popup authority

@@ -6,7 +6,7 @@ use gpui_kit::component::{
     menu::{DropdownMenu, PopupMenuItem},
     ActiveTheme as _, Disableable,
 };
-use gpui_kit::UniformListScrollHandle;
+use gpui_kit::{ScrollStrategy, UniformListScrollHandle};
 use splitty_client_core::hub::{
     HostDirectoryState, HostManagementAction, HostManagementOutcome, HostManagementResult,
     HubUpdate,
@@ -20,6 +20,55 @@ use std::{
 };
 
 mod editor;
+
+/// A rendered Drawer group, independent of remote terminal send readiness.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(super) struct HostGroupTarget {
+    owner: SourceToken,
+    source: SourceId,
+    target: String,
+}
+
+impl HostGroupTarget {
+    pub(super) fn capture(model: &WindowWorkspace, source: SourceId) -> Option<Self> {
+        let target = model.host(source)?.action_target().target().to_owned();
+        let captured = Self {
+            owner: model.lifecycle_token(),
+            source,
+            target,
+        };
+        captured.is_current(model).then_some(captured)
+    }
+
+    pub(super) fn is_current(&self, model: &WindowWorkspace) -> bool {
+        self.owner == model.lifecycle_token()
+            && model
+                .host(self.source)
+                .is_some_and(|host| host.action_target().target() == self.target.as_str())
+            && model
+                .opened()
+                .iter()
+                .any(|entry| entry.key().source_id() == self.source)
+    }
+
+    pub(super) fn owner(&self) -> SourceToken {
+        self.owner
+    }
+
+    pub(super) fn source_id(&self) -> SourceId {
+        self.source
+    }
+
+    pub(super) fn target(&self) -> &str {
+        &self.target
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum HostSection {
+    Host,
+    Ports,
+}
 
 struct HostConnectForm {
     owner: SourceToken,
@@ -451,7 +500,7 @@ impl Workspace {
         }
     }
 
-    fn hosts_navigation_blocked(&self) -> bool {
+    pub(super) fn hosts_navigation_blocked(&self) -> bool {
         self.rename.is_some()
             || self.template_dialog.is_some()
             || self.profile_picker.is_some()
@@ -472,6 +521,52 @@ impl Workspace {
         self.sync_visible(cx);
         self.focus.focus(window, cx);
         cx.notify();
+    }
+
+    /// Reveal one current host section without making a connection or changing a mapping.
+    pub(super) fn show_host_group(
+        &mut self,
+        target: &HostGroupTarget,
+        section: HostSection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        if self.hosts_navigation_blocked()
+            || self.hosts.has_open_form()
+            || self.ports.has_open_form()
+            || cx.has_active_drag()
+            || !self
+                .model
+                .as_ref()
+                .is_some_and(|model| target.is_current(model))
+        {
+            return false;
+        }
+        let Some(index) = self
+            .project_host_rows()
+            .iter()
+            .position(|row| match (section, row) {
+                (HostSection::Host, HostRow::Host { target: row, .. })
+                | (HostSection::Ports, HostRow::PortHeader { target: row, .. }) => {
+                    row == target.target()
+                }
+                _ => false,
+            })
+        else {
+            return false;
+        };
+        if self.destination != Destination::Hosts {
+            self.show_hosts(window, cx);
+            if self.destination != Destination::Hosts {
+                return false;
+            }
+        }
+        self.hosts
+            .scroll
+            .scroll_to_item_strict(index, ScrollStrategy::Top);
+        self.focus.focus(window, cx);
+        cx.notify();
+        true
     }
 
     pub(super) fn show_screens(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -608,47 +703,11 @@ impl Workspace {
             .into_any_element()
     }
 
-    pub(super) fn render_hosts(&self, cx: &mut Context<Self>) -> AnyElement {
-        let theme = cx.theme();
-        let muted = theme.muted_foreground;
-        let foreground = theme.foreground;
-        let border = theme.border;
-        let surface = theme.background;
-        let row_height = chrome_rems((self.appearance.font_size * 4.0 + 16.0).max(82.0));
+    fn project_host_rows(&self) -> Vec<HostRow> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let (status, failed, loading) = match &self.hosts.state {
-            HostDirectoryState::Unavailable => (
-                "Host directory unavailable for this local service".to_owned(),
-                false,
-                false,
-            ),
-            HostDirectoryState::Loading { previous } => (
-                if previous.is_some() {
-                    "Refreshing hosts · showing last observations"
-                } else {
-                    "Loading hosts…"
-                }
-                .to_owned(),
-                false,
-                true,
-            ),
-            HostDirectoryState::Ready(snapshot) => (
-                if snapshot.directory().hosts.is_empty() {
-                    "No known hosts yet"
-                } else {
-                    "Connect a host to browse its live Screens"
-                }
-                .to_owned(),
-                false,
-                false,
-            ),
-            HostDirectoryState::Failed { previous, reason } => {
-                (failure_status(previous.is_some(), reason), true, false)
-            }
-        };
         let mut rows = Vec::<HostRow>::new();
         let forward_rows = self.ports.rows(self.model.as_ref());
         let mut entries: Vec<_> = self
@@ -1004,7 +1063,48 @@ impl Workspace {
                 });
             }
         }
-        let rows = Arc::new(rows);
+        rows
+    }
+
+    pub(super) fn render_hosts(&self, cx: &mut Context<Self>) -> AnyElement {
+        let forward_rows = self.ports.rows(self.model.as_ref());
+        let theme = cx.theme();
+        let muted = theme.muted_foreground;
+        let foreground = theme.foreground;
+        let border = theme.border;
+        let surface = theme.background;
+        let row_height = chrome_rems((self.appearance.font_size * 4.0 + 16.0).max(82.0));
+        let (status, failed, loading) = match &self.hosts.state {
+            HostDirectoryState::Unavailable => (
+                "Host directory unavailable for this local service".to_owned(),
+                false,
+                false,
+            ),
+            HostDirectoryState::Loading { previous } => (
+                if previous.is_some() {
+                    "Refreshing hosts · showing last observations"
+                } else {
+                    "Loading hosts…"
+                }
+                .to_owned(),
+                false,
+                true,
+            ),
+            HostDirectoryState::Ready(snapshot) => (
+                if snapshot.directory().hosts.is_empty() {
+                    "No known hosts yet"
+                } else {
+                    "Connect a host to browse its live Screens"
+                }
+                .to_owned(),
+                false,
+                false,
+            ),
+            HostDirectoryState::Failed { previous, reason } => {
+                (failure_status(previous.is_some(), reason), true, false)
+            }
+        };
+        let rows = Arc::new(self.project_host_rows());
         let visible_targets: HashSet<&str> = rows
             .iter()
             .filter_map(|row| match row {
@@ -1644,6 +1744,244 @@ mod tests {
     use splitty_client_core::{native_workspace::CommandKind, workspace::SourceWorkspace};
     use tokio::sync::mpsc;
     use uuid::Uuid;
+
+    #[cfg(feature = "ui-test-support")]
+    fn with_view(
+        run: impl FnOnce(&mut gpui_kit::VisualTestContext, gpui_kit::Entity<super::Workspace>),
+    ) {
+        use gpui_kit::{AppContext, TestAppContext};
+        use splitty_client_core::native_workspace::Worker;
+        use std::{
+            cell::RefCell,
+            rc::Rc,
+            sync::{atomic::AtomicBool, Arc},
+        };
+
+        let mut app = TestAppContext::single();
+        app.update(gpui_kit::init);
+        let content = Rc::new(RefCell::new(None));
+        let (_, window) = app.add_window_view({
+            let content = content.clone();
+            move |window, cx| {
+                let view = cx.new(|cx| {
+                    let (workspace, worker) = super::Workspace::new_with_worker(
+                        false,
+                        Arc::new(AtomicBool::new(false)),
+                        window,
+                        cx,
+                        |_, _, _| Worker::ui_test_fixture(),
+                    );
+                    worker.shutdown().unwrap();
+                    workspace
+                });
+                *content.borrow_mut() = Some(view.clone());
+                gpui_kit::base::Root::new(view, window, cx)
+            }
+        });
+        run(window, content.borrow_mut().take().unwrap());
+    }
+
+    #[cfg(feature = "ui-test-support")]
+    #[test]
+    fn host_group_target_requires_exact_live_group_but_not_remote_readiness() {
+        use super::HostGroupTarget;
+        use splitty_client_core::workspace::WindowWorkspace;
+
+        let owner = Uuid::new_v4();
+        let mut model = WindowWorkspace::new(owner);
+        let keys = model
+            .ui_test_screen_order_fixture(&[("one", "One")], Some("one.test"))
+            .unwrap();
+        let source = keys[0].source_id();
+        let target = HostGroupTarget::capture(&model, source).unwrap();
+        assert_eq!(target.owner(), model.lifecycle_token());
+        assert_eq!(target.source_id(), source);
+        assert_eq!(target.target(), "one.test");
+
+        model.disconnect(source).unwrap();
+        assert!(
+            target.is_current(&model),
+            "an offline opened group remains inspectable"
+        );
+        model.finish_attempt(source).unwrap();
+        model.retry(source).unwrap();
+        assert!(
+            target.is_current(&model),
+            "reconnect does not replace the group"
+        );
+        let mut changed_target = target.clone();
+        changed_target.target = "two.test".into();
+        assert!(!changed_target.is_current(&model));
+        let replacement_keys = model
+            .ui_test_screen_order_fixture(&[("other", "Other")], Some("two.test"))
+            .unwrap();
+        let mut changed_source = target.clone();
+        changed_source.source = replacement_keys[0].source_id();
+        assert!(!changed_source.is_current(&model));
+        model.detach(model.lifecycle_token(), &keys[0]).unwrap();
+        assert!(!target.is_current(&model));
+        assert!(HostGroupTarget::capture(&model, source).is_none());
+
+        let mut replacement = WindowWorkspace::new(Uuid::new_v4());
+        replacement
+            .ui_test_screen_order_fixture(&[("one", "One")], Some("one.test"))
+            .unwrap();
+        assert!(
+            !target.is_current(&replacement),
+            "another local owner cannot reuse the target"
+        );
+    }
+
+    #[cfg(feature = "ui-test-support")]
+    #[test]
+    fn host_group_navigation_uses_current_rows_and_never_submits_an_action() {
+        use super::{Destination, HostGroupTarget, HostRow, HostSection};
+        use splitty_client_core::{hub::HostDirectorySnapshot, workspace::WindowWorkspace};
+        use std::sync::Arc;
+
+        with_view(|window, view| {
+            let owner = Uuid::new_v4();
+            let mut model = WindowWorkspace::new(owner);
+            let first = model
+                .ui_test_screen_order_fixture(&[("a", "A")], Some("one.test"))
+                .unwrap();
+            model
+                .ui_test_screen_order_fixture(&[("b", "B")], Some("two.test"))
+                .unwrap();
+            let one = HostGroupTarget::capture(&model, first[0].source_id()).unwrap();
+            let two =
+                HostGroupTarget::capture(&model, model.source_for_target("two.test").unwrap())
+                    .unwrap();
+            let (commands, mut receiver) = mpsc::channel(32);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.model = Some(model);
+                    workspace.hosts.set_owner(owner);
+                    assert!(workspace.hosts.accept(HubUpdate {
+                        connection_id: owner,
+                        generation: 1,
+                        state: HostDirectoryState::Ready(Arc::new(
+                            HostDirectorySnapshot::ui_test_fixture_with_aliases(
+                                owner,
+                                1,
+                                &[("two.test", Some("Same")), ("one.test", Some("Same"))],
+                            )
+                            .unwrap(),
+                        )),
+                    }));
+                    let host_index = workspace
+                        .project_host_rows()
+                        .iter()
+                        .position(|row| {
+                            matches!(row,
+                        HostRow::Host { target, .. } if target == one.target())
+                        })
+                        .unwrap();
+                    assert!(workspace.show_host_group(&one, HostSection::Host, window, cx));
+                    assert!(workspace.destination == Destination::Hosts);
+                    assert_eq!(
+                        workspace
+                            .hosts
+                            .scroll
+                            .0
+                            .borrow()
+                            .deferred_scroll_to_item
+                            .unwrap()
+                            .item_index,
+                        host_index
+                    );
+
+                    let ports_index = workspace
+                        .project_host_rows()
+                        .iter()
+                        .position(|row| {
+                            matches!(row,
+                        HostRow::PortHeader { target, .. } if target == two.target())
+                        })
+                        .unwrap();
+                    assert!(
+                        workspace.show_host_group(&two, HostSection::Ports, window, cx),
+                        "already-open Hosts must still scroll"
+                    );
+                    assert_eq!(
+                        workspace
+                            .hosts
+                            .scroll
+                            .0
+                            .borrow()
+                            .deferred_scroll_to_item
+                            .unwrap()
+                            .item_index,
+                        ports_index
+                    );
+                    assert_ne!(
+                        host_index, ports_index,
+                        "colliding aliases do not merge canonical rows"
+                    );
+
+                    workspace.open_host_connect(window, cx);
+                    assert!(!workspace.show_host_group(&one, HostSection::Host, window, cx));
+                    assert_eq!(
+                        workspace
+                            .hosts
+                            .scroll
+                            .0
+                            .borrow()
+                            .deferred_scroll_to_item
+                            .unwrap()
+                            .item_index,
+                        ports_index
+                    );
+                    workspace.close_host_connect(window, cx);
+                    assert!(workspace.hosts.accept(HubUpdate {
+                        connection_id: owner,
+                        generation: 2,
+                        state: HostDirectoryState::Ready(Arc::new(
+                            HostDirectorySnapshot::ui_test_fixture_with_aliases(
+                                owner,
+                                2,
+                                &[("one.test", Some("Same")), ("two.test", Some("Same"))],
+                            )
+                            .unwrap(),
+                        )),
+                    }));
+                    let reordered_index = workspace
+                        .project_host_rows()
+                        .iter()
+                        .position(|row| matches!(row, HostRow::Host { target, .. } if target == one.target()))
+                        .unwrap();
+                    assert_ne!(reordered_index, host_index);
+                    assert!(workspace.show_host_group(&one, HostSection::Host, window, cx));
+                    assert_eq!(workspace.hosts.scroll.0.borrow().deferred_scroll_to_item.unwrap().item_index, reordered_index);
+
+                    workspace
+                        .model
+                        .as_mut()
+                        .unwrap()
+                        .detach(one.owner(), &first[0])
+                        .unwrap();
+                    assert!(!workspace.show_host_group(&one, HostSection::Host, window, cx));
+                    workspace.ports_owner_changed(one.owner(), window, cx);
+                    workspace.open_port_form(None, window, cx);
+                    assert!(workspace.ports.has_open_form());
+                    assert!(!workspace.show_host_group(&two, HostSection::Ports, window, cx));
+                    assert_eq!(workspace.hosts.scroll.0.borrow().deferred_scroll_to_item.unwrap().item_index, reordered_index);
+                });
+                window.draw(cx).clear(cx);
+            });
+            while let Ok(command) = receiver.try_recv() {
+                assert!(
+                    matches!(
+                        command.kind(),
+                        CommandKind::RefreshForwards | CommandKind::Visible { .. }
+                    ),
+                    "passive navigation queued command kind {:?}",
+                    std::mem::discriminant(command.kind())
+                );
+            }
+        });
+    }
 
     #[test]
     fn host_open_keeps_rendered_attempt_and_requires_queue_admission() {
