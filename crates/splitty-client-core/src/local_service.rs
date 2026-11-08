@@ -2,7 +2,7 @@
 use crate::api_stream::ApiStream as Client;
 use crate::{
     appearance::{AppearanceSnapshot, ColorScheme, DrawerVisibilityResult},
-    settings::{SettingsEdit, SettingsField},
+    settings::{SettingsDomain, SettingsEdit, SettingsField},
     shell_profiles::ShellProfilesSnapshot,
     zoom::{ZoomAction, ZoomResult},
 };
@@ -37,6 +37,12 @@ enum Feature {
     Notifications,
 }
 impl Feature {
+    fn settings(domain: SettingsDomain) -> Self {
+        match domain {
+            SettingsDomain::Appearance => Self::Appearance,
+            SettingsDomain::Notifications => Self::Notifications,
+        }
+    }
     fn index(self) -> usize {
         match self {
             Self::Appearance => 0,
@@ -63,7 +69,8 @@ enum Job {
     DrawerVisibility(Uuid, bool),
     Template(Uuid, crate::templates::TemplateApiRequest),
 }
-type Read = Pin<Box<dyn Future<Output = (Client, Job, LocalServiceUpdate, bool)> + Send>>;
+type Read =
+    Pin<Box<dyn Future<Output = (Client, Job, LocalServiceUpdate, Option<SettingsDomain>)> + Send>>;
 
 /// `next_update` may be cancelled without cancelling the retained request. Each
 /// feature coalesces its own refreshes; completing even a superseded read gives
@@ -71,12 +78,13 @@ type Read = Pin<Box<dyn Future<Output = (Client, Job, LocalServiceUpdate, bool)>
 /// mutations are submitted at most once and never automatically retried.
 pub struct LocalServiceClient {
     client: Option<Client>,
-    ready: VecDeque<(u64, LocalServiceUpdate)>,
+    ready: VecDeque<(SettingsDomain, u64, LocalServiceUpdate)>,
     settings: VecDeque<(Uuid, SettingsEdit)>,
     active_settings: Option<(Uuid, SettingsField)>,
     uncertain_settings: Vec<(SettingsField, Uuid)>,
     uncertain_legacy: Vec<SettingsField>,
     last_appearance: Option<Arc<AppearanceSnapshot>>,
+    last_notifications: Option<NotificationSettingsRead>,
     terminal_generation: u64,
     pending: Option<Read>,
     active_zoom: Option<Uuid>,
@@ -107,6 +115,7 @@ impl LocalServiceClient {
             uncertain_settings: Vec::new(),
             uncertain_legacy: Vec::new(),
             last_appearance: None,
+            last_notifications: None,
             terminal_generation: 1,
             pending: None,
             active_zoom: None,
@@ -212,12 +221,30 @@ impl LocalServiceClient {
                 "This setting is pending or awaiting reconciliation",
             ));
         }
-        self.last_appearance
-            .as_ref()
-            .ok_or_else(|| {
-                io::Error::new(io::ErrorKind::WouldBlock, "Local settings are not ready")
-            })?
-            .validate_edit(&edit)?;
+        match field.domain() {
+            SettingsDomain::Appearance => self
+                .last_appearance
+                .as_ref()
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "Local appearance settings are not ready",
+                    )
+                })?
+                .validate_edit(&edit)?,
+            SettingsDomain::Notifications => {
+                if !self
+                    .last_notifications
+                    .as_ref()
+                    .is_some_and(|read| read.value(field).is_some())
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::WouldBlock,
+                        "Local notification settings are not ready",
+                    ));
+                }
+            }
+        }
         self.settings.push_back((request, edit));
         Ok(())
     }
@@ -310,8 +337,8 @@ impl LocalServiceClient {
         Ok(())
     }
     pub async fn next_update(&mut self) -> LocalServiceUpdate {
-        if let Some((generation, update)) = self.ready.pop_front() {
-            if generation == self.generations[0] {
+        while let Some((domain, generation, update)) = self.ready.pop_front() {
+            if generation == self.generations[Feature::settings(domain).index()] {
                 return update;
             }
         }
@@ -342,7 +369,8 @@ impl LocalServiceClient {
                     Job::Template(id, request)
                 } else if !self.settings.is_empty() && (self.prefer_write || feature.is_none()) {
                     let (id, edit) = self.settings.pop_front().expect("queued settings");
-                    let generation = match increment(self.generations[0]) {
+                    let index = Feature::settings(edit.field().domain()).index();
+                    let generation = match increment(self.generations[index]) {
                         Ok(generation) => generation,
                         Err(error) => {
                             return LocalServiceUpdate::SettingsWrite(
@@ -355,8 +383,10 @@ impl LocalServiceClient {
                             )
                         }
                     };
-                    self.generations[0] = generation;
-                    self.terminal_generation = generation.max(self.terminal_generation);
+                    self.generations[index] = generation;
+                    if edit.field().domain() == SettingsDomain::Appearance {
+                        self.terminal_generation = generation.max(self.terminal_generation);
+                    }
                     self.active_settings = Some((id, edit.field()));
                     Job::Settings(id, edit, generation)
                 } else if self.drawer_visibility.is_some()
@@ -422,7 +452,7 @@ impl LocalServiceClient {
                     let cancelled = || {
                         io::Error::new(io::ErrorKind::Interrupted, "local settings read cancelled")
                     };
-                    let mut home_read = false;
+                    let mut observed = None;
                     let result = match job.clone() {
                         Job::BackendVersion => LocalServiceUpdate::BackendVersion {
                             connection,
@@ -455,7 +485,7 @@ impl LocalServiceClient {
                         Job::Read(Feature::Appearance, generation) => {
                             LocalServiceUpdate::Appearance(tokio::select! { biased;
                                 _ = cancel.notified() => Err(cancelled()),
-                                result = crate::appearance::local::read(&mut client, connection, generation, scheme, terminal_generation, previous, &mut home_read) => result.map(Arc::new),
+                                result = crate::appearance::local::read(&mut client, connection, generation, scheme, terminal_generation, previous, &mut observed) => result.map(Arc::new),
                             })
                         }
                         Job::Read(Feature::Profiles, generation) => {
@@ -465,13 +495,15 @@ impl LocalServiceClient {
                             })
                         }
                         Job::Read(Feature::Notifications, generation) => {
+                            let result = tokio::select! { biased;
+                                _ = cancel.notified() => Err(cancelled()),
+                                result = notification_settings::read(&mut client) => result,
+                            };
+                            if result.is_ok() {
+                                observed = Some(SettingsDomain::Notifications);
+                            }
                             LocalServiceUpdate::NotificationSettings(NotificationSettingsRead::new(
-                                connection,
-                                generation,
-                                tokio::select! { biased;
-                                    _ = cancel.notified() => Err(cancelled()),
-                                    result = notification_settings::read(&mut client) => result,
-                                },
+                                connection, generation, result,
                             ))
                         }
                         Job::Zoom(id, action) => LocalServiceUpdate::Zoom(
@@ -488,10 +520,10 @@ impl LocalServiceClient {
                             .await,
                         ),
                     };
-                    (client, job, result, home_read)
+                    (client, job, result, observed)
                 }));
             }
-            let (client, job, mut result, home_read) =
+            let (client, job, mut result, observed) =
                 self.pending.as_mut().expect("settings job started").await;
             self.pending = None;
             self.client = Some(client);
@@ -503,14 +535,15 @@ impl LocalServiceClient {
                 Job::Settings(id, edit, _) => {
                     self.active_settings = None;
                     self.prefer_write = false;
-                    self.dirty[0] = true;
+                    let index = Feature::settings(edit.field().domain()).index();
+                    self.dirty[index] = true;
                     if let LocalServiceUpdate::SettingsWrite(outcome) = &mut result {
                         // A same-service notification invalidates reads, not a
                         // matched successful write acknowledgement. The writer's
                         // own broadcast commonly arrives before its API reply.
                         // Reserve completion for the latest subsequent read; no
                         // effective values from the mutation reply are published.
-                        outcome.require_refresh(self.generations[0]);
+                        outcome.require_refresh(self.generations[index]);
                         if matches!(outcome.outcome(), SettingsWriteOutcome::Uncertain { .. }) {
                             self.uncertain_settings.push((edit.field(), id));
                         }
@@ -527,6 +560,11 @@ impl LocalServiceClient {
                     }
                     if let LocalServiceUpdate::Appearance(Ok(snapshot)) = &mut result {
                         self.last_appearance = Some(snapshot.clone());
+                    }
+                    if let LocalServiceUpdate::NotificationSettings(read) = &result {
+                        if read.result().is_ok() {
+                            self.last_notifications = Some(read.clone());
+                        }
                     }
                 }
                 Job::Zoom(..) => {
@@ -554,17 +592,26 @@ impl LocalServiceClient {
                     self.dirty[0] = true;
                 }
             }
-            if home_read {
-                self.uncertain_legacy.clear();
-            }
-            if home_read && !self.uncertain_settings.is_empty() {
-                let reconciled = SettingsReconciled {
-                    connection_id: self.connection_id,
-                    generation: self.generations[0],
-                    requests: std::mem::take(&mut self.uncertain_settings),
-                };
-                self.ready.push_back((self.generations[0], result));
-                return LocalServiceUpdate::SettingsReconciled(reconciled);
+            if let Some(domain) = observed {
+                if domain == SettingsDomain::Appearance {
+                    self.uncertain_legacy.clear();
+                }
+                let (requests, remaining): (Vec<_>, Vec<_>) =
+                    std::mem::take(&mut self.uncertain_settings)
+                        .into_iter()
+                        .partition(|(field, _)| field.domain() == domain);
+                self.uncertain_settings = remaining;
+                if !requests.is_empty() {
+                    let generation = self.generations[Feature::settings(domain).index()];
+                    let reconciled = SettingsReconciled {
+                        connection_id: self.connection_id,
+                        generation,
+                        domain,
+                        requests,
+                    };
+                    self.ready.push_back((domain, generation, result));
+                    return LocalServiceUpdate::SettingsReconciled(reconciled);
+                }
             }
             return result;
         }

@@ -291,6 +291,11 @@ async fn notification_settings_read_is_owned_coalesced_and_refreshes_independent
     assert_eq!(initial.generation(), 1);
     assert!(initial.result().unwrap().enabled);
     assert!(!initial.result().unwrap().process_exited);
+    assert_eq!(
+        initial.default_value(SettingsField::NotificationEnabled),
+        Some(crate::settings::SettingsValue::Bool(true))
+    );
+    assert!(initial.metadata_error().is_none());
 
     {
         let mut config = service.state.config.write().unwrap();

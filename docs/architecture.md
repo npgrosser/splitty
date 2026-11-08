@@ -1231,9 +1231,23 @@ submits typed single-field intents through the workspace's fixed local owner,
 including while a remote Screen is shown. The existing auxiliary API stream
 owns a bounded FIFO, one active transaction and per-field exclusion shared with
 Drawer and zoom commands. Confirmed values come from authoritative reads;
-rejected or uncertain mutations are never replayed. A fresh successful home
-read explicitly releases uncertain fields, even if a subsequent theme read
-fails. Closing the workspace discards unsent work and joins owned cancellation.
+rejected or uncertain mutations are never replayed. Each field identifies its
+appearance or notification observation domain. Admission, acknowledgement
+validation, required readback generations and deferred delivery use that domain;
+an OS appearance refresh cannot settle or supersede a notification edit. A fresh
+successful home projection releases only its domain's uncertain fields, even if
+subsequent appearance theme resolution fails. Closing the workspace discards
+unsent work and joins owned cancellation.
+
+Notification observation retains six required effective booleans and at most four
+optional service-default booleans after releasing charged home and metadata
+replies. These typed values establish compatible explicit edit choices without
+appearance or metadata availability. Reset requires an exact published default;
+metadata failure preserves effective switches and disables only unavailable
+resets. Failed reads retain same-owner last-good evidence, while owner replacement
+starts without edit authority. Notification mutation acknowledgements validate
+only the notification projection; controls and unread policy receive effective
+values from subsequent authoritative reads, never mutation reply values.
 
 The local presentation snapshot carries metadata, theme choices and a separate
 terminal palette. Named theme resolution exposes the actual source identifier

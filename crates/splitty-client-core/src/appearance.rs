@@ -11,7 +11,9 @@ use splitty_transport::budget::Charged;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use crate::settings::{SettingsEdit, SettingsField, SettingsMetadata, SettingsValue};
+use crate::settings::{
+    SettingsDomain, SettingsEdit, SettingsField, SettingsMetadata, SettingsValue,
+};
 
 mod terminal_preferences;
 pub use terminal_preferences::TerminalPreferences;
@@ -121,11 +123,11 @@ impl AppearanceSnapshot {
     pub fn terminal_palette_error(&self) -> Option<&str> {
         self.terminal_palette_error.as_deref()
     }
-    pub fn value(&self, field: SettingsField) -> SettingsValue {
+    pub fn value(&self, field: SettingsField) -> Option<SettingsValue> {
         use SettingsField as F;
         use SettingsValue as V;
         let a = self.settings();
-        match field {
+        Some(match field {
             F::ThemeMode => V::Text(a.theme_mode.clone()),
             F::Theme => V::Text(a.theme.clone()),
             F::ThemeDark => V::Text(a.theme_dark.clone()),
@@ -138,9 +140,19 @@ impl AppearanceSnapshot {
             F::CloseOnExit => V::Text(self.terminal().close_on_exit().into()),
             F::DrawerPinned => V::Bool(self.drawer().pinned),
             F::DrawerWidth => V::Number(f64::from(self.drawer().sidebar_width)),
-        }
+            F::NotificationEnabled
+            | F::NotificationProcessFinished
+            | F::NotificationProcessExited
+            | F::NotificationProcessCrashed => return None,
+        })
     }
     pub(crate) fn validate_edit(&self, edit: &SettingsEdit) -> std::io::Result<()> {
+        if edit.field().domain() != SettingsDomain::Appearance {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Not an appearance setting",
+            ));
+        }
         let metadata = self
             .metadata()
             .ok_or_else(|| std::io::Error::other("Settings metadata is unavailable"))?;

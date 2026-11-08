@@ -366,7 +366,13 @@ async fn editor_reads_service_defaults_limits_and_catalog_without_writes() {
     let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
     let current = snapshot(&mut reader).await;
     assert_eq!(current.connection_id(), owner);
-    assert_eq!(current.value(F::FontSize), V::Number(18.0));
+    assert_eq!(current.value(F::FontSize), Some(V::Number(18.0)));
+    assert_eq!(current.value(F::NotificationEnabled), None);
+    assert!(current
+        .validate_edit(
+            &crate::settings::SettingsEdit::new(F::NotificationEnabled, V::Bool(false)).unwrap()
+        )
+        .is_err());
     let metadata = current.metadata().unwrap();
     assert_eq!(metadata.default_value(F::DrawerPinned), Some(V::Bool(true)));
     assert_eq!(

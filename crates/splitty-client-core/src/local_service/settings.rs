@@ -2,7 +2,7 @@ use super::decode;
 use crate::{
     api_stream::ApiStream,
     appearance::local::HomeAppearance,
-    settings::{SettingsEdit, SettingsField},
+    settings::{SettingsDomain, SettingsEdit, SettingsField},
 };
 use splitty_core::native_api::Operation;
 use splitty_transport::wire;
@@ -91,7 +91,7 @@ fn uncertain(reason: &str) -> SettingsWriteOutcome {
         reason: reason.into(),
     }
 }
-fn classify(client: &ApiStream, reply: &wire::Reply) -> SettingsWriteOutcome {
+fn classify(client: &ApiStream, field: SettingsField, reply: &wire::Reply) -> SettingsWriteOutcome {
     if reply.uncertain {
         return uncertain("Settings update outcome is unknown; refreshing current values");
     }
@@ -100,7 +100,15 @@ fn classify(client: &ApiStream, reply: &wire::Reply) -> SettingsWriteOutcome {
             reason: "The local service rejected this setting".into(),
         };
     }
-    match decode::<HomeAppearance>(client, reply).and_then(|home| home.validate()) {
+    let validation = match field.domain() {
+        SettingsDomain::Appearance => {
+            decode::<HomeAppearance>(client, reply).and_then(|home| home.validate())
+        }
+        SettingsDomain::Notifications => {
+            decode::<super::notification_settings::HomeNotifications>(client, reply).map(|_| ())
+        }
+    };
+    match validation {
         Ok(()) => SettingsWriteOutcome::Confirmed,
         Err(_) => uncertain("Settings update reply was invalid; refreshing current values"),
     }
@@ -116,7 +124,7 @@ pub(super) async fn execute(
     let outcome = tokio::select! { biased;
         _ = cancel.notified() => uncertain("Settings update cancelled; outcome is unknown"),
         result = client.request(Operation::HomeUpdate, edit.args()) => match result {
-            Ok(reply) => classify(client, &reply),
+            Ok(reply) => classify(client, edit.field(), &reply),
             Err(_) => uncertain("Settings update reply unavailable; outcome is unknown"),
         },
     };
@@ -135,6 +143,7 @@ pub(super) async fn execute(
 pub struct SettingsReconciled {
     pub(super) connection_id: Uuid,
     pub(super) generation: u64,
+    pub(super) domain: SettingsDomain,
     pub(super) requests: Vec<(SettingsField, Uuid)>,
 }
 impl SettingsReconciled {
@@ -143,11 +152,13 @@ impl SettingsReconciled {
     pub fn ui_test_fixture(
         connection_id: Uuid,
         generation: u64,
+        domain: SettingsDomain,
         requests: Vec<(SettingsField, Uuid)>,
     ) -> Self {
         Self {
             connection_id,
             generation,
+            domain,
             requests,
         }
     }
@@ -156,6 +167,9 @@ impl SettingsReconciled {
     }
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+    pub fn domain(&self) -> SettingsDomain {
+        self.domain
     }
     pub fn requests(&self) -> &[(SettingsField, Uuid)] {
         &self.requests

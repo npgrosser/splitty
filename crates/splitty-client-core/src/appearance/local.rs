@@ -1,7 +1,7 @@
 use super::{theme_name, AppearanceSnapshot, ColorScheme, HomePresentation, TerminalPreferences};
 use crate::api_stream::ApiStream as Client;
 use crate::local_service::decode;
-use crate::settings::SettingsMetadata;
+use crate::settings::{SettingsDomain, SettingsMetadata};
 use serde::Deserialize;
 use splitty_core::native_api::Operation;
 use splitty_core::{
@@ -70,11 +70,11 @@ pub(crate) async fn read(
     scheme: ColorScheme,
     terminal_generation: u64,
     previous: Option<Arc<AppearanceSnapshot>>,
-    home_read: &mut bool,
+    observed: &mut Option<SettingsDomain>,
 ) -> io::Result<AppearanceSnapshot> {
     let home = read_typed::<HomeAppearance>(client, Operation::HomeGet).await?;
     home.validate()?;
-    *home_read = true;
+    *observed = Some(SettingsDomain::Appearance);
     let settings = home.map(|home| HomePresentation {
         appearance: home.appearance,
         drawer: home.drawer,

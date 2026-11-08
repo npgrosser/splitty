@@ -2,6 +2,13 @@
 use serde::Deserialize;
 use std::{collections::BTreeMap, io};
 
+/// Independent authoritative read lifecycles; these are not editor sections.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SettingsDomain {
+    Appearance,
+    Notifications,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum SettingsField {
     ThemeMode,
@@ -16,9 +23,13 @@ pub enum SettingsField {
     CloseOnExit,
     DrawerPinned,
     DrawerWidth,
+    NotificationEnabled,
+    NotificationProcessFinished,
+    NotificationProcessExited,
+    NotificationProcessCrashed,
 }
 impl SettingsField {
-    pub const ALL: [Self; 12] = [
+    pub const ALL: [Self; 16] = [
         Self::ThemeMode,
         Self::Theme,
         Self::ThemeDark,
@@ -31,7 +42,20 @@ impl SettingsField {
         Self::CloseOnExit,
         Self::DrawerPinned,
         Self::DrawerWidth,
+        Self::NotificationEnabled,
+        Self::NotificationProcessFinished,
+        Self::NotificationProcessExited,
+        Self::NotificationProcessCrashed,
     ];
+    pub fn domain(self) -> SettingsDomain {
+        match self {
+            Self::NotificationEnabled
+            | Self::NotificationProcessFinished
+            | Self::NotificationProcessExited
+            | Self::NotificationProcessCrashed => SettingsDomain::Notifications,
+            _ => SettingsDomain::Appearance,
+        }
+    }
     pub fn path(self) -> &'static str {
         match self {
             Self::ThemeMode => "appearance.themeMode",
@@ -46,6 +70,10 @@ impl SettingsField {
             Self::CloseOnExit => "terminal.closeOnExit",
             Self::DrawerPinned => "drawer.pinned",
             Self::DrawerWidth => "drawer.sidebarWidth",
+            Self::NotificationEnabled => "notifications.enabled",
+            Self::NotificationProcessFinished => "notifications.processFinished",
+            Self::NotificationProcessExited => "notifications.processExited",
+            Self::NotificationProcessCrashed => "notifications.processCrashed",
         }
     }
     pub(crate) fn is_theme(self) -> bool {
@@ -75,7 +103,14 @@ impl SettingsEdit {
     pub fn new(field: SettingsField, value: SettingsValue) -> io::Result<Self> {
         use SettingsField as F;
         let valid = match (&value, field) {
-            (SettingsValue::Bool(_), F::DrawerPinned) => true,
+            (
+                SettingsValue::Bool(_),
+                F::DrawerPinned
+                | F::NotificationEnabled
+                | F::NotificationProcessFinished
+                | F::NotificationProcessExited
+                | F::NotificationProcessCrashed,
+            ) => true,
             (SettingsValue::Number(n), F::FontSize) => {
                 *n == 0.0 || (n.fract() == 0.0 && (8.0..=24.0).contains(n))
             }
@@ -225,5 +260,54 @@ impl<'de> Deserialize<'de> for SettingsLimits {
             }
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notification_edits_are_four_boolean_fields_in_their_own_domain() {
+        use SettingsField as F;
+        let fields = [
+            (F::NotificationEnabled, "enabled"),
+            (F::NotificationProcessFinished, "processFinished"),
+            (F::NotificationProcessExited, "processExited"),
+            (F::NotificationProcessCrashed, "processCrashed"),
+        ];
+        for (field, key) in fields {
+            assert_eq!(field.domain(), SettingsDomain::Notifications);
+            assert_eq!(field.path(), format!("notifications.{key}"));
+            for enabled in [true, false] {
+                let edit = SettingsEdit::new(field, SettingsValue::Bool(enabled)).unwrap();
+                assert_eq!(
+                    edit.args(),
+                    serde_json::json!({"body":{"notifications":{key:enabled}}})
+                        .as_object()
+                        .unwrap()
+                        .clone()
+                );
+            }
+            for wrong in [
+                SettingsValue::Text("true".into()),
+                SettingsValue::Number(1.0),
+            ] {
+                assert!(SettingsEdit::new(field, wrong).is_err());
+            }
+        }
+        assert_eq!(
+            F::ALL
+                .into_iter()
+                .filter(|field| field.domain() == SettingsDomain::Appearance)
+                .count(),
+            12
+        );
+        assert!(
+            !F::ALL
+                .into_iter()
+                .any(|field| ["notifications.toasts", "notifications.desktop"]
+                    .contains(&field.path()))
+        );
     }
 }

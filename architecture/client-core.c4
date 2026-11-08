@@ -63,12 +63,12 @@ model {
     }
 
     client_settings = component 'client_settings' {
-      description 'UI-free bounded settings field, value, single-field edit and service metadata contracts shared by local mutations and presentation.'
+      description 'UI-free bounded settings fields, values, single-field edits and service metadata; explicit appearance/notification domains identify independent authoritative readback lifecycles.'
       metadata { module 'splitty_client_core::settings' }
     }
 
     local_service = component 'local_service' {
-      description 'One owned auxiliary API stream with coalesced owner-bound backend-version reads and fair appearance/profile/notification reads, bounded single-field settings FIFO and cross-path field exclusion, identified zoom/Drawer/template jobs, charged replies, explicit uncertainty reconciliation without replay and joined cancellation cleanup.'
+      description 'One owned auxiliary API stream with coalesced owner-bound backend-version reads and fair appearance/profile/notification reads, bounded single-field settings FIFO and cross-path field exclusion, identified zoom/Drawer/template jobs, charged replies, domain-scoped acknowledgement/readback generations and uncertainty release, bounded notification reset evidence independent of themes, no replay and joined cancellation cleanup.'
       metadata { module 'splitty_client_core::local_service' }
     }
 

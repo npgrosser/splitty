@@ -78,7 +78,10 @@ async fn scripted_tail(
                     .frame
                     .decode_charged::<wire::Request>(&peer.sender.context().budget)
                     .unwrap();
-                if request.operation == "home.get" && exchange.operation != "home.get" {
+                if (request.operation == "home.get" && exchange.operation != "home.get")
+                    || (request.operation == "home.metadata"
+                        && exchange.operation != "home.metadata")
+                {
                     // An independent notification read can occur between
                     // scripted appearance and mutation requests.
                     peer.sender
@@ -88,7 +91,11 @@ async fn scripted_tail(
                                 id: request.id,
                                 status: 200,
                                 content_type: wire::ContentType::Json,
-                                body: home(1.0),
+                                body: if request.operation == "home.metadata" {
+                                    splitty_core::config::settings_metadata().to_string()
+                                } else {
+                                    home(1.0)
+                                },
                                 uncertain: false,
                             },
                         )
@@ -197,6 +204,12 @@ async fn notification_settings_read_reports_invalid_home_without_replacing_a_lat
             status: 200,
             uncertain: false,
             body: home(1.0),
+        },
+        Exchange {
+            operation: "home.metadata",
+            status: 200,
+            uncertain: false,
+            body: splitty_core::config::settings_metadata().to_string(),
         },
     ])
     .await;

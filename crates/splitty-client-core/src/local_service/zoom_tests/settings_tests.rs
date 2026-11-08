@@ -48,15 +48,21 @@ fn edit(field: F) -> SettingsEdit {
             F::CloseOnExit => V::Text("never".into()),
             F::DrawerPinned => V::Bool(false),
             F::DrawerWidth => V::Number(240.0),
+            F::NotificationEnabled
+            | F::NotificationProcessFinished
+            | F::NotificationProcessExited
+            | F::NotificationProcessCrashed => V::Bool(false),
         },
     )
     .unwrap()
 }
 #[tokio::test]
 async fn admission_is_local_bounded_field_exclusive_and_close_discards_unsent() {
-    let (api, task, dir) = scripted(appearance_exchanges()).await;
+    let mut exchanges = appearance_exchanges();
+    exchanges.extend(notification_exchanges());
+    let (api, task, dir) = scripted(exchanges).await;
     let owner = Uuid::new_v4();
-    let mut client = loaded(api, owner).await;
+    let mut client = loaded_domains(api, owner).await;
     assert!(client
         .enqueue_settings(Uuid::new_v4(), Uuid::new_v4(), edit(F::Theme))
         .is_err());
@@ -65,7 +71,7 @@ async fn admission_is_local_bounded_field_exclusive_and_close_discards_unsent() 
             .enqueue_settings(owner, Uuid::new_v4(), edit(field))
             .unwrap();
     }
-    assert_eq!(client.settings.len(), F::ALL.len());
+    assert_eq!(client.settings.len(), MAX_QUEUED_SETTINGS);
     assert!(client.settings.len() <= MAX_QUEUED_SETTINGS);
     assert!(client
         .enqueue_settings(owner, Uuid::new_v4(), edit(F::Theme))
@@ -196,27 +202,34 @@ async fn rejection_and_uncertainty_reconcile_without_replay_even_when_theme_fail
 }
 #[tokio::test]
 async fn close_reports_active_uncertainty_and_discards_next_field() {
-    let (admitted, received) = tokio::sync::oneshot::channel();
-    let (api, task, dir) = scripted_tail(appearance_exchanges(), Tail::Hold(admitted)).await;
-    let owner = Uuid::new_v4();
-    let id = Uuid::new_v4();
-    let mut client = loaded(api, owner).await;
-    client
-        .enqueue_settings(owner, id, edit(F::FontSize))
-        .unwrap();
-    client
-        .enqueue_settings(owner, Uuid::new_v4(), edit(F::DrawerWidth))
-        .unwrap();
-    tokio::select! { result = client.next_update() => { drop(result); panic!("write should remain pending") }, _ = received => {} }
-    let outcomes = client.finish_with_outcomes().await.unwrap();
-    assert_eq!(outcomes.len(), 1);
-    assert_eq!(outcomes[0].request_id(), id);
-    assert!(matches!(
-        outcomes[0].outcome(),
-        SettingsWriteOutcome::Uncertain { .. }
-    ));
-    task.await.unwrap();
-    std::fs::remove_dir_all(dir).unwrap();
+    for field in [F::FontSize, F::NotificationEnabled] {
+        let (admitted, received) = tokio::sync::oneshot::channel();
+        let (api, task, dir) = scripted_tail(
+            appearance_exchanges()
+                .into_iter()
+                .chain(notification_exchanges())
+                .collect(),
+            Tail::Hold(admitted),
+        )
+        .await;
+        let owner = Uuid::new_v4();
+        let id = Uuid::new_v4();
+        let mut client = loaded_domains(api, owner).await;
+        client.enqueue_settings(owner, id, edit(field)).unwrap();
+        client
+            .enqueue_settings(owner, Uuid::new_v4(), edit(F::DrawerWidth))
+            .unwrap();
+        tokio::select! { result = client.next_update() => { drop(result); panic!("write should remain pending") }, _ = received => {} }
+        let outcomes = client.finish_with_outcomes().await.unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes[0].request_id(), id);
+        assert!(matches!(
+            outcomes[0].outcome(),
+            SettingsWriteOutcome::Uncertain { .. }
+        ));
+        task.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 }
 #[test]
 fn patches_are_single_fields_and_font_gap_is_not_admitted() {
@@ -448,9 +461,400 @@ fn own_settings_event_before_ack_requires_fresh_read_without_uncertainty() {
             assert!(current.generation() >= result.generation());
             assert_eq!(current.settings().font_size, 20);
             assert!(client.uncertain_settings.is_empty());
+            // The same real writer now changes only a notification field. Other
+            // preferences survive, and an OS change cannot invalidate its ack.
+            // Seed persisted preferences through the existing real API: HomeUpdate
+            // reloads disk, so mutating only the fixture's in-memory config would
+            // not establish the preservation precondition.
+            let reply = client
+                .client
+                .as_mut()
+                .unwrap()
+                .request(
+                    splitty_core::native_api::Operation::HomeUpdate,
+                    serde_json::json!({"body":{"notifications":{"toasts":true,"desktop":true}}})
+                        .as_object()
+                        .unwrap()
+                        .clone(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(reply.status, 200);
+            drop(reply);
+            client.refresh_settings(owner).unwrap();
+            let before = loop {
+                if let LocalServiceUpdate::NotificationSettings(read) = raw_next(&mut client).await
+                {
+                    break read;
+                }
+            };
+            assert!(before.result().unwrap().enabled);
+            let id = Uuid::new_v4();
+            client
+                .enqueue_settings(owner, id, edit(F::NotificationEnabled))
+                .unwrap();
+            super::super::tests::begin(&mut client).await;
+            let event = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let event = session.next_event().await.unwrap().unwrap();
+                    if event.json().is_some_and(|json| {
+                        json["type"] == "settings.changed"
+                            && json["settings"]["notifications"]["enabled"] == false
+                    }) {
+                        break event;
+                    }
+                }
+            })
+            .await
+            .unwrap();
+            client.refresh_settings(event.connection_id).unwrap();
+            client.set_scheme(owner, ColorScheme::Light).unwrap();
+            drop(event);
+            let LocalServiceUpdate::SettingsWrite(result) = raw_next(&mut client).await else {
+                panic!("notification ack missing")
+            };
+            assert_eq!(result.request_id(), id);
+            assert_eq!(result.outcome(), &SettingsWriteOutcome::Confirmed);
+            assert_eq!(result.generation(), client.generations[2]);
+            assert!(
+                client
+                    .last_notifications
+                    .as_ref()
+                    .unwrap()
+                    .result()
+                    .unwrap()
+                    .enabled
+            );
+            let current = loop {
+                if let LocalServiceUpdate::NotificationSettings(read) = raw_next(&mut client).await
+                {
+                    break read;
+                }
+            };
+            assert!(current.generation() >= result.generation());
+            let settings = current.result().unwrap();
+            assert!(!settings.enabled);
+            assert!(settings.toasts && settings.desktop);
+            assert_eq!(
+                settings.process_finished,
+                before.result().unwrap().process_finished
+            );
+            assert_eq!(
+                settings.process_exited,
+                before.result().unwrap().process_exited
+            );
+            assert_eq!(
+                settings.process_crashed,
+                before.result().unwrap().process_crashed
+            );
+            assert_eq!(
+                service.state.config.read().unwrap().appearance.font_size,
+                20
+            );
+
             client.finish().await.unwrap();
             session.finish().await.unwrap();
             service.close().await.unwrap();
             assert!(!path.exists());
         });
+}
+
+fn notification_exchanges() -> Vec<Exchange> {
+    vec![
+        exchange("home.get", home(1.0)),
+        exchange(
+            "home.metadata",
+            splitty_core::config::settings_metadata().to_string(),
+        ),
+    ]
+}
+async fn raw_next(client: &mut LocalServiceClient) -> LocalServiceUpdate {
+    tokio::time::timeout(Duration::from_secs(5), client.next_update())
+        .await
+        .unwrap()
+}
+async fn loaded_domains(api: Client, owner: Uuid) -> LocalServiceClient {
+    let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+    client.dirty = [true, false, true];
+    assert!(matches!(
+        raw_next(&mut client).await,
+        LocalServiceUpdate::Appearance(Ok(_))
+    ));
+    assert!(
+        matches!(raw_next(&mut client).await, LocalServiceUpdate::NotificationSettings(read) if read.result().is_ok())
+    );
+    client
+}
+
+#[tokio::test]
+async fn notifications_keep_values_and_edit_choices_when_theme_or_reset_metadata_fails() {
+    let mut metadata = splitty_core::config::settings_metadata();
+    metadata["defaults"]["notifications"]["enabled"] = false.into();
+    metadata["defaults"]["notifications"]["processFinished"] = false.into();
+    metadata["defaults"]["notifications"]["processExited"] = true.into();
+    metadata["defaults"]["notifications"]["processCrashed"] = false.into();
+    for (status, body, expected) in [
+        (200, metadata.to_string(), Some(false)),
+        (404, "{}".into(), None),
+        (200, "{".into(), None),
+        (
+            200,
+            "{\"defaults\":{\"notifications\":{\"enabled\":\"false\"}},\"limits\":{}}".into(),
+            None,
+        ),
+    ] {
+        let mut exchanges = vec![
+            exchange("home.get", home(1.0)),
+            Exchange {
+                operation: "theme.get",
+                status: 500,
+                uncertain: false,
+                body: "{}".into(),
+            },
+        ];
+        exchanges.push(exchange("home.get", home(1.0)));
+        exchanges.push(Exchange {
+            operation: "home.metadata",
+            status,
+            uncertain: false,
+            body,
+        });
+        let (api, task, dir) = scripted(exchanges).await;
+        let budget = api.sender().context().budget.clone();
+        let owner = Uuid::new_v4();
+        let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+        client.dirty = [true, false, true];
+        assert!(matches!(
+            raw_next(&mut client).await,
+            LocalServiceUpdate::Appearance(Err(_))
+        ));
+        let LocalServiceUpdate::NotificationSettings(read) = raw_next(&mut client).await else {
+            panic!("notification read missing")
+        };
+        assert!(read.result().unwrap().enabled);
+        assert_eq!(read.value(F::NotificationEnabled), Some(V::Bool(true)));
+        assert_eq!(read.value(F::FontSize), None);
+        assert_eq!(
+            read.default_value(F::NotificationEnabled),
+            expected.map(V::Bool)
+        );
+        assert_eq!(read.metadata_error().is_some(), expected.is_none());
+        if expected.is_some() {
+            assert_eq!(
+                read.default_value(F::NotificationProcessExited),
+                Some(V::Bool(true))
+            );
+        }
+        assert!(client.last_appearance.is_none());
+        assert!(client
+            .enqueue_settings(Uuid::new_v4(), Uuid::new_v4(), edit(F::NotificationEnabled))
+            .is_err());
+        client
+            .enqueue_settings(owner, Uuid::new_v4(), edit(F::NotificationEnabled))
+            .unwrap();
+        // Finish discards the unsent edit; the retained notification read carries no lease.
+        client.finish().await.unwrap();
+        task.await.unwrap();
+        assert_eq!(budget.used(), 0);
+        assert!(read.result().is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn mixed_domain_fifo_acknowledges_against_only_its_own_projection() {
+    let mut exchanges = appearance_exchanges();
+    exchanges.extend(notification_exchanges());
+    exchanges.push(exchange("home.update", home(1.0)));
+    exchanges.extend(appearance_exchanges());
+    // A notification reply need not contain any appearance/theme fields.
+    let notification_home =
+        serde_json::json!({"notifications": splitty_core::config::NotificationSettings::default()})
+            .to_string();
+    exchanges.push(exchange("home.update", notification_home));
+    exchanges.extend(notification_exchanges());
+    let (api, task, dir) = scripted(exchanges).await;
+    let owner = Uuid::new_v4();
+    let mut client = loaded_domains(api, owner).await;
+    let first = Uuid::new_v4();
+    let second = Uuid::new_v4();
+    client
+        .enqueue_settings(owner, first, edit(F::FontSize))
+        .unwrap();
+    client
+        .enqueue_settings(owner, second, edit(F::NotificationEnabled))
+        .unwrap();
+    assert!(client
+        .enqueue_settings(owner, Uuid::new_v4(), edit(F::NotificationEnabled))
+        .is_err());
+    assert!(client
+        .enqueue_settings(owner, second, edit(F::DrawerWidth))
+        .is_err());
+    assert!(client
+        .enqueue_zoom(owner, Uuid::new_v4(), ZoomAction::In)
+        .is_ok());
+    // Exercise settings FIFO, without sending the independent queued zoom.
+    client.zoom.clear();
+    let LocalServiceUpdate::SettingsWrite(appearance) = raw_next(&mut client).await else {
+        panic!("first write missing")
+    };
+    assert_eq!(appearance.request_id(), first);
+    assert_eq!(appearance.outcome(), &SettingsWriteOutcome::Confirmed);
+    assert_eq!(client.generations, [2, 1, 1]);
+    assert!(matches!(
+        raw_next(&mut client).await,
+        LocalServiceUpdate::Appearance(Ok(_))
+    ));
+    let terminal_generation = client.terminal_generation;
+    let LocalServiceUpdate::SettingsWrite(notification) = raw_next(&mut client).await else {
+        panic!("second write missing")
+    };
+    assert_eq!(notification.request_id(), second);
+    assert_eq!(notification.outcome(), &SettingsWriteOutcome::Confirmed);
+    assert_eq!(client.generations, [2, 1, 2]);
+    assert_eq!(client.terminal_generation, terminal_generation);
+    assert!(client.last_notifications.as_ref().unwrap().generation() < notification.generation());
+    let LocalServiceUpdate::NotificationSettings(current) = raw_next(&mut client).await else {
+        panic!("readback missing")
+    };
+    assert_eq!(current.generation(), notification.generation());
+    client.finish().await.unwrap();
+    task.await.unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn notification_uncertainty_needs_its_own_valid_home_but_not_metadata() {
+    let mut exchanges = appearance_exchanges();
+    exchanges.extend(notification_exchanges());
+    exchanges.push(exchange("home.update", "{}".into())); // malformed notification acknowledgement
+    exchanges.push(exchange("home.get", home(1.0)));
+    exchanges.push(Exchange {
+        operation: "theme.get",
+        status: 500,
+        uncertain: false,
+        body: "{}".into(),
+    });
+    exchanges.push(exchange("home.get", "{}".into())); // invalid notification refresh
+    exchanges.push(exchange("home.get", home(1.0)));
+    exchanges.push(Exchange {
+        operation: "home.metadata",
+        status: 404,
+        uncertain: false,
+        body: "{}".into(),
+    });
+    let (api, task, dir) = scripted(exchanges).await;
+    let owner = Uuid::new_v4();
+    let id = Uuid::new_v4();
+    let mut client = loaded_domains(api, owner).await;
+    client
+        .enqueue_settings(owner, id, edit(F::NotificationEnabled))
+        .unwrap();
+    let LocalServiceUpdate::SettingsWrite(outcome) = raw_next(&mut client).await else {
+        panic!("outcome missing")
+    };
+    assert!(matches!(
+        outcome.outcome(),
+        SettingsWriteOutcome::Uncertain { .. }
+    ));
+    client.set_scheme(owner, ColorScheme::Light).unwrap();
+    assert!(matches!(
+        raw_next(&mut client).await,
+        LocalServiceUpdate::Appearance(Err(_))
+    ));
+    assert!(client.field_pending(F::NotificationEnabled));
+    let LocalServiceUpdate::NotificationSettings(failed) = raw_next(&mut client).await else {
+        panic!("failed read missing")
+    };
+    assert!(failed.result().is_err());
+    assert!(client.field_pending(F::NotificationEnabled));
+    assert!(
+        client
+            .last_notifications
+            .as_ref()
+            .unwrap()
+            .result()
+            .unwrap()
+            .enabled
+    );
+    assert!(client
+        .enqueue_settings(owner, Uuid::new_v4(), edit(F::NotificationEnabled))
+        .is_err());
+    client.refresh_settings(owner).unwrap();
+    client.dirty = [false, false, true];
+    let LocalServiceUpdate::SettingsReconciled(reconciled) = raw_next(&mut client).await else {
+        panic!("reconciliation missing")
+    };
+    assert_eq!(reconciled.domain(), SettingsDomain::Notifications);
+    assert_eq!(reconciled.requests(), &[(F::NotificationEnabled, id)]);
+    assert!(!client.field_pending(F::NotificationEnabled));
+    // A newer OS-only appearance generation must not discard queued notification delivery.
+    client.set_scheme(owner, ColorScheme::Dark).unwrap();
+    let LocalServiceUpdate::NotificationSettings(current) = raw_next(&mut client).await else {
+        panic!("queued notification missing")
+    };
+    assert_eq!(current.generation(), reconciled.generation());
+    assert!(current.metadata_error().is_some());
+    client
+        .enqueue_settings(owner, Uuid::new_v4(), edit(F::NotificationEnabled))
+        .unwrap();
+    client.finish().await.unwrap();
+    task.await.unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn superseded_notification_observation_and_queued_delivery_are_discarded() {
+    let mut exchanges = notification_exchanges();
+    exchanges.extend(notification_exchanges()); // superseded in-flight read
+    exchanges.extend(notification_exchanges()); // accepted fresh read
+    exchanges.push(Exchange {
+        operation: "home.update",
+        status: 200,
+        uncertain: true,
+        body: "{}".into(),
+    });
+    exchanges.extend(notification_exchanges()); // reconciliation and deferred result
+    let mut changed = notification_exchanges();
+    let mut home: serde_json::Value = serde_json::from_str(&changed[0].body).unwrap();
+    home["notifications"]["enabled"] = false.into();
+    changed[0].body = home.to_string();
+    exchanges.extend(changed);
+    let (api, task, dir) = scripted(exchanges).await;
+    let owner = Uuid::new_v4();
+    let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+    client.dirty = [false, false, true];
+    assert!(matches!(
+        raw_next(&mut client).await,
+        LocalServiceUpdate::NotificationSettings(_)
+    ));
+    client.refresh_settings(owner).unwrap();
+    client.dirty = [false, false, true];
+    super::super::tests::begin(&mut client).await;
+    client.refresh_settings(owner).unwrap();
+    client.dirty = [false, false, true];
+    let LocalServiceUpdate::NotificationSettings(read) = raw_next(&mut client).await else {
+        panic!("fresh read missing")
+    };
+    assert_eq!(read.generation(), 3);
+    client
+        .enqueue_settings(owner, Uuid::new_v4(), edit(F::NotificationEnabled))
+        .unwrap();
+    assert!(matches!(
+        raw_next(&mut client).await,
+        LocalServiceUpdate::SettingsWrite(_)
+    ));
+    let LocalServiceUpdate::SettingsReconciled(reconciled) = raw_next(&mut client).await else {
+        panic!("reconciled missing")
+    };
+    client.refresh_settings(owner).unwrap();
+    client.dirty = [false, false, true];
+    let LocalServiceUpdate::NotificationSettings(read) = raw_next(&mut client).await else {
+        panic!("fresh deferred replacement missing")
+    };
+    assert!(read.generation() > reconciled.generation());
+    assert!(!read.result().unwrap().enabled);
+    client.finish().await.unwrap();
+    task.await.unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
 }
