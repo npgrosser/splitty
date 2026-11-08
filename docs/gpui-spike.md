@@ -2018,5 +2018,61 @@ the Linux GUI executable is
 The previously frozen Linux fixture backend is reused after verifying unchanged
 server/core/remote/transport/shell-integration sources and lockfile; its hash is
 `5880d40578ee539f5d0e635a7d7fb2e1a9c7b7aa7f7dd5797cc9ea94e79ca3ba`.
-Actual-window acceptance is pending. No new Windows package or smoothness claim
-is implied by these checks; full workspace CI remains deferred.
+This initial candidate exposed the platform event-dispatch failure described
+below. No new Windows package or smoothness claim is implied by these checks;
+full workspace CI remains deferred.
+
+### Linux event fairness and complete remote creation acceptance
+
+The initial candidate reproducibly lost a suffix of terminal input during
+remote creation. A private payload-free trace measured a 1.995-second GUI poll
+gap while 144 keyboard callbacks continued at a median 12.919 ms interval. The
+worker waited 1.073 seconds on its bounded update channel; 15 later inputs were
+refused by the full command queue. Polling then consumed 64 updates in 755 µs.
+No slow reconciliation or poll-task termination was observed. The pinned X11
+drain-until-empty loop starved foreground runnables; this was not a remote
+collector or terminal-emulator workaround.
+
+The explicit `gpui-pre-linux` patch bounds each native pass to 32 raw events,
+retains trailing repeat/keymap state and schedules one explicitly woken weak
+continuation for buffered XCB events. Application queue sizes, source authority,
+input ordering and replay policy are unchanged. The published archive checksum,
+Apache-2.0 license and original file hashes are retained; exactly one upstream
+source file is patched. Four added regressions cover finite dispatch,
+repeat/keymap/client-message ordering and real calloop continuation fairness and
+wakeup. Actual IME-server acceptance is separate from the unchanged XIM handler
+and its ordered-message unit coverage.
+
+Frozen source `b78f81086532248209223aaebe4a86a31c793746` (equivalent application
+and SDK files in integration commit `a4621ce`) uses GUI SHA-256
+`2c60541c6d109195e71be02264c5aa32848feac734e64a4cff26322611628122`,
+source-manifest SHA-256
+`dd12888f8fa0f4aebf8d84660d2dd494450d414f5f6aed1efc2cc0bee7e1a932`
+and the unchanged fixture backend above. Although the lockfile now selects the
+patched GUI dependency, all 271 resolved packages reachable from the backend
+remain identical to its earlier freeze.
+
+The owned X11 fixture keeps the same 25-ms xdotool setting (measured callbacks
+about 13 ms apart). While B's private bridge is paused, deliberate creation adds
+only its pending reference and A accepts terminal input. After release, exactly
+one host-named B Screen/session appears, existing local/A/B work is unchanged and
+A still accepts input without selection takeover. After opening the new Screen,
+the fixture renders the hover-only Detach action before clicking, requires the
+window title to switch to the old B Screen, verifies the new Drawer row is gone
+and runs a marker in the old B session. Hosts Reopen returns to the new Screen's
+original PID/pane/session. Normal window close preserves all host sessions,
+then owned fixture cleanup completes.
+
+This strengthened gate avoids the earlier harness false positive, where a
+premature hover-action click could leave the Screen open and make Reopen a no-op.
+Result SHA-256:
+`d46f8af214a9da5ed6316fa1863d9e057a96529f8868631b688610cdce1dd28f`;
+harness SHA-256:
+`aef7d9f5fa15da16cda3d05034872de09707ceb5da0655ac21c842ef71ebb369`.
+The fixture uses an owned SSH-shape shim and software rendering; real OpenSSH,
+IME servers, other platforms and smoothness are not established by this run.
+
+Integration checks after the patch pass: 267 client-core and 187 GPUI tests,
+8 targeted platform tests plus 2 matching GPUI tests, strict Core/GPUI/platform
+all-target Clippy, 17 architecture tests, formatting and both affected strict
+OpenSpec validations. Full workspace CI remains the later checkpoint.

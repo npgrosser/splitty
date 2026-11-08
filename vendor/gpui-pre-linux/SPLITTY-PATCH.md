@@ -11,8 +11,10 @@ continuous input stream. Preserve event order, XIM handling, repeat filtering,
 and Expose coalescing; carry trailing release/keymap normalization across a
 batch boundary. No application queue or input routing changes.
 
-This pinned patch is a prototype pending actual-window acceptance. Remove the
-path override when a reviewed upstream release supplies the same guarantee.
+The native two-host window regression passes with sustained input, delayed
+creation confirmation, detach/reopen and normal cleanup; see the acceptance
+record in `docs/gpui-spike.md` in the enclosing workspace. Remove the path override
+when a reviewed upstream release supplies the same guarantee and passes these checks.
 
 ## Targeted checks
 
@@ -27,5 +29,5 @@ The four added tests cover a perpetually readable event source, repeat/real
 release handling at the budget boundary, keymap/client-message ordering, and
 actual calloop idle fairness plus explicit wakeup without an fd event. The XIM
 filter/dispatch body is unchanged; the unit test checks its ordered message
-input, not a real input-method server. Actual X11 application acceptance remains
-required to establish terminal input/output progress under continuous typing.
+input, not a real input-method server. Actual X11 application acceptance is
+required alongside these tests to establish input/output progress under typing.
