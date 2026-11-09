@@ -384,10 +384,12 @@ native workspace; cross-process live synchronization is not implemented.
 Appearance font size and family apply to workspace chrome, matching the web
 client. Empty/zero overrides use resolved UI theme defaults. The supported size
 range is 8–24 px; a CSS font list selects an available concrete family or a native
-UI generic. Terminal typography uses the existing monospace font at a 15 px
-baseline with 21 px rows. A proportional UI font therefore does not alter
-terminal cells. Display zoom scales that baseline; general terminal-font
-settings remain separate work.
+UI generic. Terminal typography uses the web client's bundled terminal font
+(JetBrainsMono Nerd Font Mono, read from the embedded frontend assets) at a
+14 px baseline, with rows as tall as the font's ascent and descent; see
+[web look alignment](#macos-preview-and-web-look-alignment-2026-11-09). A
+proportional UI font therefore does not alter terminal cells. Display zoom
+scales that baseline; general terminal-font settings remain separate work.
 
 Native colors support checked `#RGB`, `#RGBA`, `#RRGGBB`, `#RRGGBBAA`, decimal
 `rgb(...)`/`rgba(...)` with comma-separated channels, and `transparent`. Alpha is
@@ -2144,3 +2146,113 @@ Remote workflows have Linux fixture acceptance, not separate Windows remote or
 real-SSH acceptance. The older pre-fix rename candidate remains disabled. Full
 workspace CI is still the explicit later checkpoint; this is a development
 preview rather than a release or a web-client replacement.
+
+## macOS preview and web look alignment (2026-11-09)
+
+The native client builds and runs on macOS (Apple Silicon) from this branch:
+`scripts/bootstrap-libghostty-vt.py` builds the pinned library for
+`aarch64-macos`, and the build needs only Xcode's command line tools, because
+GPUI Kit compiles its Metal shaders at runtime (`runtime_shaders`). The local
+workspace uses the in-process embedded service, as on Linux. The real-window
+`--workspace-smoke` passes all 18 stages. There is no macOS packaging for the
+native client; it runs as a plain executable.
+
+The workspace chrome now follows the web client's look. Values the web client
+takes from the theme come from the theme here too (`NativeAppearance`): the
+surface, text, border, hover, active, accent, danger, success and warning
+colors, the menu radius (`border-radius`), the shadow color, the drop marker
+(`hover-bg` fill, `drag-over-border`), and the tab bar's `tab-height`,
+`tab-font-size` and `tab-accent-*`. Fixed sizes are named constants that cite
+the web rule they match.
+
+- **Title bar (macOS):** drawn by the app in `surface-raised`, 36 px high,
+  without a divider, with the native window buttons and the title centered in
+  the system font.
+- **Tabs:** only the focused group's visible tab uses the content surface;
+  text steps from primary to secondary to muted with selection and focus. 14 px
+  insets, 200 px maximum width, a 9 px close icon, 1 px separators between tabs
+  and the theme's accent line. Group actions appear while the pointer is over
+  their tab bar.
+- **Groups:** no frame around groups (focus shows through the tab colors),
+  1 px `border-subtle` boundaries with a 4 px resize handle laid over both
+  neighbors, and no padding around the layout. Floating groups have a 1 px
+  `border-default` frame and a shadow.
+- **Dropping tabs:** a group's edge zones span 20% of its content; the marker
+  covers only the content below the tab bar. The whole layout's edges react
+  within 10 px and are marked 20 px wide; a drop there places the pane beside
+  all groups through the existing `MovePane` split target (the root, or the
+  child a two-child root collapses into). Over a tab bar, the hovered tab is
+  marked (its pointer-side half from 100 px width) and the tab goes before it,
+  or after it when moved right within its group; the empty bar space appends.
+  The dragged tab is drawn 30 px left of the pointer and 4 px below its tip.
+- **Menus:** the tab menu and the new-tab profile picker share the web
+  client's context menu look. The tab menu offers Close Tab, Close Other Tabs,
+  Close Tabs to the Right, Copy Working Directory, Copy SSH Path (remote
+  Screens) and a Move to Screen submenu.
+- **Drawer:** the web drawer's sizes, weights and per-state colors. A pane
+  entry counts as running while a process other than its shell is in the
+  foreground (the session's `busy`); running entries use secondary text, a
+  primary dot, and a larger primary title icon with a glow. A Screen card's
+  padding selects the Screen like its row.
+- **Subdued text:** secondary and muted chrome text keep the theme's values;
+  only primary text is lifted to a readable contrast. Kit controls keep their
+  own readability policy.
+- **Terminal:** the bundled terminal font at 14 px, rows from the font's
+  ascent and descent, leftover space split evenly on both sides, and a bar
+  cursor by default (`CSI 0 q` restores it) that only the focused terminal
+  shows.
+- **Screen drag in the Drawer:** the dragged card lifts and follows the
+  pointer while the other cards make room; the dropped order is held until the
+  service's order arrives, at most 1 s.
+
+### Limitations and differences
+
+GPUI has no text letter spacing and no text shadow:
+
+- The "SCREENS" caption has no extra letter spacing.
+- A running pane icon's glow is a soft round light behind the glyph rather
+  than a glow following its shape.
+- GPUI does not expose the macOS window background color, so the title bar is
+  drawn by the app; it shows the workspace title, where the web client's native
+  title bar always shows "Splitty".
+
+Left out because they need new capabilities:
+
+- "Open Folder in" (VS Code, Zed, SFTP client) in the tab menu: the link
+  builders live in the Tauri shell, and the native client has no reviewed way
+  to open `vscode://`, `zed://` or `sftp://` links.
+- Move to Screen on remote Screens: the transfer command is local-only at the
+  worker's source admission and in the remote dispatch.
+- The "New screen" options menu, a Settings shortcut, an active state for
+  Templates and the 340 px Drawer flyout: the native client has no such
+  features.
+- A separate "failed" host state: the model has none; an offline host with a
+  non-retryable error is shown as failed.
+
+Different by choice:
+
+- No pulsing host or unread indicators, to avoid continuous repainting.
+- No Drawer list scrollbar, to keep wheel navigation between Screens.
+- Screen row actions reserve their lane while hidden, so names truncate
+  earlier, and they do not appear on keyboard focus.
+- The Ports button stays visible without ports.
+- Closing several tabs asks once if any is busy; "Keep open" closes none, and
+  the closes run one at a time and stop at the first failure.
+- Screen drag starts after 2 px (GPUI's threshold), shows the arrow cursor,
+  and updates the Screen numbers when the service's order arrives.
+- Drop targets narrower than 100 px use the regular marker.
+- The floating group shadow uses GPUI's default instead of the theme's shadow
+  color.
+- Icons are Kit's Lucide shapes.
+
+### macOS test status
+
+`cargo test -p splitty-gpui --features ui-test-support` passes except two
+tests that assume Linux key semantics:
+`keys_follow_modes_and_leave_printable_commits_to_platform` (Option is not
+Alt) and `focused_pty_keeps_tab_bytes_while_find_and_controls_traverse` (find
+is Cmd+F). In `splitty-client-core`, 45 tests fail on macOS before these
+changes, mostly with "Not a directory" from test paths. Two document and
+palette tests fail only under parallel load, with "transport byte budget
+exhausted", and pass alone. Input methods, dead keys and the clipboard are
+not verified on macOS, and the look was checked by eye.

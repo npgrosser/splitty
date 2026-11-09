@@ -44,13 +44,46 @@ use anyhow::{anyhow, Result};
 use gpui_kit::{prelude::*, *};
 use std::{collections::HashMap, ops::Range, time::Instant};
 
-const BASE_FONT_SIZE: f32 = 15.;
-const BASE_LINE_HEIGHT: f32 = 21.;
+/// The web client's terminal font size; display zoom scales it.
+const BASE_FONT_SIZE: f32 = 14.;
+/// Provisional row height until layout measures the face: rows use the
+/// font's own ascent and descent, as the web client's line height of 1.0.
+const BASE_LINE_HEIGHT: f32 = 18.;
 const DEFAULT_SELECTION_FOREGROUND: u32 = 0xffffff;
 const DEFAULT_SELECTION_BACKGROUND: u32 = 0x345778;
 const MAX_ALTERNATE_WHEEL_KEYS: i32 = 5;
 
+/// The terminal face: the web client's bundled font, or Kit's monospace
+/// family when that font cannot be registered.
+struct TerminalFamily(SharedString);
+impl Global for TerminalFamily {}
+
+/// The terminal face's family, also used by chrome that shows text in it.
+pub(crate) fn terminal_family(cx: &App) -> SharedString {
+    cx.try_global::<TerminalFamily>().map_or_else(
+        || {
+            gpui_kit::base::Theme::global(cx)
+                .tokens
+                .typography
+                .mono
+                .clone()
+        },
+        |family| family.0.clone(),
+    )
+}
+
 pub(crate) fn init(cx: &mut App) {
+    let family = splitty_client_core::appearance::terminal_font_data()
+        .filter(|data| cx.text_system().add_fonts(vec![data.clone()]).is_ok())
+        .map(|_| SharedString::from(splitty_client_core::appearance::TERMINAL_FONT_FAMILY))
+        .unwrap_or_else(|| {
+            gpui_kit::base::Theme::global(cx)
+                .tokens
+                .typography
+                .mono
+                .clone()
+        });
+    cx.set_global(TerminalFamily(family));
     // Kit's Root binds these keys before raw key handlers run. Only the
     // focused PTY publishes this context; find fields and overlays retain
     // ordinary focus traversal.
@@ -272,6 +305,22 @@ impl TerminalMetrics {
             (f32::from(self.line_height) * display_scale)
                 .round()
                 .max(1.) as u32,
+        )
+    }
+
+    /// `bounds` without the leading half of the space whole cells leave over.
+    fn balanced(self, bounds: Bounds<Pixels>) -> Bounds<Pixels> {
+        let size = self.grid_size(bounds.size.width, bounds.size.height);
+        let spare = |extent: Pixels, cell: Pixels, cells: u16| {
+            ((extent - cell * f32::from(cells)) / 2.)
+                .floor()
+                .max(px(0.))
+        };
+        let left = spare(bounds.size.width, self.cell_width, size.cols);
+        let top = spare(bounds.size.height, self.line_height, size.rows);
+        Bounds::new(
+            bounds.origin + point(left, top),
+            gpui_kit::size(bounds.size.width - left, bounds.size.height - top),
         )
     }
 
@@ -514,7 +563,7 @@ impl Terminal {
             size_report_pending: false,
             resized_pixel_cell: None,
             // GPUI font lookup takes concrete family names, not CSS generic families.
-            face: font(gpui_kit::base::Theme::global(cx).tokens.typography.mono),
+            face: font(terminal_family(cx)),
             size,
             generation: 0,
             composition: String::new(),
@@ -1332,12 +1381,22 @@ impl Terminal {
             .advance(font_id, self.metrics.font_size, 'M')
         {
             let width = advance.width.max(px(1.));
-            if width != self.metrics.cell_width {
+            let text = window.text_system();
+            let line_height = (text.ascent(font_id, self.metrics.font_size)
+                + text.descent(font_id, self.metrics.font_size).abs())
+            .round()
+            .max(px(1.));
+            if width != self.metrics.cell_width || line_height != self.metrics.line_height {
                 self.metrics.cell_width = width;
+                self.metrics.line_height = line_height;
                 self.row_cache.clear();
                 self.content_revision = self.content_revision.wrapping_add(1);
             }
         }
+        // As the web client's balanced window padding, the space left over by
+        // whole cells is split evenly: removing its leading half keeps the grid.
+        let bounds = self.metrics.balanced(bounds);
+        self.bounds = bounds;
         // Pixel positions are floats; clamp before converting to protocol cell dimensions.
         let size = self
             .metrics
@@ -1531,18 +1590,21 @@ impl Terminal {
         frame.finish()?;
         self.row_cache
             .retain(|_, row| row.last_frame == current_frame);
-        paint_cursor(
-            cursor,
-            if composition { &self.composition } else { "" },
-            SelectionColors {
-                foreground: self.selection_foreground,
-                background: self.selection_background,
-            },
-            &self.face,
-            geometry,
-            window,
-            cx,
-        )?;
+        // As in the web client, only the focused terminal shows its cursor.
+        if self.focus.is_focused(window) {
+            paint_cursor(
+                cursor,
+                if composition { &self.composition } else { "" },
+                SelectionColors {
+                    foreground: self.selection_foreground,
+                    background: self.selection_background,
+                },
+                &self.face,
+                geometry,
+                window,
+                cx,
+            )?;
+        }
         Ok(())
     }
 }
@@ -1836,9 +1898,10 @@ fn paint_cursor(
                 color.opacity(0.35),
             ));
         }
+        // One pixel wide, as the web client's bar cursor.
         CursorShape::Bar => {
             window.paint_quad(fill(
-                Bounds::new(origin, size(bar, metrics.line_height)),
+                Bounds::new(origin, size(hairline, metrics.line_height)),
                 color,
             ));
         }
@@ -2381,11 +2444,11 @@ mod tests {
     use crate::terminal_engine::{
         Engine, MouseButton as EngineMouseButton, MouseModifiers, MousePolicy, MouseTracking,
     };
-    use gpui_kit::{px, Modifiers, MouseButton, NavigationDirection};
+    use gpui_kit::{point, px, size, Bounds, Modifiers, MouseButton, NavigationDirection};
 
     #[test]
     fn scaled_text_grid_and_hit_cells_share_the_same_metrics() {
-        for (scale, font, row) in [(0.5, 7.5, 10.5), (1.25, 18.75, 26.25), (3., 45., 63.)] {
+        for (scale, font, row) in [(0.5, 7., 9.), (1.25, 17.5, 22.5), (3., 42., 54.)] {
             let mut metrics = TerminalMetrics::new(scale);
             metrics.cell_width = px(9. * scale);
             assert_eq!(f32::from(metrics.font_size), font);
@@ -2400,6 +2463,27 @@ mod tests {
                 .hit_cell(10. * 9. * scale, 2.5 * row, grid)
                 .is_none());
         }
+    }
+
+    #[test]
+    fn leftover_space_is_split_evenly_without_changing_the_grid() {
+        let mut metrics = TerminalMetrics::new(1.);
+        metrics.cell_width = px(10.);
+        metrics.line_height = px(20.);
+        let bounds = Bounds::new(point(px(100.), px(50.)), size(px(105.), px(47.)));
+        let balanced = metrics.balanced(bounds);
+        // 5 px beside 10 columns and 7 px below 2 rows: the leading halves move in.
+        assert_eq!(balanced.origin, point(px(102.), px(53.)));
+        assert_eq!(balanced.size, size(px(103.), px(44.)));
+        assert_eq!(
+            metrics.grid_size(balanced.size.width, balanced.size.height),
+            metrics.grid_size(bounds.size.width, bounds.size.height)
+        );
+        // An exact fit keeps its bounds; the two-column minimum never pads.
+        let exact = Bounds::new(point(px(0.), px(0.)), size(px(100.), px(40.)));
+        assert_eq!(metrics.balanced(exact), exact);
+        let narrow = Bounds::new(point(px(0.), px(0.)), size(px(5.), px(40.)));
+        assert_eq!(metrics.balanced(narrow).origin.x, px(0.));
     }
 
     #[test]

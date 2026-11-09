@@ -672,54 +672,47 @@ impl Workspace {
         }
     }
 
-    pub(super) fn render_hosts_navigation(&self, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_hosts_navigation(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let weak = cx.entity().downgrade();
         let source = self.local_model().map(SourceWorkspace::source_token);
-        Button::new("open-hosts")
-            .accessibility_label("Show Hosts")
-            .tooltip("Inspect cached Hosts")
-            .selected(self.destination == Destination::Hosts)
-            .disabled(
-                source.is_none()
-                    || (self.hosts_navigation_blocked() && self.destination != Destination::Hosts),
-            )
-            .ghost()
-            .compact()
-            .small()
-            .w_full()
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(chrome_rems(10.))
-                    .text_color(rgb(self.appearance.secondary))
-                    .child(
-                        div()
-                            .w(chrome_rems(15.))
-                            .flex_none()
-                            .flex()
-                            .justify_center()
-                            .child(Icon::new(IconName::Server).size_3()),
-                    )
-                    .child("Hosts"),
-            )
-            .on_click(move |_, window, cx| {
-                let _ = weak.update(cx, |this, cx| {
-                    if !source.is_some_and(|source| {
-                        this.local_model()
-                            .is_some_and(|model| model.source_token() == source)
-                    }) {
-                        return;
-                    }
-                    if this.destination == Destination::Hosts {
-                        this.show_screens(window, cx);
-                    } else {
-                        this.show_hosts(window, cx);
-                    }
-                });
-            })
-            .into_any_element()
+        let active = self.destination == Destination::Hosts;
+        let disabled = source.is_none() || (self.hosts_navigation_blocked() && !active);
+        self.drawer_nav_item(
+            "open-hosts",
+            super::drawer::NavItem {
+                icon: IconName::Server,
+                label: "Hosts",
+                shortcut: None,
+                active,
+            },
+            window,
+            cx,
+        )
+        .accessibility_label("Show Hosts")
+        .tooltip("Inspect cached Hosts")
+        .selected(active)
+        .disabled(disabled)
+        .when(disabled, |button| button.cursor_default())
+        .on_click(move |_, window, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                if !source.is_some_and(|source| {
+                    this.local_model()
+                        .is_some_and(|model| model.source_token() == source)
+                }) {
+                    return;
+                }
+                if this.destination == Destination::Hosts {
+                    this.show_screens(window, cx);
+                } else {
+                    this.show_hosts(window, cx);
+                }
+            });
+        })
+        .into_any_element()
     }
 
     fn project_host_rows(&self) -> Vec<HostRow> {

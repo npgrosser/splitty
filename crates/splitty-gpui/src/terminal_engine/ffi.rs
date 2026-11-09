@@ -209,9 +209,12 @@ pub const OPT_CURSOR: c_int = 14;
 pub const OPT_PALETTE: c_int = 15;
 pub const OPT_IMAGE_LIMIT: c_int = 16;
 pub const OPT_SELECTION: c_int = 22;
+pub const OPT_DEFAULT_CURSOR_STYLE: c_int = 23;
 pub const OPT_SCROLLBACK_BYTES: c_int = 28;
 pub const OPT_SCROLLBACK_LINES: c_int = 29;
 pub const DATA_CURSOR_X: c_int = 3;
+// GhosttyCursorStyle (types.h), an int-typed C enum.
+pub const CURSOR_STYLE_BAR: c_int = 0;
 pub const DATA_CURSOR_Y: c_int = 4;
 pub const DATA_CURSOR_VISIBLE: c_int = 7;
 pub const DATA_KITTY_FLAGS: c_int = 8;

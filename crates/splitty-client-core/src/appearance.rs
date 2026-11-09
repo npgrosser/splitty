@@ -18,6 +18,15 @@ use crate::settings::{
 mod terminal_preferences;
 pub use terminal_preferences::TerminalPreferences;
 
+/// The family of the terminal font the web client bundles.
+pub const TERMINAL_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
+
+/// That font's data, read from the embedded frontend assets.
+pub fn terminal_font_data() -> Option<std::borrow::Cow<'static, [u8]>> {
+    splitty_server::embed::FrontendAssets::get("JetBrainsMonoNerdFontMono-Regular.ttf")
+        .map(|file| file.data)
+}
+
 pub(crate) mod local;
 #[cfg(feature = "ui-test-support")]
 #[doc(hidden)]

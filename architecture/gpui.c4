@@ -28,7 +28,7 @@ model {
     }
 
     gpui_workspace = component 'gpui_workspace' {
-      description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references with passive exact-host navigation, bounded port menus, captured remote Screen creation and separate popup/group intent lifetimes, one captured inline rename editor for local and live remote Screens, plus global navigation, source-qualified unread count and severity projection over a shared notification ledger, one bounded outgoing passive Screen during reversible navigation motion, captured same-source Screen drag and keyboard placement with transient measured insertion feedback and no second order owner, deliberate Hosts connection, live catalog, explicit host update confirmation and Ports controls, retained source-qualified terminal views and one identity-bound terminal context popup with separate retained presentation and live command authority, fixed-local controlled settings with separate appearance and notification observations plus local library controls, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools.'
+      description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references with passive exact-host navigation, bounded port menus, captured remote Screen creation and separate popup/group intent lifetimes, one captured inline rename editor for local and live remote Screens, plus global navigation, source-qualified unread count and severity projection over a shared notification ledger, one bounded outgoing passive Screen during reversible navigation motion, captured same-source Screen drag and keyboard placement with transient measured row displacement, a dropped arrangement held until the service order arrives, and no second order owner, deliberate Hosts connection, live catalog, explicit host update confirmation and Ports controls, retained source-qualified terminal views and one identity-bound terminal context popup with separate retained presentation and live command authority, fixed-local controlled settings with separate appearance and notification observations plus local library controls, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools.'
       metadata { module 'splitty_gpui::workspace' }
     }
 
@@ -65,6 +65,7 @@ model {
     gpui_app -> terminal 'Show terminal output and forward native input'
     terminal -> terminal_engine 'Borrow native terminal state and encode checked input'
     terminal -> splitty.client_core.external_links 'Validate bounded HTTP(S) targets before explicit platform dispatch'
+    terminal -> splitty.client_core.appearance 'Register the bundled terminal font as the terminal face'
     gpui_workspace -> terminal 'Keep source-scoped terminal views, rebind route geometry and subscribe to deliberate remote loopback link gestures and admitted local context intents'
     gpui_workspace -> gpui_appearance 'Convert resolved theme values for native chrome and terminal colors'
     gpui_host_update -> gpui_workspace 'Use the workspace view, captured focus and current destination'

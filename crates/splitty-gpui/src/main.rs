@@ -25,11 +25,25 @@ use std::{
     time::Duration,
 };
 
+/// Windows and macOS hide the system title bar of a workspace window and draw
+/// it in the theme's colors; macOS keeps its native window buttons.
+const CUSTOM_TITLEBAR: bool = cfg!(any(target_os = "windows", target_os = "macos"));
+/// The web client's title bar height.
+const MACOS_TITLE_BAR_HEIGHT: Pixels = px(36.);
+/// Keeps the centered title clear of the window buttons on both sides.
+const MACOS_TITLE_INSET: Pixels = px(80.);
+/// Centers the native window buttons vertically in the 36 px bar.
+const MACOS_TRAFFIC_LIGHTS: Point<Pixels> = Point {
+    x: px(9.),
+    y: px(10.),
+};
+
 struct RootView {
     content: AnyView,
     title: String,
     _title_subscription: Option<Subscription>,
-    windows_chrome: bool,
+    /// The window draws its own title bar in the theme's colors.
+    custom_titlebar: bool,
     waiting_for_appearance: bool,
     appearance_subscription: Option<Subscription>,
     reveal_timeout: Option<Task<()>>,
@@ -43,6 +57,7 @@ impl RootView {
     ) -> Self {
         // Windows applies a hidden window's initial placement on activation.
         let windows_chrome = cfg!(target_os = "windows") && workspace.is_some();
+        let custom_titlebar = CUSTOM_TITLEBAR && workspace.is_some();
         let title = workspace.map_or_else(
             || "Splitty".to_owned(),
             |workspace| workspace.read(cx).window_title(),
@@ -79,7 +94,7 @@ impl RootView {
             content,
             title,
             _title_subscription: title_subscription,
-            windows_chrome,
+            custom_titlebar,
             waiting_for_appearance: windows_chrome,
             appearance_subscription,
             reveal_timeout,
@@ -104,36 +119,83 @@ impl RootView {
         cx.notify();
     }
 }
+impl RootView {
+    fn windows_title_bar(&self, cx: &App) -> AnyElement {
+        TitleBar::new()
+            .bg(cx.theme().background)
+            .border_color(cx.theme().border)
+            .text_color(cx.theme().foreground)
+            .child(
+                div()
+                    .id("window-title")
+                    .flex_1()
+                    .min_w_0()
+                    .overflow_hidden()
+                    .text_ellipsis()
+                    .whitespace_nowrap()
+                    .tooltip({
+                        let title = self.title.clone();
+                        move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(title.clone())
+                                .build(window, cx)
+                        }
+                    })
+                    .child(self.title.clone()),
+            )
+            .into_any_element()
+    }
+
+    /// Matches the web client's native macOS title bar: the drawer's raised
+    /// surface without a divider, the title centered over the whole window in
+    /// the system font. The title has no hitbox, so dragging and double clicks
+    /// reach the bar underneath it.
+    fn macos_title_bar(&self, cx: &App) -> AnyElement {
+        div()
+            .relative()
+            .flex_shrink_0()
+            .child(
+                TitleBar::new()
+                    .h(MACOS_TITLE_BAR_HEIGHT)
+                    .bg(cx.theme().sidebar)
+                    .border_b_0(),
+            )
+            .child(
+                div()
+                    .absolute()
+                    .inset_0()
+                    .px(MACOS_TITLE_INSET)
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .overflow_hidden()
+                            .text_ellipsis()
+                            .whitespace_nowrap()
+                            .font_family(".SystemUIFont")
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(cx.theme().muted_foreground)
+                            .child(self.title.clone()),
+                    ),
+            )
+            .into_any_element()
+    }
+}
+
 impl Render for RootView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .size_full()
             .flex()
             .flex_col()
-            .when(self.windows_chrome, |view| {
-                view.child(
-                    TitleBar::new()
-                        .bg(cx.theme().background)
-                        .border_color(cx.theme().border)
-                        .text_color(cx.theme().foreground)
-                        .child(
-                            div()
-                                .id("window-title")
-                                .flex_1()
-                                .min_w_0()
-                                .overflow_hidden()
-                                .text_ellipsis()
-                                .whitespace_nowrap()
-                                .tooltip({
-                                    let title = self.title.clone();
-                                    move |window, cx| {
-                                        gpui_kit::component::tooltip::Tooltip::new(title.clone())
-                                            .build(window, cx)
-                                    }
-                                })
-                                .child(self.title.clone()),
-                        ),
-                )
+            .when(self.custom_titlebar, |view| {
+                view.child(if cfg!(target_os = "macos") {
+                    self.macos_title_bar(cx)
+                } else {
+                    self.windows_title_bar(cx)
+                })
             })
             .child(
                 div()
@@ -265,8 +327,8 @@ fn main() -> anyhow::Result<()> {
                         }
                         .into(),
                     ),
-                    appears_transparent: cfg!(target_os = "windows") && !probe,
-                    ..Default::default()
+                    appears_transparent: CUSTOM_TITLEBAR && !probe,
+                    traffic_light_position: (!probe).then_some(MACOS_TRAFFIC_LIGHTS),
                 }),
                 show: !cfg!(target_os = "windows") || probe,
                 focus: !cfg!(target_os = "windows") || probe,

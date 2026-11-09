@@ -3,6 +3,9 @@ use super::hosts::HostGroupTarget;
 use super::*;
 use splitty_client_core::workspace::{HostActionTarget, RemoteScreenCreateStatus};
 
+/// `.drawer-host-add` in the web client's `Drawer.svelte`: a 26 px square.
+const HOST_ADD_BUTTON: f32 = 26.;
+
 pub(super) struct RemoteCreateNotice {
     owner: SourceToken,
     source: SourceToken,
@@ -288,6 +291,7 @@ impl Workspace {
     pub(super) fn render_remote_create_action(
         &self,
         group: &HostGroupTarget,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let source = group.source_id();
@@ -329,25 +333,33 @@ impl Workspace {
         );
         let create_group = group.clone();
         let create_weak = cx.entity().downgrade();
-        Button::new(SharedString::from(format!("drawer-host-new-{source}")))
-            .debug_selector(move || format!("drawer-host-new-{source}"))
-            .accessibility_label(create_label)
-            .tooltip(create_tooltip)
-            .icon(Icon::new(IconName::Plus).size_3())
-            .ghost()
-            .compact()
-            .small()
-            .w(chrome_rems(26.))
-            .h(chrome_rems(26.))
-            .loading(creating || queued)
-            .disabled(create_error.is_some())
-            .on_click(move |_, window, cx| {
-                if let Some((target, execution, _)) = &create_capture {
-                    let _ = create_weak.update(cx, |this, cx| {
-                        this.create_remote_screen(&create_group, target, *execution, window, cx);
-                    });
-                }
-            })
-            .into_any_element()
+        // `.drawer-host-add`: a 26 px Drawer icon button with a 14 px plus,
+        // the size Kit gives a small button's icon.
+        super::drawer::drawer_control(
+            SharedString::from(format!("drawer-host-new-{source}")),
+            rgb(self.appearance.muted).into(),
+            super::drawer::ICON_BUTTON_RADIUS,
+            &self.appearance,
+            window,
+            cx,
+        )
+        .debug_selector(move || format!("drawer-host-new-{source}"))
+        .accessibility_label(create_label)
+        .tooltip(create_tooltip)
+        .icon(Icon::new(IconName::Plus))
+        .small()
+        .w(chrome_rems(HOST_ADD_BUTTON))
+        .h(chrome_rems(HOST_ADD_BUTTON))
+        .when(create_error.is_some(), |button| button.cursor_default())
+        .loading(creating || queued)
+        .disabled(create_error.is_some())
+        .on_click(move |_, window, cx| {
+            if let Some((target, execution, _)) = &create_capture {
+                let _ = create_weak.update(cx, |this, cx| {
+                    this.create_remote_screen(&create_group, target, *execution, window, cx);
+                });
+            }
+        })
+        .into_any_element()
     }
 }

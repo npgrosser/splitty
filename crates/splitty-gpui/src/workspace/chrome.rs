@@ -408,7 +408,7 @@ impl Workspace {
             .icon(Icon::new(icon))
             .ghost()
             .compact()
-            .small()
+            .xsmall()
             .disabled(disabled)
             .on_click(move |_, window, cx| {
                 if let Some(target) = &target {
@@ -470,7 +470,7 @@ impl Workspace {
                 .icon(Icon::new(IconName::ChevronDown))
                 .ghost()
                 .compact()
-                .small()
+                .xsmall()
                 .disabled(target.is_none());
             if let Some(picker_target) = target {
                 let picker_slot = slot.to_owned();
@@ -547,13 +547,20 @@ impl Workspace {
                 .map(|bounds| bounds.size.width),
             self.appearance.zoom.window_scale(),
         );
+        // Like the web client, group actions show while the pointer is over
+        // their tab bar; a maximized group keeps its restore control visible.
         let mut actions = div()
             .id(SharedString::from(format!("group-actions-{slot}")))
             .flex()
             .flex_none()
             .items_center()
             .gap_1()
-            .px_1();
+            .px_1()
+            .when(!maximized, |actions| {
+                actions
+                    .opacity(0.)
+                    .group_hover(screen_motion::TAB_BAR_GROUP, |style| style.opacity(1.))
+            });
         if tiled {
             if compact && !remote {
                 let menu_target = target.clone();
@@ -570,7 +577,7 @@ impl Workspace {
                         .icon(Icon::new(IconName::Ellipsis))
                         .ghost()
                         .compact()
-                        .small()
+                        .xsmall()
                         .dropdown_menu(move |mut menu, _, _| {
                             for (label, icon, disabled, command) in [
                                 (
@@ -707,7 +714,7 @@ impl Workspace {
                             .icon(Icon::new(IconName::Minimize))
                             .outline()
                             .compact()
-                            .small()
+                            .xsmall()
                             .disabled(restore_target.is_none())
                             .on_click(move |_, window, cx| {
                                 if let Some(target) = &restore_target {

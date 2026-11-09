@@ -1,15 +1,93 @@
-//! The captured tab's Close action and, where supported, Screen transfer.
+//! The captured tab's context menu: Close actions over its tab group, its
+//! working directory and, for local Screens, moving it to another Screen.
+//! Entries, order and keyboard behavior follow the web client's tab menu.
 use super::*;
+use gpui_kit::base::DeferredPopover;
 
-fn destination_ids(
-    screens: &[splitty_client_core::workspace::ScreenInfo],
-    source: &PaneActionTarget,
-) -> Vec<String> {
-    screens
-        .iter()
-        .filter(|screen| screen.id.as_str() != source.screen_id)
-        .map(|screen| screen.id.to_string())
-        .collect()
+#[cfg(all(test, feature = "ui-test-support"))]
+mod view_tests;
+
+/// A main-menu entry, in the web client's order.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabMenuAction {
+    Close,
+    CloseOthers,
+    CloseRight,
+    CopyDirectory,
+    CopySshPath,
+    MoveToScreen,
+}
+
+impl TabMenuAction {
+    /// The suffix of the entry's element id and test selector.
+    fn key(self) -> &'static str {
+        match self {
+            Self::Close => "close",
+            Self::CloseOthers => "close-others",
+            Self::CloseRight => "close-right",
+            Self::CopyDirectory => "copy-cwd",
+            Self::CopySshPath => "copy-ssh",
+            Self::MoveToScreen => "move",
+        }
+    }
+}
+
+struct TabMenuRow {
+    action: TabMenuAction,
+    label: &'static str,
+    detail: Option<SharedString>,
+    enabled: bool,
+    separator_before: bool,
+}
+
+/// A "Move to Screen" destination.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum TransferChoice {
+    Existing(String),
+    New,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TabCloseScope {
+    Others,
+    Right,
+}
+
+/// The open "Move to Screen" submenu.
+#[derive(Default)]
+struct TransferMenu {
+    /// The keyboard focus once it moved into the submenu; the parent row keeps
+    /// it otherwise.
+    focused: Option<TransferChoice>,
+    scroll: ScrollHandle,
+}
+
+pub(super) struct TabContextMenu {
+    pub(super) source: PaneActionTarget,
+    /// The pointer position that opened the menu, in window coordinates.
+    position: Point<Pixels>,
+    /// The keyboard focus among the main entries. As in the web client it
+    /// starts on the first enabled entry and is shown only once the keyboard
+    /// moves it.
+    selected: Option<TabMenuAction>,
+    focus_visible: bool,
+    transfer: Option<TransferMenu>,
+    scroll: ScrollHandle,
+    panel_bounds: menu_style::PlacedBounds,
+    move_row_bounds: menu_style::PlacedBounds,
+    /// Popup-aware interactions elsewhere step aside while the menu is open.
+    _open: DeferredPopover,
+    /// Kit's root binds Tab to focus traversal ahead of raw key handlers;
+    /// while the menu is open, Tab closes it instead, as in the web client.
+    _tab_closes: Subscription,
+}
+
+impl TabContextMenu {
+    fn keyboard_in_transfer(&self) -> bool {
+        self.transfer
+            .as_ref()
+            .is_some_and(|transfer| transfer.focused.is_some())
+    }
 }
 
 fn tab_context_matches(
@@ -24,12 +102,104 @@ fn tab_context_matches(
         && model.screen_for(pane) == Some(screen.screen_id())
 }
 
+/// The tabs of the canonical group holding `pane`, in tab order.
+fn tab_group<'a>(model: &'a SourceWorkspace, pane: &str) -> Option<Vec<&'a str>> {
+    fn slot_tabs<'a>(node: &'a LayoutNode, pane: &str) -> Option<Vec<&'a str>> {
+        match node {
+            LayoutNode::Slot { pane_ids, .. } => pane_ids
+                .iter()
+                .any(|id| id.as_str() == pane)
+                .then(|| pane_ids.iter().map(|id| id.as_str()).collect()),
+            LayoutNode::Split { children, .. } => {
+                children.iter().find_map(|child| slot_tabs(child, pane))
+            }
+        }
+    }
+    let screen = model.snapshot()?;
+    std::iter::once(&screen.root)
+        .chain(screen.floating.iter().map(|entry| &entry.root))
+        .find_map(|root| slot_tabs(root, pane))
+}
+
+/// The longest working directory the menu copies.
+const MAX_CWD_BYTES: usize = 4096;
+/// The longest detail text, in characters, as in the web client.
+const MAX_DETAIL_CHARS: usize = 120;
+
+/// The working directory the service last reported for the pane's session
+/// (or, before that, its pane), when it is plain text that is safe to paste.
+fn pane_cwd(model: &SourceWorkspace, pane: &str) -> Option<String> {
+    let screen = model.snapshot()?;
+    let (_, state) = screen.panes.iter().find(|(id, _)| id.as_str() == pane)?;
+    state
+        .session_id
+        .as_ref()
+        .and_then(|session| screen.sessions.get(session))
+        .and_then(|session| session.cwd.as_deref())
+        .filter(|cwd| !cwd.is_empty())
+        .or(state.cwd.as_deref())
+        .filter(|cwd| {
+            !cwd.is_empty() && cwd.len() <= MAX_CWD_BYTES && !cwd.chars().any(char::is_control)
+        })
+        .map(str::to_owned)
+}
+
+/// A remote folder as scp, rsync and sshfs take it: `target:/path`, or
+/// `ssh://target/path` when the target carries a port or an IPv6 literal.
+fn ssh_path(target: &str, cwd: &str) -> Option<String> {
+    if target.is_empty()
+        || !cwd.starts_with('/')
+        || target.chars().chain(cwd.chars()).any(char::is_control)
+    {
+        return None;
+    }
+    let port = target
+        .rsplit_once(':')
+        .is_some_and(|(_, port)| !port.is_empty() && port.bytes().all(|b| b.is_ascii_digit()));
+    Some(if port || target.contains('[') {
+        format!("ssh://{target}{cwd}")
+    } else {
+        format!("{target}:{cwd}")
+    })
+}
+
+/// Untrusted text as one bounded display line.
+fn detail_line(text: &str) -> SharedString {
+    hosts::display(&text.chars().take(MAX_DETAIL_CHARS).collect::<String>()).into()
+}
+
+/// The tab's label as its tab bar shows it.
+fn tab_title(model: &SourceWorkspace, pane: &str, index: usize) -> String {
+    model
+        .snapshot()
+        .and_then(|screen| screen.panes.iter().find(|(id, _)| id.as_str() == pane))
+        .and_then(|(_, pane)| pane.title.as_deref())
+        .filter(|title| !title.is_empty())
+        .map(hosts::display)
+        .unwrap_or_else(|| format!("Terminal {}", index + 1))
+}
+
+/// The next keyboard focus among `items`: arrows wrap, Home and End jump.
+fn step<T: Clone + PartialEq>(items: &[T], current: Option<&T>, key: &str) -> Option<T> {
+    let last = items.len().checked_sub(1)?;
+    let index = current.and_then(|current| items.iter().position(|item| item == current));
+    let next = match key {
+        "home" => 0,
+        "end" => last,
+        "down" => index.map_or(0, |index| if index == last { 0 } else { index + 1 }),
+        "up" => index.map_or(last, |index| index.checked_sub(1).unwrap_or(last)),
+        _ => return current.cloned(),
+    };
+    items.get(next).cloned()
+}
+
 impl Workspace {
     pub(super) fn open_tab_context_menu_captured(
         &mut self,
         source: SourceToken,
         screen: &ScreenKey,
         pane: &str,
+        position: Point<Pixels>,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
@@ -39,14 +209,6 @@ impl Workspace {
         {
             return;
         }
-        self.open_tab_context_menu(pane, window, cx);
-    }
-    pub(super) fn open_tab_context_menu(
-        &mut self,
-        pane: &str,
-        _window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
         if self.rename.is_some()
             || self
                 .pending_close
@@ -60,36 +222,185 @@ impl Workspace {
         };
         match model.capture_pane_action(pane) {
             Ok(source) => {
-                let selected =
-                    usize::from(!self.is_remote_selected() && model.can_transfer_pane(&source));
                 self.profile_picker = None;
-                self.tab_context_menu = Some(TabContextMenu {
-                    source,
-                    selected,
-                    scroll: ScrollHandle::new(),
+                let owner = cx.entity().downgrade();
+                let menu_window = window.window_handle();
+                let tab_closes = cx.intercept_keystrokes(move |event, window, cx| {
+                    if window.window_handle() == menu_window && event.keystroke.key == "tab" {
+                        cx.stop_propagation();
+                        let _ = owner.update(cx, |this, cx| {
+                            this.dismiss_tab_context_menu(window, cx);
+                        });
+                    }
                 });
+                let mut menu = TabContextMenu {
+                    source,
+                    position,
+                    selected: None,
+                    focus_visible: false,
+                    transfer: None,
+                    scroll: ScrollHandle::new(),
+                    panel_bounds: Rc::default(),
+                    move_row_bounds: Rc::default(),
+                    _open: GlobalState::register_deferred_popover(cx),
+                    _tab_closes: tab_closes,
+                };
+                menu.selected = self
+                    .tab_menu_rows(&menu)
+                    .iter()
+                    .find(|row| row.enabled)
+                    .map(|row| row.action);
+                self.tab_context_menu = Some(menu);
+                // Keys reach the workspace's handler while the terminal is
+                // not focused; closing returns focus to the terminal.
+                self.focus.focus(window, cx);
             }
             Err(error) => self.status = format!("Tab action unavailable: {error}"),
         }
         cx.notify();
     }
 
-    pub(super) fn tab_context_menu_change(
-        &mut self,
-        pane: &str,
-        open: bool,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if open {
-            self.open_tab_context_menu(pane, window, cx);
-        } else if self
-            .tab_context_menu
-            .as_ref()
-            .is_some_and(|menu| menu.source.pane_id == pane)
-        {
-            self.tab_context_menu = None;
+    fn dismiss_tab_context_menu(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.tab_context_menu.take().is_some() {
+            self.focus_current(window, cx);
             cx.notify();
+        }
+    }
+
+    fn tab_menu_can_transfer(&self, menu: &TabContextMenu) -> bool {
+        !self.is_remote_selected()
+            && self
+                .selected_model()
+                .is_some_and(|model| model.can_transfer_pane(&menu.source))
+    }
+
+    /// The SSH target of the captured tab's remote source.
+    fn tab_menu_remote_target(&self, menu: &TabContextMenu) -> Option<&str> {
+        self.model
+            .as_ref()?
+            .source_target(menu.source.source_token().source_id())
+    }
+
+    fn tab_menu_rows(&self, menu: &TabContextMenu) -> Vec<TabMenuRow> {
+        let Some(model) = self.selected_model() else {
+            return Vec::new();
+        };
+        let pane = menu.source.pane_id.as_str();
+        let group = tab_group(model, pane).unwrap_or_default();
+        let index = group.iter().position(|tab| *tab == pane);
+        let row = |action, label, enabled| TabMenuRow {
+            action,
+            label,
+            detail: None,
+            enabled,
+            separator_before: false,
+        };
+        let mut rows = vec![
+            row(TabMenuAction::Close, "Close Tab", true),
+            row(
+                TabMenuAction::CloseOthers,
+                "Close Other Tabs",
+                group.len() > 1,
+            ),
+            row(
+                TabMenuAction::CloseRight,
+                "Close Tabs to the Right",
+                index.is_some_and(|index| index + 1 < group.len()),
+            ),
+        ];
+        if let Some(cwd) = pane_cwd(model, pane) {
+            rows.push(TabMenuRow {
+                separator_before: true,
+                ..row(TabMenuAction::CopyDirectory, "Copy Working Directory", true)
+            });
+            if let Some(path) = self
+                .tab_menu_remote_target(menu)
+                .and_then(|target| ssh_path(target, &cwd))
+            {
+                rows.push(TabMenuRow {
+                    detail: Some(detail_line(&path)),
+                    ..row(TabMenuAction::CopySshPath, "Copy SSH Path", true)
+                });
+            }
+        }
+        if self.tab_menu_can_transfer(menu) {
+            rows.push(TabMenuRow {
+                separator_before: true,
+                ..row(TabMenuAction::MoveToScreen, "Move to Screen", true)
+            });
+        }
+        rows
+    }
+
+    fn tab_menu_enabled(&self, menu: &TabContextMenu) -> Vec<TabMenuAction> {
+        self.tab_menu_rows(menu)
+            .into_iter()
+            .filter(|row| row.enabled)
+            .map(|row| row.action)
+            .collect()
+    }
+
+    /// The other Screens of the tab's source by name, then a new one.
+    fn tab_menu_transfer_choices(&self, menu: &TabContextMenu) -> Vec<(TransferChoice, String)> {
+        let mut choices: Vec<_> = self
+            .selected_model()
+            .map(|model| {
+                model
+                    .screens()
+                    .iter()
+                    .filter(|screen| screen.id.as_str() != menu.source.screen_id)
+                    .map(|screen| {
+                        (
+                            TransferChoice::Existing(screen.id.to_string()),
+                            screen.name.clone().unwrap_or_else(|| "Screen".to_owned()),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let busy = self.pending_transfer.is_some()
+            || self
+                .selected_model()
+                .is_some_and(|model| model.transfer_pending() || model.routes_reconciling());
+        choices.push((
+            TransferChoice::New,
+            if busy {
+                "Move in progress"
+            } else {
+                "New Screen"
+            }
+            .to_owned(),
+        ));
+        choices
+    }
+
+    /// Scrolls a long panel to keep the keyboard focus in view; separators are
+    /// children too.
+    fn reveal_tab_menu_focus(&self) {
+        let Some(menu) = self.tab_context_menu.as_ref() else {
+            return;
+        };
+        if let Some(transfer) = &menu.transfer {
+            if let Some(focused) = &transfer.focused {
+                let choices = self.tab_menu_transfer_choices(menu);
+                if let Some(index) = choices.iter().position(|(choice, _)| choice == focused) {
+                    let separator =
+                        usize::from(*focused == TransferChoice::New && choices.len() > 1);
+                    transfer.scroll.scroll_to_item(index + separator);
+                }
+                return;
+            }
+        }
+        let rows = self.tab_menu_rows(menu);
+        if let Some(index) = rows
+            .iter()
+            .position(|row| Some(row.action) == menu.selected)
+        {
+            let separators = rows[..=index]
+                .iter()
+                .filter(|row| row.separator_before)
+                .count();
+            menu.scroll.scroll_to_item(index + separators);
         }
     }
 
@@ -99,76 +410,192 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        cx.stop_propagation();
         let Some(menu) = self.tab_context_menu.as_ref() else {
             return;
         };
-        let count = self.selected_model().map_or(1, |model| {
-            if !self.is_remote_selected() && model.can_transfer_pane(&menu.source) {
-                destination_ids(model.screens(), &menu.source).len() + 2
-            } else {
-                1
+        let in_transfer = menu.keyboard_in_transfer();
+        let key = key.key.to_ascii_lowercase();
+        match key.as_str() {
+            "tab" => self.dismiss_tab_context_menu(window, cx),
+            "escape" | "left" if in_transfer => self.leave_transfer_menu(cx),
+            "escape" => self.dismiss_tab_context_menu(window, cx),
+            "right"
+                if !in_transfer
+                    && menu.selected == Some(TabMenuAction::MoveToScreen)
+                    && self
+                        .tab_menu_enabled(menu)
+                        .contains(&TabMenuAction::MoveToScreen) =>
+            {
+                self.enter_transfer_menu(cx)
             }
-        });
-        match key.key.to_ascii_lowercase().as_str() {
-            "escape" => {
-                self.tab_context_menu = None;
+            "up" | "down" | "home" | "end" => {
+                if in_transfer {
+                    let choices: Vec<_> = self
+                        .tab_menu_transfer_choices(menu)
+                        .into_iter()
+                        .map(|(choice, _)| choice)
+                        .collect();
+                    let menu = self.tab_context_menu.as_mut().expect("open menu");
+                    let transfer = menu.transfer.as_mut().expect("open submenu");
+                    transfer.focused = step(&choices, transfer.focused.as_ref(), &key);
+                    menu.focus_visible = true;
+                } else {
+                    let enabled = self.tab_menu_enabled(menu);
+                    let menu = self.tab_context_menu.as_mut().expect("open menu");
+                    menu.selected = step(&enabled, menu.selected.as_ref(), &key);
+                    menu.focus_visible = true;
+                    if menu.selected != Some(TabMenuAction::MoveToScreen) {
+                        menu.transfer = None;
+                    }
+                }
+                self.reveal_tab_menu_focus();
                 cx.notify();
             }
-            "up" => {
-                if let Some(menu) = self.tab_context_menu.as_mut() {
-                    menu.selected = menu.selected.saturating_sub(1);
-                    menu.scroll.scroll_to_item(if menu.selected == 0 {
-                        1
-                    } else {
-                        menu.selected + 3
-                    });
-                    cx.notify();
-                }
-            }
-            "down" => {
-                if let Some(menu) = self.tab_context_menu.as_mut() {
-                    menu.selected = (menu.selected + 1).min(count - 1);
-                    menu.scroll.scroll_to_item(if menu.selected == 0 {
-                        1
-                    } else {
-                        menu.selected + 3
-                    });
-                    cx.notify();
-                }
-            }
-            "enter" | "return" => {
-                let source = &menu.source;
-                let pane = source.pane_id.clone();
-                let selected = menu.selected.min(count - 1);
-                if selected == 0 {
-                    self.choose_close_tab(&pane, window, cx);
-                } else {
-                    let destination = self.selected_model().and_then(|model| {
-                        destination_ids(model.screens(), source)
-                            .get(selected - 1)
-                            .cloned()
-                    });
-                    self.choose_transfer(&pane, destination.as_deref(), cx);
+            "enter" | "return" | "space" => {
+                let pane = menu.source.pane_id.clone();
+                if in_transfer {
+                    let choice = menu
+                        .transfer
+                        .as_ref()
+                        .and_then(|transfer| transfer.focused.clone());
+                    if let Some(choice) = choice.filter(|choice| {
+                        self.tab_menu_transfer_choices(menu)
+                            .iter()
+                            .any(|(current, _)| current == choice)
+                    }) {
+                        let existing = match choice {
+                            TransferChoice::Existing(screen) => Some(screen),
+                            TransferChoice::New => None,
+                        };
+                        self.choose_transfer(&pane, existing.as_deref(), window, cx);
+                    }
+                } else if let Some(action) = menu
+                    .selected
+                    .filter(|action| self.tab_menu_enabled(menu).contains(action))
+                {
+                    self.choose_tab_menu_action(&pane, action, window, cx);
                 }
             }
             _ => {}
         }
-        cx.stop_propagation();
     }
 
-    pub(super) fn choose_close_tab(
+    /// Opens the submenu with the keyboard focus on its first entry.
+    fn enter_transfer_menu(&mut self, cx: &mut Context<Self>) {
+        let Some(menu) = self.tab_context_menu.as_ref() else {
+            return;
+        };
+        let first = self
+            .tab_menu_transfer_choices(menu)
+            .into_iter()
+            .next()
+            .map(|(choice, _)| choice);
+        let menu = self.tab_context_menu.as_mut().expect("open menu");
+        menu.transfer
+            .get_or_insert_with(TransferMenu::default)
+            .focused = first;
+        menu.focus_visible = true;
+        self.reveal_tab_menu_focus();
+        cx.notify();
+    }
+
+    /// Closes the submenu and returns the keyboard focus to its row.
+    fn leave_transfer_menu(&mut self, cx: &mut Context<Self>) {
+        if let Some(menu) = self.tab_context_menu.as_mut() {
+            menu.transfer = None;
+            menu.selected = Some(TabMenuAction::MoveToScreen);
+            menu.focus_visible = true;
+            cx.notify();
+        }
+    }
+
+    /// Pointer movement onto a main row opens the submenu of a row that has
+    /// one and closes it on any other row; the keyboard focus stays put.
+    fn tab_menu_hover(&mut self, action: Option<TabMenuAction>, cx: &mut Context<Self>) {
+        let Some(menu) = self.tab_context_menu.as_mut() else {
+            return;
+        };
+        if action == Some(TabMenuAction::MoveToScreen) {
+            if menu.transfer.is_none() {
+                menu.transfer = Some(TransferMenu::default());
+                cx.notify();
+            }
+        } else if menu.transfer.take().is_some() {
+            cx.notify();
+        }
+    }
+
+    fn tab_menu_click(
+        &mut self,
+        action: TabMenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.tab_context_menu.as_mut() else {
+            return;
+        };
+        menu.selected = Some(action);
+        menu.focus_visible = false;
+        let pane = menu.source.pane_id.clone();
+        let enabled = self
+            .tab_context_menu
+            .as_ref()
+            .is_some_and(|menu| self.tab_menu_enabled(menu).contains(&action));
+        if enabled {
+            self.choose_tab_menu_action(&pane, action, window, cx);
+        }
+    }
+
+    fn choose_tab_menu_action(
+        &mut self,
+        pane: &str,
+        action: TabMenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        match action {
+            TabMenuAction::Close => self.choose_close_tab(pane, window, cx),
+            TabMenuAction::CloseOthers => {
+                self.choose_close_tabs(pane, TabCloseScope::Others, window, cx)
+            }
+            TabMenuAction::CloseRight => {
+                self.choose_close_tabs(pane, TabCloseScope::Right, window, cx)
+            }
+            TabMenuAction::CopyDirectory | TabMenuAction::CopySshPath => {
+                self.choose_copy(pane, action, window, cx)
+            }
+            TabMenuAction::MoveToScreen => {
+                if let Some(menu) = self.tab_context_menu.as_mut() {
+                    menu.transfer.get_or_insert_with(TransferMenu::default);
+                    cx.notify();
+                }
+            }
+        }
+    }
+
+    /// Takes the open menu when it belongs to `pane` and returns focus to the
+    /// terminal; the chosen action continues from the captured target.
+    fn take_tab_menu(
         &mut self,
         pane: &str,
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        let Some(menu) = self.tab_context_menu.take() else {
-            return;
-        };
+    ) -> Option<TabContextMenu> {
+        let menu = self.tab_context_menu.take()?;
         if menu.source.pane_id != pane {
             self.tab_context_menu = Some(menu);
-            return;
+            return None;
         }
+        self.focus_current(window, cx);
+        cx.notify();
+        Some(menu)
+    }
+
+    fn choose_close_tab(&mut self, pane: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.take_tab_menu(pane, window, cx) else {
+            return;
+        };
         let Some(model) = self.selected_model() else {
             return;
         };
@@ -188,19 +615,104 @@ impl Workspace {
         );
     }
 
-    pub(super) fn choose_transfer(
+    /// Closes the other tabs of the captured tab's group, or those right of
+    /// it, through one assessed and, where needed, confirmed close.
+    fn choose_close_tabs(
+        &mut self,
+        pane: &str,
+        scope: TabCloseScope,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.take_tab_menu(pane, window, cx) else {
+            return;
+        };
+        let Some(model) = self.selected_model() else {
+            return;
+        };
+        if let Err(error) = model.validate_pane_action(&menu.source) {
+            self.status = format!("Tab changed: {error}");
+            cx.notify();
+            return;
+        }
+        let group = tab_group(model, pane).unwrap_or_default();
+        let Some(index) = group.iter().position(|tab| *tab == pane) else {
+            return;
+        };
+        let closing: Vec<String> = match scope {
+            TabCloseScope::Others => group
+                .iter()
+                .filter(|tab| **tab != pane)
+                .map(|tab| (*tab).to_owned())
+                .collect(),
+            TabCloseScope::Right => group[index + 1..]
+                .iter()
+                .map(|tab| (*tab).to_owned())
+                .collect(),
+        };
+        let titles = closing
+            .iter()
+            .map(|tab| {
+                let index = group.iter().position(|current| current == tab).unwrap_or(0);
+                (tab.clone(), tab_title(model, tab, index))
+            })
+            .collect::<HashMap<_, _>>();
+        // Right to left, as the web client closes them.
+        let closing: Vec<_> = closing.into_iter().rev().collect();
+        self.request_close_tabs_captured(
+            menu.source.source_token(),
+            &menu.source.screen_id,
+            closing,
+            &titles,
+            window,
+            cx,
+        );
+    }
+
+    fn choose_copy(
+        &mut self,
+        pane: &str,
+        action: TabMenuAction,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(menu) = self.take_tab_menu(pane, window, cx) else {
+            return;
+        };
+        let Some(model) = self.selected_model() else {
+            return;
+        };
+        if let Err(error) = model.validate_pane_action(&menu.source) {
+            self.status = format!("Tab changed: {error}");
+            cx.notify();
+            return;
+        }
+        let cwd = pane_cwd(model, pane);
+        let text = match action {
+            TabMenuAction::CopyDirectory => cwd,
+            TabMenuAction::CopySshPath => self
+                .tab_menu_remote_target(&menu)
+                .zip(cwd)
+                .and_then(|(target, cwd)| ssh_path(target, &cwd)),
+            _ => None,
+        };
+        match text {
+            Some(text) => cx.write_to_clipboard(ClipboardItem::new_string(text)),
+            None => self.status = "The working directory is no longer known".into(),
+        }
+        cx.notify();
+    }
+
+    fn choose_transfer(
         &mut self,
         pane: &str,
         existing: Option<&str>,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(menu) = self.tab_context_menu.take() else {
+        let Some(menu) = self.take_tab_menu(pane, window, cx) else {
             return;
         };
-        if menu.source.pane_id != pane {
-            self.tab_context_menu = Some(menu);
-            return;
-        }
         let Some(model) = self.selected_model() else {
             return;
         };
@@ -260,394 +772,191 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn render_tab_context_menu(&self, pane: &str, cx: &mut Context<Self>) -> AnyElement {
+    /// The open menu as a window overlay: a backdrop that closes it on any
+    /// outside press, the panel at the pointer and the open submenu.
+    pub(super) fn render_tab_context_menu(
+        &self,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let menu = self.tab_context_menu.as_ref()?;
         if !self
             .selected_model()
-            .is_some_and(|model| model.capture_pane_action(pane).is_ok())
+            .is_some_and(|model| model.validate_pane_action(&menu.source).is_ok())
         {
-            return div().into_any_element();
+            return None;
         }
-        let open = self
-            .tab_context_menu
-            .as_ref()
-            .is_some_and(|menu| menu.source.pane_id == pane);
-        let selected = self
-            .tab_context_menu
-            .as_ref()
-            .map(|menu| menu.selected)
-            .unwrap_or(0);
-        let source = self
-            .tab_context_menu
-            .as_ref()
-            .filter(|menu| menu.source.pane_id == pane);
-        let can_transfer = !self.is_remote_selected()
-            && self
-                .selected_model()
-                .zip(source)
-                .is_some_and(|(model, menu)| model.can_transfer_pane(&menu.source));
-        let selected = if can_transfer { selected } else { 0 };
-        let scroll = source.map(|menu| menu.scroll.clone()).unwrap_or_default();
-        let destinations: Vec<_> = self
-            .selected_model()
-            .zip(source)
-            .filter(|_| can_transfer)
-            .map(|(model, menu)| {
-                model
-                    .screens()
-                    .iter()
-                    .filter(|screen| screen.id.as_str() != menu.source.screen_id)
-                    .map(|screen| {
-                        (
-                            screen.id.to_string(),
-                            screen.name.clone().unwrap_or_else(|| "Screen".to_owned()),
-                        )
+        let colors = &self.appearance;
+        let pane = menu.source.pane_id.clone();
+        let viewport = window.viewport_size();
+        let max_height = menu_style::panel_max_height(window);
+        let keyboard_in_transfer = menu.keyboard_in_transfer();
+        let mut panel = menu_style::panel(colors)
+            .id(SharedString::from(format!("tab-context-items-{pane}")))
+            .debug_selector(|| "tab-context-menu".into())
+            .max_w(chrome_rems(300.))
+            .max_h(max_height)
+            .overflow_y_scroll()
+            .track_scroll(&menu.scroll);
+        for row in self.tab_menu_rows(menu) {
+            if row.separator_before {
+                panel = panel.child(menu_style::separator(colors));
+            }
+            let action = row.action;
+            let id = SharedString::from(format!("tab-context-{}-{pane}", action.key()));
+            let selector = format!("tab-context-{}", action.key());
+            let label = menu_style::label(colors, row.label, row.detail);
+            let element = if row.enabled {
+                let expanded = action == TabMenuAction::MoveToScreen && menu.transfer.is_some();
+                let focused =
+                    menu.focus_visible && !keyboard_in_transfer && menu.selected == Some(action);
+                menu_style::item(colors, focused || expanded, action == TabMenuAction::Close)
+                    .id(id)
+                    .debug_selector(move || selector)
+                    .child(label)
+                    .on_hover(cx.listener(move |this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this.tab_menu_hover(Some(action), cx);
+                        }
+                    }))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        cx.stop_propagation();
+                        this.tab_menu_click(action, window, cx);
+                    }))
+                    .when(action == TabMenuAction::MoveToScreen, |row| {
+                        let bounds = menu.move_row_bounds.clone();
+                        row.child(menu_style::meta().child(menu_style::chevron()))
+                            .child(
+                                canvas(move |row, _, _| bounds.set(Some(row)), |_, _, _, _| {})
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .size_full(),
+                            )
                     })
-                    .collect()
-            })
-            .unwrap_or_default();
-        let weak = cx.entity().downgrade();
-        let content_weak = weak.clone();
-        let changed_pane = pane.to_owned();
-        let menu_pane = pane.to_owned();
-        let anchor_id = SharedString::from(format!("tab-context-anchor-{pane}"));
-        let colors = self.appearance.clone();
-        let busy = self.pending_transfer.is_some()
-            || self
-                .selected_model()
-                .is_some_and(|model| model.transfer_pending() || model.routes_reconciling());
-        Popover::new(SharedString::from(format!("tab-context-menu-{pane}")))
-            .absolute()
-            .bottom_0()
-            .left_0()
-            .w_0()
-            .h_0()
-            .open(open)
-            .mouse_button(MouseButton::Left)
-            .trigger_with(move |_, _, _| div().id(anchor_id).w_0().h_0().into_any_element())
-            .on_open_change(move |open, window, cx| {
-                let _ = weak.update(cx, |this, cx| {
-                    this.tab_context_menu_change(&changed_pane, *open, window, cx)
-                });
-            })
-            .content(move |_, window, _| {
-                let weak = content_weak.clone();
-                let new_index = destinations.len() + 1;
-                let mut items = div()
-                    .id(SharedString::from(format!("tab-context-items-{menu_pane}")))
-                    .flex()
-                    .flex_col()
-                    .min_w(chrome_rems(190.))
-                    .max_w(chrome_rems(300.))
-                    .max_h(px((300. * colors.zoom.window_scale())
-                        .min(f32::from(window.viewport_size().height) * 0.55)))
-                    .overflow_y_scroll()
-                    .track_scroll(&scroll)
-                    .bg(rgb(colors.raised))
-                    .text_color(rgb(colors.text))
-                    .border_1()
-                    .border_color(rgb(colors.border))
-                    .on_click(|_, _, cx| cx.stop_propagation())
-                    .child(div().px_3().py_1().child("Tab actions"));
-                let close_pane = menu_pane.clone();
-                let close_weak = weak.clone();
-                items = items.child(
-                    div()
-                        .id(SharedString::from(format!(
-                            "tab-context-close-{close_pane}"
-                        )))
-                        .debug_selector(|| "tab-context-close".into())
-                        .px_3()
-                        .py_1()
-                        .cursor_pointer()
-                        .bg(rgb(if selected == 0 {
-                            colors.active
-                        } else {
-                            colors.raised
-                        }))
-                        .child("Close Tab")
-                        .on_click(move |_, window, cx| {
+                    .into_any_element()
+            } else {
+                menu_style::disabled_item(colors)
+                    .id(id)
+                    .debug_selector(move || selector)
+                    .child(label)
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        if *hovered {
+                            this.tab_menu_hover(None, cx);
+                        }
+                    }))
+                    .into_any_element()
+            };
+            panel = panel.child(element);
+        }
+        let transfer = menu.transfer.as_ref().map(|transfer| {
+            let choices = self.tab_menu_transfer_choices(menu);
+            let separated = choices.len() > 1;
+            let mut submenu = menu_style::submenu_panel(colors)
+                .id(SharedString::from(format!("tab-context-move-menu-{pane}")))
+                .debug_selector(|| "tab-context-move-menu".into())
+                .max_w(chrome_rems(300.))
+                .max_h(max_height)
+                .overflow_y_scroll()
+                .track_scroll(&transfer.scroll);
+            for (choice, label) in choices {
+                if choice == TransferChoice::New && separated {
+                    submenu = submenu.child(menu_style::separator(colors));
+                }
+                let focused = menu.focus_visible && transfer.focused.as_ref() == Some(&choice);
+                let (id, selector, existing) = match choice {
+                    TransferChoice::Existing(screen) => (
+                        format!("transfer-existing-{pane}-{screen}"),
+                        format!("tab-context-transfer-{screen}"),
+                        Some(screen),
+                    ),
+                    TransferChoice::New => (
+                        format!("transfer-new-{pane}"),
+                        "tab-context-transfer-new".to_owned(),
+                        None,
+                    ),
+                };
+                let pane = pane.clone();
+                submenu = submenu.child(
+                    menu_style::item(colors, focused, false)
+                        .id(SharedString::from(id))
+                        .debug_selector(move || selector)
+                        .child(menu_style::label(colors, label, None))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                             cx.stop_propagation();
-                            let _ = close_weak.update(cx, |this, cx| {
-                                this.choose_close_tab(&close_pane, window, cx)
-                            });
-                        }),
+                            this.choose_transfer(&pane, existing.as_deref(), window, cx);
+                        })),
                 );
-                if !can_transfer {
-                    return items;
-                }
-                items = items
-                    .child(div().h(px(1.)).mx_2().bg(rgb(colors.border)))
-                    .child(div().px_3().py_1().child("Move to Screen"));
-                for (index, (screen_id, name)) in destinations.into_iter().enumerate() {
-                    let pane = menu_pane.clone();
-                    let id = screen_id.clone();
-                    let weak = weak.clone();
-                    items = items.child(
-                        div()
-                            .id(SharedString::from(format!("transfer-existing-{pane}-{id}")))
-                            .px_3()
-                            .py_1()
-                            .cursor_pointer()
-                            .bg(rgb(if index + 1 == selected {
-                                colors.active
-                            } else {
-                                colors.raised
-                            }))
-                            .child(name)
-                            .on_click(move |_, _, cx| {
-                                cx.stop_propagation();
-                                let _ = weak.update(cx, |this, cx| {
-                                    this.choose_transfer(&pane, Some(&id), cx)
-                                });
-                            }),
-                    );
-                }
-                let pane = menu_pane.clone();
-                let new_selected = selected == new_index;
-                items.child(
+            }
+            menu_style::placed(
+                menu_style::Placement::Beside {
+                    parent: menu.panel_bounds.clone(),
+                    row: menu.move_row_bounds.clone(),
+                },
+                None,
+                submenu,
+            )
+        });
+        Some(
+            deferred(
+                anchored().position(point(px(0.), px(0.))).child(
                     div()
-                        .id(SharedString::from(format!("transfer-new-{pane}")))
-                        .debug_selector(|| "tab-context-transfer-new".into())
-                        .px_3()
-                        .py_1()
-                        .cursor_pointer()
-                        .bg(rgb(if new_selected {
-                            colors.active
-                        } else {
-                            colors.raised
-                        }))
-                        .child(if busy {
-                            "Move in progress"
-                        } else {
-                            "New Screen"
-                        })
-                        .on_click(move |_, _, cx| {
+                        .id("tab-context-backdrop")
+                        .w(viewport.width)
+                        .h(viewport.height)
+                        .occlude()
+                        .on_any_mouse_down(cx.listener(|this, _: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
-                            let _ =
-                                weak.update(cx, |this, cx| this.choose_transfer(&pane, None, cx));
-                        }),
-                )
-            })
-            .into_any_element()
+                            this.dismiss_tab_context_menu(window, cx);
+                        }))
+                        .on_scroll(|_, _, cx| cx.stop_propagation())
+                        .child(menu_style::placed(
+                            menu_style::Placement::Pointer(menu.position),
+                            Some(menu.panel_bounds.clone()),
+                            panel,
+                        ))
+                        .children(transfer),
+                ),
+            )
+            .with_priority(gpui_kit::base::POPUP_PRIORITY)
+            .into_any_element(),
+        )
     }
 }
 
-#[cfg(all(test, feature = "ui-test-support"))]
-mod view_tests {
-    use super::{CloseTarget, Command, Destination, Workspace};
-    use gpui_kit::{
-        AppContext, Entity, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, TestAppContext,
-        VisualTestContext,
-    };
-    use splitty_client_core::{native_workspace::Worker, workspace::WindowWorkspace};
-    use std::{
-        cell::RefCell,
-        rc::Rc,
-        sync::{atomic::AtomicBool, Arc},
-    };
-    use tokio::sync::mpsc;
-    use uuid::Uuid;
+#[cfg(test)]
+mod menu_tests {
+    use super::{ssh_path, step};
 
-    fn model_with_tabs(owner: Uuid) -> WindowWorkspace {
-        let mut model = WindowWorkspace::new(owner);
-        model.ui_test_local_screen_fixture("Work").unwrap();
-        let token = model.lifecycle_token();
-        model
-            .source_mut(token.source_id())
-            .unwrap()
-            .apply_snapshot(
-                owner,
-                &serde_json::json!({"type":"mux.screen_snapshot","screen":{
-                    "id":"work","revision":2,
-                    "root":{"type":"slot","id":"slot","paneIds":["p0","p1"],"activePaneId":"p0"},
-                    "panes":{"p0":{"id":"p0","sessionId":"s0"},
-                        "p1":{"id":"p1","sessionId":"s1"}},
-                    "sessions":{"s0":{"id":"s0","status":"running","busy":false},
-                        "s1":{"id":"s1","status":"running","busy":false}}
-                }}),
-            )
-            .unwrap();
-        model
-    }
-
-    fn with_menu(
-        run: impl FnOnce(
-            &mut VisualTestContext,
-            Entity<Workspace>,
-            Uuid,
-            mpsc::Receiver<splitty_client_core::native_workspace::Command>,
-        ),
-    ) {
-        let mut app = TestAppContext::single();
-        app.update(gpui_kit::init);
-        let content = Rc::new(RefCell::new(None));
-        let (_, window) = app.add_window_view({
-            let content = content.clone();
-            move |window, cx| {
-                let view = cx.new(|cx| {
-                    let (workspace, worker) = Workspace::new_with_worker(
-                        false,
-                        Arc::new(AtomicBool::new(false)),
-                        window,
-                        cx,
-                        |_, _, _| Worker::ui_test_fixture(),
-                    );
-                    worker.shutdown().unwrap();
-                    workspace
-                });
-                *content.borrow_mut() = Some(view.clone());
-                gpui_kit::base::Root::new(view, window, cx)
-            }
-        });
-        let view = content.borrow_mut().take().unwrap();
-        let owner = Uuid::new_v4();
-        let model = model_with_tabs(owner);
-        let token = model.lifecycle_token();
-        let (commands, receiver) = mpsc::channel(32);
-        window.update(|window, cx| {
-            view.update(cx, |workspace, cx| {
-                workspace.model = Some(model);
-                workspace.commands = commands;
-                workspace.destination = Destination::Screens;
-                let screen = workspace
-                    .model
-                    .as_ref()
-                    .unwrap()
-                    .local_source()
-                    .screen_key("work");
-                workspace.open_tab_context_menu_captured(token, &screen, "p1", window, cx);
-                cx.notify();
-            });
-            window.draw(cx).clear(cx);
-        });
-        run(window, view, owner, receiver);
-    }
-
-    fn next_close(
-        receiver: &mut mpsc::Receiver<splitty_client_core::native_workspace::Command>,
-    ) -> splitty_client_core::workspace::ClosePlan {
-        loop {
-            let command = receiver.try_recv().expect("assessed close sent");
-            if let Command::RequestClose { plan, .. } = command.kind() {
-                return plan.clone();
-            }
-        }
+    #[test]
+    fn ssh_paths_follow_the_web_client_forms() {
+        assert_eq!(
+            ssh_path("demo@192.0.2.9", "/srv/app").as_deref(),
+            Some("demo@192.0.2.9:/srv/app")
+        );
+        assert_eq!(
+            ssh_path("devbox:2222", "/srv").as_deref(),
+            Some("ssh://devbox:2222/srv")
+        );
+        assert_eq!(
+            ssh_path("demo@[2001:db8::1]", "/srv").as_deref(),
+            Some("ssh://demo@[2001:db8::1]/srv")
+        );
+        assert_eq!(ssh_path("devbox", "relative"), None);
+        assert_eq!(ssh_path("", "/srv"), None);
+        assert_eq!(ssh_path("devbox", "/srv\n; rm -rf /"), None);
     }
 
     #[test]
-    fn inactive_tab_close_pointer_uses_assessed_captured_pane() {
-        with_menu(|window, _, owner, mut receiver| {
-            let bounds = window
-                .debug_bounds("tab-context-close")
-                .expect("Close Tab shown");
-            let center = bounds.center();
-            window.simulate_event(MouseDownEvent {
-                button: MouseButton::Left,
-                position: center,
-                click_count: 1,
-                modifiers: Modifiers::default(),
-                first_mouse: false,
-            });
-            window.simulate_event(MouseUpEvent {
-                button: MouseButton::Left,
-                position: center,
-                click_count: 1,
-                modifiers: Modifiers::default(),
-            });
-            let plan = next_close(&mut receiver);
-            assert_eq!(plan.connection_id, Some(owner));
-            assert_eq!(
-                plan.target,
-                CloseTarget::Pane {
-                    screen: "work".into(),
-                    pane: "p1".into()
-                }
-            );
-        });
-    }
-
-    #[test]
-    fn tab_close_keyboard_and_stale_owner_do_not_redirect() {
-        with_menu(|window, view, _, mut receiver| {
-            window.simulate_keystrokes("up enter");
-            let plan = next_close(&mut receiver);
-            assert_eq!(
-                plan.target,
-                CloseTarget::Pane {
-                    screen: "work".into(),
-                    pane: "p1".into()
-                }
-            );
-            window.update(|window, cx| {
-                view.update(cx, |workspace, cx| {
-                    let old = workspace
-                        .model
-                        .as_ref()
-                        .unwrap()
-                        .local_source()
-                        .source_token();
-                    let screen = workspace
-                        .model
-                        .as_ref()
-                        .unwrap()
-                        .local_source()
-                        .screen_key("work");
-                    workspace.open_tab_context_menu_captured(old, &screen, "p1", window, cx);
-                    workspace.model = Some(model_with_tabs(Uuid::new_v4()));
-                    workspace.choose_close_tab("p1", window, cx);
-                });
-            });
-            while let Ok(command) = receiver.try_recv() {
-                assert!(
-                    !matches!(command.kind(), Command::RequestClose { .. }),
-                    "replacement owner cannot receive the old tab's close"
-                );
-            }
-        });
-    }
-
-    #[test]
-    fn remote_tab_offers_assessed_close_without_local_screen_transfer() {
-        with_menu(|window, view, _, mut receiver| {
-            let mut remote = WindowWorkspace::new(Uuid::new_v4());
-            let (screen, terminal) = remote
-                .ui_test_remote_terminal_fixture("demo@192.0.2.9")
-                .unwrap();
-            let source = terminal.source_token();
-            window.update(|window, cx| {
-                view.update(cx, |workspace, cx| {
-                    workspace.model = Some(remote);
-                    workspace.open_tab_context_menu_captured(source, &screen, "p0", window, cx);
-                    cx.notify();
-                });
-                window.draw(cx).clear(cx);
-            });
-            assert!(window.debug_bounds("tab-context-close").is_some());
-            assert!(window.debug_bounds("tab-context-transfer-new").is_none());
-            let center = window.debug_bounds("tab-context-close").unwrap().center();
-            window.simulate_event(MouseDownEvent {
-                button: MouseButton::Left,
-                position: center,
-                click_count: 1,
-                modifiers: Modifiers::default(),
-                first_mouse: false,
-            });
-            window.simulate_event(MouseUpEvent {
-                button: MouseButton::Left,
-                position: center,
-                click_count: 1,
-                modifiers: Modifiers::default(),
-            });
-            let plan = next_close(&mut receiver);
-            assert_eq!(plan.source_token(), Some(source));
-            assert_eq!(
-                plan.target,
-                CloseTarget::Pane {
-                    screen: "work".into(),
-                    pane: "p0".into()
-                }
-            );
-        });
+    fn keyboard_steps_wrap_and_jump() {
+        let items = ["a", "b", "c"];
+        assert_eq!(step(&items, Some(&"c"), "down"), Some("a"));
+        assert_eq!(step(&items, Some(&"a"), "up"), Some("c"));
+        assert_eq!(step(&items, Some(&"b"), "home"), Some("a"));
+        assert_eq!(step(&items, Some(&"a"), "end"), Some("c"));
+        assert_eq!(step(&items, None, "down"), Some("a"));
+        assert_eq!(step(&items, Some(&"gone"), "up"), Some("c"));
+        assert_eq!(step::<&str>(&[], None, "down"), None);
     }
 }
 

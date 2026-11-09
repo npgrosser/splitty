@@ -676,10 +676,17 @@ impl ScreenModel {
         if source.id().as_str() != drag.source_slot {
             return Err(invalid("dragged pane changed slots"));
         }
-        if !matches!(
-            screen.root.find_node(&NodeId::from(target)),
-            Some(LayoutNode::Slot { .. })
-        ) {
+        // An edge of the whole layout targets its root split, as the web
+        // client's root drop zones do.
+        let root_edge = placement != MovePlacement::Tab
+            && screen.root.id().as_str() == target
+            && matches!(screen.root, LayoutNode::Split { .. });
+        if !root_edge
+            && !matches!(
+                screen.root.find_node(&NodeId::from(target)),
+                Some(LayoutNode::Slot { .. })
+            )
+        {
             return Err(invalid("drop destination is no longer a slot"));
         }
         let LayoutNode::Slot { pane_ids, .. } = source else {
@@ -690,6 +697,23 @@ impl ScreenModel {
         {
             return Ok(None);
         }
+        // Removing the source's only pane collapses a two-child root into the
+        // remaining child before the service places the pane, so that child,
+        // the new root, is the node to place it beside.
+        let target = match &screen.root {
+            LayoutNode::Split { children, .. }
+                if root_edge
+                    && pane_ids.len() == 1
+                    && children.len() == 2
+                    && children.iter().any(|child| child.id() == source.id()) =>
+            {
+                children
+                    .iter()
+                    .find(|child| child.id() != source.id())
+                    .map_or(target, |child| child.id().as_str())
+            }
+            _ => target,
+        };
         let source_resulting_sizes = if pane_ids.len() == 1 {
             screen
                 .root
@@ -753,6 +777,18 @@ impl ScreenModel {
     ) -> io::Result<bool> {
         let Some(op) = self.move_op(&drag, &target, placement)? else {
             return Ok(false);
+        };
+        // Confirmation looks for the pane beside the node the op names.
+        let target = match &op {
+            ScreenOp::MovePane {
+                target_slot_id,
+                target_split_id,
+                ..
+            } => target_split_id
+                .as_ref()
+                .or(target_slot_id.as_ref())
+                .map_or(target, ToString::to_string),
+            _ => target,
         };
         self.send_op(client, &op)?;
         self.maximized_slot = None;
@@ -1302,6 +1338,73 @@ mod tests {
         model.reset_connection(Uuid::new_v4());
         apply_screen(&mut model, same_screen);
         assert!(!model.can_move(&fresh, "slot-a", MovePlacement::Tab));
+    }
+
+    #[test]
+    fn layout_edge_moves_place_the_pane_beside_the_whole_layout() {
+        // Three groups side by side: the bottom edge spans all of them.
+        let model = drag_workspace();
+        let drag = model.capture_drag("c").unwrap();
+        assert!(model.move_op(&drag, "root", MovePlacement::Tab).is_err());
+        let op = model
+            .move_op(&drag, "root", MovePlacement::Below)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            &op,
+            ScreenOp::MovePane { target_split_id: Some(target), target_slot_id: None, .. }
+                if target.as_str() == "root"
+        ));
+        let (moved, _) = mux::reduce_screen(model.snapshot().unwrap().clone(), op).unwrap();
+        let LayoutNode::Split { axis, children, .. } = &moved.root else {
+            panic!("the layout gains a root split");
+        };
+        assert_eq!(*axis, Axis::Vertical);
+        assert!(matches!(&children[0], LayoutNode::Split { children: row, .. } if row.len() == 2));
+        assert!(
+            matches!(&children[1], LayoutNode::Slot { pane_ids, .. } if pane_ids[0].as_str() == "c")
+        );
+
+        // Two groups: removing the dragged one makes the other the root, so the
+        // pane is placed beside that group and the move is confirmed there.
+        let mut model = ScreenModel::new(
+            ScreenIds {
+                screen_id: "screen".into(),
+                pane_id: "a".into(),
+            },
+            Uuid::new_v4(),
+        );
+        let event = serde_json::json!({"type":"mux.screen_snapshot", "screen": {
+            "id":"screen", "revision":1,
+            "root":{"type":"split","id":"root","axis":"horizontal","sizes":[0.5,0.5],"children":[
+                {"type":"slot","id":"slot-a","paneIds":["a"]},
+                {"type":"slot","id":"slot-c","paneIds":["c"]}]},
+            "panes":{"a":{"id":"a","sessionId":"sa"},"c":{"id":"c","sessionId":"sc"}},
+            "sessions":{"sa":{"id":"sa","status":"running"},"sc":{"id":"sc","status":"running"}}
+        }});
+        model.apply_snapshot(model.connection_id, &event).unwrap();
+        let drag = model.capture_drag("c").unwrap();
+        let op = model
+            .move_op(&drag, "root", MovePlacement::Below)
+            .unwrap()
+            .unwrap();
+        assert!(matches!(
+            &op,
+            ScreenOp::MovePane { target_split_id: Some(target), .. } if target.as_str() == "slot-a"
+        ));
+        let (mut moved, _) = mux::reduce_screen(model.snapshot().unwrap().clone(), op).unwrap();
+        assert!(
+            matches!(&moved.root, LayoutNode::Split { axis: Axis::Vertical, children, .. } if children.len() == 2)
+        );
+        model.pending_move = Some(PendingMove {
+            drag,
+            target: "slot-a".into(),
+            placement: MovePlacement::Below,
+        });
+        moved.revision += 1;
+        apply_screen(&mut model, moved);
+        assert!(model.pending_move.is_none());
+        assert_eq!(model.focused_pane(), Some("c"));
     }
 
     #[test]

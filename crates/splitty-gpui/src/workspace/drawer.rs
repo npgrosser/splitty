@@ -3,11 +3,146 @@ use super::*;
 use gpui_kit::assets::IconName;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::{
-    button::{Button, ButtonVariants},
+    button::{Button, ButtonCustomVariant, ButtonVariants},
     menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
     Disableable, Icon, Sizable,
 };
+use splitty_client_core::ports::ForwardState;
 use splitty_client_core::workspace::ScreenState;
+
+// Drawer metrics from the web client's `Drawer.svelte`, in CSS pixels at zoom
+// 1; every one passes through `chrome_rems`. Colors come from the theme.
+
+/// `.drawer-sidebar`: the Drawer's own text size, independent of the theme's.
+/// Its text inherits the web client's body weight, 500. Both are set on each
+/// text element rather than the Drawer itself: menus opened from the Drawer
+/// inherit its text style.
+const SIDEBAR_TEXT: f32 = 12.5;
+/// `.drawer-head`: `padding: 10px 8px 6px 16px`.
+const HEAD_PADDING: [f32; 4] = [10., 8., 6., 16.];
+/// `.drawer-head-label`: 10.5px, weight 600, uppercase.
+const HEAD_LABEL_TEXT: f32 = 10.5;
+/// `.drawer-icon-btn`: a 24 px square with radius 5.
+const ICON_BUTTON: f32 = 24.;
+pub(super) const ICON_BUTTON_RADIUS: f32 = 5.;
+/// `.drawer-screens`: `padding: 2px 0 4px`. The native cards keep only their
+/// top margin, so the bottom padding also takes the last card's 1 px margin.
+const LIST_PADDING_TOP: f32 = 2.;
+const LIST_PADDING_BOTTOM: f32 = 5.;
+/// `.drawer-screen`: `margin: 1px 8px`, where the vertical margins of
+/// neighboring cards collapse into one 1 px gap; `padding: 1px 0 3px`.
+pub(super) const CARD_INSET: f32 = 8.;
+const CARD_GAP: f32 = 1.;
+const CARD_PADDING_TOP: f32 = 1.;
+const CARD_PADDING_BOTTOM: f32 = 3.;
+/// `.drawer-screen`: `border-radius: 6px`, fixed rather than themed.
+const CARD_RADIUS: f32 = 6.;
+/// `.drawer-screen.unreachable:not(.active)`: a Screen of a host that failed
+/// or went offline.
+const UNREACHABLE_OPACITY: f32 = 0.55;
+/// `.drawer-screen-row`: `height: 30px; padding: 0 4px 0 8px; gap: 8px`.
+const ROW_HEIGHT: f32 = 30.;
+const ROW_PADDING_LEFT: f32 = 8.;
+const ROW_PADDING_RIGHT: f32 = 4.;
+const ROW_GAP: f32 = 8.;
+/// `.drawer-screen-index`: 14 px wide, 10.5px monospace.
+const INDEX_WIDTH: f32 = 14.;
+const INDEX_TEXT: f32 = 10.5;
+/// `.drawer-screen-actions`: `gap: 1px` between the 24 px buttons.
+const ACTION_GAP: f32 = 1.;
+/// `.drawer-screen-badge`: a 16 px pill, `padding: 0 5px`, 10px weight 600.
+const BADGE_HEIGHT: f32 = 16.;
+const BADGE_PADDING_X: f32 = 5.;
+const BADGE_TEXT: f32 = 10.;
+/// A Screen's own status ("Loading", "Offline"), sized as `.drawer-host-note`.
+pub(super) const NOTE_TEXT: f32 = 10.5;
+/// `.drawer-screen-input`: `padding: 2px 6px; border-radius: 4px`.
+const RENAME_PADDING: [f32; 2] = [2., 6.];
+const RENAME_RADIUS: f32 = 4.;
+/// `.drawer-pane-item`: `height: 21px; padding: 0 8px 0 30px; gap: 7px`,
+/// 11px monospace.
+const PANE_HEIGHT: f32 = 21.;
+const PANE_INDENT: f32 = 30.;
+const PANE_PADDING_RIGHT: f32 = 8.;
+const PANE_GAP: f32 = 7.;
+const PANE_TEXT: f32 = 11.;
+/// `.drawer-pane-dot`: a 5 px dot in a 12 px slot, which also holds the
+/// leading title icon and the viewer's document icon.
+const PANE_GLYPH_SLOT: f32 = 12.;
+const PANE_DOT: f32 = 5.;
+/// `.drawer-pane-icon`: 10px, 12px while a process runs; `.drawer-pane-doc`: 10 px.
+const PANE_ICON_TEXT: f32 = 10.;
+const PANE_RUNNING_ICON_TEXT: f32 = 12.;
+const PANE_DOC_ICON: f32 = 10.;
+/// A running pane's title icon glows in its own color, as the web client's
+/// `drop-shadow(0 0 2px currentColor)`: a soft round light behind the glyph.
+const PANE_GLOW_CORE: f32 = 6.;
+const PANE_GLOW_BLUR: f32 = 4.;
+const PANE_GLOW_OPACITY: f32 = 0.6;
+/// `.drawer-pane-badge`: a 6 px unread dot.
+const PANE_BADGE: f32 = 6.;
+/// `.drawer-pane-stack`: `padding-left: 9px` after the pane indent, with a
+/// 1.5 px rail inset 4 px from both ends and rounded by 1 px.
+const STACK_PADDING_LEFT: f32 = 9.;
+const STACK_RAIL_WIDTH: f32 = 1.5;
+const STACK_RAIL_INSET: f32 = 4.;
+const STACK_RAIL_RADIUS: f32 = 1.;
+/// `.drawer-new`: `margin: 4px 8px 0`, 32 px tall, radius 6, `gap: 8px`, and
+/// a 14 px plus in a 14 px slot.
+const NEW_MARGIN_TOP: f32 = 4.;
+const NEW_HEIGHT: f32 = 32.;
+const NEW_PADDING_X: f32 = 8.;
+const NEW_GAP: f32 = 8.;
+const NEW_ICON: f32 = 14.;
+/// `.drawer-spacer`: `min-height: 8px`.
+const SPACER_MIN_HEIGHT: f32 = 8.;
+/// `.drawer-nav`: `padding: 6px 8px 10px; gap: 1px`.
+const NAV_PADDING: [f32; 3] = [6., 8., 10.];
+const NAV_GAP: f32 = 1.;
+/// `.drawer-nav-item`: 30 px tall, `padding: 0 8px`, `gap: 10px`, radius 6,
+/// and a 15 px icon at opacity .8 (1 while active).
+const NAV_ITEM_HEIGHT: f32 = 30.;
+const NAV_ITEM_PADDING_X: f32 = 8.;
+const NAV_ITEM_GAP: f32 = 10.;
+const NAV_ITEM_RADIUS: f32 = 6.;
+const NAV_ICON: f32 = 15.;
+const NAV_ICON_OPACITY: f32 = 0.8;
+/// `.drawer-nav-shortcut`: 10px in the system face.
+const NAV_SHORTCUT_TEXT: f32 = 10.;
+
+/// One destination of the Drawer's bottom navigation.
+pub(super) struct NavItem {
+    pub(super) icon: IconName,
+    pub(super) label: &'static str,
+    /// The destination's keyboard shortcut, shown as a hint.
+    pub(super) shortcut: Option<&'static str>,
+    pub(super) active: bool,
+}
+
+/// A Drawer control in the web client's `.drawer-icon-btn` manner: `rest` at
+/// rest; on hover the primary text color over one `hover-bg` layer, which
+/// stacks over a hovered or active card as the translucent web color does.
+pub(super) fn drawer_control(
+    id: impl Into<ElementId>,
+    rest: Hsla,
+    radius: f32,
+    appearance: &NativeAppearance,
+    window: &Window,
+    cx: &App,
+) -> Button {
+    let hover: Hsla = rgba(appearance.hover_overlay).into();
+    Button::new(id)
+        .custom(
+            ButtonCustomVariant::new(cx)
+                .foreground(rgb(appearance.text).into())
+                .hover(hover)
+                .active(hover),
+        )
+        .bg(transparent_black())
+        .text_color(rest)
+        .rounded(chrome_rems(radius).to_pixels(window.rem_size()))
+        .cursor_pointer()
+}
 
 fn pane_list_transition() -> Transition {
     Transition::new(Duration::from_millis(150)).easing(Easing::CubicBezier {
@@ -20,26 +155,14 @@ fn pane_list_transition() -> Transition {
 
 #[derive(Clone)]
 pub(super) struct ScreenDrag {
-    owner: SourceToken,
-    screen: ScreenKey,
-    view: EntityId,
+    pub(super) owner: SourceToken,
+    pub(super) screen: ScreenKey,
+    pub(super) view: EntityId,
 }
 
-#[derive(Clone)]
-pub(super) struct ScreenDrop {
-    drag: ScreenKey,
-    row: ScreenKey,
-    before: Option<ScreenKey>,
-    after_row: bool,
-    bounds: Bounds<Pixels>,
-    scroll_offset: Point<Pixels>,
-    order: Vec<ScreenKey>,
-}
-
-struct ScreenDragPreview {
-    label: String,
-    appearance: NativeAppearance,
-}
+/// The platform drag's own preview stays empty: the lifted row is painted in
+/// the Drawer list itself, where it follows the pointer vertically.
+struct ScreenDragPreview;
 
 #[derive(Clone)]
 struct ScreenMoveOption {
@@ -50,17 +173,6 @@ struct ScreenMoveOption {
 impl Render for ScreenDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
-            .flex()
-            .items_center()
-            .h(chrome_rems(30.))
-            .px_3()
-            .rounded_md()
-            .border_1()
-            .border_color(rgb(self.appearance.border))
-            .bg(rgb(self.appearance.raised))
-            .text_color(rgb(self.appearance.text))
-            .text_size(chrome_rems(12.5))
-            .child(self.label.clone())
     }
 }
 
@@ -102,6 +214,47 @@ fn screen_move_items(
 pub(super) enum WheelTarget {
     Screens,
     Slot { screen: String, slot: String },
+}
+
+fn chrome_px(base: f32, window_scale: f32) -> Pixels {
+    px(base * window_scale)
+}
+
+impl Workspace {
+    /// A Screen card's top or bottom padding. It is part of the highlighted
+    /// card, so a click there selects the Screen like a click on its row.
+    fn card_padding(
+        &self,
+        key: &ScreenKey,
+        owner: Option<SourceToken>,
+        editing: bool,
+        edge: &str,
+        height: f32,
+        cx: &mut Context<Self>,
+    ) -> Stateful<Div> {
+        let weak = cx.entity().downgrade();
+        let select = key.clone();
+        div()
+            .id(SharedString::from(format!("drawer-card-{edge}-{key}")))
+            .flex_none()
+            .w_full()
+            .h(chrome_rems(height))
+            .when(!editing, |padding| {
+                padding.on_click(move |event, window, cx| {
+                    if !event.standard_click() {
+                        return;
+                    }
+                    let _ = weak.update(cx, |this, cx| {
+                        if this.lifecycle_token() == owner
+                            && !GlobalState::is_in_deferred_context(cx)
+                        {
+                            this.switch_screen_key(select.clone(), window, cx);
+                            this.focus_current(window, cx);
+                        }
+                    });
+                })
+            })
+    }
 }
 
 #[cfg(all(test, feature = "ui-test-support"))]
@@ -445,8 +598,50 @@ mod view_tests {
             window.update(|_, cx| {
                 let workspace = view.read(cx);
                 assert_eq!(workspace.model.as_ref().unwrap().shown_key(), shown);
-                assert!(workspace.drawer_drop.is_none());
+                assert!(
+                    workspace
+                        .drawer_drag
+                        .as_ref()
+                        .is_some_and(|session| !session.is_dragging()),
+                    "the dropped arrangement waits for the service's order"
+                );
             });
+        });
+    }
+
+    #[test]
+    fn card_padding_selects_its_screen_like_the_row() {
+        with_view(|window, view| {
+            let owner = Uuid::new_v4();
+            let mut model = WindowWorkspace::new(owner);
+            let keys = model
+                .ui_test_screen_order_fixture(&[("a", "A"), ("b", "B")], None)
+                .unwrap();
+            let (commands, mut receiver) = mpsc::channel(4);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, _| {
+                    workspace.commands = commands;
+                    workspace.model = Some(model);
+                    workspace.destination = Destination::Screens;
+                });
+                window.draw(cx).clear(cx);
+            });
+            let other = keys
+                .iter()
+                .find(|key| {
+                    window.update(|_, cx| {
+                        view.read(cx).model.as_ref().unwrap().shown_key().as_ref() != Some(*key)
+                    })
+                })
+                .expect("a Screen that is not shown")
+                .clone();
+            let card = block_bounds(window, &other);
+            // The bottom padding lies below the row and any pane entries.
+            let padding = point(card.center().x, card.bottom() - px(1.));
+            mouse_click(window, padding, MouseButton::Left, 1);
+            let command = receiver.try_recv().expect("the padding selects its Screen");
+            assert!(matches!(command.kind(), Command::SwitchScreen(screen) if screen == &other));
+            assert!(receiver.try_recv().is_err(), "one selection per click");
         });
     }
 
@@ -510,6 +705,84 @@ mod view_tests {
     }
 
     #[test]
+    fn header_cards_rows_and_panes_keep_web_drawer_metrics() {
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let keys = model
+                .ui_test_screen_order_fixture(&[("a", "A"), ("b", "B")], None)
+                .unwrap();
+            let owner = model.lifecycle_token();
+            // A stacked group of two panes beside a single pane.
+            model
+                .source_mut(owner.source_id())
+                .unwrap()
+                .apply_snapshot(
+                    owner.connection_id(),
+                    &json!({"type":"mux.screen_snapshot","screen":{
+                        "id":"a","revision":1,
+                        "root":{"type":"split","id":"split","axis":"horizontal",
+                            "sizes":[0.5,0.5],"children":[
+                                {"type":"slot","id":"left","paneIds":["p0","p1"]},
+                                {"type":"slot","id":"right","paneIds":["p2"]}
+                            ]},
+                        "panes":{"p0":{"id":"p0"},"p1":{"id":"p1"},"p2":{"id":"p2"}},
+                        "sessions":{}
+                    }}),
+                )
+                .unwrap();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, _| {
+                    workspace.model = Some(model);
+                    workspace.destination = Destination::Screens;
+                });
+                window.draw(cx).clear(cx);
+            });
+            let bounds = |window: &mut VisualTestContext, selector: String| {
+                window
+                    .debug_bounds(Box::leak(selector.into_boxed_str()))
+                    .unwrap()
+            };
+            let pin = window.debug_bounds("drawer-pin").unwrap();
+            assert_near(pin.size.width, px(24.), "pin width");
+            assert_near(pin.size.height, px(24.), "pin height");
+            assert_near(pin.top(), px(10.), "header top padding");
+            let first = block_bounds(window, &keys[0]);
+            let second = block_bounds(window, &keys[1]);
+            assert_near(
+                first.top(),
+                pin.bottom() + px(6. + 2. + 1.),
+                "header bottom padding, list padding and card margin",
+            );
+            assert_near(first.left(), px(8.), "card inset");
+            assert_near(first.size.width, px(200. - 1. - 16.), "card width");
+            assert_near(
+                first.size.height,
+                px(1. + 30. + 3. * 21. + 3.),
+                "card padding, row and three panes",
+            );
+            assert_near(second.size.height, px(1. + 30. + 3.), "card without panes");
+            assert_near(second.top() - first.bottom(), px(1.), "gap between cards");
+            let index = bounds(window, format!("drawer-index-{}", keys[0]));
+            assert_near(index.left() - first.left(), px(8.), "row left padding");
+            assert_near(index.size.width, px(14.), "index width");
+            let stacked = bounds(window, format!("drawer-pane-{}-p0", keys[0]));
+            let single = bounds(window, format!("drawer-pane-{}-p2", keys[0]));
+            assert_near(stacked.size.height, px(21.), "pane height");
+            assert_near(
+                stacked.top() - first.top(),
+                px(1. + 30.),
+                "panes follow the row",
+            );
+            assert_near(
+                stacked.left() - first.left(),
+                px(30. + 9.),
+                "a stacked pane sits past the indent and the rail",
+            );
+            assert_near(single.left(), first.left(), "a single pane indents inside");
+        });
+    }
+
+    #[test]
     fn screen_drag_rejects_noop_cross_group_and_stale_geometry() {
         with_view(|window, view| {
             let owner = Uuid::new_v4();
@@ -540,7 +813,11 @@ mod view_tests {
             drag_screen(window, &local[2], &remote[0], false);
             assert!(receiver.try_recv().is_err(), "cannot cross a host group");
             let finish = hover_screen_drop(window, &local[2], &local[0]);
-            assert!(window.update(|_, cx| view.read(cx).drawer_drop.is_some()));
+            assert!(window.update(|_, cx| view
+                .read(cx)
+                .drawer_drag
+                .as_ref()
+                .is_some_and(|session| session.is_lifted())));
             window.simulate_resize(size(px(900.), px(620.)));
             window.simulate_mouse_up(finish, MouseButton::Left, Modifiers::default());
             assert!(
@@ -592,7 +869,13 @@ mod view_tests {
                 window.draw(cx).clear(cx);
             });
             let finish = hover_screen_drop(window, &keys[2], &keys[0]);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| workspace.focus.focus(window, cx));
+            });
             window.simulate_keystrokes("escape");
+            assert!(
+                window.update(|_, cx| !cx.has_active_drag() && view.read(cx).drawer_drag.is_none())
+            );
             window.simulate_mouse_up(finish, MouseButton::Left, Modifiers::default());
             assert!(
                 receiver.try_recv().is_err(),
@@ -633,7 +916,193 @@ mod view_tests {
                 receiver.try_recv().is_err(),
                 "deactivation cancels captured drag"
             );
-            assert!(window.update(|_, cx| view.read(cx).drawer_drop.is_none()));
+            assert!(window.update(|_, cx| view.read(cx).drawer_drag.is_none()));
+        });
+    }
+
+    fn block_bounds(
+        window: &mut VisualTestContext,
+        screen: &splitty_client_core::workspace::ScreenKey,
+    ) -> gpui_kit::Bounds<Pixels> {
+        let selector: &'static str = Box::leak(format!("drawer-block-{screen}").into_boxed_str());
+        window.debug_bounds(selector).unwrap()
+    }
+
+    fn assert_near(actual: Pixels, expected: Pixels, what: &str) {
+        assert!(
+            (f32::from(actual) - f32::from(expected)).abs() < 1.,
+            "{what}: {actual:?} is not {expected:?}"
+        );
+    }
+
+    fn sent_moves(
+        receiver: &mut mpsc::Receiver<splitty_client_core::native_workspace::Command>,
+    ) -> Vec<(
+        splitty_client_core::workspace::ScreenKey,
+        Option<splitty_client_core::workspace::ScreenKey>,
+    )> {
+        let mut moves = Vec::new();
+        while let Ok(command) = receiver.try_recv() {
+            if let Command::MoveScreen { screen, before } = command.kind() {
+                moves.push((screen.clone(), before.clone()));
+            }
+        }
+        moves
+    }
+
+    #[test]
+    fn screen_drag_rows_make_room_with_web_motion_and_cancel_returns_them_at_once() {
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let keys = model
+                .ui_test_screen_order_fixture(&[("a", "A"), ("b", "B"), ("c", "C")], None)
+                .unwrap();
+            let (commands, mut receiver) = mpsc::channel(4);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.model = Some(model);
+                    workspace.destination = Destination::Screens;
+                    workspace.focus.focus(window, cx);
+                });
+                window.draw(cx).clear(cx);
+            });
+            let before: Vec<_> = keys.iter().map(|key| block_bounds(window, key)).collect();
+            let room = before[1].top() - before[0].top();
+            let select: &'static str =
+                Box::leak(format!("drawer-select-{}", keys[2]).into_boxed_str());
+            let press = window.debug_bounds(select).unwrap().center();
+            let finish = hover_screen_drop(window, &keys[2], &keys[0]);
+            let lift = finish.y - press.y;
+            assert_near(
+                block_bounds(window, &keys[2]).top(),
+                before[2].top() + lift,
+                "the lifted row keeps the grabbed point under the pointer",
+            );
+            assert_near(
+                block_bounds(window, &keys[0]).top(),
+                before[0].top(),
+                "neighbors start from their slots",
+            );
+            advance(window, Duration::from_millis(100));
+            let halfway = block_bounds(window, &keys[0]).top() - before[0].top();
+            assert!(
+                halfway > room * 0.5 && halfway < room,
+                "the shift eases out: {halfway:?} of {room:?} at half time"
+            );
+            advance(window, Duration::from_millis(150));
+            for index in 0..2 {
+                assert_near(
+                    block_bounds(window, &keys[index]).top(),
+                    before[index].top() + room,
+                    "passed rows make room by one row pitch",
+                );
+            }
+            assert_near(
+                block_bounds(window, &keys[2]).top(),
+                before[2].top() + lift,
+                "the lifted row does not ease",
+            );
+            window.simulate_keystrokes("escape");
+            redraw(window);
+            for (key, slot) in keys.iter().zip(&before) {
+                assert_near(
+                    block_bounds(window, key).top(),
+                    slot.top(),
+                    "a cancel returns every row to its slot at once",
+                );
+            }
+            window.simulate_mouse_up(finish, MouseButton::Left, Modifiers::default());
+            assert!(sent_moves(&mut receiver).is_empty());
+        });
+    }
+
+    #[test]
+    fn screen_drop_holds_the_landed_order_until_the_service_order_arrives() {
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let keys = model
+                .ui_test_screen_order_fixture(&[("a", "A"), ("b", "B"), ("c", "C")], None)
+                .unwrap();
+            let (commands, mut receiver) = mpsc::channel(32);
+            let reconcile = |window: &mut VisualTestContext, model: &WindowWorkspace| {
+                window.update(|window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        workspace.reconcile(model.clone(), window, cx)
+                    });
+                    window.draw(cx).clear(cx);
+                });
+            };
+            window.update(|_, cx| {
+                view.update(cx, |workspace, _| {
+                    workspace.commands = commands;
+                    workspace.destination = Destination::Screens;
+                });
+            });
+            reconcile(window, &model);
+            let slots: Vec<_> = keys
+                .iter()
+                .map(|key| block_bounds(window, key).top())
+                .collect();
+            let tops = |window: &mut VisualTestContext| {
+                keys.iter()
+                    .map(|key| block_bounds(window, key).top())
+                    .collect::<Vec<_>>()
+            };
+            let assert_tops = |actual: Vec<Pixels>, expected: [Pixels; 3], what: &str| {
+                for (actual, expected) in actual.into_iter().zip(expected) {
+                    assert_near(actual, expected, what);
+                }
+            };
+            sent_moves(&mut receiver);
+
+            drag_screen(window, &keys[0], &keys[2], true);
+            assert_eq!(sent_moves(&mut receiver), [(keys[0].clone(), None)]);
+            redraw(window);
+            assert_tops(
+                tops(window),
+                [slots[2], slots[0], slots[1]],
+                "the dropped row sits in its gap while the order is submitted",
+            );
+            reconcile(window, &model);
+            assert_tops(
+                tops(window),
+                [slots[2], slots[0], slots[1]],
+                "an update with the old order keeps the landed presentation",
+            );
+
+            model
+                .ui_test_screen_order_fixture(&[("b", "B"), ("c", "C"), ("a", "A")], None)
+                .unwrap();
+            reconcile(window, &model);
+            assert!(window.update(|_, cx| view.read(cx).drawer_drag.is_none()));
+            assert_tops(
+                tops(window),
+                [slots[2], slots[0], slots[1]],
+                "the service's order takes over without a visible jump",
+            );
+
+            drag_screen(window, &keys[1], &keys[0], true);
+            assert_eq!(sent_moves(&mut receiver), [(keys[1].clone(), None)]);
+            redraw(window);
+            assert_tops(
+                tops(window),
+                [slots[1], slots[2], slots[0]],
+                "a second drop is held as well",
+            );
+            advance(window, Duration::from_millis(999));
+            assert_tops(
+                tops(window),
+                [slots[1], slots[2], slots[0]],
+                "the hold lasts while an answer may still come",
+            );
+            advance(window, Duration::from_millis(2));
+            assert!(window.update(|_, cx| view.read(cx).drawer_drag.is_none()));
+            assert_tops(
+                tops(window),
+                [slots[2], slots[0], slots[1]],
+                "an unanswered drop returns to the model's order",
+            );
         });
     }
 
@@ -1905,108 +2374,21 @@ impl Workspace {
         })
     }
 
-    fn place_screen(
+    /// Submits one relative placement; returns whether it was admitted.
+    pub(super) fn place_screen(
         &mut self,
         owner: SourceToken,
         screen: ScreenKey,
         before: Option<ScreenKey>,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if self.lifecycle_token() != Some(owner)
             || !self.can_place_screen(owner, &screen, before.as_ref())
         {
-            return;
+            return false;
         }
         self.send_captured(owner, Command::MoveScreen { screen, before }, cx);
-    }
-
-    fn screen_drag_hover(
-        &mut self,
-        row: &ScreenKey,
-        event: &DragMoveEvent<ScreenDrag>,
-        cx: &mut Context<Self>,
-    ) {
-        let drag = event.drag(cx);
-        if drag.view != cx.entity().entity_id()
-            || self.lifecycle_token() != Some(drag.owner)
-            || !event.bounds.contains(&event.event.position)
-        {
-            return;
-        }
-        let Some(model) = self.model.as_ref() else {
-            return;
-        };
-        let order: Vec<_> = model
-            .opened()
-            .iter()
-            .map(|entry| entry.key().clone())
-            .collect();
-        let Some(index) = order.iter().position(|key| key == row) else {
-            return;
-        };
-        if row.source_id() != drag.screen.source_id() || !model.can_move_screen(&drag.screen) {
-            return;
-        }
-        let after_row = event.event.position.y >= event.bounds.center().y;
-        let before = if after_row {
-            order
-                .get(index + 1)
-                .filter(|next| next.source_id() == row.source_id())
-                .cloned()
-        } else {
-            Some(row.clone())
-        };
-        if !matches!(
-            model.validate_screen_move(drag.owner, &drag.screen, before.as_ref()),
-            Ok(true)
-        ) {
-            if self.drawer_drop.take().is_some() {
-                cx.notify();
-            }
-            return;
-        }
-        let changed = self.drawer_drop.as_ref().is_none_or(|target| {
-            target.drag != drag.screen
-                || target.row != *row
-                || target.after_row != after_row
-                || target.before != before
-        });
-        self.drawer_drop = Some(ScreenDrop {
-            drag: drag.screen.clone(),
-            row: row.clone(),
-            before,
-            after_row,
-            bounds: event.bounds,
-            scroll_offset: self.drawer_scroll.offset(),
-            order,
-        });
-        if changed {
-            cx.notify();
-        }
-    }
-
-    fn screen_drop(&mut self, drag: &ScreenDrag, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(target) = self.drawer_drop.take() else {
-            return;
-        };
-        cx.notify();
-        if drag.view != cx.entity().entity_id()
-            || self.lifecycle_token() != Some(drag.owner)
-            || target.drag != drag.screen
-            || !target.bounds.contains(&window.mouse_position())
-            || target.scroll_offset != self.drawer_scroll.offset()
-            || self.model.as_ref().is_none_or(|model| {
-                model
-                    .opened()
-                    .iter()
-                    .map(|entry| entry.key().clone())
-                    .collect::<Vec<_>>()
-                    != target.order
-            })
-        {
-            return;
-        }
-        self.place_screen(drag.owner, drag.screen.clone(), target.before, cx);
+        true
     }
 
     fn set_drawer_overlay(&mut self, open: bool, cx: &mut Context<Self>) {
@@ -2067,6 +2449,71 @@ impl Workspace {
         }));
     }
 
+    /// `.drawer-nav-item`: one destination of the Drawer's bottom navigation,
+    /// with its look for `active`; the caller adds identity and actions.
+    pub(super) fn drawer_nav_item(
+        &self,
+        id: impl Into<ElementId>,
+        NavItem {
+            icon,
+            label,
+            shortcut,
+            active,
+        }: NavItem,
+        window: &Window,
+        cx: &App,
+    ) -> Button {
+        drawer_control(
+            id,
+            rgb(if active {
+                self.appearance.text
+            } else {
+                self.appearance.secondary
+            })
+            .into(),
+            NAV_ITEM_RADIUS,
+            &self.appearance,
+            window,
+            cx,
+        )
+        .when(active, |item| item.bg(rgb(self.appearance.active)))
+        .small()
+        .w_full()
+        .h(chrome_rems(NAV_ITEM_HEIGHT))
+        .px(chrome_rems(NAV_ITEM_PADDING_X))
+        .child(
+            div()
+                .w_full()
+                .min_w_0()
+                .flex()
+                .items_center()
+                .gap(chrome_rems(NAV_ITEM_GAP))
+                .text_size(chrome_rems(SIDEBAR_TEXT))
+                .font_weight(FontWeight::MEDIUM)
+                .child(
+                    div()
+                        .w(chrome_rems(NAV_ICON))
+                        .flex_none()
+                        .flex()
+                        .justify_center()
+                        .opacity(if active { 1. } else { NAV_ICON_OPACITY })
+                        .child(Icon::new(icon).size(chrome_rems(NAV_ICON))),
+                )
+                .child(label)
+                .when_some(shortcut, |row, shortcut| {
+                    row.child(
+                        div()
+                            .ml_auto()
+                            .flex_none()
+                            .font(font(self.ui_family.clone()))
+                            .text_size(chrome_rems(NAV_SHORTCUT_TEXT))
+                            .text_color(rgb(self.appearance.muted))
+                            .child(shortcut),
+                    )
+                }),
+        )
+    }
+
     pub(super) fn render_drawer(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let owner = self.lifecycle_token();
         let pin_label = match self.drawer_pending {
@@ -2075,7 +2522,8 @@ impl Workspace {
             None if self.drawer_visible => "Unpin drawer",
             None => "Pin drawer",
         };
-        let muted = cx.theme().muted_foreground;
+        let muted: Hsla = rgb(self.appearance.muted).into();
+        let mono = terminal::terminal_family(cx);
         let mut list = div()
             .id("drawer-screen-list")
             .flex_shrink_1()
@@ -2084,29 +2532,20 @@ impl Workspace {
             .track_scroll(&self.drawer_scroll)
             .on_drag_move(
                 cx.listener(|this, event: &DragMoveEvent<ScreenDrag>, _, cx| {
-                    if this
-                        .drawer_drop
-                        .as_ref()
-                        .is_some_and(|target| !target.bounds.contains(&event.event.position))
-                    {
-                        this.drawer_drop = None;
-                        cx.notify();
-                    }
+                    this.track_screen_drag(event, cx);
                 }),
             )
-            .on_drop(cx.listener(Self::screen_drop))
-            .on_scroll(cx.listener(|this, _: &ScrollEvent, _, cx| {
-                if this.drawer_drop.take().is_some() {
-                    cx.notify();
-                }
-            }))
-            .py_1();
+            .pt(chrome_rems(LIST_PADDING_TOP))
+            .pb(chrome_rems(LIST_PADDING_BOTTOM));
         if let Some(window_model) = &self.model {
-            let mut port_counts = HashMap::new();
+            // Per host target: its known ports and how many are forwarded.
+            let mut port_counts = HashMap::<String, (usize, usize)>::new();
             for row in self.ports.rows(Some(window_model)) {
-                *port_counts
+                let counts = port_counts
                     .entry(row.key().target().to_owned())
-                    .or_insert(0) += 1;
+                    .or_default();
+                counts.0 += 1;
+                counts.1 += usize::from(row.state() == ForwardState::Up);
             }
             let shown = window_model.shown_key();
             let opened = window_model.opened();
@@ -2135,18 +2574,30 @@ impl Workspace {
                         if let Some(group) =
                             super::hosts::HostGroupTarget::capture(window_model, key.source_id())
                         {
-                            let count = port_counts.get(group.target()).copied().unwrap_or(0);
+                            let counts =
+                                port_counts.get(group.target()).copied().unwrap_or_default();
                             list = list
-                                .child(self.render_drawer_host(group, title, count, window, cx));
+                                .child(self.render_drawer_host(group, title, counts, window, cx));
                         }
                     }
                 }
                 let active = shown.as_ref() == Some(&key);
+                let unreachable = remote
+                    && super::drawer_ports::host_indicator(window_model.host(key.source_id()))
+                        .unreachable();
                 let editing = self
                     .rename
                     .as_ref()
                     .is_some_and(|editor| editor.screen == key);
-                let actions_visible = self.drawer_hovered.as_ref() == Some(&key) && !editing;
+                // GPUI reports no hover while a drag is active; the pressed row
+                // keeps its hover look, as the web drawer's dragged row stays
+                // under the pointer.
+                let held = self
+                    .drawer_drag
+                    .as_ref()
+                    .is_some_and(|session| session.holds(&key));
+                let actions_visible =
+                    (self.drawer_hovered.as_ref() == Some(&key) || held) && !editing;
                 let hover_transition =
                     Transition::new(Duration::from_millis(80)).easing(Easing::Ease);
                 let label = entry.name().map(super::hosts::display).unwrap_or_else(|| {
@@ -2186,10 +2637,20 @@ impl Workspace {
                         .sum::<usize>()
                         > 1
                 });
-                let trailing_actions = if editing {
+                // The row actions are 24 px buttons 1 px apart: close or
+                // detach, a remote Screen's more menu and, with several
+                // panes, the collapse toggle. Their lane stays reserved while
+                // they are hidden, so hovering never moves the name's
+                // rename/select target.
+                let actions = if editing {
+                    0
+                } else {
+                    1 + usize::from(remote) + usize::from(can_collapse)
+                };
+                let action_lane = if actions == 0 {
                     0.
                 } else {
-                    27. + if remote { 27. } else { 0. } + if can_collapse { 24. } else { 0. }
+                    actions as f32 * ICON_BUTTON + (actions - 1) as f32 * ACTION_GAP + ROW_GAP
                 };
                 let mut row = div()
                     .id(SharedString::from(format!("drawer-screen-{key}")))
@@ -2197,20 +2658,21 @@ impl Workspace {
                     .relative()
                     .items_center()
                     .min_w_0()
-                    .h(chrome_rems(30.))
-                    .px_2()
-                    .pr(chrome_rems(8. + trailing_actions))
-                    .gap(chrome_rems(8.))
+                    .h(chrome_rems(ROW_HEIGHT))
+                    .pl(chrome_rems(ROW_PADDING_LEFT))
+                    .pr(chrome_rems(ROW_PADDING_RIGHT + action_lane))
+                    .gap(chrome_rems(ROW_GAP))
                     .child(
                         div()
                             .id(SharedString::from(format!("drawer-index-{key}")))
                             .when(cfg!(all(test, feature = "ui-test-support")), |index| {
                                 index.debug_selector(|| format!("drawer-index-{key}"))
                             })
-                            .w(chrome_rems(14.))
+                            .w(chrome_rems(INDEX_WIDTH))
                             .flex_none()
-                            .text_size(chrome_rems(10.5))
-                            .font(font(self.mono_family.clone()))
+                            .text_size(chrome_rems(INDEX_TEXT))
+                            .font_weight(FontWeight::MEDIUM)
+                            .font(font(mono.clone()))
                             .text_align(TextAlign::Right)
                             .text_color(if active {
                                 rgb(self.appearance.accent)
@@ -2221,14 +2683,30 @@ impl Workspace {
                     );
                 let mut row_actions = div()
                     .absolute()
-                    .right_0()
+                    .right(chrome_rems(ROW_PADDING_RIGHT))
                     .top_0()
                     .h_full()
                     .flex()
-                    .items_center();
+                    .items_center()
+                    .gap(chrome_rems(ACTION_GAP));
                 if editing {
                     if let Some(editor) = &self.rename {
-                        row = row.child(div().flex_1().min_w_0().child(Input::new(&editor.input)));
+                        row = row.child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .py(chrome_rems(RENAME_PADDING[0]))
+                                .px(chrome_rems(RENAME_PADDING[1]))
+                                .border_1()
+                                .border_color(rgb(self.appearance.accent))
+                                .rounded(chrome_rems(RENAME_RADIUS))
+                                .bg(rgb(self.appearance.surface))
+                                .text_color(rgb(self.appearance.text))
+                                .text_size(chrome_rems(SIDEBAR_TEXT))
+                                .font_weight(FontWeight::MEDIUM)
+                                .line_height(relative(1.2))
+                                .child(Input::new(&editor.input)),
+                        );
                     }
                 } else {
                     let select = key.clone();
@@ -2255,7 +2733,7 @@ impl Workspace {
                             .text_ellipsis()
                             .whitespace_nowrap()
                             .font_weight(FontWeight::MEDIUM)
-                            .text_size(chrome_rems(12.5))
+                            .text_size(chrome_rems(SIDEBAR_TEXT))
                             .tooltip(label.clone())
                             .child(
                                 div()
@@ -2266,6 +2744,9 @@ impl Workspace {
                                     })
                                     .w_full()
                                     .min_w_0()
+                                    // Kit sizes button content itself; the
+                                    // label restates the Drawer's size.
+                                    .text_size(chrome_rems(SIDEBAR_TEXT))
                                     .text_color(transition::<Hsla>(
                                         format!("drawer-screen-text-{key}"),
                                         rgb(if active || actions_visible {
@@ -2375,31 +2856,7 @@ impl Workspace {
                             down.clone(),
                         )
                     });
-                    let drag_enabled = window_model.can_move_screen(&key) && owner.is_some();
-                    let drag_label = label.clone();
-                    let drag_appearance = self.appearance.clone();
-                    row = row.child(
-                        div()
-                            .id(SharedString::from(format!("drawer-drag-{key}")))
-                            .flex_1()
-                            .min_w_0()
-                            .when(drag_enabled, |view| {
-                                view.on_drag(
-                                    ScreenDrag {
-                                        owner: owner.expect("checked drag owner"),
-                                        screen: key.clone(),
-                                        view: cx.entity().entity_id(),
-                                    },
-                                    move |_, _, _, cx| {
-                                        cx.new(|_| ScreenDragPreview {
-                                            label: drag_label.clone(),
-                                            appearance: drag_appearance.clone(),
-                                        })
-                                    },
-                                )
-                            })
-                            .child(select_button),
-                    );
+                    row = row.child(div().flex_1().min_w_0().child(select_button));
                 }
                 if let Some(summary) = unread_summary {
                     let count = self.notifications.unread_count(&key);
@@ -2410,9 +2867,18 @@ impl Workspace {
                                 badge.debug_selector(|| format!("drawer-unread-{key}-{count}"))
                             })
                             .flex_none()
-                            .text_size(chrome_rems(10.))
-                            .font(font(self.mono_family.clone()))
-                            .text_color(cx.theme().primary)
+                            .h(chrome_rems(BADGE_HEIGHT))
+                            .min_w(chrome_rems(BADGE_HEIGHT))
+                            .px(chrome_rems(BADGE_PADDING_X))
+                            .rounded(chrome_rems(BADGE_HEIGHT / 2.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .bg(rgb(self.appearance.accent))
+                            .text_color(rgb(self.appearance.surface))
+                            .text_size(chrome_rems(BADGE_TEXT))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .line_height(chrome_rems(BADGE_HEIGHT))
                             .tooltip(move |window, cx| {
                                 gpui_kit::component::tooltip::Tooltip::new(summary.clone())
                                     .build(window, cx)
@@ -2427,7 +2893,8 @@ impl Workspace {
                                 label.debug_selector(|| format!("drawer-state-{key}-{state}"))
                             })
                             .flex_none()
-                            .text_sm()
+                            .text_size(chrome_rems(NOTE_TEXT))
+                            .font_weight(FontWeight::MEDIUM)
                             .text_color(muted)
                             .child(state),
                     );
@@ -2437,47 +2904,52 @@ impl Workspace {
                     let collapse_key = key.clone();
                     let weak = cx.entity().downgrade();
                     row_actions = row_actions.child(
-                        Button::new(SharedString::from(format!("drawer-collapse-{key}")))
-                            .accessibility_label(if collapsed {
-                                format!("Show panes in {label}")
-                            } else {
-                                format!("Hide panes in {label}")
-                            })
-                            .when(cfg!(all(test, feature = "ui-test-support")), |button| {
-                                button.debug_selector(|| format!("drawer-collapse-{key}"))
-                            })
-                            .ghost()
-                            .cursor_pointer()
-                            .compact()
-                            .xsmall()
-                            .w(chrome_rems(24.))
-                            .icon(Icon::new(if collapsed {
-                                IconName::ChevronRight
-                            } else {
-                                IconName::ChevronDown
-                            }))
-                            .on_click(move |_, window, cx| {
-                                let _ = weak.update(cx, |this, cx| {
-                                    if this.lifecycle_token() != owner {
-                                        return;
+                        drawer_control(
+                            SharedString::from(format!("drawer-collapse-{key}")),
+                            muted,
+                            ICON_BUTTON_RADIUS,
+                            &self.appearance,
+                            window,
+                            cx,
+                        )
+                        .accessibility_label(if collapsed {
+                            format!("Show panes in {label}")
+                        } else {
+                            format!("Hide panes in {label}")
+                        })
+                        .when(cfg!(all(test, feature = "ui-test-support")), |button| {
+                            button.debug_selector(|| format!("drawer-collapse-{key}"))
+                        })
+                        .xsmall()
+                        .w(chrome_rems(ICON_BUTTON))
+                        .h(chrome_rems(ICON_BUTTON))
+                        .icon(Icon::new(if collapsed {
+                            IconName::ChevronRight
+                        } else {
+                            IconName::ChevronDown
+                        }))
+                        .on_click(move |_, window, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                if this.lifecycle_token() != owner {
+                                    return;
+                                }
+                                if !this.drawer_collapsed.insert(collapse_key.clone()) {
+                                    this.drawer_collapsed.remove(&collapse_key);
+                                } else {
+                                    if this
+                                        .drawer_pane_hovered
+                                        .as_ref()
+                                        .is_some_and(|(screen, _)| screen == &collapse_key)
+                                    {
+                                        this.drawer_pane_hovered = None;
                                     }
-                                    if !this.drawer_collapsed.insert(collapse_key.clone()) {
-                                        this.drawer_collapsed.remove(&collapse_key);
-                                    } else {
-                                        if this
-                                            .drawer_pane_hovered
-                                            .as_ref()
-                                            .is_some_and(|(screen, _)| screen == &collapse_key)
-                                        {
-                                            this.drawer_pane_hovered = None;
-                                        }
-                                        if this.destination == Destination::Screens {
-                                            this.focus_current(window, cx);
-                                        }
+                                    if this.destination == Destination::Screens {
+                                        this.focus_current(window, cx);
                                     }
-                                    cx.notify();
-                                });
-                            }),
+                                }
+                                cx.notify();
+                            });
+                        }),
                     );
                 }
                 if actions_visible && remote {
@@ -2507,46 +2979,51 @@ impl Workspace {
                         .execution_token(key.source_id())
                         .filter(|_| state.is_none());
                     row_actions = row_actions.child(
-                        Button::new(SharedString::from(format!("drawer-more-{key}")))
-                            .accessibility_label(format!("More actions for {label}"))
-                            .when(cfg!(all(test, feature = "ui-test-support")), |button| {
-                                button.debug_selector(|| format!("drawer-more-{key}"))
-                            })
-                            .tooltip("More Screen actions")
-                            .icon(Icon::new(IconName::Ellipsis))
-                            .ghost()
-                            .cursor_pointer()
-                            .compact()
-                            .xsmall()
-                            .w(chrome_rems(27.))
-                            .dropdown_menu(move |menu, _, _| {
-                                let weak = weak.clone();
-                                let terminate = terminate.clone();
-                                screen_move_items(
-                                    menu,
-                                    weak.clone(),
-                                    owner,
-                                    terminate.clone(),
-                                    up.clone(),
-                                    down.clone(),
-                                )
-                                .item(
-                                    PopupMenuItem::new("Terminate Screen…")
-                                        .disabled(token.is_none())
-                                        .on_click(move |_, window, cx| {
-                                            if let Some(token) = token {
-                                                let _ = weak.update(cx, |this, cx| {
-                                                    this.request_terminate_screen(
-                                                        token,
-                                                        terminate.clone(),
-                                                        window,
-                                                        cx,
-                                                    )
-                                                });
-                                            }
-                                        }),
-                                )
-                            }),
+                        drawer_control(
+                            SharedString::from(format!("drawer-more-{key}")),
+                            muted,
+                            ICON_BUTTON_RADIUS,
+                            &self.appearance,
+                            window,
+                            cx,
+                        )
+                        .accessibility_label(format!("More actions for {label}"))
+                        .when(cfg!(all(test, feature = "ui-test-support")), |button| {
+                            button.debug_selector(|| format!("drawer-more-{key}"))
+                        })
+                        .tooltip("More Screen actions")
+                        .icon(Icon::new(IconName::Ellipsis))
+                        .xsmall()
+                        .w(chrome_rems(ICON_BUTTON))
+                        .h(chrome_rems(ICON_BUTTON))
+                        .dropdown_menu(move |menu, _, _| {
+                            let weak = weak.clone();
+                            let terminate = terminate.clone();
+                            screen_move_items(
+                                menu,
+                                weak.clone(),
+                                owner,
+                                terminate.clone(),
+                                up.clone(),
+                                down.clone(),
+                            )
+                            .item(
+                                PopupMenuItem::new("Terminate Screen…")
+                                    .disabled(token.is_none())
+                                    .on_click(move |_, window, cx| {
+                                        if let Some(token) = token {
+                                            let _ = weak.update(cx, |this, cx| {
+                                                this.request_terminate_screen(
+                                                    token,
+                                                    terminate.clone(),
+                                                    window,
+                                                    cx,
+                                                )
+                                            });
+                                        }
+                                    }),
+                            )
+                        }),
                     );
                 }
                 if actions_visible {
@@ -2558,56 +3035,50 @@ impl Workspace {
                         "Close screen"
                     };
                     row_actions = row_actions.child(
-                        div()
-                            .id(SharedString::from(format!("drawer-close-hover-{key}")))
-                            .rounded_md()
-                            .hover(|style| style.bg(cx.theme().list_hover))
-                            .child(
-                                Button::new(SharedString::from(format!("drawer-close-{key}")))
-                                    .accessibility_label(if remote {
-                                        format!("Detach {label}: keeps running on the host")
-                                    } else {
-                                        format!("Close {label}")
+                        drawer_control(
+                            SharedString::from(format!("drawer-close-{key}")),
+                            muted,
+                            ICON_BUTTON_RADIUS,
+                            &self.appearance,
+                            window,
+                            cx,
+                        )
+                        .accessibility_label(if remote {
+                            format!("Detach {label}: keeps running on the host")
+                        } else {
+                            format!("Close {label}")
+                        })
+                        .xsmall()
+                        .w(chrome_rems(ICON_BUTTON))
+                        .h(chrome_rems(ICON_BUTTON))
+                        .tooltip(close_tooltip)
+                        .icon(Icon::new(if remote {
+                            IconName::Unplug
+                        } else {
+                            IconName::X
+                        }))
+                        .on_click(move |_, window, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                if this.lifecycle_token() == owner
+                                    && this.model.as_ref().is_some_and(|model| {
+                                        model.opened().iter().any(|entry| entry.key() == &close)
                                     })
-                                    .ghost()
-                                    .cursor_pointer()
-                                    .compact()
-                                    .xsmall()
-                                    .w(chrome_rems(27.))
-                                    .tooltip(close_tooltip)
-                                    .icon(Icon::new(if remote {
-                                        IconName::Unplug
-                                    } else {
-                                        IconName::X
-                                    }))
-                                    .on_click(move |_, window, cx| {
-                                        let _ = weak.update(cx, |this, cx| {
-                                            if this.lifecycle_token() == owner
-                                                && this.model.as_ref().is_some_and(|model| {
-                                                    model
-                                                        .opened()
-                                                        .iter()
-                                                        .any(|entry| entry.key() == &close)
-                                                })
-                                            {
-                                                this.request_close_screen(
-                                                    close.clone(),
-                                                    window,
-                                                    cx,
-                                                );
-                                            }
-                                        });
-                                    }),
-                            ),
+                                {
+                                    this.request_close_screen(close.clone(), window, cx);
+                                }
+                            });
+                        }),
                     );
                 }
                 if actions_visible {
                     row = row.child(row_actions);
                 }
+                // `active-bg` and `hover-bg` composited over the Drawer, which
+                // is the card's own color at rest.
                 let block_background: Hsla = if active {
                     rgb(self.appearance.active).into()
                 } else if actions_visible {
-                    cx.theme().list_hover
+                    rgb(self.appearance.hover).into()
                 } else {
                     rgb(self.appearance.raised).into()
                 };
@@ -2618,21 +3089,102 @@ impl Workspace {
                     window,
                     cx,
                 );
+                // The row's part in a Screen drag: the lifted row follows the
+                // pointer, the rows it passes make room, and a cancel or a
+                // landed drop returns everything to its slot at once.
+                let motion = self
+                    .drawer_drag
+                    .as_ref()
+                    .map(|session| session.motion(&key))
+                    .unwrap_or_default();
+                let offset = transition(
+                    format!("drawer-drag-offset-{key}"),
+                    motion.offset,
+                    if motion.animate {
+                        screen_drag::screen_shift_transition()
+                    } else {
+                        Transition::new(Duration::ZERO)
+                    },
+                    window,
+                    cx,
+                );
+                let opacity = transition(
+                    format!("drawer-drag-opacity-{key}"),
+                    if motion.lifted {
+                        screen_drag::SCREEN_DRAG_OPACITY
+                    } else {
+                        1.
+                    },
+                    screen_drag::screen_lift_transition(),
+                    window,
+                    cx,
+                );
+                let opacity = if unreachable && !active {
+                    opacity * UNREACHABLE_OPACITY
+                } else {
+                    opacity
+                };
+                let measured = self.drawer_row_slots.clone();
+                let measured_scroll = self.drawer_scroll.clone();
+                let measured_key = key.clone();
+                let drag_owner = owner.filter(|_| window_model.can_move_screen(&key) && !editing);
                 let mut block = div()
                     .id(SharedString::from(format!("drawer-block-{key}")))
                     .when(cfg!(all(test, feature = "ui-test-support")), |block| {
                         block.debug_selector(|| format!("drawer-block-{key}"))
                     })
-                    .mx_2()
-                    .my_0p5()
+                    .mx(chrome_rems(CARD_INSET))
+                    .mt(chrome_rems(CARD_GAP))
                     .relative()
-                    .rounded_md()
+                    .top(px(offset))
+                    .when(opacity < 1., |block| block.opacity(opacity))
+                    .rounded(chrome_rems(CARD_RADIUS))
                     .bg(block_background)
-                    .on_drag_move({
-                        let row_key = key.clone();
-                        cx.listener(move |this, event: &DragMoveEvent<ScreenDrag>, _, cx| {
-                            this.screen_drag_hover(&row_key, event, cx);
-                        })
+                    .child(
+                        canvas(
+                            move |bounds, _, _| {
+                                measured.borrow_mut().insert(
+                                    measured_key,
+                                    RowSlot {
+                                        top: f32::from(bounds.top() - measured_scroll.offset().y)
+                                            - offset,
+                                        height: f32::from(bounds.size.height),
+                                    },
+                                );
+                            },
+                            |_, (), _, _| {},
+                        )
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .size_full(),
+                    )
+                    .when_some(drag_owner, |block, owner| {
+                        let press_key = key.clone();
+                        let weak = cx.entity().downgrade();
+                        block
+                            .capture_any_mouse_down(cx.listener(
+                                move |this, event: &MouseDownEvent, _, _| {
+                                    if event.button == MouseButton::Left {
+                                        this.press_screen_row(&press_key, event.position);
+                                    }
+                                },
+                            ))
+                            .on_drag(
+                                ScreenDrag {
+                                    owner,
+                                    screen: key.clone(),
+                                    view: cx.entity().entity_id(),
+                                },
+                                move |drag, _, window, cx| {
+                                    let position = window.mouse_position();
+                                    let _ = weak.update(cx, |this, cx| {
+                                        this.begin_screen_drag(drag.owner, &drag.screen, position);
+                                        cx.notify();
+                                    });
+                                    cx.new(|_| ScreenDragPreview)
+                                },
+                            )
                     })
                     .on_hover({
                         let hover_key = key.clone();
@@ -2646,19 +3198,8 @@ impl Workspace {
                             }
                         })
                     })
+                    .child(self.card_padding(&key, owner, editing, "top", CARD_PADDING_TOP, cx))
                     .child(row);
-                if let Some(target) = self.drawer_drop.as_ref().filter(|target| target.row == key) {
-                    block = block.child(
-                        div()
-                            .absolute()
-                            .left_0()
-                            .right_0()
-                            .when(target.after_row, |line| line.bottom_0())
-                            .when(!target.after_row, |line| line.top_0())
-                            .h(px(2.))
-                            .bg(rgb(self.appearance.accent)),
-                    );
-                }
                 if let Some(screen) = screen_snapshot {
                     let groups = drawer_pane_groups(screen);
                     let multiple_groups = groups.len() > 1;
@@ -2670,7 +3211,7 @@ impl Workspace {
                         if collapsed {
                             0.
                         } else {
-                            21. * pane_count as f32
+                            PANE_HEIGHT * pane_count as f32
                         },
                         pane_list_transition(),
                         window,
@@ -2690,10 +3231,19 @@ impl Workspace {
                         let mut group_view = div().flex().flex_col().flex_none();
                         if stacked {
                             group_view = group_view
-                                .ml(chrome_rems(30.))
-                                .pl(chrome_rems(9.))
-                                .border_l_1()
-                                .border_color(rgb(self.appearance.border));
+                                .relative()
+                                .ml(chrome_rems(PANE_INDENT))
+                                .pl(chrome_rems(STACK_PADDING_LEFT))
+                                .child(
+                                    div()
+                                        .absolute()
+                                        .left_0()
+                                        .top(chrome_rems(STACK_RAIL_INSET))
+                                        .bottom(chrome_rems(STACK_RAIL_INSET))
+                                        .w(chrome_rems(STACK_RAIL_WIDTH))
+                                        .rounded(chrome_rems(STACK_RAIL_RADIUS))
+                                        .bg(rgb(self.appearance.border)),
+                                );
                         }
                         for pane_id in group {
                             let Some((_, pane)) =
@@ -2719,13 +3269,20 @@ impl Workspace {
                                     self.notifications.severity(&source.pane_key(pane_id))
                                 });
                             let is_viewer = pane.viewer.is_some();
+                            // "Running" as the web Drawer has it: the
+                            // foreground process is not the session's own
+                            // shell. The service derives `busy` from exactly
+                            // that and clears it when the process exits.
                             let busy = pane
                                 .session_id
                                 .as_ref()
                                 .and_then(|id| screen.sessions.get(id))
                                 .is_some_and(|session| session.busy);
+                            let glows = busy && !is_viewer && leading_icon.is_some();
                             let glyph: AnyElement = if is_viewer {
-                                Icon::new(IconName::FileText).size_3().into_any_element()
+                                Icon::new(IconName::FileText)
+                                    .size(chrome_rems(PANE_DOC_ICON))
+                                    .into_any_element()
                             } else if let Some(icon) = leading_icon {
                                 div()
                                     .when(cfg!(all(test, feature = "ui-test-support")), |view| {
@@ -2733,18 +3290,22 @@ impl Workspace {
                                             format!("drawer-title-icon-{pane_id}-{icon}")
                                         })
                                     })
-                                    .text_size(chrome_rems(if busy { 12. } else { 10. }))
+                                    .text_size(chrome_rems(if busy {
+                                        PANE_RUNNING_ICON_TEXT
+                                    } else {
+                                        PANE_ICON_TEXT
+                                    }))
                                     .when(busy, |icon| icon.text_color(rgb(self.appearance.text)))
                                     .child(icon.to_string())
                                     .into_any_element()
                             } else {
                                 div()
-                                    .size(chrome_rems(5.))
+                                    .size(chrome_rems(PANE_DOT))
                                     .rounded_full()
                                     .bg(if busy {
-                                        rgb(self.appearance.text)
+                                        rgb(self.appearance.text).into()
                                     } else {
-                                        muted.into()
+                                        muted
                                     })
                                     .into_any_element()
                             };
@@ -2791,23 +3352,31 @@ impl Workspace {
                                 .compact()
                                 .xsmall()
                                 .w_full()
-                                .h(chrome_rems(21.))
-                                .pl(chrome_rems(if stacked { 0. } else { 30. }))
+                                .h(chrome_rems(PANE_HEIGHT))
+                                .pl(chrome_rems(if stacked { 0. } else { PANE_INDENT }))
+                                .pr(chrome_rems(PANE_PADDING_RIGHT))
                                 .justify_start()
-                                .font(font(self.mono_family.clone()))
-                                .text_size(chrome_rems(11.))
+                                .font(font(mono.clone()))
+                                .font_weight(FontWeight::NORMAL)
+                                .text_size(chrome_rems(PANE_TEXT))
                                 .child(
                                     div()
                                         .w_full()
                                         .min_w_0()
                                         .flex()
                                         .items_center()
-                                        .gap(chrome_rems(7.))
+                                        .gap(chrome_rems(PANE_GAP))
+                                        .text_size(chrome_rems(PANE_TEXT))
                                         .text_color(transition::<Hsla>(
                                             format!("drawer-pane-text-{key}-{pane_id}"),
-                                            rgb(if pane_hovered {
+                                            // A viewer keeps its color on
+                                            // hover, as the web rule order
+                                            // has it.
+                                            rgb(if is_viewer {
+                                                self.appearance.secondary
+                                            } else if pane_hovered {
                                                 self.appearance.text
-                                            } else if busy || is_viewer {
+                                            } else if busy {
                                                 self.appearance.secondary
                                             } else {
                                                 self.appearance.muted
@@ -2819,11 +3388,35 @@ impl Workspace {
                                         ))
                                         .child(
                                             div()
-                                                .w(chrome_rems(12.))
+                                                .relative()
+                                                .w(chrome_rems(PANE_GLYPH_SLOT))
+                                                .h_full()
                                                 .flex_none()
                                                 .flex()
                                                 .items_center()
                                                 .justify_center()
+                                                .when(glows, |slot| {
+                                                    slot.child(
+                                                        div()
+                                                            .absolute()
+                                                            .left(chrome_rems(
+                                                                (PANE_GLYPH_SLOT - PANE_GLOW_CORE) / 2.,
+                                                            ))
+                                                            .top(chrome_rems(
+                                                                (PANE_HEIGHT - PANE_GLOW_CORE) / 2.,
+                                                            ))
+                                                            .size(chrome_rems(PANE_GLOW_CORE))
+                                                            .rounded_full()
+                                                            .shadow(vec![BoxShadow {
+                                                                color: Hsla::from(rgb(self.appearance.text))
+                                                                    .opacity(PANE_GLOW_OPACITY),
+                                                                offset: point(px(0.), px(0.)),
+                                                                blur_radius: chrome_px(PANE_GLOW_BLUR, self.appearance.zoom.window_scale()),
+                                                                spread_radius: px(0.),
+                                                                inset: false,
+                                                            }]),
+                                                    )
+                                                })
                                                 .child(glyph),
                                         )
                                         .child(
@@ -2845,7 +3438,7 @@ impl Workspace {
                                                     badge.debug_selector(|| format!("drawer-pane-unread-{key}-{pane_id}-{}", super::unread::severity_label(severity)))
                                                 })
                                                 .flex_none()
-                                                .size(chrome_rems(6.))
+                                                .size(chrome_rems(PANE_BADGE))
                                                 .rounded_full()
                                                 .bg(super::unread::severity_color(severity, cx))
                                         )),
@@ -2899,7 +3492,19 @@ impl Workspace {
                     }
                     block = block.child(pane_list);
                 }
-                list = list.child(block);
+                block = block.child(self.card_padding(
+                    &key,
+                    owner,
+                    editing,
+                    "bottom",
+                    CARD_PADDING_BOTTOM,
+                    cx,
+                ));
+                if motion.lifted {
+                    list = list.child(screen_drag::RaisedInClip::new(block));
+                } else {
+                    list = list.child(block);
+                }
             }
             if let Some(pending) =
                 window_model
@@ -2934,62 +3539,62 @@ impl Workspace {
             list = list.child(div().px_2().py_3().text_color(muted).child("Connecting…"));
         }
         let weak = cx.entity().downgrade();
-        let create = Button::new("drawer-create")
-            .accessibility_label("Create local Screen")
-            .small()
-            .w_full()
-            .h(chrome_rems(32.))
-            .ghost()
-            .cursor_pointer()
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(chrome_rems(8.))
-                    .text_color(rgb(self.appearance.secondary))
-                    .child(
-                        div()
-                            .w(chrome_rems(14.))
-                            .flex_none()
-                            .flex()
-                            .justify_end()
-                            .child(Icon::new(IconName::Plus).size_3()),
-                    )
-                    .child("New screen"),
-            )
-            .on_click(move |_, window, cx| {
-                let _ = weak.update(cx, |this, cx| {
-                    if this.lifecycle_token() == owner {
-                        this.create_screen(window, cx);
-                    }
-                });
+        let create = drawer_control(
+            "drawer-create",
+            rgb(self.appearance.secondary).into(),
+            CARD_RADIUS,
+            &self.appearance,
+            window,
+            cx,
+        )
+        .accessibility_label("Create local Screen")
+        .small()
+        .w_full()
+        .h(chrome_rems(NEW_HEIGHT))
+        .px(chrome_rems(NEW_PADDING_X))
+        .child(
+            div()
+                .w_full()
+                .flex()
+                .items_center()
+                .gap(chrome_rems(NEW_GAP))
+                .text_size(chrome_rems(SIDEBAR_TEXT))
+                .font_weight(FontWeight::MEDIUM)
+                .child(
+                    div()
+                        .w(chrome_rems(NEW_ICON))
+                        .flex_none()
+                        .flex()
+                        .justify_end()
+                        .child(Icon::new(IconName::Plus).size(chrome_rems(NEW_ICON))),
+                )
+                .child("New screen"),
+        )
+        .on_click(move |_, window, cx| {
+            let _ = weak.update(cx, |this, cx| {
+                if this.lifecycle_token() == owner {
+                    this.create_screen(window, cx);
+                }
             });
+        });
         let weak = cx.entity().downgrade();
-        let templates = Button::new("drawer-templates")
-            .accessibility_label("Open local Templates")
-            .ghost()
-            .cursor_pointer()
-            .small()
-            .w_full()
-            .h(chrome_rems(30.))
-            .child(
-                div()
-                    .w_full()
-                    .flex()
-                    .items_center()
-                    .gap(chrome_rems(10.))
-                    .text_color(rgb(self.appearance.secondary))
-                    .child(
-                        div()
-                            .w(chrome_rems(15.))
-                            .flex_none()
-                            .flex()
-                            .justify_center()
-                            .child(Icon::new(IconName::LayoutGrid).size_3()),
-                    )
-                    .child("Templates"),
+        let templates = self
+            .drawer_nav_item(
+                "drawer-templates",
+                NavItem {
+                    icon: IconName::LayoutGrid,
+                    label: "Templates",
+                    shortcut: Some(if cfg!(target_os = "macos") {
+                        "⌘P"
+                    } else {
+                        "Alt+P"
+                    }),
+                    active: false,
+                },
+                window,
+                cx,
             )
+            .accessibility_label("Open local Templates")
             .on_click(move |_, window, cx| {
                 let _ = weak.update(cx, |this, cx| {
                     if this.lifecycle_token() == owner {
@@ -3039,98 +3644,137 @@ impl Workspace {
             .child(
                 div()
                     .id("drawer-header")
-                    .h(chrome_rems(32.))
-                    .pl_4()
-                    .pr_2()
+                    .flex_none()
+                    .pt(chrome_rems(HEAD_PADDING[0]))
+                    .pr(chrome_rems(HEAD_PADDING[1]))
+                    .pb(chrome_rems(HEAD_PADDING[2]))
+                    .pl(chrome_rems(HEAD_PADDING[3]))
                     .flex()
                     .items_center()
                     .justify_between()
-                    .text_color(muted)
                     .child(
+                        // GPUI has no letter spacing; the web label adds .06em.
                         div()
-                            .text_size(chrome_rems(10.5))
+                            .text_size(chrome_rems(HEAD_LABEL_TEXT))
                             .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(muted)
                             .child("SCREENS"),
                     )
                     .child(
-                        Button::new("drawer-pin")
-                            .when(cfg!(all(test, feature = "ui-test-support")), |button| {
-                                button.debug_selector(|| "drawer-pin".into())
-                            })
-                            .accessibility_label(pin_label)
-                            .tooltip(pin_label)
-                            .selected(self.drawer_visible)
-                            .disabled(self.drawer_pending.is_some() || owner.is_none())
-                            .ghost()
-                            .when(self.drawer_pending.is_none() && owner.is_some(), |button| {
-                                button.cursor_pointer()
-                            })
-                            .compact()
-                            .xsmall()
-                            .icon(Icon::new(if self.drawer_visible {
-                                IconName::PinOff
+                        // One pin icon in both states, as the web Drawer has
+                        // it: pinned shows in the secondary text color.
+                        drawer_control(
+                            "drawer-pin",
+                            if self.drawer_visible {
+                                rgb(self.appearance.secondary).into()
                             } else {
-                                IconName::Pin
-                            }))
-                            .on_click({
-                                let weak = cx.entity().downgrade();
-                                move |_, _, cx| {
-                                    let _ = weak.update(cx, |this, cx| {
-                                        if this.lifecycle_token() == owner {
-                                            this.toggle_drawer(cx);
-                                        }
-                                    });
-                                }
-                            }),
+                                muted
+                            },
+                            ICON_BUTTON_RADIUS,
+                            &self.appearance,
+                            window,
+                            cx,
+                        )
+                        .when(cfg!(all(test, feature = "ui-test-support")), |button| {
+                            button.debug_selector(|| "drawer-pin".into())
+                        })
+                        .accessibility_label(pin_label)
+                        .tooltip(pin_label)
+                        .selected(self.drawer_visible)
+                        .disabled(self.drawer_pending.is_some() || owner.is_none())
+                        .when(self.drawer_pending.is_some() || owner.is_none(), |button| {
+                            button.cursor_default()
+                        })
+                        .small()
+                        .w(chrome_rems(ICON_BUTTON))
+                        .h(chrome_rems(ICON_BUTTON))
+                        .icon(Icon::new(IconName::Pin))
+                        .on_click({
+                            let weak = cx.entity().downgrade();
+                            move |_, _, cx| {
+                                let _ = weak.update(cx, |this, cx| {
+                                    if this.lifecycle_token() == owner {
+                                        this.toggle_drawer(cx);
+                                    }
+                                });
+                            }
+                        }),
                     ),
             )
             .child(list)
-            .child(div().px_2().py_1().child(create))
-            .child(div().flex_1().min_h(chrome_rems(8.)))
+            .child(
+                // The web row and its button both lay `hover-bg` on hover.
+                div()
+                    .id("drawer-new")
+                    .flex_none()
+                    .mx(chrome_rems(CARD_INSET))
+                    .mt(chrome_rems(NEW_MARGIN_TOP))
+                    .rounded(chrome_rems(CARD_RADIUS))
+                    .hover(|style| style.bg(rgba(self.appearance.hover_overlay)))
+                    .child(create),
+            )
+            .child(div().flex_1().min_h(chrome_rems(SPACER_MIN_HEIGHT)))
             .child(
                 div()
-                    .px_2()
-                    .pt_1()
-                    .pb_2()
+                    .flex_none()
+                    .flex()
+                    .flex_col()
+                    .gap(chrome_rems(NAV_GAP))
+                    .pt(chrome_rems(NAV_PADDING[0]))
+                    .px(chrome_rems(NAV_PADDING[1]))
+                    .pb(chrome_rems(NAV_PADDING[2]))
                     .border_t_1()
                     .border_color(rgb(self.appearance.subtle_border))
-                    .child(self.render_hosts_navigation(cx))
+                    .child(self.render_hosts_navigation(window, cx))
                     .child(templates)
                     .child(
-                        Button::new("drawer-settings")
-                            .accessibility_label("Open Settings")
-                            .track_focus(&self.settings_trigger)
-                            .ghost()
-                            .cursor_pointer()
-                            .small()
-                            .w_full()
-                            .h(chrome_rems(30.))
-                            .selected(self.destination == Destination::Settings)
-                            .child(
-                                div()
-                                    .w_full()
-                                    .flex()
-                                    .items_center()
-                                    .gap(chrome_rems(10.))
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(
-                                        div()
-                                            .w(chrome_rems(15.))
-                                            .flex_none()
-                                            .flex()
-                                            .justify_center()
-                                            .child(Icon::new(IconName::SlidersHorizontal).size_3()),
-                                    )
-                                    .child("Settings"),
-                            )
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                if this.destination == Destination::Settings {
-                                    this.close_settings(window, cx);
-                                } else {
-                                    this.show_settings(window, cx);
-                                }
-                            })),
+                        self.drawer_nav_item(
+                            "drawer-settings",
+                            NavItem {
+                                icon: IconName::SlidersHorizontal,
+                                label: "Settings",
+                                shortcut: None,
+                                active: self.destination == Destination::Settings,
+                            },
+                            window,
+                            cx,
+                        )
+                        .accessibility_label("Open Settings")
+                        .track_focus(&self.settings_trigger)
+                        .selected(self.destination == Destination::Settings)
+                        .on_click(cx.listener(|this, _, window, cx| {
+                            if this.destination == Destination::Settings {
+                                this.close_settings(window, cx);
+                            } else {
+                                this.show_settings(window, cx);
+                            }
+                        })),
                     ),
+            )
+            .children(
+                self.drawer_drag
+                    .as_ref()
+                    .filter(|session| session.is_dragging())
+                    .map(|_| {
+                        // A drag ends wherever the button is released, inside the
+                        // Drawer or not, as the web list's window listener does.
+                        let weak = cx.entity().downgrade();
+                        canvas(
+                            |_, _, _| {},
+                            move |_, (), window, _| {
+                                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                                    if phase == DispatchPhase::Capture
+                                        && event.button == MouseButton::Left
+                                    {
+                                        let _ =
+                                            weak.update(cx, |this, cx| this.finish_screen_drag(cx));
+                                    }
+                                });
+                            },
+                        )
+                        .absolute()
+                        .size_0()
+                    }),
             )
             .into_any_element()
     }

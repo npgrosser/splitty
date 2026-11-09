@@ -5,8 +5,10 @@ mod drawer_ports;
 mod floating;
 mod host_update;
 mod hosts;
+mod menu_style;
 mod ports;
 mod remote_screen_create;
+mod screen_drag;
 mod screen_motion;
 mod settings;
 mod shell_profiles;
@@ -44,8 +46,8 @@ use splitty_client_core::workspace::{
 };
 use splitty_client_core::zoom::{Zoom, ZoomAction, ZoomOutcome, ZoomResult};
 use std::{
-    cell::Cell,
-    collections::{BTreeSet, HashMap, HashSet},
+    cell::{Cell, RefCell},
+    collections::{BTreeSet, HashMap, HashSet, VecDeque},
     rc::Rc,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
@@ -56,15 +58,17 @@ use std::{
 use tokio::sync::mpsc;
 use uuid::Uuid;
 
-use self::drawer::{ScreenDrop, WheelNavigation, WheelTarget};
+use self::drawer::{ScreenDrag, WheelNavigation, WheelTarget};
 use self::floating::{FloatGesture, FloatGestureKind};
 use self::hosts::{HostKey, HostsView};
 use self::ports::PortsView;
+use self::screen_drag::{RowSlot, ScreenDragSession};
 use self::screen_motion::{ScreenMotion, ScreenProjection};
 use self::settings::{SettingsEvent, SettingsView};
 use self::shell_profiles::ProfilePicker;
 use self::templates::TemplateDialog;
 use self::terminal_menu::TerminalMenu;
+use self::transfer::TabContextMenu;
 
 /// The local appearance read has produced either a usable theme or a visible
 /// failure. The window shell may now reveal its first painted frame.
@@ -115,6 +119,15 @@ enum Shortcut {
     NextTab,
 }
 
+/// The resize handle across a 1 px group boundary (the web client's sash).
+const SPLIT_HANDLE: f32 = 4.;
+/// Drop zones, as the web client's dockview defaults: a group's edge zones
+/// span 20% of its content, and the whole layout's edges react within 10 px
+/// and are marked 20 px wide.
+const CONTENT_EDGE_ZONE: f32 = 0.2;
+const LAYOUT_EDGE_ACTIVATION: f32 = 10.;
+const LAYOUT_EDGE_MARKER: f32 = 20.;
+
 fn chrome_rems(base_px: f32) -> Rems {
     rems(base_px / 16.)
 }
@@ -128,8 +141,9 @@ fn drawer_transition() -> Transition {
     })
 }
 
-fn tab_header_pixels(font_size: f32, window_scale: f32) -> Pixels {
-    px((font_size + 19.).max(32.) * window_scale + 1.)
+/// A group's tab bar height on screen: the theme's `tab-height` at window zoom.
+fn tab_header_pixels(tab_height: f32, window_scale: f32) -> Pixels {
+    px(tab_height * window_scale)
 }
 
 fn zoom_shortcut(key: &Keystroke, is_mac: bool) -> Option<ZoomAction> {
@@ -282,11 +296,15 @@ enum DropTarget {
         slot: LayoutKey,
         placement: MovePlacement,
     },
+    /// A tab bar: placing the tab before `before`, or last. `marker` is the
+    /// marked area relative to the group.
     Header {
         slot: LayoutKey,
         before: Option<String>,
-        marker_x: Pixels,
+        marker: Bounds<Pixels>,
     },
+    /// An edge of the whole layout: the pane goes beside all groups.
+    Layout { placement: MovePlacement },
 }
 
 fn slot_by_id<'a>(node: &'a LayoutNode, id: &str) -> Option<&'a LayoutNode> {
@@ -309,37 +327,76 @@ fn layout_node_by_id<'a>(node: &'a LayoutNode, id: &str) -> Option<&'a LayoutNod
     }
 }
 
-fn tab_insertion(
+/// A tab narrower than this is marked whole, as in dockview.
+const TAB_HALF_MARK_MIN: f32 = 100.;
+
+/// The tab under `position` in a tab strip whose visible part is `viewport`,
+/// and the area to mark: the half toward the pointer on a wide tab, otherwise
+/// the whole tab, clipped to the strip.
+fn tab_drop(
     viewport: Bounds<Pixels>,
-    point: Point<Pixels>,
+    position: Point<Pixels>,
     count: usize,
     offset_x: Pixels,
     scale: f32,
     mut bounds_for: impl FnMut(usize) -> Option<Bounds<Pixels>>,
-) -> Option<(usize, Pixels)> {
-    if !viewport.contains(&point) || viewport.size.width <= px(4. * scale) || count == 0 {
+) -> Option<(usize, Bounds<Pixels>)> {
+    if !viewport.contains(&position) {
         return None;
     }
-    let marker = |x: Pixels| {
-        let left = viewport.left() + px(scale);
-        let right = viewport.right() - px(3. * scale);
-        if x < left {
-            left
-        } else if x > right {
-            right
+    (0..count).find_map(|index| {
+        let tab = bounds_for(index)?;
+        let left = tab.left() + offset_x;
+        let right = left + tab.size.width;
+        if position.x < left || position.x >= right {
+            return None;
+        }
+        let (left, right) = if tab.size.width >= px(TAB_HALF_MARK_MIN * scale) {
+            let middle = left + tab.size.width / 2.;
+            if position.x < middle {
+                (left, middle)
+            } else {
+                (middle, right)
+            }
         } else {
-            x
-        }
+            (left, right)
+        };
+        let left = left.max(viewport.left());
+        let right = right.min(viewport.right());
+        Some((
+            index,
+            Bounds::new(
+                point(left, viewport.top()),
+                size(right - left, viewport.size.height),
+            ),
+        ))
+    })
+}
+
+/// The tab a dropped tab is placed before when dropped on the tab at
+/// `hovered`: as in dockview, which removes a moved tab before inserting it
+/// at the hovered index, a tab moved right within its group lands after it.
+fn tab_drop_before<'a>(
+    pane_ids: &'a [impl AsRef<str>],
+    hovered: usize,
+    dragged: &str,
+) -> Option<&'a str> {
+    let source = pane_ids.iter().position(|pane| pane.as_ref() == dragged);
+    let index = match source {
+        Some(source) if source < hovered => hovered + 1,
+        _ => hovered,
     };
-    for index in 0..count {
-        let bounds = bounds_for(index)?;
-        let left = bounds.left() + offset_x;
-        if point.x < left + bounds.size.width / 2. {
-            return Some((index, marker(left)));
-        }
-    }
-    let last = bounds_for(count - 1)?;
-    Some((count, marker(last.right() + offset_x)))
+    pane_ids.get(index).map(AsRef::as_ref)
+}
+
+/// A group's content area below its tab bar.
+fn slot_body(slot: Bounds<Pixels>, header_height: Pixels) -> Option<Bounds<Pixels>> {
+    (slot.size.height > header_height).then(|| {
+        Bounds::new(
+            point(slot.left(), slot.top() + header_height),
+            size(slot.size.width, slot.size.height - header_height),
+        )
+    })
 }
 
 fn body_drop_zone(
@@ -347,54 +404,55 @@ fn body_drop_zone(
     header_height: Pixels,
     position: Point<Pixels>,
 ) -> Option<MovePlacement> {
-    if !slot.contains(&position) || slot.size.height <= header_height {
+    if !slot.contains(&position) {
         return None;
     }
-    let body = Bounds::new(
-        point(slot.left(), slot.top() + header_height),
-        size(slot.size.width, slot.size.height - header_height),
-    );
-    drop_zone(body, position)
+    drop_zone(slot_body(slot, header_height)?, position)
 }
 struct DragPreview {
     title: String,
     active: bool,
     appearance: NativeAppearance,
+    /// Where the pointer grabbed the tab; GPUI keeps that point under it.
+    grab: Point<Pixels>,
 }
+
+/// The dragged tab starts just below the pointer's tip and extends right of
+/// and below it, so a marked drop target stays visible under the pointer even
+/// at the top edge of a tab bar. The horizontal inset is the web client's
+/// drag image offset.
+const DRAG_PREVIEW_LEFT_OF_POINTER: f32 = 30.;
+const DRAG_PREVIEW_BELOW_POINTER: f32 = 4.;
 impl Render for DragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .items_center()
-            .gap_2()
-            .pl_3()
-            .pr_1()
-            .h(chrome_rems((self.appearance.font_size + 19.).max(32.)))
-            .font(font(self.appearance.font_family.clone()))
-            .text_size(chrome_rems(self.appearance.font_size))
-            .bg(rgb(if self.active {
-                self.appearance.active
-            } else {
-                self.appearance.raised
-            }))
-            .text_color(rgb(if self.active {
-                self.appearance.text
-            } else {
-                self.appearance.secondary
-            }))
-            .border_1()
-            .border_color(rgb(self.appearance.border))
-            .child(Icon::new(IconName::SquareTerminal).xsmall())
-            .child(
-                div()
-                    .max_w(chrome_rems(180.))
-                    .min_w_0()
-                    .overflow_hidden()
-                    .whitespace_nowrap()
-                    .text_ellipsis()
-                    .child(self.title.clone()),
-            )
-            .child(Icon::new(IconName::X).xsmall())
+        let scale = self.appearance.zoom.window_scale();
+        // GPUI draws this view with `grab` under the pointer; the margins move
+        // the tab from there to its place beside the pointer.
+        div().child(
+            screen_motion::tab_surface(&self.appearance, self.active, true, true)
+                .when(cfg!(all(test, feature = "ui-test-support")), |tab| {
+                    tab.debug_selector(|| "tab-drag-preview".into())
+                })
+                .h(chrome_rems(self.appearance.tab_height))
+                .ml(self.grab.x - px(DRAG_PREVIEW_LEFT_OF_POINTER * scale))
+                .mt(self.grab.y + px(DRAG_PREVIEW_BELOW_POINTER * scale))
+                .font(font(self.appearance.font_family.clone()))
+                .border_1()
+                .border_color(rgb(self.appearance.border))
+                .child(screen_motion::tab_label(self.title.clone()))
+                .child(
+                    div()
+                        .flex()
+                        .flex_none()
+                        .items_center()
+                        .justify_center()
+                        .ml(chrome_rems(screen_motion::TAB_LABEL_GAP))
+                        .size(chrome_rems(screen_motion::TAB_CLOSE_BOX))
+                        .child(
+                            Icon::new(IconName::X).size(chrome_rems(screen_motion::TAB_CLOSE_ICON)),
+                        ),
+                ),
+        )
     }
 }
 
@@ -412,10 +470,65 @@ fn drop_zone(bounds: Bounds<Pixels>, point: Point<Pixels>) -> Option<MovePlaceme
     ];
     edges
         .into_iter()
-        .filter(|(distance, _)| *distance < 0.22)
+        .filter(|(distance, _)| *distance < CONTENT_EDGE_ZONE)
         .min_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, placement)| placement)
         .or(Some(MovePlacement::Tab))
+}
+
+/// The layout edge within `activation` of `point`, nearest first.
+fn layout_edge_zone(
+    viewport: Bounds<Pixels>,
+    point: Point<Pixels>,
+    activation: Pixels,
+) -> Option<MovePlacement> {
+    if !viewport.contains(&point) {
+        return None;
+    }
+    [
+        (point.x - viewport.left(), MovePlacement::Left),
+        (viewport.right() - point.x, MovePlacement::Right),
+        (point.y - viewport.top(), MovePlacement::Above),
+        (viewport.bottom() - point.y, MovePlacement::Below),
+    ]
+    .into_iter()
+    .filter(|(distance, _)| *distance < activation)
+    .min_by(|a, b| f32::from(a.0).total_cmp(&f32::from(b.0)))
+    .map(|(_, placement)| placement)
+}
+
+/// The band marking a layout edge, relative to the layout's origin.
+fn layout_edge_marker(
+    viewport: Size<Pixels>,
+    placement: MovePlacement,
+    width: Pixels,
+) -> Bounds<Pixels> {
+    let width = width.min(viewport.width).min(viewport.height);
+    match placement {
+        MovePlacement::Left => Bounds::new(point(px(0.), px(0.)), size(width, viewport.height)),
+        MovePlacement::Right => Bounds::new(
+            point(viewport.width - width, px(0.)),
+            size(width, viewport.height),
+        ),
+        MovePlacement::Above => Bounds::new(point(px(0.), px(0.)), size(viewport.width, width)),
+        MovePlacement::Below => Bounds::new(
+            point(px(0.), viewport.height - width),
+            size(viewport.width, width),
+        ),
+        MovePlacement::Tab => Bounds::new(point(px(0.), px(0.)), viewport),
+    }
+}
+
+/// `element` with a border of any width on all sides.
+fn bordered<E: Styled>(mut element: E, width: Pixels) -> E {
+    let width = Some(AbsoluteLength::Pixels(width));
+    element.style().border_widths = EdgesRefinement {
+        top: width,
+        right: width,
+        bottom: width,
+        left: width,
+    };
+    element
 }
 
 fn drop_highlight(bounds: Bounds<Pixels>, placement: MovePlacement) -> Bounds<Pixels> {
@@ -682,13 +795,6 @@ struct PendingDrawerPin {
     desired: bool,
 }
 
-#[derive(Clone)]
-struct TabContextMenu {
-    source: PaneActionTarget,
-    selected: usize,
-    scroll: ScrollHandle,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct PendingTransfer {
     source: SourceToken,
@@ -703,6 +809,11 @@ impl PendingTransfer {
 struct PendingClose {
     plan: ClosePlan,
     prompting: bool,
+    /// Further pane closes of one tab-menu action, assessed with `plan` and
+    /// covered by its one decision. Each is submitted only after the previous
+    /// one settles and is validated again then.
+    queued: VecDeque<ClosePlan>,
+    confirmed: bool,
 }
 impl PendingClose {
     fn matches_response(
@@ -733,9 +844,13 @@ impl PendingClose {
             return Ok(Some(self.plan.clone()));
         }
         match model {
-            Some(model) => model
-                .validate_close(&self.plan, true)
-                .map_err(|error| error.to_string())?,
+            Some(model) => {
+                for plan in std::iter::once(&self.plan).chain(&self.queued) {
+                    model
+                        .validate_close(plan, true)
+                        .map_err(|error| error.to_string())?;
+                }
+            }
             None => return Err("Close target is gone".into()),
         }
         Ok(Some(self.plan.clone()))
@@ -745,6 +860,20 @@ impl PendingClose {
             if !self.prompting
                 && self.matches_response(*request_id, *source, model)
                 && self.plan.target == CloseTarget::Window)
+    }
+}
+/// What a close confirmation says and offers; the second answer confirms.
+struct ClosePrompt<'a> {
+    title: &'a str,
+    detail: &'a str,
+    answers: &'a [&'a str],
+}
+/// How many tabs of a stopped multi-tab close remain open.
+fn tabs_stayed_open(count: usize) -> String {
+    if count == 1 {
+        "1 tab stayed open".to_owned()
+    } else {
+        format!("{count} tabs stayed open")
     }
 }
 fn admit_close(
@@ -758,6 +887,8 @@ fn admit_close(
     Ok(PendingClose {
         plan,
         prompting: false,
+        queued: VecDeque::new(),
+        confirmed,
     })
 }
 pub struct Workspace {
@@ -783,6 +914,8 @@ pub struct Workspace {
     worker_finished: Arc<AtomicBool>,
     split_bounds: HashMap<LayoutKey, Bounds<Pixels>>,
     slot_bounds: HashMap<LayoutKey, Bounds<Pixels>>,
+    /// Each group's empty tab bar space after its new-tab actions.
+    tab_voids: HashMap<LayoutKey, Bounds<Pixels>>,
     tab_scrolls: HashMap<LayoutKey, TabScroll>,
     drawer_scroll: ScrollHandle,
     drop_target: Option<DropTarget>,
@@ -809,7 +942,12 @@ pub struct Workspace {
     drawer_collapsed: HashSet<ScreenKey>,
     drawer_hovered: Option<ScreenKey>,
     drawer_pane_hovered: Option<(ScreenKey, String)>,
-    drawer_drop: Option<ScreenDrop>,
+    /// The Drawer Screen drag in progress or its held drop.
+    drawer_drag: Option<ScreenDragSession>,
+    /// The last pressed Drawer row and its press height in list content coordinates.
+    drawer_press: Option<(ScreenKey, f32)>,
+    /// Drawer row slots measured at the last prepaint, without drag offsets.
+    drawer_row_slots: Rc<RefCell<HashMap<ScreenKey, RowSlot>>>,
     drawer_pending: Option<PendingDrawerPin>,
     wheel_navigation: WheelNavigation,
     pending_zoom: HashSet<Uuid>,
@@ -1030,7 +1168,7 @@ impl Workspace {
         let activation_subscription = cx.observe_window_activation(window, |this, window, cx| {
             this.notification_window_active = window.is_window_active();
             this.refresh_notification_watch(cx);
-            if !window.is_window_active() && this.drawer_drop.take().is_some() {
+            if !window.is_window_active() && this.cancel_screen_drag() {
                 cx.stop_active_drag(window);
                 cx.notify();
             }
@@ -1048,7 +1186,7 @@ impl Workspace {
                 this.refresh_notification_watch(cx);
             });
         let drawer_bounds_subscription = cx.observe_window_bounds(window, |this, window, cx| {
-            if this.drawer_drop.take().is_some() {
+            if this.cancel_screen_drag() {
                 cx.stop_active_drag(window);
                 cx.notify();
             }
@@ -1115,6 +1253,7 @@ impl Workspace {
                 worker_finished: worker.finished.clone(),
                 split_bounds: HashMap::new(),
                 slot_bounds: HashMap::new(),
+                tab_voids: HashMap::new(),
                 tab_scrolls: HashMap::new(),
                 drawer_scroll: ScrollHandle::new(),
                 drop_target: None,
@@ -1141,7 +1280,9 @@ impl Workspace {
                 drawer_collapsed: HashSet::new(),
                 drawer_hovered: None,
                 drawer_pane_hovered: None,
-                drawer_drop: None,
+                drawer_drag: None,
+                drawer_press: None,
+                drawer_row_slots: Rc::default(),
                 drawer_pending: None,
                 wheel_navigation: WheelNavigation::default(),
                 pending_zoom: HashSet::new(),
@@ -1268,7 +1409,9 @@ impl Workspace {
             self.drawer_visible = self.drawer_authoritative_pinned;
         }
         self.drawer_width = snapshot.drawer().sidebar_width.clamp(150, 400);
-        self.drawer_drop = None;
+        if self.cancel_screen_drag() {
+            cx.stop_active_drag(window);
+        }
         self.drawer_edge_reveal = snapshot.drawer().edge_reveal;
         if self.drawer_visible {
             self.drawer_overlay_open = false;
@@ -1423,6 +1566,7 @@ impl Workspace {
         self.drop_target = None;
         self.split_bounds.clear();
         self.slot_bounds.clear();
+        self.tab_voids.clear();
         gpui_kit::component::theme::Theme::update(cx, |theme| {
             theme.font_size = px(16. * zoom.window_scale());
         });
@@ -1791,19 +1935,45 @@ impl Workspace {
         } else {
             format!("Running sessions: {}", plan.busy_count)
         };
+        self.prompt_close(
+            plan,
+            VecDeque::new(),
+            ClosePrompt {
+                title: &title,
+                detail: &detail,
+                answers: if remote_terminate {
+                    &["Cancel", "Terminate"]
+                } else {
+                    &["Keep open", "Close"]
+                },
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Shows one confirmation for `plan` and its queued closes; only the
+    /// confirming answer submits them, after validating each again.
+    fn prompt_close(
+        &mut self,
+        plan: ClosePlan,
+        queued: VecDeque<ClosePlan>,
+        prompt: ClosePrompt,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let request_id = plan.request_id;
         self.pending_close = Some(PendingClose {
-            plan: plan.clone(),
+            plan,
             prompting: true,
+            queued,
+            confirmed: false,
         });
         let prompt = window.prompt(
             PromptLevel::Warning,
-            &title,
-            Some(&detail),
-            if remote_terminate {
-                &["Cancel", "Terminate"]
-            } else {
-                &["Keep open", "Close"]
-            },
+            prompt.title,
+            Some(prompt.detail),
+            prompt.answers,
             cx,
         );
         cx.spawn_in(window, async move |this, cx| {
@@ -1819,9 +1989,13 @@ impl Workspace {
                 let Some(decision) = decision else {
                     return;
                 };
-                this.pending_close = None;
+                let queued = this
+                    .pending_close
+                    .take()
+                    .map(|pending| pending.queued)
+                    .unwrap_or_default();
                 match decision {
-                    Ok(Some(plan)) => this.submit_close(plan, true, cx),
+                    Ok(Some(plan)) => this.submit_close_queued(plan, true, queued, cx),
                     Ok(None) => {}
                     Err(error) => this.status = error,
                 }
@@ -1830,6 +2004,161 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Closes several tabs of one captured Screen. Every pane is assessed
+    /// now; busy or unresolved ones get one confirmation for all of them.
+    /// The closes then run one after another through the single-pane close,
+    /// each validated again when it is submitted, and the first rejection
+    /// leaves the remaining tabs open.
+    fn request_close_tabs_captured(
+        &mut self,
+        source: SourceToken,
+        screen: &str,
+        panes: Vec<String>,
+        titles: &HashMap<String, String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(model) = self
+            .model_for_source(source.source_id())
+            .filter(|model| model.source_token() == source)
+        else {
+            return;
+        };
+        if panes.is_empty() || !self.owns_surface(source, &model.screen_key(screen)) {
+            return;
+        }
+        self.wheel_navigation.reset();
+        self.float_gesture = None;
+        self.tab_context_menu = None;
+        self.close_profile_picker(window, cx);
+        self.dismiss_templates(window, cx);
+        if self.pending_close.is_some() {
+            self.status = "A close is still in progress".into();
+            cx.notify();
+            return;
+        }
+        let model = self
+            .model_for_source(source.source_id())
+            .expect("checked source");
+        let mut request_id = self.next_close_id;
+        let mut plans = VecDeque::new();
+        for pane in panes {
+            request_id = request_id.saturating_add(1);
+            match model.assess_close(
+                request_id,
+                CloseTarget::Pane {
+                    screen: screen.to_owned(),
+                    pane,
+                },
+            ) {
+                Ok(plan) => plans.push_back(plan),
+                Err(error) => {
+                    self.status = error.to_string();
+                    cx.notify();
+                    return;
+                }
+            }
+        }
+        self.next_close_id = request_id;
+        let count = plans.len();
+        let mut busy_sessions = BTreeSet::new();
+        let mut busy_tabs = Vec::new();
+        let mut unresolved = 0;
+        for plan in &plans {
+            unresolved += plan.unresolved_count;
+            let mut busy = false;
+            for affected in plan.affected.iter().filter(|affected| affected.busy) {
+                busy = true;
+                if let CloseIdentity::Pane {
+                    session: Some(session),
+                    ..
+                }
+                | CloseIdentity::Session { session, .. } = &affected.identity
+                {
+                    busy_sessions.insert(session.clone());
+                }
+            }
+            if let (true, CloseTarget::Pane { pane, .. }) = (busy, &plan.target) {
+                busy_tabs.push(
+                    titles
+                        .get(pane)
+                        .cloned()
+                        .unwrap_or_else(|| "Terminal".into()),
+                );
+            }
+        }
+        let needs_confirmation = plans.iter().any(ClosePlan::needs_confirmation);
+        let first = plans.pop_front().expect("at least one pane");
+        if !needs_confirmation {
+            self.submit_close_queued(first, false, plans, cx);
+            return;
+        }
+        let title = if count == 1 {
+            "Close terminal pane?".to_owned()
+        } else {
+            format!("Close {count} tabs?")
+        };
+        let detail = if unresolved != 0 {
+            "Session state is still loading.".to_owned()
+        } else {
+            let mut names = busy_tabs
+                .iter()
+                .take(3)
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if busy_tabs.len() > 3 {
+                names.push_str(&format!(" and {} more", busy_tabs.len() - 3));
+            }
+            format!("Running sessions: {} ({names})", busy_sessions.len())
+        };
+        self.prompt_close(
+            first,
+            plans,
+            ClosePrompt {
+                title: &title,
+                detail: &detail,
+                answers: &["Keep open", "Close"],
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Submits the next queued close once the previous one settled, if its
+    /// Screen is still the shown one and its impact is still what was decided.
+    fn continue_close_queue(
+        &mut self,
+        mut queued: VecDeque<ClosePlan>,
+        confirmed: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(plan) = queued.pop_front() else {
+            self.focus_current(window, cx);
+            cx.notify();
+            return;
+        };
+        let check = match (&plan.target, plan.source_token(), self.close_model(&plan)) {
+            (CloseTarget::Pane { screen, .. }, Some(source), Some(model))
+                if self.owns_surface(source, &model.screen_key(screen)) =>
+            {
+                model
+                    .validate_close(&plan, confirmed)
+                    .map_err(|error| error.to_string())
+            }
+            _ => Err("The Screen changed".to_owned()),
+        };
+        match check {
+            Ok(()) => self.submit_close_queued(plan, confirmed, queued, cx),
+            Err(error) => {
+                self.status = format!("{error}; {}", tabs_stayed_open(queued.len() + 1));
+                self.focus_current(window, cx);
+                cx.notify();
+            }
+        }
     }
 
     fn request_close_captured(
@@ -1865,8 +2194,18 @@ impl Workspace {
         self.request_close(target, window, cx);
     }
     fn submit_close(&mut self, plan: ClosePlan, confirmed: bool, cx: &mut Context<Self>) {
+        self.submit_close_queued(plan, confirmed, VecDeque::new(), cx);
+    }
+    fn submit_close_queued(
+        &mut self,
+        plan: ClosePlan,
+        confirmed: bool,
+        queued: VecDeque<ClosePlan>,
+        cx: &mut Context<Self>,
+    ) {
         match admit_close(&self.commands, plan, confirmed) {
-            Ok(pending) => {
+            Ok(mut pending) => {
+                pending.queued = queued;
                 if pending.plan.target == CloseTarget::Window {
                     self.cancel_remote_create_follow();
                 }
@@ -2115,7 +2454,14 @@ impl Workspace {
             self.drawer_collapsed.clear();
             self.drawer_hovered = None;
             self.drawer_pane_hovered = None;
-            self.drawer_drop = None;
+            if self
+                .drawer_drag
+                .take()
+                .is_some_and(|session| session.is_dragging())
+            {
+                cx.stop_active_drag(window);
+            }
+            self.drawer_press = None;
             self.drawer_pending = None;
             self.wheel_navigation.reset();
             self.appearance_error = None;
@@ -2181,6 +2527,7 @@ impl Workspace {
                 &mut self.slot_bounds,
             );
             self.tab_scrolls.retain(|id, _| slots.contains(id));
+            self.tab_voids.retain(|id, _| slots.contains(id));
             for slot in slots {
                 self.tab_scrolls.entry(slot).or_default();
             }
@@ -2188,6 +2535,7 @@ impl Workspace {
         } else {
             self.split_bounds.clear();
             self.slot_bounds.clear();
+            self.tab_voids.clear();
             self.tab_scrolls.clear();
         }
         self.panes.retain(|pane, view| {
@@ -2316,7 +2664,10 @@ impl Workspace {
             self.float_gesture = None;
         }
         self.drop_target = None;
-        self.drawer_drop = None;
+        self.drawer_row_slots
+            .borrow_mut()
+            .retain(|key, _| opened_keys.contains(key));
+        self.reconcile_screen_drag(&window_model, window, cx);
         self.model = Some(window_model);
         self.reconcile_terminal_menu(window, cx);
         self.host_update_reconcile(window, cx);
@@ -2794,7 +3145,7 @@ impl Workspace {
         if event.keystroke.key == "escape" && cx.has_active_drag() {
             cx.stop_active_drag(window);
             self.drop_target = None;
-            self.drawer_drop = None;
+            self.cancel_screen_drag();
             cx.stop_propagation();
             cx.notify();
             return;
@@ -3178,8 +3529,15 @@ impl Workspace {
                             self.close_model(&pending.plan),
                         )
                     }) {
-                        self.pending_close = None;
-                        self.status = reason;
+                        let remaining = self
+                            .pending_close
+                            .take()
+                            .map_or(0, |pending| pending.queued.len());
+                        self.status = if remaining == 0 {
+                            reason
+                        } else {
+                            format!("{reason}; {}", tabs_stayed_open(remaining))
+                        };
                         self.focus_current(window, cx);
                         cx.notify();
                     }
@@ -3192,9 +3550,8 @@ impl Workspace {
                             self.close_model(&pending.plan),
                         )
                     }) {
-                        self.pending_close = None;
-                        self.focus_current(window, cx);
-                        cx.notify();
+                        let pending = self.pending_close.take().expect("matched close");
+                        self.continue_close_queue(pending.queued, pending.confirmed, window, cx);
                     }
                 }
                 update @ Update::WindowCloseApproved { .. } => {
@@ -3748,7 +4105,13 @@ impl Workspace {
                 Some(DropTarget::Body { slot, .. }) => Some(slot),
                 _ => None,
             };
-            if next_body.is_some() && previous_body.is_none() {
+            let marks = |target: &Option<DropTarget>| {
+                matches!(
+                    target,
+                    Some(DropTarget::Body { .. } | DropTarget::Layout { .. })
+                )
+            };
+            if marks(&target) && !marks(&self.drop_target) {
                 self.drop_motion_generation = self.drop_motion_generation.wrapping_add(1);
             }
             self.drop_motion_duration = if previous_body
@@ -3766,7 +4129,7 @@ impl Workspace {
 
     fn tab_header_height(&self) -> Pixels {
         tab_header_pixels(
-            self.appearance.font_size,
+            self.appearance.tab_height,
             self.appearance.zoom.window_scale(),
         )
     }
@@ -3796,6 +4159,24 @@ impl Workspace {
                 return None;
             }
         }
+        // As in the web client, the layout's own edges win over the groups'.
+        if let (Some(viewport), LayoutNode::Split { id: root_id, .. }) = (self.float_viewport, root)
+        {
+            let activation = px(LAYOUT_EDGE_ACTIVATION * self.appearance.zoom.window_scale());
+            if let Some(placement) = model
+                .maximized_slot_id()
+                .is_none()
+                .then(|| layout_edge_zone(viewport, position, activation))
+                .flatten()
+            {
+                if model
+                    .check_move(drag, root_id.as_str(), placement)
+                    .is_ok_and(|moves| moves)
+                {
+                    return Some(DropTarget::Layout { placement });
+                }
+            }
+        }
         self.slot_bounds.iter().find_map(|(slot, bounds)| {
             if slot.screen() != &screen {
                 return None;
@@ -3809,21 +4190,46 @@ impl Workspace {
                     return None;
                 };
                 let scroll = self.tab_scrolls.get(slot)?;
-                let (index, marker) = tab_insertion(
+                let relative = |marker: Bounds<Pixels>| Bounds {
+                    origin: point(marker.left() - bounds.left(), marker.top() - bounds.top()),
+                    size: marker.size,
+                };
+                // As in dockview: over a tab, mark it and place before it;
+                // over the empty bar space, mark that space and place last.
+                let (before, marker) = match tab_drop(
                     scroll.handle.bounds(),
                     position,
                     pane_ids.len(),
                     scroll.handle.offset().x,
                     self.appearance.zoom.window_scale(),
                     |index| scroll.handle.bounds_for_item(index),
-                )?;
-                let before = pane_ids.get(index).map(ToString::to_string);
+                ) {
+                    Some((index, marker)) => (
+                        tab_drop_before(
+                            &pane_ids
+                                .iter()
+                                .map(|pane| pane.as_str())
+                                .collect::<Vec<_>>(),
+                            index,
+                            drag.pane_id(),
+                        )
+                        .map(ToOwned::to_owned),
+                        marker,
+                    ),
+                    None => (
+                        None,
+                        *self
+                            .tab_voids
+                            .get(slot)
+                            .filter(|void| void.contains(&position))?,
+                    ),
+                };
                 model
                     .can_place_tab(drag, slot.node_id(), before.as_deref())
                     .then(|| DropTarget::Header {
                         slot: slot.clone(),
                         before,
-                        marker_x: marker - bounds.left(),
+                        marker: relative(marker),
                     })
             } else {
                 let placement = body_drop_zone(*bounds, self.tab_header_height(), position)?;
@@ -3859,6 +4265,25 @@ impl Workspace {
                             Command::MovePane {
                                 drag: drag.origin.clone(),
                                 target: slot.node_id().to_owned(),
+                                placement,
+                            },
+                            cx,
+                        ),
+                        Ok(false) => {}
+                        Err(error) => self.status = error.to_string(),
+                    }
+                }
+                DropTarget::Layout { placement } => {
+                    let root = model
+                        .presentation_root()
+                        .map(|root| root.id().to_string())
+                        .unwrap_or_default();
+                    match model.check_move(&drag.origin, &root, placement) {
+                        Ok(true) => self.send_captured(
+                            drag.origin.source_token(),
+                            Command::MovePane {
+                                drag: drag.origin.clone(),
+                                target: root,
                                 placement,
                             },
                             cx,
@@ -4213,19 +4638,27 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
-        let (Some(DropTarget::Body { slot, placement }), Some(viewport)) =
-            (&self.drop_target, self.float_viewport)
-        else {
-            return None;
-        };
-        let bounds = self.slot_bounds.get(slot)?;
-        let local = drop_highlight(*bounds, *placement);
-        let target = Bounds {
-            origin: point(
-                bounds.origin.x + local.origin.x - viewport.origin.x,
-                bounds.origin.y + local.origin.y - viewport.origin.y,
+        let viewport = self.float_viewport?;
+        let target = match &self.drop_target {
+            Some(DropTarget::Body { slot, placement }) => {
+                // Like the web client, the marker covers the group's content
+                // below its tab bar, the area the body drop zones measure.
+                let bounds = slot_body(*self.slot_bounds.get(slot)?, self.tab_header_height())?;
+                let local = drop_highlight(bounds, *placement);
+                Bounds {
+                    origin: point(
+                        bounds.origin.x + local.origin.x - viewport.origin.x,
+                        bounds.origin.y + local.origin.y - viewport.origin.y,
+                    ),
+                    size: local.size,
+                }
+            }
+            Some(DropTarget::Layout { placement }) => layout_edge_marker(
+                viewport.size,
+                *placement,
+                px(LAYOUT_EDGE_MARKER * self.appearance.zoom.window_scale()),
             ),
-            size: local.size,
+            _ => return None,
         };
         let bounds = transition(
             format!("drop-highlight-{}", self.drop_motion_generation),
@@ -4245,9 +4678,11 @@ impl Workspace {
                 .top(bounds.origin.y)
                 .w(bounds.size.width)
                 .h(bounds.size.height)
-                .border_2()
-                .border_color(rgb(self.appearance.accent))
-                .bg(rgba((self.appearance.accent << 8) | 0x44))
+                // The theme's `hover-bg` fill and `drag-over-border`.
+                .bg(rgba(self.appearance.hover_overlay))
+                .when_some(self.appearance.drag_over_border, |marker, border| {
+                    bordered(marker, px(border.width)).border_color(rgb(border.color))
+                })
                 .into_any_element(),
         )
     }
@@ -4278,6 +4713,11 @@ impl Workspace {
                 let remote = self.is_remote_selected();
                 let ready = identity
                     .is_some_and(|source| self.execution_token(source.source_id()) == Some(source));
+                let focused = self
+                    .selected_model()
+                    .and_then(SourceWorkspace::focused_pane)
+                    .is_some_and(|pane| pane_ids.iter().any(|id| id.as_str() == pane));
+                let chrome_scale = self.appearance.zoom.window_scale();
                 let mut tabs = div()
                     .on_children_prepainted(move |_, window, _| {
                         let width = tracked.handle.bounds().size.width;
@@ -4318,8 +4758,7 @@ impl Workspace {
                     .flex()
                     .flex_initial()
                     .min_w_0()
-                    .h(chrome_rems((self.appearance.font_size + 19.).max(32.)))
-                    .gap_1()
+                    .h(chrome_rems(self.appearance.tab_height))
                     .bg(rgb(self.appearance.raised))
                     .overflow_x_scroll()
                     .restrict_scroll_to_axis()
@@ -4377,7 +4816,7 @@ impl Workspace {
                     let drag_title = title.clone();
                     let drag_appearance = self.appearance.clone();
                     tabs = tabs.child(
-                        screen_motion::tab_surface(&self.appearance, active)
+                        screen_motion::tab_surface(&self.appearance, active, focused, index == 0)
                             .id(SharedString::from(format!("tab-{slot_key}-{pane_key}")))
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 if ready && !GlobalState::is_in_deferred_context(cx) {
@@ -4410,13 +4849,14 @@ impl Workspace {
                             ))
                             .on_mouse_down(
                                     MouseButton::Right,
-                                    cx.listener(move |this, _, window, cx| {
+                                    cx.listener(move |this, event: &MouseDownEvent, window, cx| {
                                         cx.stop_propagation();
                                         if let Some(source) = tab_source {
                                             this.open_tab_context_menu_captured(
                                                 source,
                                                 &right_screen,
                                                 &right_click,
+                                                event.position,
                                                 window,
                                                 cx,
                                             );
@@ -4439,17 +4879,17 @@ impl Workspace {
                                             origin,
                                             owner: cx.entity().entity_id(),
                                         },
-                                        move |_, _, _, cx| {
+                                        move |_, grab, _, cx| {
                                             cx.new(|_| DragPreview {
                                                 title: drag_title.clone(),
                                                 active,
                                                 appearance: drag_appearance.clone(),
+                                                grab,
                                             })
                                         },
                                     )
                                 },
                             )
-                            .child(Icon::new(IconName::SquareTerminal).xsmall())
                             .child(
                                 screen_motion::tab_label(title.clone())
                                     .id(SharedString::from(format!("drag-tab-{slot_key}-{pane_key}")))
@@ -4468,17 +4908,22 @@ impl Workspace {
                                         })
                                     }),
                             )
-                            .child(self.render_tab_context_menu(pane.as_str(), cx))
                             .child(
                                 Button::new(SharedString::from(format!(
                                     "close-{slot_key}-{pane_key}"
                                 )))
                                 .accessibility_label(format!("Close {title}"))
                                 .tooltip(format!("Close {title}"))
-                                .icon(Icon::new(IconName::X))
+                                .child(
+                                    Icon::new(IconName::X)
+                                        .size(chrome_rems(screen_motion::TAB_CLOSE_ICON)),
+                                )
                                 .ghost()
                                 .compact()
-                                .xsmall()
+                                .with_size(px(screen_motion::TAB_CLOSE_BOX * chrome_scale))
+                                .size(chrome_rems(screen_motion::TAB_CLOSE_BOX))
+                                .p_0()
+                                .ml(chrome_rems(screen_motion::TAB_LABEL_GAP))
                                 .disabled(!ready)
                                 .on_click(
                                     move |_, window, cx| {
@@ -4502,24 +4947,33 @@ impl Workspace {
                     );
                 }
                 let header = div()
+                    .group(screen_motion::TAB_BAR_GROUP)
                     .flex()
                     .items_center()
                     .flex_none()
-                    .h(chrome_rems((self.appearance.font_size + 19.).max(32.)))
+                    .h(chrome_rems(self.appearance.tab_height))
                     .bg(rgb(self.appearance.raised))
                     .child(tabs)
                     .child(self.render_group_new_tab_actions(id.as_str(), selected, window, cx))
-                    .child(div().flex_1().min_w_0())
+                    .child(div().relative().flex_1().min_w_0().h_full().child({
+                        let entity = cx.entity();
+                        let void_key = slot_key.clone();
+                        canvas(
+                            move |bounds, _, cx| {
+                                entity.update(cx, |this, _| {
+                                    this.tab_voids.insert(void_key.clone(), bounds);
+                                })
+                            },
+                            |_, (), _, _| {},
+                        )
+                        .absolute()
+                        .size_full()
+                    }))
                     .child(self.render_group_actions(id.as_str(), selected, surface, cx));
-                let focused = self
-                    .selected_model()
-                    .and_then(SourceWorkspace::focused_pane)
-                    .is_some_and(|pane| pane_ids.iter().any(|id| id.as_str() == pane));
                 let bounds_id = slot_key.clone();
                 let bounds_source = identity;
                 let target = id.to_string();
                 let entity = cx.entity();
-                let chrome_scale = self.appearance.zoom.window_scale();
                 let mut slot = div()
                     .id(SharedString::from(format!("slot-{slot_key}")))
                     .relative()
@@ -4533,12 +4987,6 @@ impl Workspace {
                     .flex_col()
                     .min_w_0()
                     .min_h_0()
-                    .border_1()
-                    .border_color(rgb(if focused {
-                        self.appearance.border
-                    } else {
-                        self.appearance.subtle_border
-                    }))
                     .child(
                         canvas(
                             move |bounds, _, cx| {
@@ -4617,17 +5065,20 @@ impl Workspace {
                 } {
                     Some(DropTarget::Header {
                         slot: target,
-                        marker_x,
+                        marker,
                         ..
                     }) if target == &slot_key => {
                         slot = slot.child(
                             div()
                                 .absolute()
-                                .left(*marker_x)
-                                .top_0()
-                                .w(chrome_rems(3.))
-                                .h(self.tab_header_height())
-                                .bg(rgb(self.appearance.accent)),
+                                .left(marker.left())
+                                .top(marker.top())
+                                .w(marker.size.width)
+                                .h(marker.size.height)
+                                .bg(rgba(self.appearance.hover_overlay))
+                                .when_some(self.appearance.drag_over_border, |mark, border| {
+                                    bordered(mark, px(border.width)).border_color(rgb(border.color))
+                                }),
                         );
                     }
                     _ => {}
@@ -4677,22 +5128,41 @@ impl Workspace {
                         .absolute()
                         .size_full(),
                     );
+                // As in the web client, groups meet at a 1 px line; its wider
+                // resize handle is laid over both neighbors after them, so it
+                // stays on top of their content.
+                let ratios: Vec<f32> = (0..children.len())
+                    .map(|index| {
+                        sizes
+                            .get(index)
+                            .copied()
+                            .filter(|n| n.is_finite() && *n > 0.)
+                            .unwrap_or(1.) as f32
+                    })
+                    .collect();
+                let total = ratios.iter().sum::<f32>().max(f32::EPSILON);
+                let mut before = 0f32;
+                let mut handles = Vec::new();
                 for (index, child) in children.iter().enumerate() {
-                    let ratio = sizes
-                        .get(index)
-                        .copied()
-                        .filter(|n| n.is_finite() && *n > 0.)
-                        .unwrap_or(1.);
+                    let ratio = ratios[index];
                     split = split.child(
                         div()
                             .flex_basis(px(0.))
-                            .flex_grow(ratio as f32)
+                            .flex_grow(ratio)
                             .min_w_0()
                             .min_h_0()
                             .overflow_hidden()
                             .child(self.render_node(child, surface, projection, window, cx)),
                     );
+                    before += ratio;
                     if index + 1 < children.len() {
+                        split = split.child(
+                            div()
+                                .flex_none()
+                                .bg(rgb(self.appearance.subtle_border))
+                                .when(horizontal, |view| view.w(px(1.)).h_full())
+                                .when(!horizontal, |view| view.h(px(1.)).w_full()),
+                        );
                         let node = split_key.clone();
                         let source = self.selected_model().map(SourceWorkspace::source_token);
                         let revision = self
@@ -4701,13 +5171,28 @@ impl Workspace {
                             .map(|screen| screen.revision);
                         let axis = axis.clone();
                         let sizes = sizes.clone();
-                        split = split.child(
+                        let offset = (before / total).clamp(0., 1.);
+                        let hit = chrome_rems(SPLIT_HANDLE);
+                        let half = chrome_rems(-SPLIT_HANDLE / 2.);
+                        handles.push(
                             div()
                                 .id(SharedString::from(format!("divider-{split_key}-{index}")))
-                                .flex_none()
-                                .bg(rgb(self.appearance.border))
-                                .when(horizontal, |view| view.w(chrome_rems(5.)).h_full())
-                                .when(!horizontal, |view| view.h(chrome_rems(5.)).w_full())
+                                .absolute()
+                                .occlude()
+                                .when(horizontal, |view| {
+                                    view.top_0()
+                                        .bottom_0()
+                                        .left(relative(offset))
+                                        .ml(half)
+                                        .w(hit)
+                                })
+                                .when(!horizontal, |view| {
+                                    view.left_0()
+                                        .right_0()
+                                        .top(relative(offset))
+                                        .mt(half)
+                                        .h(hit)
+                                })
                                 .when(interactive, |view| {
                                     view.cursor(if horizontal {
                                         CursorStyle::ResizeColumn
@@ -4740,6 +5225,7 @@ impl Workspace {
                         );
                     }
                 }
+                split = split.children(handles);
                 split.into_any_element()
             }
         }
@@ -4768,7 +5254,7 @@ impl Workspace {
             );
         let left = projected.left() - viewport.left();
         let top = projected.top() - viewport.top();
-        let header_height = chrome_rems((self.appearance.font_size + 19.).max(32.));
+        let header_height = chrome_rems(self.appearance.tab_height);
         let move_id = id.clone();
         let dock_id = id.clone();
         let maximize_id = id.clone();
@@ -4796,8 +5282,10 @@ impl Workspace {
             .flex_col()
             .overflow_hidden()
             .occlude()
-            .border_2()
-            .border_color(rgb(self.appearance.accent))
+            // The web client's floating group frame.
+            .border_1()
+            .border_color(rgb(self.appearance.border))
+            .shadow_lg()
             .bg(rgb(self.appearance.surface))
             .on_mouse_down(
                 MouseButton::Left,
@@ -4957,6 +5445,7 @@ impl Workspace {
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.sample_screen_motion(window, cx);
+        self.expire_screen_drag(cx);
         let mut messages = Vec::new();
         if !self.status.is_empty() {
             messages.push(self.status.clone());
@@ -5181,8 +5670,6 @@ impl Render for Workspace {
                         .min_h_0()
                         .min_w_0()
                         .overflow_hidden()
-                        .p_1()
-                        .pt_0()
                         .child(
                             canvas(
                                 move |bounds, _, cx| {
@@ -5406,6 +5893,7 @@ impl Render for Workspace {
             })
             .when_some(template_overlay, |view, overlay| view.child(overlay))
             .children(self.render_terminal_menu(window))
+            .children(self.render_tab_context_menu(window, cx))
     }
 }
 fn first_selected_slot(model: &SourceWorkspace, node: &LayoutNode) -> Option<(String, String)> {
@@ -5580,7 +6068,7 @@ mod tests {
     };
     use std::{
         cell::Cell,
-        collections::HashMap,
+        collections::{HashMap, VecDeque},
         time::{Duration, Instant},
     };
 
@@ -5651,9 +6139,9 @@ mod tests {
 
     #[test]
     fn scaled_tab_header_and_insertion_marker_match_visible_geometry() {
-        assert_eq!(tab_header_pixels(13., 0.5), px(17.));
-        assert_eq!(tab_header_pixels(13., 1.25), px(41.));
-        assert_eq!(tab_header_pixels(13., 3.), px(97.));
+        assert_eq!(tab_header_pixels(28., 0.5), px(14.));
+        assert_eq!(tab_header_pixels(32., 1.25), px(40.));
+        assert_eq!(tab_header_pixels(32., 3.), px(96.));
         let viewport = Bounds::new(point(px(0.), px(0.)), size(px(540.), px(97.)));
         let tab = |index| {
             Some(Bounds::new(
@@ -5661,17 +6149,29 @@ mod tests {
                 size(px(180.), px(97.)),
             ))
         };
+        // At 3x zoom the half-mark minimum is 300 px, so a 180 px tab is
+        // marked whole; a wider one is marked on the pointer's half.
         assert_eq!(
-            super::tab_insertion(viewport, point(px(530.), px(48.)), 3, px(0.), 3., tab),
-            Some((3, px(531.)))
+            super::tab_drop(viewport, point(px(530.), px(48.)), 3, px(0.), 3., tab),
+            Some((
+                2,
+                Bounds::new(point(px(360.), px(0.)), size(px(180.), px(97.)))
+            ))
+        );
+        assert_eq!(
+            super::tab_drop(viewport, point(px(530.), px(48.)), 3, px(0.), 1., tab),
+            Some((
+                2,
+                Bounds::new(point(px(450.), px(0.)), size(px(90.), px(97.)))
+            ))
         );
         let slot = Bounds::new(point(px(0.), px(0.)), size(px(540.), px(400.)));
         assert_eq!(
-            super::body_drop_zone(slot, tab_header_pixels(13., 3.), point(px(200.), px(96.))),
+            super::body_drop_zone(slot, tab_header_pixels(32., 3.), point(px(200.), px(95.))),
             None
         );
         assert!(
-            super::body_drop_zone(slot, tab_header_pixels(13., 3.), point(px(200.), px(150.)))
+            super::body_drop_zone(slot, tab_header_pixels(32., 3.), point(px(200.), px(150.)))
                 .is_some()
         );
     }
@@ -5684,6 +6184,8 @@ mod tests {
         let pending = PendingClose {
             plan: plan.clone(),
             prompting: false,
+            queued: VecDeque::new(),
+            confirmed: false,
         };
         let approval = |request_id, source| Update::WindowCloseApproved { request_id, source };
         let foreign = SourceWorkspace::new("00000000-0000-4000-8000-000000000002".parse().unwrap());
@@ -5700,12 +6202,16 @@ mod tests {
             .matches_window_approval(&approval(9, Some(model.source_token())), Some(&foreign)));
         assert!(!PendingClose {
             plan,
-            prompting: true
+            prompting: true,
+            queued: VecDeque::new(),
+            confirmed: false,
         }
         .matches_window_approval(&approval(9, Some(model.source_token())), Some(&model)));
         let pane = PendingClose {
             plan: ClosePlan::startup_window(9),
             prompting: false,
+            queued: VecDeque::new(),
+            confirmed: false,
         };
         assert!(pane.matches_window_approval(&approval(9, None), None));
         assert!(
@@ -5878,6 +6384,8 @@ mod tests {
         let startup = PendingClose {
             plan: ClosePlan::startup_window(4),
             prompting: true,
+            queued: VecDeque::new(),
+            confirmed: false,
         };
         assert!(startup.is_prompt_for(4));
         assert!(
@@ -5896,6 +6404,8 @@ mod tests {
         let removed = PendingClose {
             plan: model.assess_close(5, CloseTarget::Window).unwrap(),
             prompting: true,
+            queued: VecDeque::new(),
+            confirmed: false,
         };
         let replacement =
             SourceWorkspace::new("00000000-0000-4000-8000-000000000002".parse().unwrap());
@@ -6258,6 +6768,35 @@ mod tests {
     }
 
     #[test]
+    fn layout_edges_react_within_their_activation_and_mark_a_band() {
+        use gpui_kit::{point, px, size, Bounds};
+        use splitty_client_core::workspace::MovePlacement::*;
+        let viewport = Bounds::new(point(px(200.), px(40.)), size(px(900.), px(600.)));
+        for (x, y, expected) in [
+            (550., 635., Some(Below)),
+            (205., 300., Some(Left)),
+            (1095., 300., Some(Right)),
+            (550., 45., Some(Above)),
+            (550., 300., None),
+            (550., 625., None),
+            (100., 300., None),
+        ] {
+            assert_eq!(
+                super::layout_edge_zone(viewport, point(px(x), px(y)), px(10.)),
+                expected
+            );
+        }
+        assert_eq!(
+            super::layout_edge_marker(viewport.size, Below, px(20.)),
+            Bounds::new(point(px(0.), px(580.)), size(px(900.), px(20.)))
+        );
+        assert_eq!(
+            super::layout_edge_marker(viewport.size, Right, px(20.)),
+            Bounds::new(point(px(880.), px(0.)), size(px(20.), px(600.)))
+        );
+    }
+
+    #[test]
     fn drop_zones_are_bounded_and_cover_center_and_four_edges() {
         use gpui_kit::{point, px, size, Bounds};
         use splitty_client_core::workspace::MovePlacement::*;
@@ -6297,18 +6836,24 @@ mod tests {
                 size(px(60.), px(32.)),
             ))
         };
-        for (x, expected_index, expected_marker) in
-            [(10., 0, 1.), (40., 1, 60.), (90., 2, 120.), (170., 3, 177.)]
+        // Narrow tabs are marked whole; the point beyond the last tab is the
+        // bar's empty space, not a tab.
+        for (x, expected_index, expected_left) in
+            [(10., 0, 0.), (40., 0, 0.), (90., 1, 60.), (170., 2, 120.)]
         {
             assert_eq!(
-                super::tab_insertion(viewport, point(px(x), px(16.)), 3, px(0.), 1., tab),
-                Some((expected_index, px(expected_marker))),
+                super::tab_drop(viewport, point(px(x), px(16.)), 3, px(0.), 1., tab),
+                Some((
+                    expected_index,
+                    Bounds::new(point(px(expected_left), px(0.)), size(px(60.), px(32.)))
+                )),
             );
         }
         assert_eq!(
-            super::tab_insertion(viewport, point(px(190.), px(16.)), 3, px(0.), 1., tab),
+            super::tab_drop(viewport, point(px(190.), px(16.)), 3, px(0.), 1., tab),
             None
         );
+        // A scrolled strip clips the marked tab to its visible part.
         let clipped = Bounds::new(point(px(100.), px(0.)), size(px(120.), px(32.)));
         let shifted = |index| {
             Some(Bounds::new(
@@ -6317,13 +6862,22 @@ mod tests {
             ))
         };
         assert_eq!(
-            super::tab_insertion(clipped, point(px(105.), px(16.)), 3, px(-20.), 1., shifted),
-            Some((1, px(120.))),
+            super::tab_drop(clipped, point(px(105.), px(16.)), 3, px(-20.), 1., shifted),
+            Some((
+                0,
+                Bounds::new(point(px(100.), px(0.)), size(px(20.), px(32.)))
+            )),
         );
         assert_eq!(
-            super::tab_insertion(clipped, point(px(99.), px(16.)), 3, px(-20.), 1., shifted),
+            super::tab_drop(clipped, point(px(99.), px(16.)), 3, px(-20.), 1., shifted),
             None
         );
+        // Moving right within a group lands after the hovered tab.
+        let panes = ["a", "b", "c"];
+        assert_eq!(super::tab_drop_before(&panes, 1, "a"), Some("c"));
+        assert_eq!(super::tab_drop_before(&panes, 2, "a"), None);
+        assert_eq!(super::tab_drop_before(&panes, 0, "c"), Some("a"));
+        assert_eq!(super::tab_drop_before(&panes, 1, "other"), Some("b"));
         let slot = Bounds::new(point(px(0.), px(0.)), size(px(200.), px(120.)));
         assert_eq!(
             super::body_drop_zone(slot, px(33.), point(px(100.), px(20.))),

@@ -3,35 +3,107 @@ use super::*;
 use crate::terminal::TerminalPresentation;
 use gpui_kit::base::{transition_with_status, MotionStatus};
 
-/// Shared tab geometry and colors; interaction is attached only by the live projection.
-pub(super) fn tab_surface(appearance: &NativeAppearance, active: bool) -> Div {
+// Fixed group tab geometry, as in the web client's dockview tabs. The bar
+// height, tab font size, accent line and all colors come from the theme
+// (`NativeAppearance`).
+/// Space before the title and after the close button.
+pub(super) const TAB_INSET: f32 = 14.;
+/// Space between the title and the close button's hit box.
+pub(super) const TAB_LABEL_GAP: f32 = 10.;
+pub(super) const TAB_MAX_WIDTH: f32 = 200.;
+/// The close button's hit box and its icon.
+pub(super) const TAB_CLOSE_BOX: f32 = 17.;
+pub(super) const TAB_CLOSE_ICON: f32 = 9.;
+/// The selected tab's accent line in a group without focus.
+const UNFOCUSED_ACCENT_OPACITY: f32 = 0.4;
+/// Group actions appear while the pointer is over their tab bar.
+pub(super) const TAB_BAR_GROUP: &str = "group-tab-bar";
+
+/// Shared tab geometry and colors; interaction is attached only by the live
+/// projection. `selected` is the group's visible tab, `group_focused` whether
+/// the group holds the focused pane, `first` whether the tab starts its strip.
+pub(super) fn tab_surface(
+    appearance: &NativeAppearance,
+    selected: bool,
+    group_focused: bool,
+    first: bool,
+) -> Div {
+    // Only the focused group's visible tab joins the pane content's surface.
+    let (background, text) = match (selected, group_focused) {
+        (true, true) => (appearance.surface, appearance.text),
+        (true, false) | (false, true) => (appearance.raised, appearance.secondary),
+        (false, false) => (appearance.raised, appearance.muted),
+    };
     div()
         .relative()
         .flex()
         .flex_none()
         .items_center()
-        .gap_2()
-        .pl_3()
-        .pr_1()
-        .bg(rgb(if active {
-            appearance.active
-        } else {
-            appearance.raised
-        }))
-        .text_color(rgb(if active {
-            appearance.text
-        } else {
-            appearance.secondary
-        }))
+        .h_full()
+        .max_w(chrome_rems(TAB_MAX_WIDTH))
+        .pl(chrome_rems(TAB_INSET))
+        .pr(chrome_rems(TAB_INSET))
+        .text_size(chrome_rems(appearance.tab_font_size))
+        .font_weight(FontWeight::MEDIUM)
+        .bg(rgb(background))
+        .text_color(rgb(text))
+        .when(!first, |tab| {
+            tab.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .top_0()
+                    .h_full()
+                    .w(px(1.))
+                    .bg(rgb(appearance.subtle_border)),
+            )
+        })
+        .when_some(appearance.tab_accent.filter(|_| selected), |tab, accent| {
+            tab.child(
+                div()
+                    .absolute()
+                    .left_0()
+                    .right_0()
+                    .h(chrome_rems(accent.thickness))
+                    .map(|line| {
+                        if accent.bottom {
+                            line.bottom_0()
+                        } else {
+                            line.top_0()
+                        }
+                    })
+                    .bg(rgb(accent.color))
+                    .when(!group_focused, |line| {
+                        line.opacity(UNFOCUSED_ACCENT_OPACITY)
+                    }),
+            )
+        })
 }
 
 pub(super) fn tab_label(title: String) -> Div {
     div()
-        .max_w(chrome_rems(180.))
+        .min_w_0()
         .overflow_hidden()
         .whitespace_nowrap()
         .text_ellipsis()
         .child(title)
+}
+
+/// An inert drawing of a tab's close button.
+fn passive_close_icon(disabled: bool, cx: &App) -> Div {
+    div()
+        .flex_none()
+        .flex()
+        .items_center()
+        .justify_center()
+        .ml(chrome_rems(TAB_LABEL_GAP))
+        .size(chrome_rems(TAB_CLOSE_BOX))
+        .text_color(if disabled {
+            cx.theme().muted_foreground.opacity(0.5)
+        } else {
+            cx.theme().secondary_foreground
+        })
+        .child(Icon::new(IconName::X).size(chrome_rems(TAB_CLOSE_ICON)))
 }
 
 // These are inert drawings of Kit's compact ghost icon-button geometry, not
@@ -345,8 +417,6 @@ impl Workspace {
             .w(outgoing.viewport.size.width)
             .h(outgoing.viewport.size.height)
             .overflow_hidden()
-            .p_1()
-            .pt_0()
             .bg(rgb(self.appearance.surface))
             .child(self.render_node(root, surface, &projection, window, cx))
             .children(Self::presented_terminals(root, outgoing));
@@ -387,13 +457,7 @@ impl Workspace {
             .get(id.as_str())
             .copied()
             .unwrap_or_default();
-        let mut tabs = div()
-            .flex()
-            .flex_none()
-            .h_full()
-            .relative()
-            .left(offset.x)
-            .gap_1();
+        let mut tabs = div().flex().flex_none().h_full().relative().left(offset.x);
         for (ix, pane) in pane_ids.iter().enumerate() {
             let title = outgoing
                 .model
@@ -403,10 +467,14 @@ impl Workspace {
                 .filter(|title| !title.is_empty())
                 .unwrap_or_else(|| format!("Terminal {}", ix + 1));
             tabs = tabs.child(
-                tab_surface(&self.appearance, selected == Some(pane.as_str()))
-                    .child(Icon::new(IconName::SquareTerminal).xsmall())
-                    .child(tab_label(title))
-                    .child(passive_icon(IconName::X, true, !outgoing.ready, cx)),
+                tab_surface(
+                    &self.appearance,
+                    selected == Some(pane.as_str()),
+                    focused,
+                    ix == 0,
+                )
+                .child(tab_label(title))
+                .child(passive_close_icon(!outgoing.ready, cx)),
             );
         }
         let mut new_tab = div()
@@ -415,15 +483,16 @@ impl Workspace {
             .items_center()
             .gap_1()
             .px_1()
-            .child(passive_icon(IconName::Plus, false, !outgoing.ready, cx));
+            .child(passive_icon(IconName::Plus, true, !outgoing.ready, cx));
         if !outgoing.remote {
             new_tab = new_tab.child(passive_icon(
                 IconName::ChevronDown,
-                false,
+                true,
                 !outgoing.ready,
                 cx,
             ));
         }
+        let maximized_slot = outgoing.model.maximized_slot_id() == Some(id.as_str());
         let mut actions = div().flex().flex_none().items_center().gap_1().px_1();
         if surface == Surface::Tiled {
             let maximized = outgoing.model.maximized_slot_id() == Some(id.as_str());
@@ -432,25 +501,25 @@ impl Workspace {
                 self.appearance.zoom.window_scale(),
             );
             if compact && !outgoing.remote {
-                actions = actions.child(passive_icon(IconName::Ellipsis, false, false, cx));
+                actions = actions.child(passive_icon(IconName::Ellipsis, true, false, cx));
             } else {
                 for icon in [
                     IconName::SquareSplitHorizontal,
                     IconName::SquareSplitVertical,
                 ] {
-                    actions = actions.child(passive_icon(icon, false, !outgoing.ready, cx));
+                    actions = actions.child(passive_icon(icon, true, !outgoing.ready, cx));
                 }
                 if !outgoing.remote {
                     actions = actions.child(passive_icon(
                         IconName::PanelsTopLeft,
-                        false,
+                        true,
                         !selected.is_some_and(|pane| outgoing.floatable.contains(pane)),
                         cx,
                     ));
                     if !maximized {
                         actions = actions.child(passive_icon(
                             IconName::Maximize,
-                            false,
+                            true,
                             !outgoing.ready,
                             cx,
                         ));
@@ -497,18 +566,12 @@ impl Workspace {
                 .min_w_0()
                 .min_h_0()
                 .overflow_hidden()
-                .border_1()
-                .border_color(rgb(if focused {
-                    self.appearance.border
-                } else {
-                    self.appearance.subtle_border
-                }))
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .flex_none()
-                        .h(chrome_rems((self.appearance.font_size + 19.).max(32.)))
+                        .h(chrome_rems(self.appearance.tab_height))
                         .bg(rgb(self.appearance.raised))
                         .child(
                             div()
@@ -521,7 +584,8 @@ impl Workspace {
                         )
                         .child(new_tab)
                         .child(div().flex_1().min_w_0())
-                        .child(actions),
+                        // No pointer hovers a presented bar.
+                        .child(actions.when(!maximized_slot, |actions| actions.opacity(0.))),
                 )
                 .into_any_element(),
         )
@@ -574,8 +638,10 @@ impl Workspace {
             .flex()
             .flex_col()
             .overflow_hidden()
-            .border_2()
-            .border_color(rgb(self.appearance.accent))
+            // The web client's floating group frame.
+            .border_1()
+            .border_color(rgb(self.appearance.border))
+            .shadow_lg()
             .bg(rgb(self.appearance.surface))
             .child(
                 div()

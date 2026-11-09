@@ -6,6 +6,21 @@ use gpui_kit::{px, rgb, App, Hsla, Rgba};
 use splitty_client_core::appearance::{AppearanceSnapshot, ColorScheme};
 use splitty_client_core::zoom::Zoom;
 
+/// A solid border of the given width and color.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DragOverBorder {
+    pub width: f32,
+    pub color: u32,
+}
+
+/// A line along the selected tab of a group.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabAccent {
+    pub color: u32,
+    pub thickness: f32,
+    pub bottom: bool,
+}
+
 #[derive(Clone, Debug)]
 pub struct NativeAppearance {
     pub surface: u32,
@@ -17,9 +32,30 @@ pub struct NativeAppearance {
     pub border: u32,
     pub subtle_border: u32,
     pub active: u32,
+    pub hover: u32,
     pub accent: u32,
     pub font_family: String,
     pub font_size: f32,
+    /// Group tab bar sizing from the theme's `tab-height` and `tab-font-size`.
+    pub tab_height: f32,
+    pub tab_font_size: f32,
+    /// The selected tab's line from the theme's `tab-accent-*` tokens; `None`
+    /// when the theme makes it transparent.
+    pub tab_accent: Option<TabAccent>,
+    /// Menus: the theme's `danger`, `danger-hover` and `border-radius`.
+    pub danger: u32,
+    pub danger_hover: u32,
+    pub radius: f32,
+    /// Status colors from the theme's `success` and `warning`, as host
+    /// connection dots use them.
+    pub success: u32,
+    pub warning: u32,
+    /// Translucent `0xRRGGBBAA` colors drawn over content: the drop marker's
+    /// fill (`hover-bg`) and menu shadows (`shadow`).
+    pub hover_overlay: u32,
+    pub shadow: u32,
+    /// The drop marker's border from `drag-over-border`, if the theme has one.
+    pub drag_over_border: Option<DragOverBorder>,
     pub terminal: TerminalColors,
     pub selection_foreground: u32,
     pub selection_background: u32,
@@ -40,9 +76,21 @@ impl NativeAppearance {
             border: 0x416783,
             subtle_border: 0x263544,
             active: 0x30475b,
+            hover: 0x1f2c3a,
             accent: 0x76b8e8,
             font_family: ui_family.into(),
             font_size: 13.,
+            tab_height: 32.,
+            tab_font_size: 12.,
+            tab_accent: None,
+            danger: 0xe06c75,
+            danger_hover: 0x3a2730,
+            radius: 8.,
+            success: 0x98c379,
+            warning: 0xe5c07b,
+            hover_overlay: 0xffffff0f,
+            shadow: 0x00000073,
+            drag_over_border: None,
             terminal: TerminalColors::default(),
             selection_foreground: 0xd9e2ef,
             selection_background: 0x345778,
@@ -79,6 +127,11 @@ impl NativeAppearance {
         result.border = color(&ui.border_default, result.surface, result.border);
         result.subtle_border = color(&ui.border_subtle, result.surface, result.subtle_border);
         result.active = color(&ui.active_bg, result.raised, result.active);
+        result.hover = color(&ui.hover_bg, result.raised, result.hover);
+        result.danger = color(&ui.danger, result.overlay, result.danger);
+        result.danger_hover = color(&ui.danger_hover, result.overlay, result.danger_hover);
+        result.success = color(&ui.success, result.surface, result.success);
+        result.warning = color(&ui.warning, result.surface, result.warning);
         result.accent = color(&ui.accent, result.surface, result.accent);
         result.terminal.background =
             color(&terminal.bg, result.surface, result.terminal.background);
@@ -116,6 +169,38 @@ impl NativeAppearance {
         for (target, value) in result.terminal.ansi.iter_mut().zip(ansi) {
             *target = color(value, background, *target);
         }
+        let mut sizing = |value: &str, min: f32, max: f32, fallback: f32| {
+            theme_px(value, min, max).unwrap_or_else(|| {
+                fallback_used = true;
+                fallback
+            })
+        };
+        result.tab_height = sizing(&ui.tab_height, 16., 64., result.tab_height);
+        result.tab_font_size = sizing(&ui.tab_font_size, 8., 24., result.tab_font_size);
+        let accent_thickness = sizing(&ui.tab_accent_thickness, 0., 8., 2.);
+        result.radius = sizing(&ui.border_radius, 0., 24., result.radius);
+        result.tab_accent = tab_accent(
+            &ui.tab_accent_color,
+            accent_thickness,
+            &ui.tab_accent_position,
+            result.raised,
+        )
+        .unwrap_or_else(|| {
+            fallback_used = true;
+            None
+        });
+        let mut translucent = |value: &str, fallback: u32| {
+            parse_color(value).map(Color::rgba).unwrap_or_else(|| {
+                fallback_used = true;
+                fallback
+            })
+        };
+        result.hover_overlay = translucent(&ui.hover_bg, result.hover_overlay);
+        result.shadow = translucent(&ui.shadow, result.shadow);
+        result.drag_over_border = drag_over_border(&ui.drag_over_border).unwrap_or_else(|| {
+            fallback_used = true;
+            None
+        });
         let settings = snapshot.settings();
         result.zoom = Zoom::from_values(settings.zoom, &settings.zoom_scope);
         let (size, invalid_size) = chrome_font_size(settings.font_size, &ui.font_size);
@@ -130,11 +215,9 @@ impl NativeAppearance {
             Some(family) => result.font_family = family,
             None => fallback_used = true,
         }
-        // Direct workspace chrome and Kit controls share the same readable
-        // text policy. Terminal colors remain exactly the selected palette.
-        result.text = readable_rgb(result.text, result.surface);
-        result.secondary = readable_rgb(result.secondary, result.raised);
-        result.muted = readable_rgb(result.muted, result.surface);
+        // Terminal colors remain exactly the selected palette.
+        (result.text, result.secondary, result.muted) =
+            chrome_text(result.text, result.secondary, result.muted, result.surface);
         let mut token = |value: &str, background| {
             let parsed = parse_color(value).map(|color| color.over(background));
             fallback_used |= parsed.is_none();
@@ -365,6 +448,14 @@ fn readable_text(requested: Hsla, background: Hsla) -> Hsla {
     blend(requested, target, high)
 }
 
+/// Workspace chrome text: primary text is kept readable on the surface, while
+/// secondary and muted text keep the theme's values. Their low contrast is how
+/// a theme subdues idle entries against running and selected ones, as in the
+/// web client; lifting them would erase that difference.
+fn chrome_text(text: u32, secondary: u32, muted: u32, surface: u32) -> (u32, u32, u32) {
+    (readable_rgb(text, surface), secondary, muted)
+}
+
 fn readable_rgb(requested: u32, background: u32) -> u32 {
     u32::from(Rgba::from(readable_text(
         rgb(requested).into(),
@@ -379,6 +470,13 @@ struct Color {
 }
 
 impl Color {
+    /// This color as `0xRRGGBBAA`, keeping its alpha.
+    fn rgba(self) -> u32 {
+        let channel = |value: f32| (value.clamp(0., 255.).round() as u32) & 255;
+        let [r, g, b] = self.rgb;
+        (channel(r) << 24) | (channel(g) << 16) | (channel(b) << 8) | channel(self.alpha * 255.)
+    }
+
     fn over(self, background: u32) -> u32 {
         let mut packed = 0;
         for (channel, shift) in self.rgb.into_iter().zip([16, 8, 0]) {
@@ -447,6 +545,57 @@ fn parse_color(value: &str) -> Option<Color> {
 fn bounded_number(value: &str, max: f32) -> Option<f32> {
     let value: f32 = value.trim().parse().ok()?;
     (value.is_finite() && (0. ..=max).contains(&value)).then_some(value)
+}
+
+/// A `drag-over-border` value: `none`, or `<width>px solid <color>`. `None`
+/// means unsupported, `Some(None)` no border.
+fn drag_over_border(value: &str) -> Option<Option<DragOverBorder>> {
+    let value = value.trim();
+    if value.is_empty() || value == "none" || value == "0" {
+        return Some(None);
+    }
+    let (width, rest) = value.split_once(char::is_whitespace)?;
+    let (style, color) = rest.trim_start().split_once(char::is_whitespace)?;
+    if style != "solid" {
+        return None;
+    }
+    let width = theme_px(width, 0., 8.)?;
+    let color = parse_color(color.trim())?;
+    Some((width > 0. && color.alpha > 0.).then(|| DragOverBorder {
+        width,
+        color: color.over(0),
+    }))
+}
+
+/// The selected tab's line, `Some(None)` for a transparent or zero-width line
+/// and `None` for an unsupported color.
+fn tab_accent(
+    color: &str,
+    thickness: f32,
+    position: &str,
+    raised: u32,
+) -> Option<Option<TabAccent>> {
+    let color = parse_color(color)?;
+    Some((color.alpha > 0. && thickness > 0.).then(|| TabAccent {
+        color: color.over(raised),
+        thickness,
+        bottom: position.trim() == "bottom",
+    }))
+}
+
+/// A theme length such as `28px` within `min..=max`.
+fn theme_px(value: &str, min: f32, max: f32) -> Option<f32> {
+    if value.len() > 32 {
+        return None;
+    }
+    let value = value.trim();
+    let number = if value == "0" {
+        "0"
+    } else {
+        value.strip_suffix("px")?
+    };
+    let number: f32 = number.trim().parse().ok()?;
+    (number.is_finite() && (min..=max).contains(&number)).then_some(number)
 }
 
 fn chrome_font_size(override_size: i32, theme_size: &str) -> (f32, bool) {
@@ -519,6 +668,18 @@ mod tests {
         assert_eq!(readable_text(primary, background), primary);
         let packed: Hsla = rgb(readable_rgb(0x6b6b6b, 0x10151c)).into();
         assert!(contrast(packed, background) >= 4.5);
+    }
+
+    #[test]
+    fn chrome_keeps_subdued_theme_text_and_only_lifts_unreadable_primary_text() {
+        // splitty-classic-dark-gray: secondary #585858 and muted #484848 on
+        // #1e1e1e stay distinct from primary text and from each other.
+        assert_eq!(
+            chrome_text(0xa0a0a0, 0x585858, 0x484848, 0x1e1e1e),
+            (0xa0a0a0, 0x585858, 0x484848)
+        );
+        let (primary, _, _) = chrome_text(0x303030, 0x585858, 0x484848, 0x1e1e1e);
+        assert!(contrast(rgb(primary).into(), rgb(0x1e1e1e).into()) >= 4.5);
     }
 
     #[test]
@@ -638,5 +799,72 @@ mod tests {
         // this adapter only exports chrome typography and RGB terminal input.
         let fallback = NativeAppearance::fallback("Noto Sans");
         assert_eq!(fallback.terminal, TerminalColors::default());
+    }
+
+    #[test]
+    fn tab_sizing_and_accent_tokens_are_bounded_theme_values() {
+        assert_eq!(theme_px("28px", 16., 64.), Some(28.));
+        assert_eq!(theme_px(" 12.5px ", 8., 24.), Some(12.5));
+        assert_eq!(theme_px("0", 0., 8.), Some(0.));
+        assert_eq!(theme_px("2rem", 8., 24.), None);
+        assert_eq!(theme_px("200px", 16., 64.), None);
+        assert_eq!(theme_px("NaNpx", 0., 8.), None);
+        assert_eq!(
+            tab_accent("#e0e0e0", 2., "bottom", 0x242424),
+            Some(Some(TabAccent {
+                color: 0xe0e0e0,
+                thickness: 2.,
+                bottom: true,
+            }))
+        );
+        assert_eq!(
+            tab_accent("#63a0ff", 2., "top", 0x1a1a1a).map(|line| line.map(|line| line.bottom)),
+            Some(Some(false))
+        );
+        assert_eq!(tab_accent("transparent", 2., "top", 0x1a1a1a), Some(None));
+        assert_eq!(tab_accent("#e0e0e0", 0., "top", 0x1a1a1a), Some(None));
+        assert_eq!(tab_accent("var(--x)", 2., "top", 0x1a1a1a), None);
+    }
+
+    #[cfg(feature = "ui-test-support")]
+    #[test]
+    fn status_tokens_come_from_the_theme_with_distinct_fallbacks() {
+        use splitty_client_core::appearance::test_support::{settings_snapshot, Availability};
+        let snapshot = settings_snapshot(uuid::Uuid::new_v4(), 1, Availability::Full);
+        let ui = &snapshot.theme().ui;
+        let native = NativeAppearance::from_snapshot(&snapshot, &[], "Sans", "Mono");
+        let expected = |value: &str| parse_color(value).unwrap().over(native.surface);
+        assert_eq!(native.success, expected(&ui.success));
+        assert_eq!(native.warning, expected(&ui.warning));
+        assert_ne!(native.success, native.warning);
+        // Without a theme the status colors stay apart from each other and
+        // from the danger color, so every host state keeps its own dot.
+        let fallback = NativeAppearance::fallback("Sans");
+        let colors = [fallback.success, fallback.warning, fallback.danger];
+        assert!(colors
+            .iter()
+            .enumerate()
+            .all(|(index, color)| !colors[index + 1..].contains(color)));
+    }
+
+    #[test]
+    fn drop_marker_and_shadow_tokens_keep_translucency_and_parse_borders() {
+        assert_eq!(
+            parse_color("rgba(255, 255, 255, 0.06)").map(Color::rgba),
+            Some(0xffffff0f)
+        );
+        assert_eq!(parse_color("#000000").map(Color::rgba), Some(0x000000ff));
+        assert_eq!(
+            drag_over_border("1px solid #585858"),
+            Some(Some(DragOverBorder {
+                width: 1.,
+                color: 0x585858,
+            }))
+        );
+        assert_eq!(drag_over_border("none"), Some(None));
+        assert_eq!(drag_over_border(""), Some(None));
+        assert_eq!(drag_over_border("1px solid transparent"), Some(None));
+        assert_eq!(drag_over_border("1px dashed #585858"), None);
+        assert_eq!(drag_over_border("thin solid #585858"), None);
     }
 }

@@ -667,3 +667,40 @@ fn mouse_outside_release_modifiers_and_invalid_geometry_are_bounded() -> Result<
     );
     Ok(())
 }
+
+#[test]
+fn cursor_defaults_to_bar_and_decscusr_reset_restores_it() -> Result<()> {
+    fn shape(engine: &mut Engine) -> Result<CursorShape> {
+        let frame = engine.frame()?;
+        let shape = frame.cursor.shape;
+        frame.finish()?;
+        Ok(shape)
+    }
+    let mut engine = Engine::new(20, 3)?;
+    assert_eq!(shape(&mut engine)?, CursorShape::Bar);
+    engine.feed(b"\x1b[2 q", false)?;
+    assert_eq!(shape(&mut engine)?, CursorShape::Block);
+    engine.feed(b"\x1b[0 q", false)?;
+    assert_eq!(shape(&mut engine)?, CursorShape::Bar);
+    engine.feed(b"\x1b[4 q", false)?;
+    engine.reset()?;
+    assert_eq!(shape(&mut engine)?, CursorShape::Bar);
+    Ok(())
+}
+
+#[test]
+fn faint_text_is_reported_at_half_strength_over_its_background() -> Result<()> {
+    let mut engine = Engine::new(20, 3)?;
+    engine.feed(b"\x1b[2mX\x1b[0mY", false)?;
+    let mut frame = engine.frame()?;
+    let mut row = frame.next_row()?.expect("first row");
+    let faint = row.next_cell()?.expect("faint cell");
+    let (faint_foreground, background) = (faint.foreground, faint.background);
+    let normal = row.next_cell()?.expect("normal cell").foreground;
+    frame.finish()?;
+    assert_ne!(faint_foreground, normal);
+    assert_eq!(faint_foreground, super::half_way(normal, background));
+    assert_eq!(super::half_way(0xffffff, 0x000000), 0x808080);
+    assert_eq!(super::half_way(0xe0e0e0, 0x1e1e1e), 0x7f7f7f);
+    Ok(())
+}

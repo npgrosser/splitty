@@ -15,6 +15,9 @@ pub const MAX_INPUT: usize = 64 * 1024;
 const MAX_COPY: usize = 16 * 1024 * 1024;
 const SCROLLBACK_BYTES: usize = 32 * 1024 * 1024;
 const SCROLLBACK_LINES: usize = 5000;
+/// The cursor shape until a program selects one with DECSCUSR, and the shape
+/// its reset (`CSI 0 q`) restores: a bar, as in the web client.
+const DEFAULT_CURSOR_STYLE: std::ffi::c_int = ffi::CURSOR_STYLE_BAR;
 const DEFAULT_ANSI: [u32; 16] = [
     0x18212d, 0xe06c75, 0x98c379, 0xe5c07b, 0x61afef, 0xc678dd, 0x56b6c2, 0xabb2bf, 0x5c6370,
     0xff7a85, 0xb5e890, 0xffd891, 0x82c7ff, 0xe8a0ff, 0x7adbea, 0xffffff,
@@ -274,6 +277,7 @@ impl Engine {
         }
         engine.option(ffi::OPT_SCROLLBACK_BYTES, &SCROLLBACK_BYTES)?;
         engine.option(ffi::OPT_SCROLLBACK_LINES, &SCROLLBACK_LINES)?;
+        engine.option(ffi::OPT_DEFAULT_CURSOR_STYLE, &DEFAULT_CURSOR_STYLE)?;
         engine.install_colors(ColorConfig::default())?;
         engine.install_mouse_geometry(engine.mouse_geometry)?;
         // Image presentation is outside this probe. No file/shared-memory or
@@ -1288,6 +1292,11 @@ impl Row<'_> {
         if style.flags & (1 << 4) != 0 {
             mem::swap(&mut foreground, &mut background);
         }
+        // Faint text (SGR 2) is drawn at half strength over its background,
+        // as the web client's xterm does.
+        if style.flags & STYLE_FAINT != 0 {
+            foreground = half_way(foreground, background);
+        }
         Ok(Some(Cell {
             col,
             text: std::str::from_utf8(&self.text[..len])?,
@@ -1302,6 +1311,17 @@ impl Row<'_> {
             selected,
         }))
     }
+}
+
+/// `GHOSTTY_STYLE_FLAG_FAINT` (style.h).
+const STYLE_FAINT: u16 = 1 << 2;
+
+/// The color halfway between two packed RGB colors.
+fn half_way(color: u32, background: u32) -> u32 {
+    [16, 8, 0].into_iter().fold(0, |packed, shift| {
+        let channel = |value: u32| (value >> shift) & 255;
+        packed | (channel(color) + channel(background)).div_ceil(2) << shift
+    })
 }
 
 fn check(result: ffi::Status) -> Result<()> {

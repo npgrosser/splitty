@@ -8,6 +8,14 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **Native web look alignment** (2026-11-09, provisional, tbd; no OpenSpec change, recorded in `docs/gpui-spike.md`):
+  - **WL-1:** secondary and muted chrome text keep the theme's values, and only primary text is lifted to 4.5:1. The alternative, lifting all text, erases the theme's idle/running distinction.
+  - **WL-2:** the default terminal cursor is a bar (the web client's default; `CSI 0 q` restores it), and only the focused terminal shows a cursor.
+  - **WL-3:** the macOS title bar is drawn by the app and shows the workspace title. The alternative is the web client's fixed "Splitty".
+  - **WL-4:** closing several tabs asks once when any is busy, "Keep open" closes none, and the closes run one at a time and stop at the first failure. The alternative is the web client's behavior: close idle tabs at once and ask only about busy ones.
+  - **WL-5:** a host is shown as failed when it is offline with a non-retryable error, until the model has a failed state.
+  - **WL-6:** the dragged tab is drawn 4 px below the pointer's tip (the web drag image is 10 px below) and 30 px left of it.
+
 - **`native-remote-screen-create` RSC-5** (2026-11-08, provisional, tbd): restore foreground fairness at the pinned external Linux platform with finite event batches and one explicit continuation for buffered events. Keep the published source/license and patch provenance in the repository; retain application queue limits and exact input ordering instead of increasing buffers or replaying rejected input.
 
 - **`native-remote-screen-rename` NRR-1/NRR-2/NRR-3** (2026-11-08, provisional, tbd): permit exact-source renaming of opened canonical remote Screens through existing dispatch; share one window/source/Screen-bound inline editor independent of selection; retain canonical observations without optimistic name storage or replay. See the change design.
@@ -27,7 +35,7 @@ Each point names what holds now, the alternative, and where it is recorded.
 - **`native-tab-management` NT-2** (2026-11-07, provisional, tbd): clamped focused-group Mod+PageUp/PageDown, scrollable tabs with selected-tab reveal and header insertion; same-group reorder retains selection/maximization.
 - **`native-tab-management` NT-3** (2026-11-07, provisional, tbd): one pending exact placement, ordered catalog watermark and accepted post-fence Screen snapshot for settlement, without a new acknowledgment protocol.
 
-- **`native-appearance` NA-1 font semantics** (2026-11-07, provisional, tbd): appearance font size/family apply to chrome, with resolved UI theme defaults for unset overrides and working native UI defaults for unsupported values. Terminal typography remains native monospace at 15 px text / 21 px rows; terminal-font configuration and display zoom are separate.
+- **`native-appearance` NA-1 font semantics** (2026-11-07, updated 2026-11-09, provisional, tbd): appearance font size/family apply to chrome, with resolved UI theme defaults for unset overrides and working native UI defaults for unsupported values. Terminal typography uses the web client's bundled terminal font at 14 px with rows from the font's ascent and descent and evenly split leftover space; terminal-font configuration and display zoom are separate.
 - **`native-appearance` NA-2 presentation subset** (2026-11-07, provisional, tbd): consume existing local settings for chrome typography and resolved terminal/semantic chrome colors without writes, CSS layout/effects, activation of dormant `terminal.theme` behavior or cross-service live synchronization.
 
 - **`native-local-workspace` NL-1 layout confirmation** (2026-11-07, provisional, tbd): await the authoritative screen snapshot after edits in the first native local workspace, rather than introducing optimistic layout state.

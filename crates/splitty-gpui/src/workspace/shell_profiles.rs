@@ -457,13 +457,13 @@ impl Workspace {
                 let id = profile.id.clone();
                 let available = profile.available;
                 let selected = picker.selected.as_deref() == Some(id.as_str());
-                let mut title = profile.name.clone();
-                if profile.id == snapshot.state().default_profile_id {
-                    title.push_str(" · Default");
-                }
-                if profile.experimental {
-                    title.push_str(" · Experimental");
-                }
+                let default = profile.id == snapshot.state().default_profile_id;
+                let badge = match (default, profile.experimental) {
+                    (true, true) => Some("Default · Experimental"),
+                    (true, false) => Some("Default"),
+                    (false, true) => Some("Experimental"),
+                    (false, false) => None,
+                };
                 let detail = (!available).then(|| {
                     profile
                         .reason
@@ -472,80 +472,120 @@ impl Workspace {
                         .unwrap_or("Unavailable")
                         .to_owned()
                 });
-                let row = div()
-                    .id(SharedString::from(format!("shell-profile-option-{index}")))
+                let label = div()
                     .flex()
                     .flex_col()
-                    .px_2()
-                    .py_1()
-                    .bg(rgb(if selected {
-                        colors.active
-                    } else {
-                        colors.raised
-                    }))
-                    .text_color(rgb(if available { colors.text } else { colors.muted }))
-                    .child(title)
-                    .when_some(detail, |row, reason| {
-                        row.child(div().text_size(chrome_rems(11.)).child(reason))
-                    })
-                    .when(available, |row| {
-                        row.cursor_pointer()
-                            .on_click(cx.listener(move |this, _, window, cx| {
-                                cx.stop_propagation();
-                                this.choose_profile(&id, window, cx);
-                            }))
+                    .min_w_0()
+                    .child(format!(
+                        "{}  {}",
+                        profile_glyph(&profile.command),
+                        profile.name
+                    ))
+                    .when_some(detail, |label, reason| {
+                        label.child(menu_style::detail(colors, reason).mt(px(2.)))
                     });
+                let meta = div()
+                    .flex()
+                    .flex_none()
+                    .items_center()
+                    .gap(chrome_rems(6.))
+                    .when_some(badge, |meta, badge| {
+                        meta.child(menu_style::badge(colors, badge))
+                    })
+                    .when(default, |meta| {
+                        meta.child(menu_style::detail(
+                            colors,
+                            if cfg!(target_os = "macos") {
+                                "⌘T"
+                            } else {
+                                "Alt+T"
+                            },
+                        ))
+                    });
+                let row = if available {
+                    menu_style::item(colors, selected, false)
+                        .id(SharedString::from(format!("shell-profile-option-{index}")))
+                        .child(label)
+                        .child(meta)
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.choose_profile(&id, window, cx);
+                        }))
+                        .into_any_element()
+                } else {
+                    menu_style::disabled_item(colors)
+                        .id(SharedString::from(format!("shell-profile-option-{index}")))
+                        .child(label)
+                        .child(meta)
+                        .into_any_element()
+                };
                 entries = entries.child(row);
             }
         }
         if count == 0 {
-            entries = entries.child(div().px_2().py_2().child(if self.profiles.is_some() {
-                "No enabled shell profiles"
-            } else {
-                "Loading shell profiles…"
-            }));
+            entries = entries.child(menu_style::disabled_item(colors).child(
+                if self.profiles.is_some() {
+                    "No enabled shell profiles"
+                } else {
+                    "Loading shell profiles…"
+                },
+            ));
         }
-        let menu = div()
+        let menu = menu_style::panel(colors)
             .id("shell-profile-picker")
             .debug_selector(|| "shell-profile-picker".into())
-            .w(chrome_rems(360.))
             .max_w(px((f32::from(window.viewport_size().width) - 16.).max(0.)))
-            .p_2()
-            .border_1()
-            .border_color(rgb(colors.border))
-            .bg(rgb(colors.raised))
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
             .on_mouse_move(|_, _, cx| cx.stop_propagation())
             .on_scroll(|_, _, cx| cx.stop_propagation())
-            .child(
-                div()
-                    .px_2()
-                    .py_1()
-                    .font_weight(FontWeight::BOLD)
-                    .child("New tab with shell"),
-            )
             .when_some(self.profiles_error.as_ref(), |menu, reason| {
-                menu.child(
-                    div()
-                        .px_2()
-                        .py_1()
-                        .text_color(rgb(colors.secondary))
-                        .child(format!("Profiles: {reason}")),
-                )
+                menu.child(menu_style::caption(colors, format!("Profiles: {reason}")))
             })
             .child(entries);
         Some(menu.into_any_element())
     }
 }
 
+/// The web client's text glyph for a profile's shell, shown before its name.
+fn profile_glyph(command: &str) -> &'static str {
+    let executable = command
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if executable.contains("powershell") || executable.starts_with("pwsh") {
+        "❯_"
+    } else if executable == "fish" {
+        "><>"
+    } else if executable == "zsh" {
+        "%"
+    } else if executable == "bash" {
+        "$"
+    } else {
+        ">_"
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{source_matches_slot, ProfileSource};
+    use super::{profile_glyph, source_matches_slot, ProfileSource};
     use crate::workspace::presented_slot_in;
     use splitty_client_core::{
         workspace::{ScreenModel, SourceWorkspace},
         EmbeddedService, ScreenIds,
     };
+
+    #[test]
+    fn profile_glyphs_follow_the_shell_executable() {
+        assert_eq!(profile_glyph("/bin/zsh"), "%");
+        assert_eq!(profile_glyph("/usr/local/bin/fish"), "><>");
+        assert_eq!(profile_glyph("bash"), "$");
+        assert_eq!(
+            profile_glyph("C:\\Program Files\\PowerShell\\7\\pwsh.exe"),
+            "❯_"
+        );
+        assert_eq!(profile_glyph("/bin/sh"), ">_");
+    }
 
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]

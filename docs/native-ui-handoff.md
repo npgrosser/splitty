@@ -118,6 +118,9 @@ self-install only for Linux x86_64.
 
 ## Open work and next checkpoint
 
+- macOS runs and the chrome follows the web client's look; the gaps and
+  deliberate differences are listed in
+  [the GPUI runbook](gpui-spike.md#macos-preview-and-web-look-alignment-2026-11-09).
 - `native-remote-screen-create`: **13/14 tasks**; only deferred full workspace
   checks remain. `native-remote-screen-rename`: **9/10 tasks**; same gate remains.
   Do not archive either as fully checked yet.
