@@ -25,7 +25,7 @@
 
 ## Open
 
-- [ ] System notifications on Windows.
+- [ ] System notifications on Windows. `system_notification` in `crates/splitty-gpui/src/workspace/unread.rs` hands a notice's title to the system through `notify-send` on Linux and `osascript` on macOS and drops it on other platforms. Windows needs the same: a system notification titled "Splitty" with the notice's title as its text, sent off the UI thread, without a console window flashing up, and failing silently. The caller already decides when: `notifications.desktop` is on and the window is not the active one (`observe_notification`); nothing about that changes. Verify in the Windows app: a command that finishes in a background terminal while another window is active shows the notification, and none appears while the Splitty window is active.
 
 ## Verification record
 
