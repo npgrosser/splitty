@@ -42,8 +42,10 @@ fn decode(bytes: &[u8]) -> String {
     }
     let offset = usize::from(bytes.starts_with(&[0xff, 0xfe])) * 2;
     let words = bytes[offset..]
-        .chunks_exact(2)
-        .map(|pair| u16::from_le_bytes([pair[0], pair[1]]));
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|pair| u16::from_le_bytes(*pair));
     char::decode_utf16(words)
         .map(|value| value.unwrap_or(char::REPLACEMENT_CHARACTER))
         .collect()
