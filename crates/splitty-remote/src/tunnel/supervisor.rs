@@ -427,11 +427,18 @@ where
     Used: Future<Output = Result<String, RemoteError>> + Send,
 {
     tokio::pin!(shutdown);
+    let mut restored = None;
     loop {
         let previous = connected.daemon.instance.clone();
+        // The connection is handed over before its restoration is reported,
+        // so whoever reads the report finds the new connection in use.
+        let used = use_connection(connected);
+        if let Some(event) = restored.take() {
+            on_event(event);
+        }
         let reason = tokio::select! { biased;
             _ = &mut shutdown => return Ok(()),
-            reason = use_connection(connected) => reason,
+            reason = used => reason,
         };
         let reason = match reason {
             Ok(reason) => reason,
@@ -455,17 +462,17 @@ where
             };
             match result {
                 Ok(Ok(next)) => {
-                    if next.daemon.instance == previous {
-                        on_event(Event::Restored);
+                    restored = Some(if next.daemon.instance == previous {
+                        Event::Restored
                     } else {
-                        on_event(Event::Replaced {
+                        Event::Replaced {
                             instance: next
                                 .daemon
                                 .instance
                                 .clone()
                                 .expect("admitted native daemon"),
-                        });
-                    }
+                        }
+                    });
                     connected = next;
                     break;
                 }
@@ -956,6 +963,10 @@ mod tests {
             |connection| {
                 let first = used.fetch_add(1, Ordering::SeqCst) == 0;
                 if !first {
+                    assert!(
+                        matches!(events.lock().unwrap().as_slice(), [Event::Lost { .. }]),
+                        "the new connection is in use before it is reported"
+                    );
                     stop.take().unwrap().send(()).unwrap();
                 }
                 async move {

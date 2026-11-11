@@ -2687,8 +2687,9 @@ async fn handle_connect(target: &str, forward: &[String], open: bool, json: bool
             |mut connection| {
                 let backend = backend.clone();
                 let host = host.clone();
+                // In use before the supervisor reports the tunnel restored.
+                backend.set_remote(Some(connection.daemon.clone()));
                 async move {
-                    backend.set_remote(Some(connection.daemon.clone()));
                     while connection.client.recv().await.is_some() {}
                     backend.set_remote(None);
                     let (result, ended) = connection.client.finish().await;

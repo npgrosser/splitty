@@ -2042,11 +2042,18 @@ impl HubSocket {
     async fn next(&mut self) -> Message {
         use futures::StreamExt;
 
-        tokio::time::timeout(WAIT, self.0.next())
-            .await
-            .expect("a message in time")
-            .expect("the socket is open")
-            .expect("a message")
+        // Keepalive frames arrive whenever the server sends them; a slow
+        // run sees them between the messages the test waits for.
+        loop {
+            let message = tokio::time::timeout(WAIT, self.0.next())
+                .await
+                .expect("a message in time")
+                .expect("the socket is open")
+                .expect("a message");
+            if !matches!(message, Message::Ping(_) | Message::Pong(_)) {
+                return message;
+            }
+        }
     }
 
     async fn next_json(&mut self) -> serde_json::Value {
