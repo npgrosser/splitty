@@ -337,6 +337,9 @@ fn main() -> anyhow::Result<()> {
         }
         backend => backend,
     };
+    if let splitty_client_core::owned_service::LocalBackend::Wsl(launch) = &backend {
+        startup::set_wsl_distro(launch.distro());
+    }
     let worker = Rc::new(RefCell::new(None));
     let launched_worker = worker.clone();
     let window_error = Rc::new(RefCell::new(None));

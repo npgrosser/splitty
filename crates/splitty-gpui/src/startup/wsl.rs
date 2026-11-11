@@ -9,7 +9,9 @@
 //! one version share an installation. The remembered distribution is read from
 //! the web app's state file for the same reason.
 
+#[cfg(target_os = "windows")]
 const ARCHIVE_NAME: &str = "splitty-wsl-x86_64.tar.gz";
+#[cfg(target_os = "windows")]
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Prints the facts a start needs in one `wsl.exe` round trip.

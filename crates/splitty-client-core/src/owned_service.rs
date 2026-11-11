@@ -47,6 +47,9 @@ impl WslLaunch {
             config_dir,
         })
     }
+    pub fn distro(&self) -> &str {
+        &self.distro
+    }
     /// `askpass` is the Linux path of the SSH dialog executable, when there is one.
     fn arguments(&self, askpass: Option<&str>) -> Vec<String> {
         let mut arguments = vec![

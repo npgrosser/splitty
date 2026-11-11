@@ -253,11 +253,27 @@ pub(super) fn editor_uri(
             EditorChoice::Sftp => format!("sftp://{target}{encoded_path}"),
         })
     } else {
-        match choice {
-            EditorChoice::VsCode => Some(format!("vscode://file{encoded_path}")),
-            EditorChoice::Zed => Some(format!("zed://file{encoded_path}")),
-            EditorChoice::Sftp => None,
-        }
+        local_editor_uri(choice, crate::startup::wsl_distro(), &encoded_path)
+    }
+}
+
+/// A local path is a path of the WSL distribution when the backend runs in
+/// one: VS Code opens it through its WSL remote, and Zed has no URL for it.
+fn local_editor_uri(
+    choice: EditorChoice,
+    wsl_distro: Option<&str>,
+    encoded_path: &str,
+) -> Option<String> {
+    match (choice, wsl_distro) {
+        (EditorChoice::VsCode, None) => Some(format!("vscode://file{encoded_path}")),
+        (EditorChoice::VsCode, Some(distro)) => (!distro.is_empty()
+            && distro.len() <= 64
+            && distro
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte)))
+        .then(|| format!("vscode://vscode-remote/wsl+{distro}{encoded_path}")),
+        (EditorChoice::Zed, None) => Some(format!("zed://file{encoded_path}")),
+        (EditorChoice::Zed, Some(_)) | (EditorChoice::Sftp, _) => None,
     }
 }
 
@@ -1062,6 +1078,34 @@ mod menu_tests {
         assert_eq!(step(&items, None, "down"), Some("a"));
         assert_eq!(step(&items, Some(&"gone"), "up"), Some("c"));
         assert_eq!(step::<&str>(&[], None, "down"), None);
+    }
+}
+
+#[cfg(test)]
+mod editor_tests {
+    use super::{local_editor_uri, EditorChoice};
+
+    #[test]
+    fn a_local_path_in_wsl_opens_through_the_wsl_remote_of_vs_code() {
+        let path = "/home/user/project/";
+        assert_eq!(
+            local_editor_uri(EditorChoice::VsCode, None, path).as_deref(),
+            Some("vscode://file/home/user/project/")
+        );
+        assert_eq!(
+            local_editor_uri(EditorChoice::VsCode, Some("Ubuntu-24.04"), path).as_deref(),
+            Some("vscode://vscode-remote/wsl+Ubuntu-24.04/home/user/project/")
+        );
+        assert_eq!(
+            local_editor_uri(EditorChoice::VsCode, Some("Bad Name/.."), path),
+            None
+        );
+        assert_eq!(
+            local_editor_uri(EditorChoice::Zed, Some("Ubuntu"), path),
+            None
+        );
+        assert!(local_editor_uri(EditorChoice::Zed, None, path).is_some());
+        assert_eq!(local_editor_uri(EditorChoice::Sftp, None, path), None);
     }
 }
 

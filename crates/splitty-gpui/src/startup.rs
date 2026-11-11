@@ -15,6 +15,19 @@ pub struct Options {
 #[cfg(any(target_os = "windows", test))]
 pub mod wsl;
 
+static WSL_DISTRO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+
+/// Records the WSL distribution the local backend runs in.
+pub fn set_wsl_distro(distro: &str) {
+    let _ = WSL_DISTRO.set(distro.to_owned());
+}
+
+/// The WSL distribution of the local backend, when it runs in one; local
+/// paths are then paths of that distribution.
+pub fn wsl_distro() -> Option<&'static str> {
+    WSL_DISTRO.get().map(String::as_str)
+}
+
 impl Options {
     pub fn parse(
         arguments: impl IntoIterator<Item = String>,
