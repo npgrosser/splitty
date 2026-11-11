@@ -842,7 +842,60 @@ impl Workspace {
         }
     }
 
-    /// Reopen several Screens of one connected host in one step.
+    /// The live Screens of a connected host that are not open in this
+    /// window, in the catalog's order, with the connection they open through.
+    /// Nothing while the host's catalog is not the current one.
+    pub(super) fn unopened_host_screens(
+        &self,
+        target: &str,
+    ) -> Option<(SourceToken, Vec<ScreenKey>)> {
+        let model = self.model.as_ref()?;
+        let id = model.source_for_target(target)?;
+        let host = model.host(id)?;
+        if host.status() != SourceStatus::Ready || host.catalog_state() != CatalogState::Ready {
+            return None;
+        }
+        let source = model.source(id)?;
+        let token = model.execution_token(id)?;
+        let screens = source
+            .live_catalog()?
+            .iter()
+            .map(|screen| source.screen_key(screen.id.as_str()))
+            .filter(|key| !model.opened().iter().any(|entry| entry.key() == key))
+            .collect();
+        Some((token, screens))
+    }
+
+    /// How many Screens "Open all" would open: offered from two on, since
+    /// one Screen has its own entry.
+    pub(super) fn open_all_host_screens_offer(&self, target: &str) -> Option<(SourceToken, usize)> {
+        let (source, screens) = self.unopened_host_screens(target)?;
+        (screens.len() >= 2).then_some((source, screens.len()))
+    }
+
+    /// Open every Screen of the host that is not open here, in one step,
+    /// through the connection the offer was made for. What is opened is read
+    /// when the action runs, so a Screen that ended meanwhile is left out.
+    pub(super) fn open_all_host_screens(
+        &mut self,
+        source: SourceToken,
+        target: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.hosts.pending_open.is_some() {
+            return;
+        }
+        match self.unopened_host_screens(target) {
+            Some((current, screens)) if current == source => {
+                self.open_host_screens(source, screens, window, cx)
+            }
+            _ => {}
+        }
+    }
+
+    /// Open several Screens of one connected host in one step and show the
+    /// first.
     fn open_host_screens(
         &mut self,
         source: SourceToken,
@@ -865,7 +918,7 @@ impl Workspace {
                 self.show_screens(window, cx)
             }
             Err(error) => {
-                self.hosts.command_error = Some(format!("Reopen could not be sent: {error}"));
+                self.hosts.command_error = Some(format!("Open could not be sent: {error}"));
                 cx.notify();
             }
         }
@@ -1778,6 +1831,27 @@ impl Workspace {
                             .on_click(move |_, _, cx| {
                                 let _ = weak.update(cx, |this, cx| {
                                     this.begin_host_restore(owner, host.clone(), cx);
+                                });
+                            }),
+                    );
+                }
+                if let Some((source, count)) = self.open_all_host_screens_offer(target) {
+                    let (weak, host) = (weak.clone(), target.clone());
+                    actions = actions.child(
+                        Button::new(SharedString::from(format!("host-open-all-{target}")))
+                            .focus_ring(focus_visible(cx))
+                            .debug_selector({
+                                let target = target.clone();
+                                move || format!("host-open-all-{target}")
+                            })
+                            .xsmall()
+                            .h(chrome_rems(24.))
+                            .label(format!("Open all {count} Screens"))
+                            .tooltip("Open the Screens of this host that are not open here")
+                            .disabled(self.hosts.pending_open.is_some())
+                            .on_click(move |_, window, cx| {
+                                let _ = weak.update(cx, |this, cx| {
+                                    this.open_all_host_screens(source, &host, window, cx);
                                 });
                             }),
                     );

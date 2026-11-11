@@ -34,3 +34,10 @@ The native window SHALL take a remote Screen out of the window when its connecte
 #### Scenario: Terminate an idle remote Screen
 - **WHEN** the user terminates a remote Screen whose terminals are idle
 - **THEN** it ends without a question and leaves the window
+
+### Requirement: Native Open All Screens Of A Host
+Where a connected host with a current catalog has two or more live Screens that are not open in the window, the native window SHALL offer to open all of them in one step. The step SHALL open exactly those Screens in the catalog's order through the connection the offer was made for, show the first, leave out a Screen that ended meanwhile, and SHALL NOT be replayed after a connection change.
+
+#### Scenario: Open the rest of a host
+- **WHEN** a host has four live Screens, one of them open in the window, and the user chooses to open all
+- **THEN** the three others open in the window and the first of them is shown

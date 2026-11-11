@@ -877,6 +877,22 @@ impl Workspace {
                 entry
             }
         };
+        if let Some((source, count)) = self.open_all_host_screens_offer(target) {
+            let host = target.to_owned();
+            content.entries.push(separated(
+                MenuEntry::new(
+                    "open-all-screens",
+                    format!("Open all {count} Screens"),
+                    move |this, window, cx| {
+                        this.open_all_host_screens(source, &host, window, cx);
+                    },
+                )
+                .icon(IconName::PanelsTopLeft)
+                .detail("The Screens that are not open here")
+                .keep_open()
+                .enabled(!opening),
+            ));
+        }
         let remembered = self.remembered_host_screens(target).len();
         if let Some(owner) = owner.filter(|_| remembered > 0 && !opening) {
             let host = target.to_owned();
@@ -2205,6 +2221,124 @@ mod view_tests {
                 let workspace = view.read(cx);
                 assert!(workspace.drawer_popover.is_none());
                 assert!(workspace.hosts.pending_open.is_none());
+            });
+        });
+    }
+
+    #[test]
+    fn a_host_opens_all_its_unopened_screens_in_one_step() {
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let owner = model.lifecycle_token();
+            model
+                .ui_test_screen_order_fixture(&[("local", "Local")], None)
+                .unwrap();
+            let keys = model
+                .ui_test_screen_order_fixture(
+                    &[
+                        ("api", "api"),
+                        ("infra", "infra"),
+                        ("logs", "logs"),
+                        ("web", "web"),
+                    ],
+                    Some("beta.example"),
+                )
+                .unwrap();
+            let source = keys[0].source_id();
+            let execution = model.execution_token(source).unwrap();
+            // One Screen that is not open here has its own entry only.
+            model.detach(owner, &keys[0]).unwrap();
+            let (commands, mut receiver) = mpsc::channel(32);
+            window.update(|window, cx| {
+                cx.set_reduce_motion(true);
+                window.resize(size(px(900.), px(620.)));
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.reconcile(model.clone(), window, cx);
+                    workspace.hosts.set_owner(owner.connection_id());
+                    assert!(workspace.hosts.accept(HubUpdate {
+                        connection_id: owner.connection_id(),
+                        generation: 1,
+                        state: HostDirectoryState::Ready(Arc::new(
+                            HostDirectorySnapshot::ui_test_fixture(
+                                owner.connection_id(),
+                                1,
+                                &["beta.example"],
+                            )
+                            .unwrap(),
+                        )),
+                    }));
+                    workspace.drawer_visible = true;
+                    assert_eq!(
+                        workspace.unopened_host_screens("beta.example"),
+                        Some((execution, vec![keys[0].clone()]))
+                    );
+                    assert_eq!(workspace.open_all_host_screens_offer("beta.example"), None);
+                    workspace.toggle_hosts_popover(window, cx);
+                    workspace.popover_show_host("beta.example", false, window, cx);
+                });
+            });
+            draw(window);
+            assert!(window.debug_bounds("popover-screen-api").is_some());
+            assert!(window.debug_bounds("popover-open-all-screens").is_none());
+
+            // From two on, one entry opens them all: the unopened ones only,
+            // in the catalog's order.
+            model.detach(owner, &keys[2]).unwrap();
+            model.detach(owner, &keys[3]).unwrap();
+            let unopened = vec![keys[0].clone(), keys[2].clone(), keys[3].clone()];
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    // A catalog that is not the current one offers nothing.
+                    let mut stale = model.clone();
+                    let action = stale.host(source).unwrap().action_target().clone();
+                    stale.ui_test_host_update_catalog_failed(&action).unwrap();
+                    workspace.reconcile(stale, window, cx);
+                    assert_eq!(workspace.open_all_host_screens_offer("beta.example"), None);
+                    workspace.reconcile(model.clone(), window, cx);
+                    assert_eq!(
+                        workspace.open_all_host_screens_offer("beta.example"),
+                        Some((execution, 3))
+                    );
+                })
+            });
+            draw(window);
+            while receiver.try_recv().is_ok() {}
+            click(window, "popover-open-all-screens");
+            let mut sent = std::iter::from_fn(|| receiver.try_recv().ok())
+                .filter(|command| !matches!(command.kind(), Command::ReleaseHostBrowsing));
+            let command = sent.next().expect("the Screens open with one command");
+            let Command::OpenRemoteScreens { screens } = command.kind() else {
+                panic!("expected one batch open");
+            };
+            assert_eq!(screens, &unopened);
+            assert_eq!(command.source_token(), Some(execution));
+            assert!(sent.next().is_none(), "no Screen is opened singly");
+            window.update(|_, cx| {
+                let workspace = view.read(cx);
+                assert!(workspace.drawer_popover.is_none());
+                assert!(workspace.destination == Destination::Screens);
+            });
+
+            // The Hosts manager offers the same for the host's group.
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.manage_host("beta.example", window, cx)
+                })
+            });
+            draw(window);
+            while receiver.try_recv().is_ok() {}
+            click(window, "host-open-all-beta.example");
+            let batches: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok())
+                .filter_map(|command| match command.kind() {
+                    Command::OpenRemoteScreens { screens } => Some(screens.clone()),
+                    Command::OpenRemoteScreen { .. } => panic!("no Screen is opened singly"),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(batches, [unopened]);
+            window.update(|_, cx| {
+                assert!(view.read(cx).destination == Destination::Screens);
             });
         });
     }
