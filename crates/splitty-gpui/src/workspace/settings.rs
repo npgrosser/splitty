@@ -69,6 +69,8 @@ enum Section {
     Workspace,
     Remote,
     Notifications,
+    /// Windows only, and only while several WSL distributions are installed.
+    Wsl,
 }
 
 impl Section {
@@ -87,6 +89,7 @@ impl Section {
             Self::Workspace => "workspace",
             Self::Remote => "remote",
             Self::Notifications => "notifications",
+            Self::Wsl => "wsl",
         }
     }
 
@@ -97,6 +100,7 @@ impl Section {
             Self::Workspace => "Workspace",
             Self::Remote => "Remote",
             Self::Notifications => "Notifications",
+            Self::Wsl => "WSL",
         }
     }
 
@@ -107,6 +111,7 @@ impl Section {
             Self::Workspace => WORKSPACE,
             Self::Remote => REMOTE,
             Self::Notifications => NOTIFICATIONS,
+            Self::Wsl => &[],
         }
     }
 
@@ -117,6 +122,41 @@ impl Section {
             Self::Workspace => "Drawer placement and size",
             Self::Remote => "Hosts and their ports",
             Self::Notifications => "Activity from other terminals",
+            Self::Wsl => "The distribution local terminals run in",
+        }
+    }
+}
+
+/// The choice of the WSL distribution for local terminals. It is application
+/// state on the Windows side, not a setting of the service, and applies at the
+/// next start.
+#[derive(Default)]
+struct WslChoice {
+    /// Installed distributions a user works in; the section shows with two or more.
+    distros: Vec<String>,
+    /// The distribution chosen for the next start.
+    chosen: Option<String>,
+    /// The distribution being checked before it is remembered.
+    checking: Option<String>,
+    error: Option<String>,
+}
+
+impl WslChoice {
+    fn offered(&self) -> bool {
+        self.distros.len() > 1
+    }
+
+    fn note(&self, running: Option<&str>) -> String {
+        match (&self.checking, &self.error, &self.chosen) {
+            (Some(distro), _, _) => format!("Checking '{distro}'…"),
+            (None, Some(error), _) => error.clone(),
+            (None, None, Some(chosen)) if running != Some(chosen.as_str()) => {
+                format!("Local terminals run in '{chosen}' when Splitty starts next.")
+            }
+            _ => {
+                "A change applies when Splitty starts next; running terminals stay where they are."
+                    .to_owned()
+            }
         }
     }
 }
@@ -164,6 +204,7 @@ pub(super) struct SettingsView {
     selects: BTreeMap<SettingsField, Entity<SelectState<SearchableVec<String>>>>,
     choices: BTreeMap<SettingsField, Vec<(String, SettingsValue)>>,
     writes: BTreeMap<SettingsField, WriteState>,
+    wsl: WslChoice,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -229,6 +270,23 @@ impl SettingsView {
             ));
             selects.insert(field, select);
         }
+        let wsl = WslChoice {
+            chosen: crate::startup::wsl_distro().map(str::to_owned),
+            ..WslChoice::default()
+        };
+        if wsl.chosen.is_some() {
+            cx.spawn(async move |this, cx| {
+                let distros = cx
+                    .background_executor()
+                    .spawn(async { crate::startup::wsl_distributions() })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.wsl.distros = distros;
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
         Self {
             owner: None,
             snapshot: None,
@@ -242,8 +300,64 @@ impl SettingsView {
             selects,
             choices: BTreeMap::new(),
             writes: BTreeMap::new(),
+            wsl,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Checks the distribution off the UI thread and remembers it for the
+    /// next start; a refusal keeps the earlier choice.
+    fn choose_wsl_distribution(&mut self, distro: String, cx: &mut Context<Self>) {
+        if self.wsl.checking.is_some() || self.wsl.chosen.as_deref() == Some(distro.as_str()) {
+            return;
+        }
+        self.wsl.checking = Some(distro.clone());
+        self.wsl.error = None;
+        cx.notify();
+        cx.spawn(async move |this, cx| {
+            let checked = distro.clone();
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::startup::select_wsl_distribution(&checked) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.wsl.checking = None;
+                match result {
+                    Ok(()) => this.wsl.chosen = Some(distro),
+                    Err(error) => this.wsl.error = Some(error),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    fn render_wsl(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut choices = div().flex().flex_wrap().gap_2();
+        for (index, distro) in self.wsl.distros.iter().enumerate() {
+            let name = distro.clone();
+            choices = choices.child(
+                Button::new(("settings-wsl-distro", index))
+                    .label(distro.clone())
+                    .selected(self.wsl.chosen.as_deref() == Some(distro.as_str()))
+                    .disabled(self.wsl.checking.is_some())
+                    .outline()
+                    .small()
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.choose_wsl_distribution(name.clone(), cx);
+                    })),
+            );
+        }
+        div().flex().flex_col().gap_3().child(choices).child(
+            div()
+                .text_sm()
+                .text_color(if self.wsl.error.is_some() && self.wsl.checking.is_none() {
+                    cx.theme().danger
+                } else {
+                    cx.theme().muted_foreground
+                })
+                .child(self.wsl.note(crate::startup::wsl_distro())),
+        )
     }
 
     pub(super) fn set_snapshot(
@@ -885,7 +999,10 @@ impl SettingsView {
 impl Render for SettingsView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let mut nav = div().flex().gap_1().flex_wrap();
-        for section in Section::ALL {
+        let sections = Section::ALL
+            .into_iter()
+            .chain(self.wsl.offered().then_some(Section::Wsl));
+        for section in sections {
             let selected = self.section == section;
             nav = nav.child(
                 Button::new(SharedString::from(format!("settings-nav-{}", section.id())))
@@ -1015,7 +1132,10 @@ impl Render for SettingsView {
                                         .child(notice),
                                 )
                             })
-                            .child(form),
+                            .child(form)
+                            .when(self.section == Section::Wsl, |view| {
+                                view.child(self.render_wsl(cx))
+                            }),
                     ),
             )
     }
@@ -1127,6 +1247,36 @@ fn display_value(field: SettingsField, value: &SettingsValue) -> String {
             format!("{:.0}%", number * 100.)
         }
         SettingsValue::Number(number) => number.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod wsl_tests {
+    use super::WslChoice;
+
+    #[test]
+    fn the_wsl_section_shows_with_several_distributions_and_says_what_applies_next() {
+        let mut choice = WslChoice {
+            distros: vec!["Ubuntu".into()],
+            chosen: Some("Ubuntu".into()),
+            ..WslChoice::default()
+        };
+        assert!(!choice.offered());
+        choice.distros.push("Debian".into());
+        assert!(choice.offered());
+        assert!(choice.note(Some("Ubuntu")).starts_with("A change applies"));
+
+        choice.checking = Some("Debian".into());
+        assert_eq!(choice.note(Some("Ubuntu")), "Checking 'Debian'…");
+        choice.checking = None;
+        choice.error = Some("'Debian' cannot be used: its default user is root.".into());
+        assert!(choice.note(Some("Ubuntu")).contains("default user is root"));
+        choice.error = None;
+        choice.chosen = Some("Debian".into());
+        assert_eq!(
+            choice.note(Some("Ubuntu")),
+            "Local terminals run in 'Debian' when Splitty starts next."
+        );
     }
 }
 

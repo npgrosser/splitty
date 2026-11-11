@@ -28,6 +28,26 @@ pub fn wsl_distro() -> Option<&'static str> {
     WSL_DISTRO.get().map(String::as_str)
 }
 
+/// The WSL distributions the settings offer for local terminals. Blocks on
+/// `wsl.exe`; call it off the UI thread.
+pub fn wsl_distributions() -> Vec<String> {
+    #[cfg(target_os = "windows")]
+    return wsl::distributions();
+    #[cfg(not(target_os = "windows"))]
+    Vec::new()
+}
+
+/// Remembers a supported distribution for the next start. Blocks on
+/// `wsl.exe`; call it off the UI thread.
+pub fn select_wsl_distribution(distro: &str) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    return wsl::select(distro);
+    #[cfg(not(target_os = "windows"))]
+    Err(format!(
+        "'{distro}' is not a WSL distribution of this system."
+    ))
+}
+
 impl Options {
     pub fn parse(
         arguments: impl IntoIterator<Item = String>,

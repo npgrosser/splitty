@@ -75,11 +75,35 @@ fn parse_list(bytes: &[u8]) -> Vec<Listed> {
         .collect()
 }
 
-/// WSL 2 distributions in the order they are tried: the default one first.
+/// WSL 2 distributions a user works in, in the order they are offered: the
+/// default one first. The distributions container tools keep for themselves
+/// are left out; they are never started to be inspected.
 fn candidates(listed: &[Listed]) -> Vec<&str> {
-    let mut names: Vec<&Listed> = listed.iter().filter(|item| item.version == 2).collect();
+    let mut names: Vec<&Listed> = listed
+        .iter()
+        .filter(|item| item.version == 2 && !is_tool_distribution(&item.name))
+        .collect();
     names.sort_by_key(|item| !item.is_default);
     names.into_iter().map(|item| item.name.as_str()).collect()
+}
+
+fn is_tool_distribution(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    ["docker-desktop", "rancher-desktop", "podman-machine"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+}
+
+/// The state file with `distro` as the selected distribution and no pending
+/// switch; its other fields are kept.
+fn selected_state(existing: &str, distro: &str) -> String {
+    let mut state = match serde_json::from_str(existing) {
+        Ok(serde_json::Value::Object(state)) => state,
+        _ => serde_json::Map::new(),
+    };
+    state.remove("pendingDistro");
+    state.insert("selectedDistro".to_owned(), distro.into());
+    serde_json::Value::Object(state).to_string()
 }
 
 /// The distribution the web app remembered, a pending switch before the
@@ -158,7 +182,7 @@ fn unsupported(distro: &str, inspection: &Inspection) -> Option<String> {
 }
 
 #[cfg(target_os = "windows")]
-pub use windows::{prepare, report_failure};
+pub use windows::{distributions, prepare, report_failure, select};
 
 #[cfg(target_os = "windows")]
 mod windows {
@@ -303,15 +327,50 @@ mod windows {
             .ok_or_else(|| format!("The WSL backend that ships with Splitty is missing: {name}\nInstall Splitty again."))
     }
 
-    fn remembered_distro() -> Option<String> {
-        let state = PathBuf::from(std::env::var_os("APPDATA")?)
-            .join("com.splitty.app")
-            .join("windows.json");
-        remembered(&std::fs::read_to_string(state).ok()?)
+    fn state_path() -> Option<PathBuf> {
+        Some(
+            PathBuf::from(std::env::var_os("APPDATA")?)
+                .join("com.splitty.app")
+                .join("windows.json"),
+        )
     }
 
-    /// The remembered distribution, or the first supported WSL 2 distribution
-    /// with the default one tried first.
+    fn remembered_distro() -> Option<String> {
+        remembered(&std::fs::read_to_string(state_path()?).ok()?)
+    }
+
+    /// Stores the choice through a temporary file and one rename.
+    fn remember(distro: &str) -> Result<(), String> {
+        let path = state_path().ok_or("The application data directory is unknown.")?;
+        let existing = std::fs::read_to_string(&path).unwrap_or_default();
+        let temporary = path.with_extension(format!("json.{}.tmp", std::process::id()));
+        let write = || -> std::io::Result<()> {
+            if let Some(directory) = path.parent() {
+                std::fs::create_dir_all(directory)?;
+            }
+            std::fs::write(&temporary, selected_state(&existing, distro))?;
+            std::fs::rename(&temporary, &path)
+        };
+        write().map_err(|error| {
+            let _ = std::fs::remove_file(&temporary);
+            format!("The choice could not be saved: {error}")
+        })
+    }
+
+    fn list() -> Result<Vec<Listed>, String> {
+        let listed = wsl(&["--list", "--verbose"], None, QUERY_TIMEOUT)?;
+        if !listed.success {
+            return Err(format!(
+                "WSL distributions could not be listed: {}\n\nInstall a distribution from an elevated PowerShell with\n    wsl --install -d Ubuntu",
+                reason(&listed)
+            ));
+        }
+        Ok(parse_list(&listed.stdout))
+    }
+
+    /// The remembered distribution; otherwise the only installed one, or with
+    /// several the one chosen in a dialog, which is then remembered. A
+    /// distribution is started to be inspected only once it is the candidate.
     fn choose(expected: &str) -> Result<(String, Inspection), String> {
         if let Some(distro) = remembered_distro() {
             let inspection = inspect(&distro, expected)?;
@@ -322,32 +381,73 @@ mod windows {
                 )),
             };
         }
-        let listed = wsl(&["--list", "--verbose"], None, QUERY_TIMEOUT)?;
-        if !listed.success {
-            return Err(format!(
-                "WSL distributions could not be listed: {}\n\nInstall a distribution from an elevated PowerShell with\n    wsl --install -d Ubuntu",
-                reason(&listed)
-            ));
-        }
-        let listed = parse_list(&listed.stdout);
+        let listed = list()?;
+        let candidates = candidates(&listed);
+        let ask = candidates.len() > 1;
         let mut refused = Vec::new();
-        for distro in candidates(&listed) {
-            match inspect(distro, expected) {
-                Ok(inspection) => match unsupported(distro, &inspection) {
-                    None => return Ok((distro.to_owned(), inspection)),
-                    Some(why) => refused.push(format!("{distro}: {why}")),
-                },
-                Err(error) => refused.push(error),
+        for (index, distro) in candidates.iter().enumerate() {
+            if ask {
+                let rest = candidates.len() - index - 1;
+                let otherwise = match rest {
+                    0 => "No leaves Splitty without a distribution.".to_owned(),
+                    1 => format!("No uses '{}'.", candidates[index + 1]),
+                    _ => "No asks about the next one.".to_owned(),
+                };
+                // The last of several is the answer when the others were declined.
+                if rest > 0 || !refused.is_empty() {
+                    let question = format!(
+                        "Several WSL distributions are installed.\n\nRun local terminals in '{distro}'?\n\n{otherwise} The choice can be changed in the settings."
+                    );
+                    if !confirm(&question) {
+                        continue;
+                    }
+                }
             }
+            let problem = match inspect(distro, expected) {
+                Ok(inspection) => match unsupported(distro, &inspection) {
+                    None => {
+                        if ask {
+                            // Starting works without the file; only the next
+                            // start would ask again.
+                            let _ = remember(distro);
+                        }
+                        return Ok(((*distro).to_owned(), inspection));
+                    }
+                    Some(why) => format!("{distro}: {why}"),
+                },
+                Err(error) => error,
+            };
+            if ask && index + 1 < candidates.len() {
+                report_failure(&format!("This distribution cannot be used.\n\n{problem}"));
+            }
+            refused.push(problem);
         }
-        Err(if refused.is_empty() {
+        Err(if candidates.is_empty() {
             "No WSL 2 distribution was found. Install one from an elevated PowerShell with\n    wsl --install -d Ubuntu\nand start Splitty again.".to_owned()
+        } else if refused.is_empty() {
+            "No WSL distribution was chosen.".to_owned()
         } else {
             format!(
                 "No supported WSL distribution was found (WSL 2, x86_64, Ubuntu or Debian, a normal default user).\n\n{}",
                 refused.join("\n")
             )
         })
+    }
+
+    /// The distributions the settings offer, the default one first.
+    pub fn distributions() -> Vec<String> {
+        list()
+            .map(|listed| candidates(&listed).into_iter().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    /// Remembers `distro` for the next start, once it is known to be supported.
+    pub fn select(distro: &str) -> Result<(), String> {
+        let inspection = inspect(distro, "")?;
+        if let Some(why) = unsupported(distro, &inspection) {
+            return Err(format!("'{distro}' cannot be used: {why}"));
+        }
+        remember(distro)
     }
 
     fn install(distro: &str, expected: &str) -> Result<String, String> {
@@ -405,30 +505,35 @@ mod windows {
         WslLaunch::new(distro, backend, None).map_err(|error| error.to_string())
     }
 
-    /// A release build has no console, so a startup failure is shown in a dialog.
-    pub fn report_failure(message: &str) {
-        #[link(name = "user32")]
-        extern "system" {
-            fn MessageBoxW(
-                window: *mut std::ffi::c_void,
-                text: *const u16,
-                caption: *const u16,
-                flags: u32,
-            ) -> i32;
-        }
-        const MB_ICONERROR: u32 = 0x10;
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBoxW(
+            window: *mut std::ffi::c_void,
+            text: *const u16,
+            caption: *const u16,
+            flags: u32,
+        ) -> i32;
+    }
+
+    fn message_box(message: &str, flags: u32) -> i32 {
         let wide = |text: &str| -> Vec<u16> { text.encode_utf16().chain([0]).collect() };
         let (text, caption) = (wide(message), wide("Splitty"));
         // SAFETY: both buffers are NUL-terminated UTF-16 and outlive the call;
         // a null owner window is allowed.
-        unsafe {
-            MessageBoxW(
-                std::ptr::null_mut(),
-                text.as_ptr(),
-                caption.as_ptr(),
-                MB_ICONERROR,
-            );
-        }
+        unsafe { MessageBoxW(std::ptr::null_mut(), text.as_ptr(), caption.as_ptr(), flags) }
+    }
+
+    /// A release build has no console, so a startup failure is shown in a dialog.
+    pub fn report_failure(message: &str) {
+        const MB_ICONERROR: u32 = 0x10;
+        message_box(message, MB_ICONERROR);
+    }
+
+    fn confirm(question: &str) -> bool {
+        const MB_YESNO: u32 = 0x4;
+        const MB_ICONQUESTION: u32 = 0x20;
+        const IDYES: i32 = 6;
+        message_box(question, MB_YESNO | MB_ICONQUESTION) == IDYES
     }
 }
 
@@ -459,6 +564,30 @@ mod tests {
             assert_eq!(candidates(&listed), ["Ubuntu 24.04", "Debian"]);
         }
         assert!(parse_list(b"").is_empty());
+    }
+
+    #[test]
+    fn distributions_of_container_tools_are_not_offered() {
+        let listed = parse_list(
+            b"  NAME                STATE     VERSION\n* docker-desktop      Stopped   2\n  Ubuntu              Running   2\n  rancher-desktop-data Stopped  2\n",
+        );
+        assert_eq!(candidates(&listed), ["Ubuntu"]);
+    }
+
+    #[test]
+    fn a_saved_choice_replaces_a_pending_switch_and_keeps_other_fields() {
+        let state = selected_state(
+            r#"{"selectedDistro":"Ubuntu","pendingDistro":"Arch","other":1}"#,
+            "Debian",
+        );
+        assert_eq!(remembered(&state).as_deref(), Some("Debian"));
+        let state: serde_json::Value = serde_json::from_str(&state).unwrap();
+        assert_eq!(state["other"], 1);
+        assert!(state.get("pendingDistro").is_none());
+        assert_eq!(
+            remembered(&selected_state("not json", "Ubuntu 24.04")).as_deref(),
+            Some("Ubuntu 24.04")
+        );
     }
 
     #[test]

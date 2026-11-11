@@ -3,6 +3,7 @@
 - [x] 1.1 `WslLaunch` takes an optional configuration directory; without one the backend keeps the distribution's default (unit, `owned_service.rs`).
 - [x] 1.2 Startup without arguments on Windows: distribution choice, support checks, backend installation from the archive beside the executable, visible failure dialog (unit tests for list parsing, choice and command construction; the installation itself is checked in the installed app).
 - [x] 1.3 The Windows executable carries the application icon and version resource.
+- [x] 1.4 With several installed distributions the first start asks and remembers the answer, and the settings show a WSL section that checks and remembers another one for the next start; tool distributions are left out (unit: candidate list, state file, section visibility and note).
 
 ## 2. Packages
 
@@ -23,3 +24,4 @@
 - Linux packages: `packaging/linux/native/build.sh` run against a release build of `splitty-gpui` and `splitty`; `dpkg-deb -I/-c` and `rpm -qip/-qlp/-qRp` show the expected control data, files and requirements, with the rpmbuild of Ubuntu 22.04 (4.17) as well as a current one; `splitty-gpui --help` and `splitty --version` run from the unpacked tar.gz. The legacy Electron deb built with the new naming installs `splitty-web.desktop` and shares no path with the native deb. Not installed on a system here: CI installs the deb on Ubuntu 22.04.
 - Workflows: `actionlint` (with shellcheck) passes on every workflow; the release's collect and publish steps were run against placeholder files named for `0.3.0-rc.1` and refuse a missing package or a duplicate name. `scripts/release.sh --check` still passes with the renamed legacy products.
 - Only a CI or release run shows: the macOS script (bundle layout, ad-hoc signature and its verification, `hdiutil`), the native build and the terminal library on Ubuntu 22.04, the Windows jobs (native build without the remote payload variables, NSIS on the runner, `bundle.ps1`), and the Tauri installer under the product name "Splitty Web".
+- Distribution choice: unit tests for the candidate list without tool distributions, the state file and the settings section; the optimized MSVC build and its tests pass. Not seen in a real window: the dialog on a first start and the WSL settings section, since the test system has one user distribution.
