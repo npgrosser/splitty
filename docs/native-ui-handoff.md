@@ -129,6 +129,12 @@ It is not real OpenSSH installation/update acceptance.
   minimum system version is whatever the build's linker targets; it is tested
   on the release runner's macOS only. The provisional packaging decisions are
   NDD-1 to NDD-6 in `openspec/open-decisions.md`.
+- Windows: the app needs a WSL distribution; hosts without WSL remain with
+  the legacy web app (draft `native-windows-without-wsl`). Each start is an
+  independent instance with its own backend that shares only the settings
+  files with the others (draft `native-windows-one-backend`). The dialog on a
+  first start with several distributions and the WSL settings section have
+  not been seen in a real window.
 - Vendored platform tests are workspace-excluded and require their explicit
   documented regression command.
 - Real SSH daemon installation/update, individual Windows remote UX, broader

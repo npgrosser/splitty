@@ -150,6 +150,8 @@ Ideen und Features, nicht fest eingeplant, aber vorsortiert. Ausgearbeitete Vorh
 | 120 | [Native UI mit GPUI](../openspec/changes/native-ui-gpui/proposal.md) | Standard-Desktop-App der Releases (Windows, macOS Apple Silicon, Linux x86_64), Web-Shells als Legacy: lokaler/Remote-Workspace, Drawer und Animationen, Screen-Reihenfolge, Settings, Hosts, ausgehende Ports und Aktivitätsanzeigen unter Linux geprüft; native Windows-Activity-Vorschau mit Hardwaregrafik und Drawer-Radnavigation geprüft | Settings-Parität, weitere Menüaktionen, tatsächliche Host-Updates sowie verbleibende Plattform- und Cutover-Prüfungen offen |
 | 121 | [Terminal-Paletten aus Ghostty](../openspec/changes/ghostty-terminal-themes/proposal.md) | Draft | — |
 | 122 | [Native Remote-UX](../openspec/changes/native-remote-ux/proposal.md) | In Umsetzung: Host-Browser, Drawer, Gruppen-Drag und getrennte lokale Port-Einstellungen; Mockup als Referenz | 120; gemeinsame Remote-Dienstnamen als eigener Protokollschritt |
+| 123 | [Natives Windows ohne WSL](../openspec/changes/native-windows-without-wsl/proposal.md) | Draft: Hosts direkt über das Windows-`ssh.exe`, ohne lokales Backend | 120 |
+| 124 | [Ein Backend für mehrere native Fenster](../openspec/changes/native-windows-one-backend/proposal.md) | Draft: ein zweiter Start öffnet ein Fenster am laufenden Backend | 120 |
 
 **101** macht mehrere gleichzeitige Clients am selben Screen verlässlich. Verbinden können sie sich schon heute (Single-Attach wurde im März 2026 entfernt); es fehlen Layout-Sync für alle Ops, Reihenfolge und Input-Routing. Geteilte Output-Streams (`fix-pty-reader`) und die Resize-Policy (`pty-size-policy`: kleinste Größe der aktiven Clients, sichtbare Markierung, Übernahme) sind erledigt.
 
