@@ -8,7 +8,7 @@ VERSION := $(shell sed -n '/^\[workspace\.package\]/,/^\[/ s/^version = "\(.*\)"
 
 FRONTEND_STAMP := frontend/.build-stamp
 
-.PHONY: dev dev-tauri clean test icons electron dmg \
+.PHONY: dev dev-tauri clean test icons electron dmg native-package \
        install-no-gui install-tauri install-electron \
        uninstall-no-gui uninstall-tauri uninstall-electron uninstall-config \
        check-splitty-not-running
@@ -54,7 +54,18 @@ dev-tauri: frontend/node_modules
 test:
 	cargo test
 
-# --- macOS app bundle ---
+# --- Native desktop app (crates/splitty-gpui) ---
+
+# The packages a release publishes for this system, into build/: deb, rpm and
+# tar.gz on Linux, a disk image on macOS. docs/development.md has Windows.
+native-package:
+ifeq ($(UNAME),Darwin)
+	packaging/macos/native/build.sh
+else
+	packaging/linux/native/build.sh
+endif
+
+# --- Legacy web app: macOS app bundle (Tauri) ---
 
 check-splitty-not-running:
 ifeq ($(UNAME),Darwin)
@@ -128,7 +139,7 @@ endif
 
 uninstall-electron:
 	rm -f $(HOME)/.local/bin/Splitty-Electron.AppImage
-	rm -f $(HOME)/.local/share/applications/splitty.desktop
+	rm -f $(HOME)/.local/share/applications/splitty-web.desktop
 	rm -f $(HOME)/.local/share/icons/hicolor/128x128/apps/splitty.png
 	@echo "Removed Splitty (Electron)"
 
@@ -151,7 +162,7 @@ install-electron: electron
 	chmod +x $(HOME)/.local/bin/Splitty-Electron.AppImage
 	cp packaging/linux/splitty.png $(HOME)/.local/share/icons/hicolor/128x128/apps/splitty.png
 	sed 's|Splitty-Electron.AppImage|$(HOME)/.local/bin/Splitty-Electron.AppImage|g' \
-		packaging/electron/linux/splitty.desktop > $(HOME)/.local/share/applications/splitty.desktop
+		packaging/electron/linux/splitty.desktop > $(HOME)/.local/share/applications/splitty-web.desktop
 	@echo "Installed to $(HOME)/.local/bin/Splitty-Electron.AppImage + desktop entry"
 
 run-electron: $(BUILD)/splitty frontend-electron/node_modules

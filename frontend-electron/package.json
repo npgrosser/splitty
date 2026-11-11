@@ -5,7 +5,7 @@
   "homepage": "https://github.com/npgrosser/splitty",
   "author": "Splitty contributors",
   "license": "MIT",
-  "desktopName": "splitty.desktop",
+  "desktopName": "splitty-web.desktop",
   "private": true,
   "main": "compiled/main.js",
   "scripts": {
@@ -40,6 +40,11 @@
       "icon": "../packaging/electron/icon.png",
       "category": "Development",
       "syncDesktopName": true,
+      "desktop": {
+        "entry": {
+          "Name": "Splitty Web"
+        }
+      },
       "maintainer": "Splitty contributors <https://github.com/npgrosser/splitty>",
       "synopsis": "Multi-session terminal manager"
     },

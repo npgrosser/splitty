@@ -1,11 +1,11 @@
 [Desktop Entry]
-Name=Splitty
+Name=Splitty Web
 Exec=Splitty-Electron.AppImage %U
 Icon=splitty
 Type=Application
 Categories=Development;
 Comment=Multi-session terminal manager
-StartupWMClass=splitty
+StartupWMClass=splitty-web
 Actions=new-window;
 
 [Desktop Action new-window]
