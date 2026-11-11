@@ -23,13 +23,26 @@ pub enum SettingsField {
     CloseOnExit,
     DrawerPinned,
     DrawerWidth,
+    ReconnectHosts,
+    AutoForwardPorts,
+    /// The native app's own tab bars (`nativeTabs`).
+    TabsShowSplit,
+    TabsShowFloat,
+    TabsShowMaximize,
+    TabsCloseButton,
+    TabsLocked,
+    /// The editor a pane's request opens a file or a folder in.
+    EditorFile,
+    EditorFolder,
     NotificationEnabled,
+    NotificationToasts,
+    NotificationDesktop,
     NotificationProcessFinished,
     NotificationProcessExited,
     NotificationProcessCrashed,
 }
 impl SettingsField {
-    pub const ALL: [Self; 16] = [
+    pub const ALL: [Self; 27] = [
         Self::ThemeMode,
         Self::Theme,
         Self::ThemeDark,
@@ -42,7 +55,18 @@ impl SettingsField {
         Self::CloseOnExit,
         Self::DrawerPinned,
         Self::DrawerWidth,
+        Self::ReconnectHosts,
+        Self::AutoForwardPorts,
+        Self::TabsShowSplit,
+        Self::TabsShowFloat,
+        Self::TabsShowMaximize,
+        Self::TabsCloseButton,
+        Self::TabsLocked,
+        Self::EditorFile,
+        Self::EditorFolder,
         Self::NotificationEnabled,
+        Self::NotificationToasts,
+        Self::NotificationDesktop,
         Self::NotificationProcessFinished,
         Self::NotificationProcessExited,
         Self::NotificationProcessCrashed,
@@ -50,6 +74,8 @@ impl SettingsField {
     pub fn domain(self) -> SettingsDomain {
         match self {
             Self::NotificationEnabled
+            | Self::NotificationToasts
+            | Self::NotificationDesktop
             | Self::NotificationProcessFinished
             | Self::NotificationProcessExited
             | Self::NotificationProcessCrashed => SettingsDomain::Notifications,
@@ -70,7 +96,18 @@ impl SettingsField {
             Self::CloseOnExit => "terminal.closeOnExit",
             Self::DrawerPinned => "drawer.pinned",
             Self::DrawerWidth => "drawer.sidebarWidth",
+            Self::ReconnectHosts => "remote.reconnectHosts",
+            Self::AutoForwardPorts => "remote.autoForwardPorts",
+            Self::TabsShowSplit => "nativeTabs.showSplit",
+            Self::TabsShowFloat => "nativeTabs.showFloat",
+            Self::TabsShowMaximize => "nativeTabs.showMaximize",
+            Self::TabsCloseButton => "nativeTabs.closeButton",
+            Self::TabsLocked => "nativeTabs.locked",
+            Self::EditorFile => "editors.file",
+            Self::EditorFolder => "editors.folder",
             Self::NotificationEnabled => "notifications.enabled",
+            Self::NotificationToasts => "notifications.toasts",
+            Self::NotificationDesktop => "notifications.desktop",
             Self::NotificationProcessFinished => "notifications.processFinished",
             Self::NotificationProcessExited => "notifications.processExited",
             Self::NotificationProcessCrashed => "notifications.processCrashed",
@@ -90,6 +127,8 @@ pub enum SettingsValue {
     Text(String),
     Number(f64),
     Bool(bool),
+    /// A list of plain names, as the hosts to reconnect at start.
+    List(Vec<String>),
 }
 
 /// One explicit field intent. Construction admits only bounded native values;
@@ -106,11 +145,28 @@ impl SettingsEdit {
             (
                 SettingsValue::Bool(_),
                 F::DrawerPinned
+                | F::AutoForwardPorts
+                | F::TabsShowSplit
+                | F::TabsShowFloat
+                | F::TabsShowMaximize
+                | F::TabsLocked
                 | F::NotificationEnabled
+                | F::NotificationToasts
+                | F::NotificationDesktop
                 | F::NotificationProcessFinished
                 | F::NotificationProcessExited
                 | F::NotificationProcessCrashed,
             ) => true,
+            (SettingsValue::List(hosts), F::ReconnectHosts) => {
+                hosts.len() <= 64
+                    && hosts.iter().enumerate().all(|(index, host)| {
+                        !host.is_empty()
+                            && host.chars().count() <= 256
+                            && !host.starts_with('-')
+                            && !host.chars().any(|c| c.is_control() || c.is_whitespace())
+                            && !hosts[..index].contains(host)
+                    })
+            }
             (SettingsValue::Number(n), F::FontSize) => {
                 *n == 0.0 || (n.fract() == 0.0 && (8.0..=24.0).contains(n))
             }
@@ -120,6 +176,12 @@ impl SettingsEdit {
             }
             (SettingsValue::Text(s), F::ThemeMode) => matches!(s.as_str(), "auto" | "fixed"),
             (SettingsValue::Text(s), F::ZoomScope) => matches!(s.as_str(), "window" | "terminals"),
+            (SettingsValue::Text(s), F::TabsCloseButton) => {
+                matches!(s.as_str(), "always" | "active")
+            }
+            (SettingsValue::Text(s), F::EditorFile | F::EditorFolder) => {
+                matches!(s.as_str(), "vscode" | "zed")
+            }
             (SettingsValue::Text(s), F::CloseOnExit) => {
                 matches!(s.as_str(), "always" | "never" | "graceful")
             }
@@ -230,7 +292,7 @@ impl SettingsLimits {
                     && self.max.is_some_and(|max| *n <= max)
                     && (self.values.is_empty() || self.values.contains(n))
             }
-            SettingsValue::Bool(_) => false,
+            SettingsValue::Bool(_) | SettingsValue::List(_) => false,
         }
     }
 }
@@ -256,7 +318,7 @@ impl<'de> Deserialize<'de> for SettingsLimits {
             match value {
                 SettingsValue::Text(s) => result.choices.push(s),
                 SettingsValue::Number(n) => result.values.push(n),
-                SettingsValue::Bool(_) => {}
+                SettingsValue::Bool(_) | SettingsValue::List(_) => {}
             }
         }
         Ok(result)
@@ -268,10 +330,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn notification_edits_are_four_boolean_fields_in_their_own_domain() {
+    fn notification_edits_are_boolean_fields_in_their_own_domain() {
         use SettingsField as F;
         let fields = [
             (F::NotificationEnabled, "enabled"),
+            (F::NotificationToasts, "toasts"),
+            (F::NotificationDesktop, "desktop"),
             (F::NotificationProcessFinished, "processFinished"),
             (F::NotificationProcessExited, "processExited"),
             (F::NotificationProcessCrashed, "processCrashed"),
@@ -301,13 +365,7 @@ mod tests {
                 .into_iter()
                 .filter(|field| field.domain() == SettingsDomain::Appearance)
                 .count(),
-            12
-        );
-        assert!(
-            !F::ALL
-                .into_iter()
-                .any(|field| ["notifications.toasts", "notifications.desktop"]
-                    .contains(&field.path()))
+            21
         );
     }
 }

@@ -47,8 +47,16 @@ fn edit(field: F) -> SettingsEdit {
             F::ZoomScope => V::Text("window".into()),
             F::CloseOnExit => V::Text("never".into()),
             F::DrawerPinned => V::Bool(false),
+            F::ReconnectHosts => V::List(vec!["vm1".into()]),
+            F::AutoForwardPorts => V::Bool(true),
+            F::TabsShowSplit | F::TabsShowFloat | F::TabsShowMaximize => V::Bool(false),
+            F::TabsCloseButton => V::Text("active".into()),
+            F::TabsLocked => V::Bool(true),
+            F::EditorFile | F::EditorFolder => V::Text("zed".into()),
             F::DrawerWidth => V::Number(240.0),
             F::NotificationEnabled
+            | F::NotificationToasts
+            | F::NotificationDesktop
             | F::NotificationProcessFinished
             | F::NotificationProcessExited
             | F::NotificationProcessCrashed => V::Bool(false),

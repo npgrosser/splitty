@@ -78,8 +78,10 @@ pub struct ForwardRequest {
     action: ForwardAction,
     local: Option<u16>,
     remember: bool,
+    restore: Option<bool>,
     label: Option<String>,
     link: Option<(TerminalToken, WebUrl)>,
+    automatic: bool,
 }
 impl ForwardRequest {
     pub fn start(
@@ -95,9 +97,17 @@ impl ForwardRequest {
             action: ForwardAction::Start,
             local,
             remember,
+            restore: None,
             label,
             link: None,
+            automatic: false,
         })
+    }
+    /// Started by `remote.autoForwardPorts`, not by the user: the service
+    /// never remaps a saved port for it.
+    pub fn automatic(mut self) -> Self {
+        self.automatic = true;
+        self
     }
     pub fn open(
         key: MappingKey,
@@ -124,14 +134,21 @@ impl ForwardRequest {
         request.action = ForwardAction::Save;
         Ok(request)
     }
+    /// Saving restoration is independent of starting or stopping a tunnel.
+    pub fn with_restore(mut self, enabled: bool) -> Self {
+        self.restore = Some(enabled);
+        self
+    }
     pub fn stop(key: MappingKey) -> Self {
         Self {
             key,
             action: ForwardAction::Stop,
             local: None,
             remember: false,
+            restore: None,
             label: None,
             link: None,
+            automatic: false,
         }
     }
     pub fn forget(key: MappingKey) -> Self {
@@ -366,6 +383,7 @@ impl ForwardSnapshot {
                 row.local = Some(saved.local);
                 row.label = Some(saved.label.clone());
                 row.saved = true;
+                row.restore = saved.enabled;
                 row.state = if !saved.enabled {
                     ForwardState::Paused
                 } else if saved.last_error.is_some() {
@@ -404,6 +422,7 @@ pub struct ForwardRow {
     label: Option<String>,
     process: Option<String>,
     saved: bool,
+    restore: bool,
     state: ForwardState,
     error: Option<String>,
 }
@@ -415,6 +434,7 @@ impl ForwardRow {
             label: None,
             process: None,
             saved: false,
+            restore: false,
             state: ForwardState::Detected,
             error: None,
         }
@@ -433,6 +453,9 @@ impl ForwardRow {
     }
     pub fn is_saved(&self) -> bool {
         self.saved
+    }
+    pub fn restores_on_connect(&self) -> bool {
+        self.restore
     }
     pub fn state(&self) -> ForwardState {
         self.state

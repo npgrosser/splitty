@@ -163,6 +163,13 @@ impl SourceWorkspace {
     pub(crate) fn set_templates_supported(&mut self, value: bool) {
         self.templates_supported = value;
     }
+    /// Whether this connection's service opens viewer panes (`viewer-v1`).
+    pub fn viewers_supported(&self) -> bool {
+        self.viewers_supported
+    }
+    pub(crate) fn set_viewers_supported(&mut self, value: bool) {
+        self.viewers_supported = value;
+    }
     pub fn template_apply_pending(&self) -> bool {
         self.pending_template.is_some()
     }
@@ -186,7 +193,7 @@ impl SourceWorkspace {
         self.require_catalog()?;
         self.require_routes_settled()?;
         if !self.templates_supported {
-            return Err(invalid("Local service does not support server templates"));
+            return Err(invalid("This service does not support templates"));
         }
         if !self.catalog_initialized
             || self.pending_template.is_some()
@@ -209,9 +216,12 @@ impl SourceWorkspace {
         target: TemplateApplyTarget,
         root: String,
     ) -> io::Result<TemplateApplyPlan> {
-        self.require_local()?;
         self.require_template_idle()?;
-        if draft.connection_id() != self.connection_id || root.len() > 4096 {
+        // Templates are kept by the local service; a host is sent the whole
+        // template with the request.
+        if (self.kind() == SourceKind::Local && draft.connection_id() != self.connection_id)
+            || root.len() > 4096
+        {
             return Err(invalid("Template source changed or root exceeds limit"));
         }
         let lease = draft.reserve_copy()?;
@@ -312,7 +322,6 @@ impl SourceWorkspace {
         replace_confirmed: bool,
         send: impl FnOnce(&str, &mux::ApplyTemplate) -> io::Result<()>,
     ) -> io::Result<()> {
-        self.require_local()?;
         self.require_template_idle()?;
         if plan.source_token() != self.source_token() || plan.consumed.load(Ordering::Acquire) {
             return Err(invalid(
@@ -344,6 +353,14 @@ impl SourceWorkspace {
         plan.consumed.store(true, Ordering::Release);
         self.mutation = mutation;
         self.catalog_dirty = true;
+        if self.kind() == SourceKind::Remote && plan.request.create_screen {
+            // A window shows only the Screens it opened: hold a place for the
+            // one the host is about to make, so its refresh reads it too.
+            self.catalog.push(ScreenInfo {
+                id: plan.screen_id().into(),
+                name: None,
+            });
+        }
         self.pending_template = Some(PendingTemplate {
             preview: PendingTemplateProjection { plan },
             mutation,
@@ -556,6 +573,18 @@ impl SourceWorkspace {
         } else {
             TemplateApplyOutcome::Unverified{reason:"Expected template layout was not observed; it may have changed after application. No retry was sent".into()}
         };
+        if self.kind() == SourceKind::Remote
+            && plan.request.create_screen
+            && !matches!(outcome, TemplateApplyOutcome::Confirmed { .. })
+            && self
+                .live_catalog()
+                .is_none_or(|live| !live.iter().any(|info| info.id.as_str() == plan.screen_id()))
+        {
+            // The host never made the Screen; its place goes again.
+            self.catalog
+                .retain(|info| info.id.as_str() != plan.screen_id());
+            self.models.remove(plan.screen_id());
+        }
         Some(TemplateApplyResult {
             connection_id: self.connection_id,
             request_id: plan.request_id,

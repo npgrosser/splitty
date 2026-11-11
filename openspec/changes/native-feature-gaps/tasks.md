@@ -1,0 +1,48 @@
+# Tasks
+
+## Done
+
+- [x] Command palette (`Alt+Shift+P`, `⌘⇧P`) with word filter, keys and pointer; shortcut list; `Ctrl+,` opens Settings.
+- [x] Float, dock, move a float, maximize and refill an empty Screen on remote Screens.
+- [x] `remote.autoForwardPorts`: baseline per connection, one automatic forward per port and process, switch under Settings → Remote.
+- [x] A remote Screen that ended on its connected host leaves the window by itself. Terminating a remote Screen asks only when a terminal is busy or unresolved, as a local close does; confirmations are drawn in the window's theme.
+- [x] Moving a pane to another Screen on a remote host, into an opened Screen or a new one, which the window opens.
+- [x] Templates on remote hosts: a saved template applies to the Screen shown or to a new Screen of its host, and a remote Screen is saved as a template through `mux.extract_template`; the local service keeps the templates.
+- [x] Suggested changes: a replacement for the selected passage with an optional remark, shown on its card; Ctrl or Cmd with Enter sends; a card or a marked line number chooses its thread. The selected passage stands when the focus moves to the field.
+- [x] Dropped files can be kept in the pane's folder (`upload-control-v1`, `dir`), and a drop on a scratchpad goes to its terminal.
+- [x] `notifications.toasts` and `notifications.desktop`: notice with Show, system notification on Linux and macOS, both switches under Settings → Notifications.
+- [x] Kitty graphics: placements and pixels from the terminal engine, textures kept per image generation, drawn below or above the text by layer. PNG images are decoded for the library (bounded by the image storage), since most programs send PNG.
+- [x] Reverse forwards: client for `reverse.*` and `reversePreferences.*`, opened on first use; panel with share, stop, resume, remember and forget; the service's refusal in full.
+- [x] Viewer panes: read with `viewer.read` and `ifVersion`, again every 2 seconds for a shown file and at once for a newer record; Markdown, source lines, images, binary notice, failure with Read again; Open Selection in Viewer.
+- [x] A job pane without a terminal names its job's state and error.
+- [x] Viewer tabs behave as tabs: a viewer pane can be dragged, floated, docked and acted on through its group, by its pane instead of a session.
+- [x] Viewer annotations: comments on a selected passage of the rendered view or on chosen source lines, general comments, replies, resolve, reopen and delete; passages anchored by quote and context and marked in the document; the review as Markdown, copied or pasted into the origin terminal with `mark_sent`; Approve and Request changes for a waiting `splitty review`.
+- [x] Viewer: HTML documents rendered as inertly as Markdown, syntax colors in the source view and in code blocks from the terminal's palette (syntect, worked out off the UI thread), and a source view that scrolls sideways to long lines.
+- [x] Annotations: a passage that changed is anchored at the passage it most likely became (trigram similarity near its lines) and marked as changed; a thread moves to the selected passage; marks can be hidden, and resolved threads marked; closing a viewer pane or a Screen with annotations asks first; a review goes to any terminal of the Screen, as a file whose path is inserted, or to the terminal's scratchpad; a waiting review says when its document changed and notes it in the review.
+- [x] Tab bar settings of the native app in a group of their own (`nativeTabs`), with its own defaults: split, float and maximize buttons shown, a close button on every tab or only the selected one, and locked tabs; under Settings → Workspace. The web client's `tabs` group stays the web client's. Its Window group has no native meaning: the title bar is the system's.
+- [x] Open In Client Editor (`editor-open-v1`): each connection registers for editor requests; a request is shown as a notice naming the editor, the host and the path, at most one per connection and not within two seconds of the last; Open launches the editor and answers `dispatched`, Decline `denied`, the deadline `expired`, a terminal that ended `disconnected`. The editor follows the request, then the `editors` rules by project folder and extension, then the default for files or folders, both under Settings → Workspace. The rules themselves are edited in the web client or the settings file.
+- [x] Forwarded commands (`POST /api/command`): `pane.activate`, `pane.clear`, `pane.close` and `pane.split` act on the named or focused pane of the Screen shown from the sending service; `pane.copy` and `pane.paste` only for the local service (provisional, tbd).
+
+## Open
+
+- [ ] System notifications on Windows.
+
+## Verification record
+
+- 253 native, 295 shared-client, 514 `splitty-core` and the architecture tests passed; strict Clippy on the three touched crates passed.
+- Optimized native app with the SSH fixtures: palette filter and Enter, shortcut list, remote maximize, float and dock, automatic forward of a new port 8123, activity notice and its Show, a Kitty test image, rendered Markdown with its source, a Rust file with line numbers, a PNG, and a terminal selection opened in a viewer.
+- Annotations in the optimized app: a comment on a rendered passage with its mark, a reply, Send to terminal with the entries marked as handed over, a comment on source lines 5-8, and `splitty review --text` answered with Request changes, which printed the review.
+- Not seen working: a successful share (the fixture's SSH server ends the reverse channel; the panel showed the service's reason), a system notification, images over a remote connection, a viewer on a remote Screen.
+- Optimized native app with the SSH fixture: terminate of a busy remote Screen asked in the themed dialog and an idle one ended at once and left the window; a tab moved to an opened remote Screen and to a new one; a saved template applied as a new Screen of the host; a remote Screen saved as a template; a suggested change sent with Ctrl+Enter, chosen, resolved and deleted.
+- Not tried: dropping files (a drop cannot be made in the headless window).
+- Viewer in the optimized app: a Rust file with syntax colors, scrolled sideways to its longest line; an HTML report with a script, a remote image, a `javascript:` link and a fixed overlay rendered as text, a list and a table without anything running or loading.
+- Annotations in the optimized app: a comment whose passage was reworded on disk showed as changed at the new wording, was moved to another selected passage, the marks were hidden, the review went to the terminal's scratchpad and as a file with its path inserted, and closing the viewer asked first.
+- Tab settings in the optimized app: with the float button off and the close button on the selected tab only, the tab bar showed neither; Reset brought both back.
+- Full gate: `cargo fmt --all --check`, `cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings` and `openspec validate --specs` passed. `cargo test --workspace --exclude splitty-gui` passed except three `splitty-server` forward tests that bind local port 5173, which a dev server on this machine held; they are untouched by this change.
+- Later in the optimized app: a waiting `splitty review` showed that its document changed and Request changes printed the review with that note; a Markdown document opened on a remote Screen; a PNG sent with the Kitty protocol showed in a terminal of a remote Screen.
+- The gate's test run also had one relay test and two `remote_connect` tests fail under the full parallel run; each passed alone.
+- Still not seen: a drop of files (no drop can be made in the headless window), a successful reverse share (the fixture's SSH server refuses it), a system notification (no notification service in the headless session).
+- A view test drops a file on a host's pane and keeps it in the pane's folder: the store command carries the folder.
+- Editor requests in the optimized app: `splitty open --editor` on a file in a local terminal showed the notice, and Decline ended the command with the service's refusal; `splitty open` on a folder in a terminal of the SSH fixture showed the notice with the host. A view test presses Open and Decline and reads the answers. Open was not pressed in the app, so that no editor starts on this machine.
+- System notification in the optimized app: with a recording stand-in for `notify-send`, a command that finished in a terminal of the SSH fixture while the window was not the active one called it with the notice's title; with the window active only the notice in the window appeared, as intended.
+- Forwarded commands: a view test (in-process) forwards `pane.split`, `pane.activate` and `pane.close` and reads the window's commands, and shows that another Screen's pane, a wrong direction, an unknown type and an earlier connection change nothing. Not seen in the app: its own service has no HTTP listener and the control socket does not offer `/api/command`. Copy, paste and clear are not covered by a test.

@@ -51,7 +51,7 @@ pub(super) struct TemplateDialog {
     source: SourceToken,
     mode: TemplateMode,
     catalog: Option<Arc<TemplateCatalogSnapshot>>,
-    pending: Option<(Uuid, TemplateApiRequest)>,
+    pub(super) pending: Option<(Uuid, TemplateApiRequest)>,
     error: Option<String>,
     scroll: ScrollHandle,
 }
@@ -148,6 +148,17 @@ impl Workspace {
         };
         if cx.has_active_drag() {
             cx.stop_active_drag(window);
+        }
+        if self.destination == Destination::Settings {
+            self.close_settings(window, cx);
+        } else if self.destination == Destination::Hosts {
+            self.show_screens(window, cx);
+            if self.destination == Destination::Hosts {
+                return;
+            }
+        }
+        if !self.drawer_visible {
+            self.drawer_overlay_open = true;
         }
         self.drag = None;
         self.float_gesture = None;
@@ -357,10 +368,11 @@ impl Workspace {
     }
 
     fn template_extract(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(model) = self.model.as_ref().map(WindowWorkspace::local_source) else {
+        // The Screen shown is saved, local or on a host.
+        let Some(model) = self.selected_model().or_else(|| self.local_model()) else {
             return;
         };
-        let Some(screen) = model.shown_screen_id() else {
+        let Some(screen) = model.shown_screen_id().map(str::to_owned) else {
             self.status = "Select a Screen to save".into();
             cx.notify();
             return;
@@ -368,7 +380,7 @@ impl Workspace {
         let name_text = model
             .screens()
             .iter()
-            .find(|info| info.id.as_str() == screen)
+            .find(|info| info.id.as_str() == screen.as_str())
             .and_then(|info| info.name.as_deref())
             .unwrap_or("Screen")
             .to_owned();
@@ -405,21 +417,56 @@ impl Workspace {
         }) else {
             return;
         };
-        if !self
-            .model
-            .as_ref()
-            .map(WindowWorkspace::local_source)
-            .is_some_and(|model| model.shown_screen_id() == Some(screen_id.as_str()))
-        {
+        let shown = self
+            .selected_model()
+            .or_else(|| self.local_model())
+            .filter(|model| model.shown_screen_id() == Some(screen_id.as_str()))
+            .map(SourceWorkspace::source_token);
+        let Some(shown) = shown else {
             if let Some(dialog) = &mut self.template_dialog {
                 dialog.error = Some("Source Screen changed; reopen Save".into());
             }
             cx.notify();
             return;
-        }
+        };
         if name.is_empty() {
             if let Some(dialog) = &mut self.template_dialog {
                 dialog.error = Some("Enter a template name".into());
+            }
+            cx.notify();
+            return;
+        }
+        let Some(dialog) = self.template_dialog.as_mut() else {
+            return;
+        };
+        if shown != dialog.source {
+            // A host reads its own Screen; the local service keeps the result.
+            if dialog.pending.is_some() {
+                return;
+            }
+            let request_id = Uuid::new_v4();
+            match self.commands.try_send(WorkerCommand::new(
+                shown,
+                Command::ExtractTemplate {
+                    owner: dialog.owner,
+                    request_id,
+                    screen: screen_id.clone(),
+                    name: name.clone(),
+                    root: root.clone(),
+                },
+            )) {
+                Ok(()) => {
+                    dialog.pending = Some((
+                        request_id,
+                        TemplateApiRequest::Extract {
+                            screen_id,
+                            name,
+                            root,
+                        },
+                    ));
+                    dialog.error = None;
+                }
+                Err(error) => dialog.error = Some(format!("Request not sent: {error}")),
             }
             cx.notify();
             return;
@@ -556,7 +603,8 @@ impl Workspace {
         else {
             return;
         };
-        let Some(model) = self.model.as_ref().map(WindowWorkspace::local_source) else {
+        // A template goes to the source of the Screen shown, local or a host.
+        let Some(model) = self.selected_model().or_else(|| self.local_model()) else {
             return;
         };
         let target = match target {
@@ -625,12 +673,12 @@ impl Workspace {
             return;
         }
         let plan = plan.clone();
-        if !self
+        let current = self
             .model
             .as_ref()
-            .map(WindowWorkspace::local_source)
-            .is_some_and(|model| model.source_token() == plan.source_token())
-        {
+            .and_then(|window| window.source(plan.source_token().source_id()))
+            .is_some_and(|model| model.source_token() == plan.source_token());
+        if !current {
             dialog.error = Some("Template review belongs to an earlier connection".into());
             cx.notify();
             return;
@@ -718,13 +766,18 @@ impl Workspace {
 
     pub(super) fn template_overlay(
         &self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<AnyElement> {
         let dialog = self.template_dialog.as_ref()?;
         let colors = &self.appearance;
         let weak = cx.entity().downgrade();
-        let mut body = div().flex().flex_col().gap_2();
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(chrome_rems(8.))
+            .text_size(chrome_rems(12.))
+            .line_height(relative(1.45));
         let title = match &dialog.mode {
             TemplateMode::Library => "Saved templates",
             TemplateMode::Extract { .. } => "Save current Screen",
@@ -743,10 +796,7 @@ impl Workspace {
                         body.child(
                             div()
                                 .id("template-save-current")
-                                .px_3()
-                                .py_2()
-                                .bg(rgb(colors.active))
-                                .cursor_pointer()
+                                .map(|button| action_style(button, colors, true))
                                 .child("Save current Screen…")
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.template_extract(window, cx)
@@ -771,10 +821,7 @@ impl Workspace {
                                             .id(SharedString::from(format!("template-load-{slug}")))
                                             .flex_1()
                                             .min_w_0()
-                                            .px_2()
-                                            .py_1()
-                                            .cursor_pointer()
-                                            .bg(rgb(colors.overlay))
+                                            .map(|row| row_style(row, colors, false))
                                             .child(name)
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.template_load(slug.clone(), cx)
@@ -785,9 +832,7 @@ impl Workspace {
                                             .id(SharedString::from(format!(
                                                 "template-delete-{slug_for_delete}"
                                             )))
-                                            .px_2()
-                                            .py_1()
-                                            .cursor_pointer()
+                                            .map(|button| quiet_style(button, colors))
                                             .child("Delete")
                                             .on_click(cx.listener(move |this, _, _, cx| {
                                                 this.template_delete(
@@ -805,27 +850,27 @@ impl Workspace {
                 }
                 TemplateMode::Extract { name, root, .. } => {
                     body = body
-                        .child("Name")
+                        .child(field_label(colors, "Name"))
                         .child(
                             div()
                                 .id("template-extract-name")
-                                .h(chrome_rems(34.))
+                                .map(|field| field_box(field, colors))
                                 .child(Input::new(name)),
                         )
-                        .child("Relative root on the terminal host (optional)")
+                        .child(field_label(
+                            colors,
+                            "Relative root on the terminal host (optional)",
+                        ))
                         .child(
                             div()
                                 .id("template-extract-root")
-                                .h(chrome_rems(34.))
+                                .map(|field| field_box(field, colors))
                                 .child(Input::new(root)),
                         )
                         .child(
                             div()
                                 .id("template-extract-submit")
-                                .px_3()
-                                .py_2()
-                                .bg(rgb(colors.active))
-                                .cursor_pointer()
+                                .map(|button| action_style(button, colors, true))
                                 .child("Extract for review")
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.template_extract_submit(cx)),
@@ -839,18 +884,18 @@ impl Workspace {
                     commands,
                 } => {
                     body = body
-                        .child("Name")
+                        .child(field_label(colors, "Name"))
                         .child(
                             div()
                                 .id("template-save-name")
-                                .h(chrome_rems(34.))
+                                .map(|field| field_box(field, colors))
                                 .child(Input::new(name)),
                         )
-                        .child("File slug")
+                        .child(field_label(colors, "File slug"))
                         .child(
                             div()
                                 .id("template-save-slug")
-                                .h(chrome_rems(34.))
+                                .map(|field| field_box(field, colors))
                                 .child(Input::new(slug)),
                         );
                     for command_name in names_with_commands(draft) {
@@ -872,10 +917,7 @@ impl Workspace {
                                 .id(SharedString::from(format!(
                                     "template-command-{command_name}"
                                 )))
-                                .px_2()
-                                .py_1()
-                                .cursor_pointer()
-                                .bg(rgb(colors.overlay))
+                                .map(|row| row_style(row, colors, false))
                                 .child(label)
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     this.template_toggle_command(&command_name, cx)
@@ -885,10 +927,7 @@ impl Workspace {
                     body = body.child(
                         div()
                             .id("template-save-submit")
-                            .px_3()
-                            .py_2()
-                            .bg(rgb(colors.active))
-                            .cursor_pointer()
+                            .map(|button| action_style(button, colors, true))
                             .child("Save template")
                             .on_click(cx.listener(|this, _, _, cx| this.template_save(cx))),
                     );
@@ -910,10 +949,7 @@ impl Workspace {
                     body = body.child(summary).child(
                         div()
                             .id("template-overwrite-confirm")
-                            .px_3()
-                            .py_2()
-                            .bg(rgb(colors.active))
-                            .cursor_pointer()
+                            .map(|button| action_style(button, colors, true))
                             .child("Replace saved template")
                             .on_click(cx.listener(|this, _, _, cx| this.template_overwrite(cx))),
                     );
@@ -946,14 +982,7 @@ impl Workspace {
                         .child(
                             div()
                                 .id("template-target-new")
-                                .px_2()
-                                .py_1()
-                                .cursor_pointer()
-                                .bg(rgb(if current {
-                                    colors.overlay
-                                } else {
-                                    colors.active
-                                }))
+                                .map(|row| row_style(row, colors, !current))
                                 .child("New Screen")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.template_select_target(TargetChoice::NewScreen, cx)
@@ -962,33 +991,26 @@ impl Workspace {
                         .child(
                             div()
                                 .id("template-target-current")
-                                .px_2()
-                                .py_1()
-                                .cursor_pointer()
-                                .bg(rgb(if current {
-                                    colors.active
-                                } else {
-                                    colors.overlay
-                                }))
+                                .map(|row| row_style(row, colors, current))
                                 .child("Replace current Screen")
                                 .on_click(cx.listener(|this, _, _, cx| {
                                     this.template_select_target(TargetChoice::CurrentScreen, cx)
                                 })),
                         )
-                        .child("Root directory on the terminal host (optional)")
+                        .child(field_label(
+                            colors,
+                            "Root directory on the terminal host (optional)",
+                        ))
                         .child(
                             div()
                                 .id("template-apply-root")
-                                .h(chrome_rems(34.))
+                                .map(|field| field_box(field, colors))
                                 .child(Input::new(root)),
                         )
                         .child(
                             div()
                                 .id("template-prepare-review")
-                                .px_3()
-                                .py_2()
-                                .bg(rgb(colors.active))
-                                .cursor_pointer()
+                                .map(|button| action_style(button, colors, true))
                                 .child(if direct_layout {
                                     "Apply layout"
                                 } else {
@@ -1057,10 +1079,7 @@ impl Workspace {
                     body = body.child(
                         div()
                             .id("template-layout-only")
-                            .px_3()
-                            .py_2()
-                            .bg(rgb(colors.active))
-                            .cursor_pointer()
+                            .map(|button| action_style(button, colors, true))
                             .child("Layout only (no commands)")
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.template_apply(TemplateApplyChoice::LayoutOnly, window, cx)
@@ -1070,10 +1089,7 @@ impl Workspace {
                         body = body.child(
                             div()
                                 .id("template-run-commands")
-                                .px_3()
-                                .py_2()
-                                .bg(rgb(colors.overlay))
-                                .cursor_pointer()
+                                .map(|button| action_style(button, colors, false))
                                 .child("Run displayed commands")
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.template_apply(
@@ -1091,10 +1107,7 @@ impl Workspace {
                         .child(
                             div()
                                 .id("template-delete-confirm")
-                                .px_3()
-                                .py_2()
-                                .bg(rgb(colors.active))
-                                .cursor_pointer()
+                                .map(|button| action_style(button, colors, true))
                                 .child("Delete this template")
                                 .on_click(
                                     cx.listener(|this, _, _, cx| this.template_delete_submit(cx)),
@@ -1104,79 +1117,79 @@ impl Workspace {
             }
         }
         if let Some(error) = &dialog.error {
-            body = body.child(div().text_color(rgb(colors.accent)).child(error.clone()));
+            body = body.child(div().text_color(rgb(colors.danger)).child(error.clone()));
         }
         let weak_for_dismiss = weak.clone();
         let show_back = !matches!(&dialog.mode, TemplateMode::Library) && dialog.pending.is_none();
-        let overlay = div()
+        let panel = div()
             .id("template-modal")
-            .absolute()
             .size_full()
-            .occlude()
+            .min_w_0()
+            .min_h_0()
             .flex()
-            .items_center()
-            .justify_center()
-            .bg(rgba(0x000000aa))
-            .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
-            .on_mouse_move(|_, _, cx| cx.stop_propagation())
-            .on_scroll(|_, _, cx| cx.stop_propagation())
+            .flex_col()
+            .bg(rgb(colors.raised))
+            .text_color(rgb(colors.text))
             .child(
                 div()
-                    .w(chrome_rems(700.))
-                    .max_w(relative(0.94))
-                    .max_h(px(f32::from(window.viewport_size().height) * 0.82))
                     .flex()
-                    .flex_col()
-                    .gap_3()
-                    .p_4()
-                    .border_1()
-                    .border_color(rgb(colors.border))
-                    .rounded_md()
-                    .bg(rgb(colors.raised))
+                    .flex_wrap()
+                    .items_center()
+                    .justify_between()
+                    .gap_2()
+                    .px_4()
+                    .py_3()
+                    .border_b_1()
+                    .border_color(rgb(colors.subtle_border))
+                    .child(
+                        div()
+                            .text_size(chrome_rems(12.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child(title),
+                    )
                     .child(
                         div()
                             .flex()
                             .items_center()
-                            .justify_between()
-                            .child(div().font_weight(FontWeight::BOLD).child(title))
+                            .gap_2()
                             .when(show_back, |header| {
                                 header.child(
-                                    div()
-                                        .id("template-back")
-                                        .px_2()
-                                        .py_1()
-                                        .cursor_pointer()
-                                        .child("Back to library")
+                                    Button::new("template-back")
+                                        .focus_ring(focus_visible(cx))
+                                        .label("Back")
+                                        .ghost()
+                                        .small()
                                         .on_click(cx.listener(|this, _, window, cx| {
                                             this.template_library(window, cx)
                                         })),
                                 )
                             })
                             .child(
-                                div()
-                                    .id("template-cancel")
-                                    .px_2()
-                                    .py_1()
-                                    .cursor_pointer()
-                                    .child("Cancel")
+                                Button::new("template-cancel")
+                                    .focus_ring(focus_visible(cx))
+                                    .label("Close")
+                                    .ghost()
+                                    .small()
                                     .on_click(move |_, window, cx| {
                                         let _ = weak_for_dismiss.update(cx, |this, cx| {
                                             this.dismiss_templates(window, cx)
                                         });
                                     }),
                             ),
-                    )
-                    .child(
-                        div()
-                            .id("template-modal-scroll")
-                            .flex_1()
-                            .min_h_0()
-                            .overflow_y_scroll()
-                            .track_scroll(&dialog.scroll)
-                            .child(body),
                     ),
+            )
+            .child(
+                div()
+                    .id("template-modal-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .min_w_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&dialog.scroll)
+                    .p_4()
+                    .child(body),
             );
-        Some(overlay.into_any_element())
+        Some(panel.into_any_element())
     }
 
     pub(super) fn render_template_node(
@@ -1349,6 +1362,95 @@ impl Workspace {
         }
         viewport.into_any_element()
     }
+}
+
+/// A button of the template panel; the primary one carries the accent.
+fn action_style<E: Styled + StatefulInteractiveElement>(
+    button: E,
+    colors: &NativeAppearance,
+    primary: bool,
+) -> E {
+    let hover: Hsla = rgba(colors.hover_overlay).into();
+    button
+        .h(chrome_rems(28.))
+        .px(chrome_rems(12.))
+        .mt(chrome_rems(4.))
+        .flex()
+        .items_center()
+        .justify_center()
+        .rounded(chrome_rems(5.))
+        .border_1()
+        .border_color(rgb(if primary {
+            colors.accent
+        } else {
+            colors.subtle_border
+        }))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(rgb(if primary {
+            colors.accent
+        } else {
+            colors.secondary
+        }))
+        .cursor_pointer()
+        .hover(move |button| button.bg(hover))
+}
+
+/// A row to choose: a saved template, a target or a command.
+fn row_style<E: Styled + StatefulInteractiveElement>(
+    row: E,
+    colors: &NativeAppearance,
+    chosen: bool,
+) -> E {
+    let hover: Hsla = rgb(colors.hover).into();
+    row.px(chrome_rems(10.))
+        .py(chrome_rems(7.))
+        .rounded(chrome_rems(4.))
+        .cursor_pointer()
+        .bg(if chosen {
+            rgb(colors.active).into()
+        } else {
+            gpui::transparent_black()
+        })
+        .text_color(rgb(if chosen {
+            colors.text
+        } else {
+            colors.secondary
+        }))
+        .hover(move |row| row.bg(hover))
+}
+
+/// A quiet action beside a row.
+fn quiet_style<E: Styled + StatefulInteractiveElement>(button: E, colors: &NativeAppearance) -> E {
+    let danger: Hsla = rgb(colors.danger).into();
+    button
+        .px(chrome_rems(8.))
+        .py(chrome_rems(5.))
+        .rounded(chrome_rems(4.))
+        .text_size(chrome_rems(11.))
+        .text_color(rgb(colors.muted))
+        .cursor_pointer()
+        .hover(move |button| button.text_color(danger))
+}
+
+/// The frame of a text field.
+fn field_box<E: Styled>(field: E, colors: &NativeAppearance) -> E {
+    field
+        .h(chrome_rems(30.))
+        .px(chrome_rems(4.))
+        .flex()
+        .items_center()
+        .rounded(chrome_rems(5.))
+        .border_1()
+        .border_color(rgb(colors.subtle_border))
+        .bg(rgb(colors.surface))
+}
+
+fn field_label(colors: &NativeAppearance, text: &'static str) -> Div {
+    div()
+        .mt(chrome_rems(4.))
+        .text_size(chrome_rems(11.))
+        .text_color(rgb(colors.secondary))
+        .child(text)
 }
 
 #[cfg(test)]

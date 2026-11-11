@@ -226,11 +226,16 @@ async fn read_ready(stdout: impl tokio::io::AsyncRead + Unpin, marker: &str) -> 
 /// OpenSSH ssh_session2 runs ssh_init_forwarding before LocalCommand, and
 /// ExitOnForwardFailure exits before that command when -L cannot bind. A live
 /// authenticating child plus someone else's TCP listener is not readiness.
-async fn wait_for_ready(child: &mut Worker, port: u16, marker: &str) -> io::Result<()> {
+async fn wait_for_ready(
+    child: &mut Worker,
+    port: u16,
+    marker: &str,
+    timeout: Duration,
+) -> io::Result<()> {
     let stdout = child
         .stdout()
         .ok_or_else(|| io::Error::other("missing SSH readiness pipe"))?;
-    tokio::time::timeout(SETUP_TIMEOUT, async {
+    tokio::time::timeout(timeout, async {
         read_ready(stdout, marker).await?;
         wait_for_forward(child, port).await
     })
@@ -339,7 +344,7 @@ impl PortTunnel {
 
         let port = local.port();
         let mut command = port_command(ssh, port, remote);
-        command.arg(host);
+        command.arg(ssh.target().destination());
         // ssh -G can await. Recheck at the handoff, with IPv4 still held.
         local
             .check_forward_address()
@@ -359,13 +364,15 @@ impl PortTunnel {
         })?;
         // As late as possible (SR-13), see `PortReservation`.
         drop(local);
+        let timeout = crate::ssh::startup_timeout(&command, SETUP_TIMEOUT);
         let mut child = Worker::spawn(&mut command, &Admission::global())
             .map_err(|error| PortTunnelError::Ssh(SshError::Spawn(error)))?;
         let stderr = child
             .stderr()
             .map(|stderr| tokio::spawn(keep_end(stderr, diagnostic_bytes)));
         let mut tunnel = Self { child, stderr };
-        let Err(error) = wait_for_ready(&mut tunnel.child, port, READY_MARKER).await else {
+        let Err(error) = wait_for_ready(&mut tunnel.child, port, READY_MARKER, timeout).await
+        else {
             if let Err(source) = check_forward_address(port) {
                 tunnel.close().await;
                 return Err(PortTunnelError::LocalPortUnavailable {
@@ -758,7 +765,12 @@ mod tests {
         let mut child =
             Worker::spawn(&mut command, &Admission::global()).expect("delayed SSH fixture");
         let mut release = child.stdin().expect("gate");
-        let ready = wait_for_ready(&mut child, port, "not-emitted-before-binding");
+        let ready = wait_for_ready(
+            &mut child,
+            port,
+            "not-emitted-before-binding",
+            SETUP_TIMEOUT,
+        );
         tokio::pin!(ready);
         assert!(
             tokio::time::timeout(Duration::from_millis(50), &mut ready)

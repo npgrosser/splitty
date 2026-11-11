@@ -5,6 +5,7 @@
 )]
 mod app;
 mod appearance;
+mod askpass;
 mod document;
 mod offscreen;
 mod startup;
@@ -40,6 +41,7 @@ const MACOS_TRAFFIC_LIGHTS: Point<Pixels> = Point {
 
 struct RootView {
     content: AnyView,
+    workspace: Option<WeakEntity<workspace::Workspace>>,
     title: String,
     _title_subscription: Option<Subscription>,
     /// The window draws its own title bar in the theme's colors.
@@ -71,8 +73,8 @@ impl RootView {
                 if this.title != title {
                     window.set_window_title(&title);
                     this.title = title;
-                    cx.notify();
                 }
+                cx.notify();
             })
         });
         let appearance_subscription = workspace.filter(|_| windows_chrome).map(|workspace| {
@@ -92,6 +94,7 @@ impl RootView {
         });
         Self {
             content,
+            workspace: workspace.map(Entity::downgrade),
             title,
             _title_subscription: title_subscription,
             custom_titlebar,
@@ -120,63 +123,79 @@ impl RootView {
     }
 }
 impl RootView {
-    fn windows_title_bar(&self, cx: &App) -> AnyElement {
-        TitleBar::new()
-            .bg(cx.theme().background)
-            .border_color(cx.theme().border)
-            .text_color(cx.theme().foreground)
-            .child(
-                div()
-                    .id("window-title")
-                    .flex_1()
-                    .min_w_0()
-                    .overflow_hidden()
-                    .text_ellipsis()
-                    .whitespace_nowrap()
-                    .tooltip({
-                        let title = self.title.clone();
-                        move |window, cx| {
-                            gpui_kit::component::tooltip::Tooltip::new(title.clone())
-                                .build(window, cx)
-                        }
-                    })
-                    .child(self.title.clone()),
-            )
-            .into_any_element()
-    }
-
-    /// Matches the web client's native macOS title bar: the drawer's raised
-    /// surface without a divider, the title centered over the whole window in
-    /// the system font. The title has no hitbox, so dragging and double clicks
+    /// Matches the web client's custom title bar (`TitleBar.svelte`): the
+    /// drawer's `surface-raised` background without a bottom divider, the title
+    /// centered over the window in `text-secondary`, and platform window
+    /// controls on the trailing edge (or native traffic lights on macOS).
+    /// The centered title overlay has no hitbox, so dragging and double clicks
     /// reach the bar underneath it.
-    fn macos_title_bar(&self, cx: &App) -> AnyElement {
+    fn title_bar(&self, cx: &App) -> AnyElement {
+        let workspace = self.workspace.clone();
+        let (bg, title_color, font_family) = self
+            .workspace
+            .as_ref()
+            .and_then(|workspace| workspace.upgrade())
+            .map(|workspace| {
+                let appearance = workspace.read(cx).appearance();
+                (
+                    rgb(appearance.raised).into(),
+                    rgb(appearance.secondary).into(),
+                    SharedString::from(appearance.font_family.clone()),
+                )
+            })
+            .unwrap_or_else(|| {
+                (
+                    cx.theme().sidebar,
+                    cx.theme().muted_foreground,
+                    if cfg!(target_os = "macos") {
+                        ".SystemUIFont".into()
+                    } else {
+                        cx.theme().font_family.clone()
+                    },
+                )
+            });
+        let title_inset = if cfg!(target_os = "macos") {
+            MACOS_TITLE_INSET
+        } else {
+            px(108.)
+        };
         div()
             .relative()
             .flex_shrink_0()
             .child(
                 TitleBar::new()
                     .h(MACOS_TITLE_BAR_HEIGHT)
-                    .bg(cx.theme().sidebar)
-                    .border_b_0(),
+                    .bg(bg)
+                    .border_b_0()
+                    .on_close_window(move |_, window, cx| {
+                        if let Some(workspace) = workspace.as_ref() {
+                            let _ = workspace.update(cx, |workspace, cx| {
+                                workspace.request_window_close(window, cx);
+                            });
+                        } else {
+                            window.remove_window();
+                        }
+                    }),
             )
             .child(
                 div()
                     .absolute()
                     .inset_0()
-                    .px(MACOS_TITLE_INSET)
+                    .px(title_inset)
                     .flex()
                     .items_center()
                     .justify_center()
                     .child(
                         div()
+                            .id("window-title")
                             .min_w_0()
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .font_family(".SystemUIFont")
-                            .text_size(px(13.))
-                            .font_weight(FontWeight::SEMIBOLD)
-                            .text_color(cx.theme().muted_foreground)
+                            .font_family(font_family)
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::MEDIUM)
+                            .text_color(title_color)
                             .child(self.title.clone()),
                     ),
             )
@@ -185,18 +204,15 @@ impl RootView {
 }
 
 impl Render for RootView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let show_titlebar = self.custom_titlebar
+            || (self.workspace.is_some()
+                && matches!(window.window_decorations(), Decorations::Client { .. }));
         div()
             .size_full()
             .flex()
             .flex_col()
-            .when(self.custom_titlebar, |view| {
-                view.child(if cfg!(target_os = "macos") {
-                    self.macos_title_bar(cx)
-                } else {
-                    self.windows_title_bar(cx)
-                })
-            })
+            .when(show_titlebar, |view| view.child(self.title_bar(cx)))
             .child(
                 div()
                     .flex_1()
@@ -276,6 +292,12 @@ impl OwnedWorker {
 }
 
 fn main() -> anyhow::Result<()> {
+    if std::env::var_os("SPLITTY_BROWSER_ASKPASS").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return splitty_client_core::ssh_askpass_helper().map_err(Into::into);
+    }
+    if std::env::var_os("SPLITTY_SSH_ASKPASS").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        return askpass::run();
+    }
     if let Some(code) = offscreen::subprocess_exit() {
         std::process::exit(code);
     }
@@ -298,6 +320,8 @@ fn main() -> anyhow::Result<()> {
                 );
         return Ok(());
     }
+    #[cfg(target_os = "windows")]
+    splitty_client_core::set_askpass_program(std::env::current_exe()?);
     let worker = Rc::new(RefCell::new(None));
     let launched_worker = worker.clone();
     let window_error = Rc::new(RefCell::new(None));
@@ -307,6 +331,8 @@ fn main() -> anyhow::Result<()> {
     let application = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
     application.run(move |cx| {
         gpui_kit::init(cx);
+        #[cfg(not(target_os = "windows"))]
+        askpass::install(cx);
         terminal::init(cx);
         gpui_kit::component::theme::Theme::change(
             gpui_kit::component::theme::ThemeMode::Dark,

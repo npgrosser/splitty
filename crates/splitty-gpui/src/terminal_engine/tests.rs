@@ -236,7 +236,7 @@ fn selection_damage_and_scrolled_cursor_are_observable() -> Result<()> {
 }
 
 #[test]
-fn clipboard_and_image_effects_stay_disabled() -> Result<()> {
+fn clipboard_effects_stay_disabled() -> Result<()> {
     let mut engine = Engine::new(20, 3)?;
     assert!(engine
         .feed(b"\x1b]52;c;aGVsbG8=\x07\x1b]52;c;?\x07", false)?
@@ -244,6 +244,35 @@ fn clipboard_and_image_effects_stay_disabled() -> Result<()> {
     // No clipboard-read callback means mode 5522 still pastes literal text.
     engine.feed(b"\x1b[?5522h", false)?;
     assert_eq!(engine.paste("safe")?, b"safe");
+    Ok(())
+}
+
+#[test]
+fn a_kitty_image_is_placed_and_its_pixels_are_read_as_bgra() -> Result<()> {
+    let mut engine = Engine::new(20, 5)?;
+    engine.resize(20, 5, 10, 20)?;
+    assert!(engine.frame()?.images()?.is_empty());
+    // Transmit and show a 2x1 RGB image, red then blue, as image 7.
+    engine.feed(b"\x1b_Ga=T,f=24,s=2,v=1,i=7,q=2;/wAAAAD/\x1b\\", false)?;
+    let mut frame = engine.frame()?;
+    let images = frame.images()?;
+    assert_eq!(images.len(), 1);
+    let placement = images[0];
+    assert_eq!(
+        (placement.image_id, placement.col, placement.row),
+        (7, 0, 0)
+    );
+    assert_eq!((placement.width, placement.height), (2, 1));
+    assert_eq!((placement.source_width, placement.source_height), (2, 1));
+    assert!(placement.generation != 0);
+    let pixels = frame.image_pixels(7)?.expect("stored pixels");
+    assert_eq!((pixels.width, pixels.height), (2, 1));
+    assert_eq!(pixels.bgra, [0, 0, 255, 255, 255, 0, 0, 255]);
+    assert!(frame.image_pixels(8)?.is_none());
+    frame.finish()?;
+    // Deleting the image removes its placement.
+    engine.feed(b"\x1b_Ga=d,d=I,i=7,q=2\x1b\\", false)?;
+    assert!(engine.frame()?.images()?.is_empty());
     Ok(())
 }
 
@@ -702,5 +731,38 @@ fn faint_text_is_reported_at_half_strength_over_its_background() -> Result<()> {
     assert_eq!(faint_foreground, super::half_way(normal, background));
     assert_eq!(super::half_way(0xffffff, 0x000000), 0x808080);
     assert_eq!(super::half_way(0xe0e0e0, 0x1e1e1e), 0x7f7f7f);
+    Ok(())
+}
+#[test]
+fn a_kitty_png_is_decoded_and_placed() -> Result<()> {
+    let mut engine = Engine::new(20, 8)?;
+    engine.resize(20, 8, 10, 20)?;
+    // A 48x48 PNG of one color (224, 64, 64), as programs usually send images.
+    engine.feed(
+        b"\x1b_Ga=T,f=100,i=9,q=2;iVBORw0KGgoAAAANSUhEUgAAADAAAAAwCAIAAADYYG7QAAAAOklEQVR42u3OMQ0AAAgDsEmbfxVIwQXhaFIBzbSvREhISEhISEhISEhISEhISEhISEhISEhISEjozgKXaGC19rykhgAAAABJRU5ErkJggg==\x1b\\",
+        false,
+    )?;
+    let mut frame = engine.frame()?;
+    let images = frame.images()?;
+    assert_eq!(images.len(), 1);
+    assert_eq!((images[0].source_width, images[0].source_height), (48, 48));
+    let pixels = frame.image_pixels(9)?.expect("decoded pixels");
+    assert_eq!((pixels.width, pixels.height), (48, 48));
+    assert_eq!(pixels.bgra[..4], [64, 64, 224, 255]);
+    frame.finish()?;
+    // Bytes that are no PNG are refused without a placement.
+    engine.feed(b"\x1b_Ga=T,f=100,i=10,q=2;bm90IGEgcG5n\x1b\\", false)?;
+    assert_eq!(engine.frame()?.images()?.len(), 1);
+    Ok(())
+}
+#[test]
+fn clearing_the_screen_takes_a_kitty_image_away() -> Result<()> {
+    let mut engine = Engine::new(20, 8)?;
+    engine.resize(20, 8, 10, 20)?;
+    engine.feed(b"\x1b_Ga=T,f=24,s=2,v=1,i=7,q=2;/wAAAAD/\x1b\\", false)?;
+    assert_eq!(engine.frame()?.images()?.len(), 1);
+    // What clear writes: home, erase the display, erase the scrollback.
+    engine.feed(b"\x1b[H\x1b[2J\x1b[3J", false)?;
+    assert!(engine.frame()?.images()?.is_empty());
     Ok(())
 }

@@ -249,8 +249,8 @@ fn narrow_settings_keeps_navigation_close_and_scrolled_controls_accessible() {
         window.update(|window, cx| window.draw(cx).clear(cx));
         let wide_nav = window.debug_bounds("settings-nav").unwrap();
         let wide_content = window.debug_bounds("settings-content").unwrap();
-        assert_eq!(wide_nav.right(), wide_content.left());
-        assert_eq!(wide_nav.top(), wide_content.top());
+        assert_eq!(wide_nav.left(), wide_content.left());
+        assert_eq!(wide_content.top(), wide_nav.bottom());
         window.simulate_resize(size(px(560.), px(420.)));
         window.update(|window, cx| window.draw(cx).clear(cx));
         let drawer = window.debug_bounds("drawer-slide").unwrap();
@@ -260,7 +260,13 @@ fn narrow_settings_keeps_navigation_close_and_scrolled_controls_accessible() {
         let close = window.debug_bounds("settings-close").unwrap();
         assert_eq!(drawer.size.width, px(200.));
         assert_eq!(settings.left(), drawer.right());
-        assert_eq!(settings.size.width, px(360.));
+        let panel = window.debug_bounds("drawer-panel").unwrap();
+        assert_eq!(panel.size.width, px(360.));
+        assert_eq!(
+            settings.size.width,
+            panel.size.width - px(1.),
+            "content excludes the panel border"
+        );
         assert_eq!(nav.right(), settings.right());
         assert_eq!(content.top(), nav.bottom());
         assert!(close.left() >= content.left() && close.right() <= content.right());
@@ -272,7 +278,12 @@ fn narrow_settings_keeps_navigation_close_and_scrolled_controls_accessible() {
                 .right()
                 <= nav.right()
         );
-        assert!(commands.try_recv().is_err());
+        while let Ok(command) = commands.try_recv() {
+            assert!(
+                matches!(command.kind(), Command::ResizePane { .. }),
+                "resizing does not submit a user command"
+            );
+        }
         click(window, "settings-close", false);
         window.update(|_, cx| {
             assert!(view.read(cx).destination != crate::workspace::Destination::Settings);
@@ -339,10 +350,14 @@ fn notification_controls_keep_last_good_values_and_fence_uncertainty_and_old_own
             },
         );
         click(window, "settings-reset-notifications.enabled", false);
-        assert!(
-            commands.try_recv().is_err(),
-            "missing default cannot submit Reset"
-        );
+        // A terminal resize can settle after the appearance error redraw. It is
+        // unrelated to Reset; no settings or other user command may escape.
+        while let Ok(command) = commands.try_recv() {
+            assert!(
+                matches!(command.kind(), Command::ResizePane { .. }),
+                "missing default cannot submit Reset"
+            );
+        }
         click(window, "settings-control-notifications.enabled", true);
         let id = request(&mut commands, owner, field, false);
         deliver(

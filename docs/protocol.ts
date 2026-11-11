@@ -2285,6 +2285,8 @@ interface RememberedScreen {
   name?: string;
   /** Its place among the window's screens, local ones included. */
   position?: number;
+  /** Its host was closed in the client; offered again, not reopened unasked. */
+  closed?: boolean;
 }
 
 /**
@@ -2366,7 +2368,8 @@ interface CatalogScreen {
  *
  * POST reuses an active/opening forward; a different explicit local port is
  * refused. Explicit success enables an existing saved rule and persists a new
- * selected local; failure preserves prior durable values and closes any new
+ * selected local; preserveRestore:true keeps the existing enabled choice instead.
+ * Failure preserves prior durable values and closes any new
  * uncommitted tunnel. POST alone never remembers a mapping. automatic:true
  * refuses a disabled rule, cannot select local, and never changes preferences.
  * Unknown fields retain legacy POST/DELETE behavior (ignored).
@@ -2404,6 +2407,8 @@ interface OpenRemoteForward extends RemoteForwardKey {
   local?: number;
   /** Omitted/false is explicit consent; true cannot be combined with local. */
   automatic?: boolean;
+  /** Explicit opening preserves the saved restore choice instead of enabling it. */
+  preserveRestore?: boolean;
 }
 
 interface RemoteForward {
@@ -2424,10 +2429,12 @@ interface RemoteForward {
  *
  * Metadata only: never connects, reserves a port or starts/retries a forward.
  * PUT merges supplied fields; unknown fields and null values are invalid.
- * Create: enabled=true, omitted local uses the active forward's actual port or
- * the remote port, omitted label is "". Update: omitted fields and enabled are
- * preserved. Supplying a local different from an active up/down forward yields
- * active_mapping_conflict. Only successful explicit POST resumes a saved rule.
+ * Create: omitted enabled defaults to true for legacy clients; native supplies false
+ * until restoration is explicitly chosen. Omitted local uses the active forward's actual port or
+ * the remote port, omitted label is "". Update: omitted fields are preserved.
+ * Supplied enabled changes restoration only, never starts or stops a live tunnel. Supplying a local different from an active up/down forward yields
+ * active_mapping_conflict. Explicit POST may resume a saved rule; native sends
+ * preserveRestore:true so one-off forwarding does not change restoration.
  * Forget removes saved metadata/errors, leaving an active forward supervised.
  *
  * Persisted atomically as remote-forwards.json in the private config directory:
@@ -2445,6 +2452,8 @@ interface SaveRemoteForward extends RemoteForwardKey {
   local?: number;
   /** At most 200 Unicode characters. "" clears; omitted preserves/defaults. */
   label?: string;
+  /** Local restore consent. Omitted preserves the prior value or legacy true default. */
+  enabled?: boolean;
 }
 
 interface SavedRemoteForward {

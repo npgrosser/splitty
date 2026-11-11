@@ -20,6 +20,9 @@ pub fn build(
     terminals: Arc<dyn splitty_core::pty::terminal::TerminalFactory>,
     control_socket: &Path,
 ) -> Runtime {
+    if let Ok(program) = std::env::current_exe() {
+        splitty_remote::askpass::enable(program);
+    }
     let config = splitty_core::config::load();
     let shell_profiles = Arc::new(RwLock::new(
         splitty_core::shell_profiles::state_from_settings(&config.shells),

@@ -97,7 +97,8 @@ export interface FailureView {
 
 /** How an error of a host's connection reads. The target and every hub string stay plain text. */
 export function describeFailure(target: string, error: RemoteFailure): FailureView {
-  const headline = HEADLINES[error.code](target);
+  const changedKey = error.code === "host_key" && /REMOTE HOST IDENTIFICATION HAS CHANGED/i.test(error.message ?? "");
+  const headline = changedKey ? `The SSH host key of ${target} has changed.` : HEADLINES[error.code](target);
   const folded = error.code === "host_key" || error.code === "auth" || error.code === "unreachable" || error.code === "bridge";
   let message = error.message;
   if (error.code === "incompatible" && !message && error.version) {
@@ -106,10 +107,11 @@ export function describeFailure(target: string, error: RemoteFailure): FailureVi
   const view: FailureView = {
     headline,
     copy: error.code === "host_key" || error.code === "auth"
-      ? `ssh ${target}`
+      ? sshCommand(target)
       : [message, error.hint].filter(Boolean).join("\n"),
   };
-  if (error.hint) view.hint = error.hint;
+  if (changedKey) view.hint = "Verify the new fingerprint with the host administrator before replacing the saved host key.";
+  else if (error.hint) view.hint = error.hint;
   if (message) {
     if (folded) view.details = message;
     else view.message = message;
@@ -117,11 +119,18 @@ export function describeFailure(target: string, error: RemoteFailure): FailureVi
   return view;
 }
 
+/** Targets use host:port; OpenSSH uses a separate -p argument. */
+function sshCommand(target: string): string {
+  const match = /^(.*\]|[^:]+):([0-9]+)$/.exec(target);
+  const destination = (match?.[1] ?? target).replace(/\[([0-9a-fA-F:.]+)\]$/, "$1");
+  return match ? `ssh -p ${match[2]} ${destination}` : `ssh ${destination}`;
+}
+
 const HEADLINES: Record<RemoteFailure["code"], (target: string) => string> = {
   migration_unavailable: (t) => `Splitty cannot safely update the server on ${t}.`,
   unsupported_environment: () => "This connection is not supported in the local environment.",
   invalid_target: (t) => `${t} is not a host Splitty can connect to.`,
-  host_key: (t) => `${t} is not known yet.`,
+  host_key: (t) => `The SSH host key of ${t} could not be verified.`,
   auth: (t) => `SSH login to ${t} failed.`,
   unreachable: (t) => `${t} could not be reached.`,
   unsupported_host: (t) => `${t} cannot run Splitty.`,

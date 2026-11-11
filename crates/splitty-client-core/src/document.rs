@@ -35,12 +35,37 @@ pub struct DocumentRead {
     document: Option<Document>,
     size: usize,
     finished: bool,
+    /// The version the reader has; the service answers `viewer.unchanged` for it.
+    if_version: Option<String>,
     _lease: Lease,
+}
+
+/// How a read ended.
+pub enum ReadOutcome {
+    Document(Document),
+    /// The document is still the version the read named.
+    Unchanged,
+    Failed {
+        code: String,
+        error: String,
+    },
 }
 
 impl Client {
     pub fn read_document(&self, pane_id: &str) -> io::Result<DocumentRead> {
+        self.read_document_if(pane_id, None)
+    }
+
+    /// Read a document unless it still is `if_version`.
+    pub fn read_document_if(
+        &self,
+        pane_id: &str,
+        if_version: Option<&str>,
+    ) -> io::Result<DocumentRead> {
         identifier(pane_id)?;
+        if if_version.is_some_and(|version| version.is_empty() || version.len() > 256) {
+            return Err(invalid("invalid document version"));
+        }
         let lease = self
             .sender()
             .context()
@@ -54,6 +79,7 @@ impl Client {
             document: None,
             size: 0,
             finished: false,
+            if_version: if_version.map(str::to_owned),
             _lease: lease,
         };
         read.send(self)?;
@@ -62,6 +88,55 @@ impl Client {
 }
 
 impl DocumentRead {
+    /// Whether `event` answers this read on its connection.
+    pub fn answers(&self, event: &Event) -> bool {
+        event.connection_id == self.connection_id
+            && event.json().is_some_and(|value| {
+                value["requestId"].as_str() == Some(self.request_id.as_str())
+                    && value["type"]
+                        .as_str()
+                        .is_some_and(|kind| kind.starts_with("viewer."))
+            })
+    }
+
+    /// Take an answer: None while more chunks are on their way.
+    pub fn settle(&mut self, client: &Client, event: &Event) -> Option<ReadOutcome> {
+        if !self.answers(event) {
+            return None;
+        }
+        let value = event.json()?;
+        let words = |key: &str, limit: usize| -> String {
+            value[key]
+                .as_str()
+                .unwrap_or_default()
+                .chars()
+                .filter(|c| !c.is_control())
+                .take(limit)
+                .collect()
+        };
+        match value["type"].as_str() {
+            Some("viewer.unchanged") => {
+                self.finished = true;
+                Some(ReadOutcome::Unchanged)
+            }
+            Some("viewer.failed") => {
+                self.finished = true;
+                Some(ReadOutcome::Failed {
+                    code: words("code", 64),
+                    error: words("error", 512),
+                })
+            }
+            _ => match self.accept(client, event) {
+                Ok(Some(document)) => Some(ReadOutcome::Document(document)),
+                Ok(None) => None,
+                Err(error) => Some(ReadOutcome::Failed {
+                    code: "invalid".into(),
+                    error: error.to_string(),
+                }),
+            },
+        }
+    }
+
     /// Ignore unrelated events; reject another connection before inspecting
     /// any peer-controlled request ID. Successful partial chunks request the
     /// next versioned chunk, never mixing a changed file into retained bytes.
@@ -98,9 +173,14 @@ impl DocumentRead {
         }
         let offset = self.document.as_ref().map_or(0, |doc| doc.bytes.len());
         let version = self.document.as_ref().map(|doc| doc.version.as_str());
+        let if_version = self.if_version.as_deref().filter(|_| offset == 0);
         client.command(0, || {
-            json!({"type":"viewer.read", "requestId":self.request_id,
-            "paneId":self.pane_id, "offset":offset, "version":version})
+            let mut message = json!({"type":"viewer.read", "requestId":self.request_id,
+            "paneId":self.pane_id, "offset":offset, "version":version});
+            if let Some(known) = if_version {
+                message["ifVersion"] = json!(known);
+            }
+            message
         })
     }
 
@@ -192,6 +272,7 @@ mod tests {
             document: None,
             size: 0,
             finished: false,
+            if_version: None,
             _lease: budget.reserve(1024, false).unwrap(),
         }
     }

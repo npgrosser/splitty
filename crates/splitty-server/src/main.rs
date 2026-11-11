@@ -655,6 +655,13 @@ fn resolve_loopback_bind(addr: &str, remote: bool) -> std::net::SocketAddr {
 }
 
 fn main() {
+    if std::env::var_os("SPLITTY_BROWSER_ASKPASS").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        std::process::exit(if splitty_remote::askpass::helper().is_ok() {
+            0
+        } else {
+            1
+        });
+    }
     // Before a reinstall can move the binary away (see `cli_path`).
     splitty_core::pty::cli_path::remember_executable();
     // A session keeper is a few blocking threads that outlive the daemon, not

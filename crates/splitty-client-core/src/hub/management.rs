@@ -6,12 +6,14 @@ use crate::workspace::SourceToken;
 pub enum HostManagementAction {
     Connect,
     SetAlias,
+    SetOrder,
     Forget,
 }
 #[derive(Clone, Debug)]
 pub struct HostManagementRequest {
     target: String,
     alias: Option<String>,
+    order: Option<Vec<String>>,
     action: HostManagementAction,
 }
 impl HostManagementRequest {
@@ -23,6 +25,28 @@ impl HostManagementRequest {
     }
     pub fn forget(target: &str) -> io::Result<Self> {
         Self::new(target, None, HostManagementAction::Forget)
+    }
+    /// Persist local host-group presentation order, anchored to the moved host.
+    pub fn set_order(target: &str, order: Vec<String>) -> io::Result<Self> {
+        let mut request = Self::new(target, None, HostManagementAction::SetOrder)?;
+        if order.len() > 256 || !order.iter().any(|item| item == request.target()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "Host order must include its moved host and at most 256 targets",
+            ));
+        }
+        let mut seen = HashSet::new();
+        for item in &order {
+            let parsed = SshTarget::parse(item).map_err(io::Error::other)?;
+            if parsed.as_str() != item || !seen.insert(item) {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "Host order requires distinct canonical targets",
+                ));
+            }
+        }
+        request.order = Some(order);
+        Ok(request)
     }
     fn new(target: &str, alias: Option<&str>, action: HostManagementAction) -> io::Result<Self> {
         let target = SshTarget::parse(target).map_err(io::Error::other)?;
@@ -39,6 +63,7 @@ impl HostManagementRequest {
             alias: alias
                 .map(|s| s.trim().to_owned())
                 .filter(|alias| action != HostManagementAction::Connect || !alias.is_empty()),
+            order: None,
             action,
         })
     }
@@ -49,6 +74,9 @@ impl HostManagementRequest {
         self.action
     }
     fn body(&self) -> serde_json::Value {
+        if let Some(order) = &self.order {
+            return serde_json::json!({"order":order});
+        }
         let mut body = serde_json::json!({"target":self.target});
         if self.action == HostManagementAction::Connect {
             body["hidden"] = false.into();
@@ -157,7 +185,9 @@ impl Job {
 }
 pub(super) async fn write(client: &mut ApiStream, job: &Job) -> (HostManagementResult, bool) {
     use HostManagementOutcome::*;
-    let op = if job.request.action == HostManagementAction::Forget {
+    let op = if job.request.action == HostManagementAction::SetOrder {
+        Operation::HostOrderUpdate
+    } else if job.request.action == HostManagementAction::Forget {
         Operation::HostForget
     } else {
         Operation::HostPreferencesUpdate
@@ -202,7 +232,10 @@ pub(super) async fn write(client: &mut ApiStream, job: &Job) -> (HostManagementR
             false,
         );
     }
-    let valid = if op == Operation::HostForget {
+    let valid = if op == Operation::HostOrderUpdate {
+        decode::<splitty_remote::hosts::HostOrder>(client, &reply)
+            .is_ok_and(|row| row.version == 1 && job.request.order.as_ref() == Some(&row.order))
+    } else if op == Operation::HostForget {
         reply.status == 204 && reply.body.is_empty()
     } else {
         decode::<splitty_remote::hosts::HostPreference>(client, &reply).is_ok_and(|row| {

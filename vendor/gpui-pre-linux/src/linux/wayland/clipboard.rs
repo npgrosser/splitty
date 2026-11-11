@@ -2,10 +2,13 @@ use std::{
     fs::File,
     io::{ErrorKind, Write},
     os::fd::{AsRawFd, BorrowedFd, OwnedFd},
+    path::PathBuf,
 };
 
 use calloop::{LoopHandle, PostAction};
 use filedescriptor::Pipe;
+use http_client::Url;
+use smallvec::SmallVec;
 use strum::IntoEnumIterator;
 use wayland_client::{Connection, protocol::wl_data_offer::WlDataOffer};
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1;
@@ -20,6 +23,17 @@ pub(crate) const FILE_LIST_MIME_TYPE: &str = "text/uri-list";
 
 /// Text mime types that we'll accept from other programs.
 pub(crate) const ALLOWED_TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "UTF8_STRING"];
+
+/// Splitty patch: the local files a copied `text/uri-list` names. Comment
+/// lines and anything that is not a `file:` URL are left out.
+pub(crate) fn file_list_paths(list: &str) -> SmallVec<[PathBuf; 2]> {
+    list.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| Url::parse(line).ok())
+        .filter_map(|url| url.to_file_path().ok())
+        .collect()
+}
 
 pub(crate) struct Clipboard {
     connection: Connection,
@@ -117,6 +131,17 @@ impl<T: ReceiveData> DataOffer<T> {
         Some(ClipboardItem::new_string(result))
     }
 
+    /// Splitty patch: the files of a copied file list, which a file manager
+    /// offers next to their names as text.
+    fn read_files(&self, connection: &Connection) -> Option<gpui::ExternalPaths> {
+        if !self.has_mime_type(FILE_LIST_MIME_TYPE) {
+            return None;
+        }
+        let bytes = self.read_bytes(connection, FILE_LIST_MIME_TYPE)?;
+        let paths = file_list_paths(&String::from_utf8(bytes).ok()?);
+        (!paths.is_empty()).then_some(gpui::ExternalPaths(paths))
+    }
+
     fn read_image(&self, connection: &Connection) -> Option<ClipboardItem> {
         for format in ImageFormat::iter() {
             let mime_type = format.mime_type();
@@ -200,9 +225,20 @@ impl Clipboard {
             return self.contents.clone();
         }
 
-        let item = offer
+        // Splitty patch: a copied file list is read as files too; its text
+        // stays the item's text.
+        let files = offer.read_files(&self.connection);
+        let mut item = offer
             .read_text(&self.connection)
-            .or_else(|| offer.read_image(&self.connection))?;
+            .or_else(|| offer.read_image(&self.connection));
+        if let Some(files) = files {
+            item.get_or_insert_with(|| ClipboardItem {
+                entries: Vec::new(),
+            })
+            .entries
+            .push(ClipboardEntry::ExternalPaths(files));
+        }
+        let item = item?;
 
         self.cached_read = Some(item.clone());
         Some(item)
@@ -253,5 +289,24 @@ impl Clipboard {
                 },
             )
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod file_list_tests {
+    use super::file_list_paths;
+    use std::path::PathBuf;
+
+    #[test]
+    fn file_list_names_only_local_files() {
+        let list = "# copied\r\nfile:///home/me/My%20Report.pdf\r\nhttps://example.com/a.png\r\n\r\nfile:///tmp/shot.png\n";
+        assert_eq!(
+            file_list_paths(list).to_vec(),
+            [
+                PathBuf::from("/home/me/My Report.pdf"),
+                PathBuf::from("/tmp/shot.png")
+            ]
+        );
+        assert!(file_list_paths("not a url").is_empty());
     }
 }

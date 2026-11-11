@@ -24,9 +24,11 @@ pub use catalog::{SourceKind, SourceWorkspace};
 pub use identity::{LayoutKey, PaneKey, ScreenKey, SourceId, SourceToken, TerminalToken};
 use serde::Deserialize;
 use serde_json::Value;
+pub use splitty_core::mux::jobs::JobState;
 pub use splitty_core::mux::{
     Axis, Direction, FloatBounds, FloatingEntry, LayoutNode, ScreenInfo, ScreenState,
 };
+pub use splitty_core::mux::{ViewerSource, ViewerState};
 use splitty_core::{
     ids::{NodeId, PaneId, SessionId},
     mux::{self, ScreenOp},
@@ -35,6 +37,7 @@ use std::{
     collections::{HashMap, HashSet},
     io,
     sync::Arc,
+    time::{Duration, Instant},
 };
 use uuid::Uuid;
 #[cfg(test)]
@@ -204,6 +207,22 @@ struct SentTabSelection {
     snapshot_revision: u64,
 }
 
+/// How long an unconfirmed layout change outlives its last submission.
+const PREVIEW_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Layout changes of this window that the service has not confirmed yet. The
+/// screen shows them at once; `server` keeps the last authoritative state.
+#[derive(Clone)]
+struct LayoutPreview {
+    server: Arc<ScreenState>,
+    /// A pane or tab move, with the root layout it was made on. It holds
+    /// while the service still reports that layout's structure.
+    arranged: Option<(ScreenOp, LayoutNode)>,
+    /// The latest submitted sizes of each split, until a snapshot has them.
+    resizes: Vec<(NodeId, Vec<f64>)>,
+    touched: Instant,
+}
+
 /// The snapshot supplies layout and session identity. Only focus and selected
 /// tabs belong to this window; pending IDs prevent another screen's spawn
 /// notification from becoming a local session route.
@@ -213,6 +232,7 @@ pub struct ScreenModel {
     ids: ScreenIds,
     connection_id: Uuid,
     snapshot: Option<Arc<ScreenState>>,
+    preview: Option<LayoutPreview>,
     focused_pane: Option<String>,
     maximized_slot: Option<String>,
     pending_focus: Option<String>,
@@ -226,6 +246,10 @@ pub struct ScreenModel {
     session_panes: HashMap<String, String>,
     ready_sessions: HashSet<String>,
     resync_pending: bool,
+    /// Per viewer pane, the process that waits for its review: the wait's
+    /// ID and the waiting pane's title. A snapshot carries it; the typed
+    /// record never reads it back.
+    review_waits: HashMap<String, (String, String)>,
 }
 
 impl ScreenModel {
@@ -237,6 +261,7 @@ impl ScreenModel {
             ids,
             connection_id,
             snapshot: None,
+            preview: None,
             focused_pane,
             maximized_slot: None,
             pending_focus: None,
@@ -250,6 +275,7 @@ impl ScreenModel {
             session_panes: HashMap::new(),
             ready_sessions: HashSet::new(),
             resync_pending: false,
+            review_waits: HashMap::new(),
         }
     }
 
@@ -259,6 +285,92 @@ impl ScreenModel {
 
     pub fn snapshot(&self) -> Option<&ScreenState> {
         self.snapshot.as_deref()
+    }
+
+    /// The last state the service reported, without this window's
+    /// unconfirmed layout changes.
+    pub fn server_snapshot(&self) -> Option<&ScreenState> {
+        self.preview
+            .as_ref()
+            .map(|preview| &*preview.server)
+            .or(self.snapshot.as_deref())
+    }
+
+    /// Show a submitted layout change before the service confirms it.
+    fn preview(&mut self, op: &ScreenOp) {
+        let Some(shown) = self.snapshot.clone() else {
+            return;
+        };
+        let Ok((mut next, _)) = mux::reduce_screen((*shown).clone(), op.clone()) else {
+            return;
+        };
+        // Revisions count the service's changes only.
+        next.revision = shown.revision;
+        let preview = self.preview.get_or_insert_with(|| LayoutPreview {
+            server: shown,
+            arranged: None,
+            resizes: Vec::new(),
+            touched: Instant::now(),
+        });
+        preview.touched = Instant::now();
+        match op {
+            ScreenOp::ResizeSplit { node_id, sizes } => {
+                preview.resizes.retain(|(node, _)| node != node_id);
+                preview.resizes.push((node_id.clone(), sizes.clone()));
+            }
+            _ => preview.arranged = Some((op.clone(), preview.server.root.clone())),
+        }
+        self.snapshot = Some(Arc::new(next));
+        self.reconcile_selection();
+    }
+
+    /// Lay the still unconfirmed changes over a state the service reported.
+    fn rebase_preview(&mut self, server: Arc<ScreenState>) -> Arc<ScreenState> {
+        let Some(preview) = &mut self.preview else {
+            return server;
+        };
+        let expired = preview.touched.elapsed() > PREVIEW_TIMEOUT;
+        let mut shown = (*server).clone();
+        if let Some((op, base)) = preview.arranged.take() {
+            // The shown root is kept as it is, so the nodes the move made
+            // keep their IDs until the service names its own.
+            if let Some(current) = self
+                .snapshot
+                .as_ref()
+                .filter(|_| !expired && same_structure(&base, &server.root))
+            {
+                shown.root = current.root.clone();
+                preview.arranged = Some((op, base));
+            }
+        }
+        preview.resizes.retain(|(node, sizes)| {
+            !expired
+                && matches!(shown.root.find_node(node),
+                    Some(LayoutNode::Split { sizes: current, .. })
+                        if current.len() == sizes.len()
+                            && current.iter().zip(sizes).any(|(a, b)| (a - b).abs() > 1e-9))
+        });
+        for (node, sizes) in &preview.resizes {
+            if let Some(LayoutNode::Split { sizes: current, .. }) = shown.root.find_node_mut(node) {
+                current.clone_from(sizes);
+            }
+        }
+        if preview.arranged.is_none() && preview.resizes.is_empty() {
+            self.preview = None;
+            return server;
+        }
+        preview.server = server;
+        Arc::new(shown)
+    }
+
+    /// Return to the service's layout, as after a rejected change.
+    pub fn drop_preview(&mut self) -> bool {
+        let Some(preview) = self.preview.take() else {
+            return false;
+        };
+        self.snapshot = Some(preview.server);
+        self.reconcile_selection();
+        true
     }
 
     pub fn focused_pane(&self) -> Option<&str> {
@@ -354,6 +466,27 @@ impl ScreenModel {
             }
             _ => false,
         }
+    }
+
+    /// The process waiting for the review of viewer pane `pane_id`: the wait's
+    /// ID and the waiting pane's title.
+    pub fn review_wait(&self, pane_id: &str) -> Option<(&str, &str)> {
+        self.review_waits
+            .get(pane_id)
+            .map(|(id, title)| (id.as_str(), title.as_str()))
+    }
+
+    /// What a tab stands for while it is dragged or acted on: its terminal's
+    /// session, or for a viewer pane, which has none, the pane itself.
+    pub fn identity_for(&self, pane_id: &str) -> Option<String> {
+        if let Some(session) = self.session_for(pane_id) {
+            return Some(session.to_owned());
+        }
+        self.snapshot()?
+            .panes
+            .values()
+            .any(|pane| pane.id.as_str() == pane_id && pane.viewer.is_some())
+            .then(|| format!("viewer:{pane_id}"))
     }
 
     pub fn session_for(&self, pane_id: &str) -> Option<&str> {
@@ -489,6 +622,7 @@ impl ScreenModel {
         self.sent_tab_selections.clear();
         self.maximized_slot = None;
         self.snapshot = None;
+        self.preview = None;
         self.connection_id = connection_id;
         WorkspaceDelta {
             snapshot_changed: true,
@@ -511,7 +645,30 @@ impl ScreenModel {
             return Err(invalid("expected screen snapshot"));
         }
         let screen = ScreenState::deserialize(&event["screen"]).map_err(io::Error::other)?;
-        self.apply_screen(Arc::new(screen))
+        let waits: HashMap<String, (String, String)> = event["screen"]["panes"]
+            .as_object()
+            .into_iter()
+            .flatten()
+            .filter_map(|(pane, value)| {
+                let wait = &value["viewer"]["reviewWait"];
+                let id = wait["id"]
+                    .as_str()
+                    .filter(|id| !id.is_empty() && id.len() <= 256)?;
+                let title: String = wait["title"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .chars()
+                    .filter(|c| !c.is_control())
+                    .take(256)
+                    .collect();
+                Some((pane.clone(), (id.to_owned(), title)))
+            })
+            .collect();
+        let delta = self.apply_screen(Arc::new(screen))?;
+        if delta.snapshot_changed {
+            self.review_waits = waits;
+        }
+        Ok(delta)
     }
     fn apply_screen(&mut self, screen: Arc<ScreenState>) -> io::Result<WorkspaceDelta> {
         if screen.id.as_str() != self.ids.screen_id.as_str() {
@@ -533,6 +690,8 @@ impl ScreenModel {
             self.pending_recreation = None;
         }
         self.reconcile_sent_tab_selections(&screen);
+        let server = screen.clone();
+        let screen = self.rebase_preview(screen);
         let old = std::mem::take(&mut self.pane_sessions);
         let mut next = HashMap::new();
         for pane_id in screen.panes_in_layout_order() {
@@ -572,6 +731,18 @@ impl ScreenModel {
             self.pending_focus = None;
         }
         self.confirm_move();
+        // A move the service arranged differently is settled as well.
+        if self
+            .preview
+            .as_ref()
+            .is_none_or(|preview| preview.arranged.is_none())
+            && self.pending_move.as_ref().is_some_and(|pending| {
+                server.revision > pending.drag.revision
+                    && !same_structure(&pending.drag.snapshot.root, &server.root)
+            })
+        {
+            self.pending_move = None;
+        }
         let mut delta = route_delta(&old, &self.pane_sessions);
         delta.snapshot_changed = true;
         Ok(delta)
@@ -640,7 +811,7 @@ impl ScreenModel {
             screen_id: self.screen_id().to_owned(),
             revision: screen.revision,
             pane: pane.to_owned(),
-            session: self.session_for(pane)?.to_owned(),
+            session: self.identity_for(pane)?,
             source_slot: slot.id().to_string(),
             snapshot: self.snapshot.as_ref()?.clone(),
         })
@@ -665,7 +836,7 @@ impl ScreenModel {
             || drag.connection_id != self.connection_id
             || drag.screen_id != self.screen_id()
             || !same_layout(&drag.snapshot.root, &screen.root)
-            || self.session_for(&drag.pane) != Some(drag.session.as_str())
+            || self.identity_for(&drag.pane).as_deref() != Some(drag.session.as_str())
         {
             return Err(invalid("Pane drag is stale; drag the tab again"));
         }
@@ -792,6 +963,8 @@ impl ScreenModel {
         };
         self.send_op(client, &op)?;
         self.maximized_slot = None;
+        self.preview(&op);
+        self.select_tab(&drag.pane);
         self.pending_move = Some(PendingMove {
             drag,
             target,
@@ -803,6 +976,7 @@ impl ScreenModel {
     pub fn reject_move(&mut self, connection: Uuid) {
         if connection == self.connection_id {
             self.pending_move = None;
+            self.drop_preview();
         }
     }
 
@@ -810,13 +984,13 @@ impl ScreenModel {
         let Some(pending) = self.pending_move.as_ref() else {
             return;
         };
-        let Some(screen) = self.snapshot() else {
+        let Some(screen) = self.server_snapshot() else {
             return;
         };
         if screen.revision <= pending.drag.revision {
             return;
         }
-        if self.session_for(&pending.drag.pane) != Some(pending.drag.session.as_str()) {
+        if self.identity_for(&pending.drag.pane).as_deref() != Some(pending.drag.session.as_str()) {
             self.pending_move = None;
             return;
         }
@@ -949,11 +1123,33 @@ impl ScreenModel {
         node_id: &str,
         sizes: Vec<f64>,
     ) -> io::Result<()> {
+        // A split of an unconfirmed move has no ID the service knows.
+        if self
+            .server_snapshot()
+            .is_none_or(|screen| screen.root.find_node(&NodeId::from(node_id)).is_none())
+        {
+            return Err(invalid("split is not confirmed yet"));
+        }
+        let op = ScreenOp::ResizeSplit {
+            node_id: NodeId::from(node_id),
+            sizes,
+        };
+        self.send_op(client, &op)?;
+        self.preview(&op);
+        Ok(())
+    }
+
+    pub fn set_scratchpad(
+        &mut self,
+        client: &Client,
+        session_id: &str,
+        text: String,
+    ) -> io::Result<()> {
         self.send_op(
             client,
-            &ScreenOp::ResizeSplit {
-                node_id: NodeId::from(node_id),
-                sizes,
+            &ScreenOp::SetScratchpad {
+                session_id: SessionId::from(session_id),
+                text,
             },
         )
     }
@@ -1095,6 +1291,29 @@ impl ScreenModel {
 // Compare only the canonical layout, allowing titles/activity and tab focus to
 // advance without making an otherwise valid drag of a running shell stale.
 fn same_layout(a: &LayoutNode, b: &LayoutNode) -> bool {
+    same_structure(a, b) && same_sizes(a, b)
+}
+
+fn same_sizes(a: &LayoutNode, b: &LayoutNode) -> bool {
+    match (a, b) {
+        (
+            LayoutNode::Split {
+                sizes: az,
+                children: ac,
+                ..
+            },
+            LayoutNode::Split {
+                sizes: bz,
+                children: bc,
+                ..
+            },
+        ) => az == bz && ac.iter().zip(bc).all(|(a, b)| same_sizes(a, b)),
+        _ => true,
+    }
+}
+
+/// The same nodes and tabs in the same places, whatever the split sizes.
+fn same_structure(a: &LayoutNode, b: &LayoutNode) -> bool {
     match (a, b) {
         (
             LayoutNode::Slot {
@@ -1112,21 +1331,20 @@ fn same_layout(a: &LayoutNode, b: &LayoutNode) -> bool {
             LayoutNode::Split {
                 id: a,
                 axis: aa,
-                sizes: az,
                 children: ac,
+                ..
             },
             LayoutNode::Split {
                 id: b,
                 axis: ba,
-                sizes: bz,
                 children: bc,
+                ..
             },
         ) => {
             a == b
                 && aa == ba
-                && az == bz
                 && ac.len() == bc.len()
-                && ac.iter().zip(bc).all(|(a, b)| same_layout(a, b))
+                && ac.iter().zip(bc).all(|(a, b)| same_structure(a, b))
         }
         _ => false,
     }
@@ -1310,6 +1528,81 @@ mod tests {
                 &serde_json::json!({"type":"mux.screen_snapshot","screen":screen}),
             )
             .unwrap()
+    }
+
+    fn sizes(model: &ScreenModel) -> Vec<f64> {
+        match &model.snapshot().unwrap().root {
+            LayoutNode::Split { sizes, .. } => sizes.clone(),
+            _ => panic!("root split"),
+        }
+    }
+
+    #[test]
+    fn unconfirmed_resize_survives_older_snapshots_until_the_service_has_it() {
+        let mut model = drag_workspace();
+        let server = model.snapshot().unwrap().clone();
+        let resize = |sizes: [f64; 3]| ScreenOp::ResizeSplit {
+            node_id: NodeId::from("root"),
+            sizes: sizes.to_vec(),
+        };
+        model.preview(&resize([0.3, 0.2, 0.5]));
+        model.preview(&resize([0.4, 0.1, 0.5]));
+        assert_eq!(sizes(&model), [0.4, 0.1, 0.5]);
+        assert!(same_layout(
+            &model.server_snapshot().unwrap().root,
+            &server.root
+        ));
+        // The service answers the first resize while the second is under way.
+        let (mut first, _) = mux::reduce_screen(server.clone(), resize([0.3, 0.2, 0.5])).unwrap();
+        first.revision = 2;
+        apply_screen(&mut model, first.clone());
+        assert_eq!(sizes(&model), [0.4, 0.1, 0.5]);
+        let (mut second, _) = mux::reduce_screen(first, resize([0.4, 0.1, 0.5])).unwrap();
+        second.revision = 3;
+        apply_screen(&mut model, second);
+        assert_eq!(sizes(&model), [0.4, 0.1, 0.5]);
+        assert!(model.preview.is_none());
+    }
+
+    #[test]
+    fn unconfirmed_move_shows_at_once_and_yields_to_the_service() {
+        let mut model = drag_workspace();
+        let server = model.snapshot().unwrap().clone();
+        let op = ScreenOp::MovePane {
+            pane_id: PaneId::from("c"),
+            target_slot_id: Some(NodeId::from("slot-a")),
+            target_split_id: None,
+            direction: None,
+            source_resulting_sizes: Some(vec![0.4, 0.6]),
+            resulting_sizes: None,
+        };
+        let tabs = |model: &ScreenModel| match model
+            .snapshot()
+            .unwrap()
+            .root
+            .find_node(&NodeId::from("slot-a"))
+        {
+            Some(LayoutNode::Slot { pane_ids, .. }) => pane_ids.len(),
+            _ => 0,
+        };
+        model.preview(&op);
+        assert_eq!(tabs(&model), 2);
+        assert_eq!(model.snapshot().unwrap().revision, server.revision);
+        // An unrelated change of the service keeps the move on screen.
+        let mut titled = server.clone();
+        titled.revision = 2;
+        apply_screen(&mut model, titled);
+        assert_eq!(tabs(&model), 2);
+        // Rejected: the service's layout is back.
+        assert!(model.drop_preview());
+        assert_eq!(tabs(&model), 1);
+        // Confirmed: the service's own layout replaces the preview.
+        model.preview(&op);
+        let (mut moved, _) = mux::reduce_screen(server, op).unwrap();
+        moved.revision = 3;
+        apply_screen(&mut model, moved.clone());
+        assert!(model.preview.is_none());
+        assert!(same_layout(&model.snapshot().unwrap().root, &moved.root));
     }
 
     #[test]

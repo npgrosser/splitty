@@ -1,9 +1,10 @@
 /**
- * Svelte action: velocity-based wheel gesture detection.
+ * Svelte action: debounced wheel gesture detection.
  *
- * Treats each swipe as a single gesture — fires onSwipe("up"|"down")
- * on the first peak, then ignores momentum until velocity drops or
- * a time gap appears. Works well with both touchpads and mouse wheels.
+ * Treats each continuous scroll/swipe as a single gesture — fires
+ * onSwipe("up"|"down") once the noise floor is exceeded, then ignores
+ * subsequent events (including touchpad acceleration and momentum) until
+ * an idle gap > 120 ms appears.
  *
  * Usage:
  *   <div use:swipeWheel={{ onSwipe: (dir) => ... }}>
@@ -14,7 +15,6 @@ export function swipeWheel(
 ) {
   let switched = false;
   let lastTime = 0;
-  let lastDelta = 0;
   let onSwipe = params.onSwipe;
 
   function handleWheel(e: WheelEvent) {
@@ -25,12 +25,9 @@ export function swipeWheel(
     const deltaAbs = Math.abs(e.deltaY);
     lastTime = now;
 
-    // New gesture: time gap OR velocity increasing (new swipe after momentum died)
-    if (gap > 120 || (switched && deltaAbs > lastDelta * 1.5)) {
+    if (gap > 120) {
       switched = false;
     }
-
-    lastDelta = deltaAbs;
 
     if (switched || deltaAbs < 2) return;
 

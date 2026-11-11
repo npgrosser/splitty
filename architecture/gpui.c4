@@ -7,6 +7,11 @@ model {
       metadata { module 'splitty_gpui' }
     }
 
+    gpui_askpass = component 'gpui_askpass' {
+      description 'Native SSH authentication and explicit host-key confirmation windows over the shared broker for Unix embedded services, with connection-scoped credential reuse and cancellation; standalone OpenSSH askpass presentation for the Windows WSL helper.'
+      metadata { module 'splitty_gpui::askpass' }
+    }
+
     gpui_startup = component 'gpui_startup' {
       description 'Parse explicit native workspace launch options before creating a window, including an isolated Windows WSL backend target.'
       metadata { module 'splitty_gpui::startup' }
@@ -28,7 +33,7 @@ model {
     }
 
     gpui_workspace = component 'gpui_workspace' {
-      description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references with passive exact-host navigation, bounded port menus, captured remote Screen creation and separate popup/group intent lifetimes, one captured inline rename editor for local and live remote Screens, plus global navigation, source-qualified unread count and severity projection over a shared notification ledger, one bounded outgoing passive Screen during reversible navigation motion, captured same-source Screen drag and keyboard placement with transient measured row displacement, a dropped arrangement held until the service order arrives, and no second order owner, deliberate Hosts connection, live catalog, explicit host update confirmation and Ports controls, retained source-qualified terminal views and one identity-bound terminal context popup with separate retained presentation and live command authority, fixed-local controlled settings with separate appearance and notification observations plus local library controls, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools.'
+      description 'Single canonical Screen projection over WindowWorkspace selection, local-first source-grouped Drawer references with passive exact-host navigation, bounded port menus, captured remote Screen creation and separate popup/group intent lifetimes, one captured inline rename editor for local and live remote Screens, plus global navigation, source-qualified unread count and severity projection over a shared notification ledger, one bounded outgoing passive Screen during reversible navigation motion, captured same-source Screen drag and keyboard placement with transient measured row displacement, a dropped arrangement held until the service order arrives, and no second order owner, deliberate Hosts connection, live catalog, explicit host update confirmation and Ports controls, retained source-qualified terminal views and one identity-bound terminal context popup with separate retained presentation and live command authority, fixed-local controlled settings with separate appearance and notification observations plus local library controls, basic remote tab/split input and resize, default remote detach and assessed termination, plus local floating, transfer and template tools. Native Hosts uses a themed searchable master-detail browser with virtualized Screens and Ports, cached connect-and-open continuations fenced by view and owner, per-group creation, within-group screen clipping and whole-host drag motion. The window title carries workspace identity without an extra terminal header. Connecting, the Screens of a host and its ports open as small panels beside the Drawer that share the look of the context menus and one keyboard model; the Hosts browser is the manager behind them. Images and files pasted or dropped into a terminal or scratchpad go to the server of that pane and arrive as paths, and offered files are saved after the user chose Save, each shown as a window notice. A host group closes as a whole from its caption, its panel or the manager while its Screens keep running; the Hosts panel then shows how many Screens the host had open here and reopens them when the host is chosen.'
       metadata { module 'splitty_gpui::workspace' }
     }
 
@@ -52,6 +57,9 @@ model {
       metadata { module 'splitty_gpui::offscreen' }
     }
 
+    gpui_main -> gpui_askpass 'Handle SSH questions before ordinary application startup'
+    gpui_main -> splitty.client_core.client_root 'Register the native executable as the SSH prompt helper'
+    gpui_askpass -> splitty.client_core.client_root 'Recognize confirmation questions and exit when the SSH parent ends'
     gpui_main -> gpui_app 'Construct and close the probe window'
     gpui_main -> gpui_startup 'Validate process options before platform startup'
     gpui_startup -> splitty.client_core.owned_service 'Construct the explicit platform backend configuration'
@@ -75,6 +83,7 @@ model {
     gpui_workspace -> splitty.client_core.client_notifications 'Supply window observation, admit source facts and render bounded unread projections'
     gpui_workspace -> splitty.client_core.appearance 'Match owner and generation before applying resolved appearance'
     gpui_workspace -> splitty.client_core.client_settings 'Build bounded typed settings edits and render service metadata choices'
+    gpui_workspace -> splitty.client_core.client_annotations 'Anchor annotations in the shown document, describe selected passages and write the review of a viewer pane'
     gpui_workspace -> splitty.client_core.local_service 'Present field/domain-bound settings outcomes and independently accepted notification values and reset evidence'
     gpui_workspace -> splitty.client_core.client_shell_profiles 'Retain owner-bound service choices for the new-tab picker'
     gpui_workspace -> splitty.client_core.hub 'Present fixed-local host observations and retained Connect/name forms, submit validated metadata intents and match identified outcomes'
@@ -85,7 +94,7 @@ model {
     gpui_appearance -> splitty.client_core.appearance 'Consume charged appearance snapshot values'
     gpui_appearance -> splitty.client_core.client_zoom 'Project confirmed display zoom and scope'
     gpui_workspace -> splitty.client_core.client_zoom 'Submit zoom intents and present confirmed scale'
-    gpui_workspace -> splitty.client_core.native_workspace 'Submit fixed-local host and navigation intents including one owner-bound remote Screen creation request, exact captured local or remote Screen renames, source-bound terminal commands and assessed close/template intents; reject obsolete output and outcomes'
+    gpui_workspace -> splitty.client_core.native_workspace 'Send pasted or dropped files to the source of their pane and answer its file offers; submit fixed-local host and navigation intents including one owner-bound remote Screen creation request, exact captured local or remote Screen renames, source-bound terminal commands and assessed close/template intents; reject obsolete output and outcomes'
     gpui_workspace -> splitty.client_core.owned_service 'Pass the selected backend into the shared workspace worker'
     gpui_workspace -> splitty.client_core.client_workspace 'Render the selected canonical source root and all-source terminal routes without a second layout tree; bind Drawer actions to retained host groups, validate captured remote Screen creation and local or live remote rename targets, project canonical pending or missing references, and navigate the shared current Hosts row projection by canonical target'
     gpui_workspace -> splitty.client_core.client_root 'Consume charged source events and construct isolated native view fixtures'

@@ -72,8 +72,20 @@ pub async fn client_with_host<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     budget: &ConnectionBudget,
     open_host: Option<wire::OpenHost>,
 ) -> io::Result<()> {
+    client_with_startup_timeout(read, write, budget, open_host, wire::HANDSHAKE_TIMEOUT).await
+}
+
+/// The local connector may allow time for SSH authentication before the peer
+/// starts. This deadline is local policy and must never come from the peer.
+pub async fn client_with_startup_timeout<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    read: &mut R,
+    write: &mut W,
+    budget: &ConnectionBudget,
+    open_host: Option<wire::OpenHost>,
+    startup_timeout: std::time::Duration,
+) -> io::Result<()> {
     let mut disconnected_write = None;
-    let result = deadline(async {
+    let result = timeout(startup_timeout, async {
         let sent = async {
             write.write_all(wire::MAGIC).await?;
             write_control(
@@ -111,7 +123,13 @@ pub async fn client_with_host<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         }
         Ok(())
     })
-    .await;
+    .await
+    .unwrap_or_else(|_| {
+        Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "native handshake timed out",
+        ))
+    });
     match disconnected_write {
         Some(error)
             if !result
@@ -362,6 +380,32 @@ pub struct Expected<'a> {
 mod tests {
     use super::*;
     use tokio::io::{duplex, split};
+
+    #[tokio::test(start_paused = true)]
+    async fn trusted_ssh_startup_can_wait_for_interactive_authentication() {
+        let (client_io, server_io) = duplex(4096);
+        let (mut read, mut write) = split(client_io);
+        let (mut server_read, mut server_write) = split(server_io);
+        let server = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(10)).await;
+            super::server(
+                &mut server_read,
+                &mut server_write,
+                &ConnectionBudget::default(),
+            )
+            .await
+        });
+        client_with_startup_timeout(
+            &mut read,
+            &mut write,
+            &ConnectionBudget::default(),
+            None,
+            Duration::from_secs(120),
+        )
+        .await
+        .unwrap();
+        server.await.unwrap().unwrap();
+    }
     fn ready() -> Ready {
         Ready {
             generation: 1,

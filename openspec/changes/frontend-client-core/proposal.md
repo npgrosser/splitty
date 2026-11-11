@@ -79,3 +79,7 @@ Out of scope:
 - remembered remote screens as server state;
 - notification filtering on the server;
 - extending the architecture check to TypeScript.
+
+## Carried-over design notes
+
+- 2026-11-10, follow-up to the `native-ui-gpui` architecture review: retain the current crate structure, clarify responsibility boundaries, and reduce duplicated Web/GPUI client logic through shared client-core policies. Review the scope and naming of `splitty-remote`; the concrete browser reuse mechanism remains open.

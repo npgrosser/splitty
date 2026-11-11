@@ -1,9 +1,10 @@
 //! Group-local chrome. Each command carries the pane displayed in its own slot.
+use super::popover::{MenuEntry, PopoverAnchor, PopoverKind};
 use super::*;
 use gpui_kit::assets::IconName;
+use gpui_kit::base::{FocusableExt as _, Selectable as _};
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
-    menu::{DropdownMenu, PopupMenuItem},
     Disableable, Icon, Sizable,
 };
 
@@ -297,6 +298,7 @@ pub(super) mod view_tests {
 #[derive(Clone)]
 pub(super) enum GroupCommand {
     NewTab,
+    Scratchpad,
     Split(Axis),
     Float,
     Maximize,
@@ -318,11 +320,6 @@ impl Workspace {
             cx.notify();
             return;
         }
-        if self.is_remote_selected()
-            && matches!(action, GroupCommand::Float | GroupCommand::Maximize)
-        {
-            return;
-        }
         match action {
             GroupCommand::NewTab => {
                 self.send_captured(
@@ -333,6 +330,10 @@ impl Workspace {
                     },
                     cx,
                 );
+            }
+            GroupCommand::Scratchpad => {
+                self.toggle_scratchpad(&target.pane.pane_id, window, cx);
+                return;
             }
             GroupCommand::Split(axis) => {
                 if !model.is_root_pane(&target.pane.pane_id) {
@@ -393,12 +394,11 @@ impl Workspace {
 
     fn group_button(
         weak: WeakEntity<Self>,
-        id: String,
-        label: &'static str,
-        icon: IconName,
+        (id, label, icon): (String, &'static str, IconName),
         disabled: bool,
         target: Option<GroupTarget>,
         action: GroupCommand,
+        focus_ring: bool,
     ) -> AnyElement {
         let selector = id.clone();
         Button::new(SharedString::from(id))
@@ -409,6 +409,7 @@ impl Workspace {
             .ghost()
             .compact()
             .xsmall()
+            .focus_ring(focus_ring)
             .disabled(disabled)
             .on_click(move |_, window, cx| {
                 if let Some(target) = &target {
@@ -445,12 +446,15 @@ impl Workspace {
             .px_1()
             .child(Self::group_button(
                 weak.clone(),
-                format!("group-new-tab-{slot}"),
-                "New tab in this group",
-                IconName::Plus,
+                (
+                    format!("group-new-tab-{slot}"),
+                    "New tab in this group",
+                    IconName::Plus,
+                ),
                 target.is_none(),
                 target.clone(),
                 GroupCommand::NewTab,
+                focus_visible(cx),
             ));
         if !remote {
             let trigger_selector = format!("shell-profile-trigger-{slot}");
@@ -463,6 +467,7 @@ impl Workspace {
                 .read(cx)
                 .clone();
             let button = Button::new(SharedString::from(format!("group-profile-{slot}")))
+                .focus_ring(focus_visible(cx))
                 .debug_selector(move || trigger_selector.clone())
                 .track_focus(&trigger_focus)
                 .accessibility_label("Choose shell profile for this group")
@@ -502,7 +507,13 @@ impl Workspace {
                                         &picker_target.pane,
                                         cx,
                                     ) {
-                                        close_focus.focus(window, cx);
+                                        // Only the keyboard returns to the
+                                        // trigger; a click goes back to work.
+                                        if window.last_input_was_keyboard() {
+                                            close_focus.focus(window, cx);
+                                        } else {
+                                            this.focus_current(window, cx);
+                                        }
                                     }
                                 }
                             });
@@ -525,7 +536,6 @@ impl Workspace {
         surface: Surface,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let remote = self.is_remote_selected();
         let target = self
             .selected_model()
             .and_then(|model| GroupTarget::capture(model, slot, selected?))
@@ -562,10 +572,8 @@ impl Workspace {
                     .group_hover(screen_motion::TAB_BAR_GROUP, |style| style.opacity(1.))
             });
         if tiled {
-            if compact && !remote {
+            if compact {
                 let menu_target = target.clone();
-                let menu_weak = cx.entity().downgrade();
-                let focus_weak = cx.entity().downgrade();
                 actions = actions.child(
                     Button::new(SharedString::from(format!("group-more-{slot}")))
                         .accessibility_label("More group actions")
@@ -578,72 +586,91 @@ impl Workspace {
                         .ghost()
                         .compact()
                         .xsmall()
-                        .dropdown_menu(move |mut menu, _, _| {
-                            for (label, icon, disabled, command) in [
+                        .focus_ring(focus_visible(cx))
+                        .selected(self.drawer_popover_is("group-more"))
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            let Some(target) = menu_target.clone() else {
+                                return;
+                            };
+                            let mut entries = Vec::new();
+                            for (key, label, icon, enabled, command) in [
                                 (
-                                    "Split right",
+                                    "scratchpad",
+                                    "Scratchpad",
+                                    IconName::FileText,
+                                    true,
+                                    GroupCommand::Scratchpad,
+                                ),
+                                (
+                                    "split-right",
+                                    "Split Right",
                                     IconName::SquareSplitHorizontal,
-                                    menu_target.is_none(),
+                                    true,
                                     GroupCommand::Split(Axis::Horizontal),
                                 ),
                                 (
-                                    "Split below",
+                                    "split-below",
+                                    "Split Below",
                                     IconName::SquareSplitVertical,
-                                    menu_target.is_none(),
+                                    true,
                                     GroupCommand::Split(Axis::Vertical),
                                 ),
                                 (
-                                    "Float tab",
+                                    "float",
+                                    "Float Tab",
                                     IconName::PanelsTopLeft,
-                                    !can_float,
+                                    can_float,
                                     GroupCommand::Float,
                                 ),
                                 (
-                                    "Maximize group",
+                                    "maximize",
+                                    "Maximize Group",
                                     IconName::Maximize,
-                                    menu_target.is_none(),
+                                    true,
                                     GroupCommand::Maximize,
                                 ),
                             ] {
-                                if maximized && matches!(command, GroupCommand::Maximize) {
+                                let shown = match command {
+                                    GroupCommand::Split(_) => this.tab_prefs.show_split,
+                                    GroupCommand::Float => this.tab_prefs.show_float,
+                                    GroupCommand::Maximize => {
+                                        !maximized && this.tab_prefs.show_maximize
+                                    }
+                                    _ => true,
+                                };
+                                if !shown {
                                     continue;
                                 }
-                                let target = menu_target.clone();
-                                let weak = menu_weak.clone();
-                                menu = menu.item(
-                                    PopupMenuItem::new(label)
-                                        .icon(Icon::new(icon))
-                                        .disabled(disabled)
-                                        .on_click(move |_, window, cx| {
-                                            if let Some(target) = &target {
-                                                let _ = weak.update(cx, |this, cx| {
-                                                    this.group_command(
-                                                        target,
-                                                        command.clone(),
-                                                        window,
-                                                        cx,
-                                                    )
-                                                });
-                                            }
-                                        }),
+                                let target = target.clone();
+                                entries.push(
+                                    MenuEntry::new(key, label, move |this, window, cx| {
+                                        this.group_command(&target, command.clone(), window, cx)
+                                    })
+                                    .icon(icon)
+                                    .enabled(enabled),
                                 );
                             }
-                            menu
-                        })
-                        .on_open_change(move |open, window, cx| {
-                            let _ = focus_weak.update(cx, |this, cx| {
-                                this.wheel_navigation.reset();
-                                if *open {
-                                    this.drop_target = None;
-                                } else {
-                                    this.focus_current(window, cx);
-                                }
-                                cx.notify();
-                            });
-                        }),
+                            this.wheel_navigation.reset();
+                            this.drop_target = None;
+                            this.open_drawer_popover(
+                                PopoverKind::Actions(entries),
+                                PopoverAnchor::Pointer(event.position()),
+                                None,
+                                window,
+                                cx,
+                            );
+                            this.tag_drawer_popover("group-more");
+                        })),
                 );
             } else {
                 for (suffix, label, icon, action) in [
+                    (
+                        "scratchpad",
+                        "Toggle scratchpad",
+                        IconName::FileText,
+                        GroupCommand::Scratchpad,
+                    ),
                     (
                         "split-right",
                         "Split this group right",
@@ -657,40 +684,48 @@ impl Workspace {
                         GroupCommand::Split(Axis::Vertical),
                     ),
                 ] {
+                    if matches!(action, GroupCommand::Split(_)) && !self.tab_prefs.show_split {
+                        continue;
+                    }
                     actions = actions.child(Self::group_button(
                         cx.entity().downgrade(),
-                        format!("group-{suffix}-{slot}"),
-                        label,
-                        icon,
+                        (format!("group-{suffix}-{slot}"), label, icon),
                         target.is_none(),
                         target.clone(),
                         action,
+                        focus_visible(cx),
                     ));
                 }
-                if !remote {
+                if self.tab_prefs.show_float {
                     actions = actions.child(Self::group_button(
                         cx.entity().downgrade(),
-                        format!("group-float-{slot}"),
-                        "Float this tab",
-                        IconName::PanelsTopLeft,
+                        (
+                            format!("group-float-{slot}"),
+                            "Float this tab",
+                            IconName::PanelsTopLeft,
+                        ),
                         !can_float,
                         target.clone(),
                         GroupCommand::Float,
+                        focus_visible(cx),
                     ));
                 }
-                if !remote && !maximized {
+                if !maximized && self.tab_prefs.show_maximize {
                     actions = actions.child(Self::group_button(
                         cx.entity().downgrade(),
-                        format!("group-maximize-{slot}"),
-                        "Maximize this group",
-                        IconName::Maximize,
+                        (
+                            format!("group-maximize-{slot}"),
+                            "Maximize this group",
+                            IconName::Maximize,
+                        ),
                         target.is_none(),
                         target.clone(),
                         GroupCommand::Maximize,
+                        focus_visible(cx),
                     ));
                 }
             }
-            if maximized && !remote {
+            if maximized {
                 let restore_target = target.clone();
                 let weak = cx.entity().downgrade();
                 let (state_text, restore_label) = maximized_chrome_copy(compact);

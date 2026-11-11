@@ -8,7 +8,7 @@ use crate::{
     owned_service::OwnedService,
     workspace::{
         CatalogState, HostActionTarget, HostDiagnostic, HostUpdateOffer, HostUpdatePlan,
-        HostUpdateState, SourceId,
+        HostUpdateState, SourceId, SourceStatus,
     },
     Client,
 };
@@ -260,6 +260,9 @@ pub(super) struct Remotes<'a> {
     update_plan: Option<Arc<HostUpdatePlan>>,
     cursor: usize,
     cleanup_error: Option<io::Error>,
+    /// Hosts connected at start, each with the Screens to open once its
+    /// catalog is known. This demand is not a view's to release.
+    restoring: Vec<(HostActionTarget, Vec<String>)>,
 }
 impl<'a> Remotes<'a> {
     pub fn new(service: &'a OwnedService) -> Self {
@@ -269,6 +272,7 @@ impl<'a> Remotes<'a> {
             update_plan: None,
             cursor: 0,
             cleanup_error: None,
+            restoring: Vec::new(),
         }
     }
     pub async fn next(&mut self) -> Step {
@@ -304,6 +308,86 @@ impl<'a> Remotes<'a> {
             ));
         }
         self.connect_explicit(window, owner, target)
+    }
+    /// Connect a known host and, once its catalog is known, open the listed
+    /// Screens it still has. A host already in the window is left as it is.
+    pub fn restore(
+        &mut self,
+        window: &mut WindowWorkspace,
+        owner: SourceToken,
+        target: &str,
+        screens: Vec<String>,
+        known: &HostDirectorySnapshot,
+    ) -> io::Result<()> {
+        if window.source_for_target(target).is_some() {
+            return Ok(());
+        }
+        self.connect(window, owner, target, known)?;
+        let action = window
+            .source_for_target(target)
+            .and_then(|id| window.host(id))
+            .expect("admitted host")
+            .action_target()
+            .clone();
+        self.restoring.push((action, screens));
+        Ok(())
+    }
+    /// Open what a restored host still has and give up its browse demand; a
+    /// host that did not come up leaves the window with a notice.
+    fn settle_restores(&mut self, window: &mut WindowWorkspace, out: &mut SourceEffects) {
+        let mut index = 0;
+        while index < self.restoring.len() {
+            let (action, _) = &self.restoring[index];
+            let id = action.source_id();
+            let state = window
+                .host(id)
+                .filter(|host| host.action_target() == action)
+                .map(|host| (host.status(), host.catalog_state()));
+            let ready = match state {
+                // Another attempt replaced this one, or the host is gone.
+                None => {
+                    self.restoring.swap_remove(index);
+                    continue;
+                }
+                Some((SourceStatus::Ready, CatalogState::Ready)) => true,
+                Some((SourceStatus::Ready, CatalogState::Failed))
+                | Some((SourceStatus::Offline, _)) => false,
+                Some(_) => {
+                    index += 1;
+                    continue;
+                }
+            };
+            let (action, screens) = self.restoring.swap_remove(index);
+            if ready {
+                // A start does not take the view from what is already used.
+                let shown = window.shown_key();
+                let keys: Vec<ScreenKey> = window
+                    .source(id)
+                    .map(|model| {
+                        let live = model.live_catalog().unwrap_or_default();
+                        screens
+                            .iter()
+                            .filter(|id| {
+                                live.iter().any(|screen| screen.id.as_str() == id.as_str())
+                            })
+                            .map(|id| model.screen_key(id))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(token) = window.execution_token(id).filter(|_| !keys.is_empty()) {
+                    let _ = self.open_many(window, token, &keys);
+                }
+                if let Some(shown) = shown {
+                    let _ = window.select(window.lifecycle_token(), &shown);
+                }
+            } else {
+                out.updates.push(Update::HostReconnectFailed {
+                    target: action.target().to_owned(),
+                });
+            }
+            let _ = self.release_browse(window, &action);
+            out.changed = true;
+        }
     }
     /// Called only after confirmed local metadata preparation for an entered target.
     pub(super) fn connect_explicit(
@@ -362,6 +446,7 @@ impl<'a> Remotes<'a> {
             .hosts()
             .filter(|host| host.is_browsing())
             .map(|host| host.action_target().clone())
+            .filter(|action| !self.restoring.iter().any(|(held, _)| held == action))
             .collect();
         for action in actions {
             let _ = self.release_browse(window, &action);
@@ -373,6 +458,7 @@ impl<'a> Remotes<'a> {
         action: &HostActionTarget,
     ) -> io::Result<()> {
         self.index(window, action)?;
+        self.restoring.retain(|(held, _)| held != action);
         window.host_mut(action).expect("validated host").browsing = false;
         self.remove_unused(window);
         Ok(())
@@ -383,6 +469,7 @@ impl<'a> Remotes<'a> {
         action: &HostActionTarget,
     ) -> io::Result<()> {
         let index = self.index(window, action)?;
+        self.restoring.retain(|(held, _)| held != action);
         if !window
             .host(action.source_id())
             .is_some_and(|host| host.can_cancel())
@@ -473,6 +560,34 @@ impl<'a> Remotes<'a> {
         window.host_mut(&host.action).expect("opened host").catalog = CatalogState::Loading;
         Ok(())
     }
+    /// Open the listed Screens the host still has, in their order, and show
+    /// the first. Screens that have ended are left out.
+    pub fn open_many(
+        &mut self,
+        window: &mut WindowWorkspace,
+        owner: SourceToken,
+        keys: &[ScreenKey],
+    ) -> io::Result<()> {
+        let index = self
+            .hosts
+            .iter()
+            .position(|host| {
+                Some(host.action.source_id()) == keys.first().map(ScreenKey::source_id)
+            })
+            .ok_or_else(|| crate::connection::invalid("Host source is gone"))?;
+        if !window.open_listed(owner, keys)? {
+            return Ok(());
+        }
+        let host = &mut self.hosts[index];
+        host.source
+            .as_mut()
+            .ok_or_else(|| crate::connection::invalid("Host connection is unavailable"))?
+            .begin_observation(window)?;
+        host.observation_deadline
+            .get_or_insert_with(|| Instant::now() + Duration::from_secs(15));
+        window.host_mut(&host.action).expect("opened host").catalog = CatalogState::Loading;
+        Ok(())
+    }
     pub fn detach(
         &mut self,
         window: &mut WindowWorkspace,
@@ -480,6 +595,20 @@ impl<'a> Remotes<'a> {
         key: &ScreenKey,
     ) -> io::Result<()> {
         window.detach(owner, key)?;
+        self.remove_unused(window);
+        Ok(())
+    }
+    /// Take every Screen of the host out of the window and release the host.
+    /// Nothing is ended on the host.
+    pub fn close(
+        &mut self,
+        window: &mut WindowWorkspace,
+        action: &HostActionTarget,
+    ) -> io::Result<()> {
+        self.index(window, action)?;
+        self.restoring.retain(|(held, _)| held != action);
+        window.detach_all(action.local_owner(), action.source_id())?;
+        window.host_mut(action).expect("validated host").browsing = false;
         self.remove_unused(window);
         Ok(())
     }
@@ -505,6 +634,10 @@ impl<'a> Remotes<'a> {
                 | CommandKind::Select { .. }
                 | CommandKind::Focus { .. }
                 | CommandKind::Input { .. }
+                | CommandKind::StoreFiles { .. }
+                | CommandKind::CancelFileStore { .. }
+                | CommandKind::AnswerFileOffer { .. }
+                | CommandKind::AnswerEditorRequest { .. }
                 | CommandKind::ResizePane { .. }
                 | CommandKind::Visible { .. }
                 | CommandKind::ResizeSplit { .. }
@@ -513,6 +646,17 @@ impl<'a> Remotes<'a> {
                 | CommandKind::MovePane { .. }
                 | CommandKind::PlaceTab { .. }
                 | CommandKind::SetMaximized { .. }
+                | CommandKind::ReadViewer { .. }
+                | CommandKind::OpenTextViewer { .. }
+                | CommandKind::Annotate { .. }
+                | CommandKind::AnswerReview { .. }
+                | CommandKind::NewTerminal { .. }
+                | CommandKind::FloatPane { .. }
+                | CommandKind::DockFloat { .. }
+                | CommandKind::MoveFloat { .. }
+                | CommandKind::TransferPane { .. }
+                | CommandKind::ApplyTemplate { .. }
+                | CommandKind::ExtractTemplate { .. }
         ) || matches!(&command.kind,CommandKind::RequestClose {plan,..} if plan.target!=CloseTarget::Window);
         let effects = if allowed {
             host.source
@@ -538,6 +682,39 @@ impl<'a> Remotes<'a> {
                 source.cancel_created_follow();
             }
         }
+    }
+    /// A Screen that its connected host no longer has leaves the window, the
+    /// same as if it had been detached by hand.
+    fn detach_missing(&mut self, window: &mut WindowWorkspace) -> bool {
+        let mut gone = Vec::new();
+        for host in &self.hosts {
+            if host.cancelled || host.dispose {
+                continue;
+            }
+            let Some(source) = window.source(host.action.source_id()) else {
+                continue;
+            };
+            if !source.is_ready() {
+                continue;
+            }
+            gone.extend(
+                source
+                    .screens()
+                    .iter()
+                    .filter(|info| source.is_missing(info.id.as_str()))
+                    .map(|info| {
+                        (
+                            host.action.local_owner(),
+                            source.screen_key(info.id.as_str()),
+                        )
+                    }),
+            );
+        }
+        let mut changed = false;
+        for (owner, key) in gone {
+            changed |= window.detach(owner, &key).is_ok();
+        }
+        changed
     }
     fn remove_unused(&mut self, window: &mut WindowWorkspace) {
         for host in &mut self.hosts {
@@ -809,8 +986,9 @@ impl<'a> Remotes<'a> {
         Ok(out)
     }
     pub fn reconcile(&mut self, window: &mut WindowWorkspace) -> anyhow::Result<SourceEffects> {
-        self.remove_unused(window);
         let mut out = SourceEffects::default();
+        out.changed |= self.detach_missing(window);
+        self.remove_unused(window);
         if self
             .update_plan
             .as_ref()
@@ -992,6 +1170,7 @@ impl<'a> Remotes<'a> {
                 }
             }
         }
+        self.settle_restores(window, &mut out);
         self.drain_close_outcomes(&mut out);
         Ok(out)
     }

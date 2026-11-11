@@ -87,9 +87,8 @@ impl SourceWorkspace {
                 .into(),
             pane_id: pane.into(),
             session_id: self
-                .session_for(pane)
-                .ok_or_else(|| invalid("terminal session is not ready"))?
-                .into(),
+                .identity_for(pane)
+                .ok_or_else(|| invalid("terminal session is not ready"))?,
         };
         self.validate_pane_action(&source)?;
         Ok(source)
@@ -99,7 +98,7 @@ impl SourceWorkspace {
         if source.source_token() != self.source_token()
             || self.shown_screen_id() != Some(source.screen_id.as_str())
             || self.screen_for(&source.pane_id) != Some(source.screen_id.as_str())
-            || self.session_for(&source.pane_id) != Some(source.session_id.as_str())
+            || self.identity_for(&source.pane_id).as_deref() != Some(source.session_id.as_str())
         {
             return Err(invalid("Tab action belongs to a previous terminal"));
         }
@@ -112,10 +111,9 @@ impl SourceWorkspace {
             .get(&PaneId::from(source.pane_id.as_str()))
             .ok_or_else(|| invalid("terminal pane is gone"))?;
         if find_slot(screen, &source.pane_id).is_none()
-            || pane
-                .role
-                .as_ref()
-                .is_some_and(|role| *role != mux::PaneRole::Terminal)
+            || pane.role.as_ref().is_some_and(|role| {
+                !matches!(role, mux::PaneRole::Terminal | mux::PaneRole::Viewer)
+            })
         {
             return Err(invalid("Tab action requires a canonical terminal pane"));
         }
@@ -160,7 +158,6 @@ impl SourceWorkspace {
         target: ScreenTransferTarget,
         send: impl FnOnce(&str, &str, &str, bool) -> io::Result<()>,
     ) -> io::Result<()> {
-        self.require_local()?;
         self.require_catalog()?;
         self.validate_transfer_source(&source)?;
         if self.pending_transfer.is_some()
@@ -208,6 +205,16 @@ impl SourceWorkspace {
         self.mutation = mutation;
         self.reconciling = true;
         self.catalog_dirty = true;
+        if let (SourceKind::Remote, ScreenTransferTarget::New { screen_id }) =
+            (self.kind(), &target)
+        {
+            // A window shows only the Screens it opened: hold a place for the
+            // one the host is about to make, so its refresh reads it too.
+            self.catalog.push(ScreenInfo {
+                id: screen_id.as_str().into(),
+                name: None,
+            });
+        }
         self.pending_transfer = Some(PendingTransfer {
             request_id,
             source,
@@ -235,12 +242,17 @@ impl SourceWorkspace {
         error: Option<String>,
     ) -> Option<ScreenTransferResult> {
         let pending = self.pending_transfer.take()?;
+        let held = matches!(
+            (self.kind(), &pending.target),
+            (SourceKind::Remote, ScreenTransferTarget::New { .. })
+        );
         let outcome = if let Some(reason) = pending.failure {
             ScreenTransferOutcome::Rejected(reason)
         } else if let Some(reason) = error {
             ScreenTransferOutcome::Unverified(reason)
         } else if self.screen_for(&pending.source.pane_id) != Some(pending.target.screen_id())
-            || self.session_for(&pending.source.pane_id) != Some(pending.source.session_id.as_str())
+            || self.identity_for(&pending.source.pane_id).as_deref()
+                != Some(pending.source.session_id.as_str())
             || !self
                 .models
                 .get(pending.target.screen_id())
@@ -264,6 +276,19 @@ impl SourceWorkspace {
             }
             ScreenTransferOutcome::Confirmed
         };
+        if held
+            && outcome != ScreenTransferOutcome::Confirmed
+            && self.live_catalog().is_none_or(|live| {
+                !live
+                    .iter()
+                    .any(|info| info.id.as_str() == pending.target.screen_id())
+            })
+        {
+            // The host never made the Screen; its place goes again.
+            let id = pending.target.screen_id();
+            self.catalog.retain(|info| info.id.as_str() != id);
+            self.models.remove(id);
+        }
         Some(ScreenTransferResult {
             connection_id: self.connection_id,
             request_id: pending.request_id,

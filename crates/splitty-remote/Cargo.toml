@@ -15,6 +15,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 semver = "1"
 rand = { workspace = true }
+zeroize = "1"
 # The home directory, for the user's ~/.ssh (known hosts).
 dirs = "6"
 

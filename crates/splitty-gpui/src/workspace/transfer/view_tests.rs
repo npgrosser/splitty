@@ -725,7 +725,7 @@ fn outside_presses_escape_and_tab_close_the_menu() {
 }
 
 #[test]
-fn remote_tab_copies_its_ssh_path_without_local_screen_transfer() {
+fn remote_tab_copies_its_ssh_path_and_can_move_to_a_screen() {
     with_model(
         WindowWorkspace::new(Uuid::new_v4()),
         |window, view, mut receiver| {
@@ -761,7 +761,7 @@ fn remote_tab_copies_its_ssh_path_without_local_screen_transfer() {
                 });
             });
             draw(window);
-            assert!(window.debug_bounds("tab-context-move").is_none());
+            assert!(window.debug_bounds("tab-context-move").is_some());
             assert!(
                 bounds(window, "tab-context-copy-cwd").top()
                     < bounds(window, "tab-context-copy-ssh").top()

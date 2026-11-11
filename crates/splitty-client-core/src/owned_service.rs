@@ -94,10 +94,35 @@ impl OwnedService {
                 "Windows workspace requires --wsl-distro, --wsl-backend and --wsl-config-dir",
             )),
             LocalBackend::Wsl(launch) => {
+                let mut arguments = launch.arguments();
+                if let Some(program) = splitty_remote::ssh::askpass_program() {
+                    // Resolve using the selected distro's mount configuration,
+                    // rather than assuming Windows drives are under /mnt.
+                    let mut translate = tokio::process::Command::new("wsl.exe");
+                    #[cfg(target_os = "windows")]
+                    translate.creation_flags(0x08000000);
+                    let output = translate
+                        .args(["-d", &launch.distro, "--exec", "wslpath", "-u"])
+                        .arg(program)
+                        .output()
+                        .await?;
+                    if !output.status.success() {
+                        return Err(io::Error::other(
+                            "Could not resolve the SSH dialog executable in WSL",
+                        ));
+                    }
+                    let path = std::str::from_utf8(&output.stdout)
+                        .map_err(|_| io::Error::other("Invalid WSL SSH dialog path"))?
+                        .trim();
+                    if !path.starts_with('/') || path.chars().any(char::is_control) {
+                        return Err(io::Error::other("Invalid WSL SSH dialog path"));
+                    }
+                    arguments.insert(5, format!("SPLITTY_ASKPASS_PROGRAM={path}"));
+                }
                 let mut command = tokio::process::Command::new("wsl.exe");
                 #[cfg(target_os = "windows")]
                 command.creation_flags(0x08000000); // CREATE_NO_WINDOW, no extra console
-                command.args(launch.arguments());
+                command.args(arguments);
                 Self::start_owner(command, stop).await
             }
         }

@@ -40,6 +40,12 @@ pub(super) struct SourceRuntime {
     last_close_request: u64,
     pending_close: Option<PendingClose>,
     select_created: Option<String>,
+    files: files::FileTransfers,
+    viewers: viewers::Viewers,
+    editors: editors::EditorRequests,
+    /// Template extractions under way: the request's wire ID with the
+    /// connection that keeps templates and the window's request.
+    extractions: HashMap<String, (uuid::Uuid, uuid::Uuid)>,
 }
 impl SourceRuntime {
     pub fn new(client: Client, owner: SourceToken) -> Self {
@@ -62,6 +68,10 @@ impl SourceRuntime {
             last_close_request: 0,
             pending_close: None,
             select_created: None,
+            files: files::FileTransfers::default(),
+            viewers: viewers::Viewers::default(),
+            editors: editors::EditorRequests::default(),
+            extractions: HashMap::new(),
         }
     }
     pub fn owner(&self) -> SourceToken {
@@ -189,6 +199,7 @@ impl SourceRuntime {
                 | CommandKind::MovePane { .. }
                 | CommandKind::PlaceTab { .. }
                 | CommandKind::ProfileTab { .. }
+                | CommandKind::OpenTextViewer { .. }
                 | CommandKind::NewTerminal { .. }
         );
         if shown_action
@@ -206,6 +217,47 @@ impl SourceRuntime {
         // Input and geometry inspect immutable authority; terminal traffic must
         // not clone the window's bounded navigation order via SourceEdit.
         match &command.kind {
+            CommandKind::AnswerEditorRequest { .. } => {
+                if let CommandKind::AnswerEditorRequest {
+                    request_id,
+                    outcome,
+                } = command.kind
+                {
+                    self.editors.answer(&self.client, &request_id, outcome);
+                }
+                return Ok(out);
+            }
+            CommandKind::StoreFiles { .. }
+            | CommandKind::CancelFileStore { .. }
+            | CommandKind::AnswerFileOffer { .. } => {
+                let source = self.owner;
+                match command.kind {
+                    CommandKind::StoreFiles {
+                        request_id,
+                        items,
+                        dropped,
+                        directory,
+                    } => self.files.store(
+                        &self.client,
+                        source,
+                        request_id,
+                        items,
+                        dropped,
+                        directory,
+                        &mut out.updates,
+                    ),
+                    CommandKind::CancelFileStore { request_id } => {
+                        self.files
+                            .cancel(&self.client, source, request_id, &mut out.updates)
+                    }
+                    CommandKind::AnswerFileOffer { offer_id, save } => {
+                        self.files
+                            .answer(&self.client, source, &offer_id, save, &mut out.updates)
+                    }
+                    _ => unreachable!("file commands"),
+                }
+                return Ok(out);
+            }
             CommandKind::Input { route, bytes } => {
                 let result = if window.accepts_terminal(route)
                     && self.attached.contains(route.session_id())
@@ -219,6 +271,40 @@ impl SourceRuntime {
                 };
                 if let Err(error) = result {
                     out.push(Update::Status(error.to_string()));
+                }
+                return Ok(out);
+            }
+            CommandKind::ReadViewer { pane, if_version } => {
+                // Only a pane of this connection's Screens with a viewer record.
+                let known = window.source(self.id()).is_some_and(|model| {
+                    model.is_ready()
+                        && model
+                            .screen_for(pane)
+                            .and_then(|screen| model.screen(screen))
+                            .and_then(|screen| screen.snapshot())
+                            .is_some_and(|screen| {
+                                screen.panes.values().any(|entry| {
+                                    entry.id.as_str() == pane && entry.viewer.is_some()
+                                })
+                            })
+                });
+                if known {
+                    self.viewers.read(
+                        &self.client,
+                        self.owner,
+                        pane,
+                        if_version.as_deref(),
+                        &mut out.updates,
+                    );
+                } else {
+                    out.push(Update::Viewer(viewers::ViewerUpdate {
+                        source: self.owner,
+                        pane: pane.clone(),
+                        content: viewers::ViewerContent::Failed {
+                            code: "gone".into(),
+                            error: "This document is no longer on its Screen".into(),
+                        },
+                    }));
                 }
                 return Ok(out);
             }
@@ -504,6 +590,39 @@ impl SourceRuntime {
             }
             return Ok(out);
         }
+        if let CommandKind::ExtractTemplate {
+            owner,
+            request_id,
+            screen,
+            name,
+            root,
+        } = command
+        {
+            let wire = request_id.to_string();
+            let result = if self.extractions.len() >= 8 {
+                Err(std::io::Error::other("Too many template extractions"))
+            } else if !model
+                .as_ref()
+                .is_some_and(|model| model.templates_supported())
+            {
+                Err(std::io::Error::other(
+                    "Update this host's Splitty to save its Screens as templates",
+                ))
+            } else {
+                self.client.extract_template(&wire, &screen, &name, &root)
+            };
+            match result {
+                Ok(()) => {
+                    self.extractions.insert(wire, (owner, request_id));
+                }
+                Err(error) => out.push(Update::TemplateApi(TemplateApiResult::rejected(
+                    owner,
+                    request_id,
+                    error.to_string(),
+                ))),
+            }
+            return Ok(out);
+        }
 
         let Some(model) = &mut model else {
             return Ok(out);
@@ -520,6 +639,8 @@ impl SourceRuntime {
             CommandKind::CreateRemoteScreen { .. }
             | CommandKind::ManageForward { .. }
             | CommandKind::RefreshForwards
+            | CommandKind::ManageShare { .. }
+            | CommandKind::RefreshShares
             | CommandKind::CancelForwardOpen { .. }
             | CommandKind::ManageHost { .. }
             | CommandKind::WithdrawHostConnect { .. }
@@ -532,7 +653,9 @@ impl SourceRuntime {
             | CommandKind::RefreshBackendVersion
             | CommandKind::CancelHost { .. }
             | CommandKind::ReleaseHostBrowse { .. }
+            | CommandKind::CloseHost { .. }
             | CommandKind::OpenRemoteScreen { .. }
+            | CommandKind::OpenRemoteScreens { .. }
             | CommandKind::DetachRemoteScreen { .. }
             | CommandKind::SwitchScreen(_)
             | CommandKind::MoveScreen { .. }
@@ -540,6 +663,7 @@ impl SourceRuntime {
             | CommandKind::RefreshHostDirectory { .. }
             | CommandKind::TemplateApi { .. }
             | CommandKind::ApplyTemplate { .. }
+            | CommandKind::ExtractTemplate { .. }
             | CommandKind::FloatPane { .. }
             | CommandKind::DockFloat { .. }
             | CommandKind::MoveFloat { .. }
@@ -573,6 +697,23 @@ impl SourceRuntime {
                     Err(std::io::Error::new(
                         std::io::ErrorKind::InvalidInput,
                         "Rename belongs to a previous connection",
+                    ))
+                }
+            }
+            CommandKind::SetScratchpad {
+                screen,
+                connection,
+                session,
+                text,
+            } => {
+                if self.pending_close.is_some() {
+                    Err(std::io::Error::other("A close operation is pending"))
+                } else if model.connection_id() == connection {
+                    model.set_scratchpad(&self.client, &screen, &session, text)
+                } else {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "Scratchpad edit belongs to a previous connection",
                     ))
                 }
             }
@@ -680,8 +821,74 @@ impl SourceRuntime {
                     Ok(())
                 }
             }
+            CommandKind::Annotate { screen, pane, op } => {
+                if model.screen_for(&pane) != Some(screen.as_str()) {
+                    Err(crate::connection::invalid(
+                        "The document is no longer on its Screen",
+                    ))
+                } else {
+                    model.annotation_op(&self.client, &screen, &op.screen_op(&pane))
+                }
+            }
+            CommandKind::AnswerReview {
+                screen,
+                pane,
+                wait_id,
+                verdict,
+                review,
+            } => {
+                if model.screen_for(&pane) != Some(screen.as_str()) {
+                    Err(crate::connection::invalid(
+                        "The document is no longer on its Screen",
+                    ))
+                } else {
+                    let result = self.client.answer_review(
+                        &screen,
+                        &pane,
+                        &wait_id,
+                        verdict,
+                        review.as_deref(),
+                    );
+                    if result.is_ok() {
+                        model.mark_screen_dirty(&screen);
+                    }
+                    result
+                }
+            }
+            CommandKind::OpenTextViewer {
+                screen,
+                pane,
+                title,
+                text,
+                cwd,
+            } => {
+                if !model.viewers_supported() {
+                    Err(std::io::Error::new(
+                        std::io::ErrorKind::Unsupported,
+                        "This host does not open viewers",
+                    ))
+                } else if model.shown_screen_id() != Some(screen.as_str())
+                    || model.screen_for(&pane) != Some(screen.as_str())
+                {
+                    Err(crate::connection::invalid(
+                        "The terminal is no longer on the shown Screen",
+                    ))
+                } else {
+                    let result =
+                        self.client
+                            .open_text_viewer(&screen, &pane, &title, &text, cwd.as_deref());
+                    if result.is_ok() {
+                        model.mark_screen_dirty(&screen);
+                    }
+                    result.map(|_| ())
+                }
+            }
             CommandKind::ResizeSplit { node, sizes, .. } => {
-                model.resize_split(&self.client, &node, sizes)
+                let result = model.resize_split(&self.client, &node, sizes);
+                if result.is_ok() {
+                    out.changed = true;
+                }
+                result
             }
             CommandKind::Select { pane, .. } => {
                 model.select_tab(&pane);
@@ -691,7 +898,12 @@ impl SourceRuntime {
             }
             CommandKind::Focus { .. } => unreachable!("focus is owned by the window worker"),
             CommandKind::Input { .. }
+            | CommandKind::StoreFiles { .. }
+            | CommandKind::CancelFileStore { .. }
+            | CommandKind::AnswerFileOffer { .. }
+            | CommandKind::AnswerEditorRequest { .. }
             | CommandKind::ResizePane { .. }
+            | CommandKind::ReadViewer { .. }
             | CommandKind::Visible { .. } => {
                 unreachable!("read-only controls handled before model mutation")
             }
@@ -728,6 +940,9 @@ impl SourceRuntime {
         let mut delta = WorkspaceDelta::default();
         let mut accepted_close_snapshot = false;
         let mut terminated = None;
+        self.viewers
+            .event(&self.client, source, &event, &mut out.updates);
+        self.template_extracted(&event, &mut out.updates);
         if let Some(json) = event.json() {
             match json["type"].as_str() {
                 Some("mux.welcome") if !self.welcomed => {
@@ -742,6 +957,11 @@ impl SourceRuntime {
                         json["capabilities"].as_array().is_some_and(|caps| {
                             caps.iter().any(|cap| cap == "server-templates-v1")
                         }),
+                    );
+                    workspace.set_viewers_supported(
+                        json["capabilities"]
+                            .as_array()
+                            .is_some_and(|caps| caps.iter().any(|cap| cap == "viewer-v1")),
                     );
                     workspace.set_tab_selection_supported(supports_tab_selection);
                     workspace.set_tab_placement_supported(
@@ -774,6 +994,24 @@ impl SourceRuntime {
                     }
                     out.changed = true;
                     self.welcomed = true;
+                    self.files.welcome(&self.client, json);
+                    self.editors.welcome(&self.client, json);
+                }
+                Some("editor.request" | "editor.cancelled") => {
+                    self.editors.event(
+                        &self.client,
+                        source,
+                        &self.attached,
+                        json,
+                        &mut out.updates,
+                    );
+                }
+                Some(
+                    "file.offer" | "file.chunk" | "file.closed" | "image_saved" | "image_failed"
+                    | "upload_progress" | "upload_saved" | "upload_failed",
+                ) => {
+                    self.files
+                        .event(&self.client, source, &self.attached, json, &mut out.updates);
                 }
                 Some("ports.changed") => {
                     if let Some(model) = &mut model {
@@ -927,12 +1165,25 @@ impl SourceRuntime {
                 Some("closed") => {
                     if let Some(session) = json["sessionId"].as_str() {
                         self.attached.remove(session);
+                        self.editors.session_closed(
+                            &self.client,
+                            source,
+                            session,
+                            &mut out.updates,
+                        );
                         // Client already forgets this attachment on `closed`.
                         self.owned_sessions.remove(session);
                         self.closed_sessions.insert(session.to_owned());
                     }
                 }
                 Some("mux.op_failed") | Some("error") => {
+                    let file_answer = self.files.event(
+                        &self.client,
+                        source,
+                        &self.attached,
+                        json,
+                        &mut out.updates,
+                    );
                     if json["type"] == "mux.op_failed" {
                         if let Some(model) = &mut model {
                             model.observe_placement_failure(event.connection_id, json);
@@ -970,10 +1221,17 @@ impl SourceRuntime {
                             model.reject_move(event.connection_id);
                         }
                     }
+                    if json["op"] == "resize_split" {
+                        if let Some(model) = &mut model {
+                            model.reject_resize(event.connection_id, json);
+                        }
+                    }
                     if let (Some(model), Some(pane)) = (&mut model, json["paneId"].as_str()) {
                         delta = model.observe_spawn_failure(event.connection_id, pane);
                     }
-                    out.push(Update::Status(format!("Operation rejected: {json}")));
+                    if !file_answer {
+                        out.push(Update::Status(format!("Operation rejected: {json}")));
+                    }
                     if let Some(model) = &mut model {
                         // A rejected lifecycle or pane operation can change
                         // catalog membership as well as one screen's layout.
@@ -1095,6 +1353,8 @@ impl SourceRuntime {
     }
     pub fn reconcile(&mut self, window: &mut WindowWorkspace) -> anyhow::Result<SourceEffects> {
         let mut out = SourceEffects::default();
+        self.files
+            .expire(&self.client, self.owner, &mut out.updates);
         let globally_shown = window
             .shown_key()
             .is_some_and(|key| key.source_id() == self.id());
@@ -1613,5 +1873,53 @@ mod tests {
         source.client.finish().await.unwrap();
         service.close().await.unwrap();
         let _ = std::fs::remove_dir_all(path);
+    }
+}
+impl SourceRuntime {
+    /// The service's answer to a template extraction, as the draft the
+    /// window reviews before the local service stores it.
+    fn template_extracted(&mut self, event: &Event, out: &mut Vec<Update>) {
+        let Some(value) = event
+            .json()
+            .filter(|value| value["type"] == "mux.template_extracted")
+        else {
+            return;
+        };
+        let Some((owner, request_id)) = value["requestId"]
+            .as_str()
+            .and_then(|id| self.extractions.remove(id))
+        else {
+            return;
+        };
+        let budget = self.client.budget();
+        let draft = match value["error"].as_str() {
+            Some(error) => Err(io::Error::other(
+                error.chars().take(512).collect::<String>(),
+            )),
+            None => serde_json::to_vec(&value["template"])
+                .map_err(io::Error::other)
+                .and_then(|bytes| {
+                    let lease = budget
+                        .reserve(bytes.len().saturating_mul(8), false)
+                        .map_err(io::Error::other)?;
+                    let template = serde_json::from_slice(&bytes).map_err(|_| {
+                        io::Error::new(io::ErrorKind::InvalidData, "invalid template")
+                    })?;
+                    crate::templates::TemplateDraft::new(
+                        owner,
+                        request_id,
+                        lease.charge(template),
+                        budget.clone(),
+                    )
+                }),
+        };
+        out.push(Update::TemplateApi(match draft {
+            Ok(draft) => TemplateApiResult {
+                connection_id: owner,
+                request_id,
+                outcome: crate::templates::TemplateApiOutcome::Draft(Arc::new(draft)),
+            },
+            Err(error) => TemplateApiResult::rejected(owner, request_id, error.to_string()),
+        }));
     }
 }

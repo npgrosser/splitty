@@ -391,11 +391,11 @@ impl SourceWorkspace {
                         .root
                         .find_slot(&PaneId::from(source.pane_id.as_str()))
                         .is_some()
-                }) && screen
-                    .panes
-                    .get(&PaneId::from(source.pane_id.as_str()))
-                    .and_then(|p| p.session_id.as_ref())
-                    .map(SessionId::as_str)
+                }) && self
+                    .models
+                    .get(pending.intent.screen())
+                    .and_then(|model| model.identity_for(&source.pane_id))
+                    .as_deref()
                     == Some(source.session_id.as_str())
             }
             Intent::Dock { target, slot } => {

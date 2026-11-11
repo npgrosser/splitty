@@ -364,6 +364,30 @@ impl Client {
         self.command(0, || json!({"type":"mux.workspace_resync"}))
     }
 
+    /// The allowance this connection's decoded values are charged to.
+    pub(crate) fn budget(&self) -> splitty_transport::budget::ConnectionBudget {
+        self.sender().context().budget.clone()
+    }
+
+    /// Ask the service for a Screen's layout as a template
+    /// (`mux.template_extracted` answers with the same request ID).
+    pub fn extract_template(
+        &self,
+        request_id: &str,
+        screen_id: &str,
+        name: &str,
+        root: &str,
+    ) -> io::Result<()> {
+        identifier(screen_id)?;
+        if name.len() > 512 || root.len() > 4096 {
+            return Err(invalid("Template name or root exceeds limit"));
+        }
+        self.command(name.len() + root.len(), || {
+            json!({"type":"mux.extract_template", "requestId":request_id,
+                "screenId":screen_id, "name":name, "root":root})
+        })
+    }
+
     pub fn rename_screen(&self, screen_id: &str, name: &str) -> io::Result<()> {
         identifier(screen_id)?;
         validate_rename_name(name)?;
@@ -530,6 +554,70 @@ impl Client {
     pub fn hide(&self, session_id: &str) -> io::Result<()> {
         identifier(session_id)?;
         self.command(0, || json!({"type":"hide", "id":session_id}))
+    }
+
+    /// Answer the process waiting for a review of a viewer pane
+    /// (`mux-protocol`, Review Answers).
+    pub fn answer_review(
+        &self,
+        screen_id: &str,
+        pane_id: &str,
+        wait_id: &str,
+        verdict: crate::annotations::Verdict,
+        review: Option<&str>,
+    ) -> io::Result<()> {
+        identifier(screen_id)?;
+        identifier(pane_id)?;
+        identifier(wait_id)?;
+        let review = review.filter(|text| !text.is_empty());
+        if review.is_some_and(|text| text.len() > 1024 * 1024)
+            || (review.is_none() && verdict == crate::annotations::Verdict::ChangesRequested)
+        {
+            return Err(invalid("invalid review"));
+        }
+        self.command(review.map_or(0, str::len), || {
+            let mut message = json!({"type":"viewer.review_answer", "screenId":screen_id,
+                "paneId":pane_id, "waitId":wait_id, "outcome":verdict.outcome()});
+            if let Some(review) = review {
+                message["review"] = json!(review);
+            }
+            message
+        })
+    }
+
+    /// A plain text in a viewer pane to the right of `anchor_pane_id`
+    /// (`viewer-panes`, Terminal Selection In A Viewer).
+    pub fn open_text_viewer(
+        &self,
+        screen_id: &str,
+        anchor_pane_id: &str,
+        title: &str,
+        text: &str,
+        cwd: Option<&str>,
+    ) -> io::Result<String> {
+        identifier(screen_id)?;
+        identifier(anchor_pane_id)?;
+        if text.is_empty() || text.len() > 262_144 {
+            return Err(invalid("The selection is too large for a viewer"));
+        }
+        let title: String = title
+            .chars()
+            .filter(|c| !c.is_control())
+            .take(200)
+            .collect();
+        let pane = Uuid::new_v4().to_string();
+        self.command(text.len() + title.len(), || {
+            let mut op = json!({
+                "type":"open_viewer", "paneId":anchor_pane_id, "newPaneId":pane,
+                "placement":"right",
+                "source":{"kind":"text", "title":title, "text":text}
+            });
+            if let Some(cwd) = cwd.filter(|cwd| !cwd.is_empty() && cwd.len() <= 4096) {
+                op["cwd"] = json!(cwd);
+            }
+            json!({"type":"mux.op", "screenId":screen_id, "op":op})
+        })?;
+        Ok(pane)
     }
 
     pub fn open_markdown(

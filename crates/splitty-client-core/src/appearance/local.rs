@@ -5,7 +5,9 @@ use crate::settings::{SettingsDomain, SettingsMetadata};
 use serde::Deserialize;
 use splitty_core::native_api::Operation;
 use splitty_core::{
-    config::{AppearanceSettings, DrawerSettings},
+    config::{
+        AppearanceSettings, DrawerSettings, EditorSettings, NativeTabSettings, RemoteSettings,
+    },
     theme::ResolvedTheme,
 };
 use splitty_transport::budget::Charged;
@@ -17,6 +19,14 @@ pub(crate) struct HomeAppearance {
     pub appearance: AppearanceSettings,
     pub drawer: DrawerSettings,
     pub terminal: TerminalPreferences,
+    /// Absent on a service that predates the group.
+    #[serde(default)]
+    pub remote: RemoteSettings,
+    /// Absent on a service that predates the group.
+    #[serde(default, rename = "nativeTabs")]
+    pub native_tabs: NativeTabSettings,
+    #[serde(default)]
+    pub editors: EditorSettings,
 }
 impl HomeAppearance {
     pub(crate) fn validate(&self) -> io::Result<()> {
@@ -79,6 +89,9 @@ pub(crate) async fn read(
         appearance: home.appearance,
         drawer: home.drawer,
         terminal: home.terminal,
+        remote: home.remote,
+        native_tabs: home.native_tabs,
+        editors: home.editors,
     });
     let theme = read_theme(client, theme_name(&settings.appearance, scheme)).await?;
     let metadata = read_typed::<SettingsMetadata>(client, Operation::HomeMetadata)

@@ -123,8 +123,13 @@ impl SourceWorkspace {
         };
         send(&drag.screen_id, &op)?;
         let focus = drag.source_slot != target;
+        // The tab moves in this window at once; the service's snapshot
+        // confirms it or puts the tab back.
+        let model = self.shown_mut()?;
+        model.preview(&op);
         if focus {
-            self.shown_mut()?.maximized_slot = None;
+            model.maximized_slot = None;
+            model.select_tab(&drag.pane);
         }
         self.pending_placement = Some(PendingTabPlacement {
             drag,
@@ -156,6 +161,15 @@ impl SourceWorkspace {
         }
     }
 
+    /// End the pending placement and show the service's layout again.
+    fn end_placement(&mut self) -> Option<PendingTabPlacement> {
+        let pending = self.pending_placement.take()?;
+        if let Some(model) = self.models.get_mut(&pending.drag.screen_id) {
+            model.drop_preview();
+        }
+        Some(pending)
+    }
+
     pub(super) fn placement_catalog(
         &mut self,
         connection: Uuid,
@@ -178,7 +192,7 @@ impl SourceWorkspace {
                     .then(|| "Tab placement Screen was removed".into())
             });
         if let Some(reason) = failure {
-            self.pending_placement = None;
+            self.end_placement();
             return Some(PlacementOutcome::Rejected(reason));
         }
         let screen = pending.drag.screen_id.clone();
@@ -204,7 +218,7 @@ impl SourceWorkspace {
             return None;
         }
         if let Err(error) = result {
-            self.pending_placement = None;
+            self.end_placement();
             return Some(PlacementOutcome::Rejected(format!(
                 "Tab placement could not be verified: {error}"
             )));
@@ -213,18 +227,19 @@ impl SourceWorkspace {
             // Stream order proves this matching frame is post-operation. A
             // lower revision can mean another client recreated the Screen;
             // preserve the cached state but never leave the intent pending.
-            self.pending_placement = None;
+            self.end_placement();
             return Some(PlacementOutcome::Rejected(
                 "Tab placement could not be verified from an older Screen snapshot".into(),
             ));
         }
-        let pending = self.pending_placement.take()?;
+        let pending = self.end_placement()?;
         let Some(model) = self.models.get_mut(&pending.drag.screen_id) else {
             return Some(PlacementOutcome::Rejected(
                 "Tab placement Screen was removed".into(),
             ));
         };
-        let confirmed = model.session_for(&pending.drag.pane) == Some(pending.drag.session.as_str())
+        let confirmed = model.identity_for(&pending.drag.pane).as_deref()
+            == Some(pending.drag.session.as_str())
             && model.snapshot().is_some_and(|screen| {
                 matches!(screen.root.find_node(&NodeId::from(pending.target.as_str())),
                     Some(LayoutNode::Slot { pane_ids, .. }) if at_position(pane_ids, &pending.drag.pane, pending.before.as_deref()))

@@ -1,6 +1,12 @@
 //! Own the local service and route workspace intents on one ordered connection.
+mod auto_forward;
+mod editors;
+mod files;
+mod remembered;
 mod remote;
+mod shares;
 mod source;
+mod viewers;
 use crate::{
     appearance::{AppearanceSnapshot, ColorScheme, DrawerVisibilityResult},
     hub::{
@@ -23,6 +29,11 @@ use crate::{
     zoom::{ZoomAction, ZoomResult},
     Event,
 };
+pub use editors::{
+    preferred_editor, AppEditor, EditorOutcome, EditorRequest, EditorSettings, EditorUpdate,
+    PathKind,
+};
+pub use files::{quote_path, FileUpdate, StoreItem};
 use std::{
     collections::{HashMap, HashSet},
     time::Duration,
@@ -35,6 +46,7 @@ use std::{
     thread,
 };
 use tokio::sync::mpsc;
+pub use viewers::{AnnotationOp, ReviewAnswered, ViewerContent, ViewerUpdate};
 
 /// One immutable intent captured on its assigned source connection.
 pub struct Command {
@@ -113,6 +125,39 @@ pub enum CommandKind {
         request: ForwardRequest,
     },
     RefreshForwards,
+    /// Share a local port with a host, or stop, remember or forget a share.
+    ManageShare {
+        request: crate::hub::ShareRequest,
+    },
+    RefreshShares,
+    /// Show a text, as a terminal's selection, in a viewer pane to the right
+    /// of the terminal it came from.
+    OpenTextViewer {
+        screen: String,
+        pane: String,
+        title: String,
+        text: String,
+        cwd: Option<String>,
+    },
+    /// Change the annotations of a viewer pane.
+    Annotate {
+        screen: String,
+        pane: String,
+        op: AnnotationOp,
+    },
+    /// Answer the process that waits for a review of a viewer pane.
+    AnswerReview {
+        screen: String,
+        pane: String,
+        wait_id: String,
+        verdict: crate::annotations::Verdict,
+        review: Option<String>,
+    },
+    /// Read the document of a viewer pane, unless it still is `if_version`.
+    ReadViewer {
+        pane: String,
+        if_version: Option<String>,
+    },
     CancelForwardOpen {
         request_id: uuid::Uuid,
     },
@@ -137,11 +182,20 @@ pub enum CommandKind {
     ReleaseHostBrowse {
         target: HostActionTarget,
     },
+    /// Take a host out of the window. Its Screens keep running and stay
+    /// remembered for the next connection.
+    CloseHost {
+        target: HostActionTarget,
+    },
     CreateRemoteScreen {
         request: crate::workspace::RemoteScreenCreateRequest,
     },
     OpenRemoteScreen {
         screen: ScreenKey,
+    },
+    /// Open the listed Screens that their host still has, and show the first.
+    OpenRemoteScreens {
+        screens: Vec<ScreenKey>,
     },
     DetachRemoteScreen {
         screen: ScreenKey,
@@ -158,6 +212,15 @@ pub enum CommandKind {
         plan: Arc<TemplateApplyPlan>,
         choice: TemplateApplyChoice,
         replace_confirmed: bool,
+    },
+    /// Read a Screen of this source as a template draft. The draft belongs
+    /// to `owner`, the local connection that keeps templates.
+    ExtractTemplate {
+        owner: uuid::Uuid,
+        request_id: uuid::Uuid,
+        screen: String,
+        name: String,
+        root: String,
     },
     FloatPane {
         request_id: uuid::Uuid,
@@ -209,6 +272,12 @@ pub enum CommandKind {
         screen: String,
         connection: uuid::Uuid,
         name: String,
+    },
+    SetScratchpad {
+        screen: String,
+        connection: uuid::Uuid,
+        session: String,
+        text: String,
     },
     Split {
         screen: ScreenKey,
@@ -264,7 +333,6 @@ pub enum CommandKind {
     },
     ResizeSplit {
         screen: ScreenKey,
-        revision: u64,
         node: String,
         sizes: Vec<f64>,
     },
@@ -279,6 +347,30 @@ pub enum CommandKind {
     Input {
         route: TerminalToken,
         bytes: Vec<u8>,
+    },
+    /// Store pasted images and files on this source's server.
+    /// `directory` names an existing absolute directory of the pane's server
+    /// for the files; without it they go to temporary storage.
+    StoreFiles {
+        directory: Option<String>,
+        request_id: uuid::Uuid,
+        items: Vec<StoreItem>,
+        /// Dropped files go only to a server that can cancel an upload.
+        dropped: bool,
+    },
+    /// Stop a store request; files already stored stay.
+    CancelFileStore {
+        request_id: uuid::Uuid,
+    },
+    /// Save or decline a file a pane's process offered.
+    AnswerFileOffer {
+        offer_id: String,
+        save: bool,
+    },
+    /// Tell the service what became of an editor request.
+    AnswerEditorRequest {
+        request_id: String,
+        outcome: EditorOutcome,
     },
     ResizePane {
         route: TerminalToken,
@@ -310,6 +402,19 @@ pub enum Update {
     Forward(ForwardResult),
     HostManagement(HostManagementResult),
     HostDirectory(HubUpdate),
+    RememberedScreens(Arc<crate::hub::RememberedScreens>),
+    /// The local ports shared with hosts, as the local service has them.
+    Shares(Arc<crate::hub::SharesSnapshot>),
+    /// The answer to a `ReadViewer`.
+    Viewer(ViewerUpdate),
+    /// The answer to an `AnswerReview`.
+    ReviewAnswered(ReviewAnswered),
+    /// A pane's process asks to open a path in the user's editor.
+    Editor(EditorUpdate),
+    /// A host reconnected at start did not come up; its Screens stay remembered.
+    HostReconnectFailed {
+        target: String,
+    },
     TemplateApi(TemplateApiResult),
     TemplateApply(TemplateApplyResult),
     FloatingAction(FloatingActionResult),
@@ -332,6 +437,7 @@ pub enum Update {
         connection: uuid::Uuid,
         reason: String,
     },
+    Files(FileUpdate),
     Workspace(Box<WindowWorkspace>),
     Event {
         source: SourceToken,
@@ -373,18 +479,10 @@ fn validate_command_target(model: &SourceWorkspace, command: &CommandKind) -> st
                 ));
             }
         }
-        CommandKind::ResizeSplit {
-            screen, revision, ..
-        } => {
+        // The divider leads its split in this window, so a resize is not
+        // bound to a revision: the split and its children decide.
+        CommandKind::ResizeSplit { screen, .. } => {
             model.validate_shown_key(screen)?;
-            if model
-                .snapshot()
-                .is_none_or(|snapshot| snapshot.revision != *revision)
-            {
-                return Err(crate::connection::invalid(
-                    "Divider belongs to an obsolete layout",
-                ));
-            }
         }
         _ => {}
     }
@@ -443,6 +541,9 @@ fn rejected_command(source: Option<SourceToken>, command: &CommandKind, reason: 
             *request_id,
             reason,
         )),
+        CommandKind::ExtractTemplate {
+            owner, request_id, ..
+        } => Update::TemplateApi(TemplateApiResult::rejected(*owner, *request_id, reason)),
         CommandKind::ApplyTemplate { plan, .. } => Update::TemplateApply(TemplateApplyResult {
             connection_id: plan.connection_id(),
             request_id: plan.request_id(),
@@ -1293,6 +1394,14 @@ async fn run_service(
     let mut settings = None::<RuntimeLocalService<'_>>;
     let mut ports = None::<PortsClient<'_>>;
     let mut hub = None::<RuntimeHub<'_>>;
+    let mut remembered = None::<remembered::RuntimeRemembered<'_>>;
+    let mut shares = None::<shares::RuntimeShares<'_>>;
+    // `remote.reconnectHosts` as first read; those hosts are reconnected once.
+    let mut reconnect = None::<Vec<String>>;
+    let mut reconnect_settled = false;
+    let mut auto_forward = auto_forward::AutoForward::default();
+    let mut auto_forward_enabled = false;
+    let mut forwards = None::<Arc<ForwardSnapshot>>;
     let mut remotes = remote::Remotes::new(&service);
     let mut known = None::<Arc<HostDirectorySnapshot>>;
     let mut host_connects = HostConnects::default();
@@ -1301,6 +1410,8 @@ async fn run_service(
         enum Next {
             Settings(std::io::Result<crate::local_service::LocalServiceUpdate>),
             Hub(HubEvent),
+            Remembered(Arc<crate::hub::RememberedScreens>),
+            Shares(Arc<crate::hub::SharesSnapshot>),
             Ports(PortsEvent),
             Event(std::io::Result<Option<Event>>),
             Remote(remote::Step),
@@ -1311,6 +1422,8 @@ async fn run_service(
             let next = tokio::select! {
                 result = async { match &mut settings { Some(reader)=>reader.next_update().await, None=>std::future::pending().await } } => Next::Settings(result),
                 update = async { match &mut hub { Some(reader)=>reader.next_event().await, None=>std::future::pending().await } } => Next::Hub(update),
+                list = async { match &mut remembered { Some(reader)=>reader.next_update().await, None=>std::future::pending().await } } => Next::Remembered(list),
+                list = async { match &mut shares { Some(reader)=>reader.next_update().await, None=>std::future::pending().await } } => Next::Shares(list),
                 event = async { match &mut ports { Some(ports)=>ports.next_event().await,None=>std::future::pending().await } } => Next::Ports(event),
                 event = local.client.next_event() => Next::Event(event),
                 remote = remotes.next() => Next::Remote(remote),
@@ -1320,9 +1433,11 @@ async fn run_service(
             if stop.load(Ordering::Acquire) { break; }
             let owner = window.lifecycle_token();
             match next {
+                Next::Remembered(list) => publish(&updates,Update::RememberedScreens(list),&stop).await?,
+                Next::Shares(list) => publish(&updates,Update::Shares(list),&stop).await?,
                 Next::Ports(event) => {
                     if let Some(ports)=&ports {ports.revalidate(&window);}
-                    let update=match event {PortsEvent::Snapshot(snapshot)=>Update::Forwards(snapshot),PortsEvent::Result(result)=>Update::Forward(*result)};
+                    let update=match event {PortsEvent::Snapshot(snapshot)=>{forwards=Some(snapshot.clone());Update::Forwards(snapshot)},PortsEvent::Result(result)=>Update::Forward(*result)};
                     publish(&updates,update,&stop).await?;
                 }
                 Next::Hub(HubEvent::Management(mut result)) => {
@@ -1358,7 +1473,13 @@ async fn run_service(
                         Ok(LocalServiceUpdate::Zoom(result)) => Update::Zoom(result),
                         Ok(LocalServiceUpdate::DrawerVisibility(result)) => Update::DrawerVisibility(result),
                         Ok(LocalServiceUpdate::Template(result)) => Update::TemplateApi(result),
-                        Ok(LocalServiceUpdate::Appearance(Ok(snapshot))) => Update::Appearance(snapshot),
+                        Ok(LocalServiceUpdate::Appearance(Ok(snapshot))) => {
+                            if reconnect.is_none() {
+                                reconnect=Some(match snapshot.value(crate::settings::SettingsField::ReconnectHosts) {Some(crate::settings::SettingsValue::List(hosts))=>hosts,_=>Vec::new()});
+                            }
+                            auto_forward_enabled=snapshot.value(crate::settings::SettingsField::AutoForwardPorts)==Some(crate::settings::SettingsValue::Bool(true));
+                            Update::Appearance(snapshot)
+                        },
                         Ok(LocalServiceUpdate::Appearance(Err(error))) => Update::AppearanceError { connection, reason:error.to_string() },
                         Ok(LocalServiceUpdate::ShellProfiles(Ok(snapshot))) => Update::ShellProfiles(snapshot),
                         Ok(LocalServiceUpdate::ShellProfiles(Err(error))) => Update::ShellProfilesError { connection, reason:error.to_string() },
@@ -1397,6 +1518,11 @@ async fn run_service(
                         CommandKind::RetryHost {target}=>Some((target,remotes.retry(&mut window,target))),
                         CommandKind::CancelHost {target}=>Some((target,remotes.cancel(&mut window,target))),
                         CommandKind::ReleaseHostBrowse {target}=>Some((target,remotes.release_browse(&mut window,target))),
+                        CommandKind::CloseHost {target}=>{
+                            let result=remotes.close(&mut window,target);
+                            if result.is_ok() { if let Some(memory)=&mut remembered {memory.keep(target.target());} }
+                            Some((target,result))
+                        }
                         _=>None,
                     };
                     if let Some((target,result))=lifecycle {
@@ -1431,6 +1557,15 @@ async fn run_service(
                             publish(&updates,Update::Forward(result),&stop).await?;
                         }
                         CommandKind::RefreshForwards => {if let Some(ports)=&mut ports {ports.refresh();}}
+                        CommandKind::RefreshShares => {if let Some(shares)=&mut shares {shares.refresh();}}
+                        CommandKind::ManageShare {request} => {
+                            let result=shares.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Sharing is not available")).and_then(|shares|shares.submit(request));
+                            match result {
+                                Ok(Some(list))=>publish(&updates,Update::Shares(list),&stop).await?,
+                                Ok(None)=>{}
+                                Err(error)=>publish(&updates,Update::Status(format!("Share was not sent: {error}")),&stop).await?,
+                            }
+                        }
                         CommandKind::CancelForwardOpen {request_id} => {if let Some(ports)=&mut ports {ports.cancel_open(request_id);}}
                         CommandKind::ManageHost {request_id,request} => {
                             let result=hub.as_mut().ok_or_else(||std::io::Error::new(std::io::ErrorKind::WouldBlock,"Host metadata service is not ready")).and_then(|hub|hub.enqueue(owner,request_id,request.clone()));
@@ -1502,13 +1637,16 @@ async fn run_service(
                             let result=known.as_deref().ok_or_else(||crate::connection::invalid("Host directory has not been read")).and_then(|known|remotes.connect(&mut window,owner,&target,known));
                             match result {Ok(())=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
                         }
-                        CommandKind::RetryHost { .. } | CommandKind::CancelHost { .. } | CommandKind::ReleaseHostBrowse { .. } => unreachable!("host lifecycle is dispatched before moving command"),
+                        CommandKind::RetryHost { .. } | CommandKind::CancelHost { .. } | CommandKind::ReleaseHostBrowse { .. } | CommandKind::CloseHost { .. } => unreachable!("host lifecycle is dispatched before moving command"),
                         CommandKind::CreateRemoteScreen { request } => {
                             let effects = create_remote_screen(&mut window, &mut local, &mut remotes, &mut host_connects, request);
                             publish_source_effects(&mut window, effects, &updates, &stop).await?;
                         }
                         CommandKind::OpenRemoteScreen { screen } => {
                             match remotes.open(&mut window,captured.expect("ready source capture"),&screen) {Ok(())=>{local.cancel_created_follow();remotes.cancel_created_follow();publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;},Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
+                        }
+                        CommandKind::OpenRemoteScreens { screens } => {
+                            match remotes.open_many(&mut window,captured.expect("ready source capture"),&screens) {Ok(())=>{local.cancel_created_follow();remotes.cancel_created_follow();publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;},Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
                         }
                         CommandKind::DetachRemoteScreen { screen } => {
                             match remotes.detach(&mut window,owner,&screen) {Ok(())=>publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?,Err(error)=>publish(&updates,Update::Status(error.to_string()),&stop).await?}
@@ -1545,6 +1683,8 @@ async fn run_service(
                                 publish(&updates,Update::HostDirectory(HubUpdate { connection_id:local.client.connection_id(),generation:1,state:HostDirectoryState::Loading {previous:None} }),&stop).await?;
                             } else {publish(&updates,Update::HostDirectory(HubUpdate::unavailable(local.client.connection_id())),&stop).await?;}
                             ports=Some(PortsClient::new(&service,window.lifecycle_token(),supports_hub));
+                            if supports_hub {remembered=Some(remembered::RuntimeRemembered::new(&service));}
+                            if supports_hub {shares=Some(shares::RuntimeShares::new(&service));}
                             settings=Some(RuntimeLocalService::new(&service,local.client.connection_id(),scheme));
                         }
                     }
@@ -1555,10 +1695,39 @@ async fn run_service(
             publish_source_effects(&mut window,effects,&updates,&stop).await?;
             let effects=remotes.reconcile(&mut window)?;
             publish_source_effects(&mut window,effects,&updates,&stop).await?;
+            if let Some(memory)=&mut remembered {memory.sync(&window);}
+            if let Some(ports)=&mut ports {
+                // Their results are not published: an automatic forward brings no notice.
+                for request in auto_forward.appeared(auto_forward_enabled,&window,forwards.as_deref()) {
+                    let _=ports.enqueue(owner,uuid::Uuid::new_v4(),request,&window);
+                }
+            }
+            if !reconnect_settled {
+                let list=remembered.as_ref().and_then(|memory|memory.known()).cloned();
+                if let (Some(chosen),Some(list),Some(known))=(reconnect.as_ref(),list,known.clone()) {
+                    reconnect_settled=true;
+                    let mut changed=false;
+                    for (target,screens) in list.open_hosts().into_iter().filter(|(target,_)|chosen.contains(target)) {
+                        changed|=remotes.restore(&mut window,owner,&target,screens,&known).is_ok();
+                    }
+                    if changed {publish(&updates,Update::Workspace(Box::new(window.clone())),&stop).await?;}
+                }
+            }
         }
         Ok::<(),anyhow::Error>(())
     }.await;
-    let (settings_cleanup, hub_cleanup, client_cleanup, remote_cleanup, ports_cleanup) = tokio::join!(
+    let shares_cleanup = match shares.take() {
+        Some(shares) => shares.finish().await.map_err(anyhow::Error::from),
+        None => Ok(()),
+    };
+    let (
+        settings_cleanup,
+        hub_cleanup,
+        client_cleanup,
+        remote_cleanup,
+        ports_cleanup,
+        remembered_cleanup,
+    ) = tokio::join!(
         async {
             match settings.take() {
                 Some(reader) => match reader.finish_with_outcomes().await {
@@ -1594,10 +1763,18 @@ async fn run_service(
                 None => Ok(()),
             }
         },
+        async {
+            match remembered.take() {
+                Some(memory) => memory.finish().await.map_err(anyhow::Error::from),
+                None => Ok(()),
+            }
+        },
     );
     drop(ports);
     drop(settings);
     drop(hub);
+    drop(remembered);
+    drop(shares);
     finish_owned_run(
         service,
         result,
@@ -1605,7 +1782,9 @@ async fn run_service(
             .and(hub_cleanup)
             .and(client_cleanup)
             .and(remote_cleanup)
-            .and(ports_cleanup),
+            .and(ports_cleanup)
+            .and(remembered_cleanup)
+            .and(shares_cleanup),
         &cleanup_complete,
         &stop,
     )
@@ -1640,6 +1819,8 @@ fn local_command(kind: &CommandKind) -> bool {
             | CommandKind::RefreshBackendVersion
             | CommandKind::ManageForward { .. }
             | CommandKind::RefreshForwards
+            | CommandKind::ManageShare { .. }
+            | CommandKind::RefreshShares
             | CommandKind::CancelForwardOpen { .. }
             | CommandKind::ManageHost { .. }
             | CommandKind::WithdrawHostConnect { .. }
@@ -1647,24 +1828,19 @@ fn local_command(kind: &CommandKind) -> bool {
             | CommandKind::RetryHost { .. }
             | CommandKind::CancelHost { .. }
             | CommandKind::ReleaseHostBrowse { .. }
+            | CommandKind::CloseHost { .. }
             | CommandKind::DetachRemoteScreen { .. }
             | CommandKind::SwitchScreen(_)
             | CommandKind::MoveScreen { .. }
             | CommandKind::CycleScreen { .. }
             | CommandKind::RefreshHostDirectory { .. }
             | CommandKind::TemplateApi { .. }
-            | CommandKind::ApplyTemplate { .. }
             | CommandKind::Zoom { .. }
             | CommandKind::SetColorScheme { .. }
             | CommandKind::UpdateSettings { .. }
             | CommandKind::SetDrawerVisibility { .. }
             | CommandKind::CreateScreen(_)
             | CommandKind::ProfileTab { .. }
-            | CommandKind::NewTerminal { .. }
-            | CommandKind::TransferPane { .. }
-            | CommandKind::FloatPane { .. }
-            | CommandKind::DockFloat { .. }
-            | CommandKind::MoveFloat { .. }
     ) || matches!(kind,CommandKind::RequestClose {plan,..} if plan.target==CloseTarget::Window)
 }
 fn select_window_screen(
@@ -1731,7 +1907,6 @@ fn create_remote_screen(
     request: crate::workspace::RemoteScreenCreateRequest,
 ) -> source::SourceEffects {
     host_connects.clear();
-    remotes.release_all_browse(window);
     local.cancel_created_follow();
     remotes.cancel_created_follow();
     let token = request.source();
@@ -1746,6 +1921,9 @@ fn create_remote_screen(
     } else {
         remotes.command(window, command)
     };
+    // Admit the new Screen reference before withdrawing the only demand for
+    // an empty host. Otherwise release_browse closes the connection we need.
+    remotes.release_all_browse(window);
     match result {
         Ok(mut effects) => {
             effects.changed = true;
@@ -2649,6 +2827,9 @@ mod profile_launch_tests;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod zoom_tests;
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod files_tests;
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod transfer_tests;

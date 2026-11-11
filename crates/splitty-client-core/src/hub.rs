@@ -14,10 +14,16 @@ use tokio::sync::Notify;
 use uuid::Uuid;
 
 mod management;
+mod remembered;
+mod shares;
 use crate::workspace::SourceToken;
 pub use management::{
     HostManagementAction, HostManagementOutcome, HostManagementRequest, HostManagementResult,
 };
+pub(crate) use remembered::RememberedClient;
+pub use remembered::{RememberedScreen, RememberedScreens};
+pub(crate) use shares::SharesClient;
+pub use shares::{is_administrative_port, Share, ShareRequest, ShareState, SharesSnapshot};
 
 pub(crate) enum HubEvent {
     Directory(HubUpdate),

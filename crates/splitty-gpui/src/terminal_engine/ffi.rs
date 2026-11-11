@@ -224,6 +224,32 @@ pub const RENDER_DIRTY: c_int = 3;
 pub const RENDER_ROWS: c_int = 4;
 pub const RENDER_CURSOR: c_int = 18;
 pub const RENDER_COLORS: c_int = 19;
+pub const RENDER_IMAGES: c_int = 22;
+pub const DATA_KITTY_GRAPHICS: c_int = 30;
+pub const IMAGE_ID: c_int = 2;
+pub const IMAGE_GENERATION: c_int = 3;
+pub const IMAGE_LAYER: c_int = 4;
+pub const IMAGE_Z: c_int = 5;
+pub const IMAGE_COL: c_int = 6;
+pub const IMAGE_ROW: c_int = 7;
+pub const IMAGE_OFFSET_X: c_int = 10;
+pub const IMAGE_OFFSET_Y: c_int = 11;
+pub const IMAGE_PIXEL_WIDTH: c_int = 12;
+pub const IMAGE_PIXEL_HEIGHT: c_int = 13;
+pub const IMAGE_SOURCE_X: c_int = 14;
+pub const IMAGE_SOURCE_Y: c_int = 15;
+pub const IMAGE_SOURCE_WIDTH: c_int = 16;
+pub const IMAGE_SOURCE_HEIGHT: c_int = 17;
+pub const KITTY_IMAGE_WIDTH: c_int = 3;
+pub const KITTY_IMAGE_HEIGHT: c_int = 4;
+pub const KITTY_IMAGE_FORMAT: c_int = 5;
+pub const KITTY_IMAGE_PIXELS: c_int = 7;
+pub const KITTY_FORMAT_RGB: c_int = 0;
+pub const KITTY_FORMAT_RGBA: c_int = 1;
+pub const KITTY_FORMAT_GRAY_ALPHA: c_int = 3;
+pub const KITTY_FORMAT_GRAY: c_int = 4;
+/// Images at or above this layer are drawn over the text.
+pub const IMAGE_LAYER_ABOVE_TEXT: c_int = 2;
 pub const ROW_DIRTY: c_int = 1;
 pub const ROW_CELLS: c_int = 3;
 pub const ROW_Y: c_int = 6;
@@ -241,7 +267,21 @@ pub const EVENT_GEOMETRY: c_int = 9;
 pub const FORMAT_UNWRAP: c_int = 2;
 pub const FORMAT_SELECTION: c_int = 4;
 
+/// `GHOSTTY_SYS_OPT_DECODE_PNG`: the process-wide PNG decoder.
+pub const SYS_OPT_DECODE_PNG: c_int = 2;
+
+/// `GhosttySysImage`: decoded RGBA pixels in a buffer of `ghostty_alloc`.
+#[repr(C)]
+pub struct SysImage {
+    pub width: u32,
+    pub height: u32,
+    pub data: *mut u8,
+    pub data_len: usize,
+}
+
 unsafe extern "C" {
+    pub fn ghostty_sys_set(option: c_int, value: *const c_void) -> Status;
+    pub fn ghostty_alloc(allocator: *const Allocator, len: usize) -> *mut u8;
     pub fn ghostty_search_new(
         allocator: *const Allocator,
         out: *mut Handle,
@@ -310,6 +350,16 @@ unsafe extern "C" {
         out: *mut Handle,
     ) -> Status;
     pub fn ghostty_render_state_row_iterator_free(rows: Handle);
+    pub fn ghostty_render_state_image_iterator_new(
+        allocator: *const c_void,
+        out: *mut Handle,
+    ) -> Status;
+    pub fn ghostty_render_state_image_iterator_free(images: Handle);
+    pub fn ghostty_render_state_image_iterator_next(images: Handle) -> bool;
+    pub fn ghostty_render_state_image_get(images: Handle, data: c_int, out: *mut c_void) -> Status;
+    pub fn ghostty_kitty_graphics_image(graphics: Handle, image_id: u32) -> Handle;
+    pub fn ghostty_kitty_graphics_image_get(image: Handle, data: c_int, out: *mut c_void)
+        -> Status;
     pub fn ghostty_render_state_row_iterator_next(rows: Handle) -> bool;
     pub fn ghostty_render_state_row_get(rows: Handle, data: c_int, out: *mut c_void) -> Status;
     pub fn ghostty_render_state_row_cells_new(allocator: *const c_void, out: *mut Handle)

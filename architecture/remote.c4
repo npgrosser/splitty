@@ -7,6 +7,11 @@ model {
     owner -> splitty.transport.api_request 'Delegate owned API-stream requests without a domain dependency'
 
 
+    ssh_askpass = component 'ssh_askpass' {
+      description 'Bounded process-local SSH prompt broker for browser clients, authenticated helper IPC, one-use prompt answers and shared host-key confirmation recognition. Live host scopes reuse password and key-passphrase answers between SSH steps, discard rejected answers, serialize simultaneous questions and erase credentials when the final connection ends.'
+      metadata { module 'splitty_remote::askpass' }
+    }
+
     ssh = component 'ssh' {
       description 'Reaching a host with the system ssh (on Windows the system\'s OpenSSH, without a console window): the validated target (SR-13), the hardened command, stdio-only connections (no terminal, no agent, X11 or configured forwards), forward-only connections (-N, no terminal, agent or X11), relay-only connections (a command, no terminal, agent or X11) and the forwards a host\'s configuration adds (ssh -G), POSIX quoting and allowlists for the one command line the host\'s login shell parses, the Executor trait and what a failure means (127, host keys, refused logins).'
       metadata {
@@ -95,6 +100,7 @@ model {
     bridge -> splitty.transport.queue 'Connection-wide memory budget and close scope'
     bridge -> splitty.transport.wire 'Ready identity and bounded preparation progress'
     bridge -> splitty.transport.worker 'Owned exec process slot through observed exit'
+    ssh -> ssh_askpass 'Configure interactive browser SSH helpers while keeping command stdin available'
     ssh -> splitty.transport.admission 'Admit setup processes before OS spawn; no worker wait queue'
     ssh -> splitty.transport.budget 'Reserve setup and diagnostic capture before spawn and retain output through caller consumption'
     ssh -> splitty.transport.worker 'Keep setup worker capacity through observed exit and cancellation'

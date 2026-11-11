@@ -46,6 +46,26 @@ impl WindowWorkspace {
         Ok(())
     }
 
+    /// The host reports these Screens now; opened ones it lacks are missing.
+    #[doc(hidden)]
+    pub fn ui_test_remote_catalog(&mut self, id: SourceId, screens: &[&str]) -> io::Result<()> {
+        let mut source = self
+            .source_mut(id)
+            .ok_or_else(|| invalid("fixture source missing"))?;
+        source.mark_catalog_dirty();
+        source.flush_catalog_request(|| Ok(()))?;
+        let connection = source.connection_id();
+        source.apply_catalog(
+            connection,
+            &json!({
+                "type":"mux.workspace_snapshot",
+                "screens":screens.iter().map(|id|json!({"id":id,"name":id})).collect::<Vec<_>>(),
+                "activeScreenId":screens.first()
+            }),
+        )?;
+        Ok(())
+    }
+
     /// Ordered canonical catalogs for production Drawer interaction tests.
     #[doc(hidden)]
     pub fn ui_test_screen_order_fixture(

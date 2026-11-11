@@ -137,8 +137,10 @@ mod api_cases {
             (ACTIVE, true, None, ForwardOutcome::Uncertain),
         ] {
             let mut replies = vec![(200, reply.into(), uncertain)];
-            let mut operations =
-                vec![("forward.open", json!({"body":{"target":"vm1","port":3000}}))];
+            let mut operations = vec![(
+                "forward.open",
+                json!({"body":{"target":"vm1","port":3000,"preserveRestore":true}}),
+            )];
             if let Some(confirmation) = confirmation {
                 replies.push((200, confirmation, false));
                 operations.push(("forward.list", json!({})));
@@ -169,7 +171,10 @@ mod api_cases {
         ] {
             let result = run(
                 vec![(status, body.into(), false)],
-                vec![("forward.open", json!({"body":{"target":"vm1","port":3000}}))],
+                vec![(
+                    "forward.open",
+                    json!({"body":{"target":"vm1","port":3000,"preserveRestore":true}}),
+                )],
                 request(),
                 Some(&consent()),
             )
@@ -202,7 +207,10 @@ mod api_cases {
                     (200, verify.clone(), false),
                 ],
                 vec![
-                    ("forward.open", json!({"body":{"target":"vm1","port":3000}})),
+                    (
+                        "forward.open",
+                        json!({"body":{"target":"vm1","port":3000,"preserveRestore":true}}),
+                    ),
                     (
                         "forwardPreferences.save",
                         json!({"body":{"target":"vm1","port":3000,"local":4173,"label":"App"}}),
@@ -219,6 +227,22 @@ mod api_cases {
         }
     }
     #[tokio::test]
+    async fn saving_restoration_requires_an_exact_acknowledgement() {
+        for enabled in [false, true] {
+            let result = run(vec![(200, json!({"target":"vm1","remote":3000,"local":4173,"label":"Personal","enabled":enabled}).to_string(), false)],
+                vec![("forwardPreferences.save", json!({"body":{"target":"vm1","port":3000,"local":4173,"label":"Personal","enabled":false}}))],
+                ForwardRequest::save(MappingKey::new("vm1",3000).unwrap(), Some(4173), Some("Personal".into())).unwrap().with_restore(false), None).await;
+            assert_eq!(
+                result.outcome(),
+                if enabled {
+                    ForwardOutcome::Uncertain
+                } else {
+                    ForwardOutcome::Succeeded
+                }
+            );
+        }
+    }
+    #[tokio::test]
     async fn consent_revoked_during_start_prevents_verification_and_open() {
         let (release, gate) = tokio::sync::oneshot::channel();
         let (observed, started) = tokio::sync::oneshot::channel();
@@ -228,7 +252,7 @@ mod api_cases {
             Some(observed),
             Some(vec![(
                 "forward.open",
-                json!({"body":{"target":"vm1","port":3000}}),
+                json!({"body":{"target":"vm1","port":3000,"preserveRestore":true}}),
             )]),
         )
         .await;

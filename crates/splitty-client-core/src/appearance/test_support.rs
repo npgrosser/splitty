@@ -41,6 +41,9 @@ pub fn settings_snapshot_with_pin(
             "theme": "default", "closeOnExit": "graceful"
         }))
         .expect("test terminal preferences"),
+        remote: Default::default(),
+        native_tabs: Default::default(),
+        editors: Default::default(),
     };
     let theme = resolve_theme("splitty-dark", std::path::Path::new("."));
     let metadata = serde_json::from_value::<SettingsMetadata>(settings_metadata())

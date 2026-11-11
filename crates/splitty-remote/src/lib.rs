@@ -7,6 +7,7 @@
 //! one command line that the host's login shell parses again; [`ssh`] makes
 //! that line explicit, and every value in it is quoted.
 
+pub mod askpass;
 pub mod bridge;
 pub mod handshake;
 pub mod hosts;

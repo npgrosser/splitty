@@ -141,6 +141,17 @@ pub(super) fn meta() -> Div {
         .gap(chrome_rems(META_GAP))
 }
 
+/// A shortcut hint in a row's trailing metadata area (`10px`, muted).
+pub(super) fn shortcut(appearance: &NativeAppearance, text: impl Into<SharedString>) -> Div {
+    div()
+        .flex_none()
+        .text_size(chrome_rems(DETAIL_TEXT))
+        .font_weight(FontWeight::NORMAL)
+        .text_color(rgb(appearance.muted))
+        .whitespace_nowrap()
+        .child(text.into())
+}
+
 /// The glyph at the end of a row that opens a submenu, in the row's text color.
 pub(super) fn chevron() -> Div {
     div()

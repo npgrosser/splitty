@@ -91,10 +91,8 @@ impl SourceWorkspace {
         }
         self.require_routes_settled()?;
         self.require_catalog()?;
-        if !self.catalog_initialized || self.live_catalog().is_none() || self.catalog.is_empty() {
-            return Err(invalid(
-                "An opened host group and live catalog are required",
-            ));
+        if !self.catalog_initialized || self.live_catalog().is_none() {
+            return Err(invalid("A live host catalog is required"));
         }
         if self
             .remote_creation

@@ -267,7 +267,10 @@ impl ReverseTunnel {
             .word("--socket")
             .value(&socket);
         let mut command = relay_command(ssh, &socket, local);
-        command.arg(host).arg("--").arg(relay.as_str());
+        command
+            .arg(ssh.target().destination())
+            .arg("--")
+            .arg(relay.as_str());
         let budget = splitty_transport::budget::ConnectionBudget::default();
         let diagnostic_bytes = diagnostic_budget(&budget)
             .map_err(|error| ReverseTunnelError::Ssh(SshError::Spawn(error)))?;
@@ -279,6 +282,7 @@ impl ReverseTunnel {
                 error,
             )))
         })?;
+        let timeout = crate::ssh::startup_timeout(&command, SETUP_TIMEOUT);
         let mut child = share
             .spawn(&mut command, &Admission::global())
             .await
@@ -299,7 +303,7 @@ impl ReverseTunnel {
             return Err(not_established("missing the relay's output".into()));
         };
         let mut reader = BufReader::new(stdout);
-        let report = tokio::time::timeout(SETUP_TIMEOUT, read_report(&mut reader)).await;
+        let report = tokio::time::timeout(timeout, read_report(&mut reader)).await;
         match report {
             Ok(Ok(Report::Ready)) if tunnel.child.try_wait().ok().flatten().is_none() => {}
             Ok(Ok(Report::Failed { code, detail })) => {

@@ -173,6 +173,7 @@ pub struct Engine {
     render: ffi::Handle,
     rows: ffi::Handle,
     cells: ffi::Handle,
+    images: ffi::Handle,
     encoder: ffi::Handle,
     gesture: ffi::Handle,
     mouse_encoder: ffi::Handle,
@@ -201,6 +202,7 @@ impl Engine {
             render: ptr::null_mut(),
             rows: ptr::null_mut(),
             cells: ptr::null_mut(),
+            images: ptr::null_mut(),
             encoder: ptr::null_mut(),
             gesture: ptr::null_mut(),
             mouse_encoder: ptr::null_mut(),
@@ -243,6 +245,10 @@ impl Engine {
                 ptr::null(),
                 &mut engine.cells,
             ))?;
+            check(ffi::ghostty_render_state_image_iterator_new(
+                ptr::null(),
+                &mut engine.images,
+            ))?;
             check(ffi::ghostty_key_encoder_new(
                 ptr::null(),
                 &mut engine.encoder,
@@ -280,9 +286,11 @@ impl Engine {
         engine.option(ffi::OPT_DEFAULT_CURSOR_STYLE, &DEFAULT_CURSOR_STYLE)?;
         engine.install_colors(ColorConfig::default())?;
         engine.install_mouse_geometry(engine.mouse_geometry)?;
-        // Image presentation is outside this probe. No file/shared-memory or
-        // clipboard callbacks are installed, and image storage stays disabled.
-        let disabled: u64 = 0;
+        install_png_decoder();
+        // Images arrive in the terminal's own stream only: the file and
+        // shared-memory media stay off, so a program cannot make the window
+        // read a file. No clipboard callbacks are installed.
+        let disabled: u64 = IMAGE_STORAGE_BYTES;
         // SAFETY: the option takes a uint64_t; unsupported means compiled out.
         let result = unsafe {
             ffi::ghostty_terminal_set(
@@ -1116,6 +1124,7 @@ impl Drop for Engine {
             ffi::ghostty_mouse_encoder_free(self.mouse_encoder);
             ffi::ghostty_mouse_encoder_free(self.mouse_probe);
             ffi::ghostty_key_encoder_free(self.encoder);
+            ffi::ghostty_render_state_image_iterator_free(self.images);
             ffi::ghostty_render_state_row_cells_free(self.cells);
             ffi::ghostty_render_state_row_iterator_free(self.rows);
             ffi::ghostty_render_state_free(self.render);
@@ -1123,6 +1132,100 @@ impl Drop for Engine {
         }
     }
 }
+
+/// One image as the frame places it: where its top-left cell is, how large it
+/// is drawn and which part of the image shows. Offsets and sizes are in the
+/// device pixels the terminal was last resized with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImagePlacement {
+    pub image_id: u32,
+    /// Changes whenever the image's pixels do.
+    pub generation: u64,
+    pub above_text: bool,
+    pub z: i32,
+    pub col: i32,
+    pub row: i32,
+    pub offset_x: u32,
+    pub offset_y: u32,
+    pub width: u32,
+    pub height: u32,
+    pub source_x: u32,
+    pub source_y: u32,
+    pub source_width: u32,
+    pub source_height: u32,
+}
+
+/// An image's pixels as four bytes per pixel in blue, green, red, alpha order.
+pub struct ImagePixels {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: Vec<u8>,
+}
+
+/// What one terminal keeps of the images programs sent it, per screen.
+const IMAGE_STORAGE_BYTES: u64 = 64 * 1024 * 1024;
+
+/// Give the library a PNG decoder, once for the process: without one it
+/// rejects the PNG images most programs send.
+fn install_png_decoder() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        // SAFETY: the option takes the callback itself; it lives as long as
+        // the process. An unsupported option leaves PNG images rejected.
+        let _ =
+            unsafe { ffi::ghostty_sys_set(ffi::SYS_OPT_DECODE_PNG, decode_png as *const c_void) };
+    });
+}
+
+/// Decode a PNG of the terminal's stream to RGBA in a buffer of the
+/// library's allocator, which bounds it; a refused image is rejected.
+unsafe extern "C" fn decode_png(
+    _userdata: *mut c_void,
+    allocator: *const ffi::Allocator,
+    data: *const u8,
+    len: usize,
+    out: *mut ffi::SysImage,
+) -> bool {
+    if data.is_null() || out.is_null() || len == 0 {
+        return false;
+    }
+    // SAFETY: the library lends `len` bytes at `data` for this call.
+    let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+    // A decoder must not unwind into the library.
+    let decoded = std::panic::catch_unwind(|| {
+        let mut reader =
+            image::ImageReader::with_format(std::io::Cursor::new(bytes), image::ImageFormat::Png);
+        let mut limits = image::Limits::default();
+        limits.max_alloc = Some(IMAGE_STORAGE_BYTES);
+        reader.limits(limits);
+        reader.decode().ok().map(image::DynamicImage::into_rgba8)
+    });
+    let Ok(Some(pixels)) = decoded else {
+        return false;
+    };
+    let (width, height) = pixels.dimensions();
+    let raw = pixels.into_raw();
+    if raw.is_empty() {
+        return false;
+    }
+    // SAFETY: the allocator is the one lent for this call; the buffer holds
+    // `raw.len()` bytes, and `out` is the library's zeroed struct.
+    unsafe {
+        let buffer = ffi::ghostty_alloc(allocator, raw.len());
+        if buffer.is_null() {
+            return false;
+        }
+        ptr::copy_nonoverlapping(raw.as_ptr(), buffer, raw.len());
+        (*out).width = width;
+        (*out).height = height;
+        (*out).data = buffer;
+        (*out).data_len = raw.len();
+    }
+    true
+}
+
+/// An image larger than this on one side is not drawn.
+const MAX_IMAGE_SIDE: u32 = 8192;
 
 /// Borrowing this frame prevents feed, resize, reset, and another snapshot update.
 pub struct Frame<'a> {
@@ -1177,6 +1280,159 @@ impl Frame<'_> {
     }
 
     /// Call only after the complete frame was successfully drawn or cached.
+    /// The images of this frame in drawing order: by layer, then z-index.
+    pub fn images(&mut self) -> Result<Vec<ImagePlacement>> {
+        let images = self.engine.images;
+        // SAFETY: the iterator is owned by the exclusively borrowed engine and
+        // filled from the render state this frame updated. Each output has the
+        // documented type of its key.
+        unsafe {
+            check(ffi::ghostty_render_state_get(
+                self.engine.render,
+                ffi::RENDER_IMAGES,
+                ptr::from_mut(&mut self.engine.images).cast(),
+            ))?;
+        }
+        let mut placements = Vec::new();
+        while unsafe { ffi::ghostty_render_state_image_iterator_next(images) } {
+            let read_u32 = |key| -> Result<u32> {
+                let mut value = 0u32;
+                check(unsafe {
+                    ffi::ghostty_render_state_image_get(
+                        images,
+                        key,
+                        ptr::from_mut(&mut value).cast(),
+                    )
+                })?;
+                Ok(value)
+            };
+            let read_i32 = |key| -> Result<i32> {
+                let mut value = 0i32;
+                check(unsafe {
+                    ffi::ghostty_render_state_image_get(
+                        images,
+                        key,
+                        ptr::from_mut(&mut value).cast(),
+                    )
+                })?;
+                Ok(value)
+            };
+            let mut generation = 0u64;
+            check(unsafe {
+                ffi::ghostty_render_state_image_get(
+                    images,
+                    ffi::IMAGE_GENERATION,
+                    ptr::from_mut(&mut generation).cast(),
+                )
+            })?;
+            placements.push(ImagePlacement {
+                image_id: read_u32(ffi::IMAGE_ID)?,
+                generation,
+                above_text: read_i32(ffi::IMAGE_LAYER)? >= ffi::IMAGE_LAYER_ABOVE_TEXT,
+                z: read_i32(ffi::IMAGE_Z)?,
+                col: read_i32(ffi::IMAGE_COL)?,
+                row: read_i32(ffi::IMAGE_ROW)?,
+                offset_x: read_u32(ffi::IMAGE_OFFSET_X)?,
+                offset_y: read_u32(ffi::IMAGE_OFFSET_Y)?,
+                width: read_u32(ffi::IMAGE_PIXEL_WIDTH)?,
+                height: read_u32(ffi::IMAGE_PIXEL_HEIGHT)?,
+                source_x: read_u32(ffi::IMAGE_SOURCE_X)?,
+                source_y: read_u32(ffi::IMAGE_SOURCE_Y)?,
+                source_width: read_u32(ffi::IMAGE_SOURCE_WIDTH)?,
+                source_height: read_u32(ffi::IMAGE_SOURCE_HEIGHT)?,
+            });
+            if placements.len() >= 256 {
+                break;
+            }
+        }
+        placements.sort_by_key(|placement| (placement.above_text, placement.z));
+        Ok(placements)
+    }
+
+    /// A copy of an image's current pixels, or None while they are not all
+    /// there or the image is too large to draw.
+    pub fn image_pixels(&mut self, image_id: u32) -> Result<Option<ImagePixels>> {
+        let mut graphics: ffi::Handle = ptr::null_mut();
+        // SAFETY: the storage and image handles are borrowed from the terminal,
+        // which this frame keeps from changing; the pixel view is copied before
+        // the borrow ends.
+        unsafe {
+            let status = ffi::ghostty_terminal_get(
+                self.engine.terminal,
+                ffi::DATA_KITTY_GRAPHICS,
+                ptr::from_mut(&mut graphics).cast(),
+            );
+            if status != ffi::SUCCESS || graphics.is_null() {
+                return Ok(None);
+            }
+            let image = ffi::ghostty_kitty_graphics_image(graphics, image_id);
+            if image.is_null() {
+                return Ok(None);
+            }
+            let (mut width, mut height, mut format) = (0u32, 0u32, 0i32);
+            check(ffi::ghostty_kitty_graphics_image_get(
+                image,
+                ffi::KITTY_IMAGE_WIDTH,
+                ptr::from_mut(&mut width).cast(),
+            ))?;
+            check(ffi::ghostty_kitty_graphics_image_get(
+                image,
+                ffi::KITTY_IMAGE_HEIGHT,
+                ptr::from_mut(&mut height).cast(),
+            ))?;
+            check(ffi::ghostty_kitty_graphics_image_get(
+                image,
+                ffi::KITTY_IMAGE_FORMAT,
+                ptr::from_mut(&mut format).cast(),
+            ))?;
+            let mut view = ffi::StringView {
+                ptr: ptr::null(),
+                len: 0,
+            };
+            let status = ffi::ghostty_kitty_graphics_image_get(
+                image,
+                ffi::KITTY_IMAGE_PIXELS,
+                ptr::from_mut(&mut view).cast(),
+            );
+            if status == ffi::NO_VALUE {
+                return Ok(None);
+            }
+            check(status)?;
+            let channels = match format {
+                ffi::KITTY_FORMAT_RGB => 3,
+                ffi::KITTY_FORMAT_RGBA => 4,
+                ffi::KITTY_FORMAT_GRAY_ALPHA => 2,
+                ffi::KITTY_FORMAT_GRAY => 1,
+                _ => return Ok(None),
+            };
+            let pixels = width as usize * height as usize;
+            if width == 0
+                || height == 0
+                || width > MAX_IMAGE_SIDE
+                || height > MAX_IMAGE_SIDE
+                || view.ptr.is_null()
+                || view.len != pixels * channels
+            {
+                return Ok(None);
+            }
+            let source = std::slice::from_raw_parts(view.ptr, view.len);
+            let mut bgra = Vec::with_capacity(pixels * 4);
+            for pixel in source.chunks_exact(channels) {
+                bgra.extend_from_slice(&match channels {
+                    3 => [pixel[2], pixel[1], pixel[0], 255],
+                    4 => [pixel[2], pixel[1], pixel[0], pixel[3]],
+                    2 => [pixel[0], pixel[0], pixel[0], pixel[1]],
+                    _ => [pixel[0], pixel[0], pixel[0], 255],
+                });
+            }
+            Ok(Some(ImagePixels {
+                width,
+                height,
+                bgra,
+            }))
+        }
+    }
+
     pub fn finish(self) -> Result<()> {
         // SAFETY: consuming Frame releases all row/cell borrows before cleaning.
         check(unsafe { ffi::ghostty_render_state_clean(self.engine.render) })

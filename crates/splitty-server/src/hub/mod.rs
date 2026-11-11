@@ -240,6 +240,7 @@ struct Reached {
     update: failure::UpdateAvailability,
     screens: Vec<Screen>,
     _metadata: splitty_transport::budget::Lease,
+    _authentication: Arc<splitty_remote::askpass::Session>,
 }
 
 /// What became of a socket before its relay.
@@ -291,6 +292,7 @@ pub struct Hub {
     reverses: reverse::Reverses,
     domain: Arc<admission::Domain>,
     backends: Mutex<HashMap<String, Weak<admission::Backend>>>,
+    authentication: splitty_remote::askpass::Sessions,
 }
 
 impl Hub {
@@ -319,6 +321,7 @@ impl Hub {
             remembering: Mutex::new(()),
             domain: admission::Domain::new(),
             backends: Mutex::default(),
+            authentication: splitty_remote::askpass::Sessions::default(),
         }
     }
 
@@ -455,6 +458,32 @@ impl Hub {
         self.forwards.open(target, port, local, automatic).await
     }
 
+    pub async fn open_forward_preserving_restore(
+        &self,
+        target: &str,
+        port: i64,
+        local: Option<i64>,
+        automatic: bool,
+        preserve_restore: bool,
+    ) -> Result<ForwardInfo, ForwardError> {
+        self.forwards
+            .open_with_restore(target, port, local, automatic, preserve_restore)
+            .await
+    }
+
+    pub async fn save_forward_with_restore(
+        &self,
+        target: &str,
+        port: i64,
+        local: Option<i64>,
+        label: Option<String>,
+        enabled: Option<bool>,
+    ) -> Result<SavedForward, ForwardError> {
+        self.forwards
+            .save_with_restore(target, port, local, label, enabled)
+            .await
+    }
+
     pub fn forward_preferences(&self) -> Preferences {
         self.forwards.preferences()
     }
@@ -566,6 +595,7 @@ impl Hub {
                     update,
                     screens,
                     _metadata,
+                    _authentication,
                 } = *reached;
                 let ready = HubMessage::Ready {
                     target: target.as_str(),
@@ -679,6 +709,30 @@ impl Hub {
         update: bool,
         progress: mpsc::Sender<Charged<Progress>>,
         context: &splitty_transport::queue::Context,
+    ) -> Result<Reached, HubError> {
+        let authentication = self.authentication.for_target(target.as_str());
+        let reached = authentication
+            .scope(self.reach_authenticated(
+                target,
+                update,
+                progress,
+                context,
+                authentication.clone(),
+            ))
+            .await;
+        if reached.is_err() {
+            authentication.invalidate();
+        }
+        reached
+    }
+
+    async fn reach_authenticated(
+        &self,
+        target: SshTarget,
+        update: bool,
+        progress: mpsc::Sender<Charged<Progress>>,
+        context: &splitty_transport::queue::Context,
+        authentication: Arc<splitty_remote::askpass::Session>,
     ) -> Result<Reached, HubError> {
         // Trusted hub/domain quota keys, shared by every active stream to a
         // host. Weak entries disappear when the last connection/opening ends.
@@ -914,6 +968,7 @@ impl Hub {
                 update: update_availability,
                 screens: handshake.screens,
                 _metadata: metadata.take().expect("metadata reservation"),
+                _authentication: authentication,
             })
         }
         .await;

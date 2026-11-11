@@ -10,6 +10,8 @@ use splitty_core::config::NotificationSettings;
 use std::collections::VecDeque;
 
 const MAX_RECORDS: usize = 100;
+/// Facts kept for the window between two reads; a burst shows its first ones.
+const MAX_FRESH: usize = 16;
 const MAX_ID_BYTES: usize = 128;
 const MAX_TITLE_CHARS: usize = 500;
 const MAX_HOST_CHARS: usize = 200;
@@ -68,6 +70,17 @@ pub struct NotificationCenter {
     owner: Option<SourceToken>,
     settings: Option<NotificationSettings>,
     records: VecDeque<Record>,
+    fresh: Vec<FreshNotification>,
+}
+
+/// A fact admitted since the last `take_fresh`, for a notice in the window
+/// or from the system. Its Screen is absent when no pane of the window holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreshNotification {
+    pub title: String,
+    pub severity: Severity,
+    pub pane: Option<PaneKey>,
+    pub screen: Option<ScreenKey>,
 }
 impl NotificationCenter {
     /// Apply only an already owner/generation-accepted settings result. A failed
@@ -88,6 +101,7 @@ impl NotificationCenter {
         if self.owner != Some(owner) {
             if self.owner.is_some() {
                 self.records.clear();
+                self.fresh.clear();
                 self.settings = None;
             }
             self.owner = Some(owner);
@@ -215,6 +229,15 @@ impl NotificationCenter {
         if self.records.len() == MAX_RECORDS {
             self.records.pop_front();
         }
+        // What happens in the watched pane is seen as it happens.
+        if !read && self.fresh.len() < MAX_FRESH {
+            self.fresh.push(FreshNotification {
+                title: title.clone(),
+                severity,
+                pane: captured.as_ref().map(|captured| captured.pane.clone()),
+                screen: binding.as_ref().map(|binding| binding.screen.clone()),
+            });
+        }
         self.records.push_back(Record {
             source: owner.source_id(),
             id: id.into(),
@@ -226,6 +249,26 @@ impl NotificationCenter {
             read,
         });
         true
+    }
+
+    /// The facts admitted since the last call, oldest first.
+    pub fn take_fresh(&mut self) -> Vec<FreshNotification> {
+        std::mem::take(&mut self.fresh)
+    }
+
+    /// Whether new facts show a notice in the window (`notifications.toasts`).
+    pub fn toasts(&self) -> bool {
+        self.settings
+            .as_ref()
+            .is_some_and(|settings| settings.toasts)
+    }
+
+    /// Whether new facts reach the system while the window is in the
+    /// background (`notifications.desktop`).
+    pub fn desktop(&self) -> bool {
+        self.settings
+            .as_ref()
+            .is_some_and(|settings| settings.desktop)
     }
 
     /// Read only currently bound records; stale presentation must reconcile first.

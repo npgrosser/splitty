@@ -195,6 +195,7 @@ impl Workspace {
                 .child(
                     div()
                         .id("host-connect-form")
+                        .text_size(chrome_rems(12.5))
                         .flex()
                         .flex_col()
                         .flex_none()
@@ -494,6 +495,7 @@ impl Workspace {
                 .child(
                     div()
                         .id("host-alias-form")
+                        .text_size(chrome_rems(12.5))
                         .flex()
                         .flex_col()
                         .flex_none()
@@ -696,6 +698,21 @@ impl Workspace {
             return;
         }
         if result.action() == HostManagementAction::Connect {
+            let applied = match result.outcome() {
+                HostManagementOutcome::Pending => None,
+                HostManagementOutcome::Applied => Some(true),
+                HostManagementOutcome::Rejected | HostManagementOutcome::Uncertain => Some(false),
+            };
+            if self.popover_connect_result(
+                result.request_id(),
+                result.target(),
+                applied,
+                result.reason(),
+                window,
+                cx,
+            ) {
+                return;
+            }
             let matched = self.hosts.connect.as_ref().is_some_and(|form| {
                 form.owner == result.owner()
                     && form.pending.as_ref().is_some_and(|(id, target)| {

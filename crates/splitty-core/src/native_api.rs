@@ -144,6 +144,8 @@ operations! {
     JobStop, "job.stop", "POST", "/api/jobs/{id}/stop", Backend, ["id"], MAX_JOB_BODY, Mutation, Ordinary;
     JobForget, "job.forget", "POST", "/api/jobs/{id}/forget", Backend, ["id"], MAX_JOB_BODY, Mutation, Ordinary;
     HostDirectory, "remote.directory.get", "GET", "/api/remote/directory", LocalHub, [], MAX_API_BODY, Read, Ordinary;
+    SshPrompts, "ssh.prompts.get", "GET", "/api/remote/ssh-prompts", LocalHub, [], MAX_API_BODY, Read, Ordinary;
+    SshAnswer, "ssh.prompts.answer", "POST", "/api/remote/ssh-prompts", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary;
     HostList, "host.list", "GET", "/api/remote/hosts", LocalHub, [], MAX_API_BODY, Read, Ordinary;
     HostForget, "host.forget", "DELETE", "/api/remote/hosts", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary;
     HostPreferencesGet, "hostPreferences.get", "GET", "/api/remote/host-preferences", LocalHub, [], MAX_API_BODY, Read, Ordinary;

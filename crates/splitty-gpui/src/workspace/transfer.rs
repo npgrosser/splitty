@@ -42,9 +42,39 @@ struct TabMenuRow {
 
 /// A "Move to Screen" destination.
 #[derive(Clone, Debug, PartialEq, Eq)]
-enum TransferChoice {
+pub(super) enum TransferChoice {
     Existing(String),
     New,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum EditorChoice {
+    VsCode,
+    Zed,
+    Sftp,
+}
+
+impl EditorChoice {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Self::VsCode => "VS Code",
+            Self::Zed => "Zed",
+            Self::Sftp => "SFTP Client",
+        }
+    }
+
+    pub(super) fn key(self) -> &'static str {
+        match self {
+            Self::VsCode => "vscode",
+            Self::Zed => "zed",
+            Self::Sftp => "sftp",
+        }
+    }
+}
+
+#[derive(Default)]
+pub(super) struct EditorSubmenu {
+    pub(super) focused: Option<EditorChoice>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,11 +85,11 @@ enum TabCloseScope {
 
 /// The open "Move to Screen" submenu.
 #[derive(Default)]
-struct TransferMenu {
+pub(super) struct TransferMenu {
     /// The keyboard focus once it moved into the submenu; the parent row keeps
     /// it otherwise.
-    focused: Option<TransferChoice>,
-    scroll: ScrollHandle,
+    pub(super) focused: Option<TransferChoice>,
+    pub(super) scroll: ScrollHandle,
 }
 
 pub(super) struct TabContextMenu {
@@ -128,7 +158,7 @@ const MAX_DETAIL_CHARS: usize = 120;
 
 /// The working directory the service last reported for the pane's session
 /// (or, before that, its pane), when it is plain text that is safe to paste.
-fn pane_cwd(model: &SourceWorkspace, pane: &str) -> Option<String> {
+pub(super) fn pane_cwd(model: &SourceWorkspace, pane: &str) -> Option<String> {
     let screen = model.snapshot()?;
     let (_, state) = screen.panes.iter().find(|(id, _)| id.as_str() == pane)?;
     state
@@ -146,7 +176,7 @@ fn pane_cwd(model: &SourceWorkspace, pane: &str) -> Option<String> {
 
 /// A remote folder as scp, rsync and sshfs take it: `target:/path`, or
 /// `ssh://target/path` when the target carries a port or an IPv6 literal.
-fn ssh_path(target: &str, cwd: &str) -> Option<String> {
+pub(super) fn ssh_path(target: &str, cwd: &str) -> Option<String> {
     if target.is_empty()
         || !cwd.starts_with('/')
         || target.chars().chain(cwd.chars()).any(char::is_control)
@@ -163,8 +193,76 @@ fn ssh_path(target: &str, cwd: &str) -> Option<String> {
     })
 }
 
+fn encode_byte(byte: u8, out: &mut String) {
+    const HEX: &[u8; 16] = b"0123456789ABCDEF";
+    out.push('%');
+    out.push(char::from(HEX[usize::from(byte >> 4)]));
+    out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+}
+
+fn encode_component(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
+            out.push(char::from(byte));
+        } else {
+            encode_byte(byte, &mut out);
+        }
+    }
+    out
+}
+
+fn encode_path(path: &str) -> String {
+    let mut encoded = path
+        .split('/')
+        .map(encode_component)
+        .collect::<Vec<_>>()
+        .join("/");
+    if !path.ends_with('/') {
+        encoded.push('/');
+    }
+    encoded
+}
+
+pub(super) fn editor_uri(
+    choice: EditorChoice,
+    remote_target: Option<&str>,
+    cwd: &str,
+) -> Option<String> {
+    if cwd.is_empty()
+        || cwd.len() > MAX_CWD_BYTES
+        || !cwd.starts_with('/')
+        || cwd.starts_with("//")
+        || cwd.contains('\\')
+        || cwd.chars().any(char::is_control)
+        || cwd.split('/').any(|part| part == "." || part == "..")
+    {
+        return None;
+    }
+    let encoded_path = encode_path(cwd);
+    if let Some(target) = remote_target {
+        if target.is_empty() || target.chars().any(char::is_control) {
+            return None;
+        }
+        Some(match choice {
+            EditorChoice::VsCode => format!(
+                "vscode://vscode-remote/ssh-remote+{}{encoded_path}",
+                encode_component(target)
+            ),
+            EditorChoice::Zed => format!("zed://ssh/{target}{encoded_path}"),
+            EditorChoice::Sftp => format!("sftp://{target}{encoded_path}"),
+        })
+    } else {
+        match choice {
+            EditorChoice::VsCode => Some(format!("vscode://file{encoded_path}")),
+            EditorChoice::Zed => Some(format!("zed://file{encoded_path}")),
+            EditorChoice::Sftp => None,
+        }
+    }
+}
+
 /// Untrusted text as one bounded display line.
-fn detail_line(text: &str) -> SharedString {
+pub(super) fn detail_line(text: &str) -> SharedString {
     hosts::display(&text.chars().take(MAX_DETAIL_CHARS).collect::<String>()).into()
 }
 
@@ -180,7 +278,7 @@ fn tab_title(model: &SourceWorkspace, pane: &str, index: usize) -> String {
 }
 
 /// The next keyboard focus among `items`: arrows wrap, Home and End jump.
-fn step<T: Clone + PartialEq>(items: &[T], current: Option<&T>, key: &str) -> Option<T> {
+pub(super) fn step<T: Clone + PartialEq>(items: &[T], current: Option<&T>, key: &str) -> Option<T> {
     let last = items.len().checked_sub(1)?;
     let index = current.and_then(|current| items.iter().position(|item| item == current));
     let next = match key {
@@ -268,10 +366,8 @@ impl Workspace {
     }
 
     fn tab_menu_can_transfer(&self, menu: &TabContextMenu) -> bool {
-        !self.is_remote_selected()
-            && self
-                .selected_model()
-                .is_some_and(|model| model.can_transfer_pane(&menu.source))
+        self.selected_model()
+            .is_some_and(|model| model.can_transfer_pane(&menu.source))
     }
 
     /// The SSH target of the captured tab's remote source.
@@ -713,15 +809,24 @@ impl Workspace {
         let Some(menu) = self.take_tab_menu(pane, window, cx) else {
             return;
         };
+        self.choose_transfer_captured(menu.source, existing, cx);
+    }
+
+    pub(super) fn choose_transfer_captured(
+        &mut self,
+        source: PaneActionTarget,
+        existing: Option<&str>,
+        cx: &mut Context<Self>,
+    ) {
         let Some(model) = self.selected_model() else {
             return;
         };
-        if let Err(error) = model.validate_pane_action(&menu.source) {
+        if let Err(error) = model.validate_pane_action(&source) {
             self.status = format!("Move target changed: {error}");
             cx.notify();
             return;
         }
-        if self.is_remote_selected() || !model.can_transfer_pane(&menu.source) {
+        if !model.can_transfer_pane(&source) {
             self.status = "Move unavailable for this terminal".into();
             cx.notify();
             return;
@@ -733,7 +838,7 @@ impl Workspace {
             return;
         }
         let target = if let Some(screen_id) = existing {
-            if screen_id == menu.source.screen_id
+            if screen_id == source.screen_id
                 || !model
                     .screens()
                     .iter()
@@ -752,12 +857,12 @@ impl Workspace {
             }
         };
         let request_id = Uuid::new_v4();
-        let source_token = menu.source.source_token();
+        let source_token = source.source_token();
         match self.commands.try_send(WorkerCommand::new(
             source_token,
             Command::TransferPane {
                 request_id,
-                source: menu.source,
+                source,
                 target,
             },
         )) {

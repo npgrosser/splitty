@@ -149,6 +149,7 @@ Ideen und Features, nicht fest eingeplant, aber vorsortiert. Ausgearbeitete Vorh
 | 119 | [Web-View für Dev-Server](../openspec/changes/viewer-webview/proposal.md) | Draft | 105 + Milestone 7 |
 | 120 | [Native UI mit GPUI](../openspec/changes/native-ui-gpui/proposal.md) | Entwicklungszweig: lokaler/Remote-Workspace, Drawer und Animationen, Screen-Reihenfolge, Settings, Hosts, ausgehende Ports und Aktivitätsanzeigen unter Linux geprüft; native Windows-Activity-Vorschau mit Hardwaregrafik und Drawer-Radnavigation geprüft | Settings-Parität, weitere Menüaktionen, tatsächliche Host-Updates sowie verbleibende Plattform- und Cutover-Prüfungen offen |
 | 121 | [Terminal-Paletten aus Ghostty](../openspec/changes/ghostty-terminal-themes/proposal.md) | Draft | — |
+| 122 | [Native Remote-UX](../openspec/changes/native-remote-ux/proposal.md) | In Umsetzung: Host-Browser, Drawer, Gruppen-Drag und getrennte lokale Port-Einstellungen; Mockup als Referenz | 120; gemeinsame Remote-Dienstnamen als eigener Protokollschritt |
 
 **101** macht mehrere gleichzeitige Clients am selben Screen verlässlich. Verbinden können sie sich schon heute (Single-Attach wurde im März 2026 entfernt); es fehlen Layout-Sync für alle Ops, Reihenfolge und Input-Routing. Geteilte Output-Streams (`fix-pty-reader`) und die Resize-Policy (`pty-size-policy`: kleinste Größe der aktiven Clients, sichtbare Markierung, Übernahme) sind erledigt.
 

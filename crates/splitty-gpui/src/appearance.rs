@@ -292,6 +292,8 @@ impl ComponentPalette {
         };
         set(&mut colors.background, self.surface);
         set(&mut colors.foreground, self.text);
+        set(&mut colors.title_bar, self.raised);
+        set(&mut colors.title_bar_border, self.subtle_border);
         set(&mut colors.popover, self.overlay);
         set(&mut colors.popover_foreground, self.text);
         set(&mut colors.sidebar, self.raised);

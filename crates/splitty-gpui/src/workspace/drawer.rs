@@ -1,10 +1,11 @@
 //! Window-local Screen catalog presentation. The service catalog remains authoritative.
+use super::popover::{MenuEntry, PopoverAnchor, PopoverKind};
 use super::*;
 use gpui_kit::assets::IconName;
+use gpui_kit::base::FocusableExt as _;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::{
     button::{Button, ButtonCustomVariant, ButtonVariants},
-    menu::{ContextMenuExt, DropdownMenu, PopupMenu, PopupMenuItem},
     Disableable, Icon, Sizable,
 };
 use splitty_client_core::ports::ForwardState;
@@ -17,11 +18,11 @@ use splitty_client_core::workspace::ScreenState;
 /// Its text inherits the web client's body weight, 500. Both are set on each
 /// text element rather than the Drawer itself: menus opened from the Drawer
 /// inherit its text style.
-const SIDEBAR_TEXT: f32 = 12.5;
+pub(super) const SIDEBAR_TEXT: f32 = 12.5;
 /// `.drawer-head`: `padding: 10px 8px 6px 16px`.
 const HEAD_PADDING: [f32; 4] = [10., 8., 6., 16.];
 /// `.drawer-head-label`: 10.5px, weight 600, uppercase.
-const HEAD_LABEL_TEXT: f32 = 10.5;
+pub(super) const HEAD_LABEL_TEXT: f32 = 10.5;
 /// `.drawer-icon-btn`: a 24 px square with radius 5.
 const ICON_BUTTON: f32 = 24.;
 pub(super) const ICON_BUTTON_RADIUS: f32 = 5.;
@@ -89,11 +90,6 @@ const STACK_RAIL_INSET: f32 = 4.;
 const STACK_RAIL_RADIUS: f32 = 1.;
 /// `.drawer-new`: `margin: 4px 8px 0`, 32 px tall, radius 6, `gap: 8px`, and
 /// a 14 px plus in a 14 px slot.
-const NEW_MARGIN_TOP: f32 = 4.;
-const NEW_HEIGHT: f32 = 32.;
-const NEW_PADDING_X: f32 = 8.;
-const NEW_GAP: f32 = 8.;
-const NEW_ICON: f32 = 14.;
 /// `.drawer-spacer`: `min-height: 8px`.
 const SPACER_MIN_HEIGHT: f32 = 8.;
 /// `.drawer-nav`: `padding: 6px 8px 10px; gap: 1px`.
@@ -114,7 +110,7 @@ const NAV_SHORTCUT_TEXT: f32 = 10.;
 pub(super) struct NavItem {
     pub(super) icon: IconName,
     pub(super) label: &'static str,
-    /// The destination's keyboard shortcut, shown as a hint.
+    /// The destination's keyboard shortcut or a short state, shown as a hint.
     pub(super) shortcut: Option<&'static str>,
     pub(super) active: bool,
 }
@@ -132,6 +128,7 @@ pub(super) fn drawer_control(
 ) -> Button {
     let hover: Hsla = rgba(appearance.hover_overlay).into();
     Button::new(id)
+        .focus_ring(focus_visible(cx))
         .custom(
             ButtonCustomVariant::new(cx)
                 .foreground(rgb(appearance.text).into())
@@ -142,6 +139,8 @@ pub(super) fn drawer_control(
         .text_color(rest)
         .rounded(chrome_rems(radius).to_pixels(window.rem_size()))
         .cursor_pointer()
+        // A ring marks keyboard focus only; a click leaves none behind.
+        .focus_ring(focus_visible(cx))
 }
 
 fn pane_list_transition() -> Transition {
@@ -162,52 +161,12 @@ pub(super) struct ScreenDrag {
 
 /// The platform drag's own preview stays empty: the lifted row is painted in
 /// the Drawer list itself, where it follows the pointer vertically.
-struct ScreenDragPreview;
-
-#[derive(Clone)]
-struct ScreenMoveOption {
-    before: Option<Option<ScreenKey>>,
-    enabled: bool,
-}
+pub(super) struct ScreenDragPreview;
 
 impl Render for ScreenDragPreview {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         div()
     }
-}
-
-fn screen_move_items(
-    menu: PopupMenu,
-    weak: WeakEntity<Workspace>,
-    owner: Option<SourceToken>,
-    screen: ScreenKey,
-    up: ScreenMoveOption,
-    down: ScreenMoveOption,
-) -> PopupMenu {
-    let up_weak = weak.clone();
-    let up_screen = screen.clone();
-    menu.item(
-        PopupMenuItem::new("Move Up")
-            .disabled(!up.enabled)
-            .on_click(move |_, _, cx| {
-                if let (Some(owner), Some(before)) = (owner, up.before.clone()) {
-                    let _ = up_weak.update(cx, |this, cx| {
-                        this.place_screen(owner, up_screen.clone(), before, cx)
-                    });
-                }
-            }),
-    )
-    .item(
-        PopupMenuItem::new("Move Down")
-            .disabled(!down.enabled)
-            .on_click(move |_, _, cx| {
-                if let (Some(owner), Some(before)) = (owner, down.before.clone()) {
-                    let _ = weak.update(cx, |this, cx| {
-                        this.place_screen(owner, screen.clone(), before, cx)
-                    });
-                }
-            }),
-    )
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -240,7 +199,8 @@ impl Workspace {
             .w_full()
             .h(chrome_rems(height))
             .when(!editing, |padding| {
-                padding.on_click(move |event, window, cx| {
+                padding.cursor_pointer().on_click(move |event, window, cx| {
+                    cx.stop_propagation();
                     if !event.standard_click() {
                         return;
                     }
@@ -307,6 +267,43 @@ mod view_tests {
         });
         let view = content.borrow_mut().take().unwrap();
         run(window, view);
+    }
+
+    #[test]
+    fn remote_screen_menu_survives_leaving_its_row() {
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let (key, _) = model.ui_test_remote_terminal_fixture("menu.test").unwrap();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.reconcile(model, window, cx);
+                    workspace.drawer_hovered = Some(key.clone());
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            let selector = Box::leak(format!("drawer-more-{key}").into_boxed_str());
+            let button = window.debug_bounds(selector).unwrap();
+            window.simulate_click(button.center(), Modifiers::default());
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    assert_eq!(workspace.drawer_screen_menu.as_ref(), Some(&key));
+                    workspace.drawer_hovered = None;
+                    cx.notify();
+                });
+                window.draw(cx).clear(cx);
+            });
+            assert!(
+                window.debug_bounds(selector).is_some(),
+                "keep the dropdown mounted while the pointer enters its menu"
+            );
+            window.simulate_click(point(px(700.), px(400.)), Modifiers::default());
+            window.update(|_, cx| {
+                view.update(cx, |workspace, _| {
+                    assert!(workspace.drawer_screen_menu.is_none());
+                })
+            });
+        });
     }
 
     fn mouse_click(
@@ -750,8 +747,8 @@ mod view_tests {
             let second = block_bounds(window, &keys[1]);
             assert_near(
                 first.top(),
-                pin.bottom() + px(6. + 2. + 1.),
-                "header bottom padding, list padding and card margin",
+                pin.bottom() + px(6. + 2. + 34. + 1.),
+                "header, local group caption, list padding and card margin",
             );
             assert_near(first.left(), px(8.), "card inset");
             assert_near(first.size.width, px(200. - 1. - 16.), "card width");
@@ -2155,7 +2152,7 @@ pub(super) struct WheelNavigation {
     target: Option<WheelTarget>,
     pixels: f32,
     screen_switched: bool,
-    screen_last_scroll: Option<(Instant, f32)>,
+    screen_last_scroll: Option<Instant>,
 }
 
 impl WheelNavigation {
@@ -2205,11 +2202,15 @@ impl WheelNavigation {
             return 0;
         }
         if !Self::vertical(event) {
-            self.reset();
+            if target != WheelTarget::Screens || event.modifiers.shift {
+                self.reset();
+            }
             return 0;
         }
         if !x.is_finite() || !y.is_finite() || x.abs() >= y.abs() || y == 0. {
-            self.reset();
+            if target != WheelTarget::Screens {
+                self.reset();
+            }
             return 0;
         }
         if self.target.as_ref() != Some(&target) {
@@ -2218,16 +2219,12 @@ impl WheelNavigation {
         self.target = Some(target.clone());
         if target == WheelTarget::Screens {
             let magnitude = y.abs();
-            if self
-                .screen_last_scroll
-                .is_some_and(|(last, last_magnitude)| {
-                    now.saturating_duration_since(last) > Duration::from_millis(120)
-                        || (self.screen_switched && magnitude > last_magnitude * 1.5)
-                })
-            {
+            if self.screen_last_scroll.is_some_and(|last| {
+                now.saturating_duration_since(last) > Duration::from_millis(120)
+            }) {
                 self.screen_switched = false;
             }
-            self.screen_last_scroll = Some((now, magnitude));
+            self.screen_last_scroll = Some(now);
             // DOM wheel deltas use pixels in the web action. Native line events
             // already represent wheel movement and need no pixel noise floor.
             let below_threshold = matches!(event.delta, ScrollDelta::Pixels(_)) && magnitude < 2.;
@@ -2285,25 +2282,37 @@ fn wheel_step(direction: i32) -> TabStep {
     }
 }
 
-const EDGE_WIDTH: f32 = 6.;
+const EDGE_WIDTH: f32 = 18.;
 const EDGE_DWELL: Duration = Duration::from_millis(200);
 const EDGE_INTENT_SPEED: f32 = 800.;
+
+fn workspace_left_inset(window: &Window) -> Pixels {
+    let padding = gpui_kit::component::window_paddings(window).left;
+    if padding > px(0.) {
+        padding + px(1.)
+    } else {
+        px(0.)
+    }
+}
 
 fn edge_motion(
     previous: Option<(Point<Pixels>, Instant)>,
     now: Instant,
     position: Point<Pixels>,
 ) -> bool {
-    if f32::from(position.x) > EDGE_WIDTH {
+    let x = f32::from(position.x);
+    if !(0. ..=EDGE_WIDTH).contains(&x) {
         return false;
     }
     previous.is_none_or(|(point, then)| {
-        let elapsed = now.saturating_duration_since(then).as_secs_f32();
-        elapsed == 0. || {
-            let dx = f32::from(position.x - point.x);
-            let dy = f32::from(position.y - point.y);
-            dx.hypot(dy) / elapsed < EDGE_INTENT_SPEED
+        let prev_x = f32::from(point.x);
+        let dx = x - prev_x;
+        let dy = f32::from(position.y - point.y);
+        if prev_x > EDGE_WIDTH || (dx <= 0. && dy.abs() <= -dx) {
+            return true;
         }
+        let elapsed = now.saturating_duration_since(then).as_secs_f32();
+        elapsed == 0. || dx.hypot(dy) / elapsed < EDGE_INTENT_SPEED
     })
 }
 
@@ -2362,6 +2371,111 @@ impl Workspace {
         }
     }
 
+    /// A Screen's commands, the same from its row and its More button.
+    fn screen_menu_entries(&self, key: &ScreenKey) -> Vec<MenuEntry> {
+        let Some(model) = self.model.as_ref() else {
+            return Vec::new();
+        };
+        let owner = model.lifecycle_token();
+        let remote = key.source_id() != model.local_source().source_id();
+        let source = model.source(key.source_id());
+        let mut entries = Vec::new();
+        if let Some(rename) = source
+            .filter(|source| source.validate_screen_rename(key.screen_id()).is_ok())
+            .map(SourceWorkspace::source_token)
+        {
+            let screen = key.clone();
+            entries.push(MenuEntry::new(
+                "rename",
+                "Rename Screen…",
+                move |this, window, cx| {
+                    this.start_captured_rename(owner, rename, &screen, window, cx)
+                },
+            ));
+        }
+        for (id, label, down) in [
+            ("move-up", "Move Up", false),
+            ("move-down", "Move Down", true),
+        ] {
+            let before = self.screen_menu_before(key, down);
+            let enabled = before
+                .as_ref()
+                .is_some_and(|before| self.can_place_screen(owner, key, before.as_ref()));
+            let screen = key.clone();
+            entries.push(
+                MenuEntry::new(id, label, move |this, _, cx| {
+                    if let Some(before) = before.clone() {
+                        this.place_screen(owner, screen.clone(), before, cx);
+                    }
+                })
+                .enabled(enabled),
+            );
+        }
+        let screen = key.clone();
+        let close = MenuEntry::new(
+            "close",
+            if remote {
+                "Detach from This Window"
+            } else {
+                "Close Screen"
+            },
+            move |this, window, cx| this.request_close_screen(screen.clone(), window, cx),
+        )
+        .separated();
+        entries.push(if remote {
+            close.detail("Keeps running on the host")
+        } else {
+            close
+        });
+        if remote {
+            let ready = model.opened().iter().any(|entry| {
+                entry.key() == key
+                    && entry.state() == splitty_client_core::workspace::OpenedScreenState::Ready
+            });
+            let token = model.execution_token(key.source_id()).filter(|_| ready);
+            let screen = key.clone();
+            entries.push(
+                MenuEntry::new(
+                    "terminate",
+                    "Terminate Screen…",
+                    move |this, window, cx| {
+                        if let Some(token) = token {
+                            this.request_terminate_screen(token, screen.clone(), window, cx);
+                        }
+                    },
+                )
+                .detail("Ends its terminals on the host")
+                .danger()
+                .enabled(token.is_some()),
+            );
+        }
+        entries
+    }
+
+    fn open_screen_menu(
+        &mut self,
+        key: &ScreenKey,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self
+            .model
+            .as_ref()
+            .is_some_and(|model| model.opened().iter().any(|entry| entry.key() == key))
+        {
+            return;
+        }
+        let entries = self.screen_menu_entries(key);
+        self.open_drawer_popover(
+            PopoverKind::Actions(entries),
+            PopoverAnchor::Pointer(position),
+            Some(key.clone()),
+            window,
+            cx,
+        );
+    }
+
     fn can_place_screen(
         &self,
         owner: SourceToken,
@@ -2408,20 +2522,32 @@ impl Workspace {
         self.set_drawer_overlay(!self.drawer_overlay_open, cx);
     }
 
+    pub(super) fn open_drawer_overlay(&mut self, cx: &mut Context<Self>) {
+        self.drawer_edge_task = None;
+        self.set_drawer_overlay(true, cx);
+    }
+
     pub(super) fn close_drawer_overlay(&mut self, cx: &mut Context<Self>) {
         self.drawer_edge_task = None;
         self.set_drawer_overlay(false, cx);
     }
 
-    pub(super) fn drawer_edge_hover(&mut self, event: &MouseMoveEvent, cx: &mut Context<Self>) {
+    pub(super) fn drawer_edge_hover(
+        &mut self,
+        event: &MouseMoveEvent,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
         let now = Instant::now();
+        let inset = workspace_left_inset(window);
+        let position = point(event.position.x - inset, event.position.y);
         let eligible = !self.drawer_visible
             && !self.drawer_overlay_open
             && self.drawer_edge_reveal
             && !event.dragging()
             && !GlobalState::is_in_deferred_context(cx)
-            && edge_motion(self.drawer_edge_last, now, event.position);
-        self.drawer_edge_last = Some((event.position, now));
+            && edge_motion(self.drawer_edge_last, now, position);
+        self.drawer_edge_last = Some((position, now));
         if !eligible {
             self.drawer_edge_task = None;
             return;
@@ -2439,7 +2565,7 @@ impl Workspace {
                     && this.drawer_edge_reveal
                     && this
                         .drawer_edge_last
-                        .is_some_and(|(point, _)| f32::from(point.x) <= EDGE_WIDTH)
+                        .is_some_and(|(point, _)| (0. ..=EDGE_WIDTH).contains(&f32::from(point.x)))
                     && !GlobalState::is_in_deferred_context(cx)
                 {
                     this.set_drawer_overlay(true, cx);
@@ -2514,6 +2640,43 @@ impl Workspace {
         )
     }
 
+    fn render_local_group(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let owner = self.lifecycle_token();
+        div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px(chrome_rems(CARD_INSET + 4.))
+            .h(chrome_rems(34.))
+            .text_size(chrome_rems(SIDEBAR_TEXT))
+            .text_color(rgb(self.appearance.secondary))
+            .child(Icon::new(IconName::Monitor).size(chrome_rems(14.)))
+            .child(div().flex_1().child("This computer"))
+            .child(
+                drawer_control(
+                    "drawer-create",
+                    rgb(self.appearance.secondary).into(),
+                    CARD_RADIUS,
+                    &self.appearance,
+                    window,
+                    cx,
+                )
+                .debug_selector(|| "drawer-create".into())
+                .small()
+                .w(chrome_rems(26.))
+                .h(chrome_rems(26.))
+                .icon(Icon::new(IconName::Plus).size(chrome_rems(14.)))
+                .tooltip("New screen on this computer")
+                .accessibility_label("Create local Screen")
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    if this.lifecycle_token() == owner {
+                        this.create_screen(window, cx);
+                    }
+                })),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_drawer(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let owner = self.lifecycle_token();
         let pin_label = match self.drawer_pending {
@@ -2535,6 +2698,11 @@ impl Workspace {
                     this.track_screen_drag(event, cx);
                 }),
             )
+            .on_drag_move(cx.listener(
+                |this, event: &DragMoveEvent<super::host_drag::HostDrag>, _, cx| {
+                    this.track_host_drag(event, cx)
+                },
+            ))
             .pt(chrome_rems(LIST_PADDING_TOP))
             .pb(chrome_rems(LIST_PADDING_BOTTOM));
         if let Some(window_model) = &self.model {
@@ -2549,25 +2717,62 @@ impl Workspace {
             }
             let shown = window_model.shown_key();
             let opened = window_model.opened();
-            let mut group = None;
+            let local = window_model.local_source().source_id();
+            let mut group = Some(local);
+            let mut group_header = self.render_local_group(window, cx);
+            let mut group_rows = div()
+                .id(SharedString::from(format!("drawer-group-screens-{local}")))
+                .debug_selector(move || format!("drawer-group-screens-{local}"))
+                .relative()
+                .flex()
+                .flex_col()
+                .overflow_hidden();
+            let mut remote_groups = div()
+                .id("drawer-remote-groups")
+                .relative()
+                .flex()
+                .flex_col()
+                .overflow_hidden();
             for (index, entry) in opened.iter().enumerate() {
                 let key = entry.key().clone();
                 let remote = key.source_id() != window_model.local_source().source_id();
                 let rename_source = window_model
                     .source(key.source_id())
                     .map(SourceWorkspace::source_token);
-                let rename_available = window_model
-                    .source(key.source_id())
-                    .is_some_and(|source| source.validate_screen_rename(key.screen_id()).is_ok());
                 if group != Some(key.source_id()) {
+                    if let Some(previous) = group {
+                        let block = self.render_drawer_group(
+                            previous,
+                            group_header,
+                            group_rows,
+                            window,
+                            cx,
+                        );
+                        if previous == local {
+                            list = list.child(block);
+                        } else {
+                            remote_groups = remote_groups.child(block);
+                        }
+                    }
                     group = Some(key.source_id());
+                    let source = key.source_id();
+                    group_rows = div()
+                        .id(SharedString::from(format!("drawer-group-screens-{source}")))
+                        .debug_selector(move || format!("drawer-group-screens-{source}"))
+                        .relative()
+                        .flex()
+                        .flex_col()
+                        .overflow_hidden();
+                    group_header = div().into_any_element();
                     if remote {
                         let title = window_model
                             .source_target(key.source_id())
                             .map(|target| {
                                 owner
                                     .and_then(|owner| self.hosts.accepted_alias(owner, target))
-                                    .unwrap_or(target)
+                                    .unwrap_or_else(|| {
+                                        target.rsplit_once('@').map_or(target, |(_, host)| host)
+                                    })
                             })
                             .map(super::hosts::display)
                             .unwrap_or_else(|| "Host".into());
@@ -2576,8 +2781,8 @@ impl Workspace {
                         {
                             let counts =
                                 port_counts.get(group.target()).copied().unwrap_or_default();
-                            list = list
-                                .child(self.render_drawer_host(group, title, counts, window, cx));
+                            group_header =
+                                self.render_drawer_host(group, title, counts, window, cx);
                         }
                     }
                 }
@@ -2596,8 +2801,10 @@ impl Workspace {
                     .drawer_drag
                     .as_ref()
                     .is_some_and(|session| session.holds(&key));
-                let actions_visible =
-                    (self.drawer_hovered.as_ref() == Some(&key) || held) && !editing;
+                let actions_visible = (self.drawer_hovered.as_ref() == Some(&key)
+                    || self.drawer_screen_menu.as_ref() == Some(&key)
+                    || held)
+                    && !editing;
                 let hover_transition =
                     Transition::new(Duration::from_millis(80)).easing(Easing::Ease);
                 let label = entry.name().map(super::hosts::display).unwrap_or_else(|| {
@@ -2662,6 +2869,49 @@ impl Workspace {
                     .pl(chrome_rems(ROW_PADDING_LEFT))
                     .pr(chrome_rems(ROW_PADDING_RIGHT + action_lane))
                     .gap(chrome_rems(ROW_GAP))
+                    .when(!editing, |row| {
+                        let menu_key = key.clone();
+                        row.on_mouse_down(
+                            MouseButton::Right,
+                            cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                if this.lifecycle_token() == owner
+                                    && !GlobalState::is_in_deferred_context(cx)
+                                {
+                                    this.open_screen_menu(&menu_key, event.position, window, cx);
+                                }
+                            }),
+                        )
+                    })
+                    .when(!editing, |row| {
+                        let select = key.clone();
+                        let rename_on_click = key.clone();
+                        let weak = cx.entity().downgrade();
+                        row.cursor_pointer().on_click(move |event, window, cx| {
+                            cx.stop_propagation();
+                            let _ = weak.update(cx, |this, cx| {
+                                if this.lifecycle_token() == owner
+                                    && !GlobalState::is_in_deferred_context(cx)
+                                {
+                                    if event.click_count() == 2 {
+                                        if let (Some(owner), Some(source)) = (owner, rename_source)
+                                        {
+                                            this.start_captured_rename(
+                                                owner,
+                                                source,
+                                                &rename_on_click,
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    } else if event.standard_click() {
+                                        this.switch_screen_key(select.clone(), window, cx);
+                                        this.focus_current(window, cx);
+                                    }
+                                }
+                            });
+                        })
+                    })
                     .child(
                         div()
                             .id(SharedString::from(format!("drawer-index-{key}")))
@@ -2682,13 +2932,15 @@ impl Workspace {
                             .child(format!("{}", index + 1)),
                     );
                 let mut row_actions = div()
+                    .id(SharedString::from(format!("drawer-row-actions-{key}")))
                     .absolute()
                     .right(chrome_rems(ROW_PADDING_RIGHT))
                     .top_0()
                     .h_full()
                     .flex()
                     .items_center()
-                    .gap(chrome_rems(ACTION_GAP));
+                    .gap(chrome_rems(ACTION_GAP))
+                    .on_click(|_, _, cx| cx.stop_propagation());
                 if editing {
                     if let Some(editor) = &self.rename {
                         row = row.child(
@@ -2732,7 +2984,8 @@ impl Workspace {
                             .overflow_hidden()
                             .text_ellipsis()
                             .whitespace_nowrap()
-                            .font_weight(FontWeight::MEDIUM)
+                            .font(font(self.ui_family.clone()))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_size(chrome_rems(SIDEBAR_TEXT))
                             .tooltip(label.clone())
                             .child(
@@ -2746,6 +2999,8 @@ impl Workspace {
                                     .min_w_0()
                                     // Kit sizes button content itself; the
                                     // label restates the Drawer's size.
+                                    .font(font(self.ui_family.clone()))
+                                    .font_weight(FontWeight::SEMIBOLD)
                                     .text_size(chrome_rems(SIDEBAR_TEXT))
                                     .text_color(transition::<Hsla>(
                                         format!("drawer-screen-text-{key}"),
@@ -2784,6 +3039,7 @@ impl Workspace {
                                 }
                             })
                             .on_click(move |event, window, cx| {
+                                cx.stop_propagation();
                                 let _ = weak.update(cx, |this, cx| {
                                     if this.lifecycle_token() == owner
                                         && !GlobalState::is_in_deferred_context(cx)
@@ -2807,55 +3063,6 @@ impl Workspace {
                                     }
                                 });
                             });
-                    let up = self.screen_menu_before(&key, false);
-                    let down = self.screen_menu_before(&key, true);
-                    let up_enabled = owner.is_some_and(|owner| {
-                        up.as_ref().is_some_and(|before| {
-                            self.can_place_screen(owner, &key, before.as_ref())
-                        })
-                    });
-                    let down_enabled = owner.is_some_and(|owner| {
-                        down.as_ref().is_some_and(|before| {
-                            self.can_place_screen(owner, &key, before.as_ref())
-                        })
-                    });
-                    let up = ScreenMoveOption {
-                        before: up,
-                        enabled: up_enabled,
-                    };
-                    let down = ScreenMoveOption {
-                        before: down,
-                        enabled: down_enabled,
-                    };
-                    let menu_weak = cx.entity().downgrade();
-                    let menu_screen = key.clone();
-                    let select_button = select_button.context_menu(move |menu, _, _| {
-                        let menu = if rename_available {
-                            let weak = menu_weak.clone();
-                            let screen = menu_screen.clone();
-                            menu.item(PopupMenuItem::new("Rename Screen…").on_click(
-                                move |_, window, cx| {
-                                    if let (Some(owner), Some(source)) = (owner, rename_source) {
-                                        let _ = weak.update(cx, |this, cx| {
-                                            this.start_captured_rename(
-                                                owner, source, &screen, window, cx,
-                                            );
-                                        });
-                                    }
-                                },
-                            ))
-                        } else {
-                            menu
-                        };
-                        screen_move_items(
-                            menu,
-                            menu_weak.clone(),
-                            owner,
-                            menu_screen.clone(),
-                            up.clone(),
-                            down.clone(),
-                        )
-                    });
                     row = row.child(div().flex_1().min_w_0().child(select_button));
                 }
                 if let Some(summary) = unread_summary {
@@ -2929,6 +3136,7 @@ impl Workspace {
                             IconName::ChevronDown
                         }))
                         .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
                             let _ = weak.update(cx, |this, cx| {
                                 if this.lifecycle_token() != owner {
                                     return;
@@ -2953,31 +3161,8 @@ impl Workspace {
                     );
                 }
                 if actions_visible && remote {
-                    let terminate = key.clone();
-                    let weak = cx.entity().downgrade();
-                    let up = self.screen_menu_before(&key, false);
-                    let down = self.screen_menu_before(&key, true);
-                    let up_enabled = owner.is_some_and(|owner| {
-                        up.as_ref().is_some_and(|before| {
-                            self.can_place_screen(owner, &key, before.as_ref())
-                        })
-                    });
-                    let down_enabled = owner.is_some_and(|owner| {
-                        down.as_ref().is_some_and(|before| {
-                            self.can_place_screen(owner, &key, before.as_ref())
-                        })
-                    });
-                    let up = ScreenMoveOption {
-                        before: up,
-                        enabled: up_enabled,
-                    };
-                    let down = ScreenMoveOption {
-                        before: down,
-                        enabled: down_enabled,
-                    };
-                    let token = window_model
-                        .execution_token(key.source_id())
-                        .filter(|_| state.is_none());
+                    let menu_key = key.clone();
+                    let menu_open = self.drawer_popover_screen() == Some(&key);
                     row_actions = row_actions.child(
                         drawer_control(
                             SharedString::from(format!("drawer-more-{key}")),
@@ -2991,39 +3176,22 @@ impl Workspace {
                         .when(cfg!(all(test, feature = "ui-test-support")), |button| {
                             button.debug_selector(|| format!("drawer-more-{key}"))
                         })
-                        .tooltip("More Screen actions")
                         .icon(Icon::new(IconName::Ellipsis))
                         .xsmall()
                         .w(chrome_rems(ICON_BUTTON))
                         .h(chrome_rems(ICON_BUTTON))
-                        .dropdown_menu(move |menu, _, _| {
-                            let weak = weak.clone();
-                            let terminate = terminate.clone();
-                            screen_move_items(
-                                menu,
-                                weak.clone(),
-                                owner,
-                                terminate.clone(),
-                                up.clone(),
-                                down.clone(),
-                            )
-                            .item(
-                                PopupMenuItem::new("Terminate Screen…")
-                                    .disabled(token.is_none())
-                                    .on_click(move |_, window, cx| {
-                                        if let Some(token) = token {
-                                            let _ = weak.update(cx, |this, cx| {
-                                                this.request_terminate_screen(
-                                                    token,
-                                                    terminate.clone(),
-                                                    window,
-                                                    cx,
-                                                )
-                                            });
-                                        }
-                                    }),
-                            )
-                        }),
+                        .selected(menu_open)
+                        .when(menu_open, |button| {
+                            button.bg(rgba(self.appearance.hover_overlay))
+                        })
+                        .on_click(cx.listener(
+                            move |this, event: &ClickEvent, window, cx| {
+                                cx.stop_propagation();
+                                if this.lifecycle_token() == owner {
+                                    this.open_screen_menu(&menu_key, event.position(), window, cx);
+                                }
+                            },
+                        )),
                     );
                 }
                 if actions_visible {
@@ -3058,6 +3226,7 @@ impl Workspace {
                             IconName::X
                         }))
                         .on_click(move |_, window, cx| {
+                            cx.stop_propagation();
                             let _ = weak.update(cx, |this, cx| {
                                 if this.lifecycle_token() == owner
                                     && this.model.as_ref().is_some_and(|model| {
@@ -3140,6 +3309,38 @@ impl Workspace {
                     .when(opacity < 1., |block| block.opacity(opacity))
                     .rounded(chrome_rems(CARD_RADIUS))
                     .bg(block_background)
+                    .when(!editing, |block| {
+                        let select = key.clone();
+                        let rename_on_click = key.clone();
+                        let weak = cx.entity().downgrade();
+                        block.cursor_pointer().on_click(move |event, window, cx| {
+                            cx.stop_propagation();
+                            if !event.standard_click() {
+                                return;
+                            }
+                            let _ = weak.update(cx, |this, cx| {
+                                if this.lifecycle_token() == owner
+                                    && !GlobalState::is_in_deferred_context(cx)
+                                {
+                                    if event.click_count() == 2 {
+                                        if let (Some(owner), Some(source)) = (owner, rename_source)
+                                        {
+                                            this.start_captured_rename(
+                                                owner,
+                                                source,
+                                                &rename_on_click,
+                                                window,
+                                                cx,
+                                            );
+                                        }
+                                    } else {
+                                        this.switch_screen_key(select.clone(), window, cx);
+                                        this.focus_current(window, cx);
+                                    }
+                                }
+                            });
+                        })
+                    })
                     .child(
                         canvas(
                             move |bounds, _, _| {
@@ -3445,6 +3646,7 @@ impl Workspace {
                                 )
                                 .on_click(
                                     move |_, window, cx| {
+                                        cx.stop_propagation();
                                         let _ = weak.update(cx, |this, cx| {
                                             if this.lifecycle_token() != owner
                                                 || this.drawer_collapsed.contains(&select_key)
@@ -3501,11 +3703,20 @@ impl Workspace {
                     cx,
                 ));
                 if motion.lifted {
-                    list = list.child(screen_drag::RaisedInClip::new(block));
+                    group_rows = group_rows.child(screen_drag::RaisedInClip::new(block));
                 } else {
-                    list = list.child(block);
+                    group_rows = group_rows.child(block);
                 }
             }
+            if let Some(source) = group {
+                let block = self.render_drawer_group(source, group_header, group_rows, window, cx);
+                if source == local {
+                    list = list.child(block);
+                } else {
+                    remote_groups = remote_groups.child(block);
+                }
+            }
+            list = list.child(remote_groups);
             if let Some(pending) =
                 window_model
                     .local_source()
@@ -3539,45 +3750,7 @@ impl Workspace {
             list = list.child(div().px_2().py_3().text_color(muted).child("Connecting…"));
         }
         let weak = cx.entity().downgrade();
-        let create = drawer_control(
-            "drawer-create",
-            rgb(self.appearance.secondary).into(),
-            CARD_RADIUS,
-            &self.appearance,
-            window,
-            cx,
-        )
-        .accessibility_label("Create local Screen")
-        .small()
-        .w_full()
-        .h(chrome_rems(NEW_HEIGHT))
-        .px(chrome_rems(NEW_PADDING_X))
-        .child(
-            div()
-                .w_full()
-                .flex()
-                .items_center()
-                .gap(chrome_rems(NEW_GAP))
-                .text_size(chrome_rems(SIDEBAR_TEXT))
-                .font_weight(FontWeight::MEDIUM)
-                .child(
-                    div()
-                        .w(chrome_rems(NEW_ICON))
-                        .flex_none()
-                        .flex()
-                        .justify_end()
-                        .child(Icon::new(IconName::Plus).size(chrome_rems(NEW_ICON))),
-                )
-                .child("New screen"),
-        )
-        .on_click(move |_, window, cx| {
-            let _ = weak.update(cx, |this, cx| {
-                if this.lifecycle_token() == owner {
-                    this.create_screen(window, cx);
-                }
-            });
-        });
-        let weak = cx.entity().downgrade();
+        let templates_active = self.template_dialog.is_some();
         let templates = self
             .drawer_nav_item(
                 "drawer-templates",
@@ -3589,13 +3762,15 @@ impl Workspace {
                     } else {
                         "Alt+P"
                     }),
-                    active: false,
+                    active: templates_active,
                 },
                 window,
                 cx,
             )
             .accessibility_label("Open local Templates")
+            .selected(templates_active)
             .on_click(move |_, window, cx| {
+                cx.stop_propagation();
                 let _ = weak.update(cx, |this, cx| {
                     if this.lifecycle_token() == owner {
                         this.toggle_templates(window, cx);
@@ -3614,14 +3789,19 @@ impl Workspace {
             .occlude()
             .border_r_1()
             .border_color(rgb(self.appearance.subtle_border))
+            .on_click(cx.listener(|this, _, window, cx| {
+                if this.has_drawer_panel() && !GlobalState::is_in_deferred_context(cx) {
+                    this.close_drawer_panel(window, cx);
+                }
+            }))
             .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !hovered
                     && this.drawer_overlay_open
+                    && !this.has_drawer_panel()
                     && this.rename.is_none()
                     && this.tab_context_menu.is_none()
                     && this.profile_picker.is_none()
-                    && this.template_dialog.is_none()
                     && this
                         .pending_close
                         .as_ref()
@@ -3692,6 +3872,7 @@ impl Workspace {
                         .on_click({
                             let weak = cx.entity().downgrade();
                             move |_, _, cx| {
+                                cx.stop_propagation();
                                 let _ = weak.update(cx, |this, cx| {
                                     if this.lifecycle_token() == owner {
                                         this.toggle_drawer(cx);
@@ -3702,17 +3883,6 @@ impl Workspace {
                     ),
             )
             .child(list)
-            .child(
-                // The web row and its button both lay `hover-bg` on hover.
-                div()
-                    .id("drawer-new")
-                    .flex_none()
-                    .mx(chrome_rems(CARD_INSET))
-                    .mt(chrome_rems(NEW_MARGIN_TOP))
-                    .rounded(chrome_rems(CARD_RADIUS))
-                    .hover(|style| style.bg(rgba(self.appearance.hover_overlay)))
-                    .child(create),
-            )
             .child(div().flex_1().min_h(chrome_rems(SPACER_MIN_HEIGHT)))
             .child(
                 div()
@@ -3743,6 +3913,7 @@ impl Workspace {
                         .track_focus(&self.settings_trigger)
                         .selected(self.destination == Destination::Settings)
                         .on_click(cx.listener(|this, _, window, cx| {
+                            cx.stop_propagation();
                             if this.destination == Destination::Settings {
                                 this.close_settings(window, cx);
                             } else {
@@ -3752,29 +3923,36 @@ impl Workspace {
                     ),
             )
             .children(
-                self.drawer_drag
+                (self
+                    .drawer_drag
                     .as_ref()
-                    .filter(|session| session.is_dragging())
-                    .map(|_| {
-                        // A drag ends wherever the button is released, inside the
-                        // Drawer or not, as the web list's window listener does.
-                        let weak = cx.entity().downgrade();
-                        canvas(
-                            |_, _, _| {},
-                            move |_, (), window, _| {
-                                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
-                                    if phase == DispatchPhase::Capture
-                                        && event.button == MouseButton::Left
-                                    {
-                                        let _ =
-                                            weak.update(cx, |this, cx| this.finish_screen_drag(cx));
-                                    }
-                                });
-                            },
-                        )
-                        .absolute()
-                        .size_0()
-                    }),
+                    .is_some_and(|session| session.is_dragging())
+                    || self
+                        .drawer_host_drag
+                        .as_ref()
+                        .is_some_and(|session| session.is_dragging()))
+                .then(|| {
+                    // A drag ends wherever the button is released, inside the
+                    // Drawer or not, as the web list's window listener does.
+                    let weak = cx.entity().downgrade();
+                    canvas(
+                        |_, _, _| {},
+                        move |_, (), window, _| {
+                            window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                                if phase == DispatchPhase::Capture
+                                    && event.button == MouseButton::Left
+                                {
+                                    let _ = weak.update(cx, |this, cx| {
+                                        this.finish_screen_drag(cx);
+                                        this.finish_host_drag(cx);
+                                    });
+                                }
+                            });
+                        },
+                    )
+                    .absolute()
+                    .size_0()
+                }),
             )
             .into_any_element()
     }
@@ -3837,7 +4015,7 @@ impl Workspace {
             return;
         }
         if matches!(&target, WheelTarget::Screens) {
-            self.show_screens(window, cx);
+            self.close_drawer_panel(window, cx);
             if self.destination != Destination::Screens {
                 return;
             }
@@ -3965,7 +4143,7 @@ mod tests {
     }
 
     #[test]
-    fn drawer_swipe_matches_web_noise_floor_and_renewed_impulse() {
+    fn drawer_swipe_matches_web_noise_floor_and_idle_debounce() {
         let mut wheel = WheelNavigation::default();
         let start = Instant::now();
         for (ms, y, expected) in [
@@ -3973,8 +4151,8 @@ mod tests {
             (10, -2., -1),
             (20, -2., 0),
             (30, -1., 0),
-            (40, -4., -1),
-            (50, -3., 0),
+            (40, -4., 0),
+            (50, -12., 0),
             (60, 3., 0),
             (181, 3., 1),
         ] {
@@ -4050,10 +4228,15 @@ mod tests {
     }
 
     #[test]
-    fn edge_reveal_requires_slow_unpressed_motion_inside_six_pixels() {
+    fn edge_reveal_requires_slow_unpressed_motion_inside_edge_strip() {
         let now = Instant::now();
-        assert!(edge_motion(None, now, point(px(3.), px(20.))));
-        assert!(!edge_motion(None, now, point(px(7.), px(20.))));
+        assert!(edge_motion(None, now, point(px(12.), px(20.))));
+        assert!(!edge_motion(None, now, point(px(19.), px(20.))));
+        assert!(edge_motion(
+            Some((point(px(80.), px(20.)), now)),
+            now + Duration::from_millis(10),
+            point(px(12.), px(20.)),
+        ));
         assert!(!edge_motion(
             Some((point(px(1.), px(0.)), now)),
             now + Duration::from_millis(10),

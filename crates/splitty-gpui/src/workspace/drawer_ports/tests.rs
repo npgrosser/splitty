@@ -1,11 +1,10 @@
-use super::{HostGroupTarget, Workspace, MAX_MENU_PORTS};
+use super::{HostGroupTarget, Workspace};
 use crate::workspace::chrome::view_tests::with_view;
 use crate::workspace::{CloseTarget, Command, Destination, Update, WorkerCommand};
 use gpui_kit::{
     point, px, size, Entity, KeyDownEvent, KeyUpEvent, Keystroke, Modifiers, MouseButton,
     VisualTestContext,
 };
-use serde_json::json;
 use splitty_client_core::ports::{ForwardAction, ForwardSnapshot};
 use splitty_client_core::workspace::{SourceToken, WindowWorkspace};
 use std::sync::Arc;
@@ -86,7 +85,7 @@ fn host_plus_pointer_sends_one_exact_remote_request_and_projects_pending_referen
         let (group, mut receiver) = setup(window, &view);
         window.update(|_, cx| {
             view.update(cx, |workspace, cx| {
-                workspace.destination = Destination::Hosts;
+                workspace.destination = Destination::Screens;
                 cx.notify();
             })
         });
@@ -230,17 +229,13 @@ fn host_plus_pointer_sends_one_exact_remote_request_and_projects_pending_referen
 }
 
 #[test]
-fn host_plus_keyboard_and_qualified_worker_rejection_keep_visible_feedback() {
+fn qualified_worker_rejection_of_host_plus_keeps_visible_feedback() {
     with_view(|window, view| {
         let (group, mut receiver) = setup(window, &view);
-        click(window, format!("drawer-ports-{}", group.source_id()));
-        press(window, "escape");
-        window.update(|window, cx| window.focus_next(cx));
-        draw(window);
-        press(window, "enter");
-        let command = receiver.try_recv().expect("keyboard Plus activation");
+        click(window, format!("drawer-host-new-{}", group.source_id()));
+        let command = receiver.try_recv().expect("Plus activation");
         let Command::CreateRemoteScreen { request } = command.kind() else {
-            panic!("keyboard activation must use the same creation path");
+            panic!("Plus must use the creation path");
         };
         let request = request.clone();
         assert_eq!(command.source_token(), Some(group.owner()));
@@ -627,44 +622,86 @@ fn compact_zoomed_drawer_keeps_host_create_action_in_view() {
 }
 
 #[test]
-fn real_kit_popup_inspection_escape_and_keyboard_choice_keep_exact_host() {
+fn ports_panel_is_passive_until_a_port_is_chosen_and_opens_it_in_the_browser() {
     with_view(|window, view| {
         let (group, mut receiver) = setup(window, &view);
         let trigger = format!("drawer-ports-{}", group.source_id());
         click(window, trigger.clone());
-        let first = window.update(|_, cx| view.read(cx).drawer_port_menu.as_ref().unwrap().id);
-        assert!(receiver.try_recv().is_err(), "opening/rendering is passive");
-        press(window, "escape");
-        window.update(|_, cx| assert!(view.read(cx).drawer_port_menu.is_none()));
-        assert!(receiver.try_recv().is_err(), "dismissal is passive");
-        press(window, "enter");
-        window
-            .update(|_, cx| assert_ne!(view.read(cx).drawer_port_menu.as_ref().unwrap().id, first));
-        press(window, "down");
-        press(window, "enter");
-        let command = receiver
-            .try_recv()
-            .expect("keyboard choice submits exactly once");
-        assert_eq!(command.source_token(), Some(group.owner()));
-        assert!(
-            matches!(command.kind(), Command::ManageForward { request, .. }
-            if request.action() == ForwardAction::Open && request.key().target() == "two.test"
-                && request.key().remote() == 3000 && request.local() == Some(4173) && !request.remember())
-        );
-        assert!(receiver.try_recv().is_err());
-        window.update(|_, cx| {
-            let workspace = view.read(cx);
-            assert!(workspace.drawer_port_menu.is_none());
+        assert!(window.debug_bounds("drawer-popover").is_some());
+        while let Ok(command) = receiver.try_recv() {
             assert!(
-                workspace.drawer_port_presentation(&group).entries[0].disabled,
-                "pending mapping cannot admit a duplicate choice"
+                matches!(command.kind(), Command::RefreshForwards),
+                "opening only refreshes what it lists"
             );
-        });
+        }
+        press(window, "escape");
+        window.update(|_, cx| assert!(view.read(cx).drawer_popover.is_none()));
+        assert!(receiver.try_recv().is_err(), "dismissal is passive");
+
+        click(window, trigger.clone());
+        while receiver.try_recv().is_ok() {}
+        press(window, "enter");
+        let sent = receiver.try_recv().expect("the listed port opens");
+        assert_eq!(sent.source_token(), Some(group.owner()));
+        assert!(matches!(
+            sent.kind(),
+            Command::ManageForward { request, .. }
+                if request.action() == ForwardAction::Open
+                    && request.key().target() == "two.test"
+                    && request.key().remote() == 3000
+                    && request.local() == Some(4173)
+        ));
+        window.update(|_, cx| assert!(view.read(cx).drawer_popover.is_none()));
+
+        click(window, trigger);
+        while receiver.try_recv().is_ok() {}
+        window.simulate_input("5173");
+        draw(window);
+        press(window, "enter");
+        let sent = receiver.try_recv().expect("a typed port opens");
+        assert!(matches!(
+            sent.kind(),
+            Command::ManageForward { request, .. }
+                if request.action() == ForwardAction::Open
+                    && request.key().target() == "two.test"
+                    && request.key().remote() == 5173
+                    && request.local().is_none()
+        ));
+        assert!(receiver.try_recv().is_err());
     });
 }
 
 #[test]
-fn unpinned_drawer_stays_revealed_for_popup_then_resumes_autohide() {
+fn forwarded_port_row_copies_its_address_and_stops_without_opening() {
+    with_view(|window, view| {
+        let (group, mut receiver) = setup(window, &view);
+        let trigger = format!("drawer-ports-{}", group.source_id());
+        click(window, trigger.clone());
+        while receiver.try_recv().is_ok() {}
+        click(window, "popover-port-3000-action-0".into());
+        assert!(receiver.try_recv().is_err(), "copying sends nothing");
+        window.update(|_, cx| {
+            assert!(view.read(cx).drawer_popover.is_none());
+            assert_eq!(
+                cx.read_from_clipboard().unwrap().text().as_deref(),
+                Some("localhost:4173")
+            );
+        });
+        click(window, trigger);
+        while receiver.try_recv().is_ok() {}
+        click(window, "popover-port-3000-action-1".into());
+        let sent = receiver.try_recv().expect("Stop is sent");
+        assert!(matches!(
+            sent.kind(),
+            Command::ManageForward { request, .. }
+                if request.action() == ForwardAction::Stop && request.key().remote() == 3000
+        ));
+        assert!(receiver.try_recv().is_err());
+    });
+}
+
+#[test]
+fn unpinned_drawer_stays_revealed_for_its_panel_then_resumes_autohide() {
     with_view(|window, view| {
         let (group, mut receiver) = setup(window, &view);
         window.update(|_, cx| {
@@ -676,87 +713,56 @@ fn unpinned_drawer_stays_revealed_for_popup_then_resumes_autohide() {
         });
         draw(window);
         click(window, format!("drawer-ports-{}", group.source_id()));
+        while receiver.try_recv().is_ok() {}
         window.simulate_mouse_move(point(px(500.), px(180.)), None, Modifiers::default());
         draw(window);
         window.update(|_, cx| {
             assert!(
                 view.read(cx).drawer_overlay_open,
-                "travelling to an open popup must not dismiss its Drawer"
+                "travelling to an open panel must not dismiss its Drawer"
             )
         });
         press(window, "escape");
         window.update(|_, cx| {
             let workspace = view.read(cx);
             assert!(!workspace.drawer_overlay_open);
-            assert!(workspace.drawer_port_menu.is_none());
+            assert!(workspace.drawer_popover.is_none());
         });
         assert!(receiver.try_recv().is_err());
     });
 }
 
 #[test]
-fn caption_pointer_and_keyboard_navigate_without_connect_or_forward() {
+fn host_caption_shows_its_screens_beside_the_drawer_without_connecting() {
     with_view(|window, view| {
         let (group, mut receiver) = setup(window, &view);
-        let selector = format!("drawer-host-{}", group.source_id());
-        click(window, selector.clone());
-        window.update(|_, cx| assert!(view.read(cx).destination == Destination::Hosts));
-        while let Ok(command) = receiver.try_recv() {
-            assert!(matches!(
-                command.kind(),
-                Command::RefreshForwards | Command::Visible { .. }
-            ));
-        }
+        click(window, format!("drawer-host-{}", group.source_id()));
         window.update(|_, cx| {
-            view.update(cx, |workspace, cx| {
-                workspace.destination = Destination::Screens;
-                cx.notify();
-            })
+            let workspace = view.read(cx);
+            assert!(workspace.destination == Destination::Screens);
+            assert_eq!(workspace.drawer_popover_host(), Some("two.test"));
         });
-        draw(window);
-        click(window, format!("drawer-ports-{}", group.source_id()));
+        assert!(
+            window.debug_bounds("popover-host-settings").is_some(),
+            "the manager stays one step away"
+        );
+        assert!(receiver.try_recv().is_err(), "looking connects nothing");
         press(window, "escape");
-        window.update(|window, cx| window.focus_prev(cx));
-        draw(window);
-        press(window, "enter");
-        window.update(|_, cx| assert!(view.read(cx).destination == Destination::Hosts));
+        window.update(|_, cx| assert!(view.read(cx).drawer_popover.is_none()));
         while let Ok(command) = receiver.try_recv() {
-            assert!(matches!(
-                command.kind(),
-                Command::RefreshForwards | Command::Visible { .. }
-            ));
+            assert!(matches!(command.kind(), Command::ReleaseHostBrowsing));
         }
     });
 }
 
 #[test]
-fn stale_popup_choices_cannot_restart_changed_ports_or_revive_after_detach() {
+fn panels_close_with_their_host_group_and_never_outlive_their_owner() {
     with_view(|window, view| {
         let (group, mut receiver) = setup(window, &view);
         let trigger = format!("drawer-ports-{}", group.source_id());
         click(window, trigger.clone());
-        window.update(|_, cx| view.update(cx, |workspace, _| {
-            assert!(workspace.ports.accept(snapshot(group.owner(), 2, Some("[]"), Some(
-                r#"{"version":1,"forwards":[{"target":"two.test","remote":3000,"local":4173,"label":"App","enabled":false,"lastError":null}]}"#))));
-        }));
-        draw(window);
-        // Kit deliberately caches open menu rows. The old Up item now asks for a fresh choice.
-        press(window, "down");
-        press(window, "enter");
-        assert!(receiver.try_recv().is_err());
-        window.update(|_, cx| {
-            assert!(view
-                .read(cx)
-                .ports
-                .link_notice
-                .as_ref()
-                .unwrap()
-                .contains("choose again"))
-        });
-        click(window, trigger.clone());
-        let (old, choice, screen) = window.update(|_, cx| {
-            let workspace = view.read(cx);
-            let screen = workspace
+        let screen = window.update(|_, cx| {
+            view.read(cx)
                 .model
                 .as_ref()
                 .unwrap()
@@ -765,47 +771,31 @@ fn stale_popup_choices_cannot_restart_changed_ports_or_revive_after_detach() {
                 .find(|entry| entry.key().source_id() == group.source_id())
                 .unwrap()
                 .key()
-                .clone();
-            (
-                workspace.drawer_port_menu.clone().unwrap(),
-                workspace.drawer_port_presentation(&group).entries[0]
-                    .choice
-                    .clone(),
-                screen,
-            )
+                .clone()
         });
-        press(window, "escape");
+        window.update(|window, cx| {
+            view.update(cx, |workspace, cx| {
+                workspace.request_close_screen(screen.clone(), window, cx);
+                assert!(
+                    workspace.drawer_popover.is_none(),
+                    "the last detach closes the panel before the model answers"
+                );
+            })
+        });
+        draw(window);
+        window.update(|window, cx| {
+            view.update(cx, |workspace, cx| {
+                workspace.pending_close = None;
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
         click(window, trigger);
         window.update(|window, cx| {
             view.update(cx, |workspace, cx| {
-                workspace.choose_drawer_port(&old, &choice, cx);
-                assert!(
-                    workspace.drawer_port_menu.is_some(),
-                    "old callback cannot consume a new menu"
-                );
-                let immediate = workspace.drawer_port_menu.clone().unwrap();
-                workspace.request_close_screen(screen.clone(), window, cx);
-                assert!(
-                    workspace.drawer_port_menu.is_none(),
-                    "final detach revokes before model acknowledgement"
-                );
-                workspace.choose_drawer_port(&immediate, &choice, cx);
-                let mut model = workspace.model.clone().unwrap();
-                let remote_owner = model.source(group.source_id()).unwrap().source_token();
-                model.detach(group.owner(), &screen).unwrap();
-                workspace.reconcile(model.clone(), window, cx);
-                assert!(workspace.drawer_port_menu.is_none());
-                model.open_existing(remote_owner, &screen).unwrap();
-                workspace.reconcile(model, window, cx);
-                assert!(
-                    group.is_current(workspace.model.as_ref().unwrap()),
-                    "same source group reappears"
-                );
-                workspace.choose_drawer_port(&old, &choice, cx);
-                assert!(
-                    workspace.drawer_port_menu.is_none(),
-                    "reappearing group cannot revive a capture"
-                );
+                assert!(workspace.drawer_popover.is_some());
+                workspace.reconcile(WindowWorkspace::new(Uuid::new_v4()), window, cx);
+                assert!(workspace.drawer_popover.is_none());
             })
         });
         while let Ok(command) = receiver.try_recv() {
@@ -815,81 +805,48 @@ fn stale_popup_choices_cannot_restart_changed_ports_or_revive_after_detach() {
 }
 
 #[test]
-fn projection_is_bounded_truthful_and_uses_shared_mapping_states() {
+fn dragging_remote_caption_moves_the_complete_group_without_selecting_or_connecting() {
     with_view(|window, view| {
         let (group, mut receiver) = setup(window, &view);
-        window.update(|_, cx| view.update(cx, |workspace, _| {
-            let model = workspace.model.as_mut().unwrap();
-            model.ui_test_port_observation(group.source_id(), &[(3000, "node"), (3001, "worker")]).unwrap();
-            let saved = json!({"version":1,"forwards":(3002..3016).map(|remote|
-                json!({"target":"two.test","remote":remote,"local":remote+1000,"label":"App","enabled":remote!=3003,
-                    "lastError":if remote==3004 { json!({"code":"fixture","message":"Failed","hint":null}) } else { serde_json::Value::Null }})).collect::<Vec<_>>()});
-            let active = r#"[{"target":"two.test","remote":3000,"local":4173,"state":"up"},{"target":"two.test","remote":3002,"local":4002,"state":"down"},{"target":"one.test","remote":9999,"local":9999,"state":"up"}]"#;
-            assert!(workspace.ports.accept(snapshot(group.owner(), 2, Some(active), Some(&saved.to_string()))));
-            let projected = workspace.drawer_port_presentation(&group);
-            assert_eq!(projected.total, 16);
-            assert_eq!(projected.entries.len(), MAX_MENU_PORTS);
-            assert!(projected.status.is_none());
-            assert!(projected.entries[0].label.starts_with("Open 3000 · localhost:4173"));
-            assert!(projected.entries[1].label.contains("detected"));
-            assert!(projected.entries[2].label.contains("reconnecting"));
-            assert!(projected.entries[3].label.contains("paused, preferred local 4003"));
-            assert!(projected.entries[4].label.contains("failed, preferred local 4004"));
-            assert!(projected.entries[5].label.contains("saved, preferred local 4005"));
-            assert!(projected.entries.iter().all(|entry| entry.choice.key.target() == group.target()));
-            assert!(workspace.ports.accept(snapshot(group.owner(), 3, None, Some(EMPTY_SAVED))));
-            assert_eq!(workspace.drawer_port_presentation(&group).status, Some("Some port information is unavailable"));
-            workspace.model.as_mut().unwrap().ui_test_port_observation(group.source_id(), &[]).unwrap();
-            assert!(workspace.ports.accept(snapshot(group.owner(), 4, Some("[]"), Some(EMPTY_SAVED))));
-            assert_eq!(workspace.drawer_port_presentation(&group).status, Some("No ports reported"));
-            workspace.model.as_mut().unwrap().disconnect(group.source_id()).unwrap();
-            assert_eq!(workspace.drawer_port_presentation(&group).status, Some("Host has not reported port discovery"));
-        }));
-        assert!(
-            receiver.try_recv().is_err(),
-            "projection never submits a command"
-        );
-    });
-}
-
-#[test]
-fn menu_owner_replacement_and_consumed_choice_cannot_submit_again() {
-    with_view(|window, view| {
-        let (group, mut receiver) = setup(window, &view);
-        click(window, format!("drawer-ports-{}", group.source_id()));
-        let (capture, choice) = window.update(|_, cx| {
-            let workspace = view.read(cx);
+        let (first, selected) = window.update(|_, cx| {
+            let model = view.read(cx).model.as_ref().unwrap();
             (
-                workspace.drawer_port_menu.clone().unwrap(),
-                workspace.drawer_port_presentation(&group).entries[0]
-                    .choice
-                    .clone(),
+                model.source_for_target("one.test").unwrap(),
+                model.shown_key(),
             )
         });
+        let bounds = |window: &mut VisualTestContext, id| {
+            window
+                .debug_bounds(Box::leak(format!("drawer-group-{id}").into_boxed_str()))
+                .unwrap()
+        };
+        let start = bounds(window, group.source_id()).origin + point(px(70.), px(22.));
+        let end = bounds(window, first).origin + point(px(70.), px(2.));
+        window.simulate_mouse_move(start, None, Modifiers::default());
+        window.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        window.simulate_mouse_move(
+            start - point(px(0.), px(8.)),
+            Some(MouseButton::Left),
+            Modifiers::default(),
+        );
+        draw(window);
+        window.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        draw(window);
+        assert!(
+            window.update(|_, cx| view.read(cx).drawer_host_drag.is_some()),
+            "caption drag is owned by the complete group"
+        );
+        window.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        draw(window);
+        let command = receiver.try_recv().expect("one metadata mutation");
+        assert!(matches!(command.kind(), Command::ManageHost { request, .. }
+            if request.action() == splitty_client_core::hub::HostManagementAction::SetOrder && request.target() == "two.test"));
+        assert!(
+            receiver.try_recv().is_err(),
+            "dragging neither connects nor selects"
+        );
         window.update(|_, cx| {
-            view.update(cx, |workspace, cx| {
-                workspace.choose_drawer_port(&capture, &choice, cx);
-                workspace.choose_drawer_port(&capture, &choice, cx);
-            })
+            assert_eq!(view.read(cx).model.as_ref().unwrap().shown_key(), selected)
         });
-        assert!(matches!(
-            receiver.try_recv().unwrap().kind(),
-            Command::ManageForward { .. }
-        ));
-        assert!(receiver.try_recv().is_err());
-        press(window, "escape");
-        click(window, format!("drawer-ports-{}", group.source_id()));
-        window.update(|window, cx| {
-            view.update(cx, |workspace, cx| {
-                let capture = workspace.drawer_port_menu.clone().unwrap();
-                let replacement = WindowWorkspace::new(Uuid::new_v4());
-                workspace.reconcile(replacement, window, cx);
-                assert!(workspace.drawer_port_menu.is_none());
-                workspace.choose_drawer_port(&capture, &choice, cx);
-            })
-        });
-        while let Ok(command) = receiver.try_recv() {
-            assert!(!matches!(command.kind(), Command::ManageForward { .. }));
-        }
     });
 }

@@ -386,6 +386,7 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
             json!({})
         } else {
             let body = match operation.operation {
+                Operation::SshAnswer => json!({"id":"f".repeat(64),"answer":"yes"}),
                 Operation::HostForget => json!({"target":"vm1"}),
                 Operation::HostPreferencesUpdate => json!({"target":"vm1","alias":"Forbidden"}),
                 Operation::HostOrderUpdate => json!({"order":["vm2","vm1"]}),

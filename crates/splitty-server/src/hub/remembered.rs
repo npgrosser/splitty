@@ -64,6 +64,10 @@ pub struct RememberedScreen {
     /// Its place among the window's screens, local ones included.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<u32>,
+    /// Its host was closed in the client: the screen is offered again, but
+    /// not reopened without being asked for.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closed: bool,
 }
 
 impl RememberedScreen {
@@ -194,6 +198,7 @@ mod tests {
             screen_id: id.into(),
             name: None,
             position: None,
+            closed: false,
         }
     }
 
@@ -210,9 +215,11 @@ mod tests {
             {"target": "user@vm1", "screenId": "screen-1", "name": "api", "position": 2},
             {"target": "vm1", "screenId": "screen-1"},
             {"target": "user@vm1", "screenId": "screen-2", "name": ""},
+            {"target": "vm2", "screenId": "screen-1", "closed": true},
         ]});
         let remembered = check(document.clone()).expect("the shape");
-        assert_eq!(remembered.screens.len(), 3);
+        assert_eq!(remembered.screens.len(), 4);
+        assert!(remembered.screens[3].closed && !remembered.screens[0].closed);
         assert_eq!(
             serde_json::to_value(&remembered).expect("JSON"),
             document,

@@ -1,4 +1,4 @@
-# Pinned Linux event-loop fairness patch
+# Pinned Linux platform patches
 
 Base: published `gpui-pre-linux` **0.3.11**, Apache-2.0 (`LICENSE-APACHE`).
 Crate archive SHA-256: `79cac5cbd3485c1e3db8eafd5dc69019188f5cb0a39846946af772efa386f624`.
@@ -15,6 +15,16 @@ The native two-host window regression passes with sustained input, delayed
 creation confirmation, detach/reopen and normal cleanup; see the acceptance
 record in `docs/gpui-spike.md` in the enclosing workspace. Remove the path override
 when a reviewed upstream release supplies the same guarantee and passes these checks.
+
+## Copied files on Wayland
+
+Second local change, in `src/linux/wayland/clipboard.rs`: a clipboard that
+offers `text/uri-list` is read as `ClipboardEntry::ExternalPaths` in addition
+to its text or image. Upstream reads text or an image only, so files copied in
+a file manager arrive as their names. Splitty stores pasted files on the
+pane's own server and needs the files themselves. The item's text is
+unchanged, so text inputs paste what they pasted before. X11 is unchanged.
+`file_list_names_only_local_files` covers the parsing.
 
 ## Targeted checks
 

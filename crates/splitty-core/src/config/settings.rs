@@ -120,6 +120,8 @@ pub struct HomeConfig {
     #[serde(default)]
     pub remote: RemoteSettings,
     #[serde(default)]
+    pub native_tabs: NativeTabSettings,
+    #[serde(default)]
     pub shells: ShellSettings,
 }
 
@@ -138,6 +140,7 @@ impl Default for HomeConfig {
             notifications: NotificationSettings::default(),
             experimental: ExperimentalSettings::default(),
             remote: RemoteSettings::default(),
+            native_tabs: NativeTabSettings::default(),
             shells,
         }
     }
@@ -294,6 +297,32 @@ pub struct EditorProject {
     pub editor: String,
 }
 
+/// The tab bars of the native app. They are its own: the native app shows
+/// every group action and a close button on every tab unless told otherwise,
+/// where `tabs` keeps what the web client shows.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase", default)]
+pub struct NativeTabSettings {
+    pub show_split: bool,
+    pub show_float: bool,
+    pub show_maximize: bool,
+    /// `always`, or `active` for the selected tab of a group only.
+    pub close_button: String,
+    /// Tabs stay where they are: no drag and drop.
+    pub locked: bool,
+}
+impl Default for NativeTabSettings {
+    fn default() -> Self {
+        Self {
+            show_split: true,
+            show_float: true,
+            show_maximize: true,
+            close_button: "always".into(),
+            locked: false,
+        }
+    }
+}
+
 /// Screens of other hosts (`remote-screens`).
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -303,6 +332,11 @@ pub struct RemoteSettings {
     /// any local process can reach.
     #[serde(default)]
     pub auto_forward_ports: bool,
+    /// The hosts, by SSH target, that the native app connects at start when
+    /// their screens were open as it was closed. Empty by default: connecting
+    /// can ask for a password before anything else was done.
+    #[serde(default)]
+    pub reconnect_hosts: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -501,6 +535,10 @@ impl HomeConfig {
             self.tabs.min_width = 12;
         }
 
+        if !matches!(self.native_tabs.close_button.as_str(), "always" | "active") {
+            self.native_tabs.close_button = "always".into();
+        }
+
         // Appearance settings
         if !matches!(self.appearance.theme_mode.as_str(), "fixed" | "auto") {
             self.appearance.theme_mode = "fixed".into();
@@ -545,6 +583,18 @@ impl HomeConfig {
             self.experimental.resize_debounce = 5;
         }
 
+        // Remote settings: a bounded list of distinct plain targets.
+        let mut hosts = Vec::new();
+        for host in std::mem::take(&mut self.remote.reconnect_hosts) {
+            if valid_reconnect_host(&host)
+                && !hosts.contains(&host)
+                && hosts.len() < MAX_RECONNECT_HOSTS
+            {
+                hosts.push(host);
+            }
+        }
+        self.remote.reconnect_hosts = hosts;
+
         let detection = detect_shell_profiles(&DetectionEnvironment::current());
         reconcile_shell_settings(&mut self.shells, &detection);
     }
@@ -575,6 +625,7 @@ pub fn settings_metadata() -> Value {
             "appearance.zoomScope": {"values": ["window", "terminals"]},
             "tabs.closeButton": {"values": ["always", "active"]},
             "tabs.minWidth": {"min": 0, "max": 40, "step": 1},
+            "nativeTabs.closeButton": {"values": ["always", "active"]},
             "drawer.sidebarWidth": {"min": 150, "max": 400, "step": 10},
             "window.titleBarColorMode": {"values": ["tabBar", "native", "terminal", "activeTab"]},
             "window.titleBarHeight": {"min": 0, "max": 60, "step": 1, "values": [0, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 58, 59, 60]},
@@ -622,6 +673,8 @@ fn validate_patch(patch: &Value) -> Result<(), ConfigError> {
                     validate_editor_extensions(child, &field)?;
                 } else if field == "editors.projects" {
                     validate_editor_projects(child, &field)?;
+                } else if field == "remote.reconnectHosts" {
+                    validate_reconnect_hosts(child, &field)?;
                 } else if field == "shells" { /* Shell profiles have their own update validation. */
                 } else {
                     walk(child, expected_child, limits, &field)?;
@@ -677,6 +730,36 @@ fn validate_patch(patch: &Value) -> Result<(), ConfigError> {
 
 fn valid_editor(value: &Value) -> bool {
     matches!(value.as_str(), Some("vscode" | "zed"))
+}
+
+/// How many hosts can be reconnected at start.
+const MAX_RECONNECT_HOSTS: usize = 64;
+
+/// A target as the host list spells it; whether it is an SSH target is
+/// decided where it is connected, not here.
+fn valid_reconnect_host(host: &str) -> bool {
+    !host.is_empty()
+        && host.chars().count() <= 256
+        && !host.starts_with('-')
+        && !host.chars().any(|c| c.is_control() || c.is_whitespace())
+}
+
+fn validate_reconnect_hosts(value: &Value, path: &str) -> Result<(), ConfigError> {
+    let Some(hosts) = value.as_array() else {
+        return Err(invalid(path, "expected an array"));
+    };
+    if hosts.len() > MAX_RECONNECT_HOSTS {
+        return Err(invalid(path, "too many hosts"));
+    }
+    for (index, host) in hosts.iter().enumerate() {
+        if !host.as_str().is_some_and(valid_reconnect_host) || hosts[..index].contains(host) {
+            return Err(invalid(
+                &format!("{path}.{index}"),
+                "expected a distinct host",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn validate_editor_extensions(value: &Value, path: &str) -> Result<(), ConfigError> {
@@ -1358,6 +1441,22 @@ mod tests {
         // The frontend's camelCase update survives a reload, snake_case on disk.
         let partial = serde_json::json!({"remote": {"autoForwardPorts": true}});
         assert!(update_at(&path, partial).unwrap().remote.auto_forward_ports);
+        assert!(load_from(&path).remote.reconnect_hosts.is_empty());
+        let partial = serde_json::json!({"remote": {"reconnectHosts": ["demo@vm1", "vm2:2222"]}});
+        let updated = update_at(&path, partial).unwrap();
+        assert_eq!(updated.remote.reconnect_hosts, ["demo@vm1", "vm2:2222"]);
+        assert!(updated.remote.auto_forward_ports);
+        for refused in [
+            serde_json::json!(["vm1", "vm1"]),
+            serde_json::json!(["-oProxyCommand=x"]),
+            serde_json::json!(["two words"]),
+            serde_json::json!([7]),
+            serde_json::json!("vm1"),
+        ] {
+            let partial = serde_json::json!({"remote": {"reconnectHosts": refused}});
+            assert!(update_at(&path, partial).is_err());
+        }
+        assert_eq!(load_from(&path).remote.reconnect_hosts.len(), 2);
         let toml = fs::read_to_string(&path).unwrap();
         assert!(
             toml.contains("[remote]\nauto_forward_ports = true"),

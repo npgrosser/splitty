@@ -308,6 +308,59 @@ pub(crate) mod fake_peer {
         }
     }
     #[tokio::test]
+    async fn host_order_uses_metadata_only_and_validates_the_exact_acknowledgement() {
+        for (body, outcome) in [
+            (
+                r#"{"version":1,"order":["vm2","vm1"]}"#,
+                HostManagementOutcome::Applied,
+            ),
+            (
+                r#"{"version":1,"order":["vm1","vm2"]}"#,
+                HostManagementOutcome::Uncertain,
+            ),
+        ] {
+            let (api, task, dir) = scripted_operations(
+                vec![
+                    (200, body.into(), false),
+                    (200, serde_json::to_string(&sample()).unwrap(), false),
+                ],
+                None,
+                None,
+                Some(vec![
+                    (
+                        "hostOrder.update",
+                        serde_json::json!({"body":{"order":["vm2","vm1"]}}),
+                    ),
+                    ("remote.directory.get", serde_json::json!({})),
+                ]),
+            )
+            .await;
+            let owner = owner();
+            let mut client = HubClient::new(api, owner.connection_id());
+            client
+                .enqueue(
+                    owner,
+                    Uuid::new_v4(),
+                    HostManagementRequest::set_order("vm2", vec!["vm2".into(), "vm1".into()])
+                        .unwrap(),
+                )
+                .unwrap();
+            assert_eq!(management(&mut client).await.outcome(), outcome);
+            assert!(matches!(
+                next(&mut client).await.state,
+                HostDirectoryState::Loading { .. }
+            ));
+            assert!(matches!(
+                next(&mut client).await.state,
+                HostDirectoryState::Ready(_)
+            ));
+            client.finish().await.unwrap();
+            task.await.unwrap();
+            std::fs::remove_dir_all(dir).unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn changed_during_write_does_not_discard_acknowledgement() {
         let (send, wait) = tokio::sync::oneshot::channel();
         let (observed, received) = tokio::sync::oneshot::channel();

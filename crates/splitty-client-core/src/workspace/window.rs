@@ -165,7 +165,7 @@ impl WindowWorkspace {
         }
         Ok(())
     }
-    /// Validate a ready opened host independently of the window's selected source.
+    /// Validate a ready host, including one without any opened Screens.
     pub fn validate_remote_screen_creation(
         &self,
         target: &HostActionTarget,
@@ -743,6 +743,58 @@ impl WindowWorkspace {
             .ok_or_else(|| invalid("Screen source is gone"))?
             .select_opened(key.screen_id())?;
         self.selected = Some(key.clone());
+        Ok(())
+    }
+    /// Open the listed Screens of one host that its catalog still has, in
+    /// their order, and show the first of them. Returns whether the window
+    /// gained a reference.
+    pub fn open_listed(&mut self, owner: SourceToken, keys: &[ScreenKey]) -> io::Result<bool> {
+        let source = keys
+            .first()
+            .map(ScreenKey::source_id)
+            .ok_or_else(|| invalid("no Screens to open"))?;
+        if keys.iter().any(|key| key.source_id() != source) {
+            return Err(invalid("Screens belong to several hosts"));
+        }
+        let count = |window: &Self| {
+            window
+                .source(source)
+                .map_or(0, |model| model.screens().len())
+        };
+        let before = count(self);
+        let mut first = None;
+        let mut failure = None;
+        for key in keys {
+            match self.open_existing(owner, key) {
+                Ok(()) => {
+                    first.get_or_insert(key);
+                }
+                Err(error) => failure = Some(error),
+            }
+        }
+        let Some(first) = first else {
+            return Err(failure.expect("a listed Screen failed"));
+        };
+        self.open_existing(owner, first)?;
+        Ok(count(self) != before)
+    }
+    /// Remove the window's references to every Screen of one source. The
+    /// Screens keep running where they are.
+    pub fn detach_all(&mut self, owner: SourceToken, id: SourceId) -> io::Result<()> {
+        self.check_owner(owner)?;
+        let keys: Vec<ScreenKey> = self
+            .source(id)
+            .map(|model| {
+                model
+                    .screens()
+                    .iter()
+                    .map(|screen| model.screen_key(screen.id.as_str()))
+                    .collect()
+            })
+            .unwrap_or_default();
+        for key in &keys {
+            self.detach(owner, key)?;
+        }
         Ok(())
     }
 

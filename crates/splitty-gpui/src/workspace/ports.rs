@@ -5,7 +5,6 @@ use gpui_kit::component::{
     checkbox::Checkbox,
     dialog::DialogFooter,
     input::{Input as KitInput, InputGroup},
-    menu::{DropdownMenu, PopupMenuItem},
 };
 use splitty_client_core::{
     external_links::WebUrl,
@@ -35,7 +34,7 @@ struct PortForm {
     remote: Entity<InputState>,
     local: Entity<InputState>,
     label: Entity<InputState>,
-    remember: bool,
+    restore: bool,
     edit_saved: bool,
     pending: Option<Uuid>,
     error: Option<String>,
@@ -275,17 +274,14 @@ impl Workspace {
             .w_full()
             .flex()
             .items_center()
-            .pl_6()
-            .pr_3()
             .gap_2()
             .border_b_1()
             .border_color(cx.theme().border)
-            .child(div().font_weight(FontWeight::SEMIBOLD).child("Ports"))
             .child(
                 div()
-                    .text_sm()
+                    .text_size(chrome_rems(12.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(super::hosts::display(&target)),
+                    .child("Forward to this computer"),
             )
             .child(div().flex_1())
             .child(
@@ -293,8 +289,10 @@ impl Workspace {
                     "port-add:{}:{target}",
                     target.len()
                 )))
+                .focus_ring(focus_visible(cx))
                 .label("Add port…")
-                .small()
+                .xsmall()
+                .h(chrome_rems(24.))
                 .ghost()
                 .disabled(owner.is_none())
                 .accessibility_label(format!("Add port for {target}"))
@@ -319,7 +317,8 @@ impl Workspace {
         self.open_port_form(None, window, cx);
         if let Some(form) = self.ports.form.as_ref() {
             form.target.update(cx, |input, cx| {
-                input.set_value(target.to_owned(), window, cx)
+                input.set_value(target.to_owned(), window, cx);
+                input.set_disabled(true, cx);
             });
         }
     }
@@ -334,38 +333,22 @@ impl Workspace {
         cx: &mut App,
     ) -> AnyElement {
         let key = row.key().clone();
-        let state = row.state();
-        let primary = if state == ForwardState::Up {
-            "Open"
-        } else if matches!(state, ForwardState::Paused | ForwardState::Failed) {
-            "Resume"
-        } else {
-            "Forward"
-        };
+        let active = row.state() == ForwardState::Up;
         let label = row
             .label()
-            .filter(|label| !label.is_empty())
+            .filter(|s| !s.is_empty())
+            .or(row.process())
             .map(super::hosts::display)
             .unwrap_or_else(|| format!("Port {}", key.remote()));
-        let detail = match (row.local(), row.process()) {
-            (Some(local), Some(process)) => format!(
-                "Remote {} → localhost:{local} · {}",
-                key.remote(),
-                super::hosts::display(process)
-            ),
-            (Some(local), None) => format!("Remote {} → localhost:{local}", key.remote()),
-            (None, Some(process)) => format!(
-                "Remote {} · {}",
-                key.remote(),
-                super::hosts::display(process)
-            ),
-            (None, None) => format!("Remote {} · Local port chosen when forwarded", key.remote()),
+        let detail = match row.local() {
+            Some(local) => format!("{} → localhost:{local}", key.remote()),
+            None => format!("Remote {} · TCP", key.remote()),
         };
         let primary_key = key.clone();
         let primary_local = row.local();
-        let menu_key = key.clone();
-        let menu_row = row.clone();
-        let menu_weak = weak.clone();
+        let settings_row = row.clone();
+        let settings_weak = weak.clone();
+        let primary = if active { "Copy address" } else { "Forward" };
         div()
             .id(SharedString::from(format!(
                 "host-port:{}:{}",
@@ -378,10 +361,14 @@ impl Workspace {
             .flex()
             .items_center()
             .gap_3()
-            .pl_8()
-            .pr_3()
             .border_b_1()
             .border_color(cx.theme().border)
+            .child(
+                Icon::new(IconName::Network)
+                    .xsmall()
+                    .h(chrome_rems(24.))
+                    .text_color(cx.theme().muted_foreground),
+            )
             .child(
                 div()
                     .flex_1()
@@ -398,22 +385,25 @@ impl Workspace {
                     )
                     .child(
                         div()
-                            .text_sm()
+                            .text_size(chrome_rems(12.))
                             .text_color(cx.theme().muted_foreground)
-                            .overflow_hidden()
-                            .text_ellipsis()
                             .child(detail),
                     )
                     .when_some(row.error().map(super::hosts::display), |view, error| {
-                        view.child(div().text_sm().text_color(cx.theme().danger).child(error))
+                        view.child(
+                            div()
+                                .text_size(chrome_rems(12.))
+                                .text_color(cx.theme().danger)
+                                .child(error),
+                        )
                     })
                     .when_some(
-                        feedback.map(|(text, outcome)| (text.to_owned(), outcome)),
-                        |view, (feedback, outcome)| {
+                        feedback.map(|(text, state)| (text.to_owned(), state)),
+                        |view, (text, state)| {
                             view.child(
                                 div()
-                                    .text_sm()
-                                    .text_color(match outcome {
+                                    .text_size(chrome_rems(12.))
+                                    .text_color(match state {
                                         ForwardOutcome::Succeeded | ForwardOutcome::Pending => {
                                             cx.theme().muted_foreground
                                         }
@@ -424,18 +414,16 @@ impl Workspace {
                                             cx.theme().danger
                                         }
                                     })
-                                    .overflow_hidden()
-                                    .text_ellipsis()
-                                    .child(super::hosts::display(&feedback)),
+                                    .child(super::hosts::display(&text)),
                             )
                         },
                     ),
             )
             .child(
                 div()
-                    .text_sm()
+                    .text_size(chrome_rems(12.))
                     .text_color(cx.theme().muted_foreground)
-                    .child(state_text(state)),
+                    .child(state_text(row.state())),
             )
             .child(
                 Button::new(SharedString::from(format!(
@@ -443,8 +431,10 @@ impl Workspace {
                     key.target(),
                     key.remote()
                 )))
+                .focus_ring(focus_visible(cx))
                 .label(primary)
-                .small()
+                .xsmall()
+                .h(chrome_rems(24.))
                 .disabled(owner.is_none() || pending)
                 .accessibility_label(format!("{primary} {} port {}", key.target(), key.remote()))
                 .on_click(move |_, _, cx| {
@@ -452,16 +442,31 @@ impl Workspace {
                         if this.ports.owner != owner || this.lifecycle_token() != owner {
                             return;
                         }
-                        let request = if primary == "Open" {
-                            ForwardRequest::open(primary_key.clone(), primary_local, false, None)
+                        if active {
+                            let valid = this.ports.rows(this.model.as_ref()).iter().any(|row| {
+                                row.key() == &primary_key
+                                    && row.state() == ForwardState::Up
+                                    && row.local() == primary_local
+                            });
+                            if valid {
+                                if let Some(local) = primary_local {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(format!(
+                                        "localhost:{local}"
+                                    )));
+                                }
+                            }
                         } else {
-                            ForwardRequest::start(primary_key.clone(), primary_local, false, None)
-                        };
-                        match request {
-                            Ok(request) => this.submit_forward(request, OpenOrigin::Hosts, cx),
-                            Err(error) => {
-                                this.ports.error = Some(error.to_string());
-                                cx.notify();
+                            match ForwardRequest::start(
+                                primary_key.clone(),
+                                primary_local,
+                                false,
+                                None,
+                            ) {
+                                Ok(request) => this.submit_forward(request, OpenOrigin::Hosts, cx),
+                                Err(error) => {
+                                    this.ports.error = Some(error.to_string());
+                                    cx.notify();
+                                }
                             }
                         }
                     });
@@ -469,124 +474,32 @@ impl Workspace {
             )
             .child(
                 Button::new(SharedString::from(format!(
-                    "port-more:{}:{}",
+                    "port-settings:{}:{}",
                     key.target(),
                     key.remote()
                 )))
-                .icon(Icon::new(IconName::Ellipsis))
+                .focus_ring(focus_visible(cx))
+                .debug_selector({
+                    let key = key.clone();
+                    move || format!("port-settings:{}:{}", key.target(), key.remote())
+                })
+                .icon(Icon::new(IconName::SlidersHorizontal))
                 .ghost()
-                .compact()
-                .small()
+                .xsmall()
+                .h(chrome_rems(24.))
                 .accessibility_label(format!(
-                    "More for port {} on {}",
+                    "Settings for port {} on {}",
                     key.remote(),
                     key.target()
                 ))
-                .when(cfg!(all(test, feature = "ui-test-support")), |button| {
-                    button.debug_selector(|| format!("port-more:{}:{}", key.target(), key.remote()))
-                })
-                .disabled(owner.is_none())
-                .dropdown_menu(move |menu, _, _| {
-                    let mut menu = menu;
-                    let menu_owner = owner;
-                    if matches!(
-                        state,
-                        ForwardState::Up
-                            | ForwardState::Rebuilding
-                            | ForwardState::Saved
-                            | ForwardState::Failed
-                    ) || pending
-                    {
-                        let weak = menu_weak.clone();
-                        let key = menu_key.clone();
-                        let stop_label =
-                            if matches!(state, ForwardState::Saved | ForwardState::Failed)
-                                && !pending
-                            {
-                                "Pause saved port"
-                            } else {
-                                "Stop forwarding"
-                            };
-                        menu =
-                            menu.item(PopupMenuItem::new(stop_label).on_click(move |_, _, cx| {
-                                let _ = weak.update(cx, |this, cx| {
-                                    if this.ports.owner == menu_owner
-                                        && this.lifecycle_token() == menu_owner
-                                    {
-                                        this.submit_forward(
-                                            ForwardRequest::stop(key.clone()),
-                                            OpenOrigin::Hosts,
-                                            cx,
-                                        );
-                                    }
-                                });
-                            }));
-                    }
-                    if !menu_row.is_saved() {
-                        let weak = menu_weak.clone();
-                        let row = menu_row.clone();
-                        menu = menu.item(PopupMenuItem::new("Remember port").on_click(
-                            move |_, _, cx| {
-                                let _ = weak.update(cx, |this, cx| {
-                                    if this.ports.owner == menu_owner
-                                        && this.lifecycle_token() == menu_owner
-                                    {
-                                        match ForwardRequest::save(
-                                            row.key().clone(),
-                                            row.local(),
-                                            None,
-                                        ) {
-                                            Ok(request) => {
-                                                this.submit_forward(request, OpenOrigin::Hosts, cx)
-                                            }
-                                            Err(error) => {
-                                                this.ports.error = Some(error.to_string());
-                                                cx.notify();
-                                            }
-                                        }
-                                    }
-                                });
-                            },
-                        ));
-                    }
-                    {
-                        let weak = menu_weak.clone();
-                        let row = menu_row.clone();
-                        menu =
-                            menu.item(PopupMenuItem::new("Change label or local port…").on_click(
-                                move |_, window, cx| {
-                                    let _ = weak.update(cx, |this, cx| {
-                                        if this.ports.owner == menu_owner
-                                            && this.lifecycle_token() == menu_owner
-                                        {
-                                            this.open_port_form(Some(row.clone()), window, cx);
-                                        }
-                                    });
-                                },
-                            ));
-                    }
-                    if menu_row.is_saved() {
-                        let weak = menu_weak.clone();
-                        let key = menu_key.clone();
-                        menu = menu.item(
-                            PopupMenuItem::new("Forget saved port (keeps forwarding)").on_click(
-                                move |_, _, cx| {
-                                    let _ = weak.update(cx, |this, cx| {
-                                        if this.ports.owner == menu_owner
-                                            && this.lifecycle_token() == menu_owner
-                                        {
-                                            this.submit_forward(
-                                                ForwardRequest::forget(key.clone()),
-                                                OpenOrigin::Hosts,
-                                                cx,
-                                            );
-                                        }
-                                    });
-                                },
-                            ),
-                        );
-                    }
-                    menu
+                .tooltip("Local port settings…")
+                .disabled(owner.is_none() || pending)
+                .on_click(move |_, window, cx| {
+                    let _ = settings_weak.update(cx, |this, cx| {
+                        if this.ports.owner == owner && this.lifecycle_token() == owner {
+                            this.open_port_form(Some(settings_row.clone()), window, cx);
+                        }
+                    });
                 }),
             )
             .into_any_element()
@@ -638,8 +551,10 @@ impl Workspace {
                     key.target(),
                     key.remote()
                 )))
+                .focus_ring(focus_visible(cx))
                 .label("Stop")
-                .small()
+                .xsmall()
+                .h(chrome_rems(24.))
                 .disabled(owner.is_none())
                 .accessibility_label(format!(
                     "Stop pending port {} on {}",
@@ -730,7 +645,7 @@ impl Workspace {
             remote,
             local,
             label,
-            remember: edit_saved,
+            restore: row.as_ref().is_some_and(ForwardRow::restores_on_connect),
             edit_saved,
             pending: None,
             error: None,
@@ -752,7 +667,7 @@ impl Workspace {
             let Some(view) = weak.upgrade() else {
                 return dialog.title("Add port");
             };
-            let Some((target, remote, local, label, remember, editing, edit_state, pending, error)) = ({
+            let Some((target, remote, local, label, restore, editing, edit_state, pending, error)) = ({
                 let workspace = view.read(cx);
                 workspace.ports.form.as_ref().map(|form| {
                     (
@@ -760,7 +675,7 @@ impl Workspace {
                         form.remote.clone(),
                         form.local.clone(),
                         form.label.clone(),
-                        form.remember,
+                        form.restore,
                         form.edit_key.is_some(),
                         form.edit_state,
                         form.pending.is_some(),
@@ -771,8 +686,10 @@ impl Workspace {
                 return dialog.title("Add port");
             };
             if first.replace(false) {
-                if editing || !target.read(cx).value().is_empty() {
+                if editing {
                     local.read(cx).focus_handle(cx).focus(window, cx);
+                } else if !target.read(cx).value().is_empty() {
+                    remote.read(cx).focus_handle(cx).focus(window, cx);
                 } else {
                     target.read(cx).focus_handle(cx).focus(window, cx);
                 }
@@ -781,7 +698,7 @@ impl Workspace {
             let forward = weak.clone();
             let open = weak.clone();
             let save = weak.clone();
-            let remember_weak = weak.clone();
+            let restore_weak = weak.clone();
             let field = |id: &'static str,
                          label_text: &'static str,
                          input: &Entity<InputState>,
@@ -801,7 +718,7 @@ impl Workspace {
                         ),
                 )
             };
-            let mut footer = DialogFooter::new().child(
+            let mut footer = DialogFooter::new().flex_wrap().child(
                 Button::new("port-cancel")
                     .label("Cancel")
                     .outline()
@@ -824,25 +741,14 @@ impl Workspace {
                 let resume = weak.clone();
                 footer = footer.child(
                     Button::new("port-forward-local")
-                        .label(if matches!(edit_state, Some(ForwardState::Paused | ForwardState::Failed)) { "Resume with local port" } else { "Forward with local port" })
-                        .disabled(pending)
+                        .label("Forward")
+                        .disabled(pending || matches!(edit_state, Some(ForwardState::Up | ForwardState::Rebuilding)))
                         .on_click(move |_, window, cx| {
                             let _ = resume.update(cx, |this, cx| this.submit_port_form(ForwardAction::Start, window, cx));
                         }),
                 );
             } else {
-                footer = footer
-                    .child(
-                        Button::new("port-save")
-                            .label("Save without starting")
-                            .disabled(pending)
-                            .on_click(move |_, window, cx| {
-                                let _ = save.update(cx, |this, cx| {
-                                    this.submit_port_form(ForwardAction::Save, window, cx)
-                                });
-                            }),
-                    )
-                    .child(
+                footer = footer.child(
                         Button::new("port-forward")
                             .label(if pending { "Working…" } else { "Forward" })
                             .primary()
@@ -852,20 +758,46 @@ impl Workspace {
                                     this.submit_port_form(ForwardAction::Start, window, cx)
                                 });
                             }),
-                    )
-                    .child(
-                        Button::new("port-open")
-                            .label("Open")
-                            .disabled(pending)
-                            .on_click(move |_, window, cx| {
-                                let _ = open.update(cx, |this, cx| {
-                                    this.submit_port_form(ForwardAction::Open, window, cx)
-                                });
-                            }),
                     );
             }
+            let controls = view.read(cx).ports.form.as_ref().and_then(|form| form.edit_key.clone().map(|key| (key, form.edit_saved, form.owner)));
+            let local_actions = div().flex().flex_wrap().gap_2()
+                .when(!editing, |v| {
+                    let save = weak.clone();
+                    v.child(Button::new("port-save").label("Save without starting").small().outline()
+                        .disabled(pending).on_click(move |_, window, cx| {
+                            let _ = save.update(cx, |this, cx| this.submit_port_form(ForwardAction::Save, window, cx));
+                        }))
+                        .child(Button::new("port-open").label("Open as HTTP").small().outline()
+                            .disabled(pending).on_click(move |_, window, cx| {
+                                let _ = open.update(cx, |this, cx| this.submit_port_form(ForwardAction::Open, window, cx));
+                            }))
+                })
+                .when_some(controls, |v, (key, saved, owner)| {
+                let stop = weak.clone(); let stop_key = key.clone();
+                let forget = weak.clone(); let open_http = weak.clone();
+                v.child(Button::new("port-stop").debug_selector(|| "port-stop".into()).label("Stop forwarding").small()
+                    .disabled(pending || !matches!(edit_state, Some(ForwardState::Up | ForwardState::Rebuilding | ForwardState::Saved | ForwardState::Failed)))
+                    .on_click(move |_, window, cx| { let _ = stop.update(cx, |this, cx| {
+                        if this.lifecycle_token() != Some(owner) { return; }
+                        this.submit_forward(ForwardRequest::stop(stop_key.clone()), OpenOrigin::Hosts, cx);
+                        this.cancel_port_form(window, cx);
+                    }); }))
+                .child(Button::new("port-open-http").label("Open as HTTP").small().disabled(pending)
+                    .on_click(move |_, window, cx| { let _ = open_http.update(cx, |this, cx| {
+                        if this.lifecycle_token() != Some(owner) { return; }
+                        this.submit_port_form(ForwardAction::Open, window, cx);
+                    }); }))
+                .when(saved, |v| v.child(Button::new("port-forget").label("Forget settings").small().ghost()
+                    .tooltip("Remove local settings; keep the current forward running")
+                    .disabled(pending).on_click(move |_, window, cx| { let _ = forget.update(cx, |this, cx| {
+                        if this.lifecycle_token() != Some(owner) { return; }
+                        this.submit_forward(ForwardRequest::forget(key.clone()), OpenOrigin::Hosts, cx);
+                        this.cancel_port_form(window, cx);
+                    }); })))
+            });
             dialog
-                .title(if editing { "Edit port" } else { "Add port" })
+                .title(if editing { "Local port settings" } else { "Add port" })
                 .overlay_closable(false)
                 .keyboard(true)
                 .close_button(false)
@@ -896,6 +828,7 @@ impl Workspace {
                 .child(
                     div()
                         .id("port-form")
+                        .text_size(chrome_rems(12.5))
                         .when(cfg!(all(test, feature = "ui-test-support")), |view| {
                             view.debug_selector(|| "port-form-body".into())
                         })
@@ -907,29 +840,23 @@ impl Workspace {
                         .gap_3()
                         .child(field("port-target", "SSH target", &target, editing))
                         .child(field("port-remote", "Remote port", &remote, editing))
-                        .child(field("port-local", "Local port (optional)", &local, false))
+                        .child(field("port-local", "Local port (optional)", &local, matches!(edit_state, Some(ForwardState::Up | ForwardState::Rebuilding))))
+                        .when(matches!(edit_state, Some(ForwardState::Up | ForwardState::Rebuilding)), |view| view.child(
+                            div().text_sm().text_color(cx.theme().muted_foreground).child("Stop forwarding before changing the local port.")))
                         .when(editing, |view| view.child(
                             div().text_sm().text_color(cx.theme().muted_foreground)
-                                .child("Save stores details without starting. Forward or Resume tries this local port first."),
+                                .child("These settings belong to this computer. Saving does not start or stop forwarding."),
                         ))
-                        .when(!editing, |view| {
-                            view.child(
-                                Checkbox::new("port-remember")
-                                    .label("Remember after forwarding")
-                                    .accessibility_label("Remember port")
-                                    .checked(remember)
-                                    .disabled(pending)
-                                    .on_change(move |next, _, cx| {
-                                        let _ = remember_weak.update(cx, |this, cx| {
-                                            if let Some(form) = this.ports.form.as_mut() {
-                                                form.remember = *next;
-                                                cx.notify();
-                                            }
-                                        });
-                                    }),
-                            )
-                        })
-                        .child(field("port-label", "Label (optional)", &label, false))
+                        .child(Checkbox::new("port-restore")
+                            .label("Restore when I connect")
+                            .checked(restore).disabled(pending)
+                            .on_change(move |next, _, cx| {
+                                let _ = restore_weak.update(cx, |this, cx| {
+                                    if let Some(form) = this.ports.form.as_mut() { form.restore = *next; cx.notify(); }
+                                });
+                            }))
+                        .child(field("port-label", "Personal label (optional)", &label, false))
+                        .child(local_actions)
                         .when_some(error, |view, error| {
                             view.child(
                                 div()
@@ -950,7 +877,11 @@ impl Workspace {
         if form.pending.is_some() || self.lifecycle_token() != Some(form.owner) {
             return;
         }
-        if form.edit_key.is_some() && !matches!(action, ForwardAction::Save | ForwardAction::Start)
+        if form.edit_key.is_some()
+            && !matches!(
+                action,
+                ForwardAction::Save | ForwardAction::Start | ForwardAction::Open
+            )
         {
             return;
         }
@@ -968,11 +899,16 @@ impl Workspace {
             };
             let label = (form.edit_saved || !label.is_empty()).then_some(label);
             match action {
-                ForwardAction::Start => ForwardRequest::start(key, local, form.remember, label),
-                ForwardAction::Open => ForwardRequest::open(key, local, form.remember, label),
+                ForwardAction::Start => {
+                    ForwardRequest::start(key, local, form.edit_saved || form.restore, label)
+                }
+                ForwardAction::Open => {
+                    ForwardRequest::open(key, local, form.edit_saved || form.restore, label)
+                }
                 ForwardAction::Save => ForwardRequest::save(key, local, label),
                 _ => unreachable!(),
             }
+            .map(|request| request.with_restore(form.restore))
             .map_err(|error| error.to_string())
         };
         let request = match build() {
@@ -1121,7 +1057,7 @@ impl Workspace {
     }
 
     pub(super) fn revoke_screen_links(&mut self, screen: &ScreenKey, cx: &mut Context<Self>) {
-        self.revoke_drawer_port_menu_for_screen(screen);
+        self.revoke_ports_popover_for_screen(screen, cx);
         let terminals: std::collections::HashSet<_> = self
             .model
             .as_ref()
@@ -2099,7 +2035,7 @@ mod tests {
     }
 
     #[test]
-    fn saved_only_port_menu_pauses_without_starting() {
+    fn saved_port_settings_stop_without_starting() {
         let cases = [
             (
                 r#"{"version":1,"forwards":[{"target":"vm1","remote":3000,"local":4173,"label":"App","enabled":true,"lastError":null}]}"#,
@@ -2126,6 +2062,7 @@ mod tests {
                             .source_token();
                         workspace.ports.set_owner(token);
                         workspace.destination = Destination::Hosts;
+                        workspace.hosts.section = super::super::hosts::HostSection::Ports;
                         assert!(workspace.ports.accept(Arc::new(
                             ForwardSnapshot::ui_test_fixture(token, 1, Some("[]"), Some(saved))
                                 .unwrap()
@@ -2141,11 +2078,12 @@ mod tests {
                     window.draw(cx).clear(cx);
                 });
                 let more = window
-                    .debug_bounds("port-more:vm1:3000")
+                    .debug_bounds("port-settings:vm1:3000")
                     .expect("saved port row menu should be visible");
                 window.simulate_click(more.center(), Modifiers::default());
                 window.update(|window, cx| window.draw(cx).clear(cx));
-                window.simulate_keystrokes("down enter");
+                let stop = window.debug_bounds("port-stop").unwrap();
+                window.simulate_click(stop.center(), Modifiers::default());
                 let sent = receiver
                     .try_recv()
                     .expect("Pause saved port must submit Stop");

@@ -386,11 +386,12 @@ marker measured against the current rows. It submits the same relative intent
 as its Move Up/Move Down menu actions; changing order does not navigate.
 
 Drawer wheel navigation uses the web action's gesture gate: an idle gap longer
-than 120 ms or a renewed impulse greater than 1.5 times the previous magnitude
-admits another Screen step. Pixel noise below two pixels does not start a swipe;
-native line events already represent wheel movement. Ordinary selection and
-catalog acknowledgements preserve this gate so residual momentum cannot repeat
-the change. Tab-strip distance handling and terminal scrolling remain separate.
+than 120 ms admits another Screen step, while accelerating or jittering frames
+within the same continuous touchpad swipe stay debounced. Pixel noise below two
+pixels does not start a swipe; native line events already represent wheel
+movement. Ordinary selection and catalog acknowledgements preserve this gate so
+residual momentum cannot repeat the change. Tab-strip distance handling and
+terminal scrolling remain separate.
 
 Screen navigation retains at most one outgoing `ScreenModel` projection for a
 200 ms vertical Kit transition. Its terminal surfaces reuse the existing painter
@@ -672,10 +673,19 @@ Native tab dragging captures its connection, screen, pane/session and immutable
 layout snapshot. Metadata-only revisions remain admissible; changed slot
 membership, node IDs, axes or sizes cancel the gesture. A drop submits one
 `move_pane` through the same bounded worker queue, preserving surviving source
-proportions. The preview changes decoration only. A newer authoritative snapshot
-must confirm the destination before the client selects and focuses the moved
-pane; earlier snapshots and rejection cannot install a speculative layout.
-Terminal entities and attachments remain keyed by their existing identities.
+proportions. Terminal entities and attachments remain keyed by their existing
+identities.
+
+Native layout changes made with the pointer show at once, on local and remote
+screens alike. `ScreenModel` keeps the service's last state beside the shown
+one (`LayoutPreview`): a submitted `move_pane`, `move_tab` or `resize_split`
+is reduced locally with the shared mux reducer and laid over every snapshot
+until the service reports it, reports another structure, rejects it
+(`mux.op_failed`) or five seconds pass; then the service's layout shows again.
+Revisions stay the service's. A dragged divider is drawn from the drag itself
+and keeps its origin whatever snapshots arrive; sizes go out every 32 ms and
+at release. A split made by an unconfirmed move cannot be resized until the
+service has named it.
 
 Terminal input remains bytes from the native view through the generation-checked
 workspace command queue. `Client::input_bytes` preserves UTF-8 via legacy `input`
@@ -1003,6 +1013,8 @@ A program in a pane often takes an image as a path: Claude Code turns a brackete
 
 Other files take the same way as pasted images, in chunks, and come back the other way on the user's Save.
 
+The native client does the same on its own connections. The workspace worker owns the transfers of each source (`splitty-client-core`, `native_workspace/files.rs`): pasted items go out one message per answer, an offered file is read only after Save and is written into the download folder under a name that replaces nothing. The GPUI workspace (`workspace/file_transfer.rs`) turns a paste without text, or Ctrl+V with only an image or files on the clipboard, into such a request for the pane's source and shows offers, drops awaiting Send and progress as window notices. It has no destination choice for drops yet.
+
 **Into a pane.** A drop onto a terminal or scratchpad opens the shared `DropUpload.svelte` dialog, mounted by `terminal/drop_upload_view.ts`. No bytes are sent until confirmed. Temporary storage with insertion is the default; durable storage takes an existing absolute directory (suggested from `lastCwd`) and optional insertion. All dropped files, including images, use chunked `upload`; clipboard images still use `save_image` and other clipboard files use temporary `upload`. The shared batch runner counts completed files and bytes, quotes inserted paths when necessary, and inserts nothing on failure or cancellation. The dialog becomes a nonmodal progress card in the target pane; disposing its view also aborts it.
 
 `SessionClient.uploadFile` reads slices of 1 MiB, sending each as base64 only after the previous answer (`upload_progress`, then `upload_saved`, or `upload_failed`). `upload-control-v1` gates the new drop workflow, preventing old hosts from ignoring `dir`. An AbortSignal stops further reads/chunks, unsubscribes waiting listeners, and sends `upload_cancel`; timeout/error also requests cleanup on capable hosts. Neither socket queues uploads or cancellation across reconnects. The server dispatches them in connection order; cancellation discards only that connection's unfinished upload and is idempotent. A final chunk that completed before cancellation remains saved.
@@ -1157,7 +1169,7 @@ The local server is a transport hub for screens of other hosts (`splitty_server:
 
 Every hub connection has `ssh` processes of its own, opened with `Ssh::stdio_only` (`-T -a -x -o ClearAllForwardings=yes` on top of the hardening options), so the user's configuration adds no terminal and no agent, X11 or port forwards; two windows on one host hold two bridges. Nothing but the commands of the install, the handshake, the update's `daemon stop`, the bridge, the client's messages and, for a shared port, `remote-relay prepare` and `remote-relay serve` reaches the host. `GET /api/remote/hosts` lists the known hosts of the user the server runs as. The `Connector` trait separates the flow from `ssh`, so the hub's messages, error codes and relay are tested in-process against a scripted host whose bridge is a local `sh`.
 
-With `update=1`, the hub applies the same keeper/older-version/native-instance checks as `connect`. Its conditional stop goes through the checked daemon's owner socket, followed by fresh discovery; a failed identity comparison cannot stop a replacement. Unsafe updates return an explicit incompatibility result. The hub also keeps the client's remembered remote screens (`hub::remembered`): `GET` and `PUT /api/remote/screens` read and replace `remote-screens.json` in the configuration directory (`{"version":1,"screens":[{"target","screenId","name"?,"position"?}]}`, at most 200, each target valid and each (target, screen id) once, written like `recent-hosts.json`), apart from the workspace persistence, so it works with an embedded server too.
+With `update=1`, the hub applies the same keeper/older-version/native-instance checks as `connect`. Its conditional stop goes through the checked daemon's owner socket, followed by fresh discovery; a failed identity comparison cannot stop a replacement. Unsafe updates return an explicit incompatibility result. The hub also keeps the client's remembered remote screens (`hub::remembered`): `GET` and `PUT /api/remote/screens` read and replace `remote-screens.json` in the configuration directory (`{"version":1,"screens":[{"target","screenId","name"?,"position"?,"closed"?}]}`, at most 200, each target valid and each (target, screen id) once, written like `recent-hosts.json`), apart from the workspace persistence, so it works with an embedded server too.
 
 Every daemon reports the TCP ports processes of its sessions listen on, which a client can forward. On Linux, `splitty_core::pty::ports` reads `/proc/net/tcp` and `tcp6` for the sockets in state LISTEN on loopback or wildcard addresses, the parent pid in every `/proc/<pid>/stat` for the process tree of each session's shell, and the `socket:[<inode>]` links in `/proc/<pid>/fd` of those processes; a port held in two sessions counts for the lower session id. `client_session::ports` runs the scan on a blocking thread every 2 seconds while a client is connected and sends `ports.changed` with the full list right after each `mux.welcome` (also when it is empty) and to every client when the list changes; other systems send nothing. Through the hub it is just one of the host daemon's relayed messages.
 
@@ -1165,7 +1177,7 @@ The hub forwards discovered or manually entered ports (`hub::forwards`, `/api/re
 
 `PortTunnel` verifies ownership before announcing `http://localhost:<local>`. OpenSSH runs local forwarding setup before `LocalCommand`; `ExitOnForwardFailure` prevents that command when binding fails. A fixed `LocalCommand=echo SPLITTY_FORWARD_READY_V1` produces a bounded stdout marker (4 KiB, LF/CRLF), followed by the TCP/liveness check. No target, label or other input is interpolated into executable text. `ControlMaster=no`, `ControlPath=none`, `ControlPersist=no` and `ForkAfterAuthentication=no` prevent reuse or backgrounding from bypassing this proof or losing process ownership. Configuration lookup and readiness each time out after 15 seconds. An authenticating process plus somebody else's listener cannot count as ready. `connect --forward` uses the same `PortTunnel` ownership proof. `ssh -G` still rejects configured extra forwards because `ClearAllForwardings` would also clear the requested `-L`. Service HTTP, HTTPS and WebSocket traffic remains raw TCP with no added Splitty credentials.
 
-Saved preferences are separate from live state. `hub::preferences` validates `remote-forwards.json` in the private config directory, with atomic owner-only replacement through `hosts::write_private`: version 1, canonical target and remote-port keys, local port, label (at most 200 Unicode characters), and enabled state. It bounds saved entries at 32 per host and 256 total, including disabled rules. Missing, unreadable or invalid files read empty without repair. GET/PUT/DELETE `/api/remote/forward-preferences` are guarded metadata operations that neither reserve ports nor contact hosts. PUT merges only supplied fields and preserves existing enabled state; creating from a live forward captures its actual local port. Runtime `lastError` is joined into GET but never persisted. Active GET keeps its original array of `up`/`down` records.
+Saved preferences are separate from live state. `hub::preferences` validates `remote-forwards.json` in the private config directory, with atomic owner-only replacement through `hosts::write_private`: version 1, canonical target and remote-port keys, local port, label (at most 200 Unicode characters), and enabled state. It bounds saved entries at 32 per host and 256 total, including disabled rules. Missing, unreadable or invalid files read empty without repair. GET/PUT/DELETE `/api/remote/forward-preferences` are guarded metadata operations that neither reserve ports nor contact hosts. PUT merges only supplied fields, including an explicit enabled choice; omitted enabled preserves existing consent (legacy creation defaults to enabled). Native saving defaults restoration off; creating from a live forward captures its actual local port. Runtime `lastError` is joined into GET but never persisted. Active GET keeps its original array of `up`/`down` records.
 
 Only a successful send of `remote.ready` schedules restoration of that host's enabled inactive mappings. Tasks reread current consent, reuse existing openings and never delay the relay or add hub frames. Startup, login, reads and metadata edits remain passive; discovery is unnecessary. An initial failure records `lastError` and waits for explicit action or another successful readiness event. A live supervisor survives screen detachment and Forget, keeps its selected port through loss and rebuild, reports `down` and retries with growing waits up to 10 seconds. Active/opening capacity is separately bounded at 32 per host.
 
@@ -1276,13 +1288,45 @@ The experimental native Hosts destination consumes the charged client-core
 directory state described above. Targets and cached Screen IDs remain identities;
 display sanitization does not rewrite them. Cached Screen names, counts and
 observation timestamps describe the last observation, never current reachability.
-The view owns navigation, focus and bounded list rendering. Visiting it remains
+The view owns navigation, a trapped browser focus scope and virtualized selected-host
+catalog rendering. Search and the unopened filter never contact a host. The window
+title retains Screen, host and active terminal identity; terminals have no extra
+workspace header. Drawer creation belongs to each host group. Screen previews clip
+at their group; complete remote blocks use the same drag motion and persist order
+through the local host-order metadata API, with the local group fixed above them. Visiting it remains
 passive; Connect captures a known exact target and fixed local owner. A deliberate
 host stream supplies readiness and a fresh catalog, and Open adds only the chosen
-existing Screen to the shared window. Cached entries never become live references.
+existing Screen to the shared window. A deliberate Open on a cached identity retains
+one owner- and view-scoped continuation: connect, confirm that exact ID in the live
+catalog, then open it. Cancellation, owner replacement, another selected host or
+leaving Hosts revokes that continuation; missing IDs are never recreated.
 Browse demand is independent from opened references, so leaving Hosts preserves
 opened work while releasing unused host streams. Detach removes a reference;
 explicit Terminate uses the common assessed close and an ordered absence fence.
+Close host removes every reference of one host in one step (`CloseHost`) and
+releases its stream; nothing is ended on the host. The worker keeps the local
+service's list of open remote Screens (`remoteScreens.get` and
+`remoteScreens.update`, `hub/remembered.rs`) in step with the window: a host with
+open Screens is written as exactly those, a detached or ended last Screen forgets
+the host, and a closed host or a quit app leaves its entries as they are. Each
+write replaces only the hosts it names in the list the service holds, so entries
+of other hosts and clients are kept. The native client does not put remembered
+Screens back into the Drawer at start. The Hosts panel shows their count on the
+host, and choosing the host connects it and opens those that its live catalog
+still has in one command (`OpenRemoteScreens`), under the same owner- and
+view-scoped continuation as a single cached Open. A closed host's entries carry
+`closed`. Reconnecting at start is chosen per host and kept as the list
+`remote.reconnectHosts` in the local settings. The worker reads it once, and
+when the remembered list and the host directory are known it connects the listed
+hosts whose entries are not closed; each such host holds its own demand, which a closing
+panel does not release, until its catalog is known and its remaining Screens
+are opened, or until it fails and leaves the window with one notice.
+Port rows expose direct local settings. Unknown TCP services offer Forward or Copy
+address; Open as HTTP is explicit, while terminal URLs preserve their HTTP/HTTPS
+scheme and path through verified browser activation. Native requests preserve the
+saved restore choice on one-off opening; saving restoration does not start or stop
+a tunnel. Shared remote service names remain a separate protocol/persistence
+follow-up; existing mapping labels remain local to the initiating backend.
 The local all-catalog/bootstrap policy remains local-only. The native remote
 surface remains experimental while its broader lifecycle and interaction
 acceptance suite is completed.
@@ -1347,3 +1391,8 @@ sessions or history. The native appearance adapter applies the UI palette after
 Kit mode selection through the synchronized theme update API, keeping component
 tokens and Base colors aligned; it maintains readable foregrounds and mode
 defaults for unsupported values.
+### Native functions added after the remote slice
+
+The native window has a command palette and a shortcut list (`workspace/palette.rs`): every command is a `Shortcut` or one of a few palette-only actions, run through the same `run_shortcut` as its key. Viewer panes (`workspace/viewer.rs`) ask the worker for a document with `ReadViewer`; `native_workspace/viewers.rs` reads it over the pane's own connection through `document.rs`, which now carries `ifVersion` and reports `viewer.unchanged` and `viewer.failed`. The window asks only for shown panes: at first, for a newer record, and every two seconds for a file. Terminal images come from the engine's render state (`Frame::images`, `Frame::image_pixels`) and are kept as textures per image generation; only the in-stream medium is enabled. `native_workspace/auto_forward.rs` implements `remote.autoForwardPorts` from the discovery lists the window already holds. `hub/shares.rs` is the client of the local service's reverse forwards; its stream is opened on first use. `NotificationCenter::take_fresh` hands newly admitted, unwatched facts to the window for notices and system notifications. The change `native-feature-gaps` lists what is still missing.
+
+Viewer annotations live in two places. `splitty-client-core::annotations` is pure: it anchors an annotation by its quote and context, describes a selected passage as a target, orders the list and writes the review with the entries `mark_sent` names. `workspace/viewer/notes.rs` holds the list beside the document, the field and the marks, and sends `Annotate` and `AnswerReview` commands; the worker turns them into screen operations and `viewer.review_answer`. A snapshot's `reviewWait` is read from its JSON into `ScreenModel::review_wait`, because the typed record never reads a wait back. A viewer pane has no session, so drags and group actions identify it by `identity_for`, the session or the pane itself.

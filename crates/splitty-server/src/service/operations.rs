@@ -93,6 +93,8 @@ struct OpenForwardRequest {
     local: Option<i64>,
     #[serde(default)]
     automatic: bool,
+    #[serde(default, rename = "preserveRestore")]
+    preserve_restore: bool,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +106,8 @@ struct SaveForwardRequest {
     local: Option<i64>,
     #[serde(default, deserialize_with = "supplied")]
     label: Option<String>,
+    #[serde(default, deserialize_with = "supplied")]
+    enabled: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -126,7 +130,13 @@ pub(crate) async fn save_forward(hub: &Hub, body: Value) -> Reply {
         Err(error) => return refuse_forward_request(&error),
     };
     match hub
-        .save_forward(&request.target, request.port, request.local, request.label)
+        .save_forward_with_restore(
+            &request.target,
+            request.port,
+            request.local,
+            request.label,
+            request.enabled,
+        )
         .await
     {
         Ok(row) => Payload(row).into_reply(),
@@ -164,11 +174,12 @@ pub(crate) async fn open_forward(hub: &Hub, body: Value) -> Reply {
         Err(error) => return refuse_forward_request(&error),
     };
     match hub
-        .open_forward_with(
+        .open_forward_preserving_restore(
             &request.target,
             request.port,
             request.local,
             request.automatic,
+            request.preserve_restore,
         )
         .await
     {

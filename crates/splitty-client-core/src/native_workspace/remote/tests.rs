@@ -1229,3 +1229,284 @@ async fn remote_creation_navigation_withdraws_browsing_even_when_exact_connectio
     service.close().await.unwrap();
     let _ = std::fs::remove_dir_all(path);
 }
+
+#[tokio::test]
+async fn first_remote_screen_keeps_empty_browsed_host_alive_until_terminal_arrives() {
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let local_client = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(local_client.connection_id());
+    window
+        .ui_test_screen_order_fixture(&[("local", "Local")], None)
+        .unwrap();
+    let owner = window.lifecycle_token();
+    let mut local = SourceRuntime::new(local_client, owner);
+    let mut host = admitted(&service, &mut window, "empty.test");
+    let action = host.action.clone();
+    let id = action.source_id();
+    let client = service.connect().await.unwrap();
+    window.test_bind_remote_client(id, &client);
+    let token = window.source(id).unwrap().source_token();
+    window.confirm_ready(token).unwrap();
+    let mut source = SourceRuntime::new(client, token);
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            source.reconcile(&mut window).unwrap();
+            let event = source.client.next_event().await.unwrap().unwrap();
+            source.event(&mut window, Box::new(event)).unwrap();
+            if window
+                .source(id)
+                .unwrap()
+                .live_catalog()
+                .is_some_and(|catalog| catalog.is_empty())
+                && !source.observation_pending(&window)
+            {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    window.host_mut(&action).unwrap().catalog = CatalogState::Ready;
+    host.setup = None;
+    host.source = Some(source);
+    host.remote_ready = true;
+    let mut remotes = Remotes::new(&service);
+    remotes.hosts.push(host);
+    assert!(window
+        .opened()
+        .iter()
+        .all(|entry| entry.key().source_id() != id));
+    assert!(window.host(id).unwrap().is_browsing());
+    let request = window
+        .prepare_remote_screen_creation(&action, token)
+        .unwrap();
+    let result = create_remote_screen(
+        &mut window,
+        &mut local,
+        &mut remotes,
+        &mut HostConnects::default(),
+        request.clone(),
+    );
+    assert!(result.changed);
+    assert!(result.updates.is_empty());
+    assert!(!window.host(id).unwrap().is_browsing());
+    assert!(
+        !remotes.hosts[0].dispose,
+        "the new reference must replace browse demand before it is released"
+    );
+    assert!(has_references(&window, id));
+    assert!(request.is_follow_requested());
+    let source = remotes.hosts[0].source.as_mut().unwrap();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            source.reconcile(&mut window).unwrap();
+            let event = source.client.next_event().await.unwrap().unwrap();
+            let effects = source.event(&mut window, Box::new(event)).unwrap();
+            if let Some(request) = effects.follow_remote_creation {
+                window.follow_remote_creation(&request).unwrap();
+            }
+            if window.shown_key().is_some_and(|key| {
+                key.source_id() == id
+                    && window
+                        .source(id)
+                        .unwrap()
+                        .screen(key.screen_id())
+                        .is_some_and(|screen| screen.snapshot().is_some())
+            }) {
+                break;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(window.opened().len(), 2);
+    remotes.finish(&mut window).await.unwrap();
+    local.client.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[tokio::test]
+async fn a_host_restored_at_start_keeps_its_demand_until_it_settles() {
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (runtime, path) = crate::appearance::local::tests::fixture();
+    std::fs::create_dir_all(&path).unwrap();
+    runtime
+        .state
+        .hub
+        .update_host_preference(serde_json::json!({"target":"known.test","alias":"Known"}))
+        .unwrap();
+    let service: OwnedService = crate::EmbeddedService::from_runtime(runtime).into();
+    let local = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let owner = window.lifecycle_token();
+    let mut hub = HubClient::new(service.api_stream().await.unwrap(), local.connection_id());
+    let snapshot = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let HostDirectoryState::Ready(snapshot) = hub.next_update().await.state {
+                break snapshot;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    let mut remotes = Remotes::new(&service);
+    assert!(remotes
+        .restore(&mut window, owner, "unknown.test", Vec::new(), &snapshot)
+        .is_err());
+    remotes
+        .restore(
+            &mut window,
+            owner,
+            "known.test",
+            vec!["work".into()],
+            &snapshot,
+        )
+        .unwrap();
+    // A host that is already in the window is not restored a second time.
+    remotes
+        .restore(
+            &mut window,
+            owner,
+            "known.test",
+            vec!["other".into()],
+            &snapshot,
+        )
+        .unwrap();
+    assert_eq!(remotes.restoring.len(), 1);
+    let action = remotes.hosts[0].action.clone();
+    // No SSH is started: this attempt fails as an unreachable host does.
+    remotes.hosts[0].setup = Some(Box::pin(async {
+        Err(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "unreachable",
+        ))
+    }));
+
+    // A panel that closes releases what it connected, not the restore.
+    remotes.release_all_browse(&mut window);
+    assert!(window.host(action.source_id()).unwrap().is_browsing());
+    assert!(remotes.reconcile(&mut window).unwrap().updates.is_empty());
+
+    let mut notices = Vec::new();
+    for _ in 0..4 {
+        if remotes.restoring.is_empty() {
+            break;
+        }
+        let step = next(&mut remotes).await;
+        remotes.handle(&mut window, step);
+        notices.extend(remotes.reconcile(&mut window).unwrap().updates);
+    }
+    assert!(remotes.restoring.is_empty());
+    assert!(
+        matches!(notices.as_slice(), [Update::HostReconnectFailed { target }] if target == "known.test"),
+        "an unreachable host leaves with one notice"
+    );
+    assert!(window
+        .host(action.source_id())
+        .is_none_or(|host| !host.is_browsing()));
+    remotes.finish(&mut window).await.unwrap();
+    hub.finish().await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
+
+#[tokio::test]
+async fn a_restored_host_opens_the_screens_it_still_has() {
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let local = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let owner = window.lifecycle_token();
+    let used = window
+        .ui_test_screen_order_fixture(&[("local", "Local")], None)
+        .unwrap()
+        .remove(0);
+    let keys = window
+        .ui_test_screen_order_fixture(&[("api", "api"), ("logs", "logs")], Some("back.test"))
+        .unwrap();
+    let id = keys[0].source_id();
+    window.detach_all(owner, id).unwrap();
+    window.select(owner, &used).unwrap();
+    let action = window.host(id).unwrap().action_target().clone();
+    window.host_mut(&action).unwrap().browsing = true;
+    let mut host = Host::new(&service, action.clone()).unwrap();
+    host.setup = None;
+    let mut remotes = Remotes::new(&service);
+    remotes.hosts.push(host);
+    remotes.restoring.push((
+        action.clone(),
+        vec!["logs".into(), "ended".into(), "api".into()],
+    ));
+    assert!(remotes.reconcile(&mut window).unwrap().changed);
+    assert!(remotes.restoring.is_empty());
+    assert_eq!(
+        window
+            .source(id)
+            .unwrap()
+            .screens()
+            .iter()
+            .map(|screen| screen.id.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        ["logs", "api"],
+        "the stored order, without the Screen that ended"
+    );
+    assert_eq!(
+        window.shown_key(),
+        Some(used),
+        "the Screen in use stays shown"
+    );
+    assert!(!window.host(id).unwrap().is_browsing());
+    assert!(
+        !remotes.hosts[0].dispose,
+        "the opened Screens hold the host now"
+    );
+    remotes.hosts[0].setup = Some(Box::pin(async { Err(io::Error::other("test ended")) }));
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
+#[tokio::test]
+async fn a_screen_that_ended_on_its_host_leaves_the_window() {
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let local = service.connect().await.unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let keys = window
+        .ui_test_screen_order_fixture(&[("api", "api"), ("logs", "logs")], Some("back.test"))
+        .unwrap();
+    let id = keys[0].source_id();
+    window.select(window.lifecycle_token(), &keys[1]).unwrap();
+    let action = window.host(id).unwrap().action_target().clone();
+    let mut host = Host::new(&service, action).unwrap();
+    host.setup = None;
+    let mut remotes = Remotes::new(&service);
+    remotes.hosts.push(host);
+    window.ui_test_remote_catalog(id, &["api"]).unwrap();
+    assert!(window.source(id).unwrap().is_missing("logs"));
+    assert!(remotes.reconcile(&mut window).unwrap().changed);
+    assert_eq!(
+        window
+            .source(id)
+            .unwrap()
+            .screens()
+            .iter()
+            .map(|screen| screen.id.as_str().to_owned())
+            .collect::<Vec<_>>(),
+        ["api"]
+    );
+    assert_eq!(
+        window.shown_key(),
+        Some(keys[0].clone()),
+        "the view moves to a Screen that still exists"
+    );
+    assert!(!remotes.hosts[0].dispose, "the other Screen holds the host");
+    remotes.hosts[0].setup = Some(Box::pin(async { Err(io::Error::other("test ended")) }));
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}

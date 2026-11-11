@@ -1,15 +1,13 @@
 //! Owner-bound host directory and retained local host administration.
 
+use super::popover::{MenuEntry, PopoverAnchor, PopoverKind};
 use super::*;
-use gpui_kit::base::Selectable as _;
-use gpui_kit::component::{
-    menu::{DropdownMenu, PopupMenuItem},
-    ActiveTheme as _, Disableable,
-};
+use gpui_kit::base::{FocusableExt as _, Selectable as _};
+use gpui_kit::component::{ActiveTheme as _, Disableable};
 use gpui_kit::{ScrollStrategy, UniformListScrollHandle};
 use splitty_client_core::hub::{
     HostDirectoryState, HostManagementAction, HostManagementOutcome, HostManagementResult,
-    HubUpdate,
+    HubUpdate, RememberedScreens,
 };
 use splitty_client_core::workspace::{
     CatalogState, HostActionTarget, HostUpdatePlan, HostUpdateState, SourceStatus,
@@ -122,12 +120,43 @@ impl HostKey {
     }
 }
 
+pub(super) struct PendingHostOpen {
+    owner: SourceToken,
+    target: String,
+    /// The Screen the user picked, or the Screens the host had open here.
+    screens: Vec<String>,
+    restore: bool,
+    source: Option<SourceId>,
+    observed: bool,
+}
+
+impl PendingHostOpen {
+    /// What the wait is for, as a panel or the manager says it.
+    pub(super) fn label(&self) -> String {
+        match (self.restore, self.screens.len()) {
+            (false, _) => "Connecting to open the Screen…".into(),
+            (true, 1) => "Connecting to reopen 1 Screen…".into(),
+            (true, count) => format!("Connecting to reopen {count} Screens…"),
+        }
+    }
+}
+
 pub(super) struct HostsView {
     owner: Option<Uuid>,
     generation: u64,
     state: HostDirectoryState,
     pub(super) command_error: Option<String>,
     scroll: UniformListScrollHandle,
+    selected: Option<String>,
+    pub(super) section: HostSection,
+    unopened_only: bool,
+    search: Option<Entity<InputState>>,
+    search_subscription: Option<Subscription>,
+    pub(super) pending_open: Option<PendingHostOpen>,
+    /// The remote Screens the local service remembers as open here.
+    pub(super) remembered: Option<Arc<RememberedScreens>>,
+    /// The hosts chosen to be reconnected at start, as last asked for.
+    pub(super) reconnect: Vec<String>,
     connect: Option<HostConnectForm>,
     connect_subscription: Option<Subscription>,
     alias_editor: Option<HostAliasEditor>,
@@ -144,6 +173,14 @@ impl Default for HostsView {
             state: HostDirectoryState::Unavailable,
             command_error: None,
             scroll: UniformListScrollHandle::new(),
+            selected: None,
+            section: HostSection::Host,
+            unopened_only: false,
+            search: None,
+            search_subscription: None,
+            pending_open: None,
+            remembered: None,
+            reconnect: Vec::new(),
             connect: None,
             connect_subscription: None,
             alias_editor: None,
@@ -169,6 +206,14 @@ impl HostsView {
         self.state = HostDirectoryState::Unavailable;
         self.command_error = None;
         self.scroll = UniformListScrollHandle::new();
+        self.selected = None;
+        self.search = None;
+        self.search_subscription = None;
+        self.pending_open = None;
+        self.remembered = None;
+        self.reconnect.clear();
+        self.unopened_only = false;
+        self.section = HostSection::Host;
         self.connect = None;
         self.connect_subscription = None;
         self.alias_editor = None;
@@ -199,6 +244,21 @@ impl HostsView {
             HostDirectoryState::Ready(snapshot) => Some(snapshot),
             HostDirectoryState::Unavailable => None,
         }
+    }
+
+    /// Whether `target` is in the saved host list.
+    pub(super) fn is_saved(&self, target: &str) -> bool {
+        self.snapshot().is_some_and(|snapshot| {
+            snapshot
+                .directory()
+                .hosts
+                .iter()
+                .any(|host| host.target == target)
+        })
+    }
+
+    pub(super) fn reconnects(&self, target: &str) -> bool {
+        self.reconnect.iter().any(|host| host == target)
     }
 
     pub(super) fn accepted_alias(&self, owner: SourceToken, target: &str) -> Option<&str> {
@@ -335,7 +395,7 @@ pub(super) fn display(text: &str) -> String {
 }
 
 #[derive(Clone)]
-enum HostAction {
+pub(super) enum HostAction {
     Connect { owner: SourceToken, target: String },
     Cancel(HostActionTarget),
     Retry(HostActionTarget),
@@ -344,7 +404,7 @@ enum HostAction {
 }
 
 #[derive(Clone)]
-enum HostRow {
+pub(super) enum HostRow {
     Host {
         target: String,
         title: String,
@@ -407,7 +467,7 @@ fn admit_host_open(
     Ok(true)
 }
 
-fn admit_withdraw_host_connect(
+pub(super) fn admit_withdraw_host_connect(
     commands: &mpsc::Sender<WorkerCommand>,
     owner: SourceToken,
     request_id: Uuid,
@@ -431,7 +491,456 @@ fn invoke_host_menu_for_owner(
 }
 
 impl Workspace {
-    fn host_action(&mut self, action: HostAction, cx: &mut Context<Self>) {
+    pub(super) fn place_host_group(
+        &mut self,
+        owner: SourceToken,
+        source: SourceId,
+        before: Option<SourceId>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(model) = self.model.as_ref().filter(|m| m.lifecycle_token() == owner) else {
+            return false;
+        };
+        let mut groups = super::host_drag::opened_host_groups(model);
+        let Some(index) = groups.iter().position(|id| *id == source) else {
+            return false;
+        };
+        if before == Some(source) || before.is_some_and(|id| !groups.contains(&id)) {
+            return false;
+        }
+        let Some(target) = model.source_target(source).map(str::to_owned) else {
+            return false;
+        };
+        groups.remove(index);
+        let at = before
+            .and_then(|id| groups.iter().position(|item| *item == id))
+            .unwrap_or(groups.len());
+        groups.insert(at, source);
+        let mut order: Vec<_> = groups
+            .iter()
+            .filter_map(|source| model.source_target(*source).map(str::to_owned))
+            .collect();
+        if let Some(snapshot) = self.hosts.snapshot() {
+            for target in &snapshot.directory().order {
+                if !order.contains(target) {
+                    order.push(target.clone());
+                }
+            }
+        }
+        let request =
+            match splitty_client_core::hub::HostManagementRequest::set_order(&target, order) {
+                Ok(request) => request,
+                Err(error) => {
+                    self.status = error.to_string();
+                    cx.notify();
+                    return false;
+                }
+            };
+        if !self.hosts.can_record_mutation(&target) {
+            return false;
+        }
+        let request_id = Uuid::new_v4();
+        if let Err(error) = self.commands.try_send(WorkerCommand::new(
+            owner,
+            Command::ManageHost {
+                request_id,
+                request,
+            },
+        )) {
+            self.status = format!("Host order was not sent: {error}");
+            cx.notify();
+            return false;
+        }
+        self.hosts.record_mutation(
+            target,
+            HostMutation {
+                owner,
+                request_id,
+                action: HostManagementAction::SetOrder,
+                outcome: HostManagementOutcome::Pending,
+                reason: None,
+            },
+        );
+        true
+    }
+
+    fn ensure_host_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.hosts.search.is_some() {
+            return;
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Search hosts…"));
+        self.hosts.search_subscription =
+            Some(cx.subscribe(&input, |_, _, event: &InputEvent, cx| {
+                if matches!(event, InputEvent::Change) {
+                    cx.notify();
+                }
+            }));
+        self.hosts.search = Some(input);
+    }
+
+    pub(super) fn host_search_focused(&self, window: &Window, cx: &App) -> bool {
+        self.hosts
+            .search
+            .as_ref()
+            .is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
+    }
+
+    fn render_host_tabs(&self, cx: &mut Context<Self>) -> AnyElement {
+        let owner = self.lifecycle_token();
+        let mut tabs = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .px_4()
+            .py_2()
+            .border_b_1()
+            .border_color(cx.theme().border);
+        for (section, label, icon) in [
+            (HostSection::Host, "Screens", IconName::PanelsTopLeft),
+            (HostSection::Ports, "Ports", IconName::SlidersHorizontal),
+        ] {
+            tabs = tabs.child(
+                Button::new(label)
+                    .focus_ring(focus_visible(cx))
+                    .xsmall()
+                    .h(chrome_rems(24.))
+                    .ghost()
+                    .label(label)
+                    .icon(Icon::new(icon))
+                    .selected(self.hosts.section == section)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.lifecycle_token() == owner {
+                            this.hosts.section = section;
+                            this.hosts
+                                .scroll
+                                .scroll_to_item_strict(0, ScrollStrategy::Top);
+                            cx.notify();
+                        }
+                    })),
+            );
+        }
+        if self.hosts.section == HostSection::Host {
+            tabs = tabs.child(div().flex_1()).child(
+                Button::new("hosts-unopened")
+                    .focus_ring(focus_visible(cx))
+                    .xsmall()
+                    .h(chrome_rems(24.))
+                    .ghost()
+                    .debug_selector(|| "hosts-unopened".into())
+                    .label(if self.hosts.unopened_only {
+                        "Not open here ✓"
+                    } else {
+                        "Not open here"
+                    })
+                    .selected(self.hosts.unopened_only)
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if this.lifecycle_token() == owner {
+                            this.hosts.unopened_only = !this.hosts.unopened_only;
+                            this.hosts
+                                .scroll
+                                .scroll_to_item_strict(0, ScrollStrategy::Top);
+                            cx.notify();
+                        }
+                    })),
+            );
+        }
+        tabs.into_any_element()
+    }
+
+    pub(super) fn known_host_screen(&self, target: &str, id: &str) -> bool {
+        self.model
+            .as_ref()
+            .and_then(|m| m.source_for_target(target).and_then(|s| m.source(s)))
+            .and_then(SourceWorkspace::live_catalog)
+            .is_some_and(|rows| rows.iter().any(|s| s.id.as_str() == id))
+            || self.hosts.snapshot().is_some_and(|snapshot| {
+                snapshot
+                    .directory()
+                    .hosts
+                    .iter()
+                    .any(|h| h.target == target && h.screens.iter().any(|s| s.id == id))
+            })
+    }
+
+    /// The Screens `target` had open in this window when it was closed or the
+    /// app quit. Empty while the host has Screens open here.
+    pub(super) fn remembered_host_screens(&self, target: &str) -> Vec<String> {
+        let Some(remembered) = &self.hosts.remembered else {
+            return Vec::new();
+        };
+        let open_here = self.model.as_ref().is_some_and(|model| {
+            model
+                .source_for_target(target)
+                .and_then(|source| model.source(source))
+                .is_some_and(|source| !source.screens().is_empty())
+        });
+        if open_here {
+            return Vec::new();
+        }
+        remembered
+            .on(target)
+            .map(|screen| screen.screen_id.clone())
+            .collect()
+    }
+
+    pub(super) fn begin_cached_host_open(
+        &mut self,
+        owner: SourceToken,
+        target: String,
+        screen: String,
+        cx: &mut Context<Self>,
+    ) {
+        if self.known_host_screen(&target, &screen) {
+            self.begin_host_open(owner, target, vec![screen], false, cx);
+        }
+    }
+
+    /// Connect `target` and reopen the Screens it had open here. False when
+    /// nothing is remembered for it.
+    pub(super) fn begin_host_restore(
+        &mut self,
+        owner: SourceToken,
+        target: String,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let screens = self.remembered_host_screens(&target);
+        if screens.is_empty() {
+            return false;
+        }
+        self.begin_host_open(owner, target, screens, true, cx);
+        self.hosts.pending_open.is_some()
+    }
+
+    fn begin_host_open(
+        &mut self,
+        owner: SourceToken,
+        target: String,
+        screens: Vec<String>,
+        restore: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.lifecycle_token() != Some(owner)
+            || !(self.destination == Destination::Hosts
+                || self.drawer_popover_host() == Some(target.as_str()))
+        {
+            return;
+        }
+        let model = self.model.as_ref().expect("checked local owner");
+        let source = model.source_for_target(&target);
+        let host = source.and_then(|s| model.host(s));
+        let command = match host {
+            Some(host) if host.can_retry() => Some(Command::RetryHost {
+                target: host.action_target().clone(),
+            }),
+            Some(host) if host.status() == SourceStatus::Closing => {
+                self.hosts.command_error =
+                    Some("This host is closing. Try again when it is ready.".into());
+                cx.notify();
+                return;
+            }
+            Some(_) => None,
+            None => Some(Command::ConnectHost {
+                target: target.clone(),
+            }),
+        };
+        self.hosts.selected = Some(target.clone());
+        self.hosts.pending_open = Some(PendingHostOpen {
+            owner,
+            target,
+            screens,
+            restore,
+            source,
+            observed: false,
+        });
+        self.hosts.command_error = None;
+        if let Some(command) = command {
+            if let Err(error) = self.commands.try_send(WorkerCommand::new(owner, command)) {
+                self.hosts.pending_open = None;
+                self.hosts.command_error = Some(format!("Open could not be sent: {error}"));
+            }
+        }
+        cx.notify();
+    }
+
+    pub(super) fn reconcile_host_open(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(mut pending) = self.hosts.pending_open.take() else {
+            return;
+        };
+        let Some(model) = self
+            .model
+            .as_ref()
+            .filter(|m| m.lifecycle_token() == pending.owner)
+        else {
+            return;
+        };
+        let in_browser = self.destination == Destination::Hosts
+            && self.hosts.selected.as_deref() == Some(pending.target.as_str());
+        if !in_browser && self.drawer_popover_host() != Some(pending.target.as_str()) {
+            return;
+        }
+        let Some(source) = model.source_for_target(&pending.target) else {
+            self.hosts.pending_open = Some(pending);
+            return;
+        };
+        if pending.source.is_some_and(|old| old != source) {
+            return;
+        }
+        pending.source = Some(source);
+        let Some(host) = model.host(source) else {
+            return;
+        };
+        if matches!(
+            host.status(),
+            SourceStatus::Connecting | SourceStatus::Reconnecting | SourceStatus::Ready
+        ) {
+            pending.observed = true;
+        }
+        if matches!(host.status(), SourceStatus::Offline | SourceStatus::Closing)
+            && pending.observed
+        {
+            self.hosts.command_error =
+                Some("The screen could not be opened. Retry its host connection.".into());
+            return;
+        }
+        if host.status() == SourceStatus::Ready && host.catalog_state() == CatalogState::Failed {
+            self.hosts.command_error =
+                Some("The screen catalog is unavailable. Retry the catalog to continue.".into());
+            return;
+        }
+        if host.status() != SourceStatus::Ready || host.catalog_state() != CatalogState::Ready {
+            self.hosts.pending_open = Some(pending);
+            return;
+        }
+        let Some(source_model) = model.source(source) else {
+            return;
+        };
+        let live = source_model.live_catalog().unwrap_or_default();
+        let present: Vec<ScreenKey> = pending
+            .screens
+            .iter()
+            .filter(|id| live.iter().any(|screen| screen.id.as_str() == id.as_str()))
+            .map(|id| source_model.screen_key(id))
+            .collect();
+        if present.is_empty() {
+            self.hosts.command_error = Some(
+                if pending.restore {
+                    "The Screens that were open here have ended on the host."
+                } else {
+                    "This screen is no longer on the host. The current catalog is shown; no replacement was created."
+                }
+                .into(),
+            );
+            return;
+        }
+        let Some(token) = model.execution_token(source) else {
+            return;
+        };
+        if pending.restore {
+            self.open_host_screens(token, present, window, cx);
+        } else if let Some(key) = present.into_iter().next() {
+            self.open_host_screen(token, key, window, cx);
+        }
+    }
+
+    /// Reopen several Screens of one connected host in one step.
+    fn open_host_screens(
+        &mut self,
+        source: SourceToken,
+        screens: Vec<ScreenKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(first) = screens.first() else {
+            return;
+        };
+        if self.execution_token(first.source_id()) != Some(source) {
+            return;
+        }
+        match self.commands.try_send(WorkerCommand::new(
+            source,
+            Command::OpenRemoteScreens { screens },
+        )) {
+            Ok(()) => {
+                self.close_drawer_popover(window, cx);
+                self.show_screens(window, cx)
+            }
+            Err(error) => {
+                self.hosts.command_error = Some(format!("Reopen could not be sent: {error}"));
+                cx.notify();
+            }
+        }
+    }
+
+    /// What the Settings view holds for the hosts to reconnect at start.
+    pub(super) fn sync_reconnect_hosts(&mut self, cx: &mut Context<Self>) {
+        let hosts = self.settings.read(cx).reconnect_hosts();
+        if self.hosts.reconnect != hosts {
+            self.hosts.reconnect = hosts;
+            cx.notify();
+        }
+    }
+
+    /// Choose whether `target` is reconnected at start when its Screens were
+    /// open as the app was closed.
+    pub(super) fn toggle_host_reconnect(&mut self, target: &str, cx: &mut Context<Self>) {
+        if !self.hosts.is_saved(target) {
+            return;
+        }
+        let mut hosts = self.settings.read(cx).reconnect_hosts();
+        match hosts.iter().position(|host| host == target) {
+            Some(index) => {
+                hosts.remove(index);
+            }
+            None => hosts.push(target.to_owned()),
+        }
+        let sent = self
+            .settings
+            .update(cx, |view, cx| view.set_reconnect_hosts(hosts, cx));
+        if !sent {
+            self.hosts.command_error =
+                Some("The setting is being saved. Try again in a moment.".into());
+        }
+        self.sync_reconnect_hosts(cx);
+        cx.notify();
+    }
+
+    /// Take a host out of this window. Its Screens keep running and are
+    /// offered again when the host is connected the next time.
+    pub(super) fn close_host(&mut self, group: &HostGroupTarget, cx: &mut Context<Self>) {
+        let Some(model) = self.model.as_ref().filter(|model| group.is_current(model)) else {
+            return;
+        };
+        let Some(target) = model
+            .host(group.source_id())
+            .map(|host| host.action_target().clone())
+        else {
+            return;
+        };
+        let screens: Vec<ScreenKey> = model
+            .opened()
+            .iter()
+            .map(|entry| entry.key().clone())
+            .filter(|key| key.source_id() == group.source_id())
+            .collect();
+        match self.commands.try_send(WorkerCommand::new(
+            group.owner(),
+            Command::CloseHost { target },
+        )) {
+            Ok(()) => {
+                self.hosts.pending_open = None;
+                for screen in &screens {
+                    self.cancel_remote_create_follow_for_detach(screen);
+                    self.revoke_screen_links(screen, cx);
+                }
+            }
+            Err(error) => self.status = format!("Close was not sent: {error}"),
+        }
+        cx.notify();
+    }
+
+    pub(super) fn host_action(&mut self, action: HostAction, cx: &mut Context<Self>) {
+        // Any explicit host lifecycle command supersedes the queued navigation.
+        self.hosts.pending_open = None;
         let (owner, command) = match action {
             HostAction::Connect { owner, target } => {
                 if self.lifecycle_token() != Some(owner) {
@@ -462,7 +971,7 @@ impl Workspace {
         self.send_captured(owner, command, cx);
     }
 
-    fn open_host_screen(
+    pub(super) fn open_host_screen(
         &mut self,
         source: SourceToken,
         key: ScreenKey,
@@ -491,7 +1000,10 @@ impl Workspace {
             &key,
             still_live,
         ) {
-            Ok(true) => self.show_screens(window, cx),
+            Ok(true) => {
+                self.close_drawer_popover(window, cx);
+                self.show_screens(window, cx)
+            }
             Ok(false) => {}
             Err(error) => {
                 self.hosts.command_error = Some(format!("Open could not be sent: {error}"));
@@ -502,7 +1014,10 @@ impl Workspace {
 
     pub(super) fn hosts_navigation_blocked(&self) -> bool {
         self.rename.is_some()
-            || self.template_dialog.is_some()
+            || self
+                .template_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.pending.is_some())
             || self.profile_picker.is_some()
             || self.tab_context_menu.is_some()
             || self.pending_template_apply.is_some()
@@ -511,16 +1026,21 @@ impl Workspace {
             || self.float_gesture.is_some()
     }
 
-    fn show_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn show_hosts(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.hosts_navigation_blocked() || self.destination == Destination::Hosts {
             return;
+        }
+        self.ensure_host_search(window, cx);
+        self.dismiss_templates(window, cx);
+        if !self.drawer_visible {
+            self.drawer_overlay_open = true;
         }
         self.destination = Destination::Hosts;
         self.cancel_remote_create_follow();
         self.refresh_ports(cx);
         self.wheel_navigation.reset();
         self.sync_visible(cx);
-        self.focus.focus(window, cx);
+        self.host_browser_focus.focus(window, cx);
         cx.notify();
     }
 
@@ -543,7 +1063,7 @@ impl Workspace {
         {
             return false;
         }
-        let Some(index) = self
+        let Some(_index) = self
             .project_host_rows()
             .iter()
             .position(|row| match (section, row) {
@@ -562,10 +1082,16 @@ impl Workspace {
                 return false;
             }
         }
+        self.hosts.selected = Some(target.target().to_owned());
+        self.hosts.section = section;
+        self.hosts.unopened_only = false;
         self.hosts
             .scroll
-            .scroll_to_item_strict(index, ScrollStrategy::Top);
-        self.focus.focus(window, cx);
+            .scroll_to_item_strict(0, ScrollStrategy::Top);
+        self.hosts
+            .scroll
+            .scroll_to_item_strict(0, ScrollStrategy::Top);
+        self.host_browser_focus.focus(window, cx);
         cx.notify();
         true
     }
@@ -575,6 +1101,7 @@ impl Workspace {
             return;
         }
         if self.destination == Destination::Hosts {
+            self.hosts.pending_open = None;
             if let Some(request_id) = self
                 .hosts
                 .update_prompt
@@ -672,33 +1199,63 @@ impl Workspace {
         }
     }
 
+    /// Show the Hosts manager with one host selected.
+    pub(super) fn manage_host(
+        &mut self,
+        target: &str,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.show_hosts(window, cx);
+        if self.destination == Destination::Hosts {
+            self.hosts.selected = Some(target.to_owned());
+            self.hosts.section = HostSection::Host;
+            self.hosts.unopened_only = false;
+            cx.notify();
+        }
+    }
+
+    /// The Drawer's Hosts item opens the hosts beside it; the manager is one
+    /// step further, from that list.
     pub(super) fn render_hosts_navigation(
         &self,
         window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let weak = cx.entity().downgrade();
         let source = self.local_model().map(SourceWorkspace::source_token);
-        let active = self.destination == Destination::Hosts;
+        let managing = self.destination == Destination::Hosts;
+        let active = managing || self.hosts_popover_open();
         let disabled = source.is_none() || (self.hosts_navigation_blocked() && !active);
-        self.drawer_nav_item(
-            "open-hosts",
-            super::drawer::NavItem {
-                icon: IconName::Server,
-                label: "Hosts",
-                shortcut: None,
-                active,
-            },
-            window,
-            cx,
-        )
-        .accessibility_label("Show Hosts")
-        .tooltip("Inspect cached Hosts")
-        .selected(active)
-        .disabled(disabled)
-        .when(disabled, |button| button.cursor_default())
-        .on_click(move |_, window, cx| {
-            let _ = weak.update(cx, |this, cx| {
+        // A host that is coming up without a group in the Drawer yet, as one
+        // reconnected at start, is announced where it will be found.
+        let connecting = self.model.as_ref().is_some_and(|model| {
+            model.hosts().any(|host| {
+                matches!(
+                    host.status(),
+                    SourceStatus::Connecting | SourceStatus::Reconnecting
+                ) && model
+                    .source(host.action_target().source_id())
+                    .is_none_or(|source| source.screens().is_empty())
+            })
+        });
+        let item = self
+            .drawer_nav_item(
+                "open-hosts",
+                super::drawer::NavItem {
+                    icon: IconName::Server,
+                    label: "Hosts",
+                    shortcut: connecting.then_some("Connecting…"),
+                    active,
+                },
+                window,
+                cx,
+            )
+            .accessibility_label("Connect to a host")
+            .selected(active)
+            .disabled(disabled)
+            .when(disabled, |button| button.cursor_default())
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
                 if !source.is_some_and(|source| {
                     this.local_model()
                         .is_some_and(|model| model.source_token() == source)
@@ -708,14 +1265,18 @@ impl Workspace {
                 if this.destination == Destination::Hosts {
                     this.show_screens(window, cx);
                 } else {
-                    this.show_hosts(window, cx);
+                    this.toggle_hosts_popover(window, cx);
                 }
-            });
-        })
-        .into_any_element()
+            }));
+        div()
+            .relative()
+            .w_full()
+            .child(self.anchor_probe("nav-hosts"))
+            .child(item)
+            .into_any_element()
     }
 
-    fn project_host_rows(&self) -> Vec<HostRow> {
+    pub(super) fn project_host_rows(&self) -> Vec<HostRow> {
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
@@ -888,6 +1449,7 @@ impl Workspace {
                     .map(|mutation| match mutation.outcome {
                         HostManagementOutcome::Pending => match mutation.action {
                             HostManagementAction::SetAlias => "Saving display name…".to_owned(),
+                            HostManagementAction::SetOrder => "Saving host order…".to_owned(),
                             HostManagementAction::Forget => "Removing from list…".to_owned(),
                             HostManagementAction::Connect => "Preparing connection…".to_owned(),
                         },
@@ -1075,17 +1637,563 @@ impl Workspace {
                 });
             }
         }
+        for row in &mut rows {
+            if let HostRow::Screen {
+                target, id, opened, ..
+            } = row
+            {
+                *opened = self.model.as_ref().is_some_and(|model| {
+                    model.opened().iter().any(|entry| {
+                        model.source_target(entry.key().source_id()) == Some(target.as_str())
+                            && entry.key().screen_id() == id
+                    })
+                });
+            }
+        }
         rows
     }
 
-    pub(super) fn render_hosts(&self, cx: &mut Context<Self>) -> AnyElement {
+    fn render_host_row(
+        &self,
+        row: &HostRow,
+        create_actions: &HashMap<String, (HostActionTarget, SourceToken)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let muted = cx.theme().muted_foreground;
+        let border = cx.theme().border;
+        let warning = cx.theme().warning;
+        let weak = cx.entity().downgrade();
+        let row_height = match row {
+            HostRow::Host { .. } => chrome_rems(72.),
+            HostRow::Screen { .. } => chrome_rems(46.),
+            HostRow::PortHeader { .. } => chrome_rems(38.),
+            _ => chrome_rems(64.),
+        };
+        match row {
+            HostRow::Host {
+                target,
+                title,
+                state,
+                detail,
+                action,
+                update,
+                update_blocked,
+                refresh_backend,
+                saved,
+                alias,
+                feedback,
+                mutation_pending,
+                owner,
+            } => {
+                let entry = div()
+                    .id(SharedString::from(format!(
+                        "host:{}:{target}",
+                        target.len()
+                    )))
+                    .h(row_height)
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .justify_center()
+                    .gap_1()
+                    .px_4()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(
+                        div()
+                            .flex()
+                            .items_baseline()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .max_w_full()
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_size(chrome_rems(13.5))
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(title.clone()),
+                            )
+                            .when(alias.is_some(), |view| {
+                                view.child(
+                                    div()
+                                        .min_w_0()
+                                        .text_size(chrome_rems(11.5))
+                                        .text_color(muted)
+                                        .overflow_hidden()
+                                        .text_ellipsis()
+                                        .whitespace_nowrap()
+                                        .child(display(target)),
+                                )
+                            }),
+                    )
+                    .when_some(feedback.clone(), |view, feedback| {
+                        view.child(
+                            div()
+                                .text_size(chrome_rems(12.))
+                                .text_color(warning)
+                                .overflow_hidden()
+                                .text_ellipsis()
+                                .whitespace_nowrap()
+                                .child(feedback),
+                        )
+                    });
+                let mut actions = div().flex().items_center().gap_2().child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(chrome_rems(11.5))
+                        .text_color(muted)
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(format!("{state} · {detail}")),
+                );
+                let remembered = self.remembered_host_screens(target).len();
+                if let Some(owner) = owner.filter(|_| remembered > 0) {
+                    let (weak, host) = (weak.clone(), target.clone());
+                    actions = actions.child(
+                        Button::new(SharedString::from(format!("host-reopen-{target}")))
+                            .focus_ring(focus_visible(cx))
+                            .debug_selector({
+                                let target = target.clone();
+                                move || format!("host-reopen-{target}")
+                            })
+                            .xsmall()
+                            .h(chrome_rems(24.))
+                            .label(if remembered == 1 {
+                                "Reopen 1 Screen".to_owned()
+                            } else {
+                                format!("Reopen {remembered} Screens")
+                            })
+                            .tooltip("Connect and open the Screens that were open here")
+                            .disabled(self.hosts.pending_open.is_some())
+                            .on_click(move |_, _, cx| {
+                                let _ = weak.update(cx, |this, cx| {
+                                    this.begin_host_restore(owner, host.clone(), cx);
+                                });
+                            }),
+                    );
+                }
+                if let Some((target, source)) = create_actions.get(target) {
+                    let target = target.clone();
+                    let source = *source;
+                    let weak = weak.clone();
+                    actions = actions.child(
+                        Button::new(SharedString::from(format!(
+                            "host-new-{}",
+                            target.source_id()
+                        )))
+                        .focus_ring(focus_visible(cx))
+                        .debug_selector({
+                            let source = source.source_id();
+                            move || format!("host-new-{source}")
+                        })
+                        .xsmall()
+                        .h(chrome_rems(24.))
+                        .label("New Screen")
+                        .on_click(move |_, window, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.create_remote_screen(None, &target, source, window, cx);
+                            });
+                        }),
+                    );
+                }
+                let open_group = self.model.as_ref().and_then(|model| {
+                    HostGroupTarget::capture(model, model.source_for_target(target)?)
+                });
+                if let Some(group) = open_group {
+                    let weak = weak.clone();
+                    actions = actions.child(
+                        Button::new(SharedString::from(format!("host-close-{target}")))
+                            .focus_ring(focus_visible(cx))
+                            .debug_selector({
+                                let target = target.clone();
+                                move || format!("host-close-{target}")
+                            })
+                            .xsmall()
+                            .h(chrome_rems(24.))
+                            .ghost()
+                            .label("Close host")
+                            .tooltip("Take the host out of this window; its Screens keep running")
+                            .on_click(move |_, _, cx| {
+                                let _ = weak.update(cx, |this, cx| this.close_host(&group, cx));
+                            }),
+                    );
+                }
+                if let Some(action) = action {
+                    let action = action.clone();
+                    let label = match &action {
+                        HostAction::Connect { .. } => "Connect",
+                        HostAction::Cancel(_) => "Cancel",
+                        HostAction::Retry(_) => "Retry",
+                        HostAction::RetryCatalog(_) => "Retry catalog",
+                        HostAction::Release(_) => "Stop browsing",
+                    };
+                    let target = target.clone();
+                    let weak = weak.clone();
+                    actions = actions.child(
+                        Button::new(SharedString::from(format!(
+                            "host-action:{}:{target}",
+                            target.len()
+                        )))
+                        .focus_ring(focus_visible(cx))
+                        .xsmall()
+                        .h(chrome_rems(24.))
+                        .label(label)
+                        .accessibility_label(format!("{label} {target}"))
+                        .on_click(move |_, _, cx| {
+                            let _ =
+                                weak.update(cx, |this, cx| this.host_action(action.clone(), cx));
+                        }),
+                    );
+                }
+                if let Some(update_target) = update {
+                    let trigger = window
+                        .use_keyed_state(
+                            SharedString::from(format!("host-update-focus-{target}")),
+                            cx,
+                            |_, cx| cx.focus_handle().tab_stop(true),
+                        )
+                        .read(cx)
+                        .clone();
+                    let update_target = update_target.clone();
+                    let update_weak = weak.clone();
+                    let update_focus = trigger.clone();
+                    actions = actions.child(
+                        Button::new(SharedString::from(format!("host-update-{target}")))
+                            .focus_ring(focus_visible(cx))
+                            .debug_selector({
+                                let target = target.clone();
+                                move || format!("host-update-{target}")
+                            })
+                            .xsmall()
+                            .h(chrome_rems(24.))
+                            .label("Update…")
+                            .track_focus(&trigger)
+                            .disabled(*update_blocked)
+                            .on_click(move |_, window, cx| {
+                                let _ = update_weak.update(cx, |this, cx| {
+                                    this.request_host_update(
+                                        update_target.clone(),
+                                        update_focus.clone(),
+                                        window,
+                                        cx,
+                                    )
+                                });
+                            }),
+                    );
+                }
+                if *refresh_backend {
+                    let refresh_weak = weak.clone();
+                    actions = actions.child(
+                        Button::new(SharedString::from(format!("host-backend-refresh-{target}")))
+                            .focus_ring(focus_visible(cx))
+                            .debug_selector({
+                                let target = target.clone();
+                                move || format!("host-backend-refresh-{target}")
+                            })
+                            .xsmall()
+                            .h(chrome_rems(24.))
+                            .ghost()
+                            .label("Refresh version")
+                            .on_click(move |_, _, cx| {
+                                let _ = refresh_weak
+                                    .update(cx, |this, cx| this.refresh_backend_version(cx));
+                            }),
+                    );
+                }
+                if *saved {
+                    let owner = *owner;
+                    let menu_target = target.clone();
+                    let menu_alias = alias.clone();
+                    let tag_open = self.drawer_popover_is("host-more");
+                    actions =
+                        actions.child(
+                            Button::new(SharedString::from(format!(
+                                "host-more:{}:{target}",
+                                target.len()
+                            )))
+                            .accessibility_label(format!("More for host {target}"))
+                            .icon(Icon::new(IconName::Ellipsis))
+                            .ghost()
+                            .compact()
+                            .xsmall()
+                            .h(chrome_rems(24.))
+                            .focus_ring(focus_visible(cx))
+                            .selected(tag_open)
+                            .disabled(*mutation_pending || owner.is_none())
+                            .on_click(cx.listener(
+                                move |this, event: &ClickEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    let Some(owner) = owner
+                                        .filter(|owner| this.lifecycle_token() == Some(*owner))
+                                    else {
+                                        return;
+                                    };
+                                    let (edit_target, edit_alias) =
+                                        (menu_target.clone(), menu_alias.clone());
+                                    let forget_target = menu_target.clone();
+                                    let reconnect_target = menu_target.clone();
+                                    let reconnects = this.hosts.reconnects(&menu_target);
+                                    let mut entries = vec![
+                                        MenuEntry::new(
+                                            "rename-host",
+                                            "Change Display Name…",
+                                            move |this, window, cx| {
+                                                invoke_host_menu_for_owner(
+                                                    owner,
+                                                    this.lifecycle_token(),
+                                                    || {
+                                                        this.edit_host_alias(
+                                                            &edit_target,
+                                                            edit_alias.as_deref(),
+                                                            window,
+                                                            cx,
+                                                        )
+                                                    },
+                                                );
+                                            },
+                                        ),
+                                        MenuEntry::new(
+                                            "forget-host",
+                                            "Remove from List",
+                                            move |this, _, cx| {
+                                                invoke_host_menu_for_owner(
+                                                    owner,
+                                                    this.lifecycle_token(),
+                                                    || this.forget_host(&forget_target, cx),
+                                                );
+                                            },
+                                        )
+                                        .detail("Keeps its Screens and port forwards running"),
+                                    ];
+                                    entries.insert(
+                                        1,
+                                        MenuEntry::new(
+                                            "reconnect-host",
+                                            "Reconnect at Start",
+                                            move |this, _, cx| {
+                                                invoke_host_menu_for_owner(
+                                                    owner,
+                                                    this.lifecycle_token(),
+                                                    || {
+                                                        this.toggle_host_reconnect(
+                                                            &reconnect_target,
+                                                            cx,
+                                                        )
+                                                    },
+                                                );
+                                            },
+                                        )
+                                        .detail("Brings back the Screens that were open")
+                                        .meta(if reconnects { "On" } else { "Off" }),
+                                    );
+                                    this.open_drawer_popover(
+                                        PopoverKind::Actions(entries),
+                                        PopoverAnchor::Pointer(event.position()),
+                                        None,
+                                        window,
+                                        cx,
+                                    );
+                                    this.tag_drawer_popover("host-more");
+                                },
+                            )),
+                        );
+                }
+                entry.child(actions).into_any_element()
+            }
+            HostRow::Screen {
+                target,
+                id,
+                label,
+                detail,
+                route,
+                opened,
+            } => {
+                let mut entry = div()
+                    .id(SharedString::from(format!(
+                        "host-screen:{}:{target}:{}:{id}",
+                        target.len(),
+                        id.len()
+                    )))
+                    .h(row_height)
+                    .w_full()
+                    .min_w_0()
+                    .flex()
+                    .items_center()
+                    .gap_3()
+                    .px_3()
+                    .pl_3()
+                    .border_b_1()
+                    .border_color(border)
+                    .child(
+                        Icon::new(IconName::Terminal)
+                            .size(chrome_rems(14.))
+                            .text_color(muted),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .whitespace_nowrap()
+                                    .child(label.clone()),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap_2()
+                                    .text_size(chrome_rems(11.))
+                                    .text_color(muted)
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(detail.clone()),
+                                    )
+                                    .when(*opened, |view| {
+                                        view.child(
+                                            div()
+                                                .flex_none()
+                                                .text_color(cx.theme().primary)
+                                                .child("Open in this window"),
+                                        )
+                                    }),
+                            ),
+                    );
+                if let Some((source, key)) = route {
+                    let source = *source;
+                    let key = key.clone();
+                    let weak = weak.clone();
+                    let action = if *opened { "Show" } else { "Open" };
+                    entry = entry.child(
+                        Button::new(SharedString::from(format!(
+                            "host-open:{}:{target}:{}:{id}",
+                            target.len(),
+                            id.len()
+                        )))
+                        .focus_ring(focus_visible(cx))
+                        .xsmall()
+                        .h(chrome_rems(24.))
+                        .label(action)
+                        .accessibility_label(format!("{action} {label} on {target}"))
+                        .on_click(move |_, window, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                this.open_host_screen(source, key.clone(), window, cx)
+                            });
+                        }),
+                    );
+                }
+                if route.is_none() && self.known_host_screen(target, id) {
+                    let owner = self.lifecycle_token();
+                    let target = target.clone();
+                    let id = id.clone();
+                    let weak = weak.clone();
+                    entry = entry.child(
+                        Button::new(SharedString::from(format!(
+                            "host-open-cached-{target}-{id}"
+                        )))
+                        .focus_ring(focus_visible(cx))
+                        .xsmall()
+                        .h(chrome_rems(24.))
+                        .label("Open")
+                        .disabled(self.hosts.pending_open.is_some())
+                        .on_click(move |_, _, cx| {
+                            let _ = weak.update(cx, |this, cx| {
+                                if let Some(owner) = owner {
+                                    this.begin_cached_host_open(
+                                        owner,
+                                        target.clone(),
+                                        id.clone(),
+                                        cx,
+                                    );
+                                }
+                            });
+                        }),
+                    );
+                }
+                if *opened {
+                    let key = self
+                        .model
+                        .as_ref()
+                        .and_then(|model| {
+                            model
+                                .source_for_target(target)
+                                .and_then(|source| model.source(source))
+                        })
+                        .map(|source| source.screen_key(id));
+                    if let Some(key) = key {
+                        let owner = self.lifecycle_token();
+                        let weak = weak.clone();
+                        entry = entry.child(
+                            Button::new(SharedString::from(format!("host-detach-{target}-{id}")))
+                                .focus_ring(focus_visible(cx))
+                                .xsmall()
+                                .h(chrome_rems(24.))
+                                .ghost()
+                                .icon(Icon::new(IconName::Unplug))
+                                .tooltip("Detach from this window; keep running on the host")
+                                .accessibility_label(format!("Detach {label} from this window"))
+                                .on_click(move |_, window, cx| {
+                                    let _ = weak.update(cx, |this, cx| {
+                                        if this.lifecycle_token() == owner {
+                                            this.request_close_screen(key.clone(), window, cx);
+                                        }
+                                    });
+                                }),
+                        );
+                    }
+                }
+                entry.into_any_element()
+            }
+            HostRow::PortHeader { target, owner } => {
+                Self::render_port_header(target, *owner, row_height, weak.clone(), cx)
+            }
+            HostRow::Port {
+                row,
+                owner,
+                feedback,
+                feedback_outcome,
+                pending,
+            } => Self::render_port_row(
+                row,
+                *owner,
+                feedback.as_deref().zip(*feedback_outcome),
+                *pending,
+                row_height,
+                weak.clone(),
+                cx,
+            ),
+            HostRow::PortPending {
+                key,
+                owner,
+                feedback,
+            } => Self::render_pending_port(key, *owner, feedback, row_height, weak.clone(), cx),
+        }
+    }
+
+    pub(super) fn render_hosts(&self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let compact = window.viewport_size().width / window.rem_size() < 46.;
         let forward_rows = self.ports.rows(self.model.as_ref());
         let theme = cx.theme();
         let muted = theme.muted_foreground;
+        let danger = theme.danger;
+        let warning = theme.warning;
         let foreground = theme.foreground;
         let border = theme.border;
-        let surface = theme.background;
-        let row_height = chrome_rems((self.appearance.font_size * 4.0 + 16.0).max(82.0));
+        let surface = theme.sidebar;
         let (status, failed, loading) = match &self.hosts.state {
             HostDirectoryState::Unavailable => (
                 "Host directory unavailable for this local service".to_owned(),
@@ -1116,7 +2224,168 @@ impl Workspace {
                 (failure_status(previous.is_some(), reason), true, false)
             }
         };
-        let rows = Arc::new(self.project_host_rows());
+        let all_rows = self.project_host_rows();
+        let selected = self
+            .hosts
+            .selected
+            .as_deref()
+            .filter(|target| {
+                all_rows
+                    .iter()
+                    .any(|row| matches!(row, HostRow::Host { target: t, .. } if t == target))
+            })
+            .or_else(|| {
+                all_rows.iter().find_map(|row| match row {
+                    HostRow::Host { target, .. } => Some(target.as_str()),
+                    _ => None,
+                })
+            });
+        let query = self
+            .hosts
+            .search
+            .as_ref()
+            .map(|input| input.read(cx).value().to_lowercase())
+            .unwrap_or_default();
+        let owner = self.lifecycle_token();
+        let mut directory = div()
+            .id("host-browser-directory")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .when(compact, |view| {
+                view.flex().overflow_x_scroll().overflow_y_hidden()
+            })
+            .px_2();
+        for row in &all_rows {
+            let HostRow::Host {
+                target,
+                title,
+                alias,
+                state,
+                detail,
+                ..
+            } = row
+            else {
+                continue;
+            };
+            if !format!("{title} {target}").to_lowercase().contains(&query) {
+                continue;
+            }
+            let list_title = if alias.is_none() {
+                display(
+                    target
+                        .rsplit_once('@')
+                        .map_or(target.as_str(), |(_, host)| host),
+                )
+            } else {
+                title.clone()
+            };
+            let target = target.clone();
+            let active = selected == Some(target.as_str());
+            let weak = cx.entity().downgrade();
+            directory = directory.child(
+                Button::new(SharedString::from(format!("browse-host-{target}")))
+                    .focus_ring(focus_visible(cx))
+                    .debug_selector({
+                        let target = target.clone();
+                        move || format!("browse-host-{target}")
+                    })
+                    .ghost()
+                    .w_full()
+                    .when(compact, |view| view.w(chrome_rems(180.)).flex_none())
+                    .h(chrome_rems(48.))
+                    .when(compact, |view| view.h(chrome_rems(48.)))
+                    .px_3()
+                    .selected(active)
+                    .accessibility_label(format!("Browse {title}, {state}"))
+                    .child(
+                        div()
+                            .w_full()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap_1()
+                            .child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .text_size(chrome_rems(12.5))
+                                    .child(Icon::new(IconName::Server).size(chrome_rems(13.)))
+                                    .child(
+                                        div()
+                                            .min_w_0()
+                                            .overflow_hidden()
+                                            .text_ellipsis()
+                                            .whitespace_nowrap()
+                                            .child(list_title),
+                                    ),
+                            )
+                            .child(
+                                div()
+                                    .text_size(chrome_rems(11.))
+                                    .text_color(muted)
+                                    .overflow_hidden()
+                                    .text_ellipsis()
+                                    .child(state.clone()),
+                            ),
+                    )
+                    .tooltip(format!("{}\n{}", display(&target), detail))
+                    .on_click(move |_, _, cx| {
+                        let _ = weak.update(cx, |this, cx| {
+                            if this.lifecycle_token() != owner {
+                                return;
+                            }
+                            this.hosts.pending_open = None;
+                            this.hosts.selected = Some(target.clone());
+                            this.hosts.unopened_only = false;
+                            this.hosts
+                                .scroll
+                                .scroll_to_item_strict(0, ScrollStrategy::Top);
+                            cx.notify();
+                        });
+                    }),
+            );
+        }
+        let rows: Vec<_> = all_rows
+            .iter()
+            .filter(|row| match row {
+                HostRow::Host { target, .. } => Some(target.as_str()) == selected,
+                HostRow::Screen { target, opened, .. } => {
+                    Some(target.as_str()) == selected
+                        && self.hosts.section == HostSection::Host
+                        && (!self.hosts.unopened_only || !opened)
+                }
+                HostRow::PortHeader { target, .. } => {
+                    Some(target.as_str()) == selected && self.hosts.section == HostSection::Ports
+                }
+                HostRow::Port { row, .. } => {
+                    Some(row.key().target()) == selected && self.hosts.section == HostSection::Ports
+                }
+                HostRow::PortPending { key, .. } => {
+                    Some(key.target()) == selected && self.hosts.section == HostSection::Ports
+                }
+            })
+            .cloned()
+            .collect();
+        let create_actions: HashMap<_, _> = self
+            .model
+            .iter()
+            .flat_map(|model| {
+                model.hosts().filter_map(|host| {
+                    let target = host.action_target();
+                    let source = model.execution_token(target.source_id())?;
+                    (self.drawer_host_actions_available()
+                        && !self
+                            .remote_create_enqueues
+                            .contains_key(&target.source_id())
+                        && model
+                            .validate_remote_screen_creation(target, source)
+                            .is_ok())
+                    .then(|| (target.target().to_owned(), (target.clone(), source)))
+                })
+            })
+            .collect();
         let visible_targets: HashSet<&str> = rows
             .iter()
             .filter_map(|row| match row {
@@ -1219,401 +2488,88 @@ impl Workspace {
                 )
             }
             Some(_)
-                if self.model.as_ref().is_some_and(|model| {
-                    model.hosts().any(|host| {
-                        model
-                            .source(host.action_target().source_id())
-                            .is_some_and(|source| source.port_observation().is_none())
+                if selected
+                    .and_then(|target| {
+                        self.model.as_ref().and_then(|model| {
+                            model
+                                .source_for_target(target)
+                                .and_then(|id| model.source(id))
+                        })
                     })
-                }) =>
+                    .is_some_and(|source| source.port_observation().is_none()) =>
             {
-                "Some hosts have not reported port discovery. Add a port manually.".to_owned()
+                "Port discovery has not been reported. You can add a port manually.".to_owned()
             }
-            Some(_) if forward_rows.is_empty() => {
-                "No detected or saved ports. Add a port manually.".to_owned()
+            Some(_)
+                if !forward_rows
+                    .iter()
+                    .any(|row| Some(row.key().target()) == selected) =>
+            {
+                "No detected or saved ports for this host. Add a port to get started.".to_owned()
             }
-            Some(_) => {
-                "Ports are shown under each host. Forwarding starts only when requested.".to_owned()
-            }
+            Some(_) => String::new(),
         };
-        let count = rows.len();
-        let list = uniform_list("hosts-list", count, {
-            let rows = rows.clone();
-            let weak = cx.entity().downgrade();
-            move |range, window, cx| {
-                let muted = cx.theme().muted_foreground;
-                let border = cx.theme().border;
-                let mut views = Vec::with_capacity(range.len());
-                for row in rows[range].iter() {
-                    let view = match row {
-                        HostRow::Host {
-                            target,
-                            title,
-                            state,
-                            detail,
-                            action,
-                            update,
-                            update_blocked,
-                            refresh_backend,
-                            saved,
-                            alias,
-                            feedback,
-                            mutation_pending,
-                            owner,
-                        } => {
-                            let mut entry = div()
-                                .id(SharedString::from(format!(
-                                    "host:{}:{target}",
-                                    target.len()
-                                )))
-                                .h(row_height)
-                                .w_full()
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .px_3()
-                                .border_b_1()
-                                .border_color(border)
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .font_weight(FontWeight::SEMIBOLD)
-                                                .overflow_hidden()
-                                                .text_ellipsis()
-                                                .whitespace_nowrap()
-                                                .child(title.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(muted)
-                                                .overflow_hidden()
-                                                .text_ellipsis()
-                                                .whitespace_nowrap()
-                                                .child(display(target)),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(muted)
-                                                .overflow_hidden()
-                                                .text_ellipsis()
-                                                .whitespace_nowrap()
-                                                .child(detail.clone()),
-                                        )
-                                        .when_some(feedback.clone(), |view, feedback| {
-                                            view.child(
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(cx.theme().warning)
-                                                    .overflow_hidden()
-                                                    .text_ellipsis()
-                                                    .whitespace_nowrap()
-                                                    .child(feedback),
-                                            )
-                                        }),
-                                )
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .text_sm()
-                                        .text_color(muted)
-                                        .child(state.clone()),
-                                );
-                            if let Some(action) = action {
-                                let action = action.clone();
-                                let label = match &action {
-                                    HostAction::Connect { .. } => "Connect",
-                                    HostAction::Cancel(_) => "Cancel",
-                                    HostAction::Retry(_) => "Retry",
-                                    HostAction::RetryCatalog(_) => "Retry catalog",
-                                    HostAction::Release(_) => "Stop browsing",
-                                };
-                                let target = target.clone();
-                                let weak = weak.clone();
-                                entry = entry.child(
-                                    Button::new(SharedString::from(format!(
-                                        "host-action:{}:{target}",
-                                        target.len()
-                                    )))
-                                    .small()
-                                    .label(label)
-                                    .accessibility_label(format!("{label} {target}"))
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            let _ = weak.update(cx, |this, cx| {
-                                                this.host_action(action.clone(), cx)
-                                            });
-                                        },
-                                    ),
-                                );
-                            }
-                            if let Some(update_target) = update {
-                                let trigger = window
-                                    .use_keyed_state(
-                                        SharedString::from(format!("host-update-focus-{target}")),
-                                        cx,
-                                        |_, cx| cx.focus_handle().tab_stop(true),
-                                    )
-                                    .read(cx)
-                                    .clone();
-                                let update_target = update_target.clone();
-                                let update_weak = weak.clone();
-                                let update_focus = trigger.clone();
-                                entry = entry.child(
-                                    Button::new(SharedString::from(format!(
-                                        "host-update-{target}"
-                                    )))
-                                    .debug_selector({
-                                        let target = target.clone();
-                                        move || format!("host-update-{target}")
-                                    })
-                                    .small()
-                                    .label("Update…")
-                                    .track_focus(&trigger)
-                                    .disabled(*update_blocked)
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            let _ = update_weak.update(cx, |this, cx| {
-                                                this.request_host_update(
-                                                    update_target.clone(),
-                                                    update_focus.clone(),
-                                                    window,
-                                                    cx,
-                                                )
-                                            });
-                                        },
-                                    ),
-                                );
-                            }
-                            if *refresh_backend {
-                                let refresh_weak = weak.clone();
-                                entry = entry.child(
-                                    Button::new(SharedString::from(format!(
-                                        "host-backend-refresh-{target}"
-                                    )))
-                                    .debug_selector({
-                                        let target = target.clone();
-                                        move || format!("host-backend-refresh-{target}")
-                                    })
-                                    .small()
-                                    .ghost()
-                                    .label("Refresh version")
-                                    .on_click(
-                                        move |_, _, cx| {
-                                            let _ = refresh_weak.update(cx, |this, cx| {
-                                                this.refresh_backend_version(cx)
-                                            });
-                                        },
-                                    ),
-                                );
-                            }
-                            if *saved {
-                                let owner = *owner;
-                                let edit_target = target.clone();
-                                let edit_alias = alias.clone();
-                                let forget_target = target.clone();
-                                let edit_weak = weak.clone();
-                                let forget_weak = weak.clone();
-                                entry = entry.child(
-                                    Button::new(SharedString::from(format!(
-                                        "host-more:{}:{target}",
-                                        target.len()
-                                    )))
-                                    .accessibility_label(format!("More for host {target}"))
-                                    .icon(Icon::new(IconName::Ellipsis))
-                                    .ghost()
-                                    .compact()
-                                    .small()
-                                    .disabled(*mutation_pending || owner.is_none())
-                                    .dropdown_menu(
-                                        move |menu, _, _| {
-                                            let edit_target = edit_target.clone();
-                                            let forget_target = forget_target.clone();
-                                            let edit_alias = edit_alias.clone();
-                                            let edit_weak = edit_weak.clone();
-                                            let forget_weak = forget_weak.clone();
-                                            let Some(owner) = owner else {
-                                                return menu;
-                                            };
-                                            menu.item(
-                                                PopupMenuItem::new("Change display name…")
-                                                    .on_click(move |_, window, cx| {
-                                                        let _ = edit_weak.update(cx, |this, cx| {
-                                                            invoke_host_menu_for_owner(
-                                                                owner,
-                                                                this.lifecycle_token(),
-                                                                || {
-                                                                    this.edit_host_alias(
-                                                                        &edit_target,
-                                                                        edit_alias.as_deref(),
-                                                                        window,
-                                                                        cx,
-                                                                    )
-                                                                },
-                                                            );
-                                                        });
-                                                    }),
-                                            )
-                                            .item(
-                                                PopupMenuItem::new("Remove from list").on_click(
-                                                    move |_, _, cx| {
-                                                        let _ =
-                                                            forget_weak.update(cx, |this, cx| {
-                                                                invoke_host_menu_for_owner(
-                                                                    owner,
-                                                                    this.lifecycle_token(),
-                                                                    || {
-                                                                        this.forget_host(
-                                                                            &forget_target,
-                                                                            cx,
-                                                                        )
-                                                                    },
-                                                                );
-                                                            });
-                                                    },
-                                                ),
-                                            )
-                                        },
-                                    ),
-                                );
-                            }
-                            entry.into_any_element()
-                        }
-                        HostRow::Screen {
-                            target,
-                            id,
-                            label,
-                            detail,
-                            route,
-                            opened,
-                        } => {
-                            let mut entry = div()
-                                .id(SharedString::from(format!(
-                                    "host-screen:{}:{target}:{}:{id}",
-                                    target.len(),
-                                    id.len()
-                                )))
-                                .h(row_height)
-                                .w_full()
-                                .min_w_0()
-                                .flex()
-                                .items_center()
-                                .gap_3()
-                                .px_3()
-                                .pl_6()
-                                .border_b_1()
-                                .border_color(border)
-                                .child(
-                                    div()
-                                        .flex_1()
-                                        .min_w_0()
-                                        .flex()
-                                        .flex_col()
-                                        .gap_1()
-                                        .child(
-                                            div()
-                                                .overflow_hidden()
-                                                .text_ellipsis()
-                                                .whitespace_nowrap()
-                                                .child(label.clone()),
-                                        )
-                                        .child(
-                                            div()
-                                                .text_sm()
-                                                .text_color(muted)
-                                                .overflow_hidden()
-                                                .text_ellipsis()
-                                                .whitespace_nowrap()
-                                                .child(detail.clone()),
-                                        ),
-                                );
-                            if let Some((source, key)) = route {
-                                let source = *source;
-                                let key = key.clone();
-                                let weak = weak.clone();
-                                let action = if *opened { "View" } else { "Open" };
-                                entry = entry.child(
-                                    Button::new(SharedString::from(format!(
-                                        "host-open:{}:{target}:{}:{id}",
-                                        target.len(),
-                                        id.len()
-                                    )))
-                                    .small()
-                                    .label(action)
-                                    .accessibility_label(format!("{action} {label} on {target}"))
-                                    .on_click(
-                                        move |_, window, cx| {
-                                            let _ = weak.update(cx, |this, cx| {
-                                                this.open_host_screen(
-                                                    source,
-                                                    key.clone(),
-                                                    window,
-                                                    cx,
-                                                )
-                                            });
-                                        },
-                                    ),
-                                );
-                            }
-                            entry.into_any_element()
-                        }
-                        HostRow::PortHeader { target, owner } => {
-                            Self::render_port_header(target, *owner, row_height, weak.clone(), cx)
-                        }
-                        HostRow::Port {
-                            row,
-                            owner,
-                            feedback,
-                            feedback_outcome,
-                            pending,
-                        } => Self::render_port_row(
-                            row,
-                            *owner,
-                            feedback.as_deref().zip(*feedback_outcome),
-                            *pending,
-                            row_height,
-                            weak.clone(),
-                            cx,
-                        ),
-                        HostRow::PortPending {
-                            key,
-                            owner,
-                            feedback,
-                        } => Self::render_pending_port(
-                            key,
-                            *owner,
-                            feedback,
-                            row_height,
-                            weak.clone(),
-                            cx,
-                        ),
-                    };
-                    views.push(view);
+        let mut header = Vec::new();
+        let mut content = Vec::new();
+        let mut port_header = Vec::new();
+        for row in rows {
+            match row {
+                HostRow::Host { .. } => {
+                    header.push(self.render_host_row(&row, &create_actions, window, cx))
                 }
-                views
+                HostRow::PortHeader { .. } => {
+                    port_header.push(self.render_host_row(&row, &create_actions, window, cx))
+                }
+                _ => content.push(row),
             }
+        }
+        let empty_screens =
+            content.is_empty() && selected.is_some() && self.hosts.section == HostSection::Host;
+        let count = content.len();
+        let weak = cx.entity().downgrade();
+        let catalog = uniform_list("host-catalog", count, move |range, window, cx| {
+            let Some(view) = weak.upgrade() else {
+                return Vec::new();
+            };
+            view.update(cx, |this, cx| {
+                content[range]
+                    .iter()
+                    .map(|row| this.render_host_row(row, &create_actions, window, cx))
+                    .collect()
+            })
         })
-        .flex_1()
-        .min_h_0()
-        .min_w_0()
+        .track_scroll(&self.hosts.scroll)
         .w_full()
-        .px_4()
-        .track_scroll(&self.hosts.scroll);
+        .flex_1()
+        .min_h_0();
+        let list = div().id("hosts-list").debug_selector(|| "hosts-list".into())
+            .flex_1().min_h_0().min_w_0().w_full().flex().flex_col().px_4()
+            .children(port_header)
+            .when(
+                self.hosts.section == HostSection::Ports && !ports_status.is_empty(),
+                |view| {
+                    view.child(
+                        div()
+                            .py_3()
+                            .text_size(chrome_rems(12.))
+                            .text_color(muted)
+                            .child(ports_status.clone()),
+                    )
+                },
+            )
+            .when(empty_screens, |view| view.child(div().py_6().text_size(chrome_rems(12.)).text_color(muted)
+                .child(if self.hosts.unopened_only { "All listed screens are already open in this window." }
+                    else { "No screens listed. Connect to refresh, or create a screen on this host." })))
+            .when(count > 0, |view| view.child(catalog));
         let source = self.local_model().map(SourceWorkspace::source_token);
         let weak_back = cx.entity().downgrade();
         let weak_refresh = cx.entity().downgrade();
         let weak_connect = cx.entity().downgrade();
-        let weak_port = cx.entity().downgrade();
         div()
             .id("hosts-view")
+            .debug_selector(|| "hosts-view".into())
+            .size_full()
+            .text_size(chrome_rems(12.5))
             .flex()
             .flex_col()
             .flex_1()
@@ -1624,47 +2580,23 @@ impl Workspace {
             .child(
                 div()
                     .flex()
+                    .flex_wrap()
                     .items_center()
-                    .gap_3()
+                    .gap_2()
                     .px_4()
                     .py_3()
                     .border_b_1()
                     .border_color(border)
-                    .child(
-                        Button::new("hosts-back")
-                            .icon(Icon::new(IconName::ArrowLeft))
-                            .label("Screens")
-                            .accessibility_label("Back to Screens")
-                            .ghost()
-                            .small()
-                            .on_click(move |_, window, cx| {
-                                if let Some(source) = source {
-                                    let _ = weak_back.update(cx, |this, cx| {
-                                        this.show_screens_captured(source, window, cx)
-                                    });
-                                }
-                            }),
-                    )
                     .child(div().font_weight(FontWeight::BOLD).child("Hosts"))
                     .child(div().flex_1())
                     .child(
-                        Button::new("hosts-add-port")
-                            .label("Add port…")
-                            .accessibility_label("Add port")
-                            .track_focus(&self.port_trigger)
-                            .small()
-                            .disabled(!self.ports.can_manage())
-                            .on_click(move |_, window, cx| {
-                                let _ = weak_port
-                                    .update(cx, |this, cx| this.open_port_form(None, window, cx));
-                            }),
-                    )
-                    .child(
                         Button::new("hosts-connect")
+                            .focus_ring(focus_visible(cx))
                             .label("Connect…")
                             .accessibility_label("Connect to host")
                             .track_focus(&self.host_connect_trigger)
-                            .small()
+                            .xsmall()
+                            .h(chrome_rems(24.))
                             .disabled(source.is_none())
                             .on_click(move |_, window, cx| {
                                 let _ = weak_connect
@@ -1673,6 +2605,7 @@ impl Workspace {
                     )
                     .child(
                         Button::new("hosts-refresh")
+                            .focus_ring(focus_visible(cx))
                             .label(if failed { "Retry" } else { "Refresh" })
                             .accessibility_label(if failed {
                                 "Retry host directory refresh"
@@ -1680,7 +2613,8 @@ impl Workspace {
                                 "Refresh host directory"
                             })
                             .disabled(loading || !self.hosts.can_refresh())
-                            .small()
+                            .xsmall()
+                            .h(chrome_rems(24.))
                             .on_click(move |_, _, cx| {
                                 if let Some(source) = source {
                                     let _ = weak_refresh.update(cx, |this, cx| {
@@ -1688,28 +2622,72 @@ impl Workspace {
                                     });
                                 }
                             }),
+                    )
+                    .child(
+                        Button::new("hosts-back")
+                            .focus_ring(focus_visible(cx))
+                            .label("Close")
+                            .accessibility_label("Close Hosts")
+                            .ghost()
+                            .xsmall()
+                            .h(chrome_rems(24.))
+                            .on_click(move |_, window, cx| {
+                                if let Some(source) = source {
+                                    let _ = weak_back.update(cx, |this, cx| {
+                                        this.show_screens_captured(source, window, cx)
+                                    });
+                                }
+                            }),
                     ),
             )
-            .child(
-                div()
-                    .px_4()
-                    .py_2()
-                    .text_color(if failed { theme.danger } else { muted })
-                    .child(status)
-                    .when_some(self.hosts.command_error.clone(), |view, error| {
-                        view.child(div().text_color(cx.theme().danger).child(error))
-                    }),
+            .when(
+                failed
+                    || loading
+                    || selected.is_none()
+                    || self.hosts.command_error.is_some()
+                    || self.hosts.pending_open.is_some(),
+                |view| {
+                    view.child(
+                        div()
+                            .px_4()
+                            .py_2()
+                            .text_color(if failed { danger } else { muted })
+                            .child(match &self.hosts.pending_open {
+                                Some(pending) => pending.label(),
+                                None => status,
+                            })
+                            .when(self.hosts.pending_open.is_some(), |view| {
+                                view.child(
+                                    Button::new("cancel-host-open")
+                                        .focus_ring(focus_visible(cx))
+                                        .xsmall()
+                                        .h(chrome_rems(24.))
+                                        .ghost()
+                                        .label("Cancel open")
+                                        .on_click(cx.listener(|this, _, _, cx| {
+                                            this.hosts.pending_open = None;
+                                            cx.notify();
+                                        })),
+                                )
+                            })
+                            .when_some(self.hosts.command_error.clone(), |view, error| {
+                                view.child(div().text_color(cx.theme().danger).child(error))
+                            }),
+                    )
+                },
             )
-            .child(
-                div()
-                    .px_4()
-                    .py_1()
-                    .text_sm()
-                    .text_color(muted)
-                    .child(ports_status)
-                    .when_some(self.ports.error.clone(), |view, error| {
-                        view.child(div().text_color(cx.theme().danger).child(error))
-                    }),
+            .when(
+                self.hosts.section == HostSection::Ports && self.ports.error.is_some(),
+                |view| {
+                    view.child(
+                        div().px_4().py_1().text_size(chrome_rems(12.)).when_some(
+                            self.ports.error.clone(),
+                            |view, error| {
+                                view.child(div().text_color(cx.theme().danger).child(error))
+                            },
+                        ),
+                    )
+                },
             )
             .when(!detached_feedback.is_empty(), |view| {
                 view.child(
@@ -1723,8 +2701,8 @@ impl Workspace {
                         .flex()
                         .flex_col()
                         .gap_1()
-                        .text_sm()
-                        .text_color(theme.warning)
+                        .text_size(chrome_rems(12.))
+                        .text_color(warning)
                         .children(detached_feedback),
                 )
             })
@@ -1736,12 +2714,46 @@ impl Workspace {
                         .py_1()
                         .flex()
                         .flex_col()
-                        .text_sm()
+                        .text_size(chrome_rems(12.))
                         .text_color(muted)
                         .children(detached_success),
                 )
             })
-            .child(list)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .when(compact, |view| view.flex_col())
+                    .child(
+                        div()
+                            .w(chrome_rems(210.))
+                            .when(compact, |view| view.w_full().h(chrome_rems(96.)))
+                            .flex_none()
+                            .flex()
+                            .flex_col()
+                            .border_r_1()
+                            .border_color(border)
+                            .when_some(self.hosts.search.as_ref(), |view, input| {
+                                view.child(
+                                    div().p_3().child(
+                                        gpui_kit::component::input::Input::new(input).small(),
+                                    ),
+                                )
+                            })
+                            .child(directory),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .children(header)
+                            .child(self.render_host_tabs(cx))
+                            .child(list),
+                    ),
+            )
             .into_any_element()
     }
 }
@@ -1791,6 +2803,165 @@ mod tests {
             }
         });
         run(window, content.borrow_mut().take().unwrap());
+    }
+
+    #[cfg(feature = "ui-test-support")]
+    #[test]
+    fn deliberate_cached_open_is_revoked_or_opens_only_the_current_existing_screen() {
+        use super::{Destination, HostAction};
+        use splitty_client_core::workspace::WindowWorkspace;
+        for outcome in ["open", "cancel", "missing", "owner"] {
+            with_view(|window, view| {
+                let mut model = WindowWorkspace::new(Uuid::new_v4());
+                let key = model
+                    .ui_test_screen_order_fixture(&[("work", "Work")], Some("build.test"))
+                    .unwrap()
+                    .remove(0);
+                let owner = model.lifecycle_token();
+                let (commands, mut receiver) = mpsc::channel(16);
+                window.update(|window, cx| {
+                    view.update(cx, |workspace, cx| {
+                        workspace.commands = commands;
+                        workspace.model = Some(model.clone());
+                        workspace.destination = Destination::Hosts;
+                        workspace.begin_cached_host_open(
+                            owner,
+                            "build.test".into(),
+                            "work".into(),
+                            cx,
+                        );
+                        assert!(
+                            receiver.try_recv().is_err(),
+                            "the ready catalog needs no new connection"
+                        );
+                        match outcome {
+                            "cancel" => workspace.host_action(
+                                HostAction::Release(
+                                    model.host(key.source_id()).unwrap().action_target().clone(),
+                                ),
+                                cx,
+                            ),
+                            "missing" => {
+                                model.disconnect(key.source_id()).unwrap();
+                                model.finish_attempt(key.source_id()).unwrap();
+                                model.retry(key.source_id()).unwrap();
+                                model
+                                    .ui_test_screen_order_fixture(&[], Some("build.test"))
+                                    .unwrap();
+                                workspace.model = Some(model.clone());
+                            }
+                            "owner" => workspace.model = Some(WindowWorkspace::new(Uuid::new_v4())),
+                            _ => {}
+                        }
+                        workspace.reconcile_host_open(window, cx);
+                        assert!(workspace.hosts.pending_open.is_none());
+                        if outcome == "missing" {
+                            assert!(workspace
+                                .hosts
+                                .command_error
+                                .as_deref()
+                                .unwrap()
+                                .contains("no longer"));
+                        }
+                    });
+                });
+                let mut opens = 0;
+                while let Ok(command) = receiver.try_recv() {
+                    match command.kind() {
+                        CommandKind::OpenRemoteScreen { screen } => {
+                            assert_eq!(screen, &key);
+                            opens += 1;
+                        }
+                        CommandKind::ReleaseHostBrowse { .. }
+                        | CommandKind::ReleaseHostBrowsing
+                        | CommandKind::Visible { .. } => {}
+                        _ => panic!("unexpected cached-open effect"),
+                    }
+                }
+                assert_eq!(opens, usize::from(outcome == "open"));
+            });
+        }
+    }
+
+    #[cfg(feature = "ui-test-support")]
+    #[test]
+    fn hosts_browser_keeps_catalog_visible_above_terminals() {
+        use gpui_kit::{px, size};
+        use splitty_client_core::workspace::WindowWorkspace;
+        with_view(|window, view| {
+            window.simulate_resize(size(px(1200.), px(760.)));
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.model = Some(WindowWorkspace::new(Uuid::new_v4()));
+                    workspace.drawer_visible = true;
+                    workspace.show_hosts(window, cx);
+                });
+                window.draw(cx).clear(cx);
+            });
+            let panel = window.debug_bounds("hosts-view").unwrap();
+            let list = window.debug_bounds("hosts-list").unwrap();
+            assert!(
+                panel.size.height > px(550.),
+                "Hosts browser needs a usable catalog: {panel:?}"
+            );
+            assert!(
+                list.size.height > px(350.),
+                "Host rows need a visible viewport: {list:?}"
+            );
+            assert!(list.origin.y + list.size.height <= panel.origin.y + panel.size.height);
+        });
+    }
+
+    #[cfg(feature = "ui-test-support")]
+    #[test]
+    fn hosts_can_create_before_any_remote_screen_is_opened() {
+        use super::{Destination, HostGroupTarget};
+        use gpui_kit::{px, size, Modifiers};
+        use splitty_client_core::workspace::WindowWorkspace;
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let (key, _) = model.ui_test_remote_terminal_fixture("empty.test").unwrap();
+            model.detach(model.lifecycle_token(), &key).unwrap();
+            assert!(model.opened().is_empty());
+            assert!(HostGroupTarget::capture(&model, key.source_id()).is_none());
+            let (commands, mut receiver) = mpsc::channel(8);
+            window.simulate_resize(size(px(1200.), px(760.)));
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.model = Some(model.clone());
+                    workspace.drawer_visible = true;
+                    workspace.show_hosts(window, cx);
+                });
+                window.draw(cx).clear(cx);
+            });
+            while receiver.try_recv().is_ok() {}
+            let button = window
+                .debug_bounds(Box::leak(
+                    format!("host-new-{}", key.source_id()).into_boxed_str(),
+                ))
+                .unwrap();
+            window.simulate_click(button.center(), Modifiers::default());
+            let request = loop {
+                let command = receiver
+                    .try_recv()
+                    .expect("New Screen must enqueue creation");
+                if let CommandKind::CreateRemoteScreen { request } = command.kind() {
+                    break request.clone();
+                }
+            };
+            assert_eq!(request.target().source_id(), key.source_id());
+            window.update(|_, cx| {
+                view.update(cx, |workspace, _| {
+                    assert!(workspace.destination == Destination::Screens);
+                    workspace.reconcile_remote_create(&model);
+                })
+            });
+            assert!(
+                request.is_follow_requested(),
+                "the pre-admission snapshot must not cancel the first Screen"
+            );
+        });
     }
 
     #[cfg(feature = "ui-test-support")]
@@ -1901,7 +3072,7 @@ mod tests {
                             .deferred_scroll_to_item
                             .unwrap()
                             .item_index,
-                        host_index
+                        0
                     );
 
                     let ports_index = workspace
@@ -1925,7 +3096,7 @@ mod tests {
                             .deferred_scroll_to_item
                             .unwrap()
                             .item_index,
-                        ports_index
+                        0
                     );
                     assert_ne!(
                         host_index, ports_index,
@@ -1943,7 +3114,7 @@ mod tests {
                             .deferred_scroll_to_item
                             .unwrap()
                             .item_index,
-                        ports_index
+                        0
                     );
                     workspace.close_host_connect(window, cx);
                     assert!(workspace.hosts.accept(HubUpdate {
@@ -1965,7 +3136,7 @@ mod tests {
                         .unwrap();
                     assert_ne!(reordered_index, host_index);
                     assert!(workspace.show_host_group(&one, HostSection::Host, window, cx));
-                    assert_eq!(workspace.hosts.scroll.0.borrow().deferred_scroll_to_item.unwrap().item_index, reordered_index);
+                    assert_eq!(workspace.hosts.scroll.0.borrow().deferred_scroll_to_item.unwrap().item_index, 0);
 
                     workspace
                         .model
@@ -1978,7 +3149,7 @@ mod tests {
                     workspace.open_port_form(None, window, cx);
                     assert!(workspace.ports.has_open_form());
                     assert!(!workspace.show_host_group(&two, HostSection::Ports, window, cx));
-                    assert_eq!(workspace.hosts.scroll.0.borrow().deferred_scroll_to_item.unwrap().item_index, reordered_index);
+                    assert_eq!(workspace.hosts.scroll.0.borrow().deferred_scroll_to_item.unwrap().item_index, 0);
                 });
                 window.draw(cx).clear(cx);
             });

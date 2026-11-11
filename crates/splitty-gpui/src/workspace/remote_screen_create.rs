@@ -32,15 +32,13 @@ fn remote_create_binding_current(
     model: &WindowWorkspace,
     request: &RemoteScreenCreateRequest,
 ) -> bool {
+    // A Hosts action can precede the first opened reference. Keep following it
+    // until its captured owner/connection changes or navigation cancels it.
     model.lifecycle_token() == request.target().local_owner()
         && model
             .host(request.target().source_id())
             .is_some_and(|host| host.action_target() == request.target())
         && model.execution_token(request.target().source_id()) == Some(request.source())
-        && model
-            .opened()
-            .iter()
-            .any(|entry| entry.key().source_id() == request.target().source_id())
 }
 
 impl Workspace {
@@ -227,9 +225,9 @@ impl Workspace {
         cx.notify();
     }
 
-    fn create_remote_screen(
+    pub(super) fn create_remote_screen(
         &mut self,
-        group: &HostGroupTarget,
+        group: Option<&HostGroupTarget>,
         target: &HostActionTarget,
         source: SourceToken,
         window: &mut Window,
@@ -238,10 +236,19 @@ impl Workspace {
         if !self.drawer_host_actions_available() || cx.has_active_drag() {
             return;
         }
-        let Some(model) = self.model.as_ref().filter(|model| group.is_current(model)) else {
+        let Some(model) = self.model.as_ref().filter(|model| match group {
+            Some(group) => group.is_current(model),
+            None => {
+                self.destination == Destination::Hosts
+                    || self.drawer_popover_host() == Some(target.target())
+            }
+        }) else {
             return;
         };
-        if self.remote_create_enqueues.contains_key(&group.source_id()) {
+        if self
+            .remote_create_enqueues
+            .contains_key(&target.source_id())
+        {
             return;
         }
         let request = match model.prepare_remote_screen_creation(target, source) {
@@ -267,7 +274,7 @@ impl Workspace {
                     observed: false,
                 });
                 self.remote_create_enqueues
-                    .insert(group.source_id(), request);
+                    .insert(target.source_id(), request);
                 self.remote_create_notice = None;
                 self.enter_screens_after_remote_create(window, cx);
             }
@@ -356,7 +363,7 @@ impl Workspace {
         .on_click(move |_, window, cx| {
             if let Some((target, execution, _)) = &create_capture {
                 let _ = create_weak.update(cx, |this, cx| {
-                    this.create_remote_screen(&create_group, target, *execution, window, cx);
+                    this.create_remote_screen(Some(&create_group), target, *execution, window, cx);
                 });
             }
         })

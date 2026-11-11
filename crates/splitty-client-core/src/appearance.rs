@@ -4,7 +4,7 @@
 //! reader uses a separate API stream: its request helper must never consume the
 //! session stream, where unrelated frames carry terminal output and credits.
 use splitty_core::{
-    config::{AppearanceSettings, DrawerSettings},
+    config::{AppearanceSettings, DrawerSettings, RemoteSettings},
     theme::ResolvedTheme,
 };
 use splitty_transport::budget::Charged;
@@ -37,6 +37,9 @@ pub(crate) struct HomePresentation {
     pub appearance: AppearanceSettings,
     pub drawer: DrawerSettings,
     pub terminal: TerminalPreferences,
+    pub remote: RemoteSettings,
+    pub native_tabs: splitty_core::config::NativeTabSettings,
+    pub editors: splitty_core::config::EditorSettings,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -117,6 +120,10 @@ impl AppearanceSnapshot {
     pub fn metadata_error(&self) -> Option<&str> {
         self.metadata_error.as_deref()
     }
+    /// Which editor opens what; a preference, never a permission.
+    pub fn editors(&self) -> &splitty_core::config::EditorSettings {
+        &self.settings.editors
+    }
     pub fn themes_error(&self) -> Option<&str> {
         self.themes_error.as_deref()
     }
@@ -149,7 +156,18 @@ impl AppearanceSnapshot {
             F::CloseOnExit => V::Text(self.terminal().close_on_exit().into()),
             F::DrawerPinned => V::Bool(self.drawer().pinned),
             F::DrawerWidth => V::Number(f64::from(self.drawer().sidebar_width)),
+            F::ReconnectHosts => V::List(self.settings.remote.reconnect_hosts.clone()),
+            F::AutoForwardPorts => V::Bool(self.settings.remote.auto_forward_ports),
+            F::TabsShowSplit => V::Bool(self.settings.native_tabs.show_split),
+            F::TabsShowFloat => V::Bool(self.settings.native_tabs.show_float),
+            F::TabsShowMaximize => V::Bool(self.settings.native_tabs.show_maximize),
+            F::TabsCloseButton => V::Text(self.settings.native_tabs.close_button.clone()),
+            F::TabsLocked => V::Bool(self.settings.native_tabs.locked),
+            F::EditorFile => V::Text(self.settings.editors.file.clone()),
+            F::EditorFolder => V::Text(self.settings.editors.folder.clone()),
             F::NotificationEnabled
+            | F::NotificationToasts
+            | F::NotificationDesktop
             | F::NotificationProcessFinished
             | F::NotificationProcessExited
             | F::NotificationProcessCrashed => return None,
@@ -180,7 +198,14 @@ impl AppearanceSnapshot {
             }
         } else if matches!(
             field,
-            SettingsField::FontFamily | SettingsField::DrawerPinned
+            SettingsField::FontFamily
+                | SettingsField::DrawerPinned
+                | SettingsField::ReconnectHosts
+                | SettingsField::AutoForwardPorts
+                | SettingsField::TabsShowSplit
+                | SettingsField::TabsShowFloat
+                | SettingsField::TabsShowMaximize
+                | SettingsField::TabsLocked
         ) {
             metadata.default_value(field).is_some()
         } else {

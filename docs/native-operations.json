@@ -432,6 +432,28 @@
       "deadlineMs": 30000
     },
     {
+      "operation": "ssh.prompts.get",
+      "method": "GET",
+      "path": "/api/remote/ssh-prompts",
+      "scope": "localHub",
+      "arguments": [],
+      "maxBodyBytes": 1048576,
+      "cancellation": "read",
+      "deadlineMs": 30000
+    },
+    {
+      "operation": "ssh.prompts.answer",
+      "method": "POST",
+      "path": "/api/remote/ssh-prompts",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
       "operation": "host.list",
       "method": "GET",
       "path": "/api/remote/hosts",

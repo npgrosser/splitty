@@ -36,6 +36,7 @@ pub(super) fn tab_surface(
     };
     div()
         .relative()
+        .cursor_pointer()
         .flex()
         .flex_none()
         .items_center()
@@ -474,7 +475,10 @@ impl Workspace {
                     ix == 0,
                 )
                 .child(tab_label(title))
-                .child(passive_close_icon(!outgoing.ready, cx)),
+                .when(
+                    selected == Some(pane.as_str()) || !self.tab_prefs.close_selected_only,
+                    |tab| tab.child(passive_close_icon(!outgoing.ready, cx)),
+                ),
             );
         }
         let mut new_tab = div()
@@ -507,16 +511,20 @@ impl Workspace {
                     IconName::SquareSplitHorizontal,
                     IconName::SquareSplitVertical,
                 ] {
-                    actions = actions.child(passive_icon(icon, true, !outgoing.ready, cx));
+                    if self.tab_prefs.show_split {
+                        actions = actions.child(passive_icon(icon, true, !outgoing.ready, cx));
+                    }
                 }
                 if !outgoing.remote {
-                    actions = actions.child(passive_icon(
-                        IconName::PanelsTopLeft,
-                        true,
-                        !selected.is_some_and(|pane| outgoing.floatable.contains(pane)),
-                        cx,
-                    ));
-                    if !maximized {
+                    if self.tab_prefs.show_float {
+                        actions = actions.child(passive_icon(
+                            IconName::PanelsTopLeft,
+                            true,
+                            !selected.is_some_and(|pane| outgoing.floatable.contains(pane)),
+                            cx,
+                        ));
+                    }
+                    if !maximized && self.tab_prefs.show_maximize {
                         actions = actions.child(passive_icon(
                             IconName::Maximize,
                             true,

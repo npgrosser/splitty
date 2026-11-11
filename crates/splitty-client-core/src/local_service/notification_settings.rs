@@ -24,6 +24,8 @@ pub(super) struct NotificationSnapshot {
 fn value(settings: &NotificationSettings, field: SettingsField) -> Option<SettingsValue> {
     Some(SettingsValue::Bool(match field {
         SettingsField::NotificationEnabled => settings.enabled,
+        SettingsField::NotificationToasts => settings.toasts,
+        SettingsField::NotificationDesktop => settings.desktop,
         SettingsField::NotificationProcessFinished => settings.process_finished,
         SettingsField::NotificationProcessExited => settings.process_exited,
         SettingsField::NotificationProcessCrashed => settings.process_crashed,
@@ -168,7 +170,11 @@ pub(super) async fn read(client: &mut ApiStream) -> io::Result<NotificationSnaps
     .await;
     let (defaults, metadata_error) = match metadata {
         Ok(defaults) => {
-            let error = (defaults.len() != 4)
+            let expected = SettingsField::ALL
+                .into_iter()
+                .filter(|field| field.domain() == crate::settings::SettingsDomain::Notifications)
+                .count();
+            let error = (defaults.len() != expected)
                 .then(|| "Some notification reset defaults are unavailable".to_owned());
             (defaults, error)
         }

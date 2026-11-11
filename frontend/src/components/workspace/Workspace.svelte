@@ -74,6 +74,7 @@
   import TemplateDialog from "../dialogs/TemplateDialog.svelte";
   import HostPickerDialog from "../dialogs/HostPickerDialog.svelte";
   import UpdateHostDialog from "../dialogs/UpdateHostDialog.svelte";
+  import SshAuthDialog from "../dialogs/SshAuthDialog.svelte";
   import RemoteScreenStatus from "./RemoteScreenStatus.svelte";
   import { markPaneRead, setWatchedPane } from "../../lib/notifications.ts";
   import Drawer from "../chrome/Drawer.svelte";
@@ -1082,6 +1083,8 @@
   onConfirm={updateConfirmed}
   onCancel={() => { updateHost = null; }}
 />
+
+<SshAuthDialog />
 
 <TemplateDialog
   open={templateDialogOpen}

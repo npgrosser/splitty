@@ -1217,3 +1217,52 @@ fn relative_screen_order_requires_both_capabilities_without_legacy_fallback() {
         "new connection must advertise its own support"
     );
 }
+#[test]
+fn a_remote_move_to_a_new_screen_holds_its_place_until_the_host_answers() {
+    let mut remote = SourceWorkspace::remote(
+        SourceId::initial(Uuid::new_v4()),
+        Uuid::new_v4(),
+        "host.test".into(),
+        ConnectionBudget::default(),
+    );
+    remote.set_catalog_supported(true);
+    catalog(&mut remote, &["a"], Some("a"));
+    remote.open_existing("a").unwrap();
+    let connection = remote.connection_id();
+    remote
+        .apply_snapshot(connection, &terminal_snapshot("a", "p", "s", false))
+        .unwrap();
+    let source = remote.capture_pane_action("p").unwrap();
+    let mut sent = None;
+    remote
+        .transfer_with(
+            Uuid::new_v4(),
+            source,
+            ScreenTransferTarget::New {
+                screen_id: "n".into(),
+            },
+            |from, pane, to, create| {
+                sent = Some((from.to_owned(), pane.to_owned(), to.to_owned(), create));
+                Ok(())
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        sent,
+        Some(("a".into(), "p".into(), "n".into(), true)),
+        "the host is asked to make the Screen"
+    );
+    assert!(remote.screens().iter().any(|info| info.id.as_str() == "n"));
+    // A catalog from before the move does not yet have the new Screen.
+    catalog(&mut remote, &["a"], Some("a"));
+    assert!(!remote.is_missing("n"));
+    let result = remote.finish_transfer(Some("lost".into())).unwrap();
+    assert!(matches!(
+        result.outcome,
+        ScreenTransferOutcome::Unverified(_)
+    ));
+    assert!(
+        !remote.screens().iter().any(|info| info.id.as_str() == "n"),
+        "a Screen the host never made leaves the window again"
+    );
+}

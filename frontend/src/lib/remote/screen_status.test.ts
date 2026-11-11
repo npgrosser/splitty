@@ -77,11 +77,29 @@ describe("describeFailure", () => {
       hint: "Run `ssh vm1` once in a terminal and check the fingerprint.",
     });
     expect(view).toEqual({
-      headline: "vm1 is not known yet.",
+      headline: "The SSH host key of vm1 could not be verified.",
       hint: "Run `ssh vm1` once in a terminal and check the fingerprint.",
       details: "Failed to reach vm1: ssh to vm1 failed: Host key verification failed.",
       copy: "ssh vm1",
     });
+  });
+
+  it("distinguishes a changed saved key from an unknown host", () => {
+    const message = "WARNING: REMOTE HOST IDENTIFICATION HAS CHANGED! SHA256:new-key";
+    const view = describeFailure("demo@localhost:2222", {
+      code: "host_key", message, hint: "The host key is unknown or has changed.",
+    });
+    expect(view.headline).toBe("The SSH host key of demo@localhost:2222 has changed.");
+    expect(view.hint).toBe("Verify the new fingerprint with the host administrator before replacing the saved host key.");
+    expect(view.details).toBe(message);
+    expect(view.copy).toBe("ssh -p 2222 demo@localhost");
+  });
+
+  it("copies explicit ports and IPv6 as OpenSSH arguments", () => {
+    expect(describeFailure("demo@[::1]:2222", { code: "auth", message: "Denied" }).copy)
+      .toBe("ssh -p 2222 demo@::1");
+    expect(describeFailure("demo@[::1]", { code: "auth", message: "Denied" }).copy)
+      .toBe("ssh demo@::1");
   });
 
   it("shows an incompatible host's message naming both versions", () => {

@@ -197,7 +197,8 @@ fn cross_group_focus_can_be_superseded_without_discarding_settlement() {
         Some(PlacementOutcome::Rejected(_))
     ));
     assert!(!model.placement_pending());
-    assert_eq!(model.focused_pane(), Some("c"));
+    // The moved tab took focus when it was dropped.
+    assert_eq!(model.focused_pane(), Some("b"));
 }
 
 #[test]
@@ -346,9 +347,10 @@ fn post_fence_equal_revision_confirms_but_lower_revision_rejects_without_losing_
         apply(&mut model, 2, &["b", "c", "a"], &["d", "e"]).placement,
         Some(PlacementOutcome::Confirmed)
     );
+    // A rejected placement returns the window to this confirmed state.
+    let before = serde_json::to_value(model.snapshot()).unwrap();
     admit(&mut model, "b", "right", None);
     fence(&mut model);
-    let before = serde_json::to_value(model.snapshot()).unwrap();
     let old = snapshot(1, &["b", "c", "a"], &["d", "e"]);
     assert!(model
         .apply_snapshot(Uuid::new_v4(), &old)

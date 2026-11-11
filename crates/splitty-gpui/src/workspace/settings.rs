@@ -29,16 +29,37 @@ const APPEARANCE: &[SettingsField] = &[
     SettingsField::ZoomScope,
 ];
 const TERMINAL: &[SettingsField] = &[SettingsField::TerminalTheme, SettingsField::CloseOnExit];
-const WORKSPACE: &[SettingsField] = &[SettingsField::DrawerPinned, SettingsField::DrawerWidth];
+const WORKSPACE: &[SettingsField] = &[
+    SettingsField::DrawerPinned,
+    SettingsField::DrawerWidth,
+    SettingsField::TabsCloseButton,
+    SettingsField::TabsShowSplit,
+    SettingsField::TabsShowFloat,
+    SettingsField::TabsShowMaximize,
+    SettingsField::TabsLocked,
+    SettingsField::EditorFile,
+    SettingsField::EditorFolder,
+];
+const REMOTE: &[SettingsField] = &[SettingsField::AutoForwardPorts];
 const NOTIFICATIONS: &[SettingsField] = &[
     SettingsField::NotificationEnabled,
+    SettingsField::NotificationToasts,
+    SettingsField::NotificationDesktop,
     SettingsField::NotificationProcessFinished,
     SettingsField::NotificationProcessExited,
     SettingsField::NotificationProcessCrashed,
 ];
 
 fn is_switch(field: SettingsField) -> bool {
-    field == SettingsField::DrawerPinned || field.domain() == SettingsDomain::Notifications
+    matches!(
+        field,
+        SettingsField::DrawerPinned
+            | SettingsField::AutoForwardPorts
+            | SettingsField::TabsShowSplit
+            | SettingsField::TabsShowFloat
+            | SettingsField::TabsShowMaximize
+            | SettingsField::TabsLocked
+    ) || field.domain() == SettingsDomain::Notifications
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,14 +67,16 @@ enum Section {
     Appearance,
     Terminal,
     Workspace,
+    Remote,
     Notifications,
 }
 
 impl Section {
-    const ALL: [Self; 4] = [
+    const ALL: [Self; 5] = [
         Self::Appearance,
         Self::Terminal,
         Self::Workspace,
+        Self::Remote,
         Self::Notifications,
     ];
 
@@ -62,6 +85,7 @@ impl Section {
             Self::Appearance => "appearance",
             Self::Terminal => "terminal",
             Self::Workspace => "workspace",
+            Self::Remote => "remote",
             Self::Notifications => "notifications",
         }
     }
@@ -71,6 +95,7 @@ impl Section {
             Self::Appearance => "Appearance",
             Self::Terminal => "Terminal",
             Self::Workspace => "Workspace",
+            Self::Remote => "Remote",
             Self::Notifications => "Notifications",
         }
     }
@@ -80,6 +105,7 @@ impl Section {
             Self::Appearance => APPEARANCE,
             Self::Terminal => TERMINAL,
             Self::Workspace => WORKSPACE,
+            Self::Remote => REMOTE,
             Self::Notifications => NOTIFICATIONS,
         }
     }
@@ -89,6 +115,7 @@ impl Section {
             Self::Appearance => "Interface colors, type and display scale",
             Self::Terminal => "Terminal colors and exit behavior",
             Self::Workspace => "Drawer placement and size",
+            Self::Remote => "Hosts and their ports",
             Self::Notifications => "Activity from other terminals",
         }
     }
@@ -339,6 +366,34 @@ impl SettingsView {
         }
     }
 
+    /// The hosts to reconnect at start: what a pending change asks for, else
+    /// what the service holds.
+    pub(super) fn reconnect_hosts(&self) -> Vec<String> {
+        let field = SettingsField::ReconnectHosts;
+        let pending = match self.writes.get(&field) {
+            Some(WriteState::Pending { value, .. }) => Some(value.clone()),
+            _ => None,
+        };
+        match pending.or_else(|| self.value(field)) {
+            Some(SettingsValue::List(hosts)) => hosts,
+            _ => Vec::new(),
+        }
+    }
+
+    /// Ask for another list of hosts to reconnect; false when nothing was sent.
+    pub(super) fn set_reconnect_hosts(
+        &mut self,
+        hosts: Vec<String>,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let value = SettingsValue::List(hosts);
+        self.request(SettingsField::ReconnectHosts, value.clone(), cx);
+        matches!(
+            self.writes.get(&SettingsField::ReconnectHosts),
+            Some(WriteState::Pending { value: sent, .. }) if *sent == value
+        )
+    }
+
     fn reset_captured(
         &mut self,
         owner: Option<Uuid>,
@@ -556,15 +611,26 @@ impl SettingsView {
                 Some(choices)
             }
             SettingsField::DrawerPinned
+            | SettingsField::ReconnectHosts
+            | SettingsField::AutoForwardPorts
+            | SettingsField::TabsShowSplit
+            | SettingsField::TabsShowFloat
+            | SettingsField::TabsShowMaximize
+            | SettingsField::TabsLocked
             | SettingsField::NotificationEnabled
+            | SettingsField::NotificationToasts
+            | SettingsField::NotificationDesktop
             | SettingsField::NotificationProcessFinished
             | SettingsField::NotificationProcessExited
             | SettingsField::NotificationProcessCrashed => None,
-            SettingsField::ThemeMode | SettingsField::ZoomScope | SettingsField::CloseOnExit => {
-                metadata
-                    .and_then(|metadata| metadata.choices(field))
-                    .map(|choices| choices.iter().cloned().map(SettingsValue::Text).collect())
-            }
+            SettingsField::ThemeMode
+            | SettingsField::ZoomScope
+            | SettingsField::CloseOnExit
+            | SettingsField::EditorFile
+            | SettingsField::EditorFolder
+            | SettingsField::TabsCloseButton => metadata
+                .and_then(|metadata| metadata.choices(field))
+                .map(|choices| choices.iter().cloned().map(SettingsValue::Text).collect()),
             SettingsField::FontSize | SettingsField::Zoom | SettingsField::DrawerWidth => metadata
                 .and_then(|metadata| metadata.limits(field))
                 .and_then(|limits| {
@@ -650,10 +716,19 @@ impl SettingsView {
             snapshot.metadata().is_some_and(|metadata| {
                 !matches!(
                     field,
-                    SettingsField::FontFamily | SettingsField::DrawerPinned
+                    SettingsField::FontFamily
+                        | SettingsField::DrawerPinned
+                        | SettingsField::ReconnectHosts
+                        | SettingsField::AutoForwardPorts
+                        | SettingsField::TabsShowSplit
+                        | SettingsField::TabsShowFloat
+                        | SettingsField::TabsShowMaximize
+                        | SettingsField::TabsCloseButton
+                        | SettingsField::TabsLocked
                 ) || metadata.default_value(field).is_some()
             })
         }) && (is_switch(field)
+            || field == SettingsField::ReconnectHosts
             || self
                 .choices
                 .get(&field)
@@ -808,13 +883,8 @@ impl SettingsView {
 }
 
 impl Render for SettingsView {
-    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let narrow = window.viewport_size().width < rems(45.).to_pixels(window.rem_size());
-        let mut nav = div()
-            .flex()
-            .gap_1()
-            .when(narrow, |nav| nav.flex_wrap())
-            .when(!narrow, |nav| nav.flex_col());
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut nav = div().flex().gap_1().flex_wrap();
         for section in Section::ALL {
             let selected = self.section == section;
             nav = nav.child(
@@ -825,8 +895,8 @@ impl Render for SettingsView {
                     })
                     .selected(selected)
                     .ghost()
-                    .small()
-                    .when(!narrow, |button| button.w_full().justify_start())
+                    .xsmall()
+                    .h(rems(24. / 16.))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.section != section {
                             this.section = section;
@@ -850,19 +920,20 @@ impl Render for SettingsView {
             })
             .track_focus(&self.focus)
             .flex()
-            .when(narrow, |view| view.flex_col())
+            .flex_col()
             .size_full()
             .min_w_0()
             .min_h_0()
-            .bg(cx.theme().background)
+            .bg(cx.theme().sidebar)
             .text_color(cx.theme().foreground)
             .child(
                 div()
                     .when(cfg!(all(test, feature = "ui-test-support")), |view| {
                         view.debug_selector(|| "settings-nav".into())
                     })
-                    .when(narrow, |view| view.w_full().border_b_1().py_2())
-                    .when(!narrow, |view| view.w(rems(11.)).border_r_1().py_4())
+                    .w_full()
+                    .border_b_1()
+                    .py_2()
                     .flex_none()
                     .border_color(cx.theme().border)
                     .bg(cx.theme().sidebar)
@@ -884,9 +955,8 @@ impl Render for SettingsView {
                     .child(
                         div()
                             .w_full()
-                            .max_w(rems(42.))
-                            .px_6()
-                            .py_5()
+                            .px_4()
+                            .py_4()
                             .flex()
                             .flex_col()
                             .gap_5()
@@ -908,7 +978,7 @@ impl Render for SettingsView {
                                             .gap_1()
                                             .child(
                                                 div()
-                                                    .text_2xl()
+                                                    .text_size(rems(15. / 16.))
                                                     .font_weight(FontWeight::SEMIBOLD)
                                                     .child(self.section.title()),
                                             )
@@ -965,7 +1035,18 @@ fn field_label(field: SettingsField) -> &'static str {
         SettingsField::CloseOnExit => "Close on exit",
         SettingsField::DrawerPinned => "Show drawer",
         SettingsField::DrawerWidth => "Drawer width",
+        SettingsField::ReconnectHosts => "Hosts reconnected at start",
+        SettingsField::AutoForwardPorts => "Forward new ports",
+        SettingsField::TabsShowSplit => "Split buttons",
+        SettingsField::TabsShowFloat => "Float button",
+        SettingsField::TabsShowMaximize => "Maximize button",
+        SettingsField::TabsCloseButton => "Tab close button",
+        SettingsField::TabsLocked => "Lock tabs",
+        SettingsField::EditorFile => "Editor for files",
+        SettingsField::EditorFolder => "Editor for folders",
         SettingsField::NotificationEnabled => "Enable notifications",
+        SettingsField::NotificationToasts => "Notices in the window",
+        SettingsField::NotificationDesktop => "System notifications",
         SettingsField::NotificationProcessFinished => "Process finished",
         SettingsField::NotificationProcessExited => "Process exited",
         SettingsField::NotificationProcessCrashed => "Process crashed",
@@ -986,7 +1067,22 @@ fn field_description(field: SettingsField) -> &'static str {
         SettingsField::CloseOnExit => "When a terminal session ends",
         SettingsField::DrawerPinned => "Keep the Screen drawer visible",
         SettingsField::DrawerWidth => "Width of the Screen drawer",
+        SettingsField::ReconnectHosts => "Chosen per host under Hosts",
+        SettingsField::AutoForwardPorts => "When a program on a host starts listening",
+        SettingsField::TabsShowSplit => "Show the split buttons in each group's tab bar",
+        SettingsField::TabsShowFloat => "Show the float button in each group's tab bar",
+        SettingsField::TabsShowMaximize => "Show the maximize button in each group's tab bar",
+        SettingsField::TabsCloseButton => "On every tab or only the selected one",
+        SettingsField::TabsLocked => "Tabs keep their place; no drag and drop",
+        SettingsField::EditorFile => "Opens a file a terminal asks for, after you confirm",
+        SettingsField::EditorFolder => "Opens a folder a terminal asks for, after you confirm",
         SettingsField::NotificationEnabled => "Show activity from other terminals in the drawer",
+        SettingsField::NotificationToasts => {
+            "Show a notice in the corner with a way to the terminal"
+        }
+        SettingsField::NotificationDesktop => {
+            "Notify through the system while this window is in the background"
+        }
         SettingsField::NotificationProcessFinished => "When a process finishes",
         SettingsField::NotificationProcessExited => "When a terminal session ends normally",
         SettingsField::NotificationProcessCrashed => "When a terminal session ends with an error",
@@ -997,6 +1093,7 @@ fn display_value(field: SettingsField, value: &SettingsValue) -> String {
     match value {
         SettingsValue::Bool(true) => "On".into(),
         SettingsValue::Bool(false) => "Off".into(),
+        SettingsValue::List(items) => items.join(", "),
         SettingsValue::Text(text) if field == SettingsField::FontFamily && text.is_empty() => {
             "Theme default".into()
         }
@@ -1008,6 +1105,10 @@ fn display_value(field: SettingsField, value: &SettingsValue) -> String {
             (SettingsField::ThemeMode, "fixed") => "Fixed".into(),
             (SettingsField::ZoomScope, "window") => "Whole window".into(),
             (SettingsField::ZoomScope, "terminals") => "Terminals".into(),
+            (SettingsField::EditorFile | SettingsField::EditorFolder, "vscode") => "VS Code".into(),
+            (SettingsField::EditorFile | SettingsField::EditorFolder, "zed") => "Zed".into(),
+            (SettingsField::TabsCloseButton, "always") => "Every tab".into(),
+            (SettingsField::TabsCloseButton, "active") => "Selected tab".into(),
             (SettingsField::CloseOnExit, "always") => "Always".into(),
             (SettingsField::CloseOnExit, "never") => "Never".into(),
             (SettingsField::CloseOnExit, "graceful") => "When successful".into(),
@@ -1098,6 +1199,11 @@ mod tests {
             assert!(!state.enabled(SettingsField::TerminalTheme));
             assert!(state.enabled(SettingsField::Zoom));
             assert!(state.enabled(SettingsField::DrawerPinned));
+            assert_eq!(
+                state.reconnect_hosts(),
+                Vec::<String>::new(),
+                "no host is reconnected at start unless chosen"
+            );
             assert_eq!(
                 state.snapshot.as_ref().unwrap().value(SettingsField::Theme),
                 Some(SettingsValue::Text("splitty-dark".into()))

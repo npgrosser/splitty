@@ -127,11 +127,11 @@ pub(super) struct RowMotion {
 }
 
 /// One Screen drag, from the press until the service's order arrives.
-pub(super) struct ScreenDragSession {
+pub(super) struct ScreenDragSession<Key = ScreenKey> {
     pub(super) owner: SourceToken,
-    pub(super) screen: ScreenKey,
+    pub(super) screen: Key,
     /// The dragged Screen's source group in model order when the drag began.
-    pub(super) group: Vec<ScreenKey>,
+    pub(super) group: Vec<Key>,
     slots: Vec<RowSlot>,
     from: usize,
     start: f32,
@@ -142,11 +142,11 @@ pub(super) struct ScreenDragSession {
     settling: Option<Task<()>>,
 }
 
-impl ScreenDragSession {
+impl<Key: Clone + PartialEq> ScreenDragSession<Key> {
     pub(super) fn new(
         owner: SourceToken,
-        screen: ScreenKey,
-        group: Vec<ScreenKey>,
+        screen: Key,
+        group: Vec<Key>,
         slots: Vec<RowSlot>,
         start: f32,
     ) -> Option<Self> {
@@ -175,7 +175,7 @@ impl ScreenDragSession {
     }
 
     /// `screen` is the pressed row of a drag that has not ended.
-    pub(super) fn holds(&self, screen: &ScreenKey) -> bool {
+    pub(super) fn holds(&self, screen: &Key) -> bool {
         self.is_dragging() && &self.screen == screen
     }
 
@@ -199,7 +199,7 @@ impl ScreenDragSession {
     /// The relative placement a release submits: `None` when the drag never
     /// activated or ends where it began; otherwise the Screen to insert before,
     /// with `None` inside meaning the end of the source group.
-    pub(super) fn placement(&self) -> Option<Option<ScreenKey>> {
+    pub(super) fn placement(&self) -> Option<Option<Key>> {
         if !self.is_lifted() || self.over == self.from {
             return None;
         }
@@ -216,7 +216,7 @@ impl ScreenDragSession {
         self
     }
 
-    pub(super) fn motion(&self, screen: &ScreenKey) -> RowMotion {
+    pub(super) fn motion(&self, screen: &Key) -> RowMotion {
         let Some(index) = self.group.iter().position(|key| key == screen) else {
             return RowMotion::default();
         };
@@ -272,6 +272,7 @@ impl Workspace {
         position: Point<Pixels>,
     ) {
         self.drawer_drag = None;
+        self.drawer_host_drag = None;
         let press = self.drawer_press.take();
         let Some(model) = self.model.as_ref() else {
             return;
@@ -356,9 +357,14 @@ impl Workspace {
     /// Ends a drag whose geometry or authority is no longer current. A held
     /// drop is not a drag and stays until its order arrives.
     pub(super) fn cancel_screen_drag(&mut self) -> bool {
+        let hosts = self
+            .drawer_host_drag
+            .take_if(|session| session.is_dragging())
+            .is_some();
         self.drawer_drag
             .take_if(|session| session.is_dragging())
             .is_some()
+            || hosts
     }
 
     /// A model update keeps a drag only while its owner and group order stay;

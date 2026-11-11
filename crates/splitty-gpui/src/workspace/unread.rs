@@ -86,8 +86,56 @@ impl Workspace {
             watched.as_ref(),
             host.unwrap_or("Local"),
         );
+        let toasts = self.notifications.toasts();
+        let desktop = self.notifications.desktop() && !self.notification_window_active;
+        for fresh in self.notifications.take_fresh() {
+            if toasts {
+                self.activity_notice(&fresh, cx);
+            }
+            if desktop {
+                system_notification(&fresh.title, cx);
+            }
+        }
         if changed {
             cx.notify();
+        }
+    }
+
+    /// Go to the terminal a notice told about.
+    pub(super) fn show_notified(
+        &mut self,
+        screen: ScreenKey,
+        pane: Option<PaneKey>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.destination != Destination::Screens {
+            self.show_screens(window, cx);
+        }
+        if self.current_screen_key().as_ref() == Some(&screen) {
+            if let Some(pane) = pane {
+                self.select(pane.pane_id(), window, cx);
+            }
+            return;
+        }
+        // The pane is chosen once its Screen is the shown one.
+        self.pending_notified = pane.map(|pane| (screen.clone(), pane));
+        self.switch_screen_key(screen, window, cx);
+    }
+
+    /// Select the pane of a followed notice when its Screen has come up.
+    pub(super) fn settle_notified(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((screen, pane)) = self.pending_notified.take() else {
+            return;
+        };
+        if self.current_screen_key().as_ref() != Some(&screen) {
+            return;
+        }
+        if self
+            .selected_model()
+            .is_some_and(|model| model.screen_for(pane.pane_id()) == Some(screen.screen_id()))
+        {
+            self.select(pane.pane_id(), window, cx);
         }
     }
 
@@ -104,6 +152,40 @@ impl Workspace {
             .join(" · ");
         Some(format!("{count} unread: {titles}"))
     }
+}
+
+/// Hand a notification to the system. Linux desktops take it through
+/// `notify-send`, macOS through `osascript`; elsewhere nothing is shown yet.
+fn system_notification(title: &str, cx: &App) {
+    let title = title.to_owned();
+    cx.background_executor()
+        .spawn(async move {
+            #[cfg(target_os = "linux")]
+            let _ = std::process::Command::new("notify-send")
+                .args(["--app-name", "Splitty", "--", "Splitty", &title])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            #[cfg(target_os = "macos")]
+            let _ = std::process::Command::new("osascript")
+                .args([
+                    "-e",
+                    "on run argv",
+                    "-e",
+                    "display notification (item 1 of argv) with title \"Splitty\"",
+                    "-e",
+                    "end run",
+                    &title,
+                ])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status();
+            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            drop(title);
+        })
+        .detach();
 }
 
 pub(super) fn severity_color(severity: Severity, cx: &App) -> Hsla {

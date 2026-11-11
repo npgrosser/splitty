@@ -28,21 +28,93 @@ impl ContextMenuRequest {
 
 impl EventEmitter<ContextMenuRequest> for Terminal {}
 
+/// One image or file of a paste that carries no text.
+#[derive(Clone, Debug)]
+pub(crate) enum PastedFile {
+    Image {
+        extension: &'static str,
+        bytes: Vec<u8>,
+    },
+    Path(std::path::PathBuf),
+}
+
+/// The user pasted images or files; the pane's server stores them and the
+/// workspace pastes the paths it names.
+#[derive(Clone, Debug)]
+pub(crate) struct FilePaste(pub Vec<PastedFile>);
+
+impl EventEmitter<FilePaste> for Terminal {}
+
+/// Files the user dropped onto the terminal; nothing is sent before the
+/// workspace has asked.
+#[derive(Clone, Debug)]
+pub(crate) struct FileDrop(pub Vec<std::path::PathBuf>);
+
+impl EventEmitter<FileDrop> for Terminal {}
+
+pub(crate) enum Pasted {
+    Text(String),
+    Files(Vec<PastedFile>),
+    Nothing,
+}
+
+/// What a paste carries. Copied files are files, whatever text names them;
+/// otherwise a paste with text stays a text paste.
+pub(crate) fn pasted(item: &ClipboardItem) -> Pasted {
+    let mut text = String::new();
+    let mut files = Vec::new();
+    let mut copied_files = false;
+    for entry in item.entries() {
+        match entry {
+            ClipboardEntry::String(string) => text.push_str(string.text()),
+            ClipboardEntry::Image(image) => files.push(PastedFile::Image {
+                extension: match image.format {
+                    ImageFormat::Png => "png",
+                    ImageFormat::Jpeg => "jpg",
+                    ImageFormat::Webp => "webp",
+                    ImageFormat::Gif => "gif",
+                    ImageFormat::Svg => "svg",
+                    ImageFormat::Bmp => "bmp",
+                    ImageFormat::Tiff => "tiff",
+                    ImageFormat::Ico => "ico",
+                    ImageFormat::Pnm => "pnm",
+                },
+                bytes: image.bytes.clone(),
+            }),
+            ClipboardEntry::ExternalPaths(paths) => {
+                copied_files |= !paths.paths().is_empty();
+                files.extend(paths.paths().iter().cloned().map(PastedFile::Path))
+            }
+        }
+    }
+    if copied_files {
+        files.retain(|file| matches!(file, PastedFile::Path(_)));
+        Pasted::Files(files)
+    } else if !text.is_empty() {
+        Pasted::Text(text)
+    } else if !files.is_empty() {
+        Pasted::Files(files)
+    } else {
+        Pasted::Nothing
+    }
+}
+
 #[derive(Clone, Copy)]
 pub(crate) enum LocalAction {
     Copy,
     Paste,
     Find,
+    ClearBuffer,
 }
 
 pub use crate::terminal_engine::ColorConfig as TerminalColors;
 use crate::terminal_engine::{
-    Cursor, CursorShape, Engine, MouseAction, MouseButton as EngineMouseButton, MouseInput,
-    MouseModifiers, MousePolicy, MouseTracking, Row, SearchHighlight, MAX_INPUT,
+    Cursor, CursorShape, Engine, ImagePlacement, MouseAction, MouseButton as EngineMouseButton,
+    MouseInput, MouseModifiers, MousePolicy, MouseTracking, Row, SearchHighlight, MAX_INPUT,
 };
 use anyhow::{anyhow, Result};
 use gpui_kit::{prelude::*, *};
-use std::{collections::HashMap, ops::Range, time::Instant};
+use std::{collections::HashMap, ops::Range, sync::Arc, time::Instant};
 
 /// The web client's terminal font size; display zoom scales it.
 const BASE_FONT_SIZE: f32 = 14.;
@@ -521,6 +593,8 @@ pub struct Terminal {
     search: Option<search::SearchUi>,
     search_active: bool,
     row_cache: HashMap<[u64; 2], CachedRow>,
+    /// The textures of the images on screen, by image and its pixel generation.
+    image_cache: HashMap<u32, (u64, Arc<RenderImage>)>,
     paint_sequence: usize,
     colors: TerminalColors,
     selection_foreground: u32,
@@ -579,6 +653,7 @@ impl Terminal {
             // The standalone probe has no workspace focus coordinator.
             search_active: true,
             row_cache: HashMap::new(),
+            image_cache: HashMap::new(),
             paint_sequence: 0,
             colors: TerminalColors::default(),
             selection_foreground: DEFAULT_SELECTION_FOREGROUND,
@@ -840,7 +915,15 @@ impl Terminal {
         }
     }
 
-    fn paste_text(&mut self, text: &str) {
+    fn paste_item(&mut self, item: &ClipboardItem, cx: &mut Context<Self>) {
+        match pasted(item) {
+            Pasted::Text(text) => self.paste_text(&text),
+            Pasted::Files(files) => cx.emit(FilePaste(files)),
+            Pasted::Nothing => {}
+        }
+    }
+
+    pub(crate) fn paste_text(&mut self, text: &str) {
         let result = self.engine.as_mut().map(|engine| engine.paste(text));
         if let Some(reply) = result.and_then(|result| self.output(result)) {
             // One bounded message keeps bracketed-paste framing intact.
@@ -857,6 +940,13 @@ impl Terminal {
             .as_mut()
             .and_then(|engine| engine.selection_text().ok().flatten())
             .is_some_and(|text| !text.is_empty())
+    }
+
+    /// The selected text, if any.
+    pub(crate) fn selection(&mut self) -> Option<String> {
+        self.engine
+            .as_mut()
+            .and_then(|engine| engine.selection_text().ok().flatten())
     }
 
     pub(crate) fn local_action(
@@ -876,12 +966,15 @@ impl Terminal {
                 }
             }
             LocalAction::Paste => {
-                if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-                    self.paste_text(&text);
+                if let Some(item) = cx.read_from_clipboard() {
+                    self.paste_item(&item, cx);
                 }
                 cx.notify();
             }
             LocalAction::Find => self.open_search(window, cx),
+            LocalAction::ClearBuffer => {
+                self.feed(b"\x1b[2J\x1b[3J\x1b[H", true, cx);
+            }
         }
     }
 
@@ -921,6 +1014,22 @@ impl Terminal {
                     return;
                 }
                 _ => {}
+            }
+        }
+        // A program's own Ctrl+V reads the clipboard of the machine it runs
+        // on. An image or file on this one goes to the pane's server instead;
+        // anything else stays the terminal's Ctrl+V.
+        if key.key == "v"
+            && key.modifiers.control
+            && !key.modifiers.shift
+            && !key.modifiers.alt
+            && !key.modifiers.platform
+            && !cx.platform_info().is_mac()
+        {
+            if let Some(Pasted::Files(files)) = cx.read_from_clipboard().map(|item| pasted(&item)) {
+                cx.emit(FilePaste(files));
+                cx.stop_propagation();
+                return;
             }
         }
         let result = self.engine.as_mut().map(|engine| {
@@ -1545,6 +1654,44 @@ impl Terminal {
         self.paint_sequence = self.paint_sequence.wrapping_add(1);
         let current_frame = self.paint_sequence;
         window.paint_quad(fill(geometry.bounds, rgb(base)));
+        // Images: their pixels are read once per generation and kept as
+        // textures while they are on screen.
+        let placements = frame.images()?;
+        let mut stale = std::mem::take(&mut self.image_cache);
+        for placement in &placements {
+            if self.image_cache.contains_key(&placement.image_id) {
+                continue;
+            }
+            let texture = match stale.remove(&placement.image_id) {
+                Some((generation, texture)) if generation == placement.generation => Some(texture),
+                replaced => {
+                    if let Some((_, texture)) = replaced {
+                        let _ = window.drop_image(texture);
+                    }
+                    frame.image_pixels(placement.image_id)?.and_then(|pixels| {
+                        image::RgbaImage::from_raw(pixels.width, pixels.height, pixels.bgra).map(
+                            |buffer| Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])),
+                        )
+                    })
+                }
+            };
+            if let Some(texture) = texture {
+                self.image_cache
+                    .insert(placement.image_id, (placement.generation, texture));
+            }
+        }
+        for (_, texture) in stale.into_values() {
+            let _ = window.drop_image(texture);
+        }
+        let display_scale = window.scale_factor();
+        paint_images(
+            &placements,
+            false,
+            &self.image_cache,
+            geometry,
+            display_scale,
+            window,
+        );
         while let Some(mut row) = frame.next_row()? {
             let index = row.index;
             let id = row.id;
@@ -1590,6 +1737,14 @@ impl Terminal {
         frame.finish()?;
         self.row_cache
             .retain(|_, row| row.last_frame == current_frame);
+        paint_images(
+            &placements,
+            true,
+            &self.image_cache,
+            geometry,
+            display_scale,
+            window,
+        );
         // As in the web client, only the focused terminal shows its cursor.
         if self.focus.is_focused(window) {
             paint_cursor(
@@ -1607,6 +1762,89 @@ impl Terminal {
         }
         Ok(())
     }
+}
+
+/// Where a placement is drawn and where its whole image would lie, so that
+/// the drawn part shows the placement's source rectangle scaled to its size.
+fn image_bounds(
+    placement: &ImagePlacement,
+    image: (u32, u32),
+    geometry: PaintGeometry,
+    display_scale: f32,
+) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
+    if placement.width == 0
+        || placement.height == 0
+        || placement.source_width == 0
+        || placement.source_height == 0
+    {
+        return None;
+    }
+    let scale = display_scale.max(0.1);
+    let device = |value: u32| px(value as f32 / scale);
+    let origin = geometry.bounds.origin
+        + point(
+            geometry.metrics.cell_width * placement.col as f32 + device(placement.offset_x),
+            geometry.metrics.line_height * placement.row as f32 + device(placement.offset_y),
+        );
+    let shown = Bounds::new(
+        origin,
+        size(device(placement.width), device(placement.height)),
+    );
+    // One image pixel on screen, per axis.
+    let x = f32::from(shown.size.width) / placement.source_width as f32;
+    let y = f32::from(shown.size.height) / placement.source_height as f32;
+    let whole = Bounds::new(
+        origin
+            - point(
+                px(placement.source_x as f32 * x),
+                px(placement.source_y as f32 * y),
+            ),
+        size(px(image.0 as f32 * x), px(image.1 as f32 * y)),
+    );
+    Some((shown, whole))
+}
+
+/// Paint the placements of one side of the text, clipped to the terminal.
+fn paint_images(
+    placements: &[ImagePlacement],
+    above_text: bool,
+    cache: &HashMap<u32, (u64, Arc<RenderImage>)>,
+    geometry: PaintGeometry,
+    display_scale: f32,
+    window: &mut Window,
+) {
+    if !placements
+        .iter()
+        .any(|placement| placement.above_text == above_text)
+    {
+        return;
+    }
+    window.with_content_mask(
+        Some(ContentMask {
+            bounds: geometry.bounds,
+        }),
+        |window| {
+            for placement in placements
+                .iter()
+                .filter(|placement| placement.above_text == above_text)
+            {
+                let Some((_, texture)) = cache.get(&placement.image_id) else {
+                    continue;
+                };
+                let image = texture.size(0);
+                let Some((shown, whole)) = image_bounds(
+                    placement,
+                    (image.width.0 as u32, image.height.0 as u32),
+                    geometry,
+                    display_scale,
+                ) else {
+                    continue;
+                };
+                let _ =
+                    window.paint_image(shown, whole, Corners::default(), texture.clone(), 0, false);
+            }
+        },
+    );
 }
 
 fn needs_shape(cached: Option<&CachedRow>, row_dirty: bool, full_dirty: bool) -> bool {
@@ -2001,6 +2239,12 @@ impl Render for Terminal {
                 terminal.key_context("TerminalInput")
             })
             .on_key_down(cx.listener(Self::key))
+            .drag_over::<ExternalPaths>(|terminal, _, _, _| terminal.opacity(0.7))
+            .on_drop(cx.listener(|_, paths: &ExternalPaths, _, cx| {
+                if !paths.paths().is_empty() {
+                    cx.emit(FileDrop(paths.paths().to_vec()));
+                }
+            }))
             .on_modifiers_changed(cx.listener(Self::on_link_modifiers_changed))
             .on_mouse_down(MouseButton::Left, cx.listener(Self::on_pointer_down))
             .on_mouse_down(MouseButton::Middle, cx.listener(Self::on_pointer_down))
@@ -2192,10 +2436,50 @@ impl EntityInputHandler for Terminal {
     }
 
     fn paste(&mut self, item: ClipboardItem, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(text) = item.text() {
-            self.paste_text(&text);
-            cx.notify();
-        }
+        self.paste_item(&item, cx);
+        cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod paste_tests {
+    use super::{pasted, Pasted, PastedFile};
+    use gpui_kit::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat};
+
+    fn image() -> ClipboardEntry {
+        ClipboardEntry::Image(Image::from_bytes(ImageFormat::Png, vec![1, 2, 3]))
+    }
+
+    #[test]
+    fn a_paste_is_text_unless_it_carries_only_images_or_names_copied_files() {
+        let text = ClipboardItem::new_string("ls -la".into());
+        assert!(matches!(pasted(&text), Pasted::Text(text) if text == "ls -la"));
+
+        let mut shot = ClipboardItem::new_string(String::new());
+        shot.entries.clear();
+        shot.entries.push(image());
+        assert!(matches!(
+            pasted(&shot),
+            Pasted::Files(files)
+                if matches!(files.as_slice(), [PastedFile::Image { extension: "png", .. }])
+        ));
+
+        let mut copied = ClipboardItem::new_string("/tmp/a.pdf".into());
+        copied
+            .entries
+            .push(ClipboardEntry::ExternalPaths(ExternalPaths(
+                [std::path::PathBuf::from("/tmp/a.pdf")]
+                    .into_iter()
+                    .collect(),
+            )));
+        assert!(matches!(
+            pasted(&copied),
+            Pasted::Files(files) if matches!(files.as_slice(), [PastedFile::Path(_)])
+        ));
+
+        let mut empty = ClipboardItem::new_string(String::new());
+        empty.entries.clear();
+        assert!(matches!(pasted(&empty), Pasted::Nothing));
     }
 }
 

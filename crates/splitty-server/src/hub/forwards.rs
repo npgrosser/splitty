@@ -215,6 +215,18 @@ impl Forwards {
         local: Option<i64>,
         automatic: bool,
     ) -> Result<ForwardInfo, ForwardError> {
+        self.open_with_restore(target, port, local, automatic, false)
+            .await
+    }
+
+    pub async fn open_with_restore(
+        &self,
+        target: &str,
+        port: i64,
+        local: Option<i64>,
+        automatic: bool,
+        preserve_restore: bool,
+    ) -> Result<ForwardInfo, ForwardError> {
         let (target, key) = key(target, port)?;
         let local = local.map(check_port).transpose()?;
         if automatic && local.is_some() {
@@ -223,7 +235,9 @@ impl Forwards {
             ));
         }
         self.ordered(key, move |shared, key| async move {
-            shared.open_ordered(&target, &key, local, !automatic).await
+            shared
+                .open_ordered(&target, &key, local, !automatic, preserve_restore)
+                .await
         })
         .await
     }
@@ -263,6 +277,18 @@ impl Forwards {
         local: Option<i64>,
         label: Option<String>,
     ) -> Result<SavedForward, ForwardError> {
+        self.save_with_restore(target, port, local, label, None)
+            .await
+    }
+
+    pub async fn save_with_restore(
+        &self,
+        target: &str,
+        port: i64,
+        local: Option<i64>,
+        label: Option<String>,
+        enabled: Option<bool>,
+    ) -> Result<SavedForward, ForwardError> {
         let (_, key) = key(target, port)?;
         let local = local.map(check_port).transpose()?;
         if label
@@ -295,6 +321,9 @@ impl Forwards {
         }
         if let Some(label) = label {
             row.label = label;
+        }
+        if let Some(enabled) = enabled {
+            row.enabled = enabled;
         }
         state.preferences.put(row.clone())?;
         if prior.is_some_and(|prior| prior.local != row.local) {
@@ -399,7 +428,7 @@ impl Forwards {
                     }
                 }
                 if let Ok(target) = SshTarget::parse(&key.target) {
-                    let _ = shared.open_ordered(&target, &key, None, false).await;
+                    let _ = shared.open_ordered(&target, &key, None, false, true).await;
                 }
             }));
         }
@@ -454,9 +483,12 @@ impl Shared {
         key: &Key,
         local: Option<u16>,
         explicit: bool,
+        preserve_restore: bool,
     ) -> Result<ForwardInfo, ForwardError> {
         let _changed = ChangedOnDrop(self.changes.clone());
-        let result = self.open_inner(target, key, local, explicit).await;
+        let result = self
+            .open_inner(target, key, local, explicit, preserve_restore)
+            .await;
         let mut state = lock(&self.state);
         match &result {
             Ok(_) => {
@@ -484,6 +516,7 @@ impl Shared {
         key: &Key,
         local: Option<u16>,
         explicit: bool,
+        preserve_restore: bool,
     ) -> Result<ForwardInfo, ForwardError> {
         let saved = {
             let mut state = lock(&self.state);
@@ -496,7 +529,9 @@ impl Shared {
                 let info = forward.info(key);
                 if explicit {
                     if let Some(mut row) = saved {
-                        row.enabled = true;
+                        if !preserve_restore {
+                            row.enabled = true;
+                        }
                         row.local = info.local;
                         state.preferences.put(row)?;
                     }
@@ -528,7 +563,9 @@ impl Shared {
             let mut state = lock(&self.state);
             if explicit {
                 if let Some(mut row) = saved {
-                    row.enabled = true;
+                    if !preserve_restore {
+                        row.enabled = true;
+                    }
                     row.local = info.local;
                     state.preferences.put(row)
                 } else {
@@ -831,6 +868,46 @@ mod tests {
 
     fn forwards_manager(host: &ScriptedHost, dir: &std::path::Path) -> Forwards {
         Forwards::new(Arc::new(host.clone()), dir.join("config"))
+    }
+
+    #[tokio::test]
+    async fn restoration_setting_is_durable_and_independent_of_the_live_forward() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = ScriptedHost::new(dir.path());
+        let manager = forwards_manager(&host, dir.path());
+        let row = manager
+            .save_with_restore("vm1", 5173, None, Some("Personal".into()), Some(false))
+            .await
+            .unwrap();
+        assert!(!row.enabled);
+        assert!(manager.list().is_empty(), "saving does not connect");
+        let forward = manager
+            .open_with_restore("vm1", 5173, None, false, true)
+            .await
+            .unwrap();
+        assert!(
+            !manager.preferences().forwards[0].enabled,
+            "forwarding does not opt into restoration"
+        );
+        manager
+            .save_with_restore("vm1", 5173, None, None, Some(true))
+            .await
+            .unwrap();
+        assert_eq!(manager.list()[0].local, forward.local);
+        manager
+            .save_with_restore("vm1", 5173, None, None, Some(false))
+            .await
+            .unwrap();
+        assert_eq!(
+            manager.list()[0].local,
+            forward.local,
+            "turning restore off does not stop the tunnel"
+        );
+        manager.close().await;
+        let reopened = forwards_manager(&host, dir.path());
+        assert!(!reopened.preferences().forwards[0].enabled);
+        assert_eq!(reopened.preferences().forwards[0].label, "Personal");
+        assert!(reopened.list().is_empty());
     }
 
     #[tokio::test]

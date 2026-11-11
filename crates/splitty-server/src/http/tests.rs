@@ -202,6 +202,8 @@ async fn the_hubs_routes_are_not_on_the_control_socket() {
         ("GET", "/ws/remote?target=vm1&update=1"),
         ("GET", "/api/remote/hosts"),
         ("DELETE", "/api/remote/hosts"),
+        ("GET", "/api/remote/ssh-prompts"),
+        ("POST", "/api/remote/ssh-prompts"),
         ("GET", HOST_PREFERENCES),
         ("PUT", HOST_PREFERENCES),
         ("GET", HOST_ORDER),
@@ -2234,6 +2236,45 @@ async fn forward_preferences_capture_actual_port_and_preserve_unrelated_entries(
 }
 
 #[tokio::test]
+async fn forward_restore_consent_can_be_saved_without_starting_and_preserved_on_open() {
+    let dir = tempfile::tempdir().unwrap();
+    let host = ScriptedHost::new(dir.path());
+    let app = router(&state(ADDR, dir.path()), hub(&host, dir.path()));
+    let body = json!({"target":"vm1","port":5173,"enabled":false,"label":"Personal"});
+    let (status, row) = exchange(&app, api("PUT", PREFERENCES, Some(&body))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(row["enabled"], false);
+    assert!(host.asked().is_empty());
+    let open = json!({"target":"vm1","port":5173,"preserveRestore":true});
+    assert_eq!(
+        exchange(&app, api("POST", FORWARDS, Some(&open))).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(preferences(&app).await["forwards"][0]["enabled"], false);
+    let enable = json!({"target":"vm1","port":5173,"enabled":true});
+    assert_eq!(
+        exchange(&app, api("PUT", PREFERENCES, Some(&enable)))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    assert_eq!(preferences(&app).await["forwards"][0]["enabled"], true);
+    assert_eq!(
+        exchange(&app, api("PUT", PREFERENCES, Some(&body))).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        exchange(&app, api("GET", FORWARDS, None))
+            .await
+            .1
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
 async fn forward_preference_guards_and_shapes_have_no_side_effects() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
@@ -2267,7 +2308,7 @@ async fn forward_preference_guards_and_shapes_have_no_side_effects() {
             forward("vm1", 0),
             forward("vm1", 65536),
             forward("vm1", 30.5),
-            json!({"target":"vm1","port":3000,"enabled":true}),
+            json!({"target":"vm1","port":3000,"enabled":null}),
             json!({"target":"vm1","port":3000,"extra":1}),
         ] {
             assert_eq!(
@@ -2280,6 +2321,8 @@ async fn forward_preference_guards_and_shapes_have_no_side_effects() {
         }
     }
     for (field, value) in [
+        ("enabled", json!("true")),
+        ("enabled", json!(1)),
         ("local", json!(0)),
         ("local", json!(-1)),
         ("local", json!(null)),

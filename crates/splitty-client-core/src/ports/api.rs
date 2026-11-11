@@ -97,8 +97,17 @@ fn body(request: &ForwardRequest, local: Option<u16>, label: bool) -> Map<String
         body["local"] = json!(local);
     }
     if label {
+        if let Some(enabled) = request.restore {
+            body["enabled"] = json!(enabled);
+        }
         if let Some(label) = &request.label {
             body["label"] = json!(label);
+        }
+    }
+    if !label && matches!(request.action, ForwardAction::Start | ForwardAction::Open) {
+        body["preserveRestore"] = json!(true);
+        if request.automatic {
+            body["automatic"] = json!(true);
         }
     }
     Map::from_iter([("body".into(), body)])
@@ -181,7 +190,10 @@ async fn save(
     check_reply(client, &reply)?;
     let saved = decode::<SavedForward>(client, &reply).map_err(|_| Failure::uncertain())?;
     validate_saved(&saved).map_err(|_| Failure::uncertain())?;
-    if saved.target != request.key.target
+    if request
+        .restore
+        .is_some_and(|enabled| enabled != saved.enabled)
+        || saved.target != request.key.target
         || saved.remote != request.key.remote
         || local.is_some_and(|local| local != saved.local)
         || request

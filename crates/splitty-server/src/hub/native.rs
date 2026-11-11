@@ -115,6 +115,7 @@ impl Hub {
             screens,
             target,
             _metadata,
+            _authentication,
         } = reached;
         let mut client = None;
         let mut stream = None;

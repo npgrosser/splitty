@@ -59,7 +59,8 @@ impl Feature {
     }
 }
 const MAX_QUEUED_ZOOM: usize = 32;
-const MAX_QUEUED_SETTINGS: usize = 16;
+/// One pending write per field.
+const MAX_QUEUED_SETTINGS: usize = SettingsField::ALL.len();
 #[derive(Clone)]
 enum Job {
     BackendVersion,

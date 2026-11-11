@@ -93,20 +93,23 @@ fn right_click(window: &mut VisualTestContext, terminal: &Entity<Terminal>, modi
 }
 
 fn activate_item(window: &mut VisualTestContext, view: &Entity<Workspace>, label: &str) {
-    // Navigate the actual Kit popup. Copy is disabled in these unselected fixtures;
-    // separators are skipped by Kit and no callback is invoked directly.
+    // Navigate the rendered terminal popup. Copy is disabled in these unselected fixtures;
+    // disabled items are skipped by keyboard navigation and no callback is invoked directly.
     let steps = match label {
         "Paste" => 1,
         "Find" => 2,
-        "Split Right" => 3,
-        "Split Below" => 4,
-        "Show Drawer" => 5,
+        "Clear Buffer" => 3,
+        "Split Right" => 4,
+        "Split Below" | "Split Down" => 5,
+        "Show Scratchpad" | "Hide Scratchpad" => 6,
+        "Move to Screen" => 7,
+        "Show Drawer" => 8,
         "Close Pane" => window.update(|_, cx| {
             let workspace = view.read(cx);
             if !workspace.drawer_visible && !workspace.drawer_overlay_open {
-                6
+                9
             } else {
-                5
+                8
             }
         }),
         _ => panic!("unsupported fixture menu item"),
@@ -429,5 +432,106 @@ fn rejected_focus_admission_does_not_open_menu_or_strand_keyboard_focus() {
             );
             assert_eq!(window.focused(cx), original_focus);
         });
+    });
+}
+
+#[test]
+fn body_menu_supports_scratchpad_cwd_and_move_to_screen() {
+    with_view(|window, view| {
+        let mut receiver = setup(window, &view);
+        let clicked = terminal(window, &view, "p1");
+        // Toggle Show Scratchpad via context menu.
+        right_click(window, &clicked, Modifiers::default());
+        activate_item(window, &view, "Show Scratchpad");
+        window.update(|window, cx| {
+            let workspace = view.read(cx);
+            assert_eq!(workspace.scratchpad_state_for_pane("p1"), Some(true));
+            assert!(workspace.focused_pane_scratchpad_focused(window, cx));
+        });
+        // Type into the scratchpad and hide it via context menu; verify SetScratchpad is sent.
+        window.simulate_input("note for s1");
+        right_click(window, &clicked, Modifiers::default());
+        activate_item(window, &view, "Hide Scratchpad");
+        window.update(|_, cx| {
+            assert_eq!(view.read(cx).scratchpad_state_for_pane("p1"), Some(false));
+        });
+        let sent: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+        assert!(sent.iter().any(|command| matches!(
+            command.kind(),
+            Command::SetScratchpad { screen, session, text, .. }
+                if screen == "work" && session == "s1" && text == "note for s1"
+        )));
+
+        // Move to Screen -> New Screen via keyboard submenu navigation.
+        right_click(window, &clicked, Modifiers::default());
+        for _ in 0..7 {
+            window.simulate_keystrokes("down");
+        }
+        window.simulate_keystrokes("right enter");
+        let sent: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok()).collect();
+        assert!(sent.iter().any(|command| matches!(
+            command.kind(),
+            Command::TransferPane { source, .. } if source.pane_id == "p1"
+        )));
+
+        // Hovering between "Open Folder in" and "Move to Screen" keeps only one submenu open.
+        window.update(|window, cx| {
+            view.update(cx, |workspace, cx| {
+                let source = workspace.model.as_ref().unwrap().lifecycle_token();
+                workspace
+                    .model
+                    .as_mut()
+                    .unwrap()
+                    .source_mut(source.source_id())
+                    .unwrap()
+                    .apply_snapshot(
+                        source.connection_id(),
+                        &serde_json::json!({"type":"mux.screen_snapshot","screen":{
+                            "id":"work","revision":3,
+                            "root":{"type":"split","id":"split","axis":"horizontal","sizes":[0.5,0.5],"children":[
+                                {"type":"slot","id":"left","paneIds":["p0"],"activePaneId":"p0"},
+                                {"type":"slot","id":"right","paneIds":["p1"],"activePaneId":"p1"}
+                            ]},
+                            "panes":{"p0":{"id":"p0","sessionId":"s0"},"p1":{"id":"p1","sessionId":"s1"}},
+                            "sessions":{
+                                "s0":{"id":"s0","status":"running"},
+                                "s1":{"id":"s1","status":"running","cwd":"/home/demo/project"}
+                            }
+                        }}),
+                    )
+                    .unwrap();
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        right_click(window, &clicked, Modifiers::default());
+        let open_editor_center = window
+            .debug_bounds("terminal-context-open-folder")
+            .expect("open-folder row")
+            .center();
+        window.simulate_mouse_move(open_editor_center, None, Modifiers::default());
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(window
+            .debug_bounds("terminal-context-editor-menu")
+            .is_some());
+        assert!(window.debug_bounds("terminal-context-move-menu").is_none());
+
+        let move_center = window
+            .debug_bounds("terminal-context-move")
+            .expect("move row")
+            .center();
+        window.simulate_mouse_move(move_center, None, Modifiers::default());
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(window
+            .debug_bounds("terminal-context-editor-menu")
+            .is_none());
+        assert!(window.debug_bounds("terminal-context-move-menu").is_some());
+
+        window.simulate_mouse_move(open_editor_center, None, Modifiers::default());
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(window
+            .debug_bounds("terminal-context-editor-menu")
+            .is_some());
+        assert!(window.debug_bounds("terminal-context-move-menu").is_none());
     });
 }

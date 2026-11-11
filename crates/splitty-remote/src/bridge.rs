@@ -279,6 +279,7 @@ impl NativeBridge {
             ));
         }
         // All opening/carrier and OS-worker capacity is held before spawning.
+        let startup_timeout = crate::ssh::startup_timeout(&command, wire::HANDSHAKE_TIMEOUT);
         let (mut input, mut output, process) = spawn_pipes_budgeted(command, &context.budget)?;
         let mut bridge = Self {
             ready: None,
@@ -296,7 +297,7 @@ impl NativeBridge {
         let result = tokio::select! { biased;
             _ = closing.wait_for(|closed| *closed) => Err(io::Error::new(io::ErrorKind::BrokenPipe, "native owner closed")),
             ready = async {
-                negotiation::client(&mut output, &mut input, &context.budget).await?;
+                negotiation::client_with_startup_timeout(&mut output, &mut input, &context.budget, None, startup_timeout).await?;
                 negotiation::accept(&mut output, &mut input, &context.budget, expected, progress).await
             } => ready,
         };
@@ -414,7 +415,7 @@ fn open_command(ssh: &Ssh, server: &Server) -> Command {
         .word("native-v1");
     let mut command = ssh.command();
     command
-        .arg(ssh.target().as_str())
+        .arg(ssh.target().destination())
         .arg("--")
         .arg(line.as_str());
     command

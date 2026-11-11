@@ -1,13 +1,21 @@
 //! Native projection of one authoritative local screen; no independent dock tree.
+use gpui_kit::base::FocusTrapElement as _;
 mod chrome;
 mod drawer;
 mod drawer_ports;
+mod file_transfer;
 mod floating;
+mod host_drag;
 mod host_update;
 mod hosts;
 mod menu_style;
+mod palette;
+mod pane_command;
+mod popover;
 mod ports;
+mod prompt;
 mod remote_screen_create;
+mod scratchpad;
 mod screen_drag;
 mod screen_motion;
 mod settings;
@@ -19,12 +27,15 @@ mod terminal_menu;
 mod title;
 mod transfer;
 mod unread;
+mod viewer;
 
 use crate::appearance::NativeAppearance;
 use crate::terminal::{self, Terminal};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::input::{Input, InputEvent, InputState};
-use gpui_kit::base::{transition, Easing, GlobalState, Popover, Theme, Transition};
+use gpui_kit::base::{
+    transition, Easing, FocusableExt as _, GlobalState, Popover, Theme, Transition,
+};
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
     ActiveTheme as _, Disableable, Icon, Sizable, WindowExt as _,
@@ -106,11 +117,14 @@ enum Direction {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Shortcut {
     Templates,
+    CommandPalette,
+    Settings,
     ToggleDrawer,
     NewTab,
     NewScreen,
     ScreenIndex(usize),
     ToggleMaximize,
+    Scratchpad,
     SplitRight,
     SplitDown,
     ClosePane,
@@ -130,6 +144,78 @@ const LAYOUT_EDGE_MARKER: f32 = 20.;
 
 fn chrome_rems(base_px: f32) -> Rems {
     rems(base_px / 16.)
+}
+
+/// What the native tab bars show (`nativeTabs` of the settings).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TabPrefs {
+    show_split: bool,
+    show_float: bool,
+    show_maximize: bool,
+    /// Only the selected tab of a group has a close button.
+    close_selected_only: bool,
+    /// Tabs keep their place: no drag and drop.
+    locked: bool,
+}
+impl Default for TabPrefs {
+    fn default() -> Self {
+        Self {
+            show_split: true,
+            show_float: true,
+            show_maximize: true,
+            close_selected_only: false,
+            locked: false,
+        }
+    }
+}
+impl TabPrefs {
+    fn read(snapshot: &AppearanceSnapshot) -> Self {
+        let on = |field, default| match snapshot.value(field) {
+            Some(splitty_client_core::settings::SettingsValue::Bool(value)) => value,
+            _ => default,
+        };
+        Self {
+            show_split: on(
+                splitty_client_core::settings::SettingsField::TabsShowSplit,
+                true,
+            ),
+            show_float: on(
+                splitty_client_core::settings::SettingsField::TabsShowFloat,
+                true,
+            ),
+            show_maximize: on(
+                splitty_client_core::settings::SettingsField::TabsShowMaximize,
+                true,
+            ),
+            close_selected_only: snapshot
+                .value(splitty_client_core::settings::SettingsField::TabsCloseButton)
+                == Some(splitty_client_core::settings::SettingsValue::Text(
+                    "active".into(),
+                )),
+            locked: on(
+                splitty_client_core::settings::SettingsField::TabsLocked,
+                false,
+            ),
+        }
+    }
+}
+
+/// Whether focus last moved by keyboard traversal and the keyboard is still
+/// in use. A control shows a focus ring only then: one that was clicked
+/// keeps none after its work is done.
+struct FocusVisible(bool);
+impl Global for FocusVisible {}
+
+fn focus_visible(cx: &App) -> bool {
+    cx.try_global::<FocusVisible>()
+        .is_some_and(|visible| visible.0)
+}
+
+fn set_focus_visible(visible: bool, cx: &mut App) {
+    if focus_visible(cx) != visible {
+        cx.set_global(FocusVisible(visible));
+        cx.refresh_windows();
+    }
 }
 
 fn drawer_transition() -> Transition {
@@ -186,13 +272,24 @@ fn shortcut(key: &Keystroke, is_mac: bool) -> Option<Shortcut> {
     {
         return Some(Shortcut::NewScreen);
     }
+    if mods.control
+        && !mods.shift
+        && !mods.alt
+        && !mods.platform
+        && !mods.function
+        && key.key == ","
+    {
+        return Some(Shortcut::Settings);
+    }
     if mods.control || mods.function || mods.platform != is_mac || mods.alt == is_mac {
         return None;
     }
     match (key.key.to_ascii_lowercase().as_str(), mods.shift) {
         ("p", false) => Some(Shortcut::Templates),
+        ("p", true) => Some(Shortcut::CommandPalette),
         ("t", false) => Some(Shortcut::NewTab),
         ("m", false) => Some(Shortcut::ToggleMaximize),
+        ("j", false) => Some(Shortcut::Scratchpad),
         ("d", false) => Some(Shortcut::SplitRight),
         ("d", true) => Some(Shortcut::SplitDown),
         ("w", false) => Some(Shortcut::ClosePane),
@@ -688,6 +785,8 @@ struct PaneView {
     terminal: Entity<Terminal>,
     _link_subscription: Subscription,
     _menu_subscription: Subscription,
+    _paste_subscription: Subscription,
+    _drop_subscription: Subscription,
     pending_resize: Arc<Mutex<Option<PendingResize>>>,
     marker: bool,
     tail: String,
@@ -708,25 +807,24 @@ fn dispatch_owned_update<T>(
 struct ResizeDrag {
     node: LayoutKey,
     source: SourceToken,
-    revision: u64,
     axis: Axis,
     index: usize,
     start: Point<Pixels>,
-    last_position: Point<Pixels>,
     bounds: Bounds<Pixels>,
     children: Vec<String>,
     sizes: Vec<f64>,
     last_sent: Instant,
     pending: Vec<f64>,
+    /// The button is up; the sizes hold until the model has them.
+    released: bool,
 }
 fn resize_split<'a>(
     model: &'a SourceWorkspace,
     node: &LayoutKey,
-) -> Option<(u64, Axis, Vec<String>, &'a [f64])> {
+) -> Option<(Axis, Vec<String>, &'a [f64])> {
     if model.screen_key(model.shown_screen_id()?) != *node.screen() {
         return None;
     }
-    let revision = model.snapshot()?.revision;
     let LayoutNode::Split {
         axis,
         children,
@@ -737,7 +835,6 @@ fn resize_split<'a>(
         return None;
     };
     Some((
-        revision,
         axis.clone(),
         children
             .iter()
@@ -746,23 +843,16 @@ fn resize_split<'a>(
         sizes,
     ))
 }
+/// The divider follows the pointer from where the drag began, whatever the
+/// model reports meanwhile; only another split under the same ID ends it.
 fn refresh_resize_drag(drag: &mut ResizeDrag, model: &SourceWorkspace) -> bool {
     if model.source_token() != drag.source {
         return false;
     }
-    let Some((revision, axis, children, sizes)) = resize_split(model, &drag.node) else {
+    let Some((axis, children, sizes)) = resize_split(model, &drag.node) else {
         return false;
     };
-    if axis != drag.axis || children != drag.children || drag.index + 1 >= sizes.len() {
-        return false;
-    }
-    if revision != drag.revision {
-        drag.revision = revision;
-        drag.sizes = sizes.to_vec();
-        drag.pending = drag.sizes.clone();
-        drag.start = drag.last_position;
-    }
-    true
+    axis == drag.axis && children == drag.children && drag.index + 1 < sizes.len() && !drag.released
 }
 struct RenameEditor {
     owner: SourceToken,
@@ -896,7 +986,29 @@ pub struct Workspace {
     focus: FocusHandle,
     hosts: HostsView,
     ports: PortsView,
-    drawer_port_menu: Option<drawer_ports::DrawerPortMenu>,
+    drawer_popover: Option<popover::DrawerPopover>,
+    /// Pastes on their way to a pane's server, by request.
+    file_stores: HashMap<Uuid, (SourceToken, file_transfer::StoreTarget)>,
+    file_notices: Vec<file_transfer::FileNotice>,
+    activity_serial: u64,
+    /// The documents of the viewer panes that were shown, by pane.
+    viewers: HashMap<PaneKey, viewer::ViewerPane>,
+    /// The local ports shared with hosts, as the local service has them.
+    shares: Option<Arc<splitty_client_core::hub::SharesSnapshot>>,
+    pending_notified: Option<(ScreenKey, PaneKey)>,
+    /// Dropped files waiting for the user's Send.
+    /// Dropped files waiting for the user's Send, with the directory of the
+    /// pane they were dropped on, which can take them instead.
+    file_drops: HashMap<
+        Uuid,
+        (
+            Vec<terminal::PastedFile>,
+            file_transfer::StoreTarget,
+            Option<String>,
+        ),
+    >,
+    /// Where Drawer rows that open a panel were last painted.
+    drawer_anchors: Rc<RefCell<HashMap<SharedString, Bounds<Pixels>>>>,
     remote_create_enqueues: HashMap<SourceId, RemoteScreenCreateRequest>,
     remote_create_follow: Option<RemoteScreenCreateRequest>,
     remote_create_latest: Option<remote_screen_create::RemoteCreateInterest>,
@@ -904,6 +1016,7 @@ pub struct Workspace {
     settings: Entity<SettingsView>,
     destination: Destination,
     host_connect_trigger: FocusHandle,
+    host_browser_focus: FocusHandle,
     port_trigger: FocusHandle,
     settings_trigger: FocusHandle,
     _settings_subscription: Subscription,
@@ -930,6 +1043,9 @@ pub struct Workspace {
     visible_pending: bool,
     status: String,
     appearance: NativeAppearance,
+    tab_prefs: TabPrefs,
+    /// Which editor opens what when a pane's process asks.
+    editor_prefs: splitty_client_core::native_workspace::EditorSettings,
     appearance_error: Option<String>,
     appearance_generation: u64,
     drawer_visible: bool,
@@ -941,9 +1057,15 @@ pub struct Workspace {
     drawer_edge_task: Option<Task<()>>,
     drawer_collapsed: HashSet<ScreenKey>,
     drawer_hovered: Option<ScreenKey>,
+    /// The host group whose caption the pointer is over.
+    drawer_host_hovered: Option<SourceId>,
+    drawer_screen_menu: Option<ScreenKey>,
     drawer_pane_hovered: Option<(ScreenKey, String)>,
     /// The Drawer Screen drag in progress or its held drop.
     drawer_drag: Option<ScreenDragSession>,
+    drawer_host_drag: Option<ScreenDragSession<SourceId>>,
+    drawer_host_press: Option<(SourceId, f32)>,
+    drawer_host_slots: Rc<RefCell<HashMap<SourceId, RowSlot>>>,
     /// The last pressed Drawer row and its press height in list content coordinates.
     drawer_press: Option<(ScreenKey, f32)>,
     /// Drawer row slots measured at the last prepaint, without drag offsets.
@@ -957,9 +1079,11 @@ pub struct Workspace {
     profiles_generation: u64,
     profile_picker: Option<ProfilePicker>,
     template_dialog: Option<TemplateDialog>,
+    palette: Option<palette::Palette>,
     pending_template_apply: Option<(Uuid, Uuid)>,
     tab_context_menu: Option<TabContextMenu>,
     terminal_menu: Option<TerminalMenu>,
+    scratchpads: scratchpad::ScratchpadState,
     pending_transfer: Option<PendingTransfer>,
     float_order: HashMap<ScreenKey, Vec<String>>,
     float_viewport: Option<Bounds<Pixels>>,
@@ -1084,6 +1208,10 @@ impl Workspace {
             ColorScheme,
         ) -> Worker,
     ) -> (Self, Worker) {
+        // Tests answer the platform's prompt.
+        if !cfg!(test) {
+            prompt::install(cx);
+        }
         let (commands, receiver) = mpsc::channel(64);
         let (sender, mut updates) = mpsc::channel(64);
         let initial_scheme = Self::window_scheme(window);
@@ -1165,6 +1293,13 @@ impl Workspace {
             this.scheme_pending = this.desired_scheme != this.sent_scheme;
             this.flush_scheme();
         });
+        // Tab moves focus by keyboard, which is when a focus ring helps.
+        cx.intercept_keystrokes(|event, _, cx| {
+            if event.keystroke.key == "tab" {
+                set_focus_visible(true, cx);
+            }
+        })
+        .detach();
         let activation_subscription = cx.observe_window_activation(window, |this, window, cx| {
             this.notification_window_active = window.is_window_active();
             this.refresh_notification_watch(cx);
@@ -1235,13 +1370,22 @@ impl Workspace {
                 focus: cx.focus_handle(),
                 hosts: HostsView::default(),
                 ports: PortsView::default(),
-                drawer_port_menu: None,
+                drawer_popover: None,
+                file_stores: HashMap::new(),
+                file_notices: Vec::new(),
+                activity_serial: 0,
+                viewers: HashMap::new(),
+                shares: None,
+                pending_notified: None,
+                file_drops: HashMap::new(),
+                drawer_anchors: Rc::default(),
                 remote_create_enqueues: HashMap::new(),
                 remote_create_follow: None,
                 remote_create_latest: None,
                 remote_create_notice: None,
                 settings,
                 destination: Destination::Screens,
+                host_browser_focus: cx.focus_handle(),
                 host_connect_trigger: cx.focus_handle(),
                 port_trigger: cx.focus_handle(),
                 settings_trigger: cx.focus_handle(),
@@ -1268,6 +1412,8 @@ impl Workspace {
                 visible_pending: false,
                 status: "Starting local workspace…".into(),
                 appearance: NativeAppearance::fallback(&ui_family),
+                tab_prefs: TabPrefs::default(),
+                editor_prefs: Default::default(),
                 appearance_error: None,
                 appearance_generation: 0,
                 drawer_visible: true,
@@ -1279,8 +1425,13 @@ impl Workspace {
                 drawer_edge_task: None,
                 drawer_collapsed: HashSet::new(),
                 drawer_hovered: None,
+                drawer_host_hovered: None,
+                drawer_screen_menu: None,
                 drawer_pane_hovered: None,
                 drawer_drag: None,
+                drawer_host_drag: None,
+                drawer_host_press: None,
+                drawer_host_slots: Rc::default(),
                 drawer_press: None,
                 drawer_row_slots: Rc::default(),
                 drawer_pending: None,
@@ -1292,9 +1443,11 @@ impl Workspace {
                 profiles_generation: 0,
                 profile_picker: None,
                 template_dialog: None,
+                palette: None,
                 pending_template_apply: None,
                 tab_context_menu: None,
                 terminal_menu: None,
+                scratchpads: scratchpad::ScratchpadState::default(),
                 pending_transfer: None,
                 float_order: HashMap::new(),
                 float_viewport: None,
@@ -1432,6 +1585,8 @@ impl Workspace {
             }
         }
         self.screen_motion.clear();
+        self.tab_prefs = TabPrefs::read(snapshot);
+        self.editor_prefs = snapshot.editors().clone();
         self.appearance = next;
         self.appearance_generation = snapshot.generation();
         self.appearance_error =
@@ -1439,6 +1594,7 @@ impl Workspace {
         self.settings.update(cx, |view, cx| {
             view.set_snapshot(snapshot.clone(), window, cx)
         });
+        self.sync_reconnect_hosts(cx);
         cx.emit(AppearanceSettled);
         cx.notify();
     }
@@ -1447,7 +1603,10 @@ impl Workspace {
         if self.destination == Destination::Settings
             || self.pending_close.is_some()
             || self.rename.is_some()
-            || self.template_dialog.is_some()
+            || self
+                .template_dialog
+                .as_ref()
+                .is_some_and(|dialog| dialog.pending.is_some())
             || self.profile_picker.is_some()
             || self.tab_context_menu.is_some()
             || self.pending_template_apply.is_some()
@@ -1457,11 +1616,17 @@ impl Workspace {
         {
             return;
         }
+        if self.template_dialog.is_some() {
+            self.dismiss_templates(window, cx);
+        }
         if self.destination == Destination::Hosts {
             self.show_screens(window, cx);
             if self.destination == Destination::Hosts {
                 return;
             }
+        }
+        if !self.drawer_visible {
+            self.drawer_overlay_open = true;
         }
         self.destination = Destination::Settings;
         self.cancel_remote_create_follow();
@@ -1483,6 +1648,21 @@ impl Workspace {
             self.focus_current(window, cx);
         }
         cx.notify();
+    }
+
+    pub(super) fn has_drawer_panel(&self) -> bool {
+        self.destination != Destination::Screens || self.template_dialog.is_some()
+    }
+
+    pub(super) fn close_drawer_panel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.template_dialog.is_some() {
+            self.dismiss_templates(window, cx);
+        }
+        if self.destination == Destination::Settings {
+            self.close_settings(window, cx);
+        } else if self.destination == Destination::Hosts {
+            self.show_screens(window, cx);
+        }
     }
 
     fn present_drawer_pin(&mut self, pinned: bool) {
@@ -1659,8 +1839,8 @@ impl Workspace {
         }
     }
     fn create_screen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.show_screens(window, cx);
-        if self.destination != Destination::Screens {
+        self.close_drawer_panel(window, cx);
+        if self.destination != Destination::Screens || self.template_dialog.is_some() {
             return;
         }
         let Some(model) = self.local_model() else {
@@ -1693,8 +1873,8 @@ impl Workspace {
         {
             return;
         }
-        self.show_screens(window, cx);
-        if self.destination != Destination::Screens {
+        self.close_drawer_panel(window, cx);
+        if self.destination != Destination::Screens || self.template_dialog.is_some() {
             return;
         }
         self.float_gesture = None;
@@ -1825,6 +2005,12 @@ impl Workspace {
         self.focus_current(window, cx);
         cx.notify();
     }
+    pub(crate) fn appearance(&self) -> &NativeAppearance {
+        &self.appearance
+    }
+    pub(crate) fn request_window_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.request_close(CloseTarget::Window, window, cx);
+    }
     fn request_close(&mut self, target: CloseTarget, window: &mut Window, cx: &mut Context<Self>) {
         let source = if target == CloseTarget::Window {
             None
@@ -1881,14 +2067,59 @@ impl Workspace {
                     .as_ref()
                     .is_some_and(|model| source != model.local_source().source_id())
             });
-        if !plan.needs_confirmation() && !remote_terminate {
+        // Annotations end with their viewer pane: that is asked first too.
+        let notes = match &target {
+            CloseTarget::Pane { screen, pane } => self.annotations_lost(source, screen, Some(pane)),
+            CloseTarget::Screen { screen } => self.annotations_lost(source, screen, None),
+            CloseTarget::Window => 0,
+        };
+        if !plan.needs_confirmation() && notes == 0 {
             self.submit_close(plan, false, cx);
+            return;
+        }
+        let comments = match notes {
+            1 => "1 comment ends".to_owned(),
+            count => format!("{count} comments end"),
+        };
+        if !plan.needs_confirmation() {
+            let (title, detail) = match &target {
+                CloseTarget::Pane { .. } => {
+                    ("Close this document?", format!("{comments} with it."))
+                }
+                _ => (
+                    "Close this Screen?",
+                    format!("{comments} with its documents."),
+                ),
+            };
+            self.prompt_close(
+                plan,
+                VecDeque::new(),
+                ClosePrompt {
+                    title,
+                    detail: &detail,
+                    answers: &["Keep open", "Close"],
+                },
+                window,
+                cx,
+            );
             return;
         }
         let title = match &target {
             CloseTarget::Pane { .. } => "Close terminal pane?".to_owned(),
             CloseTarget::Screen { screen } if remote_terminate => {
-                format!("Terminate Screen {}?", hosts::display(screen))
+                let name = source
+                    .and_then(|source| self.model.as_ref()?.source(source))
+                    .and_then(|current| {
+                        current
+                            .screens()
+                            .iter()
+                            .find(|info| info.id.as_str() == screen.as_str())
+                    })
+                    .and_then(|info| info.name.as_deref());
+                match name {
+                    Some(name) => format!("Terminate {}?", hosts::display(name)),
+                    None => "Terminate this Screen?".to_owned(),
+                }
             }
             CloseTarget::Screen { .. } => "Close Screen?".to_owned(),
             CloseTarget::Window => "End this local workspace?".to_owned(),
@@ -1911,27 +2142,23 @@ impl Workspace {
                     _ => None,
                 })
                 .collect::<BTreeSet<_>>();
-            let examples = sessions
-                .iter()
-                .take(3)
-                .map(|session| hosts::display(session))
-                .collect::<Vec<_>>();
-            format!(
-                "Ends {} sessions on {}. Running: {}. Unresolved: {}. {}",
-                sessions.len(),
-                hosts::display(host),
-                plan.busy_count,
-                plan.unresolved_count,
-                if sessions.is_empty() {
-                    "No session IDs were reported.".to_owned()
-                } else {
-                    format!("Sessions: {}", examples.join(", "))
-                }
-            )
+            let ends = match sessions.len() {
+                0 => "Ends the Screen".to_owned(),
+                1 => "Ends 1 terminal".to_owned(),
+                count => format!("Ends {count} terminals"),
+            };
+            let busy = match plan.busy_count {
+                0 => String::new(),
+                1 => " 1 is still running a command.".to_owned(),
+                count => format!(" {count} are still running a command."),
+            };
+            format!("{ends} on {}.{busy}", hosts::display(host))
         } else if target == CloseTarget::Window {
             "Ends all local terminal sessions.".to_owned()
         } else if plan.unresolved_count != 0 {
             "Session state is still loading.".to_owned()
+        } else if notes != 0 {
+            format!("Running sessions: {}. {comments} with it.", plan.busy_count)
         } else {
             format!("Running sessions: {}", plan.busy_count)
         };
@@ -1969,6 +2196,7 @@ impl Workspace {
             queued,
             confirmed: false,
         });
+        prompt::set_theme(&self.appearance, cx);
         let prompt = window.prompt(
             PromptLevel::Warning,
             prompt.title,
@@ -2090,8 +2318,17 @@ impl Workspace {
             }
         }
         let needs_confirmation = plans.iter().any(ClosePlan::needs_confirmation);
+        let notes: usize = plans
+            .iter()
+            .map(|plan| match &plan.target {
+                CloseTarget::Pane { screen, pane } => {
+                    self.annotations_lost(Some(source.source_id()), screen, Some(pane))
+                }
+                _ => 0,
+            })
+            .sum();
         let first = plans.pop_front().expect("at least one pane");
-        if !needs_confirmation {
+        if !needs_confirmation && notes == 0 {
             self.submit_close_queued(first, false, plans, cx);
             return;
         }
@@ -2100,7 +2337,13 @@ impl Workspace {
         } else {
             format!("Close {count} tabs?")
         };
-        let detail = if unresolved != 0 {
+        let comments = match notes {
+            1 => "1 comment ends".to_owned(),
+            count => format!("{count} comments end"),
+        };
+        let detail = if !needs_confirmation {
+            format!("{comments} with these documents.")
+        } else if unresolved != 0 {
             "Session state is still loading.".to_owned()
         } else {
             let mut names = busy_tabs
@@ -2359,6 +2602,20 @@ impl Workspace {
                 );
             },
         );
+        let paste_route = route.clone();
+        let paste_subscription = cx.subscribe(
+            &terminal,
+            move |this, terminal, event: &terminal::FilePaste, cx| {
+                this.paste_files_into_terminal(paste_route.clone(), terminal, event.0.clone(), cx);
+            },
+        );
+        let drop_route = route.clone();
+        let drop_subscription = cx.subscribe(
+            &terminal,
+            move |this, terminal, event: &terminal::FileDrop, cx| {
+                this.drop_files_into_terminal(drop_route.clone(), terminal, event.0.clone(), cx);
+            },
+        );
         if let Err(error) = terminal.update(cx, |terminal, cx| {
             terminal.set_search_active(false, cx);
             terminal.set_zoom(terminal_scale, cx);
@@ -2374,6 +2631,8 @@ impl Workspace {
                 terminal,
                 _link_subscription: link_subscription,
                 _menu_subscription: menu_subscription,
+                _paste_subscription: paste_subscription,
+                _drop_subscription: drop_subscription,
                 pending_resize,
                 marker: false,
                 tail: String::new(),
@@ -2390,7 +2649,8 @@ impl Workspace {
         self.prepare_screen_motion(&window_model, window, cx);
         self.ports_owner_changed(window_model.local_source().source_token(), window, cx);
         self.revoke_missing_terminal_links(&window_model);
-        self.reconcile_drawer_port_menu(&window_model);
+        self.reconcile_drawer_popover(&window_model, cx);
+        self.reconcile_file_transfers(&window_model, cx);
         self.reconcile_remote_create(&window_model);
         self.settings.update(cx, |view, cx| {
             view.set_owner(window_model.local_source().connection_id(), window, cx);
@@ -2410,6 +2670,13 @@ impl Workspace {
             .collect();
         self.drawer_collapsed
             .retain(|key| opened_keys.contains(key));
+        if self
+            .drawer_screen_menu
+            .as_ref()
+            .is_some_and(|key| !opened_keys.contains(key))
+        {
+            self.drawer_screen_menu = None;
+        }
         if self
             .drawer_hovered
             .as_ref()
@@ -2453,6 +2720,7 @@ impl Workspace {
             self.drawer_edge_task = None;
             self.drawer_collapsed.clear();
             self.drawer_hovered = None;
+            self.drawer_screen_menu = None;
             self.drawer_pane_hovered = None;
             if self
                 .drawer_drag
@@ -2476,6 +2744,7 @@ impl Workspace {
             self.template_dialog = None;
             self.pending_template_apply = None;
             self.tab_context_menu = None;
+            self.scratchpads = scratchpad::ScratchpadState::default();
             self.pending_transfer = None;
             self.pending_float = None;
             self.float_order.clear();
@@ -2626,24 +2895,27 @@ impl Workspace {
         }
         if old_screen != new_screen || catalog_changed {
             self.wheel_navigation.screen_changed();
-            let mut group = None;
-            let mut row = 0;
-            for entry in window_model.opened() {
-                if group != Some(entry.key().source_id()) {
-                    group = Some(entry.key().source_id());
-                    if entry.key().source_id() != window_model.local_source().source_id() {
-                        row += 1;
-                    }
+            if let Some(key) = &new_screen {
+                if let Some(slot) = self.drawer_row_slots.borrow().get(key) {
+                    let viewport = self.drawer_scroll.bounds();
+                    let offset = self.drawer_scroll.offset();
+                    let top = px(slot.top) + offset.y;
+                    let bottom = top + px(slot.height);
+                    let delta = if top < viewport.top() {
+                        viewport.top() - top
+                    } else if bottom > viewport.bottom() {
+                        viewport.bottom() - bottom
+                    } else {
+                        px(0.)
+                    };
+                    self.drawer_scroll
+                        .set_offset(point(offset.x, offset.y + delta));
                 }
-                if new_screen.as_ref() == Some(entry.key()) {
-                    self.drawer_scroll.scroll_to_item(row);
-                    break;
-                }
-                row += 1;
             }
         }
         if old_screen != new_screen {
             self.drag = None;
+            self.scratchpads.resize = None;
             self.float_gesture = None;
             self.float_viewport = None;
         }
@@ -2668,7 +2940,10 @@ impl Workspace {
             .borrow_mut()
             .retain(|key, _| opened_keys.contains(key));
         self.reconcile_screen_drag(&window_model, window, cx);
+        self.reconcile_host_drag(&window_model, window, cx);
+        self.reconcile_scratchpads(&window_model, window, cx);
         self.model = Some(window_model);
+        self.reconcile_host_open(window, cx);
         self.reconcile_terminal_menu(window, cx);
         self.host_update_reconcile(window, cx);
         self.flush_scheme();
@@ -2704,7 +2979,6 @@ impl Workspace {
                 .collect()
         });
         if self.pending_template_apply.is_some()
-            || self.destination != Destination::Screens
             || (!self.is_remote_selected()
                 && self
                     .local_model()
@@ -2862,6 +3136,9 @@ impl Workspace {
             .is_some_and(|model| model.pending_template().is_some())
         {
             self.focus.focus(window, cx);
+            return;
+        }
+        if self.focused_pane_scratchpad_focused(window, cx) {
             return;
         }
         if let Some(pane) = self
@@ -3074,10 +3351,16 @@ impl Workspace {
         );
     }
     fn key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.palette.is_some() {
+            self.palette_key(&event.keystroke, window, cx);
+            return;
+        }
+        if self.drawer_popover.is_some() {
+            // The panel took the keys it uses before any binding ran.
+            return;
+        }
         if self.terminal_menu.is_some() {
-            // Kit owns the focused popup's keys; unmatched keys never become
-            // workspace shortcuts while its captured action is pending.
-            cx.stop_propagation();
+            self.terminal_menu_key(&event.keystroke, window, cx);
             return;
         }
         if self
@@ -3158,28 +3441,55 @@ impl Workspace {
             self.wheel_navigation.reset();
             return;
         }
+        if self.scratchpad_focused(window, cx) {
+            self.wheel_navigation.reset();
+            if event.keystroke.key == "escape" {
+                cx.stop_propagation();
+                if let Some(pane) = self
+                    .selected_model()
+                    .and_then(SourceWorkspace::focused_pane)
+                    .map(str::to_owned)
+                {
+                    self.focus_pane_terminal(&pane, window, cx);
+                }
+                return;
+            }
+        }
         if GlobalState::is_in_deferred_context(cx) {
             return;
         }
         if self.destination == Destination::Settings {
             if event.keystroke.key == "escape" {
                 cx.stop_propagation();
-                if self.drawer_overlay_open {
-                    self.close_drawer_overlay(cx);
-                    self.settings.update(cx, |view, cx| view.focus(window, cx));
-                } else {
-                    self.close_settings(window, cx);
-                }
+                self.close_settings(window, cx);
+            } else if shortcut(&event.keystroke, cx.platform_info().is_mac())
+                == Some(Shortcut::CommandPalette)
+            {
+                cx.stop_propagation();
+                self.toggle_palette(window, cx);
             } else if shortcut(&event.keystroke, cx.platform_info().is_mac())
                 == Some(Shortcut::ToggleDrawer)
             {
                 cx.stop_propagation();
                 self.toggle_drawer_overlay(cx);
+            } else if shortcut_with_layout(
+                &event.keystroke,
+                cx.platform_info().is_mac(),
+                window.modifiers().shift,
+                cx.keyboard_layout().id(),
+            ) == Some(Shortcut::Templates)
+            {
+                cx.stop_propagation();
+                self.wheel_navigation.reset();
+                self.toggle_templates(window, cx);
             }
             return;
         }
         if self.destination == Destination::Hosts {
             if self.host_alias_key(&event.keystroke, window, cx) {
+                return;
+            }
+            if self.host_search_focused(window, cx) && event.keystroke.key != "escape" {
                 return;
             }
             if let Some(action) = HostKey::from_keystroke(&event.keystroke) {
@@ -3222,8 +3532,14 @@ impl Workspace {
             return;
         };
         cx.stop_propagation();
+        self.run_shortcut(action, window, cx);
+    }
+    /// Carry out a command, from its key or from the command palette.
+    fn run_shortcut(&mut self, action: Shortcut, window: &mut Window, cx: &mut Context<Self>) {
         match action {
             Shortcut::ToggleDrawer => self.toggle_drawer_overlay(cx),
+            Shortcut::CommandPalette => self.toggle_palette(window, cx),
+            Shortcut::Settings => self.show_settings(window, cx),
             Shortcut::Templates => {
                 self.wheel_navigation.reset();
                 self.toggle_templates(window, cx)
@@ -3239,10 +3555,8 @@ impl Workspace {
                     self.switch_screen_key(key, window, cx);
                 }
             }
-            Shortcut::ToggleMaximize if !self.is_remote_selected() => {
-                self.toggle_maximize(window, cx)
-            }
-            Shortcut::ToggleMaximize => {}
+            Shortcut::ToggleMaximize => self.toggle_maximize(window, cx),
+            Shortcut::Scratchpad => self.toggle_focused_scratchpad(window, cx),
             Shortcut::PreviousTab => self.cycle_tab(TabStep::Previous, cx),
             Shortcut::NextTab => self.cycle_tab(TabStep::Next, cx),
             Shortcut::SplitRight => self.split(Axis::Horizontal, cx),
@@ -3338,7 +3652,7 @@ impl Workspace {
             .and_then(SourceWorkspace::snapshot)
             .is_some_and(|screen| screen.panes.is_empty())
         {
-            if let Some(model) = self.selected_model().filter(|_| !self.is_remote_selected()) {
+            if let Some(model) = self.selected_model() {
                 if let Some(screen) = model.shown_screen_id() {
                     self.send(
                         Command::NewTerminal {
@@ -3389,7 +3703,10 @@ impl Workspace {
             };
             processed += 1;
             match update {
-                Update::Workspace(model) => self.reconcile(*model, window, cx),
+                Update::Workspace(model) => {
+                    self.reconcile(*model, window, cx);
+                    self.settle_notified(window, cx);
+                }
                 Update::RemoteScreenCreateRejected {
                     owner,
                     source,
@@ -3403,6 +3720,20 @@ impl Workspace {
                 }
                 Update::HostManagement(result) => {
                     self.host_management_result(result, window, cx);
+                }
+                Update::Viewer(update) => self.viewer_update(update, cx),
+                Update::ReviewAnswered(answer) => self.review_answered(answer, cx),
+                Update::Editor(update) => self.editor_update(update, cx),
+                Update::Shares(list) => {
+                    self.shares = Some(list);
+                    cx.notify();
+                }
+                Update::RememberedScreens(list) => {
+                    self.hosts.remembered = Some(list);
+                    cx.notify();
+                }
+                Update::HostReconnectFailed { target } => {
+                    self.host_reconnect_failed(&target, cx);
                 }
                 Update::HostUpdatePrepared(plan) => {
                     self.host_update_prepared(plan, window, cx);
@@ -3428,6 +3759,7 @@ impl Workspace {
                     {
                         self.settings
                             .update(cx, |view, cx| view.apply_write_result(&result, window, cx));
+                        self.sync_reconnect_hosts(cx);
                     }
                 }
                 Update::SettingsReconciled(result) => {
@@ -3437,6 +3769,7 @@ impl Workspace {
                     {
                         self.settings
                             .update(cx, |view, cx| view.apply_reconciled(&result, cx));
+                        self.sync_reconnect_hosts(cx);
                     }
                 }
                 Update::DrawerVisibility(result) => self.apply_drawer_visibility(result, cx),
@@ -3590,6 +3923,7 @@ impl Workspace {
                 Update::NotificationSettings { owner, read } => {
                     self.apply_notification_settings(owner, read, cx);
                 }
+                Update::Files(update) => self.file_update(update, window, cx),
                 Update::Event { source, event } => {
                     self.observe_notification(source, &event, cx);
                     if event.connection_id != source.connection_id()
@@ -3597,6 +3931,7 @@ impl Workspace {
                     {
                         continue;
                     }
+                    self.observe_pane_command(source, &event, window, cx);
                     if let Some(output) = event.output() {
                         let route = self.model.as_ref().and_then(|model| {
                             model
@@ -3669,6 +4004,8 @@ impl Workspace {
             self.zoom_feedback = None;
             cx.notify();
         }
+        self.expire_file_notices(cx);
+        self.sync_viewers(cx);
         self.flush_visible(cx);
         self.flush_resizes(cx);
         self.flush_scheme();
@@ -3846,7 +4183,6 @@ impl Workspace {
                             Command::ResizeSplit {
                                 screen: model
                                     .screen_key(model.shown_screen_id().unwrap_or_default()),
-                                revision: screen.revision,
                                 node: id.to_string(),
                                 sizes: vec![0.65, 0.35],
                             },
@@ -4194,7 +4530,7 @@ impl Workspace {
                     origin: point(marker.left() - bounds.left(), marker.top() - bounds.top()),
                     size: marker.size,
                 };
-                // As in dockview: over a tab, mark it and place before it;
+                // As in dockview: over a tab, mark its left/right half and place before/after it;
                 // over the empty bar space, mark that space and place last.
                 let (before, marker) = match tab_drop(
                     scroll.handle.bounds(),
@@ -4317,7 +4653,6 @@ impl Workspace {
         &mut self,
         source: SourceToken,
         node: LayoutKey,
-        revision: u64,
         split: (Axis, usize, Vec<f64>),
         position: Point<Pixels>,
     ) {
@@ -4326,14 +4661,9 @@ impl Workspace {
             (model.source_token() == source)
                 .then(|| resize_split(model, &node))
                 .flatten()
-                .and_then(
-                    |(current_revision, current_axis, children, current_sizes)| {
-                        (current_revision == revision
-                            && current_axis == axis
-                            && current_sizes == sizes)
-                            .then_some(children)
-                    },
-                )
+                .and_then(|(current_axis, children, current_sizes)| {
+                    (current_axis == axis && current_sizes == sizes).then_some(children)
+                })
         }) else {
             return;
         };
@@ -4341,16 +4671,15 @@ impl Workspace {
             self.drag = Some(ResizeDrag {
                 node,
                 source,
-                revision,
                 axis,
                 index,
                 start: position,
-                last_position: position,
                 bounds,
                 children,
                 pending: sizes.clone(),
                 sizes,
                 last_sent: Instant::now() - Duration::from_secs(1),
+                released: false,
             });
         }
     }
@@ -4358,6 +4687,9 @@ impl Workspace {
         let Some(drag) = &mut self.drag else {
             return;
         };
+        if drag.released {
+            return;
+        }
         if !self
             .model
             .as_ref()
@@ -4368,19 +4700,14 @@ impl Workspace {
             })
             .is_some_and(|model| {
                 model.source_token() == drag.source
-                    && resize_split(model, &drag.node).is_some_and(
-                        |(revision, axis, children, _)| {
-                            revision == drag.revision
-                                && axis == drag.axis
-                                && children == drag.children
-                        },
-                    )
+                    && resize_split(model, &drag.node).is_some_and(|(axis, children, _)| {
+                        axis == drag.axis && children == drag.children
+                    })
             })
         {
             self.drag = None;
             return;
         }
-        drag.last_position = position;
         let (delta, extent) = match drag.axis {
             Axis::Horizontal => (position.x - drag.start.x, drag.bounds.size.width),
             Axis::Vertical => (position.y - drag.start.y, drag.bounds.size.height),
@@ -4390,19 +4717,43 @@ impl Workspace {
             drag.index,
             f64::from(f32::from(delta)) / f64::from(f32::from(extent).max(1.)),
         ) {
-            drag.pending = sizes;
+            if drag.pending != sizes {
+                drag.pending = sizes;
+                // The divider is drawn from the drag, ahead of the model.
+                cx.notify();
+            }
         }
         if force || drag.last_sent.elapsed() >= Duration::from_millis(32) {
             drag.last_sent = Instant::now();
             let command = Command::ResizeSplit {
                 screen: drag.node.screen().clone(),
-                revision: drag.revision,
                 node: drag.node.node_id().to_owned(),
                 sizes: drag.pending.clone(),
             };
             let source = drag.source;
             self.send_captured(source, command, cx);
         }
+    }
+    /// The button went up: send the last sizes and keep drawing them until
+    /// the model, which has them next, is published.
+    fn end_resize(&mut self, position: Point<Pixels>, cx: &mut Context<Self>) {
+        self.drag_resize(position, true, cx);
+        let Some(drag) = &mut self.drag else {
+            return;
+        };
+        drag.released = true;
+        // A resize that was not admitted publishes no model.
+        cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(Duration::from_millis(500))
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                if this.drag.take_if(|drag| drag.released).is_some() {
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
     }
     fn reconcile_float_order(&mut self, window: &WindowWorkspace, model: &SourceWorkspace) {
         let known_screens: HashSet<_> = window
@@ -4710,7 +5061,6 @@ impl Workspace {
                 let weak = cx.entity().downgrade();
                 let slot_for_width = slot_key.clone();
                 let identity = self.selected_model().map(SourceWorkspace::source_token);
-                let remote = self.is_remote_selected();
                 let ready = identity
                     .is_some_and(|source| self.execution_token(source.source_id()) == Some(source));
                 let focused = self
@@ -4815,6 +5165,11 @@ impl Workspace {
                         .unwrap_or_else(|| format!("Terminal {}", index + 1));
                     let drag_title = title.clone();
                     let drag_appearance = self.appearance.clone();
+                    let has_scratchpad = self.pane_has_scratchpad_text(pane.as_str(), cx);
+                    let scratchpad_pane = pane.to_string();
+                    let scratchpad_screen = slot_key.screen().clone();
+                    let scratchpad_source = identity;
+                    let scratchpad_weak = cx.entity().downgrade();
                     tabs = tabs.child(
                         screen_motion::tab_surface(&self.appearance, active, focused, index == 0)
                             .id(SharedString::from(format!("tab-{slot_key}-{pane_key}")))
@@ -4864,8 +5219,8 @@ impl Workspace {
                                     }),
                                 )
                             .when_some(
-                                (!remote
-                                    && ready
+                                (ready
+                                    && !self.tab_prefs.locked
                                     && surface == Surface::Tiled
                                     && !GlobalState::is_in_deferred_context(cx))
                                 .then(|| {
@@ -4893,14 +5248,15 @@ impl Workspace {
                             .child(
                                 screen_motion::tab_label(title.clone())
                                     .id(SharedString::from(format!("drag-tab-{slot_key}-{pane_key}")))
-                                    .tooltip({
+                                    // A menu opened on the tab is not covered by its title.
+                                    .when(self.tab_context_menu.is_none(), |label| {
                                         let title = title.clone();
-                                        move |window, cx| {
+                                        label.tooltip(move |window, cx| {
                                             gpui_kit::component::tooltip::Tooltip::new(
                                                 title.clone(),
                                             )
                                             .build(window, cx)
-                                        }
+                                        })
                                     })
                                     .when(cfg!(all(test, feature = "ui-test-support")), |label| {
                                         label.debug_selector(|| {
@@ -4908,10 +5264,52 @@ impl Workspace {
                                         })
                                     }),
                             )
-                            .child(
+                            .when(has_scratchpad, |tab| {
+                                tab.child(
+                                    Button::new(SharedString::from(format!(
+                                        "tab-scratchpad-{slot_key}-{pane_key}"
+                                    )))
+.focus_ring(focus_visible(cx))
+                                    .accessibility_label("Scratchpad holds text")
+                                    .tooltip("The scratchpad holds text")
+                                    .child(
+                                        Icon::new(IconName::FileText)
+                                            .size(chrome_rems(11.))
+                                            .text_color(rgb(self.appearance.accent)),
+                                    )
+                                    .ghost()
+                                    .compact()
+                                    .with_size(px(screen_motion::TAB_CLOSE_BOX * chrome_scale))
+                                    .size(chrome_rems(screen_motion::TAB_CLOSE_BOX))
+                                    .p_0()
+                                    .ml(chrome_rems(4.))
+                                    .disabled(!ready)
+                                    .on_click(move |_, window, cx| {
+                                        cx.stop_propagation();
+                                        let _ = scratchpad_weak.update(cx, |this, cx| {
+                                            if let Some(source) = scratchpad_source {
+                                                this.select_captured(
+                                                    source,
+                                                    &scratchpad_screen,
+                                                    &scratchpad_pane,
+                                                    window,
+                                                    cx,
+                                                );
+                                                this.toggle_scratchpad(
+                                                    &scratchpad_pane,
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                        });
+                                    }),
+                                )
+                            })
+                            .when(active || !self.tab_prefs.close_selected_only, |tab| tab.child(
                                 Button::new(SharedString::from(format!(
                                     "close-{slot_key}-{pane_key}"
                                 )))
+.focus_ring(focus_visible(cx))
                                 .accessibility_label(format!("Close {title}"))
                                 .tooltip(format!("Close {title}"))
                                 .child(
@@ -4943,7 +5341,7 @@ impl Workspace {
                                         });
                                     },
                                 ),
-                            ),
+                            )),
                     );
                 }
                 let header = div()
@@ -5049,11 +5447,20 @@ impl Workspace {
                                 ))
                                 .child(view.terminal.clone()),
                         );
+                        if interactive {
+                            if let Some(scratchpad) = self.render_scratchpad(pane, &slot_key, cx) {
+                                slot = slot.child(scratchpad);
+                            }
+                        }
+                    } else if self.is_viewer_pane(pane) {
+                        slot = slot
+                            .child(div().flex_1().min_h_0().child(self.render_viewer(pane, cx)));
                     } else {
                         let message = self
                             .selected_model()
                             .and_then(|model| model.template_launch_error(pane))
                             .map(|reason| format!("Terminal failed to start: {reason}"))
+                            .or_else(|| job_outcome(self.selected_model()?.snapshot()?, pane))
                             .unwrap_or_else(|| "Starting terminal…".to_owned());
                         slot = slot.child(div().p_3().child(message));
                     }
@@ -5131,9 +5538,17 @@ impl Workspace {
                 // As in the web client, groups meet at a 1 px line; its wider
                 // resize handle is laid over both neighbors after them, so it
                 // stays on top of their content.
+                // A divider being dragged leads the model: its split is laid
+                // out from the drag.
+                let dragged = self
+                    .drag
+                    .as_ref()
+                    .filter(|drag| drag.node == split_key && drag.pending.len() == sizes.len())
+                    .map(|drag| &drag.pending);
+                let shown_sizes = dragged.unwrap_or(sizes);
                 let ratios: Vec<f32> = (0..children.len())
                     .map(|index| {
-                        sizes
+                        shown_sizes
                             .get(index)
                             .copied()
                             .filter(|n| n.is_finite() && *n > 0.)
@@ -5165,10 +5580,6 @@ impl Workspace {
                         );
                         let node = split_key.clone();
                         let source = self.selected_model().map(SourceWorkspace::source_token);
-                        let revision = self
-                            .selected_model()
-                            .and_then(SourceWorkspace::snapshot)
-                            .map(|screen| screen.revision);
                         let axis = axis.clone();
                         let sizes = sizes.clone();
                         let offset = (before / total).clamp(0., 1.);
@@ -5207,13 +5618,10 @@ impl Workspace {
                                             if GlobalState::is_in_deferred_context(cx) {
                                                 return;
                                             }
-                                            if let (Some(source), Some(revision)) =
-                                                (source, revision)
-                                            {
+                                            if let Some(source) = source {
                                                 this.begin_resize(
                                                     source,
                                                     node.clone(),
-                                                    revision,
                                                     (axis.clone(), index, sizes.clone()),
                                                     event.position,
                                                 );
@@ -5344,6 +5752,7 @@ impl Workspace {
                             )
                             .child(
                                 Button::new(SharedString::from(format!("dock-button-{id}")))
+                                    .focus_ring(focus_visible(cx))
                                     .accessibility_label("Dock this floating group")
                                     .tooltip("Dock this floating group")
                                     .icon(Icon::new(IconName::PanelsTopLeft))
@@ -5379,6 +5788,7 @@ impl Workspace {
                                 Button::new(SharedString::from(format!(
                                     "float-maximize-button-{id}"
                                 )))
+                                .focus_ring(focus_visible(cx))
                                 .accessibility_label("Maximize this floating group")
                                 .tooltip("Maximize this floating group")
                                 .icon(Icon::new(IconName::Maximize))
@@ -5444,6 +5854,10 @@ impl Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // The pointer took over: whatever Tab focused shows no ring any more.
+        if !window.last_input_was_keyboard() {
+            set_focus_visible(false, cx);
+        }
         self.sample_screen_motion(window, cx);
         self.expire_screen_drag(cx);
         let mut messages = Vec::new();
@@ -5474,7 +5888,7 @@ impl Render for Workspace {
         }
         let drawer_fraction = transition(
             "drawer-visibility",
-            if self.drawer_visible || self.drawer_overlay_open {
+            if self.drawer_visible || self.drawer_overlay_open || self.has_drawer_panel() {
                 1.
             } else {
                 0.
@@ -5495,6 +5909,76 @@ impl Render for Workspace {
             cx,
         );
         let template_overlay = self.template_overlay(window, cx);
+        let max_panel_width = (f32::from(window.viewport_size().width)
+            / self.appearance.zoom.window_scale()
+            - self.drawer_width as f32)
+            .max(240.);
+        let panel_width = 360.0_f32.min(max_panel_width);
+        let drawer_panel = if self.destination == Destination::Settings {
+            Some(self.settings.clone().into_any_element())
+        } else {
+            template_overlay
+        }
+        .map(|panel_content| {
+            div()
+                .id("drawer-panel")
+                .when(cfg!(all(test, feature = "ui-test-support")), |panel| {
+                    panel.debug_selector(|| "drawer-panel".into())
+                })
+                .w(chrome_rems(panel_width))
+                .h_full()
+                .min_h_0()
+                .flex_none()
+                .overflow_hidden()
+                .bg(rgb(self.appearance.raised))
+                .border_r_1()
+                .border_color(rgb(self.appearance.subtle_border))
+                .occlude()
+                .on_scroll(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                .child(panel_content)
+                .into_any_element()
+        });
+        let hosts_overlay = if self.destination == Destination::Hosts {
+            let width = (f32::from(window.viewport_size().width)
+                / self.appearance.zoom.window_scale()
+                - 32.)
+                .clamp(320., 800.);
+            let height = (f32::from(window.viewport_size().height)
+                / self.appearance.zoom.window_scale()
+                - 48.)
+                .clamp(260., 580.);
+            Some(
+                div()
+                    .id("hosts-overlay")
+                    .absolute()
+                    .inset_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .bg(cx.theme().overlay)
+                    .occlude()
+                    .on_scroll(cx.listener(|_, _, _, cx| cx.stop_propagation()))
+                    .on_click(cx.listener(|this, _, window, cx| this.show_screens(window, cx)))
+                    .child(
+                        div()
+                            .id("hosts-browser")
+                            .w(chrome_rems(width))
+                            .h(chrome_rems(height))
+                            .rounded(cx.theme().radius_lg)
+                            .overflow_hidden()
+                            .border_1()
+                            .border_color(cx.theme().border)
+                            .bg(cx.theme().popover)
+                            .occlude()
+                            .on_click(|_, _, cx| cx.stop_propagation())
+                            .child(self.render_hosts(window, cx))
+                            .focus_trap("hosts-browser-trap", &self.host_browser_focus),
+                    )
+                    .into_any_element(),
+            )
+        } else {
+            None
+        };
         let toolbar_source = self.lifecycle_token();
         let view = div()
             .relative()
@@ -5509,10 +5993,21 @@ impl Render for Workspace {
             .text_size(chrome_rems(self.appearance.font_size))
             .capture_key_down(cx.listener(Self::key))
             .capture_any_mouse_down(cx.listener(Self::preserve_screen_motion_focus))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                this.drawer_edge_hover(event, cx);
+            .id("workspace-root")
+            .hover_listener_mode(HoverListenerMode::InputModalityIndependent)
+            .on_hover(cx.listener(|this, hovered: &bool, _, _| {
+                if !hovered {
+                    this.drawer_edge_last = None;
+                    this.drawer_edge_task = None;
+                }
+            }))
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.drawer_edge_hover(event, window, cx);
                 if this.drag.is_some() && event.dragging() {
                     this.drag_resize(event.position, false, cx);
+                }
+                if this.scratchpads.resize.is_some() && event.dragging() {
+                    this.drag_scratchpad_resize(event.position, cx);
                 }
             }))
             .on_mouse_exit(cx.listener(|this, _: &MouseExitEvent, _, _| {
@@ -5522,8 +6017,8 @@ impl Render for Workspace {
             .on_mouse_up(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, _, cx| {
-                    this.drag_resize(event.position, true, cx);
-                    this.drag = None;
+                    this.end_resize(event.position, cx);
+                    this.scratchpads.resize = None;
                     if this.drop_target.take().is_some() {
                         cx.notify();
                     }
@@ -5532,8 +6027,8 @@ impl Render for Workspace {
             .on_mouse_up_out(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseUpEvent, _, cx| {
-                    this.drag_resize(event.position, true, cx);
-                    this.drag = None;
+                    this.end_resize(event.position, cx);
+                    this.scratchpads.resize = None;
                     if this.drop_target.take().is_some() {
                         cx.notify();
                     }
@@ -5547,11 +6042,7 @@ impl Render for Workspace {
             .min_w_0()
             .min_h_0()
             .ml(chrome_rems(reserved_width));
-        if self.destination == Destination::Settings {
-            main_content = main_content.child(self.settings.clone());
-        } else if self.destination == Destination::Hosts {
-            main_content = main_content.child(self.render_hosts(cx));
-        } else if let Some(model) = self.selected_model() {
+        if let Some(model) = self.selected_model() {
             if self.is_remote_selected() {
                 if let Some(key) = self.current_screen_key() {
                     if let Some(entry) = self.model.as_ref().and_then(|model| {
@@ -5622,7 +6113,7 @@ impl Render for Workspace {
                     );
                 }
             } else if let Some(screen) = model.snapshot() {
-                if screen.panes.is_empty() && !self.is_remote_selected() {
+                if screen.panes.is_empty() {
                     main_content = main_content.child(
                         div().flex_1().flex().items_center().justify_center().child(
                             div()
@@ -5635,7 +6126,7 @@ impl Render for Workspace {
                                 .on_click(cx.listener(move |this, _, _, cx| {
                                     if toolbar_source.is_some_and(|source| {
                                         this.lifecycle_token() == Some(source)
-                                            && this.local_model().is_some_and(|model| {
+                                            && this.selected_model().is_some_and(|model| {
                                                 model
                                                     .snapshot()
                                                     .is_some_and(|screen| screen.panes.is_empty())
@@ -5853,11 +6344,12 @@ impl Render for Workspace {
             })
             .when(drawer_fraction > 0. || reserved_width > 0., |view| {
                 let owner = self.lifecycle_token();
+                let has_panel = self.has_drawer_panel();
                 let shade =
                     (drawer_fraction * (1. - reserved_width / self.drawer_width as f32) * 68.)
                         .round()
                         .clamp(0., 68.) as u32;
-                view.when(shade > 0, |view| {
+                view.when(shade > 0 || has_panel, |view| {
                     view.child(
                         div()
                             .id("drawer-backdrop")
@@ -5866,10 +6358,11 @@ impl Render for Workspace {
                             .bg(rgba((self.appearance.overlay << 8) | shade))
                             .occlude()
                             .on_scroll(cx.listener(|_, _, _, cx| cx.stop_propagation()))
-                            .on_click(cx.listener(move |this, _, _, cx| {
+                            .on_click(cx.listener(move |this, _, window, cx| {
                                 if this.lifecycle_token() == owner
                                     && !GlobalState::is_in_deferred_context(cx)
                                 {
+                                    this.close_drawer_panel(window, cx);
                                     this.close_drawer_overlay(cx);
                                 }
                             })),
@@ -5877,23 +6370,35 @@ impl Render for Workspace {
                 })
                 .child(
                     div()
-                        .id("drawer-slide")
-                        .when(cfg!(all(test, feature = "ui-test-support")), |drawer| {
-                            drawer.debug_selector(|| "drawer-slide".into())
-                        })
+                        .id("drawer-container")
                         .absolute()
                         .top_0()
                         .left(chrome_rems(
                             (drawer_fraction - 1.) * self.drawer_width as f32,
                         ))
                         .h_full()
+                        .flex()
+                        .flex_row()
                         .occlude()
-                        .child(self.render_drawer(window, cx)),
+                        .child(
+                            div()
+                                .id("drawer-slide")
+                                .when(cfg!(all(test, feature = "ui-test-support")), |drawer| {
+                                    drawer.debug_selector(|| "drawer-slide".into())
+                                })
+                                .h_full()
+                                .flex_none()
+                                .child(self.render_drawer(window, cx)),
+                        )
+                        .when_some(drawer_panel, |view, panel| view.child(panel)),
                 )
             })
-            .when_some(template_overlay, |view, overlay| view.child(overlay))
-            .children(self.render_terminal_menu(window))
+            .children(hosts_overlay)
+            .children(self.render_terminal_menu(window, cx))
+            .children(self.render_file_notices(cx))
             .children(self.render_tab_context_menu(window, cx))
+            .children(self.render_drawer_popover(window, cx))
+            .children(self.render_palette(cx))
     }
 }
 fn first_selected_slot(model: &SourceWorkspace, node: &LayoutNode) -> Option<(String, String)> {
@@ -6036,6 +6541,27 @@ fn reveal_changed_tabs(
     for entry in current.presented_floats() {
         visit(&entry.root, previous, current, &screen, handles);
     }
+}
+/// What became of a managed job whose pane has no terminal to show, as the
+/// web client words it: the state and, if the service gave one, its reason.
+fn job_outcome(screen: &splitty_client_core::workspace::ScreenState, pane: &str) -> Option<String> {
+    let job = screen
+        .panes
+        .values()
+        .find(|entry| entry.id.as_str() == pane)?;
+    let job = screen.jobs.get(job.job_id.as_ref()?)?;
+    let state = match job.state {
+        splitty_client_core::workspace::JobState::Starting => "Job starting…",
+        splitty_client_core::workspace::JobState::Running => "Job running",
+        splitty_client_core::workspace::JobState::Stopping => "Job stopping…",
+        splitty_client_core::workspace::JobState::Exited => "Job exited",
+        splitty_client_core::workspace::JobState::Failed => "Job failed",
+        splitty_client_core::workspace::JobState::Interrupted => "Job interrupted",
+    };
+    Some(match &job.error {
+        Some(error) => format!("{state}: {}", error.chars().take(2000).collect::<String>()),
+        None => state.to_owned(),
+    })
 }
 fn resized_pair(sizes: &[f64], index: usize, delta: f64) -> Option<Vec<f64>> {
     if index + 1 >= sizes.len()
@@ -6287,7 +6813,7 @@ mod tests {
 
     #[cfg(not(target_os = "windows"))]
     #[tokio::test]
-    async fn divider_drag_uses_confirmed_revision_only_while_split_structure_survives() {
+    async fn divider_drag_keeps_its_origin_while_split_structure_survives() {
         let service = EmbeddedService::start();
         let mut client = service.connect().await.unwrap();
         let connection = client.connection_id();
@@ -6339,16 +6865,15 @@ mod tests {
         let mut drag = ResizeDrag {
             node: model.screen_key(&ids.screen_id).layout_key("root"),
             source,
-            revision: 1,
             axis: super::Axis::Horizontal,
             index: 0,
             start: point(px(10.), px(10.)),
-            last_position: point(px(60.), px(10.)),
             bounds: rectangle(0., 0., 200., 100.),
             children: vec!["left".into(), "right".into()],
             sizes: vec![0.5, 0.5],
             pending: vec![0.6, 0.4],
             last_sent: Instant::now() - Duration::from_millis(40),
+            released: false,
         };
         assert!(refresh_resize_drag(&mut drag, &model));
         model
@@ -6356,13 +6881,9 @@ mod tests {
             .unwrap();
         assert!(refresh_resize_drag(&mut drag, &model));
         assert_eq!(
-            drag.revision, 2,
-            "only a confirmed matching snapshot refreshes authority"
-        );
-        assert_eq!(drag.sizes, [0.7, 0.3]);
-        assert_eq!(
-            drag.start, drag.last_position,
-            "next pointer delta starts at the confirmed position"
+            (drag.sizes.as_slice(), drag.start),
+            ([0.5, 0.5].as_slice(), point(px(10.), px(10.))),
+            "a snapshot during the drag moves neither its sizes nor its origin"
         );
         assert!(!refresh_resize_drag(
             &mut drag,

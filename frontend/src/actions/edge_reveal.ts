@@ -6,7 +6,7 @@ export function edgeReveal(
   _node: HTMLElement,
   params: { enabled: boolean; onReveal: () => void },
 ) {
-  const EDGE_WIDTH = 6;
+  const EDGE_WIDTH = 18;
   const DWELL_MS = 200;
   const INTENT_SPEED = 800; // px/s max to count as intentional
 
@@ -19,15 +19,18 @@ export function edgeReveal(
     if (!params.enabled || e.buttons !== 0) return;
 
     const now = performance.now();
+    const enteredFromOutside = lastX > EDGE_WIDTH;
     const dt = now - lastTime;
-    const dx = Math.abs(e.clientX - lastX);
+    const rawDx = e.clientX - lastX;
+    const dx = Math.abs(rawDx);
     const dy = Math.abs(e.clientY - lastY);
+    const movingIntoEdge = rawDx <= 0 && dy <= -rawDx;
     const speed = dt > 0 ? (Math.sqrt(dx * dx + dy * dy) / dt) * 1000 : 0;
     lastX = e.clientX;
     lastY = e.clientY;
     lastTime = now;
 
-    if (e.clientX <= EDGE_WIDTH && speed < INTENT_SPEED) {
+    if (e.clientX <= EDGE_WIDTH && (enteredFromOutside || movingIntoEdge || speed < INTENT_SPEED)) {
       if (!timer) {
         timer = window.setTimeout(() => {
           timer = undefined;

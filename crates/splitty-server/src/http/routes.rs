@@ -83,6 +83,11 @@ pub(crate) fn api_routes_with(hub: Arc<Hub>) -> Router<AppState> {
             "/api/remote/directory",
             get(move || async move { Json(directory_hub.directory()) }),
         )
+        .route("/api/remote/ssh-prompts", get(|| async { Json(splitty_remote::askpass::prompts()) }).post(
+            |Json(body): Json<Value>| async move {
+                Json(serde_json::json!({"accepted": splitty_remote::askpass::respond_document(&body)}))
+            }
+        ))
         .route(
             "/api/remote/hosts",
             get(move || async move { Json(hosts_hub.known_hosts()) }).delete(

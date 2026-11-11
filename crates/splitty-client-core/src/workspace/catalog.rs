@@ -83,6 +83,7 @@ pub struct SourceWorkspace {
     pending_floating: Option<PendingFloating>,
     pending_template: Option<templates::PendingTemplate>,
     templates_supported: bool,
+    viewers_supported: bool,
     template_failures: HashMap<String, (String, String)>,
     reconciling: bool,
     route_generation: u64,
@@ -338,6 +339,7 @@ impl SourceWorkspace {
             pending_floating: None,
             pending_template: None,
             templates_supported: false,
+            viewers_supported: false,
             template_failures: HashMap::new(),
             reconciling: false,
             route_generation: 0,
@@ -628,6 +630,12 @@ impl SourceWorkspace {
     pub fn catalog_initialized(&self) -> bool {
         self.catalog_initialized
     }
+    /// See `ScreenModel::identity_for`.
+    pub fn identity_for(&self, pane: &str) -> Option<String> {
+        self.models
+            .values()
+            .find_map(|screen| screen.identity_for(pane))
+    }
     pub fn session_for(&self, pane: &str) -> Option<&str> {
         self.models
             .values()
@@ -864,6 +872,16 @@ impl SourceWorkspace {
             .as_ref()
             .filter(|creation| self.remote_creation_newer_than(creation.screen_id(), watermark))
             .map(|creation| creation.screen_id().to_owned());
+        // The Screen a pending move or template makes is not on the host
+        // until that is done.
+        let moving_to = self
+            .pending_transfer
+            .as_ref()
+            .map(|pending| pending.target.screen_id().to_owned());
+        let template_for = self
+            .pending_template
+            .as_ref()
+            .map(|pending| pending.preview.screen_id().to_owned());
         let CatalogPolicy::Remote { live, missing, .. } = &mut self.policy else {
             unreachable!()
         };
@@ -880,7 +898,10 @@ impl SourceWorkspace {
                         self.tab_selection_supported,
                     )
                 });
-            } else if newer_creation.as_deref() != Some(id) {
+            } else if newer_creation.as_deref() != Some(id)
+                && moving_to.as_deref() != Some(id)
+                && template_for.as_deref() != Some(id)
+            {
                 missing.insert(id.to_owned());
                 self.models.remove(id);
             }
@@ -1237,6 +1258,32 @@ impl SourceWorkspace {
         self.require_routes_settled()?;
         self.shown_mut()?.resize_split(client, node, sizes)
     }
+    pub fn set_scratchpad(
+        &mut self,
+        client: &Client,
+        screen: &str,
+        session: &str,
+        text: String,
+    ) -> io::Result<()> {
+        self.check_known(client, screen)?;
+        self.models
+            .get_mut(screen)
+            .ok_or_else(|| invalid("scratchpad target Screen is gone"))?
+            .set_scratchpad(client, session, text)
+    }
+    /// Send an operation on a viewer pane's annotations to the pane's Screen.
+    pub(crate) fn annotation_op(
+        &mut self,
+        client: &Client,
+        screen: &str,
+        op: &ScreenOp,
+    ) -> io::Result<()> {
+        self.check_known(client, screen)?;
+        self.models
+            .get_mut(screen)
+            .ok_or_else(|| invalid("The document's Screen is gone"))?
+            .send_op(client, op)
+    }
     pub fn capture_drag(&self, pane: &str) -> Option<PaneDrag> {
         self.shown()?.capture_drag(pane)
     }
@@ -1272,6 +1319,18 @@ impl SourceWorkspace {
     pub fn reject_move(&mut self, connection: Uuid) {
         for screen in self.models.values_mut() {
             screen.reject_move(connection);
+        }
+    }
+    /// A rejected divider change returns its screen to the service's layout.
+    pub fn reject_resize(&mut self, connection: Uuid, event: &Value) {
+        if connection != self.connection_id {
+            return;
+        }
+        if let Some(screen) = event["screenId"]
+            .as_str()
+            .and_then(|id| self.models.get_mut(id))
+        {
+            screen.drop_preview();
         }
     }
 

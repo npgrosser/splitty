@@ -566,6 +566,53 @@ fn disconnect_and_rebind_clear_live_port_observations_without_detaching_screens(
     assert!(window.source(id).unwrap().port_observation().is_none());
 }
 
+#[test]
+fn listed_screens_open_together_and_a_host_detaches_as_a_whole() {
+    let mut window = WindowWorkspace::new(Uuid::new_v4());
+    let owner = window.lifecycle_token();
+    let host = remote(&mut window, "one.test");
+    let other = remote(&mut window, "two.test");
+    catalog(&mut window, host, &["a", "b", "c"]);
+    catalog(&mut window, other, &["x"]);
+    let kept = open(&mut window, other, "x");
+    let token = window.source(host).unwrap().source_token();
+    let key = |window: &WindowWorkspace, id: &str| window.source(host).unwrap().screen_key(id);
+    let (a, c, ended) = (key(&window, "a"), key(&window, "c"), key(&window, "ended"));
+    let on_host = |window: &WindowWorkspace| {
+        window
+            .opened()
+            .into_iter()
+            .map(|entry| entry.key)
+            .filter(|key| key.source_id() == host)
+            .collect::<Vec<_>>()
+    };
+
+    // A Screen that has ended is left out, and the first listed one is shown.
+    assert!(window
+        .open_listed(token, &[a.clone(), ended.clone(), c.clone()])
+        .unwrap());
+    assert_eq!(on_host(&window), [a.clone(), c.clone()]);
+    assert_eq!(window.shown_key(), Some(a.clone()));
+    assert!(!window.open_listed(token, &[c.clone(), a.clone()]).unwrap());
+    assert_eq!(window.shown_key(), Some(c.clone()));
+    assert!(window.open_listed(token, &[ended]).is_err());
+    assert!(window
+        .open_listed(token, &[a.clone(), kept.clone()])
+        .is_err());
+    assert!(window.open_listed(token, &[]).is_err());
+    assert_eq!(on_host(&window), [a, c]);
+
+    // Closing the host removes its references and nothing else.
+    assert!(window.detach_all(token, host).is_err());
+    window.detach_all(owner, host).unwrap();
+    assert!(on_host(&window).is_empty());
+    assert_eq!(window.shown_key(), Some(kept));
+    assert_eq!(
+        window.source(host).unwrap().live_catalog().unwrap().len(),
+        3
+    );
+}
+
 /// Reuse the canonical catalog/open/snapshot fixtures for other feature tests.
 /// A repeated target deliberately replaces its connection and retains Screen IDs.
 pub(crate) fn remote_terminal_fixture(
@@ -756,8 +803,8 @@ fn remote_creation_admission_uses_exact_current_source_and_aggregate_capacity() 
     assert!(
         window
             .prepare_remote_screen_creation(&action, current)
-            .is_err(),
-        "metadata alone is not an opened group"
+            .is_ok(),
+        "a live catalog allows creating the first opened Screen from Hosts"
     );
     open(&mut window, second, "same");
     window.begin_close(second).unwrap();
