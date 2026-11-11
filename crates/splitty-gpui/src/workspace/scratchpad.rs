@@ -389,12 +389,11 @@ impl Workspace {
             };
             let found = source
                 .shown_screen_id()
-                .and_then(|screen_id| {
+                .zip(
                     source
                         .snapshot()
-                        .and_then(|snap| session_scratchpad(snap, key.session_id.as_str()))
-                        .map(|text| (screen_id, text))
-                })
+                        .and_then(|snap| session_scratchpad(snap, key.session_id.as_str())),
+                )
                 .or_else(|| {
                     source.screens().iter().find_map(|info| {
                         source
