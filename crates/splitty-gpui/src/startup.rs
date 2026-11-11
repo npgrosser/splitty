@@ -1,4 +1,4 @@
-//! Explicit process startup configuration, parsed before creating a window.
+//! Process startup configuration, parsed before creating a window.
 use splitty_client_core::owned_service::{LocalBackend, WslLaunch};
 use std::path::PathBuf;
 
@@ -11,6 +11,9 @@ pub struct Options {
     pub backend: LocalBackend,
     pub help: bool,
 }
+
+#[cfg(any(target_os = "windows", test))]
+pub mod wsl;
 
 impl Options {
     pub fn parse(
@@ -72,13 +75,15 @@ impl Options {
         if configured && (!is_windows || result.probe) {
             anyhow::bail!("WSL options are supported only by the Windows workspace");
         }
-        if is_windows && !result.probe {
+        // Without WSL options the Windows workspace chooses a distribution and
+        // installs its backend (`wsl::prepare`); the backend stays `Embedded` here.
+        if configured {
             let (Some(distro), Some(backend), Some(config)) = (distro, backend, config) else {
                 anyhow::bail!(
-                    "Windows preview requires --wsl-distro NAME --wsl-backend /absolute/path/to/splitty --wsl-config-dir /absolute/preview/config; use its supplied launcher"
+                    "An explicit WSL target requires --wsl-distro NAME --wsl-backend /absolute/path/to/splitty --wsl-config-dir /absolute/config"
                 );
             };
-            result.backend = LocalBackend::Wsl(WslLaunch::new(distro, backend, config)?);
+            result.backend = LocalBackend::Wsl(WslLaunch::new(distro, backend, Some(config))?);
         }
         Ok(result)
     }
@@ -108,8 +113,11 @@ mod tests {
     }
 
     #[test]
-    fn windows_workspace_requires_one_complete_explicit_target_before_launch() {
-        assert!(parse(&[], true).is_err());
+    fn an_explicit_windows_target_is_complete_and_no_options_leave_the_choice_to_startup() {
+        assert!(matches!(
+            parse(&[], true).unwrap().backend,
+            LocalBackend::Embedded
+        ));
         assert!(parse(&["--wsl-distro", "Test Linux"], true).is_err());
         let args = [
             "--wsl-distro",

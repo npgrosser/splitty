@@ -17,20 +17,21 @@ use std::{
 };
 use uuid::Uuid;
 
-/// Explicit development startup target. Paths are Linux paths in this distro,
-/// never host paths or shell fragments. No discovery or installation is implied.
+/// Startup target of the Windows workspace. Paths are Linux paths in this
+/// distro, never host paths or shell fragments. Without a configuration
+/// directory the backend keeps the distribution's default one.
 #[derive(Clone, Debug)]
 pub struct WslLaunch {
     distro: String,
     backend: String,
-    config_dir: String,
+    config_dir: Option<String>,
 }
 impl WslLaunch {
-    pub fn new(distro: String, backend: String, config_dir: String) -> io::Result<Self> {
+    pub fn new(distro: String, backend: String, config_dir: Option<String>) -> io::Result<Self> {
         if distro.is_empty()
             || distro.len() > 256
             || distro.chars().any(char::is_control)
-            || [&backend, &config_dir].iter().any(|path| {
+            || std::iter::once(&backend).chain(&config_dir).any(|path| {
                 path.len() > 4096
                     || !path.starts_with('/')
                     || path.len() == 1
@@ -46,21 +47,33 @@ impl WslLaunch {
             config_dir,
         })
     }
-    fn arguments(&self) -> Vec<String> {
-        vec![
+    /// `askpass` is the Linux path of the SSH dialog executable, when there is one.
+    fn arguments(&self, askpass: Option<&str>) -> Vec<String> {
+        let mut arguments = vec![
             "-d".into(),
             self.distro.clone(),
             "--exec".into(),
             "env".into(),
-            format!("SPLITTY_CONFIG_DIR={}", self.config_dir),
-            self.backend.clone(),
-            "desktop-backend".into(),
-            "--transport".into(),
-            "native-v1".into(),
-            "--backend".into(),
-            "embedded".into(),
-            "--owner".into(),
-        ]
+        ];
+        if let Some(config_dir) = &self.config_dir {
+            arguments.push(format!("SPLITTY_CONFIG_DIR={config_dir}"));
+        }
+        if let Some(askpass) = askpass {
+            arguments.push(format!("SPLITTY_ASKPASS_PROGRAM={askpass}"));
+        }
+        arguments.extend(
+            [
+                self.backend.as_str(),
+                "desktop-backend",
+                "--transport",
+                "native-v1",
+                "--backend",
+                "embedded",
+                "--owner",
+            ]
+            .map(String::from),
+        );
+        arguments
     }
 }
 
@@ -91,10 +104,10 @@ impl OwnedService {
             #[cfg(target_os = "windows")]
             LocalBackend::Embedded => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
-                "Windows workspace requires --wsl-distro, --wsl-backend and --wsl-config-dir",
+                "Windows workspace requires a WSL backend",
             )),
             LocalBackend::Wsl(launch) => {
-                let mut arguments = launch.arguments();
+                let mut askpass = None;
                 if let Some(program) = splitty_remote::ssh::askpass_program() {
                     // Resolve using the selected distro's mount configuration,
                     // rather than assuming Windows drives are under /mnt.
@@ -117,8 +130,9 @@ impl OwnedService {
                     if !path.starts_with('/') || path.chars().any(char::is_control) {
                         return Err(io::Error::other("Invalid WSL SSH dialog path"));
                     }
-                    arguments.insert(5, format!("SPLITTY_ASKPASS_PROGRAM={path}"));
+                    askpass = Some(path.to_owned());
                 }
+                let arguments = launch.arguments(askpass.as_deref());
                 let mut command = tokio::process::Command::new("wsl.exe");
                 #[cfg(target_os = "windows")]
                 command.creation_flags(0x08000000); // CREATE_NO_WINDOW, no extra console
@@ -227,11 +241,11 @@ mod tests {
         let launch = WslLaunch::new(
             "Distro with spaces".into(),
             "/home/a/backend $x".into(),
-            "/tmp/settings ' preview".into(),
+            Some("/tmp/settings ' preview".into()),
         )
         .unwrap();
         assert_eq!(
-            launch.arguments(),
+            launch.arguments(None),
             [
                 "-d",
                 "Distro with spaces",
@@ -247,6 +261,22 @@ mod tests {
                 "--owner"
             ]
         );
+        let default_config = WslLaunch::new("D".into(), "/home/a/splitty".into(), None).unwrap();
+        assert_eq!(
+            default_config.arguments(Some("/mnt/c/app/splitty.exe"))[..6],
+            [
+                "-d",
+                "D",
+                "--exec",
+                "env",
+                "SPLITTY_ASKPASS_PROGRAM=/mnt/c/app/splitty.exe",
+                "/home/a/splitty"
+            ]
+        );
+        assert_eq!(
+            default_config.arguments(None)[3..5],
+            ["env", "/home/a/splitty"]
+        );
     }
     #[test]
     fn incomplete_or_ambiguous_targets_are_rejected_before_spawn() {
@@ -258,7 +288,7 @@ mod tests {
             ("D\0", "/bin/s", "/tmp/c"),
             ("D", "/bin/s\n", "/tmp/c"),
         ] {
-            assert!(WslLaunch::new(distro.into(), binary.into(), config.into()).is_err());
+            assert!(WslLaunch::new(distro.into(), binary.into(), Some(config.into())).is_err());
         }
     }
     #[cfg(target_os = "linux")]

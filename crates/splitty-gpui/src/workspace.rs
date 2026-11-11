@@ -55,7 +55,7 @@ use splitty_client_core::workspace::{
     ScreenModel, ScreenTransferOutcome, ScreenTransferTarget, SourceId, SourceToken,
     SourceWorkspace, TabStep, TerminalToken, WindowWorkspace,
 };
-use splitty_client_core::zoom::{Zoom, ZoomAction, ZoomOutcome, ZoomResult};
+use splitty_client_core::zoom::{PresentedZoom, Zoom, ZoomAction, ZoomOutcome, ZoomResult};
 use std::{
     cell::{Cell, RefCell},
     collections::{BTreeSet, HashMap, HashSet, VecDeque},
@@ -1083,7 +1083,9 @@ pub struct Workspace {
     drawer_row_slots: Rc<RefCell<HashMap<ScreenKey, RowSlot>>>,
     drawer_pending: Option<PendingDrawerPin>,
     wheel_navigation: WheelNavigation,
-    pending_zoom: HashSet<Uuid>,
+    /// The zoom shown, ahead of the service's answer while steps are
+    /// outstanding. `appearance.zoom` is what the layout was built with.
+    zoom: PresentedZoom,
     zoom_feedback: Option<(String, Instant)>,
     profiles: Option<Arc<ShellProfilesSnapshot>>,
     profiles_error: Option<String>,
@@ -1447,7 +1449,7 @@ impl Workspace {
                 drawer_row_slots: Rc::default(),
                 drawer_pending: None,
                 wheel_navigation: WheelNavigation::default(),
-                pending_zoom: HashSet::new(),
+                zoom: PresentedZoom::new(Zoom::from_values(1.0, "window")),
                 zoom_feedback: None,
                 profiles: None,
                 profiles_error: None,
@@ -1561,6 +1563,9 @@ impl Workspace {
             &self.ui_family,
             &self.mono_family,
         );
+        // A read that arrives while zoom steps are outstanding does not move
+        // the display back: what is shown stands until they have settled.
+        next.zoom = self.zoom.observe(next.zoom);
         self.apply_zoom(next.zoom, window, cx);
         self.drawer_authoritative_pinned = snapshot.drawer().pinned;
         // A read already in flight can arrive after the click but before its
@@ -1763,14 +1768,23 @@ impl Workspace {
         });
         for view in self.panes.values() {
             view.terminal.update(cx, |terminal, cx| {
-                terminal.set_zoom(zoom.terminal_scale(), cx)
+                terminal.step_zoom(zoom.terminal_scale(), cx)
             });
         }
         self.appearance.zoom = zoom;
         cx.notify();
     }
 
-    fn submit_zoom(&mut self, action: ZoomAction, cx: &mut Context<Self>) {
+    fn show_zoom_level(&mut self, zoom: Zoom) {
+        self.zoom_feedback = Some((
+            format!("Zoom {} %", (zoom.level() * 100.).round() as u32),
+            Instant::now() + Duration::from_millis(1200),
+        ));
+    }
+
+    /// Send a zoom action and show its step at once. The service's answer
+    /// replaces what is shown when no step is outstanding any more.
+    fn submit_zoom(&mut self, action: ZoomAction, window: &mut Window, cx: &mut Context<Self>) {
         let Some(model) = self.local_model() else {
             self.status = "Zoom is unavailable while the workspace starts".into();
             cx.notify();
@@ -1786,13 +1800,13 @@ impl Workspace {
             },
         )) {
             Ok(()) => {
-                self.pending_zoom.insert(request_id);
+                let zoom = self.zoom.step(request_id, action);
+                self.apply_zoom(zoom, window, cx);
+                self.show_zoom_level(zoom);
             }
-            Err(error) => {
-                self.status = format!("Zoom request not sent: {error}");
-                cx.notify();
-            }
+            Err(error) => self.status = format!("Zoom request not sent: {error}"),
         }
+        cx.notify();
     }
 
     fn apply_zoom_result(
@@ -1804,18 +1818,20 @@ impl Workspace {
         if !self
             .local_model()
             .is_some_and(|model| model.connection_id() == result.connection_id)
-            || !self.pending_zoom.remove(&result.request_id)
         {
             return;
         }
+        let Some(zoom) = self.zoom.settle(result.request_id, &result.outcome) else {
+            return;
+        };
+        if zoom != self.appearance.zoom {
+            // The service holds another level than the steps led to, or the
+            // write failed: show what it holds.
+            self.apply_zoom(zoom, window, cx);
+            self.show_zoom_level(zoom);
+        }
         match result.outcome {
-            ZoomOutcome::Confirmed(zoom) => {
-                self.apply_zoom(zoom, window, cx);
-                self.zoom_feedback = Some((
-                    format!("Zoom {} %", (zoom.level() * 100.).round() as u32),
-                    Instant::now() + Duration::from_millis(1200),
-                ));
-            }
+            ZoomOutcome::Confirmed(_) => {}
             ZoomOutcome::Rejected { reason } => self.status = format!("Zoom: {reason}"),
             ZoomOutcome::Uncertain { reason } => {
                 self.status = format!("Zoom outcome uncertain: {reason}")
@@ -2718,7 +2734,8 @@ impl Workspace {
             }
             self.hosts
                 .set_owner(window_model.local_source().connection_id());
-            self.apply_zoom(Zoom::from_values(1.0, "window"), window, cx);
+            self.zoom = PresentedZoom::new(Zoom::from_values(1.0, "window"));
+            self.apply_zoom(self.zoom.presented(), window, cx);
             self.appearance_generation = 0;
             self.notification_settings_generation = 0;
             self.notification_settings_error = None;
@@ -2745,7 +2762,6 @@ impl Workspace {
             self.wheel_navigation.reset();
             self.appearance_error = None;
             self.appearance = NativeAppearance::fallback(&self.ui_family);
-            self.pending_zoom.clear();
             self.zoom_feedback = None;
             self.scheme_pending = true;
             self.profiles = None;
@@ -3428,7 +3444,7 @@ impl Workspace {
         }
         if let Some(action) = zoom_shortcut(&event.keystroke, cx.platform_info().is_mac()) {
             cx.stop_propagation();
-            self.submit_zoom(action, cx);
+            self.submit_zoom(action, window, cx);
             return;
         }
         if self.rename.is_some() {
@@ -3516,7 +3532,7 @@ impl Workspace {
             }
             if let Some(action) = zoom_shortcut(&event.keystroke, cx.platform_info().is_mac()) {
                 cx.stop_propagation();
-                self.submit_zoom(action, cx);
+                self.submit_zoom(action, window, cx);
                 return;
             }
         }
@@ -6615,10 +6631,12 @@ mod tests {
         WorkerCommand,
     };
     use gpui_kit::{point, px, size, Bounds, Keystroke, Modifiers, Pixels};
+    #[cfg(not(target_os = "windows"))]
+    use splitty_client_core::EmbeddedService;
     use splitty_client_core::{
         workspace::{ClosePlan, CloseTarget, LayoutNode, ScreenModel, SourceWorkspace},
         zoom::ZoomAction,
-        EmbeddedService, ScreenIds,
+        ScreenIds,
     };
     use std::{
         cell::Cell,

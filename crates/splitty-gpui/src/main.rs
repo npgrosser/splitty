@@ -1,4 +1,4 @@
-//! Explicitly invoked native UI experiment; released desktop clients are unchanged.
+//! The native desktop app.
 #![cfg_attr(
     all(target_os = "windows", not(debug_assertions)),
     windows_subsystem = "windows"
@@ -316,12 +316,27 @@ fn main() -> anyhow::Result<()> {
     )?;
     if help {
         println!(
-                    "splitty-gpui [--wsl-distro NAME --wsl-backend PATH --wsl-config-dir PATH] [--workspace-smoke] [--probe | --smoke] [--web-spike] [--screenshot PATH]\nExperimental isolated local workspace with terminal splits and tabs. Windows workspace startup requires all three WSL arguments; backend and config paths are absolute Linux paths in the named existing distribution. No WSL installation or daemon discovery is performed. --workspace-smoke exercises its real sessions, layout and keyboard routing. --probe opens the legacy terminal/Markdown fixture; --smoke checks that fixture and exits. --web-spike selects the fixture with optional CEF.\nWorkspace shortcuts: Cmd on macOS, Alt elsewhere. Modifier+T creates a tab; modifier+D splits right; modifier+Shift+D splits below; modifier+W closes the focused pane; modifier+M toggles the focused group; modifier+Shift+arrow focuses the nearest split group; modifier+PageUp/PageDown selects the previous/next tab in that group. Ctrl+Shift+Space creates a Screen; modifier+Shift+1–9 selects a Screen on verified US/German XKB layouts. Drag a tab into the tab row for exact placement, or into the pane body for a split; the tab row scrolls horizontally. Ctrl+C and Ctrl+Shift+C/V remain terminal input and copy/paste.\n--screenshot requires --smoke and the capture feature; native Linux capture remains unavailable. Manual IME and clipboard remain unverified. Released desktop clients are unchanged."
+                    "splitty-gpui [--wsl-distro NAME --wsl-backend PATH --wsl-config-dir PATH] [--workspace-smoke] [--probe | --smoke] [--web-spike] [--screenshot PATH]\nLocal workspace with terminal splits and tabs. On Windows, without WSL arguments the app uses the remembered or default WSL distribution and installs its backend there; the three WSL arguments together name an explicit target instead, with absolute Linux paths in an existing distribution, and install nothing. WSL itself is never installed. --workspace-smoke exercises its real sessions, layout and keyboard routing. --probe opens the legacy terminal/Markdown fixture; --smoke checks that fixture and exits. --web-spike selects the fixture with optional CEF.\nWorkspace shortcuts: Cmd on macOS, Alt elsewhere. Modifier+T creates a tab; modifier+D splits right; modifier+Shift+D splits below; modifier+W closes the focused pane; modifier+M toggles the focused group; modifier+Shift+arrow focuses the nearest split group; modifier+PageUp/PageDown selects the previous/next tab in that group. Ctrl+Shift+Space creates a Screen; modifier+Shift+1–9 selects a Screen on verified US/German XKB layouts. Drag a tab into the tab row for exact placement, or into the pane body for a split; the tab row scrolls horizontally. Ctrl+C and Ctrl+Shift+C/V remain terminal input and copy/paste.\n--screenshot requires --smoke and the capture feature; native Linux capture remains unavailable."
                 );
         return Ok(());
     }
     #[cfg(target_os = "windows")]
     splitty_client_core::set_askpass_program(std::env::current_exe()?);
+    // Started without a WSL target, the Windows workspace chooses a
+    // distribution and installs the backend that ships beside the executable.
+    #[cfg(target_os = "windows")]
+    let backend = match backend {
+        splitty_client_core::owned_service::LocalBackend::Embedded if !probe => {
+            match startup::wsl::prepare() {
+                Ok(launch) => splitty_client_core::owned_service::LocalBackend::Wsl(launch),
+                Err(error) => {
+                    startup::wsl::report_failure(&error);
+                    anyhow::bail!(error);
+                }
+            }
+        }
+        backend => backend,
+    };
     let worker = Rc::new(RefCell::new(None));
     let launched_worker = worker.clone();
     let window_error = Rc::new(RefCell::new(None));

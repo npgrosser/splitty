@@ -13,7 +13,7 @@ model {
     }
 
     gpui_startup = component 'gpui_startup' {
-      description 'Parse explicit native workspace launch options before creating a window, including an isolated Windows WSL backend target.'
+      description 'Parse native workspace launch options before creating a window. On Windows without an explicit WSL target: choose the remembered or default supported distribution, install the backend that ships beside the executable when its version or checksum differs, and report a failure in a dialog.'
       metadata { module 'splitty_gpui::startup' }
     }
 

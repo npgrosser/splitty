@@ -570,9 +570,11 @@ fn profile_glyph(command: &str) -> &'static str {
 mod tests {
     use super::{profile_glyph, source_matches_slot, ProfileSource};
     use crate::workspace::presented_slot_in;
+    #[cfg(not(target_os = "windows"))]
+    use splitty_client_core::EmbeddedService;
     use splitty_client_core::{
         workspace::{ScreenModel, SourceWorkspace},
-        EmbeddedService, ScreenIds,
+        ScreenIds,
     };
 
     #[test]

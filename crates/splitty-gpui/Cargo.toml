@@ -31,3 +31,11 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 cef = { version = "=156.3.0", default-features = false, features = ["sandbox"], optional = true }
 percent-encoding = { version = "2", optional = true }
 tempfile = { version = "3", optional = true }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# Verifies the WSL backend archive that ships beside the executable.
+sha2 = "0.10"
+
+# The build host compiles the Windows icon and version resource.
+[target.'cfg(windows)'.build-dependencies]
+embed-resource = "3"
