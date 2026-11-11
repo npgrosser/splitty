@@ -14,7 +14,7 @@
 
 - [x] 3.1 CI lints, tests and builds the native app as the default desktop app on the three platforms; the release workflow publishes the native packages and the legacy ones.
 - [x] 3.2 README, `docs/development.md`, the release skill's platform reference, `docs/native-ui-handoff.md` and the roadmap describe the native app as the default and the web shells as legacy.
-- [ ] 3.3 Before merge run the full gate once.
+- [x] 3.3 Before merge run the full gate once.
 
 ## Verification record
 - Windows startup: unit tests for the list, the remembered distribution, the checksum file, the inspection fields and the support rules; the two shell scripts run under `sh` with a temporary home (install, find by version and checksum, replace, nothing left after a broken archive). 133 native tests pass in an optimized MSVC build.

@@ -23,7 +23,7 @@ The native client covers the daily workflows of the web client. Releases still i
 
 ## Architecture impact
 
-none (no new crate, top-level module dependency or component relationship; the native app keeps reaching the backend through `splitty-client-core`).
+Two relationships in `architecture/gpui.c4`: `gpui_main` to the client core's `owned_service` (the prepared WSL launch target) and `gpui_workspace` to `gpui_startup` (the WSL distribution for editor links). No new crate or component.
 
 ## Decisions
 
