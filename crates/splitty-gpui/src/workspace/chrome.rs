@@ -182,6 +182,120 @@ pub(super) mod view_tests {
     }
 
     #[test]
+    fn a_zoom_step_shows_at_once_and_settles_on_the_service_value() {
+        use splitty_client_core::appearance::test_support::{settings_snapshot, Availability};
+        use splitty_client_core::zoom::{Zoom, ZoomAction, ZoomOutcome, ZoomResult};
+        with_view(|window, view| {
+            let owner = Uuid::new_v4();
+            let (commands, mut receiver) = mpsc::channel(8);
+            let at = |level| Zoom::from_values(level, "window");
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.model = Some(WindowWorkspace::new(owner));
+                    workspace.apply_appearance(
+                        &settings_snapshot(owner, 1, Availability::Full),
+                        window,
+                        cx,
+                    );
+                    assert_eq!(workspace.appearance.zoom, at(1.0));
+                    // Each key is shown before any answer.
+                    for level in [1.1, 1.25, 1.5] {
+                        workspace.submit_zoom(ZoomAction::In, window, cx);
+                        assert_eq!(workspace.appearance.zoom, at(level));
+                    }
+                    assert_eq!(workspace.zoom_feedback.as_ref().unwrap().0, "Zoom 150 %");
+                });
+            });
+            let ids: Vec<_> = std::iter::from_fn(|| receiver.try_recv().ok())
+                .filter_map(|command| match command.kind() {
+                    Command::Zoom {
+                        connection,
+                        request_id,
+                        action: ZoomAction::In,
+                    } if *connection == owner => Some(*request_id),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(ids.len(), 3, "one action per key");
+            let result = |request_id, outcome| ZoomResult {
+                connection_id: owner,
+                request_id,
+                outcome,
+            };
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    // Answers and reads behind the display do not move it back.
+                    workspace.apply_zoom_result(
+                        result(ids[0], ZoomOutcome::Confirmed(at(1.1))),
+                        window,
+                        cx,
+                    );
+                    assert_eq!(workspace.appearance.zoom, at(1.5));
+                    workspace.apply_appearance(
+                        &settings_snapshot(owner, 2, Availability::Full),
+                        window,
+                        cx,
+                    );
+                    assert_eq!(workspace.appearance.zoom, at(1.5));
+                    workspace.apply_zoom_result(
+                        result(
+                            ids[1],
+                            ZoomOutcome::Rejected {
+                                reason: "queue is full".into(),
+                            },
+                        ),
+                        window,
+                        cx,
+                    );
+                    assert_eq!(workspace.appearance.zoom, at(1.5));
+                    // The last answer is the service's value.
+                    workspace.apply_zoom_result(
+                        result(ids[2], ZoomOutcome::Confirmed(at(1.25))),
+                        window,
+                        cx,
+                    );
+                    assert_eq!(workspace.appearance.zoom, at(1.25));
+                    assert_eq!(workspace.zoom_feedback.as_ref().unwrap().0, "Zoom 125 %");
+                    // A step whose write is not known to have happened is
+                    // taken back; nothing is sent again.
+                    workspace.submit_zoom(ZoomAction::Out, window, cx);
+                    assert_eq!(workspace.appearance.zoom, at(1.1));
+                });
+            });
+            let sent = receiver.try_recv().expect("the step is sent");
+            let Command::Zoom { request_id, .. } = sent.kind() else {
+                panic!("expected a zoom action");
+            };
+            let request_id = *request_id;
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.apply_zoom_result(
+                        result(
+                            request_id,
+                            ZoomOutcome::Uncertain {
+                                reason: "reply lost".into(),
+                            },
+                        ),
+                        window,
+                        cx,
+                    );
+                    assert_eq!(workspace.appearance.zoom, at(1.25));
+                    assert!(workspace.status.contains("uncertain"));
+                    // With nothing outstanding a read is shown as it is.
+                    workspace.apply_appearance(
+                        &settings_snapshot(owner, 3, Availability::Full),
+                        window,
+                        cx,
+                    );
+                    assert_eq!(workspace.appearance.zoom, at(1.0));
+                });
+            });
+            assert!(receiver.try_recv().is_err());
+        });
+    }
+
+    #[test]
     fn maximized_group_shows_labeled_restore_and_restores_canonical_slots() {
         with_view(|window, view| {
             let owner = Uuid::new_v4();

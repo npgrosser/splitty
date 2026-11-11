@@ -114,8 +114,15 @@ use crate::terminal_engine::{
 };
 use anyhow::{anyhow, Result};
 use gpui_kit::{prelude::*, *};
-use std::{collections::HashMap, ops::Range, sync::Arc, time::Instant};
+use std::{
+    collections::HashMap,
+    ops::Range,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
+/// How long after the last zoom step of a burst the PTY learns its size.
+const SIZE_REPORT_HOLD: Duration = Duration::from_millis(120);
 /// The web client's terminal font size; display zoom scales it.
 const BASE_FONT_SIZE: f32 = 14.;
 /// Provisional row height until layout measures the face: rows use the
@@ -577,6 +584,8 @@ pub struct Terminal {
     presentation_epoch: u64,
     display_scale: f32,
     size_report_pending: bool,
+    /// Zoom steps are arriving: the size is reported when this runs out.
+    size_report_hold: Option<Task<()>>,
     resized_pixel_cell: Option<(u32, u32)>,
     face: Font,
     size: Size,
@@ -635,6 +644,7 @@ impl Terminal {
             presentation_epoch: 0,
             display_scale: 1.,
             size_report_pending: false,
+            size_report_hold: None,
             resized_pixel_cell: None,
             // GPUI font lookup takes concrete family names, not CSS generic families.
             face: font(terminal_family(cx)),
@@ -750,6 +760,27 @@ impl Terminal {
         self.scroll_route = None;
         self.content_revision = self.content_revision.wrapping_add(1);
         cx.notify();
+    }
+
+    /// One zoom step of what may be several in a row. The grid follows at
+    /// the next layout as after `set_zoom`; the PTY learns its size once no
+    /// further step came for a moment, so a burst costs one resize.
+    pub fn step_zoom(&mut self, scale: f32, cx: &mut Context<Self>) {
+        if self.metrics.scale == TerminalMetrics::new(scale).scale {
+            return;
+        }
+        self.set_zoom(scale, cx);
+        self.size_report_hold = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SIZE_REPORT_HOLD).await;
+            let _ = this.update(cx, |this, _| {
+                this.size_report_hold = None;
+                // A pane that is not shown has measured nothing: it reports
+                // when it is laid out again.
+                if this.size_report_pending {
+                    this.report_size();
+                }
+            });
+        }));
     }
 
     pub fn apply_colors(
@@ -1560,13 +1591,17 @@ impl Terminal {
             self.content_revision += 1;
             self.search_wake(cx);
             if size_changed {
-                self.report_size();
+                if self.size_report_hold.is_some() {
+                    self.size_report_pending = true;
+                } else {
+                    self.report_size();
+                }
             }
             cx.notify();
         } else {
             self.geometry_ready = true;
         }
-        if self.size_report_pending {
+        if self.size_report_pending && self.size_report_hold.is_none() {
             self.report_size();
         }
     }
@@ -2674,6 +2709,59 @@ mod presentation_tests {
             });
             assert!(window.opened_url().is_none());
             assert_eq!(commands.borrow().len(), command_count);
+        });
+    }
+
+    #[test]
+    fn a_burst_of_zoom_steps_shows_each_grid_and_reports_the_size_once() {
+        with_view(|window, view, commands| {
+            let terminal = window.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                view.read(cx).terminal.clone()
+            });
+            let resizes = || {
+                commands
+                    .borrow()
+                    .iter()
+                    .filter_map(|command| match command {
+                        Command::Resize(cols, rows) => Some((*cols, *rows)),
+                        Command::Input { .. } => None,
+                    })
+                    .collect::<Vec<_>>()
+            };
+            let before = resizes();
+            let mut grid = window.update(|_, cx| terminal.read(cx).size);
+            for scale in [1.25, 1.5, 2.] {
+                window.update(|window, cx| {
+                    terminal.update(cx, |terminal, cx| terminal.step_zoom(scale, cx));
+                    window.draw(cx).clear(cx);
+                    let terminal = terminal.read(cx);
+                    assert!(terminal.geometry_ready);
+                    assert!(
+                        terminal.size.cols < grid.cols,
+                        "each step is laid out in the next frame"
+                    );
+                    grid = terminal.size;
+                });
+            }
+            assert_eq!(resizes(), before, "the size waits for the last step");
+            window
+                .executor()
+                .advance_clock(super::SIZE_REPORT_HOLD + std::time::Duration::from_millis(1));
+            window.run_until_parked();
+            let mut expected = before;
+            expected.push((grid.cols, grid.rows));
+            assert_eq!(resizes(), expected, "one report, of the final grid");
+            // A step outside a burst is reported the same way, once.
+            window.update(|window, cx| {
+                terminal.update(cx, |terminal, cx| terminal.step_zoom(1., cx));
+                window.draw(cx).clear(cx);
+            });
+            window
+                .executor()
+                .advance_clock(super::SIZE_REPORT_HOLD + std::time::Duration::from_millis(1));
+            window.run_until_parked();
+            assert_eq!(resizes().len(), expected.len() + 1);
         });
     }
 

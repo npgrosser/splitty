@@ -23,21 +23,27 @@ impl Home {
     }
 }
 
+/// Carry out the actions that were waiting as one read and at most one
+/// write: the level is the current one with every action applied in order.
+/// The outcome is that of them all; the result names the first.
 pub(super) async fn execute(
     client: &mut Client,
     owner: Uuid,
-    id: Uuid,
-    action: ZoomAction,
+    actions: &[(Uuid, ZoomAction)],
     cancel: &Notify,
 ) -> ZoomResult {
-    let outcome = execute_inner(client, action, cancel).await;
+    let outcome = execute_inner(client, actions, cancel).await;
     ZoomResult {
         connection_id: owner,
-        request_id: id,
+        request_id: actions.first().map(|(id, _)| *id).unwrap_or_default(),
         outcome,
     }
 }
-async fn execute_inner(client: &mut Client, action: ZoomAction, cancel: &Notify) -> ZoomOutcome {
+async fn execute_inner(
+    client: &mut Client,
+    actions: &[(Uuid, ZoomAction)],
+    cancel: &Notify,
+) -> ZoomOutcome {
     let read = tokio::select! { biased;
         _ = cancel.notified() => return rejected("zoom cancelled before update"),
         result = client.request(Operation::HomeGet, serde_json::Map::new()) => result,
@@ -51,7 +57,9 @@ async fn execute_inner(client: &mut Client, action: ZoomAction, cancel: &Notify)
         Ok(home) => home.zoom(),
         Err(_) => return rejected("could not read current zoom; no update submitted"),
     };
-    let next = current.apply(action);
+    let next = actions
+        .iter()
+        .fold(current, |zoom, (_, action)| zoom.apply(*action));
     if next == current {
         return ZoomOutcome::Confirmed(current);
     }

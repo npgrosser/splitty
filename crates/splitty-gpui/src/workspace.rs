@@ -1557,7 +1557,7 @@ impl Workspace {
             return;
         }
         let available_fonts = window.text_system().all_font_names();
-        let next = NativeAppearance::from_snapshot(
+        let mut next = NativeAppearance::from_snapshot(
             snapshot,
             &available_fonts,
             &self.ui_family,

@@ -299,7 +299,7 @@ impl Workspace {
                 );
             }
             PaletteCommand::Shortcuts => self.show_shortcuts(window, cx),
-            PaletteCommand::Zoom(action) => self.submit_zoom(action, cx),
+            PaletteCommand::Zoom(action) => self.submit_zoom(action, window, cx),
         }
     }
 

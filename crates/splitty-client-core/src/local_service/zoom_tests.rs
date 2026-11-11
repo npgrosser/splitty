@@ -334,8 +334,9 @@ async fn uncertain_write_is_not_retried_and_later_intent_reads_again() {
     let first = Uuid::new_v4();
     let second = Uuid::new_v4();
     client.enqueue_zoom(owner, first, ZoomAction::In).unwrap();
-    client.enqueue_zoom(owner, second, ZoomAction::In).unwrap();
     super::tests::begin(&mut client).await;
+    // An intent that arrives while the first write runs is not part of it.
+    client.enqueue_zoom(owner, second, ZoomAction::In).unwrap();
     // A read-generation change cannot suppress an accepted write outcome.
     client.set_scheme(owner, ColorScheme::Light).unwrap();
     let LocalServiceUpdate::Zoom(result) = next(&mut client).await else {
@@ -358,6 +359,98 @@ async fn uncertain_write_is_not_retried_and_later_intent_reads_again() {
     client.finish().await.unwrap();
     task.await.unwrap();
     assert_eq!(budget.used(), 0);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[tokio::test]
+async fn queued_steps_are_one_read_and_one_write_and_the_refresh_follows_the_last() {
+    // The script is the whole conversation: a step more would be a request
+    // the service does not expect.
+    let appearance = |level: f64| {
+        [
+            ("home.get", home(level)),
+            ("theme.get", theme()),
+            (
+                "home.metadata",
+                splitty_core::config::settings_metadata().to_string(),
+            ),
+            (
+                "theme.list",
+                "[\"splitty-dark\",\"splitty-light\"]".to_owned(),
+            ),
+        ]
+    };
+    let mut script = vec![("home.get", home(1.0)), ("home.update", home(1.1))];
+    // Three steps in and a reset waited behind the first write, then two out.
+    script.extend([("home.get", home(1.1)), ("home.update", home(1.0))]);
+    script.extend([("home.get", home(1.0)), ("home.update", home(0.8))]);
+    script.extend(appearance(0.8));
+    let exchanges = script
+        .into_iter()
+        .map(|(operation, body)| Exchange {
+            operation,
+            status: 200,
+            uncertain: false,
+            body,
+        })
+        .collect();
+    let (api, task, dir) = scripted(exchanges).await;
+    let owner = Uuid::new_v4();
+    let mut client = LocalServiceClient::new(api, owner, ColorScheme::Dark);
+    client.dirty = [false; 3];
+    let enqueue = |client: &mut LocalServiceClient, actions: &[ZoomAction]| {
+        actions
+            .iter()
+            .map(|action| {
+                let id = Uuid::new_v4();
+                client.enqueue_zoom(owner, id, *action).unwrap();
+                id
+            })
+            .collect::<Vec<_>>()
+    };
+    let outcomes = |ids: Vec<Uuid>, level: f64| {
+        ids.into_iter()
+            .map(|id| ZoomResult {
+                connection_id: owner,
+                request_id: id,
+                outcome: ZoomOutcome::Confirmed(Zoom::from_values(level, "terminals")),
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = enqueue(&mut client, &[ZoomAction::In]);
+    super::tests::begin(&mut client).await;
+    use ZoomAction::{In, Out, Reset};
+    let merged = enqueue(&mut client, &[In, In, In, Reset]);
+    let mut expected = outcomes(first, 1.1);
+    // Reset wins over the steps before it: the write is 100 %.
+    expected.extend(outcomes(merged, 1.0));
+    let mut seen = Vec::new();
+    for index in 0..5 {
+        let LocalServiceUpdate::Zoom(result) = next(&mut client).await else {
+            panic!("an appearance read came between queued steps")
+        };
+        seen.push(result);
+        if index == 1 {
+            // Steps that arrive while outcomes are handed out wait their turn.
+            let late = enqueue(&mut client, &[Out, Out]);
+            expected.extend(outcomes(late, 0.8));
+        }
+    }
+    for _ in 0..2 {
+        let LocalServiceUpdate::Zoom(result) = next(&mut client).await else {
+            panic!("an appearance read came between queued steps")
+        };
+        seen.push(result);
+    }
+    assert_eq!(seen, expected);
+    // One refresh, after the last step.
+    let LocalServiceUpdate::Appearance(Ok(snapshot)) = next(&mut client).await else {
+        panic!("the appearance is read after the last step")
+    };
+    assert_eq!(snapshot.settings().zoom, 0.8);
+    drop(snapshot);
+    client.finish().await.unwrap();
+    task.await.unwrap();
     std::fs::remove_dir_all(dir).unwrap();
 }
 
@@ -432,14 +525,19 @@ async fn capacity_owner_saturation_and_pending_cancel_are_bounded() {
         next(&mut client).await,
         LocalServiceUpdate::Appearance(Ok(_))
     ));
-    let LocalServiceUpdate::Zoom(result) = next(&mut client).await else {
-        panic!("write starved")
-    };
-    assert_eq!(result.request_id, first);
-    assert_eq!(
-        result.outcome,
-        ZoomOutcome::Confirmed(Zoom::from_values(3.0, "window"))
-    );
+    // The queued actions are one job; each has its outcome, in its order,
+    // before any later read is published.
+    for index in 0..MAX_QUEUED_ZOOM {
+        let LocalServiceUpdate::Zoom(result) = next(&mut client).await else {
+            panic!("write starved")
+        };
+        assert_eq!(result.request_id == first, index == 0);
+        assert_eq!(
+            result.outcome,
+            ZoomOutcome::Confirmed(Zoom::from_values(3.0, "window"))
+        );
+    }
+    assert!(client.zoom.is_empty() && client.active_zoom.is_empty());
     assert!(matches!(
         next(&mut client).await,
         LocalServiceUpdate::ShellProfiles(Ok(_))
@@ -448,7 +546,7 @@ async fn capacity_owner_saturation_and_pending_cancel_are_bounded() {
         .enqueue_zoom(owner, Uuid::new_v4(), ZoomAction::Out)
         .unwrap();
     super::tests::begin(&mut client).await;
-    assert!(client.active_zoom.is_some());
+    assert!(!client.active_zoom.is_empty());
     client.finish().await.unwrap();
     assert_eq!(budget.used(), 0);
     assert_eq!(service.state.config.read().unwrap().appearance.zoom, 3.0);

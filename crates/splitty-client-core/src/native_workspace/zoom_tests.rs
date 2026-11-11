@@ -157,14 +157,22 @@ async fn real_service() {
             _ => {}
         }
     }
-    for ((result, id), level) in results.into_iter().zip(ids).zip([1.1, 1.25, 1.0, 0.9]) {
+    // Each action has its outcome, in order. Actions that waited together
+    // were one write, so an outcome is the level after its own action or
+    // after a later one, and the last is the level after them all.
+    let levels = [1.1, 1.25, 1.0, 0.9];
+    let mut reached = 0;
+    for (index, (result, id)) in results.into_iter().zip(ids).enumerate() {
         assert_eq!(result.connection_id, owner);
         assert_eq!(result.request_id, id);
-        assert_eq!(
-            result.outcome,
-            ZoomOutcome::Confirmed(Zoom::from_values(level, "terminals"))
-        );
+        reached = (reached.max(index)..levels.len())
+            .find(|step| {
+                result.outcome
+                    == ZoomOutcome::Confirmed(Zoom::from_values(levels[*step], "terminals"))
+            })
+            .unwrap_or_else(|| panic!("unexpected outcome {:?}", result.outcome));
     }
+    assert_eq!(reached, levels.len() - 1);
     // Drawer visibility shares the API scheduler but has its own identified
     // outcome. An invalid owner cannot change local presentation preferences.
     let foreign_drawer = Uuid::new_v4();

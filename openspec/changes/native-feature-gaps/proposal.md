@@ -15,6 +15,9 @@ The native window lacked functions the web client has: a command palette and a s
 - **Viewer panes.** A pane of the role `viewer` shows its document: rendered Markdown with its source, text with line numbers, images, or a notice for anything else. A terminal's selection opens in a viewer.
 - **Annotations and reviews.** A viewer pane lists its annotations with their threads beside the document. The user comments on a selected passage or on chosen source lines, replies, resolves and deletes; the review goes to a terminal or answers a waiting `splitty review`.
 - **Managed jobs.** A job pane without a terminal says what became of its job.
+- **Drawer navigation keys.** Hosts, Templates and Settings show their keys in the Drawer; the Hosts manager gets one, and each key works from the other destinations.
+- **Open all Screens of a host.** One action opens every live Screen of a connected host that is not open in the window.
+- **Zoom steps without a wait.** A zoom step is shown when its key is pressed; steps that wait are saved as one write.
 
 ## Not in this change
 

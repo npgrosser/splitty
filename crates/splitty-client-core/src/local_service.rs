@@ -66,7 +66,8 @@ enum Job {
     BackendVersion,
     Settings(Uuid, SettingsEdit, u64),
     Read(Feature, u64),
-    Zoom(Uuid, ZoomAction),
+    /// Every action that was waiting when the job started, in order.
+    Zoom(Vec<(Uuid, ZoomAction)>),
     DrawerVisibility(Uuid, bool),
     Template(Uuid, crate::templates::TemplateApiRequest),
 }
@@ -77,6 +78,8 @@ type Read =
 /// feature coalesces its own refreshes; completing even a superseded read gives
 /// the other dirty feature priority. Read failures wait for another refresh;
 /// mutations are submitted at most once and never automatically retried.
+/// Zoom actions that wait behind running work are carried out together, as
+/// one read and one write, and each keeps its own outcome.
 pub struct LocalServiceClient {
     client: Option<Client>,
     ready: VecDeque<(SettingsDomain, u64, LocalServiceUpdate)>,
@@ -88,7 +91,12 @@ pub struct LocalServiceClient {
     last_notifications: Option<NotificationSettingsRead>,
     terminal_generation: u64,
     pending: Option<Read>,
-    active_zoom: Option<Uuid>,
+    active_zoom: Vec<Uuid>,
+    /// Outcomes of merged zoom actions, published ahead of any other update.
+    zoom_ready: VecDeque<ZoomResult>,
+    /// The last job was a confirmed zoom write: waiting steps come before the
+    /// appearance read it made due.
+    zoom_follows: bool,
     drawer_visibility: Option<(Uuid, bool)>,
     active_drawer_visibility: Option<Uuid>,
     prefer_drawer_visibility: bool,
@@ -119,7 +127,9 @@ impl LocalServiceClient {
             last_notifications: None,
             terminal_generation: 1,
             pending: None,
-            active_zoom: None,
+            active_zoom: Vec::new(),
+            zoom_ready: VecDeque::new(),
+            zoom_follows: false,
             drawer_visibility: None,
             active_drawer_visibility: None,
             prefer_drawer_visibility: false,
@@ -215,7 +225,7 @@ impl LocalServiceClient {
             || (field == SettingsField::DrawerPinned
                 && (self.drawer_visibility.is_some() || self.active_drawer_visibility.is_some()))
             || (field == SettingsField::Zoom
-                && (!self.zoom.is_empty() || self.active_zoom.is_some()))
+                && (!self.zoom.is_empty() || !self.active_zoom.is_empty()))
         {
             return Err(io::Error::new(
                 io::ErrorKind::WouldBlock,
@@ -263,7 +273,7 @@ impl LocalServiceClient {
                 "Display zoom is pending or awaiting reconciliation",
             ));
         }
-        if self.active_zoom == Some(request) || self.zoom.iter().any(|(id, _)| *id == request) {
+        if self.active_zoom.contains(&request) || self.zoom.iter().any(|(id, _)| *id == request) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "zoom request is already pending",
@@ -338,6 +348,9 @@ impl LocalServiceClient {
         Ok(())
     }
     pub async fn next_update(&mut self) -> LocalServiceUpdate {
+        if let Some(result) = self.zoom_ready.pop_front() {
+            return LocalServiceUpdate::Zoom(result);
+        }
         while let Some((domain, generation, update)) = self.ready.pop_front() {
             if generation == self.generations[Feature::settings(domain).index()] {
                 return update;
@@ -417,23 +430,27 @@ impl LocalServiceClient {
                         .expect("queued drawer visibility");
                     self.active_drawer_visibility = Some(id);
                     Job::DrawerVisibility(id, pinned)
-                } else if !self.zoom.is_empty() && (self.prefer_write || feature.is_none()) {
-                    let (id, action) = self.zoom.pop_front().expect("queued zoom");
+                } else if !self.zoom.is_empty()
+                    && (self.prefer_write || self.zoom_follows || feature.is_none())
+                {
+                    // What waited is one job: a burst of steps costs one read
+                    // and one write instead of one of each per step.
+                    let actions: Vec<_> = self.zoom.drain(..).collect();
                     // Reserve a generation before starting this indivisible job.
                     // No read can publish it until after the mutation outcome.
                     let generation = match increment(self.generations[0]) {
                         Ok(generation) => generation,
                         Err(error) => {
-                            return LocalServiceUpdate::Zoom(ZoomResult::rejected(
-                                self.connection_id,
-                                id,
-                                error.to_string(),
-                            ))
+                            self.zoom_ready.extend(actions.iter().map(|(id, _)| {
+                                ZoomResult::rejected(self.connection_id, *id, error.to_string())
+                            }));
+                            let first = self.zoom_ready.pop_front().expect("queued zoom");
+                            return LocalServiceUpdate::Zoom(first);
                         }
                     };
                     self.generations[0] = generation;
-                    self.active_zoom = Some(id);
-                    Job::Zoom(id, action)
+                    self.active_zoom = actions.iter().map(|(id, _)| *id).collect();
+                    Job::Zoom(actions)
                 } else if let Some(feature) = feature {
                     self.dirty[feature.index()] = false;
                     Job::Read(feature, self.generations[feature.index()])
@@ -507,8 +524,8 @@ impl LocalServiceClient {
                                 connection, generation, result,
                             ))
                         }
-                        Job::Zoom(id, action) => LocalServiceUpdate::Zoom(
-                            zoom::execute(&mut client, connection, id, action, &cancel).await,
+                        Job::Zoom(actions) => LocalServiceUpdate::Zoom(
+                            zoom::execute(&mut client, connection, &actions, &cancel).await,
                         ),
                         Job::DrawerVisibility(id, pinned) => LocalServiceUpdate::DrawerVisibility(
                             drawer_visibility::execute(
@@ -529,6 +546,7 @@ impl LocalServiceClient {
             self.pending = None;
             self.client = Some(client);
             self.last_template = matches!(job, Job::Template(..));
+            self.zoom_follows = false;
             match job {
                 Job::BackendVersion => {
                     self.build_pending = false;
@@ -568,13 +586,28 @@ impl LocalServiceClient {
                         }
                     }
                 }
-                Job::Zoom(..) => {
-                    if matches!(&result, LocalServiceUpdate::Zoom(result) if matches!(result.outcome, crate::zoom::ZoomOutcome::Uncertain { .. }))
-                        && !self.uncertain_legacy.contains(&SettingsField::Zoom)
-                    {
-                        self.uncertain_legacy.push(SettingsField::Zoom);
+                Job::Zoom(actions) => {
+                    let mut confirmed = false;
+                    if let LocalServiceUpdate::Zoom(first) = &result {
+                        use crate::zoom::ZoomOutcome;
+                        confirmed = matches!(first.outcome, ZoomOutcome::Confirmed(_));
+                        if matches!(first.outcome, ZoomOutcome::Uncertain { .. })
+                            && !self.uncertain_legacy.contains(&SettingsField::Zoom)
+                        {
+                            self.uncertain_legacy.push(SettingsField::Zoom);
+                        }
+                        // The actions carried out with the first share its outcome.
+                        self.zoom_ready
+                            .extend(actions.iter().skip(1).map(|(id, _)| ZoomResult {
+                                request_id: *id,
+                                ..first.clone()
+                            }));
                     }
-                    self.active_zoom = None;
+                    self.active_zoom.clear();
+                    // Steps that wait follow a confirmed write at once and
+                    // the appearance is read after the last of them. After
+                    // any other outcome a current read comes first.
+                    self.zoom_follows = confirmed;
                     self.prefer_write = false;
                     self.prefer_drawer_visibility = true;
                     // There is no concurrent read: every later appearance starts

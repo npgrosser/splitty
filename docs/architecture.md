@@ -490,11 +490,18 @@ events refresh all three; owner-checked OS preference changes refresh appearance
 Round-robin dirty reads prevent one feature from starving the others, and
 superseded results cannot replace a newer choice. The same owned client admits
 up to 32 queued zoom intents beside its active job and alternates ready reads
-and writes. Every intent reads current settings, calculates one bounded zoom
-step with the UI-free `zoom` policy and patches only `appearance.zoom` when it
-changes. Mutation outcomes carry independent request identities; a refresh
-cannot discard an acknowledgement. Failed or uncertain writes are reported
-without retrying the mutation, and subsequent intents begin with a current read.
+and writes. The intents that wait when a zoom job starts are that one job: it
+reads current settings, applies each intent's bounded step in order with the
+UI-free `zoom` policy and patches only `appearance.zoom` when the result
+differs, so a burst of steps costs one read and one write. Intents that arrive
+during a confirmed write follow it at once, and the appearance is read after
+the last of them. Mutation outcomes carry independent request identities, one
+per intent; a refresh cannot discard an acknowledgement. Failed or uncertain
+writes are reported without retrying the mutation, and subsequent intents
+begin with a current read. The window shows an admitted step at once
+(`zoom::PresentedZoom`): confirmations and settings reads replace what is
+shown only when no step is outstanding, and after a failed or uncertain write
+the last confirmed value is shown again.
 This is ordered within one client, not an atomic increment across independent
 clients. Each feature reports its own failure while the others continue with
 current data; terminals keep working. Setup and pending-job cleanup are
@@ -510,7 +517,8 @@ set of measured metrics for shaping, paint, pointer mapping and IME bounds, and
 passes only grid and pixel geometry into the replaceable emulator. Hidden panes
 retain desired zoom until measured on return. Changed cell pixels refresh the
 emulator even when rounded grid dimensions stay the same; only changed visible
-dimensions need a new PTY size report. Applying zoom cancels gestures whose
+dimensions need a new PTY size report, and consecutive zoom steps report the
+size once, shortly after the last. Applying zoom cancels gestures whose
 captured pixel geometry is obsolete without replacing sessions, search queries
 or the canonical workspace layout.
 
