@@ -22,9 +22,19 @@ pub use terminal_preferences::TerminalPreferences;
 pub const TERMINAL_FONT_FAMILY: &str = "JetBrainsMono Nerd Font Mono";
 
 /// That font's data, read from the embedded frontend assets.
+#[cfg(not(target_os = "windows"))]
 pub fn terminal_font_data() -> Option<std::borrow::Cow<'static, [u8]>> {
     splitty_server::embed::FrontendAssets::get("JetBrainsMonoNerdFontMono-Regular.ttf")
         .map(|file| file.data)
+}
+
+/// That font's data. The Windows client does not link the server and its
+/// asset embed, so it carries the font file itself.
+#[cfg(target_os = "windows")]
+pub fn terminal_font_data() -> Option<std::borrow::Cow<'static, [u8]>> {
+    Some(std::borrow::Cow::Borrowed(include_bytes!(
+        "../../../frontend/public/JetBrainsMonoNerdFontMono-Regular.ttf"
+    )))
 }
 
 pub(crate) mod local;
