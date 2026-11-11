@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Splitty
+Exec=splitty-gpui
+Icon=splitty
+Type=Application
+Categories=Development;TerminalEmulator;
+Comment=Multi-session terminal manager
+Terminal=false
