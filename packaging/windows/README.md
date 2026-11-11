@@ -1,9 +1,14 @@
 # Local Windows installer build
 
 The installer contains two different binaries, so a complete build needs both
-toolchains: WSL builds the static Linux backend and Windows builds the native
-Tauri/WebView2 application plus the NSIS installer. The local build script
-orchestrates both and keeps their incremental caches.
+toolchains: WSL builds the static Linux backend and Windows builds the
+application plus the NSIS installer. The local build script orchestrates both
+and keeps their incremental caches.
+
+`build.ps1` builds the native app by default: `splitty-gpui.exe`, packed by
+`native/bundle.ps1` with `native/installer.nsi` as `Splitty.exe` with the
+backend archive in `resources\`. `-App web` builds the legacy Tauri/WebView2
+app with the Tauri bundler instead; it installs as "Splitty Web".
 
 ## Prerequisites
 
@@ -11,6 +16,10 @@ orchestrates both and keeps their incremental caches.
 - Visual Studio 2022 Build Tools with **Desktop development with C++** and a
   Windows 10/11 SDK
 - Rust stable (MSVC), Git for Windows, Node.js 24, and pnpm 11 on Windows
+- For the native app: NSIS 3 (`makensis.exe` on `PATH`, in its default install
+  directory or in the Tauri CLI's cache) and the pinned libghostty-vt, either
+  as `GHOSTTY_VT_DIR` or built by `scripts\bootstrap-libghostty-vt.py`
+  (Python 3)
 - Rust stable, `musl-tools`, and `file` inside the selected WSL distribution
 
 Install the Linux packages in Ubuntu or Debian once:
@@ -45,11 +54,17 @@ iteration, `-SkipTests` skips the frontend check and desktop unit tests:
 powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build.ps1 -SkipTests
 ```
 
-The finished installer is written to:
+The finished installer is written to `bundle\native\` (native app) or
+`bundle\nsis\` (`-App web`) below:
 
 ```text
-target\x86_64-pc-windows-msvc\release\bundle\nsis\
+target\x86_64-pc-windows-msvc\release\
 ```
+
+The native installer keeps the install directory, Start menu shortcut and
+uninstall entry of the earlier web app and removes that app's executable, so
+it updates an existing installation in place. The app installs the backend
+archive into the WSL distribution on its first start.
 
 ## Start the same build from WSL
 

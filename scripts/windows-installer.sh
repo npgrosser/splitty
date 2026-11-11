@@ -5,12 +5,14 @@ set -euo pipefail
 # of waiting for the release workflow: bring a checkout on a Windows drive to
 # this repository's HEAD and run packaging/windows/build.ps1 there (the
 # Windows Rust toolchain, Node and pnpm; the Linux payload in this WSL
-# distribution). Uncommitted changes are not built.
+# distribution). Uncommitted changes are not built. The native app is built
+# unless --web asks for the legacy Tauri app.
 #
 # Usage:
-#   scripts/windows-installer.sh [--skip-tests] [--install]
+#   scripts/windows-installer.sh [--skip-tests] [--install] [--web]
 #     --skip-tests  skip the frontend type check and the Windows unit tests
 #     --install     start the built setup afterwards
+#     --web         build the legacy web app ("Splitty Web") instead
 #
 # Environment:
 #   SPLITTY_WINDOWS_CHECKOUT  the Windows checkout, as a Windows path
@@ -18,14 +20,19 @@ set -euo pipefail
 #                             cloned from this repository when it does not exist
 #   SPLITTY_WINDOWS_PATH      extra Windows PATH entries for the build, separated
 #                             by ';' (for example where pnpm is installed)
+#   SPLITTY_GHOSTTY_VT_DIR    the Windows libghostty-vt prefix of the native app,
+#                             as a Windows path; without it the build runs
+#                             scripts/bootstrap-libghostty-vt.py with Windows Python
 
 skip_tests=0
 install=0
+app=native
 for arg in "$@"; do
     case "$arg" in
         --skip-tests) skip_tests=1 ;;
         --install) install=1 ;;
-        *) echo "usage: $0 [--skip-tests] [--install]" >&2; exit 2 ;;
+        --web) app=web ;;
+        *) echo "usage: $0 [--skip-tests] [--install] [--web]" >&2; exit 2 ;;
     esac
 done
 
@@ -55,14 +62,19 @@ git -C "$checkout" fetch --quiet --tags "$repo" HEAD
 git -C "$checkout" checkout --quiet --detach FETCH_HEAD
 echo "Building $(git -C "$checkout" log --oneline -1) in $checkout_win"
 
-build_args="-Distro '$WSL_DISTRO_NAME'"
+build_args="-App $app -Distro '$WSL_DISTRO_NAME'"
 [ "$skip_tests" = 1 ] && build_args="$build_args -SkipTests"
 script="\$ErrorActionPreference = 'Stop'
 \$env:Path = \"${SPLITTY_WINDOWS_PATH:-};\$env:USERPROFILE\\.cargo\\bin;\" + \$env:Path
+if ('${SPLITTY_GHOSTTY_VT_DIR:-}') { \$env:GHOSTTY_VT_DIR = '${SPLITTY_GHOSTTY_VT_DIR:-}' }
 & '$checkout_win\\packaging\\windows\\build.ps1' $build_args"
 powershell.exe -NoProfile -ExecutionPolicy Bypass -Command "$script"
 
-bundle="$checkout/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+if [ "$app" = native ]; then
+    bundle="$checkout/target/x86_64-pc-windows-msvc/release/bundle/native"
+else
+    bundle="$checkout/target/x86_64-pc-windows-msvc/release/bundle/nsis"
+fi
 setup="$(ls -t "$bundle"/*-setup.exe | head -n 1)"
 echo
 echo "Setup: $(wslpath -w "$setup")"
