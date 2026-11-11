@@ -155,7 +155,7 @@ impl Workspace {
 }
 
 /// Hand a notification to the system. Linux desktops take it through
-/// `notify-send`, macOS through `osascript`; elsewhere nothing is shown yet.
+/// `notify-send`, macOS through `osascript`, Windows through a PowerShell toast.
 fn system_notification(title: &str, cx: &App) {
     let title = title.to_owned();
     cx.background_executor()
@@ -182,11 +182,41 @@ fn system_notification(title: &str, cx: &App) {
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null())
                 .status();
-            #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+            #[cfg(target_os = "windows")]
+            {
+                use std::os::windows::process::CommandExt;
+                let root = std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+                let powershell = std::path::Path::new(&root)
+                    .join("System32\\WindowsPowerShell\\v1.0\\powershell.exe");
+                let _ = std::process::Command::new(powershell)
+                    .args(["-NoProfile", "-NonInteractive", "-Command", WINDOWS_TOAST])
+                    .env("SPLITTY_NOTICE", &title)
+                    .creation_flags(0x0800_0000) // CREATE_NO_WINDOW, no console flashing up
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status();
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
             drop(title);
         })
         .detach();
 }
+
+/// Shows a toast through Windows PowerShell's own application identity: an
+/// executable without an installer has no identity of its own to show one
+/// under. The notice's text travels in the environment and becomes a text
+/// node, so nothing in it is read as script or markup. The script has no
+/// double quotes, which keeps it one unambiguous argument.
+#[cfg(target_os = "windows")]
+const WINDOWS_TOAST: &str = "\
+$m = [Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime]; \
+$x = $m::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType, Windows.UI.Notifications, ContentType = WindowsRuntime]::ToastText02); \
+$t = $x.GetElementsByTagName('text'); \
+[void]$t.Item(0).AppendChild($x.CreateTextNode('Splitty')); \
+[void]$t.Item(1).AppendChild($x.CreateTextNode($env:SPLITTY_NOTICE)); \
+$n = [Windows.UI.Notifications.ToastNotification, Windows.UI.Notifications, ContentType = WindowsRuntime]::new($x); \
+$m::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show($n)";
 
 pub(super) fn severity_color(severity: Severity, cx: &App) -> Hsla {
     match severity {
