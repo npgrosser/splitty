@@ -1,4 +1,9 @@
-name: Windows Tauri (WSL backend)
+name: Windows installers
+
+# Builds the static servers every desktop app carries (the x86_64 one is also
+# the Windows apps' WSL backend) and the two Windows installers: the native
+# app (crates/splitty-gpui, packaging/windows/native) and the legacy web app
+# (Tauri, installed as "Splitty Web").
 
 on:
   workflow_dispatch:
@@ -187,8 +192,80 @@ jobs:
             test -d "unpacked-darwin-$arch/shell-integration"
           done
 
-  windows:
-    name: Build unsigned per-user NSIS installer
+  # The native app reaches every host through its WSL backend, so it is built
+  # without the SPLITTY_REMOTE_PAYLOAD_* variables (crates/splitty-remote/build.rs
+  # would build the archives in); the backend ships beside the executable.
+  native:
+    name: Native app NSIS installer
+    needs: [payload, smoke]
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+          targets: x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: windows-native
+
+      # The archive and its .sha256 file, which the installer ships.
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: wsl-payload
+          path: payloads
+
+      - name: Build pinned native terminal library
+        shell: pwsh
+        run: |
+          $prefix = python scripts/bootstrap-libghostty-vt.py --check --prefix (Join-Path $env:RUNNER_TEMP "splitty-ghostty-vt")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value "GHOSTTY_VT_DIR=$prefix"
+
+      - name: Build native app
+        run: cargo build --locked --release -p splitty-gpui --target x86_64-pc-windows-msvc
+
+      # packaging/windows/native/bundle.ps1 looks for makensis.exe on PATH and
+      # in the NSIS install directory.
+      - name: Make sure NSIS is installed
+        shell: pwsh
+        run: |
+          $found = Get-Command makensis.exe -CommandType Application -ErrorAction SilentlyContinue
+          foreach ($root in @(${env:ProgramFiles(x86)}, $env:ProgramFiles)) {
+            if (-not $found -and $root -and (Test-Path -LiteralPath (Join-Path $root "NSIS\makensis.exe") -PathType Leaf)) {
+              $found = $true
+            }
+          }
+          if (-not $found) {
+            choco install nsis -y --no-progress
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
+
+      - name: Build NSIS installer
+        shell: pwsh
+        run: |
+          & packaging/windows/native/bundle.ps1 `
+            -Executable target\x86_64-pc-windows-msvc\release\splitty-gpui.exe `
+            -Payload payloads\splitty-wsl-x86_64.tar.gz `
+            -OutDir out
+          if (-not $?) { exit 1 }
+          $setups = @(Get-ChildItem -Path out -Filter "Splitty_*_x64-setup.exe")
+          if ($setups.Count -ne 1) { throw "expected one Splitty_<version>_x64-setup.exe in out, found $($setups.Count)" }
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: splitty-windows-x64-native
+          path: out/Splitty_*_x64-setup.exe
+          if-no-files-found: error
+          retention-days: 3
+
+  web:
+    name: Web app NSIS installer (Tauri)
     needs: [payload, smoke]
     runs-on: windows-2025
     timeout-minutes: 60
@@ -251,25 +328,25 @@ jobs:
       - name: Test Windows launcher and navigation guard
         run: cargo test --locked --release --package splitty-gui --target x86_64-pc-windows-msvc --lib
 
-      # Compile the platform-neutral adapter/UI without linking the Unix service.
-      # This does not assert that the experimental WSL launcher is implemented.
-      - name: Build pinned native terminal library
-        shell: pwsh
-        run: |
-          $prefix = python scripts/bootstrap-libghostty-vt.py --check --prefix (Join-Path $env:RUNNER_TEMP "splitty-ghostty-vt")
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          Add-Content -Path $env:GITHUB_ENV -Value "GHOSTTY_VT_DIR=$prefix"
-
-      - name: Compile experimental native probe on Windows
-        run: cargo check --locked -p splitty-gpui --all-targets --target x86_64-pc-windows-msvc
-
       - name: Build NSIS installer
         working-directory: crates/splitty-tauri
         run: '& "../../frontend/node_modules/.bin/tauri.cmd" build --target x86_64-pc-windows-msvc --bundles nsis'
 
+      # The bundler names the setup after the product, "Splitty Web"
+      # (tauri.windows.conf.json); the release file has no space.
+      - name: Collect installer
+        shell: pwsh
+        run: |
+          $setups = @(Get-ChildItem -Path target/x86_64-pc-windows-msvc/release/bundle/nsis -Filter "*-setup.exe")
+          if ($setups.Count -ne 1) { throw "expected one setup in bundle/nsis, found $($setups.Count)" }
+          $name = $setups[0].Name
+          if ($name -notlike "Splitty Web_*_x64-setup.exe") { throw "unexpected setup name: $name" }
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item -LiteralPath $setups[0].FullName -Destination (Join-Path out ("Splitty-Web_" + $name.Substring("Splitty Web_".Length)))
+
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: splitty-windows-x64-nsis
-          path: target/x86_64-pc-windows-msvc/release/bundle/nsis/*.exe
+          name: splitty-windows-x64-web
+          path: out/Splitty-Web_*_x64-setup.exe
           if-no-files-found: error
           retention-days: 3

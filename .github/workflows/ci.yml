@@ -45,6 +45,8 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Lints and tests the server, the core and the native desktop app
+  # (crates/splitty-gpui); the legacy Tauri shell has its own jobs.
   rust:
     name: Rust tests
     if: github.event_name != 'schedule'
@@ -79,7 +81,7 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all --check
 
-      - name: Install native probe build libraries
+      - name: Install native app build libraries
         run: >-
           sudo apt-get -o Acquire::Retries=3 update &&
           sudo apt-get -o Acquire::Retries=3 install --yes
@@ -139,6 +141,123 @@ jobs:
           cargo test --locked -p splitty-server --test remote_connect connect_reconnects_and_hands_over_sessions_through_real_ssh -- --exact --nocapture
           cargo test --locked -p splitty-server --test remote_connect exposure_crash::a_published_reverse_worker_blocks_gateway_reuse_after_its_coordinator_is_killed -- --exact --nocapture
           cargo test --locked -p splitty-server --test remote_connect the_hub_updates_a_host_daemon_of_another_version -- --exact --nocapture
+
+  # The packages a release publishes for Linux, built the way release.yml
+  # builds them: a release build on the oldest supported runner, packed by
+  # packaging/linux/native/build.sh. Catches a broken package script, a
+  # library missing on that runner and dependencies that do not install.
+  native-linux:
+    name: Native app packages (Linux)
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          version: 11
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: frontend/pnpm-lock.yaml
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: native-linux
+
+      - name: Install rpm tooling and native app build libraries
+        timeout-minutes: 10
+        run: >-
+          sudo apt-get -o Acquire::Retries=3 update &&
+          sudo apt-get -o Acquire::Retries=3 install --yes rpm
+          libxkbcommon-x11-dev libwayland-dev libx11-dev libxcb1-dev
+          libfontconfig1-dev libfreetype6-dev libvulkan-dev
+
+      - name: Build pinned native terminal library
+        run: |
+          prefix=$(python3 scripts/bootstrap-libghostty-vt.py --check)
+          echo "GHOSTTY_VT_DIR=$prefix" >> "$GITHUB_ENV"
+
+      # The app links the server, which embeds frontend/dist.
+      - name: Build frontend
+        working-directory: frontend
+        run: pnpm install --frozen-lockfile && pnpm build
+
+      # The release ships the static server as the `splitty` command; this
+      # build of the same crate stands in for it.
+      - name: Build native app and splitty command
+        run: cargo build --locked --release -p splitty-gpui -p splitty-server
+
+      - name: Build deb, rpm and tar.gz
+        run: |
+          packaging/linux/native/build.sh \
+            --executable target/release/splitty-gpui \
+            --cli target/release/splitty \
+            --out out
+
+      - name: Check packages
+        run: |
+          dpkg-deb --info out/splitty_*_amd64.deb
+          dpkg-deb --contents out/splitty_*_amd64.deb
+          rpm -qip --requires out/splitty-*-1.x86_64.rpm
+          rpm -qlp out/splitty-*-1.x86_64.rpm
+          mkdir -p "$RUNNER_TEMP/native-unpacked"
+          tar -xzf out/splitty-*-linux-x86_64.tar.gz -C "$RUNNER_TEMP/native-unpacked"
+          app=$(echo "$RUNNER_TEMP"/native-unpacked/splitty-*-linux-x86_64)
+          "$app/splitty-gpui" --help
+          "$app/splitty" --version
+
+      # The dependencies the deb declares exist and install; the installed
+      # command starts.
+      - name: Install the deb
+        timeout-minutes: 10
+        run: |
+          sudo apt-get -o Acquire::Retries=3 install --yes --no-install-recommends ./out/splitty_*_amd64.deb
+          test -x /opt/splitty/splitty
+          test -f /opt/splitty/shell-integration/bash/splitty.bash
+          splitty-gpui --help
+
+  # The native app on Windows reaches its backend in WSL, which hosted
+  # runners cannot start; this compiles the app and its tests.
+  native-windows:
+    name: Native app (Windows)
+    if: github.event_name != 'schedule'
+    runs-on: windows-2025
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          key: native-windows
+
+      - name: Build pinned native terminal library
+        shell: pwsh
+        run: |
+          $prefix = python scripts/bootstrap-libghostty-vt.py --check --prefix (Join-Path $env:RUNNER_TEMP "splitty-ghostty-vt")
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content -Path $env:GITHUB_ENV -Value "GHOSTTY_VT_DIR=$prefix"
+
+      - name: Build native app
+        run: cargo build --locked -p splitty-gpui
+
+      - name: Compile native app tests
+        run: cargo check --locked -p splitty-gpui --all-targets
 
   aarch64:
     name: Static server (aarch64)
@@ -319,11 +438,13 @@ jobs:
         working-directory: architecture
         run: pnpm audit
 
+  # The native app (build, tests compiled, disk image packed) and the legacy
+  # Tauri shell's native runtime on macOS.
   tauri-macos:
-    name: Tauri native runtime (macOS)
+    name: Native app and Tauri runtime (macOS)
     if: github.event_name != 'schedule'
     runs-on: macos-15
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -378,8 +499,25 @@ jobs:
           prefix=$(python3 scripts/bootstrap-libghostty-vt.py --check --prefix "$RUNNER_TEMP/splitty-ghostty-vt")
           echo "GHOSTTY_VT_DIR=$prefix" >> "$GITHUB_ENV"
 
-      - name: Compile experimental native probe on macOS
+      - name: Build native app
+        run: |
+          cargo build --locked -p splitty-gpui
+          target/debug/splitty-gpui --help
+
+      - name: Compile native app tests
         run: cargo check --locked -p splitty-gpui --all-targets
+
+      # The disk image a release publishes, packed by the release's script
+      # from this debug build: the bundle layout, the ad-hoc signature and
+      # its verification, and hdiutil.
+      - name: Pack native app disk image
+        run: |
+          cargo build --locked -p splitty-server
+          packaging/macos/native/build.sh \
+            --executable target/debug/splitty-gpui \
+            --cli target/debug/splitty \
+            --out "$RUNNER_TEMP/native-macos"
+          hdiutil imageinfo "$RUNNER_TEMP"/native-macos/Splitty_*_aarch64.dmg > /dev/null
 
       # Gather the independent native IPC runtime evidence even when a
       # core platform test fails. The final gate still fails this job.
