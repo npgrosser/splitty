@@ -2027,6 +2027,62 @@ mod view_tests {
         });
     }
     #[test]
+    fn the_footer_keys_reach_each_destination_from_the_others_and_leave_their_own() {
+        with_view(|window, view| {
+            let owner = Uuid::new_v4();
+            let (commands, _receiver) = mpsc::channel(64);
+            let is_mac = window.update(|window, cx| {
+                cx.set_reduce_motion(true);
+                window.resize(size(px(900.), px(620.)));
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = commands;
+                    workspace.model = Some(WindowWorkspace::new(owner));
+                    workspace.hosts.set_owner(owner);
+                    workspace.drawer_visible = true;
+                    workspace.focus.focus(window, cx);
+                    cx.notify();
+                });
+                cx.platform_info().is_mac()
+            });
+            draw(window);
+            let (hosts, templates) = if is_mac {
+                ("cmd-shift-h", "cmd-p")
+            } else {
+                ("alt-h", "alt-p")
+            };
+            let settings = "ctrl-,";
+            let mut press = |key: &str| {
+                window.simulate_keystrokes(key);
+                draw(window);
+                window.update(|_, cx| {
+                    view.update(cx, |workspace, _| {
+                        // No worker answers the panel's list request here.
+                        if let Some(dialog) = workspace.template_dialog.as_mut() {
+                            dialog.pending = None;
+                        }
+                        (workspace.destination, workspace.template_dialog.is_some())
+                    })
+                })
+            };
+            // Each key opens its destination and, pressed again, leaves it.
+            assert!(press(hosts) == (Destination::Hosts, false));
+            assert!(press(hosts) == (Destination::Screens, false));
+            assert!(press(settings) == (Destination::Settings, false));
+            assert!(press(settings) == (Destination::Screens, false));
+            assert!(press(templates) == (Destination::Screens, true));
+            assert!(press(templates) == (Destination::Screens, false));
+            // Each destination is reached from the two others.
+            assert!(press(settings) == (Destination::Settings, false));
+            assert!(press(hosts) == (Destination::Hosts, false));
+            assert!(press(settings) == (Destination::Settings, false));
+            assert!(press(templates) == (Destination::Screens, true));
+            assert!(press(hosts) == (Destination::Hosts, false));
+            assert!(press(templates) == (Destination::Screens, true));
+            assert!(press(settings) == (Destination::Settings, false));
+        });
+    }
+
+    #[test]
     fn a_closed_host_keeps_running_and_reopens_its_screens_from_the_hosts_item() {
         with_view(|window, view| {
             let mut model = WindowWorkspace::new(Uuid::new_v4());

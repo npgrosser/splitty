@@ -119,6 +119,7 @@ enum Shortcut {
     Templates,
     CommandPalette,
     Settings,
+    Hosts,
     ToggleDrawer,
     NewTab,
     NewScreen,
@@ -232,6 +233,14 @@ fn tab_header_pixels(tab_height: f32, window_scale: f32) -> Pixels {
     px(tab_height * window_scale)
 }
 
+impl Shortcut {
+    /// The shortcuts of the Drawer's bottom navigation. They work from each
+    /// of its destinations, where the Screen's own shortcuts do not.
+    fn changes_destination(self) -> bool {
+        matches!(self, Self::Templates | Self::Settings | Self::Hosts)
+    }
+}
+
 fn zoom_shortcut(key: &Keystroke, is_mac: bool) -> Option<ZoomAction> {
     let mods = key.modifiers;
     if mods.alt
@@ -287,6 +296,8 @@ fn shortcut(key: &Keystroke, is_mac: bool) -> Option<Shortcut> {
     match (key.key.to_ascii_lowercase().as_str(), mods.shift) {
         ("p", false) => Some(Shortcut::Templates),
         ("p", true) => Some(Shortcut::CommandPalette),
+        // ⌘H hides the application on macOS, so the chord takes Shift there.
+        ("h", shift) if shift == is_mac => Some(Shortcut::Hosts),
         ("t", false) => Some(Shortcut::NewTab),
         ("m", false) => Some(Shortcut::ToggleMaximize),
         ("j", false) => Some(Shortcut::Scratchpad),
@@ -3373,7 +3384,18 @@ impl Workspace {
             return;
         }
         if self.template_dialog.is_some() {
-            self.template_key(&event.keystroke, window, cx);
+            // The Templates panel is a destination of the Drawer as well:
+            // its own key closes it and the others' keys leave it, unless a
+            // request of the panel is under way.
+            match shortcut(&event.keystroke, cx.platform_info().is_mac())
+                .filter(|action| action.changes_destination())
+            {
+                Some(action) => {
+                    cx.stop_propagation();
+                    self.run_key_shortcut(action, window, cx);
+                }
+                None => self.template_key(&event.keystroke, window, cx),
+            }
             return;
         }
         if self.pending_template_apply.is_some()
@@ -3458,35 +3480,27 @@ impl Workspace {
         if GlobalState::is_in_deferred_context(cx) {
             return;
         }
+        let action = shortcut(&event.keystroke, cx.platform_info().is_mac());
         if self.destination == Destination::Settings {
             if event.keystroke.key == "escape" {
                 cx.stop_propagation();
                 self.close_settings(window, cx);
-            } else if shortcut(&event.keystroke, cx.platform_info().is_mac())
-                == Some(Shortcut::CommandPalette)
-            {
+            } else if let Some(action) = action.filter(|action| {
+                action.changes_destination()
+                    || matches!(action, Shortcut::CommandPalette | Shortcut::ToggleDrawer)
+            }) {
                 cx.stop_propagation();
-                self.toggle_palette(window, cx);
-            } else if shortcut(&event.keystroke, cx.platform_info().is_mac())
-                == Some(Shortcut::ToggleDrawer)
-            {
-                cx.stop_propagation();
-                self.toggle_drawer_overlay(cx);
-            } else if shortcut_with_layout(
-                &event.keystroke,
-                cx.platform_info().is_mac(),
-                window.modifiers().shift,
-                cx.keyboard_layout().id(),
-            ) == Some(Shortcut::Templates)
-            {
-                cx.stop_propagation();
-                self.wheel_navigation.reset();
-                self.toggle_templates(window, cx);
+                self.run_key_shortcut(action, window, cx);
             }
             return;
         }
         if self.destination == Destination::Hosts {
             if self.host_alias_key(&event.keystroke, window, cx) {
+                return;
+            }
+            if let Some(action) = action.filter(|action| action.changes_destination()) {
+                cx.stop_propagation();
+                self.run_key_shortcut(action, window, cx);
                 return;
             }
             if self.host_search_focused(window, cx) && event.keystroke.key != "escape" {
@@ -3532,7 +3546,20 @@ impl Workspace {
             return;
         };
         cx.stop_propagation();
-        self.run_shortcut(action, window, cx);
+        self.run_key_shortcut(action, window, cx);
+    }
+    /// Carry out a shortcut from its key. The key of a destination that is
+    /// open leaves it for the Screens, as its Drawer entry does.
+    fn run_key_shortcut(&mut self, action: Shortcut, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            Shortcut::Settings if self.destination == Destination::Settings => {
+                self.close_settings(window, cx)
+            }
+            Shortcut::Hosts if self.destination == Destination::Hosts => {
+                self.show_screens(window, cx)
+            }
+            _ => self.run_shortcut(action, window, cx),
+        }
     }
     /// Carry out a command, from its key or from the command palette.
     fn run_shortcut(&mut self, action: Shortcut, window: &mut Window, cx: &mut Context<Self>) {
@@ -3540,6 +3567,7 @@ impl Workspace {
             Shortcut::ToggleDrawer => self.toggle_drawer_overlay(cx),
             Shortcut::CommandPalette => self.toggle_palette(window, cx),
             Shortcut::Settings => self.show_settings(window, cx),
+            Shortcut::Hosts => self.show_hosts(window, cx),
             Shortcut::Templates => {
                 self.wheel_navigation.reset();
                 self.toggle_templates(window, cx)
@@ -6973,6 +7001,7 @@ mod tests {
                 Some(Shortcut::SplitRight)
             );
             assert_eq!(shortcut(&key("w", base), is_mac), Some(Shortcut::ClosePane));
+            assert_eq!(shortcut(&key("p", base), is_mac), Some(Shortcut::Templates));
             assert_eq!(
                 shortcut(&key("pageup", base), is_mac),
                 Some(Shortcut::PreviousTab)
@@ -7000,6 +7029,29 @@ mod tests {
                     Some(Shortcut::Focus(direction))
                 );
             }
+            // Hosts: the plain chord, and with Shift where the system owns
+            // the plain one. The other form stays the terminal's.
+            let (hosts, other) = if is_mac {
+                (shifted, base)
+            } else {
+                (base, shifted)
+            };
+            assert_eq!(shortcut(&key("h", hosts), is_mac), Some(Shortcut::Hosts));
+            assert_eq!(shortcut(&key("h", other), is_mac), None);
+            assert_eq!(shortcut(&key("h", base), !is_mac), None);
+            assert_eq!(
+                shortcut(
+                    &key(
+                        "h",
+                        Modifiers {
+                            control: true,
+                            ..hosts
+                        }
+                    ),
+                    is_mac
+                ),
+                None
+            );
             assert_eq!(shortcut(&key("t", shifted), is_mac), None);
             assert_eq!(shortcut(&key("pageup", shifted), is_mac), None);
             assert_eq!(shortcut(&key("pagedown", shifted), is_mac), None);

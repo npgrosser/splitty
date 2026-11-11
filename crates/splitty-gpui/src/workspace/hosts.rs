@@ -1244,7 +1244,11 @@ impl Workspace {
                 super::drawer::NavItem {
                     icon: IconName::Server,
                     label: "Hosts",
-                    shortcut: connecting.then_some("Connecting…"),
+                    shortcut: Some(if connecting {
+                        "Connecting…".into()
+                    } else {
+                        super::drawer::nav_shortcut(Shortcut::Hosts, cx)
+                    }),
                     active,
                 },
                 window,

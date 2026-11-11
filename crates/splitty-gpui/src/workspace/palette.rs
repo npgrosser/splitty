@@ -9,7 +9,6 @@ use super::*;
 pub(super) enum PaletteCommand {
     Run(Shortcut),
     ConnectHost,
-    Hosts,
     Shortcuts,
     Zoom(ZoomAction),
 }
@@ -54,6 +53,8 @@ pub(super) fn shortcut_label(shortcut: Shortcut, is_mac: bool) -> String {
         Shortcut::ToggleDrawer => format!("{control}B"),
         Shortcut::NewScreen => format!("{control}{shift}Space"),
         Shortcut::Settings => format!("{control},"),
+        Shortcut::Hosts if is_mac => format!("{primary}{shift}H"),
+        Shortcut::Hosts => format!("{primary}H"),
         Shortcut::Templates => format!("{primary}P"),
         Shortcut::CommandPalette => format!("{primary}{shift}P"),
         Shortcut::NewTab => format!("{primary}T"),
@@ -107,7 +108,7 @@ pub(super) fn palette_entries(is_mac: bool) -> Vec<PaletteEntry> {
         run("Templates…", Shortcut::Templates),
         run("Toggle Drawer", Shortcut::ToggleDrawer),
         run("Settings", Shortcut::Settings),
-        plain("Hosts and Ports", PaletteCommand::Hosts),
+        run("Hosts and Ports", Shortcut::Hosts),
         zoom("Zoom In", "+", ZoomAction::In),
         zoom("Zoom Out", "-", ZoomAction::Out),
         zoom("Reset Zoom", "0", ZoomAction::Reset),
@@ -297,7 +298,6 @@ impl Workspace {
                     cx,
                 );
             }
-            PaletteCommand::Hosts => self.show_hosts(window, cx),
             PaletteCommand::Shortcuts => self.show_shortcuts(window, cx),
             PaletteCommand::Zoom(action) => self.submit_zoom(action, cx),
         }
@@ -435,6 +435,20 @@ mod tests {
         assert!(filter_entries(palette_entries(false), "nothing here").is_empty());
         assert_eq!(shortcut_label(Shortcut::SplitDown, true), "⌘⇧D");
         assert_eq!(shortcut_label(Shortcut::Settings, false), "Ctrl+,");
+        assert_eq!(shortcut_label(Shortcut::Templates, true), "⌘P");
+        assert_eq!(shortcut_label(Shortcut::Hosts, false), "Alt+H");
+        assert_eq!(shortcut_label(Shortcut::Hosts, true), "⌘⇧H");
+        // The Hosts manager is listed with its key, in the palette and so in
+        // the shortcut list.
+        for is_mac in [false, true] {
+            let hosts = shortcut_label(Shortcut::Hosts, is_mac);
+            assert!(palette_entries(is_mac).iter().any(|entry| {
+                entry.label == "Hosts and Ports" && entry.shortcut.as_ref() == Some(&hosts)
+            }));
+            assert!(shortcut_rows(is_mac)
+                .iter()
+                .any(|(label, key)| *label == "Hosts and Ports" && *key == hosts));
+        }
         // Every key the list shows belongs to one row only.
         let rows = shortcut_rows(false);
         let mut keys: Vec<_> = rows.iter().map(|(_, key)| key.clone()).collect();
