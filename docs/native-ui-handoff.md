@@ -1,22 +1,18 @@
-# Native UI checkpoint — 2026-11-08
+# Native app: state and open work
 
-Branch: **`feat/native-ui-gpui`**. Latest functional/demo source:
-**`2ab058554ddb7f7f48293d7cc36c77eb17820bcb`**. Later checkpoint commits only
-record acceptance and this handoff. No additional feature work is in flight at
-this cut. The native client is experimental alongside the existing web clients;
-there is no completed cutover or release.
+The native client (`crates/splitty-gpui`) is the desktop app that CI builds
+and releases publish for Windows, macOS (Apple silicon) and Linux. The web
+shells (Tauri, Electron) remain in the repository as legacy apps: they keep
+their CI jobs and are released with "Web" in their names. Nothing of the web
+client was removed. Builds and packages are described in
+[development](development.md#the-native-app); the acceptance records of the
+individual features are in the [GPUI runbook](gpui-spike.md).
 
-## Resume on another machine
-
-```sh
-git fetch origin
-git switch feat/native-ui-gpui
-git pull --ff-only
-```
+## Working on it
 
 Read `CLAUDE.md`, this file, [architecture](architecture.md), the existing
 `architecture/client-core.c4` and `architecture/gpui.c4` components, and the
-selected OpenSpec change before editing. Run `openspec list --json` from this
+selected OpenSpec change before editing. Run `openspec list --json` from the
 checkout and confirm its reported root. Build prerequisites and platform setup
 are in [development](development.md#running-from-source) and the
 [GPUI runbook](gpui-spike.md#build-and-run).
@@ -39,7 +35,7 @@ test screenshots are not prerequisites shipped by Git. Use the repository's
 commands rather than paths from an earlier session's temporary environment.
 Keep temporary fixture paths short enough for Unix sockets.
 
-## Implemented and verified checkpoint
+## Implemented and verified (checkpoint 2026-11-08)
 
 - Real local terminals, Screens, splits, tabs, pane movement and existing local
   floating/transfer/template tools; the native model projects the shared mux.
@@ -54,9 +50,9 @@ Keep temporary fixture paths short enough for Unix sockets.
 
 Current checks: **268 client-core tests, 190 GPUI tests, 17 architecture tests**,
 strict touched-crate all-target Clippy, formatting and affected strict OpenSpec
-validation. The Linux platform patch additionally has eight targeted event
-tests (four added) and strict platform Clippy. These are scoped checks, not the
-full workspace CI gate. Full commands/evidence are in
+validation at that checkpoint; later feature work added to them. The Linux
+platform patch additionally has eight targeted event tests (four added) and
+strict platform Clippy. Full commands/evidence are in
 [the GPUI acceptance record](gpui-spike.md#completed-rename-and-windows-preview-checkpoint-2026-11-08).
 
 Actual Linux windows prove creation on B while A remains usable during delayed
@@ -93,30 +89,27 @@ It is not real OpenSSH installation/update acceptance.
 - The Ghostty engine boundary remains separate from GPUI rendering. Existing
   web/xterm workarounds are not automatically native feature requirements.
 
-## Demo and reproducibility
+## Packages, CI and release
 
-Windows preview folder: `Splitty-Native-Preview-2026-11-08-Remote-Rename-2ab058554ddb`
-in Downloads. Start `Splitty starten.cmd`; the launcher checks executable/backend
-hashes and uses its own Ubuntu WSL runtime/configuration. `build.json`,
-`source-sha256.txt`, `SHA256SUMS.txt`, licenses and Linux/Windows evidence are
-included. The native MSVC release build passes the 18-stage local workspace
-smoke on RTX 4080, template interaction, normal close and owned cleanup while an
-unrelated sentinel survives. Separate Windows remote workflows remain untested.
+- Linux: `packaging/linux/native/build.sh` packs a deb, an rpm and a tar.gz
+  (x86_64) with the executable, the `splitty` command and `shell-integration/`
+  in `/opt/splitty`. macOS: `packaging/macos/native/build.sh` builds the ad-hoc
+  signed `Splitty.app` (`com.splitty.native`) and its disk image for the
+  host's architecture. Windows: `packaging/windows/native/bundle.ps1` packs the
+  executable and the WSL backend archive into a per-user NSIS installer that
+  replaces the web app of earlier releases in place; the app starts without
+  arguments and installs its backend into the chosen distribution.
+- CI lints and tests the app with the workspace on Linux, builds it on macOS
+  and Windows, packs the Linux packages on Ubuntu 22.04 (installing the deb)
+  and packs the macOS disk image. The release workflow publishes the native
+  packages under the plain names and the legacy ones as `Splitty-Web…` /
+  `splitty-web…`; the table is in [development](development.md#releases).
+- The Windows preview folders with a launcher that named a distribution, a
+  backend path and a configuration directory are superseded by the installer.
+  The explicit `--wsl-*` arguments remain for isolated previews and tests
+  ([runbook](gpui-spike.md#native-windows-preview)).
 
-The pre-ingress-fix `4f60b30` candidate is **not ready** and its starter is blocked.
-Use `2ab0585`. Earlier previews are separate. Always create new package, source,
-runtime and smoke destinations exclusively; an existing destination is an error.
-Dependency build caches may be reused with proven source/output identities.
-Never merge files into an older preview or place executables in a home root.
-No new release tag, installer or CI rollout was created.
-
-On another machine rebuild the GUI/backend using the Windows runbook; local
-Downloads packages and cached static backends are not Git artifacts. The latest
-demo's static Linux backend was reused only after verifying unchanged production
-sources and all 271 reachable resolved dependency records. It bundles remote
-self-install only for Linux x86_64.
-
-## Open work and next checkpoint
+## Open work
 
 - macOS runs and the chrome follows the web client's look; the gaps and
   deliberate differences are listed in
@@ -127,18 +120,25 @@ self-install only for Linux x86_64.
 - The broader `native-remote-screens` change retains separate unfinished
   obligations. Its checklist is not superseded wholesale by these two changes.
   Inspect source and each task before accepting additional parity claims.
-- Run the full pre-merge checks from `CLAUDE.md` when preparing a merge. CI was
-  deliberately deferred during MVP iteration. Vendored platform tests are
-  workspace-excluded and require their explicit documented regression command.
+- Packaging: the macOS disk image and the Windows installer are built only on
+  their CI runners; watch the first CI and release runs. The app sets no
+  window `app_id`, so Linux desktops cannot yet match its windows to
+  `splitty.desktop` (no `StartupWMClass`). CI compiles the app's tests on
+  Windows and macOS but runs them on Linux only. There is no native AppImage,
+  no native package for Intel Macs or aarch64 Linux, and the macOS app's
+  minimum system version is whatever the build's linker targets; it is tested
+  on the release runner's macOS only. The provisional packaging decisions are
+  NDD-1 to NDD-6 in `openspec/open-decisions.md`.
+- Vendored platform tests are workspace-excluded and require their explicit
+  documented regression command.
 - Real SSH daemon installation/update, individual Windows remote UX, broader
   terminal/IME/image parity and remaining remote-only/local-only capabilities
   still need their own acceptance. Local profiles/templates/transfers are not
   implicitly remote features. Native host-group reorder UI and remembered
   reference persistence remain unfinished.
-- Scratchpad, document/viewer and `splitty open` parity were deferred. Preserve
-  the working web client and native branch while deciding subsequent scope;
-  there is no approved requirement to remove web bridges or adopt full WASM.
+- The web client stays usable as the legacy app; there is no approved
+  requirement to remove web bridges or adopt full WASM.
 
-This checkpoint finishes the work already in flight. Start the next feature
-only with a fresh scope decision; avoid treating old planning ideas or every
-unchecked task as an instruction to implement all of them automatically.
+Start the next feature only with a fresh scope decision; avoid treating old
+planning ideas or every unchecked task as an instruction to implement all of
+them automatically.

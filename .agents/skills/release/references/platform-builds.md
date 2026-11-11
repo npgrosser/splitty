@@ -1,5 +1,7 @@
 # Local desktop packages
 
+The local build is the native app (`crates/splitty-gpui`), the package a release publishes under the plain name for each system. The legacy web apps (Tauri, Electron; "Web" in their release names) are built locally only when requested; `docs/development.md` names their builds.
+
 Detect WSL before treating `uname -s = Linux` as a Linux desktop. Use the companion `scripts/downloads.py` probe. Do not change `HOME`, `home` or `CODEX_HOME` to stage builds. Paths with spaces and apostrophes need proper quoting; prefer argument arrays/PowerShell `-File` over interpolated command strings.
 
 ## Windows through WSL
@@ -10,11 +12,13 @@ Use the existing bridge from the checkout at `release_sha`:
 bash scripts/windows-installer.sh
 ```
 
-It creates/reuses a Windows-drive checkout, fetches this repository's committed HEAD into it, and runs `packaging/windows/build.ps1` using native Windows Rust/MSVC, Node/pnpm and WSL for backend payloads. Do not pass `--install` or `--skip-tests` by default. A Linux Tauri build inside WSL would produce the wrong desktop package.
+It creates/reuses a Windows-drive checkout, fetches this repository's committed HEAD into it, and runs `packaging/windows/build.ps1` there (native app by default) using native Windows Rust/MSVC, Node/pnpm, NSIS (`makensis.exe`, also found in the Tauri CLI's cache) and WSL for the backend payload. It prints `Setup: <windows path>` for the built installer. Do not pass `--install`, `--skip-tests` or `--web` (the legacy Tauri app) by default. A Linux build inside WSL would produce the wrong desktop package.
+
+The native executable links the pinned terminal library. `SPLITTY_GHOSTTY_VT_DIR` names the Windows path of a built prefix; without it the build runs `scripts/bootstrap-libghostty-vt.py` with Windows Python, which downloads and builds it once into the user cache.
 
 Use an existing clean `SPLITTY_WINDOWS_CHECKOUT` when configured. If the default preview checkout contains other work, choose a separate release checkout, e.g. under the Windows user's `Code` folder; never discard the preview's changes. The wrapper requires WSL interop, `powershell.exe`, `wslpath`, native Windows Git, Node/pnpm, Rust/MSVC and the payload prerequisites from `packaging/windows/README.md`. `SPLITTY_WINDOWS_PATH` can add native Windows tools to PATH.
 
-The Windows staging checkout's HEAD must equal `release_sha`. Look in its `target/x86_64-pc-windows-msvc/release/bundle/nsis/` for the installer bearing `VERSION`. Verify it was produced during this build; pass its WSL path to the Downloads helper. The wrapper's current x64 restriction is real: report an unsupported Windows architecture instead of labeling an x64 package as native ARM64.
+The Windows staging checkout's HEAD must equal `release_sha`. The native installer is `target/x86_64-pc-windows-msvc/release/bundle/native/Splitty_<VERSION>_x64-setup.exe` (the path the wrapper printed); the legacy one, when requested, is under `bundle/nsis/` and is named `Splitty Web_<VERSION>_x64-setup.exe` (the release calls it `Splitty-Web_<VERSION>_x64-setup.exe`). Verify the file was produced during this build; pass its WSL path to the Downloads helper. The wrapper's current x64 restriction is real: report an unsupported Windows architecture instead of labeling an x64 package as native ARM64.
 
 If the wrapper's interpolated PowerShell command cannot represent a path/distro containing apostrophes, use a clean Windows-drive checkout at `release_sha` and invoke `packaging/windows/build-from-wsl.sh` there; that bridge uses PowerShell `-File` with separate arguments.
 
@@ -26,7 +30,7 @@ Use a checkout on a Windows drive. Run release versioning through WSL (or Git Ba
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\packaging\windows\build.ps1
 ```
 
-Select an existing WSL distribution with `-Distro` if needed. Inspect the same versioned NSIS output as above. Run the helper with `py -3` or an available Python 3; it queries Windows Downloads directly. This build needs WSL for its Linux backend even though the desktop app is native Windows.
+`-App native` is the default; `-App web` builds the legacy Tauri app. Select an existing WSL distribution with `-Distro` if needed. Inspect the same versioned output as above. Run the helper with `py -3` or an available Python 3; it queries Windows Downloads directly. This build needs WSL for its Linux backend even though the desktop app is native Windows.
 
 ## Shared payloads for native macOS and Linux
 
@@ -50,36 +54,38 @@ export SOURCE_DATE_EPOCH=0
 export SPLITTY_BUILD_TIME=1970-01-01T00:00:00Z
 ```
 
-On Linux, install `frontend-electron/` dependencies first (the frontend check imports the Electron adapters), then build and check the local frontend with `pnpm install --frozen-lockfile`, `pnpm check` and `pnpm build` in `frontend/` (the macOS script does this itself). The CI payloads provide the server binaries; build the desktop package on the current machine.
+The native Linux and macOS executables build these archives in when the variables are set, and ship the matching static server as their `splitty` command. Unpack the one for the current machine (`splitty-wsl-x86_64.tar.gz` on Linux, `splitty-darwin-aarch64.tar.gz` on an Apple silicon Mac) into a fresh directory; it holds `splitty` and `shell-integration/`. The CI payloads provide the server binaries; build the desktop package on the current machine.
 
-If payload artifacts are unavailable, build them locally from the release commit with `packaging/windows/build-wsl-payload.sh`: `aarch64`, `darwin-aarch64`, `darwin-x86_64` first, then `x86_64` with the other three payload environment variables set. On macOS, `packaging/macos/build.sh` does this by itself (below). Report which source the payloads came from; never ship missing or older backends.
+If payload artifacts are unavailable, build them locally from the release commit with `packaging/windows/build-wsl-payload.sh`: `aarch64`, `darwin-aarch64`, `darwin-x86_64` first, then `x86_64` with the other three payload environment variables set. Report which source the payloads came from; never ship missing or older backends.
 
 ## macOS
 
-Prerequisites: Xcode command-line tools, Rust (rustup) and Node/pnpm. From the checkout at `release_sha`:
+Prerequisites: Xcode command-line tools, Rust (rustup), Python 3 and Node/pnpm. On an Apple silicon Mac, from the checkout at `release_sha` with the payload environment above:
 
 ```sh
-packaging/macos/build.sh               # native architecture, the default
-packaging/macos/build.sh --universal   # only if a universal package is requested
+packaging/macos/native/build.sh \
+  --cli "$payload_dir/darwin-aarch64/splitty" \
+  --shell-integration "$payload_dir/darwin-aarch64/shell-integration"
 ```
 
-It builds the frontend, runs `pnpm check` and the desktop unit tests, and builds the DMG with all four payloads: the archives named by the four `SPLITTY_REMOTE_PAYLOAD_*` variables when all of them are exported (the CI artifacts above), otherwise built from the same commit into `build/remote-payloads/`. It sets `SPLITTY_COMMIT`, `SOURCE_DATE_EPOCH` and `SPLITTY_BUILD_TIME` itself. Do not pass `--skip-tests` by default.
+It builds the frontend, the pinned terminal library (unless `GHOSTTY_VT_DIR` names a built prefix) and a release build of `splitty-gpui`, assembles the ad-hoc signed `Splitty.app`, verifies its signature and writes `build/native-macos/Splitty_<VERSION>_aarch64.dmg` (`--out DIR` chooses another directory). Without `--cli` it builds and ships this Mac's own `splitty` instead of the release's static server; say so if that was used. The app is built for the host's architecture: an Intel Mac produces `Splitty_<VERSION>_x64.dmg`, which the release does not publish; report that instead of labeling it as the release package.
 
-The repository's `tauri.macos.conf.json` supplies ad-hoc signing. The native DMG is under `target/release/bundle/dmg/`; a universal build uses `target/universal-apple-darwin/release/bundle/dmg/`. Inspect the app executable's architecture with `file`/`lipo -info`, verify the bundle version, and copy the matching DMG to the macOS Downloads folder. Do not install into `/Applications` or stop a running app merely to produce a download.
+Inspect the app executable's architecture with `file`/`lipo -info`, verify the bundle version, and copy the DMG to the macOS Downloads folder. Do not install into `/Applications` or stop a running app merely to produce a download.
+
+The legacy web app (only when requested) is `packaging/macos/build.sh` (`--universal` for the release's universal DMG); it builds missing payloads itself and writes under `target/release/bundle/dmg/` or `target/universal-apple-darwin/release/bundle/dmg/`.
 
 ## Native Linux
 
-Prerequisites: Node.js 24 and pnpm (plus Rust if building missing payloads locally). Build for the supported x86_64 architecture, with the payload environment above. Verify the x86_64 payload archive is from this release commit, then stage its static server for Electron Builder:
+Prerequisites: Rust, Python 3, Node.js 24 and pnpm, `dpkg-deb`, `rpmbuild` (Debian/Ubuntu: `rpm`; Fedora: `rpm-build`, `dpkg`) and the development packages `docs/development.md` lists under "The native app". Build for the supported x86_64 architecture, from the checkout at `release_sha` with the payload environment above:
 
 ```sh
-mkdir -p target/release payloads/x86_64
-tar -xzf "$SPLITTY_REMOTE_PAYLOAD_X86_64" -C payloads/x86_64
-install -m 0755 payloads/x86_64/splitty target/release/splitty
-pnpm install --frozen-lockfile --dir frontend-electron
-# fpm rejects an epoch of 0 for deb and rpm; the release commit's time stays reproducible.
-SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)" pnpm --dir frontend-electron run dist --publish never
+packaging/linux/native/build.sh \
+  --cli "$payload_dir/x86_64/splitty" \
+  --shell-integration "$payload_dir/x86_64/shell-integration"
 ```
 
-The deb and rpm need `rpmbuild` (Fedora: `rpm-build`; Debian/Ubuntu: `rpm`) and, on distributions without it, the `libcrypt.so.1` compatibility library for electron-builder's bundled fpm (Fedora: `libxcrypt-compat`).
+It builds the frontend, the pinned terminal library (unless `GHOSTTY_VT_DIR` names a built prefix) and a release build of `splitty-gpui`, and writes `splitty_<VERSION>_amd64.deb`, `splitty-<VERSION>-1.x86_64.rpm` and `splitty-<VERSION>-linux-x86_64.tar.gz` into `build/native-linux/` (`--out DIR` chooses another directory). Without `--cli` it builds and ships this machine's own `splitty` instead of the release's static server; say so if that was used. The deb requires the glibc of the build machine or newer; the release builds on Ubuntu 22.04.
 
-Collect the versioned AppImage, deb and rpm from `frontend-electron/dist/`. For the release filename, rename `Splitty-<version>.AppImage` to `Splitty-Electron-<version>-x86_64.AppImage`; the deb and rpm keep their names. Copy them to the actual XDG Downloads folder with the helper. Do not use `make install` for delivery to Downloads.
+Check the packages (`dpkg-deb --info`, `rpm -qip`, and `./splitty-gpui --help` from the unpacked tar.gz) and copy all three to the actual XDG Downloads folder with the helper. Do not install them or use `make install-*` for delivery to Downloads.
+
+The legacy Electron packages (only when requested) are `pnpm --dir frontend-electron run dist --publish never` after staging the static server as `target/release/splitty`, with `SOURCE_DATE_EPOCH="$(git log -1 --format=%ct HEAD)"` (fpm rejects an epoch of 0). They need `rpmbuild` and, on distributions without it, the `libcrypt.so.1` compatibility library (Fedora: `libxcrypt-compat`). The release renames `Splitty-<version>.AppImage` to `Splitty-Web-<version>-x86_64.AppImage`, `splitty-electron_<version>_amd64.deb` to `splitty-web_<version>_amd64.deb` and `splitty-electron-<version>.x86_64.rpm` to `splitty-web-<version>.x86_64.rpm`.

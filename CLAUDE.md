@@ -8,7 +8,7 @@ The rules for building live in a few places and hold for work without an OpenSpe
 - `docs/issues/openspec-baseline-findings.md`: known bugs, stale docs and test gaps.
 - `openspec/open-decisions.md`: provisional decisions waiting for the maintainer's review.
 - `roadmap/README.md` (German): order and milestones; the next milestone is listed under "Als Nächstes".
-- `docs/native-ui-handoff.md`: the experimental GPUI branch checkpoint, verified demo and open work; read before continuing native UI changes.
+- `docs/native-ui-handoff.md`: state, packages and open work of the native app (`crates/splitty-gpui`), the default desktop app; read before continuing native UI changes. The web shells (Tauri, Electron) are legacy and keep building.
 
 ## Tests
 
@@ -28,6 +28,7 @@ A test task names its level and extends an existing test where one fits. A new s
   - `cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings`
   - `cargo test --workspace --exclude splitty-gui`
   - where `crates/splitty-tauri` is touched: `cargo clippy -p splitty-gui --all-targets -- -D warnings` and `cargo test -p splitty-gui --lib`
+  - where `packaging/linux/native` is touched: `packaging/linux/native/build.sh --executable target/release/splitty-gpui --cli target/release/splitty --out <dir>` after release builds of `splitty-gpui` and `splitty-server` (needs `dpkg-deb` and `rpmbuild`; CI also packs the macOS disk image)
   - where `frontend/` is touched: `pnpm check`, `pnpm test` and `pnpm build` there
   - `openspec validate --specs`
 

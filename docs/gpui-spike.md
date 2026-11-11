@@ -82,6 +82,14 @@ cargo run --release -p splitty-gpui -- --smoke
 
 ### Native Windows preview
 
+The installed Windows app starts without arguments, chooses the WSL
+distribution and installs the backend that ships beside it; its installer and
+the packages for Linux and macOS are described in
+[development](development.md#the-native-app). This section describes the
+explicit arguments, which remain for isolated previews and tests. Notes further
+down that call installers, CI or a release deferred record the state at their
+checkpoint.
+
 Build the GUI with native Windows Rust/MSVC and the Windows Ghostty prefix from
 [development](development.md#native-terminal-library-for-gpui). Build the matching
 `splitty-server` binary in an existing WSL distribution. The window runs on Windows;
@@ -95,11 +103,10 @@ cargo build --locked --release -p splitty-gpui --no-default-features
   --wsl-config-dir '/absolute/path/to/preview/config'
 ```
 
-All three arguments are required. Use a separate preview configuration directory;
-the process passes it directly to its owned backend. Startup does not install WSL,
-choose a default distribution, discover a daemon or open a TCP listener. A local
-preview package includes a launcher with those paths already filled in; keep its
-matching backend at that WSL path. This is an evaluation build, not an installer.
+Given one of the three arguments, all three are required. Use a separate preview
+configuration directory; the process passes it directly to its owned backend.
+With them, startup installs nothing, does not choose a distribution, discover a
+daemon or open a TCP listener.
 
 Preview bundles are immutable snapshots. Create both the Downloads package and
 its owned WSL runtime/configuration directory exclusively; refuse an existing

@@ -10,10 +10,10 @@ listed in [`CLAUDE.md`](../CLAUDE.md#checks).
 
 | Layer | Technology |
 |-------|-----------|
-| Frontend | Svelte 5, TypeScript, Vite, Tailwind CSS |
-| Terminal | xterm.js with WebGL, ligatures, search, image support; ghostty-web |
+| Frontend (web app, browser) | Svelte 5, TypeScript, Vite, Tailwind CSS |
+| Terminal (web app, browser) | xterm.js with WebGL, ligatures, search, image support; ghostty-web |
 | Layout | dockview-core |
-| Desktop | Tauri v2 (macOS and Windows releases; Linux source build); Electron (Linux release: AppImage, deb, rpm) |
+| Desktop | Native app: GPUI with `libghostty-vt` (`crates/splitty-gpui`; Windows, macOS on Apple silicon, Linux). Legacy web app: Tauri v2 (Windows, macOS; Linux source build) and Electron (Linux: AppImage, deb, rpm) |
 | Backend | Rust (Tokio, Axum) |
 | PTY | portable-pty |
 | Config | TOML (`~/.config/splitty/config.toml`) |
@@ -66,7 +66,9 @@ resolved inside the owning `ServerConnection`.
 
 - Rust (stable)
 - Node.js 24 and pnpm
-- (Tauri desktop builds) Tauri v2 prerequisites — see [Tauri docs](https://v2.tauri.app/start/prerequisites/)
+- (native app) Python 3 and a C/C++ toolchain for the terminal library; on
+  Linux the development packages named under [The native app](#the-native-app)
+- (web app, Tauri builds) Tauri v2 prerequisites — see [Tauri docs](https://v2.tauri.app/start/prerequisites/)
 
 Frontend conformance tests import the actual Electron adapters. Install both
 `frontend/` and `frontend-electron/` dependencies before running `pnpm check` or
@@ -76,10 +78,12 @@ Electron build also requires the frontend dependencies to package shared assets.
 
 ## Running from source
 
-The experimental GPUI local workspace has its own isolated service and runbook in
-[`gpui-spike.md`](gpui-spike.md). It is separate from the released desktop apps.
-The [native UI handoff](native-ui-handoff.md) records the current branch checkpoint,
-accepted preview and remaining work for a fresh development session.
+The native app (`crates/splitty-gpui`) is the desktop app releases install;
+[The native app](#the-native-app) below describes its build and packages, the
+[GPUI runbook](gpui-spike.md) its smoke modes and acceptance records, and the
+[native UI handoff](native-ui-handoff.md) its state and open work. The web
+app's shells (Tauri, Electron) are legacy: they keep building and are released
+with "Web" in their names.
 
 The workspace applies an explicit path patch to the pinned Linux platform
 dependency in `vendor/gpui-pre-linux`. Its [patch notes](../vendor/gpui-pre-linux/SPLITTY-PATCH.md)
@@ -92,11 +96,13 @@ native multi-source input/window check before this patch can be removed.
 
 ### Native terminal library for GPUI
 
-For the native Windows window with WSL terminals, see the
-[Windows preview runbook](gpui-spike.md#native-windows-preview). It uses native
-Windows Rust/MSVC for the GUI and a matching Linux backend in an explicitly named
-existing distribution. The frontend assets must be built before compiling the
-Linux backend, which embeds them.
+The native Windows app is built with Windows Rust/MSVC; its backend is the
+static Linux server, which runs in a WSL distribution. Started without
+arguments the app picks the distribution and installs the backend that ships
+beside it; the [Windows preview runbook](gpui-spike.md#native-windows-preview)
+describes the explicit `--wsl-*` arguments for isolated previews and tests.
+The frontend assets must be built before compiling the Linux backend, which
+embeds them.
 
 The GPUI app uses statically linked `libghostty-vt` 1.0.0. It needs a matching
 native library for the machine running the app: Linux and macOS build it for
@@ -125,14 +131,13 @@ On Windows PowerShell:
 $prefix = python scripts/bootstrap-libghostty-vt.py
 $env:GHOSTTY_VT_DIR = $prefix
 cargo build --locked --release -p splitty-gpui
-# Launch with the explicit WSL arguments from the Windows preview runbook.
 ```
 
 The script also accepts `--prefix` with an absolute path. An existing prefix
 that is not a matching bootstrap build is rejected; choose a new prefix.
 The GPUI build verifies the installed 1.0.0 headers and static archive before
-linking. The development app still needs the usual frontend assets and native
-windowing prerequisites described in the GPUI runbook.
+linking. On Linux and macOS the app links the server, which embeds
+`frontend/dist`: build the frontend first.
 
 ```bash
 # Backend with the embedded frontend on 127.0.0.1:9800, rebuilt on changes
@@ -185,19 +190,107 @@ core acceptance also passed at the recorded pre-review revision. Subsequent revi
 corrections require fresh targeted checks and CI; the verification status records
 which revisions and platform cases have actually passed.
 
-## Production builds
+## The native app
+
+`crates/splitty-gpui` builds one executable, `splitty-gpui`. On Linux and macOS
+it links the server and runs it in its own process (the embedded service); on
+Windows it starts the static Linux server in WSL. Its local terminals look for
+two things beside the executable, where it was started from: the `splitty`
+command, which they get on their `PATH`, and the `shell-integration/` folder.
+Every package ships both. The servers for remote hosts are built into the
+Linux and macOS executables when the build sets the four
+`SPLITTY_REMOTE_PAYLOAD_*` variables (`crates/splitty-remote/build.rs`), as a
+release does; the Windows executable is built without them, because it reaches
+hosts through its WSL backend.
+
+Every build needs the pinned terminal library
+([above](#native-terminal-library-for-gpui)); the Linux and macOS builds need
+`frontend/dist`.
+
+### Linux
+
+Build packages on Ubuntu or Debian (x86_64):
+
+```bash
+sudo apt install build-essential pkg-config rpm libxkbcommon-x11-dev \
+  libwayland-dev libx11-dev libxcb1-dev libfontconfig1-dev libfreetype6-dev \
+  libvulkan-dev
+packaging/linux/native/build.sh        # or: make native-package
+```
+
+It builds the frontend, the terminal library (unless `GHOSTTY_VT_DIR` names
+one), the app and the `splitty` command, and writes into `build/native-linux/`:
+
+| File | Content |
+|---|---|
+| `splitty_<version>_amd64.deb`, `splitty-<version>-1.x86_64.rpm` | Package `splitty`: `/opt/splitty/` (`splitty-gpui`, `splitty`, `shell-integration/`), the link `/usr/bin/splitty-gpui`, `splitty.desktop` and the icon |
+| `splitty-<version>-linux-x86_64.tar.gz` | The same files in one folder, with the desktop entry, the icon and the license |
+
+`--executable FILE` packs a built `splitty-gpui` without compiling anything;
+`--cli FILE` ships another `splitty` command (the release ships the static
+one), and `--out DIR` chooses the directory. The deb names its libraries by
+package (what the executable links, plus Wayland, EGL and the Vulkan loader,
+which it loads at run time) and the glibc version of the build system; the rpm
+names them by library, which Fedora and openSUSE share. The release builds on
+Ubuntu 22.04, so its packages need glibc 2.35 or later. A pre-release version
+is written with a tilde inside the packages (`0.3.0~rc.1`), so the release
+that follows counts as newer. The legacy Electron packages (package
+`splitty-electron`, `/opt/Splitty`, `splitty-web.desktop`) share no file with
+these and install beside them.
+
+### macOS
+
+On a Mac with Xcode's command line tools:
+
+```bash
+packaging/macos/native/build.sh        # or: make native-package
+```
+
+It builds like the Linux script and writes
+`build/native-macos/Splitty_<version>_aarch64.dmg` (`x64` on an Intel Mac; the
+terminal library is built for the host, so the app is not universal and the
+release builds it for Apple silicon only). `Splitty.app` holds `splitty-gpui`
+and `splitty` in `Contents/MacOS`, `shell-integration/` in `Contents/Resources`
+with a link from `Contents/MacOS`, and is ad-hoc signed. Its bundle identifier
+is `com.splitty.native`; the web app keeps `com.splitty.app`. Both bundles are
+named `Splitty.app`. The options are those of the Linux script.
+
+### Windows
+
+The installer combines the native executable with the static Linux backend
+built in WSL. From a checkout on a Windows drive:
+
+```powershell
+powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build.ps1 -Distro Ubuntu
+```
+
+`-App native` is the default and writes
+`target\x86_64-pc-windows-msvc\release\bundle\native\Splitty_<version>_x64-setup.exe`;
+`-App web` builds the legacy Tauri app instead. The last step is
+`packaging/windows/native/bundle.ps1`, which packs a built `splitty-gpui.exe`
+and the backend archive with NSIS (`makensis.exe` on the `PATH`, in the NSIS
+install directory or in the Tauri CLI's cache). The installer keeps the
+product name, install directory and uninstall entry of the web app of earlier
+releases and replaces it in place. See
+[the Windows packaging guide](../packaging/windows/README.md) for prerequisites,
+cache behavior, alternative distributions and fast iteration options, and
+[Releases](#releases) for the build from WSL.
+
+## The web app's packages
+
+The legacy shells keep their builds:
 
 ```bash
 make build/splitty        # server and CLI binary (embeds the frontend)
-make electron             # Linux release formats: Electron AppImage, deb, rpm (needs rpmbuild and libcrypt.so.1; Fedora: rpm-build, libxcrypt-compat)
+make electron             # Linux: Electron AppImage, deb, rpm (needs rpmbuild and libcrypt.so.1; Fedora: rpm-build, libxcrypt-compat)
 make build/splitty-gui    # Tauri desktop binary (Linux source build)
-make build/Splitty.app    # macOS app bundle
-make dmg                  # macOS disk image
+make build/Splitty.app    # macOS app bundle (Tauri)
+make dmg                  # macOS disk image (Tauri)
 ```
 
-## Local macOS app
+### macOS (Tauri)
 
-The macOS app carries the servers it installs on remote hosts (Linux and macOS,
+The macOS web app carries the servers it installs on remote hosts (Linux and macOS,
 x86_64 and aarch64). One script builds them from the checkout, as the release
 does, and then the ad-hoc signed app; `make build/Splitty.app` and `make dmg`
 run it. It needs Xcode's command line tools, Rust (rustup), Node.js and pnpm:
@@ -213,33 +306,29 @@ packaging/macos/build.sh --universal   # Apple silicon and Intel → target/univ
 four `SPLITTY_REMOTE_PAYLOAD_*` variables are set (a release run's payload
 artifacts, for example), the script takes those archives instead.
 
-## Local Windows installer
+### Windows (Tauri)
 
-The Windows package combines a static Linux backend built in WSL with the
-native Tauri/WebView2 application built by MSVC. From a checkout on a Windows
-drive, one PowerShell command builds both and creates the per-user NSIS
-installer:
+`packaging\windows\build.ps1 -App web` builds the Tauri/WebView2 application
+with MSVC and the same WSL-built backend, and creates its per-user NSIS
+installer under `target\x86_64-pc-windows-msvc\release\bundle\nsis\`. It
+installs as "Splitty Web" (`tauri.windows.conf.json`) beside the native app,
+with the application identifier it always had.
 
-```powershell
-powershell.exe -ExecutionPolicy Bypass -File .\packaging\windows\build.ps1 -Distro Ubuntu
-```
-
-It can also be started from a WSL shell when the checkout is below `/mnt/c`:
+Either app also builds from a WSL shell when the checkout is below `/mnt/c`;
+the script passes its arguments on to `build.ps1`:
 
 ```bash
-./packaging/windows/build-from-wsl.sh
+./packaging/windows/build-from-wsl.sh            # native app
+./packaging/windows/build-from-wsl.sh -App web   # legacy Tauri app
 ```
-
-See [the Windows packaging guide](../packaging/windows/README.md) for prerequisites,
-cache behavior, alternative distributions, and fast iteration options.
 
 ## Installation from source
 
 ```bash
-# Linux release format: Electron AppImage
-make install-electron     # → ~/.local/bin/Splitty-Electron.AppImage
+# Web app on Linux: Electron AppImage
+make install-electron     # → ~/.local/bin/Splitty-Electron.AppImage + splitty-web.desktop
 
-# Tauri desktop app from source — includes both GUI and server binary
+# Web app in Tauri from source — includes both GUI and server binary
 make install-tauri
 # macOS: → /Applications/Splitty.app
 # Linux: → ~/.local/bin/splitty-gui + splitty + desktop entry
@@ -271,6 +360,13 @@ and build checks. CodeQL uses the repository workflow for Actions,
 JavaScript/TypeScript, Python and Rust; GitHub's default setup must remain
 disabled because it overrides custom CodeQL workflows.
 
+CI lints and tests the native app with the workspace on Linux, builds it on
+macOS and Windows, and packs the Linux packages (a release build on Ubuntu
+22.04, as the release does, with the deb installed afterwards) and the macOS
+disk image with the release's scripts. The Windows installer needs the WSL
+backend and is built by the release and the **Windows installers** workflow
+only. The legacy shells keep their jobs.
+
 Release packages are built on `v*` tags or by manually starting the release
 workflow. Ordinary pushes do not publish packages.
 
@@ -295,12 +391,27 @@ git push --atomic origin HEAD v0.1.2
 ```
 
 The pushed tag starts the release workflow. It refuses a tag that does not match
-the version files, builds the Windows installer, the Linux Electron AppImage and the
-macOS `.dmg`, and publishes the GitHub release with them once all of them have
-built; a tag with a suffix (`v0.2.0-rc.1`) becomes a prerelease. The Windows installer is a per-user setup: run a newer one over an
-installed Splitty to update it, and uninstall it from Windows' installed apps.
-The **Windows Tauri (WSL backend)** workflow, started by hand, builds only the
-installer for any commit, as a workflow artifact.
+the version files, builds the packages below and publishes the GitHub release
+with them and `SHA256SUMS` once all of them have built; a tag with a suffix
+(`v0.2.0-rc.1`) becomes a prerelease.
+
+| System | Native app | Legacy web app |
+|---|---|---|
+| Windows x64 | `Splitty_<version>_x64-setup.exe` | `Splitty-Web_<version>_x64-setup.exe` (Tauri) |
+| macOS | `Splitty_<version>_aarch64.dmg` | `Splitty-Web_<version>_universal.dmg` (Tauri) |
+| Linux x86_64 | `splitty_<version>_amd64.deb`, `splitty-<version>-1.x86_64.rpm`, `splitty-<version>-linux-x86_64.tar.gz` | `splitty-web_<version>_amd64.deb`, `splitty-web-<version>.x86_64.rpm`, `Splitty-Web-<version>-x86_64.AppImage` (Electron) |
+
+The release also carries the static servers (`splitty-wsl-x86_64.tar.gz`,
+`splitty-wsl-aarch64.tar.gz`, `splitty-darwin-<arch>.tar.gz`). The web apps'
+files are renamed when the workflow collects them; the bundlers' own names
+(`Splitty Web_…-setup.exe`, `Splitty_…_universal.dmg`, `splitty-electron…`)
+appear only in local builds. The publish job stops if two files share a name
+or an expected package is missing.
+
+The Windows installers are per-user setups: run a newer one over an installed
+Splitty to update it, and uninstall it from Windows' installed apps. The
+**Windows installers** workflow (`windows-tauri.yml`), started by hand, builds
+the static servers and both installers for any commit, as workflow artifacts.
 
 For a branch preview without a release tag, set a distinct prerelease such as
 `0.2.0-dev.1` in `Cargo.toml`, `crates/splitty-tauri/tauri.conf.json` and
@@ -329,8 +440,8 @@ New builds retain artifacts for at most three days, including failed releases
 and standalone Windows builds. Reruns of older tags use the retention settings
 from that tag, but successful release reruns are also cleaned up.
 
-On a Windows PC with the Windows Rust toolchain, Node and pnpm, the installer
-also builds locally in a few minutes, from WSL:
+On a Windows PC with the Windows Rust toolchain, Node and pnpm, the native
+installer also builds locally in a few minutes, from WSL:
 
 ```bash
 scripts/windows-installer.sh --install
@@ -340,9 +451,12 @@ It brings a checkout on a Windows drive (`SPLITTY_WINDOWS_CHECKOUT`, by default
 `%USERPROFILE%\Code\splitty-windows-preview`, cloned when missing) to the
 committed `HEAD`, runs `packaging/windows/build.ps1` there and, with `--install`,
 starts the setup. `SPLITTY_WINDOWS_PATH` adds Windows directories to the build's
-`PATH`, for a pnpm that is not on it; `--skip-tests` skips the type check and the
-Windows unit tests. Uncommitted changes are not built, and the version is the one
-the sources carry.
+`PATH`, for a pnpm that is not on it; `SPLITTY_GHOSTTY_VT_DIR` names the Windows
+path of a built terminal library (without it the build runs the bootstrap with
+Windows Python); `--skip-tests` skips the type check and the Windows unit
+tests, and `--web` builds the legacy Tauri app instead. The script prints the
+setup's Windows path. Uncommitted changes are not built, and the version is the
+one the sources carry.
 
 ## Pinned historical rollback smoke
 

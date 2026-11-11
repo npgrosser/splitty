@@ -99,18 +99,38 @@ More in [Managed terminal jobs](docs/cli-jobs.md).
 Download the package for your system from the
 [latest release](https://github.com/npgrosser/splitty/releases/latest), or with
 the GitHub CLI, for example
-`gh release download --repo npgrosser/splitty --pattern '*.dmg'`.
+`gh release download --repo npgrosser/splitty --pattern 'Splitty_*_aarch64.dmg'`.
 
 | System | File | Notes |
 |---|---|---|
-| Windows 10/11 (x64) | `Splitty_<version>_x64-setup.exe` | Local terminals run in WSL 2 (Ubuntu or Debian); the app's setup page shows how to get it. Without WSL, the app opens remote hosts only. To update, run the newer installer. |
-| macOS (Apple silicon and Intel) | `Splitty_<version>_universal.dmg` | Clear the quarantine flag after installing (below). |
-| Linux (x86_64) | `splitty-electron_<version>_amd64.deb`, `splitty-electron-<version>.x86_64.rpm` or `Splitty-Electron-<version>-x86_64.AppImage` | Install the deb (Debian, Ubuntu) or rpm (Fedora, openSUSE) with the system's package manager, or run the AppImage directly. |
+| Windows 10/11 (x64) | `Splitty_<version>_x64-setup.exe` | Local terminals run in WSL 2 (Ubuntu or Debian): the app uses the default distribution and installs its backend there. To update, run the newer installer; it replaces an installed earlier version, including the web app of earlier releases. |
+| macOS (Apple silicon) | `Splitty_<version>_aarch64.dmg` | Clear the quarantine flag after installing (below). |
+| Linux (x86_64) | `splitty_<version>_amd64.deb`, `splitty-<version>-1.x86_64.rpm` or `splitty-<version>-linux-x86_64.tar.gz` | Install the deb (Debian, Ubuntu) or rpm (Fedora, openSUSE) with the system's package manager and start Splitty from the application menu or as `splitty-gpui`. The tar.gz runs from where it is unpacked: `./splitty-gpui`. |
 
-The Linux release uses Electron's bundled Chromium for a consistent runtime
+These are the native app. It draws its own interface on the GPU (Vulkan on
+Linux, Wayland or X11) and needs no browser engine. The deb and rpm install to
+`/opt/splitty` and name the libraries they need; with the tar.gz, keep the
+`splitty` command and the `shell-integration/` folder next to `splitty-gpui`.
+
+### The web app
+
+The earlier desktop app, which shows the web interface in a system web view or
+in Electron, is still built and released. Use it on an Intel Mac, on Windows
+without WSL (there it opens remote hosts only), or where the native app does
+not run.
+
+| System | File | Notes |
+|---|---|---|
+| Windows 10/11 (x64) | `Splitty-Web_<version>_x64-setup.exe` | Installs as "Splitty Web" beside the native app. |
+| macOS (Apple silicon and Intel) | `Splitty-Web_<version>_universal.dmg` | Its app is also named `Splitty.app`; in `/Applications` it takes the place of the native app. |
+| Linux (x86_64) | `splitty-web_<version>_amd64.deb`, `splitty-web-<version>.x86_64.rpm` or `Splitty-Web-<version>-x86_64.AppImage` | The package inside the deb and rpm is `splitty-electron`; it installs beside the native package. The AppImage runs directly. |
+
+The Linux web app uses Electron's bundled Chromium for a consistent runtime
 across distributions and to avoid WebKitGTK compatibility and rendering trouble.
-Splitty uses its own title bar by default on Linux. You can enable the native
-title bar in Settings and restart the app; an existing saved choice is preserved.
+It uses its own title bar by default. You can enable the native title bar in
+Settings and restart the app; an existing saved choice is preserved.
+
+### Checking a download
 
 The binaries are not code-signed, so Windows SmartScreen and macOS Gatekeeper
 warn about them, and Smart App Control, where it is on, blocks them. Check the
@@ -126,9 +146,10 @@ On macOS, then clear the quarantine flag:
 xattr -dr com.apple.quarantine /Applications/Splitty.app
 ```
 
-On macOS and Linux, local terminals need the
-[`splitty` command](#installing-the-command) for the agent features and
-`splitty download`; remote terminals have it already.
+Local terminals of the native app and remote terminals have the
+[`splitty` command](#advanced-the-splitty-command) for the agent features and
+`splitty download`. In the web app on macOS and Linux, local terminals need it
+[installed](#installing-the-command).
 
 ## Getting started
 
@@ -172,8 +193,9 @@ Everything about the command is in [`docs/cli.md`](docs/cli.md).
 
 ### Installing the command
 
-Terminals on remote hosts and in the Windows app have it already. The desktop
-app on macOS and Linux doesn't install it; take it from the archive of the same
+Terminals of the native app, on remote hosts and in the Windows web app have it
+already. The web app on macOS and Linux doesn't install it, and neither app
+puts it on the `PATH` of other terminals; take it from the archive of the same
 release:
 
 ```bash
@@ -256,11 +278,13 @@ vulnerabilities privately through
 ## Limitations
 
 - The binaries are not code-signed (see [Install](#install)).
-- On Windows, local terminals need WSL 2; without it, the app opens remote
-  hosts only.
+- On Windows, local terminals need WSL 2. Without a supported
+  distribution the native app says so and does not start; the web app opens
+  remote hosts only.
+- The native macOS app is built for Apple silicon; Intel Macs use the web app.
 - On a Mac host, Splitty doesn't detect listening ports yet; forward them by
   number.
-- xterm.js can garble IME and dead-key input on macOS
+- In the web app, xterm.js can garble IME and dead-key input on macOS
   (see [known issues](docs/known-issues.md)).
 
 ## Documentation
@@ -281,23 +305,26 @@ vulnerabilities privately through
 
 ## Building from source
 
-You need Rust (stable) and Node.js 24 with pnpm. Tauri builds on macOS and
-Windows, or an optional Linux Tauri build, also need the
+You need Rust (stable) and Node.js 24 with pnpm. The native app also needs
+Python 3 and a C toolchain for its terminal library and, on Linux, the
+development packages listed in [Development](docs/development.md#the-native-app).
+The web app's Tauri builds need the
 [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/).
 
 ```bash
 make dev                  # server with the embedded UI on 127.0.0.1:9800, rebuilt on changes
-make install-electron     # Linux desktop app → ~/.local/bin/Splitty-Electron.AppImage
-~/.local/bin/Splitty-Electron.AppImage
+make native-package       # native app: deb, rpm and tar.gz (Linux) or dmg (macOS) in build/
 make install-no-gui       # only splitty, to ~/.local/bin
 
-make dev-tauri            # Tauri desktop UI with rebuilds, native IPC
-make install-tauri        # Tauri app; on Linux also splitty in ~/.local/bin
+make install-electron     # web app on Linux → ~/.local/bin/Splitty-Electron.AppImage
+make dev-tauri            # web app in Tauri with rebuilds, native IPC
+make install-tauri        # web app in Tauri; on Linux also splitty in ~/.local/bin
 ```
 
-The macOS app, the Windows installer, the Linux Electron AppImage and releases are
-described in [Development](docs/development.md). A build of your own installs
-itself on remote hosts only with a payload: set `SPLITTY_REMOTE_PAYLOAD` as
+Running the native app from a checkout, the Windows installers, the web apps'
+packages and releases are described in [Development](docs/development.md). A
+build of your own installs itself on remote hosts only with a payload: set
+`SPLITTY_REMOTE_PAYLOAD` as
 [Remote development](docs/remote.md#installing-splitty-on-hosts) explains, or
 put `splitty` on the host's `PATH`.
 
