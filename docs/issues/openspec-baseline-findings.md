@@ -493,3 +493,9 @@ that area touches them.
   `http::tests::a_forward_whose_ssh_ends_is_rebuilt_on_its_port` in "Rust tests". Locally,
   `remote_connect::the_hub_forwards_a_port_a_host_pane_listens_on` failed once in a full workspace run and passed
   alone. Not yet investigated.
+- Seen on 2026-11-12 in CI on `main` for the v0.3.0 version commit, both passing in a rerun of the same commit:
+  `native_workspace::close_tests::appearance_worker_failure_keeps_output_and_recovers_from_local_service` in
+  "Rust tests" (`splitty-client-core`; no update within the 10 s of `next_update`), and
+  `pty::session::tests::managed_input_backpressure_does_not_block_revocation_or_stop` in the macOS job
+  (`splitty-core`, an assertion after the write loop that must see backpressure within 1 s). Both depend on
+  wall-clock limits on a loaded runner. Not yet investigated.
