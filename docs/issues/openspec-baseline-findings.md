@@ -396,6 +396,28 @@ entry fixes it; entries without one are small fixes or belong to `frontend-clien
   - The server commands `pane.copy` and `pane.clear` do nothing for viewer panes.
   - `socket.ts`: a doc comment sits above the wrong function, and `belongsToConnection` is used only by its test.
 
+### native app
+
+- **Fixed (2026-11-12): a scratchpad on a host's Screen was never saved and lost its text at once.** The native
+  window's gate for commands to a host (`Remotes::command`, `native_workspace/remote.rs`) did not list
+  `SetScratchpad`, so every save from a pane of a remote Screen was refused before it reached the host; the
+  refusal went to the host's diagnostic, not to the window's status line. The text lived in the editor alone
+  until the next workspace update more than two seconds after the last save, when the window took the Screen's
+  snapshot, which still held the old text, in its place (`reconcile_scratchpads`,
+  `crates/splitty-gpui/src/workspace/scratchpad.rs`). The gate now admits the save; an in-process test sends
+  one through the gate to a service and reads it back from the snapshot
+  (`a_scratchpad_save_on_a_remote_screen_reaches_its_host`). Local Screens were not affected.
+- **A scratchpad save that is not applied still loses its text** (found on 2026-11-12). The native window clears
+  an editor's unsaved mark when it hands the save to its worker (`flush_scratchpad`) and never learns whether
+  the save was applied. A save refused later (a close in progress, a replaced connection, a full command
+  queue, a host that rejects the op) leaves text that the next snapshot replaces after the two seconds in
+  which a saved text outlasts older snapshots. Keeping the mark until a snapshot shows the saved text, or taking
+  a snapshot's text only when it differs from the last one taken, would keep the edit.
+- **The native window offers scratchpads without `scratchpad-v1`** (found on 2026-11-12). `session-scratchpad`
+  lets a client offer a server's scratchpads only when the server announced the capability; the native window
+  does not read it, so on a host whose daemon does not know `set_scratchpad` the text is typed, never kept,
+  and replaced by the next snapshot.
+
 ## Stale documentation
 
 - **`terminal-sessions` has a contradictory profile-failure scenario** (found 2026-11-07 during

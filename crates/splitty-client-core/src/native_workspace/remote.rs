@@ -633,6 +633,9 @@ impl<'a> Remotes<'a> {
             &command.kind,
             CommandKind::CreateRemoteScreen { .. }
                 | CommandKind::RenameScreen { .. }
+                // A refused save would leave the text in the window alone,
+                // where the Screen's next snapshot replaces it.
+                | CommandKind::SetScratchpad { .. }
                 | CommandKind::Split { .. }
                 | CommandKind::Tab { .. }
                 | CommandKind::Select { .. }

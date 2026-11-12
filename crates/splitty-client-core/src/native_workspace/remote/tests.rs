@@ -1518,3 +1518,130 @@ async fn a_screen_that_ended_on_its_host_leaves_the_window() {
     service.close().await.unwrap();
     let _ = std::fs::remove_dir_all(path);
 }
+
+/// Drive the first host's bound source until `done` holds.
+#[cfg(not(target_os = "windows"))]
+async fn pump_first_host(
+    remotes: &mut Remotes<'_>,
+    window: &mut WindowWorkspace,
+    done: impl Fn(&WindowWorkspace, &SourceRuntime) -> bool,
+) {
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            let source = remotes.hosts[0].source.as_mut().expect("bound source");
+            source.reconcile(window).unwrap();
+            if done(window, source) {
+                break;
+            }
+            let event = source.client.next_event().await.unwrap().unwrap();
+            source.event(window, Box::new(event)).unwrap();
+        }
+    })
+    .await
+    .expect("the host's service answers");
+}
+
+/// session-scratchpad, Saving Through The Window: a save from a pane of a
+/// host's Screen passes the remote command gate, reaches the host's service
+/// and comes back in the Screen's snapshot. A save refused at the gate stays
+/// in the window only, where the next snapshot takes its place.
+#[cfg(not(target_os = "windows"))]
+#[tokio::test]
+async fn a_scratchpad_save_on_a_remote_screen_reaches_its_host() {
+    if !splitty_core::pty::testing::pty_available() {
+        return;
+    }
+    let _fixture_slot = CLIENT_FIXTURES.acquire().await.unwrap();
+    let (service, path) = service();
+    let local = service.connect().await.unwrap();
+    let client = service.connect().await.unwrap();
+    let ids = client.create_screen("Host screen").unwrap();
+    let mut window = WindowWorkspace::new(local.connection_id());
+    let id = window
+        .admit_remote(window.lifecycle_token(), "pad.test")
+        .unwrap();
+    window.test_bind_remote_client(id, &client);
+    let token = window.source(id).unwrap().source_token();
+    window.confirm_ready(token).unwrap();
+    let action = window.host(id).unwrap().action_target().clone();
+    let mut host = Host::new(&service, action.clone()).unwrap();
+    host.setup = None;
+    host.source = Some(SourceRuntime::new(client, token));
+    let mut remotes = Remotes::new(&service);
+    remotes.hosts.push(host);
+
+    pump_first_host(&mut remotes, &mut window, |window, source| {
+        window
+            .source(id)
+            .unwrap()
+            .live_catalog()
+            .is_some_and(|catalog| catalog.len() == 1)
+            && !source.observation_pending(window)
+    })
+    .await;
+    window.host_mut(&action).unwrap().catalog = crate::workspace::CatalogState::Ready;
+    let key = window.source(id).unwrap().screen_key(&ids.screen_id);
+    window.open_existing(token, &key).unwrap();
+    let screen_id = ids.screen_id.clone();
+    pump_first_host(&mut remotes, &mut window, |window, source| {
+        window
+            .source(id)
+            .unwrap()
+            .screen(&screen_id)
+            .and_then(|screen| screen.snapshot())
+            .is_some_and(|snapshot| !snapshot.sessions.is_empty())
+            && !source.observation_pending(window)
+    })
+    .await;
+    let session = window
+        .source(id)
+        .unwrap()
+        .screen(&ids.screen_id)
+        .unwrap()
+        .snapshot()
+        .unwrap()
+        .sessions
+        .keys()
+        .next()
+        .unwrap()
+        .to_string();
+
+    let effects = remotes
+        .command(
+            &mut window,
+            Command::new(
+                token,
+                CommandKind::SetScratchpad {
+                    screen: ids.screen_id.clone(),
+                    connection: token.connection_id(),
+                    session: session.clone(),
+                    text: "ask about the failing test".into(),
+                },
+            ),
+        )
+        .unwrap();
+    assert!(effects.updates.is_empty(), "the save is not rejected");
+    assert!(
+        window.host(id).unwrap().diagnostic().is_none(),
+        "the save leaves no rejection on the host"
+    );
+    pump_first_host(&mut remotes, &mut window, |window, _| {
+        window
+            .source(id)
+            .unwrap()
+            .screen(&screen_id)
+            .and_then(|screen| screen.snapshot())
+            .is_some_and(|snapshot| {
+                snapshot.sessions.iter().any(|(id, entry)| {
+                    id.as_str() == session && entry.scratchpad == "ask about the failing test"
+                })
+            })
+    })
+    .await;
+
+    remotes.hosts[0].setup = Some(Box::pin(async { Err(io::Error::other("test ended")) }));
+    remotes.finish(&mut window).await.unwrap();
+    local.finish().await.unwrap();
+    service.close().await.unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}
