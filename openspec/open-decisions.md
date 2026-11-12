@@ -8,9 +8,11 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
-- **`replay-terminal-modes` RTM-1/RTM-2** (2026-11-12, provisional, tbd; recorded in its proposal under "Decisions"):
+- **`replay-terminal-modes` RTM-1 to RTM-4** (2026-11-12, provisional, tbd; recorded in its proposal under "Decisions"):
   - **RTM-1:** the mode tracker lives in the session layer, so after a daemon restart it is as complete as the keeper's buffer. The alternative, in the keeper, survives restarts but needs a keeper capability.
   - **RTM-2:** the alternate screen is restored to its state at the oldest retained byte, every other mode to its last change before it; `?7`, `?1007`, `?2031` and `?2048` are tracked, `?2026` is never restored. The alternatives are the state at the oldest byte for every mode, or the last change for every mode.
+  - **RTM-3:** the alternate screen's kitty keyboard stack is restored only when the replay starts on the alternate screen. The alternative rebuilds it also when the replay starts on the normal screen, by switching there and back around it.
+  - **RTM-4:** where terminals differ, the tracker follows xterm: a soft reset leaves bracketed paste and focus reports alone, and resetting a mouse encoding not in effect changes nothing. The alternative follows terminals whose soft reset clears those too and whose encoding reset always returns to the default.
 
 - **`program-status` PS-1 to PS-3** (2026-11-12, provisional, tbd; recorded in its proposal under "Provisional decisions"):
   - **PS-1:** the server removes the status probe from the output it records and forwards, so no client or outer terminal answers it a second time. The alternative forwards it.

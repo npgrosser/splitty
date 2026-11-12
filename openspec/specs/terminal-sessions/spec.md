@@ -146,7 +146,7 @@ The server SHALL keep the most recent output of each session in a fixed-size buf
 - **THEN** sessions it starts keep at most 262144 bytes of output
 
 ### Requirement: Attaching to an Existing Session
-On `attach` with the `id` of an existing session, the server SHALL send that session's buffered output as binary output frames of at most 32 KiB each, then send an `attached` event with the `sessionId` and `homeDir`, and then stream new output to the connection. Buffered output MUST be sent before any new output, and the replay and the live stream SHALL together contain every byte the session produced exactly once. If the same connection already streams the session, the previous stream SHALL be replaced so that output is neither duplicated nor split between streams. Several connections MAY stream the same session at the same time, each receiving the complete output. Detaching, disconnecting or replacing a stream MUST NOT end or interrupt the session's output for later or other streams. `attach` MUST NOT change the PTY size; `cols` and `rows` in `attach` are ignored, and clients change the size with `resize`.
+On `attach` with the `id` of an existing session, the server SHALL send that session's buffered output as binary output frames of at most 32 KiB each, preceded in those frames by the sequences that restore the terminal modes the buffered output starts in (see Terminal Modes in the Replay), then send an `attached` event with the `sessionId` and `homeDir`, and then stream new output to the connection. Buffered output MUST be sent before any new output, and the buffered output and the live stream SHALL together contain every byte the session produced exactly once. If the same connection already streams the session, the previous stream SHALL be replaced so that output is neither duplicated nor split between streams. Several connections MAY stream the same session at the same time, each receiving the complete output. Detaching, disconnecting or replacing a stream MUST NOT end or interrupt the session's output for later or other streams. `attach` MUST NOT change the PTY size; `cols` and `rows` in `attach` are ignored, and clients change the size with `resize`.
 
 #### Scenario: Reattach replays buffered output
 - **WHEN** a client attaches to a session that has 70 KiB of buffered output
@@ -172,7 +172,11 @@ On `attach` with the `id` of an existing session, the server SHALL send that ses
 
 #### Scenario: No gap between replay and live output
 - **WHEN** a session produces output continuously while a client attaches
-- **THEN** the bytes the client receives, replay followed by live output, contain no byte twice and miss none produced after the oldest replayed byte
+- **THEN** the bytes the client receives after the restored modes, buffered output followed by live output, contain no byte twice and miss none produced after the oldest replayed byte
+
+#### Scenario: Replay after the buffer wrapped
+- **WHEN** a program enabled bracketed paste and then printed more than the scrollback buffer holds, and a client attaches to its session
+- **THEN** the replay begins with `CSI ? 2004 h`, ahead of the buffered output
 
 ### Requirement: Detaching from a Session
 On `detach` with a session `id`, the server SHALL stop streaming that session's output to the connection and SHALL keep the session and its process running. The server sends no response to `detach`, and detaching a session the connection does not stream has no effect.
@@ -259,7 +263,7 @@ While a connection streams a session, the server SHALL send `title` events that 
 - **THEN** the client receives a `title` event carrying that `oscTitle` without waiting for the next periodic check
 
 ### Requirement: Continuous Output Capture
-The server SHALL read each session's output continuously from the moment the session starts until its process exits, whether or not any connection streams the session. Output produced while no connection streams the session SHALL be appended to the scrollback buffer, title and prompt tracking SHALL keep running, and the session's process MUST NOT stall because no client reads its output.
+The server SHALL read each session's output continuously from the moment the session starts until its process exits, whether or not any connection streams the session. Output produced while no connection streams the session SHALL be appended to the scrollback buffer, title, prompt and terminal mode tracking SHALL keep running, and the session's process MUST NOT stall because no client reads its output.
 
 #### Scenario: Output while nobody streams
 - **WHEN** a session whose pane no client has open prints 10 KiB of output
@@ -268,6 +272,69 @@ The server SHALL read each session's output continuously from the moment the ses
 #### Scenario: Busy process without a client
 - **WHEN** a process writes more output than the kernel's PTY buffer holds while no connection streams its session
 - **THEN** the process keeps running and the newest output is in the scrollback buffer
+
+#### Scenario: Modes set while nobody streams
+- **WHEN** a program in a session that no connection streams enables mouse reporting and then prints more than the scrollback buffer holds
+- **THEN** a client that attaches afterwards receives the sequence that enables mouse reporting ahead of the buffered output
+
+### Requirement: Terminal Modes in the Replay
+Ahead of a session's buffered output, a replay SHALL carry the sequences that put a fresh terminal into the modes that output starts in (see Tracked Terminal Modes): the alternate screen as it was at the oldest buffered byte, and every other mode as its last change before that byte left it. A mode changed within the buffered output is left to the replay. The kitty keyboard flags SHALL be restored as the normal screen's stack, then the switch to the alternate screen, then the alternate screen's stack. Synchronized output (`?2026`) SHALL NOT be restored.
+
+#### Scenario: Modes set before the buffered output
+- **WHEN** a program enabled application cursor keys, bracketed paste, focus reports and mouse tracking with SGR encoding, then printed more than the scrollback buffer holds, and a client attaches
+- **THEN** the replay begins with the sequences that enable each of them, ahead of the buffered output
+
+#### Scenario: Alternate screen left within the buffered output
+- **WHEN** a program entered the alternate screen with `CSI ? 1049 h`, printed more than the scrollback buffer holds, left the alternate screen with `CSI ? 1049 l` and printed a prompt
+- **THEN** a replay begins with `CSI ? 1049 h`, so the buffered output before the switch back is drawn on the alternate screen and the prompt on the normal screen
+
+#### Scenario: Mode changed within the buffered output
+- **WHEN** a program enabled bracketed paste before the oldest buffered byte and disabled it within the buffered output
+- **THEN** the replay does not enable bracketed paste ahead of the buffered output
+
+#### Scenario: Kitty keyboard flags of both screens
+- **WHEN** before the oldest buffered byte a program pushed the kitty keyboard flags 1 on the normal screen, entered the alternate screen with `CSI ? 1049 h` and pushed the flags 5 there
+- **THEN** the replay begins with `CSI > 1 u`, `CSI ? 1049 h` and `CSI > 5 u`, in this order
+
+#### Scenario: Synchronized output is not restored
+- **WHEN** a program began synchronized output with `CSI ? 2026 h` before the oldest buffered byte and never ended it
+- **THEN** the replay does not begin synchronized output
+
+#### Scenario: Replay filtering keeps the restored modes
+- **WHEN** a replay that begins with restored modes passes the replay filtering of report requests and clipboard writes, in the server, in a client or in `splitty attach`
+- **THEN** the restored sequences pass unchanged
+
+#### Scenario: Session adopted after a daemon restart
+- **WHEN** a starting daemon adopts a session whose keeper's buffered output enabled bracketed paste, and the session then prints more than the scrollback buffer holds
+- **THEN** a client attaching to the adopted session receives `CSI ? 2004 h` ahead of the buffered output
+
+### Requirement: Tracked Terminal Modes
+The server SHALL follow, in each session's output from the first byte it records and with the output offset of each change, these modes: the alternate screen (`?1049`, `?1047`, `?47`), autowrap (`?7`), application cursor keys (`?1`), the application keypad (`ESC =`, `ESC >`, `?66`), cursor visibility (`?25`) and style (`CSI Ps SP q`), bracketed paste (`?2004`), focus reports (`?1004`), mouse tracking (`?9`, `?1000`, `?1002`, `?1003`) and its encoding (`?1005`, `?1006`, `?1015`, `?1016`), alternate scroll (`?1007`), color-scheme reports (`?2031`), in-band size reports (`?2048`), `modifyOtherKeys` (`CSI > 4 ; Pv m`), and the kitty keyboard flags (`CSI > u`, `CSI < u`, `CSI = u`) with one stack per screen. Where terminals differ, the tracking SHALL follow xterm. Bytes inside OSC, DCS, APC, PM and SOS strings SHALL NOT count as sequences, and a sequence split between two reads SHALL count once. A full reset (`ESC c`) SHALL return every tracked mode to a fresh terminal's state, and a soft reset (`CSI ! p`) cursor visibility and style, autowrap, application cursor keys and keypad, and `modifyOtherKeys`.
+
+#### Scenario: Full reset
+- **WHEN** a program entered the alternate screen and enabled bracketed paste and mouse tracking, then sent `ESC c`, all before the oldest buffered byte
+- **THEN** the replay restores none of these modes
+
+#### Scenario: Soft reset
+- **WHEN** a program hid the cursor and enabled bracketed paste, then sent `CSI ! p`, all before the oldest buffered byte
+- **THEN** the replay enables bracketed paste and does not hide the cursor
+
+#### Scenario: The last mouse tracking mode counts
+- **WHEN** a program enabled mouse tracking with `?1002` and then with `?1003`
+- **THEN** the replay enables `?1003` only
+- **AND** after a later `CSI ? 1002 l` it enables none, since resetting any tracking mode turns mouse tracking off
+
+#### Scenario: Sequences end where strings end
+- **WHEN** a program sent a DCS string whose payload holds `[?2004h`, a window title ended by BEL, and then `CSI ? 25 l`
+- **THEN** the replay hides the cursor and does not enable bracketed paste
+
+#### Scenario: Sequence split between reads
+- **WHEN** `CSI ? 2004 h` reaches the server in two reads of the terminal, split at any byte
+- **THEN** it counts as enabling bracketed paste
+
+#### Scenario: Eight-bit control bytes
+- **WHEN** the output holds the byte 0x9b followed by `?2004h`, as inside UTF-8 text
+- **THEN** it does not count as enabling bracketed paste
 
 ### Requirement: Client Handling of Session Streams
 The server streams a session at most once per connection, so a client SHALL keep at most one `attach` for a session in flight on a connection, and SHALL send `detach` for a session only when none of its views shows that session or waits for it. Binary output frames for a session that arrive after the client sent `attach` and before the matching `attached` event are that session's buffered output; the client SHALL display them, in order, before any output that follows. When a view is replaced by another view for the same session while its attach is in flight, the new view SHALL take over that attach and receive its buffered output and all later output. Historical output SHALL NOT perform clipboard operations or produce replies to terminal report requests. Live output after `attached` SHALL retain its normal behavior even when buffered before a view is wired. The server SHALL filter clipboard operations and terminal report requests from replay before sending it over any transport. Clients SHALL retain their replay protection for older servers.
