@@ -18,7 +18,7 @@ The roadmap describes three independent levels, built in the order 1 → 2 → 3
   - OSC 7 (working directory) parsing; the working directory currently comes from process polling only. OSC 0/2 titles are already parsed.
   - Spec the existing Level 1 behavior.
 - **Level 2 — app-specific parsers**
-  - Program status reports before parsers: a program that reports its own state with OSC 7501 (Program Status Protocol, https://www.superlogical.com/rex/docs/build/program-status) needs no parser. The server's scanner reads its records (`idle`, `working`, `done`, `blocked` with the kind `permission`, `question` or `auth`, `error`, a one-line message, child records) into the per-session app state and drops `working` and `blocked` at the next OSC 133 `A` or when the program exits, as the protocol asks. The server answers the protocol's `?` probe itself, so a session without a client is reported too and several clients of one session do not each answer. Which agents send it, and whether they wait for the probe's answer, is checked against the installed versions when this level starts. App parsers remain for programs that do not report.
+  - Programs that report their own state with OSC 7501 need no parser; the `session-stability-and-status` change reads their reports. App parsers remain for programs that do not report.
   - A server-side parser registry selected by the foreground process name (detected with the existing process polling). The parser switches automatically when the foreground process changes (shell → vim → shell).
   - Parsers emit semantic app states, e.g. Claude Code waiting for input, waiting for tool approval or thinking, and the vim mode.
   - User-facing config in the home config file: built-in parsers are enabled by default and can be switched off per binary; matching is a glob on the binary name only.
@@ -28,7 +28,7 @@ The roadmap describes three independent levels, built in the order 1 → 2 → 3
 - **Delivery**: every level reports through the existing notification events (drawer badges, toasts, desktop notifications).
 
 Out of scope:
-- A headless terminal emulator or screen state on the server; the scanner stays a byte-stream tap.
+- A headless terminal emulator or screen state on the server; the scanner stays a byte-stream tap. Under review, see design.md.
 - An external plugin API for parsers (dynamic libraries or WASM); the internal boundary is only designed so it could become one later.
 - Per-session parser overrides and matching on working directory, environment or arguments.
 - Editing in the diff preview; it is visualization only, not an editor.

@@ -467,6 +467,15 @@ that area touches them.
   in Chromium (Playwright, one-off: a 1.5 MiB drop, its sanitized name, mode and pasted path; `splitty download`
   saved and dismissed). Untested: the same through the hub to an SSH host, downloads in the desktop shells
   (WebView2, WebKitGTK, WKWebView, Electron), pasting files from the system clipboard, uploads over 10 MiB.
+- **version skew** (noted 2026-11-12): no test runs two builds against each other. A fallback for a peer without a
+  capability is tested per feature against a simulated peer (`older_clients_count_by_their_resizes` in
+  `protocol/sizing.rs`, the refused old server in `cli/jobs.rs`, the legacy daemon in `hub/native.rs`), so each test
+  holds the newer side's idea of the older one. Four boundaries change version independently: a desktop client and a
+  host's daemon (native transport, `mux.welcome.capabilities`); a daemon and the keepers an earlier version started
+  (`keeper::wire`); the `splitty` command in a pane and the daemon behind its `SPLITTY_SOCK`; and the files one build
+  writes and another reads (`state.json`, settings). A smoke test that starts the last released `splitty` next to the
+  current build and creates, attaches, resizes and re-attaches a session across each boundary, in both directions,
+  would show a break before a release. An in-process test cannot: it links one version of every type.
 
 ## Flaky tests
 
