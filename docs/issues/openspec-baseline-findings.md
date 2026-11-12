@@ -214,6 +214,16 @@ Line numbers refer to the tree at commit `b495e1c`.
     but not the screen contents, scrolling region, tab stops, character sets or colors set before it. After a daemon
     restart modes older than the keeper's buffer are lost, and `splitty attach` straight to a keeper gets no restore
     (RTM-1).
+  - **The replay filters keep some report requests** (seen 2026-11-12): `csi_has_side_effect` in `pty/replay.rs`, and
+    `replay_output.ts` with the same rules, drop device attributes, status, mode and window reports, but not the
+    kitty keyboard query `CSI ? u`, XTVERSION (`CSI > q`) or the cell size report `CSI 16 t`. Programs send these at
+    startup (Claude Code sends the first two), so a replay of that output under `splitty attach` can make the
+    user's terminal type its answers into the session.
+  - **`splitty attach` pops one kitty keyboard level on exit**: its reset sends `CSI < u` once
+    (`cli/attach/terminal.rs`), so a program that pushed several levels leaves the outer terminal with the rest.
+  - **XTSAVE and XTRESTORE are not tracked** (`CSI ? Pm s`, `CSI ? Pm r`): the mode tracker (`pty/modes.rs`)
+    ignores them, so it misses a mode change made through XTRESTORE, and a replay starts with that mode as it was
+    before the change.
   - **Keeper recovery continues across lost bytes**: `lost: true` is only logged, and the remaining bytes go to the
     running streams (`keeper/client.rs`).
   - **A keeper replay above 8 MiB is cut silently** (`install` and `MAX_BEHIND` in `keeper/process.rs`), only with a
