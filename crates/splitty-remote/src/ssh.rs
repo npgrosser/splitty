@@ -44,10 +44,19 @@ pub fn set_askpass_program(program: PathBuf) {
 
 /// The trusted desktop launcher passes this to an owned backend process.
 pub fn askpass_program() -> Option<PathBuf> {
-    ASKPASS
-        .get()
-        .cloned()
-        .or_else(|| std::env::var_os("SPLITTY_ASKPASS_PROGRAM").map(PathBuf::from))
+    ASKPASS.get().cloned().or_else(inherited_askpass)
+}
+
+#[cfg(not(test))]
+fn inherited_askpass() -> Option<PathBuf> {
+    std::env::var_os("SPLITTY_ASKPASS_PROGRAM").map(PathBuf::from)
+}
+
+/// This crate's tests do not depend on the environment they run in: a
+/// terminal pane of the desktop app inherits the variable.
+#[cfg(test)]
+fn inherited_askpass() -> Option<PathBuf> {
+    None
 }
 
 /// Setup output owns its byte reservation beyond process exit, until callers
