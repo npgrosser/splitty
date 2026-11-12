@@ -105,6 +105,14 @@ Line numbers refer to the tree at commit `b495e1c`.
   `splitty-open`). `load_state` returns `None` on any parse error (`daemon/persistence.rs`), so a pane role or a
   viewer `source` kind written by a newer version, after a downgrade, starts an empty workspace, and the next
   change overwrites the file. Tolerant variants or a backup of the unreadable file would keep it.
+- **A daemon drops the settings a newer version added as soon as it starts** (found on 2026-11-12 by
+  `version-skew-smoke-test`; lines as of 0.3.2). The daemon reads `config.toml` at startup
+  (`service/runtime.rs:26`), and `config::load` saves it again through the settings this version knows
+  (`config/settings.rs:863-874`; `update_at` at `:1002-1011` does the same on every change). After a 0.3.2 daemon
+  had set `terminal.theme_dark`, a 0.3.1 daemon started on the same files and nothing else changed, and 0.3.2
+  showed the default again. The values the older version knows survive beside an unknown key
+  (`tests/version_skew.rs` checks that). Keeping unknown keys through a save, or saving only on a migration or a
+  change, would keep them.
 - **Debug logs carry client text** (found on 2026-11-06): the mux handler logs every op at debug level, including
   a scratchpad's text and a viewer pane's terminal selection.
 - **A macOS host detects no listening ports** (found on 2026-10-19 with `remote-macos-hosts`). The port scan reads
@@ -476,15 +484,23 @@ that area touches them.
   in Chromium (Playwright, one-off: a 1.5 MiB drop, its sanitized name, mode and pasted path; `splitty download`
   saved and dismissed). Untested: the same through the hub to an SSH host, downloads in the desktop shells
   (WebView2, WebKitGTK, WKWebView, Electron), pasting files from the system clipboard, uploads over 10 MiB.
-- **version skew** (noted 2026-11-12): no test runs two builds against each other. A fallback for a peer without a
-  capability is tested per feature against a simulated peer (`older_clients_count_by_their_resizes` in
-  `protocol/sizing.rs`, the refused old server in `cli/jobs.rs`, the legacy daemon in `hub/native.rs`), so each test
-  holds the newer side's idea of the older one. Four boundaries change version independently: a desktop client and a
-  host's daemon (native transport, `mux.welcome.capabilities`); a daemon and the keepers an earlier version started
-  (`keeper::wire`); the `splitty` command in a pane and the daemon behind its `SPLITTY_SOCK`; and the files one build
-  writes and another reads (`state.json`, settings). A smoke test that starts the last released `splitty` next to the
-  current build and creates, attaches, resizes and re-attaches a session across each boundary, in both directions,
-  would show a break before a release. An in-process test cannot: it links one version of every type.
+- **version skew** (noted 2026-11-12, narrowed by `version-skew-smoke-test` the same day):
+  `tests/version_skew.rs` runs the last release's static Linux x86_64 `splitty` (fetched and checked against the
+  release's `SHA256SUMS` by `scripts/testing/fetch-last-release.sh`) against the current build, in CI on Linux and
+  in the release workflow before it publishes. In both directions it covers the CLI commands, `attach` and
+  `daemon stop` of one build against the other's daemon, and the current native client through either build's
+  `remote-bridge`; a keeper controlled without a daemon and adopted by the other build's daemon; the other build's
+  CLI in a pane over its `SPLITTY_SOCK`, before and after the other build's daemon took over; and `state.json`
+  (kept and ended sessions), `config.toml` and `daemon.json`. Each creates, attaches, resizes and re-attaches a
+  session. Its first run (0.3.1 against 0.3.2) found the dropped settings under server-modes. Still untested across
+  versions: the desktop window as a peer (the native app's client core, its capability fallbacks and layout ops) and
+  any older client of a newer daemon beyond the `splitty` command; everything over SSH (`connect`, the hub reading
+  the other build's `remote-handshake`, installing or updating a host's daemon, `remote-migrate`); managed jobs,
+  agent grants, viewer panes, annotations and scratchpads in `state.json`, and the other files below the
+  configuration directory (`server.toml`, templates, themes); the macOS and Windows (WSL) builds; versions older
+  than the last release (run once by hand against 0.2.4 on 2026-11-12: passed). The pinned rollback smoke in
+  `tests/daemon_lifecycle.rs` needs Bubblewrap and does not run in CI. A run shows only what differs between the
+  two builds: 0.3.1 and 0.3.2 differ in the server code by two settings.
 
 ## Flaky tests
 

@@ -481,6 +481,28 @@ supervisor have deadlines. Without an explicitly pinned artifact, the optional
 test reports `UNRUN`; strict mode makes that omission a failure. A normal
 workspace test pass alone is not historical interoperability evidence.
 
+## Version-skew smoke
+
+`crates/splitty-server/tests/version_skew.rs` runs the last release's `splitty`
+against the current build, in both directions: their clients and daemons, a
+daemon and the keepers the other build started, the CLI in a pane and the
+daemon behind its `SPLITTY_SOCK`, and the files one build writes and the other
+reads. CI runs it on Linux in the "Rust tests" job, and the release workflow
+runs it before it publishes. Locally, on Linux x86_64 with `gh`:
+
+```sh
+scripts/testing/fetch-last-release.sh --out /tmp/splitty-last-release > /tmp/splitty-last-release.env
+set -a; . /tmp/splitty-last-release.env; set +a
+cargo test -p splitty-server --test version_skew -- --nocapture
+```
+
+The script takes the newest release that is not a prerelease (`--tag` picks
+another), checks the static server against the release's `SHA256SUMS` and
+prints `SPLITTY_TEST_RELEASED_BINARY`. Without that variable the tests report
+`SKIPPED`; `SPLITTY_TEST_REQUIRE_RELEASED_BINARY=1` makes the omission a
+failure. Every process of both builds runs with a cleared environment and a
+throwaway `HOME`, so the tests never reach a daemon of the invoking user.
+
 The native local workspace also moves existing terminals: drag a tab label into
 another pane to append it as a tab, or onto a pane edge to split there. Escape
 cancels a drag. The operation preserves its terminal session; whole-group moves,

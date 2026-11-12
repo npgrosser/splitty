@@ -4,8 +4,9 @@ name: Release
 # with SHA256SUMS and, for a public repository, build provenance attestations.
 # Each platform gets the native app (crates/splitty-gpui). The legacy web
 # apps (Tauri, Electron) are not released; ci.yml keeps them building.
-# The release is published only once every platform has built; a tag with a
-# suffix (`v0.2.0-rc.1`) becomes a prerelease. The binaries are not code-signed
+# The release is published only once every platform has built and the last
+# release has run against this build (version-skew); a tag with a suffix
+# (`v0.2.0-rc.1`) becomes a prerelease. The binaries are not code-signed
 # (macOS builds are ad-hoc signed so they run on Apple Silicon); the README
 # explains how to verify downloads.
 # cleanup-release-artifacts.yml removes the run's artifacts after success.
@@ -49,6 +50,37 @@ jobs:
     uses: ./.github/workflows/windows-tauri.yml
     permissions:
       contents: read
+
+  # The last release against this build at each version boundary
+  # (crates/splitty-server/tests/version_skew.rs), before anything publishes.
+  # The tag's own release does not exist yet, so the last one is the one before.
+  version-skew:
+    name: Version skew against the last release
+    needs: version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
+        with:
+          toolchain: stable
+
+      # The server embeds frontend/dist; these tests open no page of it.
+      - name: Provide an empty frontend build
+        run: mkdir -p frontend/dist
+
+      - name: Fetch the last release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/testing/fetch-last-release.sh --out "$RUNNER_TEMP/splitty-last-release" >> "$GITHUB_ENV"
+
+      - name: Require version skew against the last release
+        env:
+          SPLITTY_TEST_REQUIRE_RELEASED_BINARY: '1'
+        run: cargo test --locked -p splitty-server --test version_skew -- --nocapture
 
   linux:
     name: Linux
@@ -264,7 +296,7 @@ jobs:
 
   publish:
     name: Publish release
-    needs: [windows, linux, macos]
+    needs: [windows, linux, macos, version-skew]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
