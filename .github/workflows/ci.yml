@@ -109,6 +109,11 @@ jobs:
       - name: Test server, core and architecture check
         run: cargo test --locked --workspace --exclude splitty-gui
 
+      # The native window's view tests are gated on this feature and need no
+      # display.
+      - name: Test native app views
+        run: cargo test --locked -p splitty-gpui --features ui-test-support
+
       # The last release's static server, checked against its SHA256SUMS, runs
       # against this build at each version boundary (tests/version_skew.rs).
       - name: Fetch the last release

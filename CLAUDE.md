@@ -27,6 +27,7 @@ A test task names its level and extends an existing test where one fits. A new s
   - `cargo fmt --all --check`
   - `cargo clippy --workspace --exclude splitty-gui --all-targets -- -D warnings`
   - `cargo test --workspace --exclude splitty-gui`
+  - where `crates/splitty-gpui` is touched: `cargo test -p splitty-gpui --features ui-test-support` (the view tests are gated on that feature)
   - where `crates/splitty-tauri` is touched: `cargo clippy -p splitty-gui --all-targets -- -D warnings` and `cargo test -p splitty-gui --lib`
   - where `packaging/linux/native` is touched: `packaging/linux/native/build.sh --executable target/release/splitty-gpui --cli target/release/splitty --out <dir>` after release builds of `splitty-gpui` and `splitty-server` (needs `dpkg-deb` and `rpmbuild`; CI also packs the macOS disk image)
   - where `frontend/` is touched: `pnpm check`, `pnpm test` and `pnpm build` there
