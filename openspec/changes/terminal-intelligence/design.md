@@ -80,3 +80,4 @@ Agents act as ACP servers and Splitty as the client, giving bidirectional, struc
 
 - Event granularity for app parsers (see proposal.md).
 - When to open the parser boundary to external plugins.
+- OSC 7501: whether the server removes the `?` probe from the output it forwards, so a client emulator that implements the protocol does not answer a second time; whether the records live with the session's output (in a keeper, in daemon mode) so they survive a daemon restart; and how a program's other output changes once the probe is answered (a program may stop drawing its status into the title).

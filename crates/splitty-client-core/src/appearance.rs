@@ -164,6 +164,7 @@ impl AppearanceSnapshot {
             F::ZoomScope => V::Text(a.zoom_scope.clone()),
             F::TerminalTheme => V::Text(self.terminal().theme().into()),
             F::CloseOnExit => V::Text(self.terminal().close_on_exit().into()),
+            F::ScrollToBottom => V::Bool(self.terminal().scroll_to_bottom()),
             F::DrawerPinned => V::Bool(self.drawer().pinned),
             F::DrawerWidth => V::Number(f64::from(self.drawer().sidebar_width)),
             F::ReconnectHosts => V::List(self.settings.remote.reconnect_hosts.clone()),
@@ -210,6 +211,7 @@ impl AppearanceSnapshot {
             field,
             SettingsField::FontFamily
                 | SettingsField::DrawerPinned
+                | SettingsField::ScrollToBottom
                 | SettingsField::ReconnectHosts
                 | SettingsField::AutoForwardPorts
                 | SettingsField::TabsShowSplit

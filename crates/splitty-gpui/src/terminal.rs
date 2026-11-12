@@ -123,6 +123,13 @@ use std::{
     time::{Duration, Instant},
 };
 
+/// How long the scrollbar stays after the last scroll or pointer move at the
+/// right edge, and how near that edge the pointer brings it up.
+const SCROLLBAR_LINGER: Duration = Duration::from_millis(800);
+const SCROLLBAR_REVEAL_EDGE: f32 = 30.;
+const SCROLLBAR_FADE_IN: Duration = Duration::from_millis(150);
+const SCROLL_BOTTOM_IN: Duration = Duration::from_millis(150);
+const SCROLL_BOTTOM_OUT: Duration = Duration::from_millis(200);
 /// How long after the last zoom step of a burst the PTY learns its size.
 const SIZE_REPORT_HOLD: Duration = Duration::from_millis(120);
 /// The web client's terminal font size; display zoom scales it.
@@ -602,6 +609,15 @@ pub struct Terminal {
     /// The scrollbar's thumb is held: where in the thumb, in pixels from its top.
     scrollbar_grab: Option<f32>,
     scrollbar_hovered: bool,
+    /// The scrollbar is in view: after scrolling or with the pointer at the
+    /// right edge, until `scrollbar_hide` runs out.
+    scrollbar_shown: bool,
+    scrollbar_hide: Option<Task<()>>,
+    scroll_to_bottom: bool,
+    /// The rows below the viewport the control last showed.
+    scroll_bottom_shown: Option<u64>,
+    /// The control on its way out, with the count it had.
+    scroll_bottom_leaving: Option<(u64, Task<()>)>,
     focus_out_subscription: Option<Subscription>,
     activation_subscription: Option<Subscription>,
     search: Option<search::SearchUi>,
@@ -664,6 +680,11 @@ impl Terminal {
             scroll_route: None,
             scrollbar_grab: None,
             scrollbar_hovered: false,
+            scrollbar_shown: false,
+            scrollbar_hide: None,
+            scroll_to_bottom: true,
+            scroll_bottom_shown: None,
+            scroll_bottom_leaving: None,
             focus_out_subscription: None,
             activation_subscription: None,
             search: None,
@@ -957,6 +978,32 @@ impl Terminal {
         engine.scrollback().ok()
     }
 
+    pub(crate) fn set_scroll_to_bottom(&mut self, shown: bool, cx: &mut Context<Self>) {
+        if self.scroll_to_bottom != shown {
+            self.scroll_to_bottom = shown;
+            cx.notify();
+        }
+    }
+
+    /// Bring the scrollbar into view; it leaves again shortly after unless
+    /// the pointer is on it or holds its thumb.
+    fn reveal_scrollbar(&mut self, cx: &mut Context<Self>) {
+        if !self.scrollbar_shown {
+            self.scrollbar_shown = true;
+            cx.notify();
+        }
+        self.scrollbar_hide = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SCROLLBAR_LINGER).await;
+            let _ = this.update(cx, |this, cx| {
+                this.scrollbar_hide = None;
+                if this.scrollbar_grab.is_none() && !this.scrollbar_hovered {
+                    this.scrollbar_shown = false;
+                    cx.notify();
+                }
+            });
+        }));
+    }
+
     /// Move the held thumb so that the grabbed point follows the pointer.
     fn drag_scrollbar(&mut self, pointer_y: Pixels, cx: &mut Context<Self>) {
         let (Some(grab), Some(scrollback)) = (self.scrollbar_grab, self.scrollback()) else {
@@ -1000,7 +1047,15 @@ impl Terminal {
             thumb.height / 2.
         });
         self.drag_scrollbar(event.position.y, cx);
+        self.reveal_scrollbar(cx);
         cx.notify();
+    }
+
+    fn release_scrollbar(&mut self, cx: &mut Context<Self>) {
+        if self.scrollbar_grab.take().is_some() {
+            self.reveal_scrollbar(cx);
+            cx.notify();
+        }
     }
 
     fn scroll_to_newest(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1013,8 +1068,11 @@ impl Terminal {
     }
 
     fn scrollbar(&self, scrollback: Scrollback, cx: &mut Context<Self>) -> Option<AnyElement> {
-        let thumb = scrollbar::thumb(f32::from(self.bounds.size.height), scrollback)?;
         let held = self.scrollbar_grab.is_some();
+        if !held && !self.scrollbar_shown {
+            return None;
+        }
+        let thumb = scrollbar::thumb(f32::from(self.bounds.size.height), scrollback)?;
         let lit = held || self.scrollbar_hovered;
         let alpha = if held {
             0xb0
@@ -1037,6 +1095,7 @@ impl Terminal {
                 )
                 .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                     this.scrollbar_hovered = *hovered;
+                    this.reveal_scrollbar(cx);
                     cx.notify();
                 }))
                 .child(
@@ -1049,19 +1108,27 @@ impl Terminal {
                         .rounded_full()
                         .bg(rgba((self.colors.foreground << 8) | alpha)),
                 )
+                .with_animation(
+                    "terminal-scrollbar-in",
+                    Animation::new(SCROLLBAR_FADE_IN),
+                    |scrollbar, shown| scrollbar.opacity(shown),
+                )
                 .into_any_element(),
         )
     }
 
     /// The control that returns to the newest rows, with how many rows lie
-    /// below the viewport.
-    fn scroll_bottom_control(&self, behind: u64, cx: &mut Context<Self>) -> AnyElement {
+    /// below the viewport. It comes in from below and leaves the same way;
+    /// on its way out it takes no clicks.
+    fn scroll_bottom_control(
+        &self,
+        behind: u64,
+        leaving: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let colors = self.colors;
-        div()
-            .id("terminal-scroll-bottom")
-            .debug_selector(|| "terminal-scroll-bottom".into())
+        let control = div()
             .absolute()
-            .bottom(px(8.))
             .right(px(20.))
             .flex()
             .items_center()
@@ -1074,12 +1141,33 @@ impl Terminal {
             .bg(rgb(colors.background))
             .text_color(rgb(colors.foreground))
             .text_size(rems(11. / 16.))
+            .child("↓")
+            .child(scrollbar::count_label(behind));
+        // Rises six pixels into its place while it becomes opaque.
+        fn place<E: Styled>(control: E, shown: f32) -> E {
+            control.opacity(shown).bottom(px(2. + 6. * shown))
+        }
+        if leaving {
+            return control
+                .with_animation(
+                    "terminal-scroll-bottom-out",
+                    Animation::new(SCROLL_BOTTOM_OUT),
+                    |control, gone| place(control, 1. - gone),
+                )
+                .into_any_element();
+        }
+        control
+            .id("terminal-scroll-bottom")
+            .debug_selector(|| "terminal-scroll-bottom".into())
             .cursor_pointer()
             .hover(|control| control.border_color(rgb(colors.foreground)))
             .on_any_mouse_down(|_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, _, window, cx| this.scroll_to_newest(window, cx)))
-            .child("↓")
-            .child(scrollbar::count_label(behind))
+            .with_animation(
+                "terminal-scroll-bottom-in",
+                Animation::new(SCROLL_BOTTOM_IN),
+                place,
+            )
             .into_any_element()
     }
 
@@ -1519,6 +1607,14 @@ impl Terminal {
         if self.pointer_move(event, window, cx.platform_info().is_mac()) {
             cx.notify();
         }
+        let edge = self.bounds.right() - px(SCROLLBAR_REVEAL_EDGE);
+        if event.position.x >= edge
+            && self
+                .scrollback()
+                .is_some_and(|scrollback| scrollback.total > scrollback.rows)
+        {
+            self.reveal_scrollbar(cx);
+        }
     }
 
     fn on_pointer_up(&mut self, event: &MouseUpEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1544,6 +1640,10 @@ impl Terminal {
     }
 
     fn on_pointer_exit(&mut self, _: &MouseExitEvent, _: &mut Window, cx: &mut Context<Self>) {
+        if self.scrollbar_grab.is_none() {
+            self.scrollbar_shown = false;
+            self.scrollbar_hide = None;
+        }
         self.cancel_pointer();
         cx.notify();
     }
@@ -1619,6 +1719,7 @@ impl Terminal {
                     let result = self.engine.as_mut().map(|engine| engine.scroll(lines));
                     self.operation(result);
                     self.search_wake(cx);
+                    self.reveal_scrollbar(cx);
                 }
                 WheelRoute::AlternateKeys => {
                     let result = self
@@ -1766,8 +1867,8 @@ impl Terminal {
                 let _ = held.update(cx, |this, cx| {
                     if event.pressed_button == Some(MouseButton::Left) {
                         this.drag_scrollbar(event.position.y, cx);
-                    } else if this.scrollbar_grab.take().is_some() {
-                        cx.notify();
+                    } else {
+                        this.release_scrollbar(cx);
                     }
                 });
                 cx.stop_propagation();
@@ -1777,11 +1878,7 @@ impl Terminal {
                 if phase != DispatchPhase::Capture || event.button != MouseButton::Left {
                     return;
                 }
-                let _ = held.update(cx, |this, cx| {
-                    if this.scrollbar_grab.take().is_some() {
-                        cx.notify();
-                    }
-                });
+                let _ = held.update(cx, |this, cx| this.release_scrollbar(cx));
             });
         }
         let terminal = cx.entity().downgrade();
@@ -2434,10 +2531,26 @@ impl Render for Terminal {
         });
         let scrollback = self.scrollback();
         let scrollbar = scrollback.and_then(|scrollback| self.scrollbar(scrollback, cx));
-        let scroll_bottom = scrollback
+        let behind = scrollback
             .map(|scrollback| scrollback.behind())
-            .filter(|behind| *behind > 0)
-            .map(|behind| self.scroll_bottom_control(behind, cx));
+            .filter(|behind| *behind > 0 && self.scroll_to_bottom);
+        if let Some(behind) = behind {
+            self.scroll_bottom_shown = Some(behind);
+            self.scroll_bottom_leaving = None;
+        } else if let Some(last) = self.scroll_bottom_shown.take() {
+            let leave = cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(SCROLL_BOTTOM_OUT).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.scroll_bottom_leaving = None;
+                    cx.notify();
+                });
+            });
+            self.scroll_bottom_leaving = Some((last, leave));
+        }
+        let leaving = self.scroll_bottom_leaving.as_ref().map(|(last, _)| *last);
+        let scroll_bottom = behind
+            .map(|behind| self.scroll_bottom_control(behind, false, cx))
+            .or_else(|| leaving.map(|last| self.scroll_bottom_control(last, true, cx)));
         let layout = cx.entity();
         let paint = layout.clone();
         div()
@@ -2795,7 +2908,14 @@ mod presentation_tests {
                     terminal.read(cx).scrollback().expect("scrollback").behind()
                 })
             };
+            let edge = |window: &mut VisualTestContext| {
+                let bounds = window.update(|_, cx| terminal.read(cx).bounds);
+                point(bounds.right() - px(20.), bounds.center().y)
+            };
             // Without history there is neither a thumb nor the control.
+            assert_eq!(behind(window), 0);
+            let near = edge(window);
+            window.simulate_mouse_move(near, None, Modifiers::default());
             assert_eq!(behind(window), 0);
             assert!(window.debug_bounds("terminal-scrollbar").is_none());
             assert!(window.debug_bounds("terminal-scroll-bottom").is_none());
@@ -2807,6 +2927,18 @@ mod presentation_tests {
             window.update(|_, cx| {
                 terminal.update(cx, |terminal, cx| terminal.feed(&output, false, cx))
             });
+            // The scrollbar stays out of the way until the pointer is at the
+            // right edge, and leaves again a moment later.
+            assert_eq!(behind(window), 0);
+            assert!(window.debug_bounds("terminal-scrollbar").is_none());
+            window.simulate_mouse_move(near, None, Modifiers::default());
+            assert_eq!(behind(window), 0);
+            assert!(window.debug_bounds("terminal-scrollbar").is_some());
+            window.executor().advance_clock(super::SCROLLBAR_LINGER);
+            window.run_until_parked();
+            assert_eq!(behind(window), 0);
+            assert!(window.debug_bounds("terminal-scrollbar").is_none());
+            window.simulate_mouse_move(near, None, Modifiers::default());
             assert_eq!(behind(window), 0);
             let track = window
                 .debug_bounds("terminal-scrollbar")
@@ -2816,6 +2948,7 @@ mod presentation_tests {
             // A press at the top of the track brings the oldest rows.
             let sent = commands.borrow().len();
             let top = point(track.center().x, track.top() + px(1.));
+            window.simulate_mouse_move(top, None, Modifiers::default());
             window.simulate_mouse_down(top, MouseButton::Left, Modifiers::default());
             window.simulate_mouse_up(top, MouseButton::Left, Modifiers::default());
             let hidden = behind(window);
@@ -2826,7 +2959,8 @@ mod presentation_tests {
             );
             assert!(window.update(|_, cx| terminal.read(cx).scrollbar_grab.is_none()));
 
-            // The held thumb follows the pointer, also outside the track.
+            // The held thumb follows the pointer, also outside the track, and
+            // stays in view while it is held.
             let middle = point(track.left() - px(80.), track.center().y);
             window.simulate_mouse_down(top, MouseButton::Left, Modifiers::default());
             window.update(|window, cx| window.draw(cx).clear(cx));
@@ -2836,9 +2970,25 @@ mod presentation_tests {
                 halfway > 100 && halfway < hidden - 100,
                 "{halfway} of {hidden}"
             );
+            window.executor().advance_clock(super::SCROLLBAR_LINGER * 2);
+            window.run_until_parked();
+            assert_eq!(behind(window), halfway);
+            assert!(window.debug_bounds("terminal-scrollbar").is_some());
             window.simulate_mouse_up(middle, MouseButton::Left, Modifiers::default());
             window.update(|window, cx| window.draw(cx).clear(cx));
             window.simulate_mouse_move(top, None, Modifiers::default());
+            assert_eq!(behind(window), halfway);
+
+            // The setting takes the control away and brings it back.
+            assert!(window.debug_bounds("terminal-scroll-bottom").is_some());
+            window.update(|_, cx| {
+                terminal.update(cx, |terminal, cx| terminal.set_scroll_to_bottom(false, cx))
+            });
+            assert_eq!(behind(window), halfway);
+            assert!(window.debug_bounds("terminal-scroll-bottom").is_none());
+            window.update(|_, cx| {
+                terminal.update(cx, |terminal, cx| terminal.set_scroll_to_bottom(true, cx))
+            });
             assert_eq!(behind(window), halfway);
 
             // The control returns to the newest rows and goes away.

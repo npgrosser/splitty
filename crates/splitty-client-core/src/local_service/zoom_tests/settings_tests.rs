@@ -46,6 +46,7 @@ fn edit(field: F) -> SettingsEdit {
             F::Zoom => V::Number(1.2),
             F::ZoomScope => V::Text("window".into()),
             F::CloseOnExit => V::Text("never".into()),
+            F::ScrollToBottom => V::Bool(false),
             F::DrawerPinned => V::Bool(false),
             F::ReconnectHosts => V::List(vec!["vm1".into()]),
             F::AutoForwardPorts => V::Bool(true),

@@ -1055,6 +1055,8 @@ pub struct Workspace {
     status: String,
     appearance: NativeAppearance,
     tab_prefs: TabPrefs,
+    /// Whether scrolled terminals show the control that returns to the bottom.
+    scroll_to_bottom: bool,
     /// Which editor opens what when a pane's process asks.
     editor_prefs: splitty_client_core::native_workspace::EditorSettings,
     appearance_error: Option<String>,
@@ -1426,6 +1428,7 @@ impl Workspace {
                 status: "Starting local workspace…".into(),
                 appearance: NativeAppearance::fallback(&ui_family),
                 tab_prefs: TabPrefs::default(),
+                scroll_to_bottom: true,
                 editor_prefs: Default::default(),
                 appearance_error: None,
                 appearance_generation: 0,
@@ -1587,8 +1590,11 @@ impl Workspace {
         }
         next.apply_component_theme(snapshot.scheme(), cx);
         let mut failure = None;
+        self.scroll_to_bottom = snapshot.terminal().scroll_to_bottom();
+        let scroll_to_bottom = self.scroll_to_bottom;
         for view in self.panes.values() {
             let applied = view.terminal.update(cx, |terminal, cx| {
+                terminal.set_scroll_to_bottom(scroll_to_bottom, cx);
                 terminal.apply_colors(
                     next.terminal,
                     next.selection_foreground,
@@ -2643,9 +2649,11 @@ impl Workspace {
                 this.drop_files_into_terminal(drop_route.clone(), terminal, event.0.clone(), cx);
             },
         );
+        let scroll_to_bottom = self.scroll_to_bottom;
         if let Err(error) = terminal.update(cx, |terminal, cx| {
             terminal.set_search_active(false, cx);
             terminal.set_zoom(terminal_scale, cx);
+            terminal.set_scroll_to_bottom(scroll_to_bottom, cx);
             terminal.apply_colors(colors, selection_foreground, selection_background, cx)
         }) {
             self.appearance_error = Some(error);

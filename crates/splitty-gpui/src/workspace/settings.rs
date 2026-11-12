@@ -28,7 +28,11 @@ const APPEARANCE: &[SettingsField] = &[
     SettingsField::Zoom,
     SettingsField::ZoomScope,
 ];
-const TERMINAL: &[SettingsField] = &[SettingsField::TerminalTheme, SettingsField::CloseOnExit];
+const TERMINAL: &[SettingsField] = &[
+    SettingsField::TerminalTheme,
+    SettingsField::CloseOnExit,
+    SettingsField::ScrollToBottom,
+];
 const WORKSPACE: &[SettingsField] = &[
     SettingsField::DrawerPinned,
     SettingsField::DrawerWidth,
@@ -54,6 +58,7 @@ fn is_switch(field: SettingsField) -> bool {
     matches!(
         field,
         SettingsField::DrawerPinned
+            | SettingsField::ScrollToBottom
             | SettingsField::AutoForwardPorts
             | SettingsField::TabsShowSplit
             | SettingsField::TabsShowFloat
@@ -725,6 +730,7 @@ impl SettingsView {
                 Some(choices)
             }
             SettingsField::DrawerPinned
+            | SettingsField::ScrollToBottom
             | SettingsField::ReconnectHosts
             | SettingsField::AutoForwardPorts
             | SettingsField::TabsShowSplit
@@ -832,6 +838,7 @@ impl SettingsView {
                     field,
                     SettingsField::FontFamily
                         | SettingsField::DrawerPinned
+                        | SettingsField::ScrollToBottom
                         | SettingsField::ReconnectHosts
                         | SettingsField::AutoForwardPorts
                         | SettingsField::TabsShowSplit
@@ -1153,6 +1160,7 @@ fn field_label(field: SettingsField) -> &'static str {
         SettingsField::ZoomScope => "Zoom applies to",
         SettingsField::TerminalTheme => "Terminal colors",
         SettingsField::CloseOnExit => "Close on exit",
+        SettingsField::ScrollToBottom => "Scroll to bottom",
         SettingsField::DrawerPinned => "Show drawer",
         SettingsField::DrawerWidth => "Drawer width",
         SettingsField::ReconnectHosts => "Hosts reconnected at start",
@@ -1185,6 +1193,9 @@ fn field_description(field: SettingsField) -> &'static str {
         SettingsField::ZoomScope => "Choose which part of this window scales",
         SettingsField::TerminalTheme => "Default follows the interface theme",
         SettingsField::CloseOnExit => "When a terminal session ends",
+        SettingsField::ScrollToBottom => {
+            "Show a control that returns to the newest output while scrolled up"
+        }
         SettingsField::DrawerPinned => "Keep the Screen drawer visible",
         SettingsField::DrawerWidth => "Width of the Screen drawer",
         SettingsField::ReconnectHosts => "Chosen per host under Hosts",

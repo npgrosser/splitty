@@ -21,6 +21,7 @@ pub enum SettingsField {
     ZoomScope,
     TerminalTheme,
     CloseOnExit,
+    ScrollToBottom,
     DrawerPinned,
     DrawerWidth,
     ReconnectHosts,
@@ -42,7 +43,7 @@ pub enum SettingsField {
     NotificationProcessCrashed,
 }
 impl SettingsField {
-    pub const ALL: [Self; 27] = [
+    pub const ALL: [Self; 28] = [
         Self::ThemeMode,
         Self::Theme,
         Self::ThemeDark,
@@ -53,6 +54,7 @@ impl SettingsField {
         Self::ZoomScope,
         Self::TerminalTheme,
         Self::CloseOnExit,
+        Self::ScrollToBottom,
         Self::DrawerPinned,
         Self::DrawerWidth,
         Self::ReconnectHosts,
@@ -94,6 +96,7 @@ impl SettingsField {
             Self::ZoomScope => "appearance.zoomScope",
             Self::TerminalTheme => "terminal.theme",
             Self::CloseOnExit => "terminal.closeOnExit",
+            Self::ScrollToBottom => "terminal.scrollToBottom",
             Self::DrawerPinned => "drawer.pinned",
             Self::DrawerWidth => "drawer.sidebarWidth",
             Self::ReconnectHosts => "remote.reconnectHosts",
@@ -145,6 +148,7 @@ impl SettingsEdit {
             (
                 SettingsValue::Bool(_),
                 F::DrawerPinned
+                | F::ScrollToBottom
                 | F::AutoForwardPorts
                 | F::TabsShowSplit
                 | F::TabsShowFloat
@@ -365,7 +369,7 @@ mod tests {
                 .into_iter()
                 .filter(|field| field.domain() == SettingsDomain::Appearance)
                 .count(),
-            21
+            22
         );
     }
 }
