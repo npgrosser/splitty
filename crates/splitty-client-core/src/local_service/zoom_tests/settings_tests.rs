@@ -10,18 +10,12 @@ fn exchange(operation: &'static str, body: String) -> Exchange {
     }
 }
 fn appearance_exchanges() -> Vec<Exchange> {
-    let theme = splitty_core::theme::resolve_theme(
-        "splitty-dark",
-        std::path::Path::new("/nonexistent-owned-theme-fixture"),
-    );
     vec![
         exchange("home.get", home(1.0)),
-        exchange("theme.get", serde_json::to_string(&theme).unwrap()),
         exchange(
             "home.metadata",
             splitty_core::config::settings_metadata().to_string(),
         ),
-        exchange("theme.list", "[\"splitty-dark\",\"splitty-light\"]".into()),
     ]
 }
 async fn loaded(api: Client, owner: Uuid) -> LocalServiceClient {
@@ -38,9 +32,12 @@ fn edit(field: F) -> SettingsEdit {
         field,
         match field {
             F::ThemeMode => V::Text("auto".into()),
-            F::Theme | F::ThemeDark | F::ThemeLight | F::TerminalTheme => {
-                V::Text("splitty-light".into())
-            }
+            F::Theme
+            | F::ThemeDark
+            | F::ThemeLight
+            | F::TerminalTheme
+            | F::TerminalThemeDark
+            | F::TerminalThemeLight => V::Text("splitty-light".into()),
             F::FontSize => V::Number(18.0),
             F::FontFamily => V::Text("Owned Test Font".into()),
             F::Zoom => V::Number(1.2),
@@ -145,7 +142,7 @@ async fn fifo_writes_release_fields_and_never_publish_optimistic_values() {
     std::fs::remove_dir_all(dir).unwrap();
 }
 #[tokio::test]
-async fn rejection_and_uncertainty_reconcile_without_replay_even_when_theme_fails() {
+async fn rejection_and_uncertainty_reconcile_without_replay_even_when_metadata_fails() {
     for (status, uncertain, body, blocked) in [
         (400, false, "{}", false),
         (200, true, "{}", true),
@@ -160,7 +157,7 @@ async fn rejection_and_uncertainty_reconcile_without_replay_even_when_theme_fail
         });
         exchanges.push(exchange("home.get", home(1.0)));
         exchanges.push(Exchange {
-            operation: "theme.get",
+            operation: "home.metadata",
             status: 500,
             uncertain: false,
             body: "{}".into(),
@@ -200,10 +197,11 @@ async fn rejection_and_uncertainty_reconcile_without_replay_even_when_theme_fail
             assert_eq!(result.connection_id(), owner);
             assert!(!client.field_pending(F::FontSize));
         }
-        assert!(matches!(
-            next(&mut client).await,
-            LocalServiceUpdate::Appearance(Err(_))
-        ));
+        let LocalServiceUpdate::Appearance(Ok(snapshot)) = next(&mut client).await else {
+            panic!("refreshed appearance missing")
+        };
+        assert!(snapshot.metadata_error().is_some());
+        drop(snapshot);
         client.finish().await.unwrap();
         task.await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();
@@ -254,30 +252,26 @@ fn patches_are_single_fields_and_font_gap_is_not_admitted() {
 }
 
 #[tokio::test]
-async fn missing_metadata_or_catalog_preserves_home_and_disables_dependent_writes() {
+async fn missing_metadata_preserves_home_and_disables_dependent_writes() {
     for missing_metadata in [true, false] {
         let mut exchanges = appearance_exchanges();
-        let failed = if missing_metadata { 2 } else { 3 };
-        exchanges[failed].status = 404;
-        exchanges[failed].body = "{}".into();
+        if missing_metadata {
+            exchanges[1].status = 404;
+            exchanges[1].body = "{}".into();
+        }
         let (api, task, dir) = scripted(exchanges).await;
         let owner = Uuid::new_v4();
         let mut client = loaded(api, owner).await;
         let snapshot = client.last_appearance.as_ref().unwrap();
         assert_eq!(snapshot.settings().zoom, 1.0);
         assert_eq!(snapshot.metadata_error().is_some(), missing_metadata);
-        assert_eq!(snapshot.themes_error().is_some(), !missing_metadata);
-        assert!(client
-            .enqueue_settings(owner, Uuid::new_v4(), edit(F::Theme))
-            .is_err());
-        if missing_metadata {
-            assert!(client
-                .enqueue_settings(owner, Uuid::new_v4(), edit(F::FontSize))
-                .is_err());
-        } else {
-            client
-                .enqueue_settings(owner, Uuid::new_v4(), edit(F::FontSize))
-                .unwrap();
+        for field in [F::Theme, F::TerminalThemeDark, F::FontSize] {
+            assert_eq!(
+                client
+                    .enqueue_settings(owner, Uuid::new_v4(), edit(field))
+                    .is_err(),
+                missing_metadata
+            );
         }
         client.finish().await.unwrap();
         task.await.unwrap();
@@ -286,30 +280,26 @@ async fn missing_metadata_or_catalog_preserves_home_and_disables_dependent_write
 }
 
 #[tokio::test]
-async fn fallback_palette_identity_is_reported_without_repainting_chrome() {
+async fn named_terminal_palettes_pass_through_without_a_theme_request() {
+    // The script is the whole conversation: a theme request would not match it.
     let mut exchanges = appearance_exchanges();
     let mut home: serde_json::Value = serde_json::from_str(&exchanges[0].body).unwrap();
-    home["terminal"]["theme"] = "splitty-light".into();
+    home["terminal"]["theme"] = "unknown-palette".into();
+    home["terminal"]["themeDark"] = "splitty-dark".into();
+    home["terminal"]["themeLight"] = "splitty-light".into();
     exchanges[0].body = home.to_string();
-    let fallback = splitty_core::theme::resolve_theme(
-        "splitty-dark",
-        std::path::Path::new("/nonexistent-owned-theme-fixture"),
-    );
-    exchanges.push(exchange(
-        "theme.get",
-        serde_json::to_string(&fallback).unwrap(),
-    ));
     let (api, task, dir) = scripted(exchanges).await;
     let owner = Uuid::new_v4();
     let client = loaded(api, owner).await;
     let snapshot = client.last_appearance.as_ref().unwrap();
-    assert!(snapshot.terminal_palette_error().is_some());
-    assert_eq!(snapshot.theme().id.as_deref(), Some("splitty-dark"));
+    assert_eq!(snapshot.ui_theme(), "splitty-dark");
+    assert_eq!(snapshot.terminal().theme(), "unknown-palette");
+    assert_eq!(snapshot.terminal().theme_dark(), "splitty-dark");
+    assert_eq!(snapshot.terminal().theme_light(), "splitty-light");
     assert_eq!(
-        snapshot.terminal_theme().id.as_deref(),
-        Some("splitty-dark")
+        snapshot.value(F::TerminalTheme),
+        Some(V::Text("unknown-palette".into()))
     );
-    assert_eq!(snapshot.terminal().theme(), "splitty-light");
     client.finish().await.unwrap();
     task.await.unwrap();
     std::fs::remove_dir_all(dir).unwrap();
@@ -596,7 +586,7 @@ async fn loaded_domains(api: Client, owner: Uuid) -> LocalServiceClient {
 }
 
 #[tokio::test]
-async fn notifications_keep_values_and_edit_choices_when_theme_or_reset_metadata_fails() {
+async fn notifications_keep_values_and_edit_choices_when_appearance_or_reset_metadata_fails() {
     let mut metadata = splitty_core::config::settings_metadata();
     metadata["defaults"]["notifications"]["enabled"] = false.into();
     metadata["defaults"]["notifications"]["processFinished"] = false.into();
@@ -612,15 +602,12 @@ async fn notifications_keep_values_and_edit_choices_when_theme_or_reset_metadata
             None,
         ),
     ] {
-        let mut exchanges = vec![
-            exchange("home.get", home(1.0)),
-            Exchange {
-                operation: "theme.get",
-                status: 500,
-                uncertain: false,
-                body: "{}".into(),
-            },
-        ];
+        let mut exchanges = vec![Exchange {
+            operation: "home.get",
+            status: 500,
+            uncertain: false,
+            body: "{}".into(),
+        }];
         exchanges.push(exchange("home.get", home(1.0)));
         exchanges.push(Exchange {
             operation: "home.metadata",
@@ -738,12 +725,6 @@ async fn notification_uncertainty_needs_its_own_valid_home_but_not_metadata() {
     exchanges.extend(notification_exchanges());
     exchanges.push(exchange("home.update", "{}".into())); // malformed notification acknowledgement
     exchanges.push(exchange("home.get", home(1.0)));
-    exchanges.push(Exchange {
-        operation: "theme.get",
-        status: 500,
-        uncertain: false,
-        body: "{}".into(),
-    });
     exchanges.push(exchange("home.get", "{}".into())); // invalid notification refresh
     exchanges.push(exchange("home.get", home(1.0)));
     exchanges.push(Exchange {
@@ -767,9 +748,10 @@ async fn notification_uncertainty_needs_its_own_valid_home_but_not_metadata() {
         SettingsWriteOutcome::Uncertain { .. }
     ));
     client.set_scheme(owner, ColorScheme::Light).unwrap();
+    // A valid appearance read does not settle a notification write.
     assert!(matches!(
         raw_next(&mut client).await,
-        LocalServiceUpdate::Appearance(Err(_))
+        LocalServiceUpdate::Appearance(Ok(_))
     ));
     assert!(client.field_pending(F::NotificationEnabled));
     let LocalServiceUpdate::NotificationSettings(failed) = raw_next(&mut client).await else {

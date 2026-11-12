@@ -2,14 +2,14 @@
 
 use super::*;
 use crate::settings::SettingsMetadata;
-use splitty_core::{config::settings_metadata, theme::resolve_theme};
+use splitty_core::config::settings_metadata;
 use splitty_transport::budget::ConnectionBudget;
+use std::sync::Arc;
 
 #[derive(Clone, Copy)]
 pub enum Availability {
     Full,
     MissingMetadata,
-    MissingThemes,
 }
 
 /// Build the same presentation type the owned local reader publishes, with
@@ -45,25 +45,17 @@ pub fn settings_snapshot_with_pin(
         native_tabs: Default::default(),
         editors: Default::default(),
     };
-    let theme = resolve_theme("splitty-dark", std::path::Path::new("."));
     let metadata = serde_json::from_value::<SettingsMetadata>(settings_metadata())
         .expect("test settings metadata");
-    let themes = vec!["splitty-dark".to_owned(), "splitty-light".to_owned()];
     Arc::new(AppearanceSnapshot {
         connection_id,
         generation,
         settings: budget.charge(0, false, || settings).expect("test charge"),
-        theme: Arc::new(budget.charge(0, false, || theme).expect("test charge")),
-        terminal_theme: None,
+        scheme: ColorScheme::Dark,
         terminal_generation: generation,
-        terminal_palette_error: None,
         metadata: (!matches!(availability, Availability::MissingMetadata))
             .then(|| budget.charge(0, false, || metadata).expect("test charge")),
-        themes: (!matches!(availability, Availability::MissingThemes))
-            .then(|| budget.charge(0, false, || themes).expect("test charge")),
         metadata_error: matches!(availability, Availability::MissingMetadata)
             .then(|| "Metadata unavailable".to_owned()),
-        themes_error: matches!(availability, Availability::MissingThemes)
-            .then(|| "Theme catalog unavailable".to_owned()),
     })
 }

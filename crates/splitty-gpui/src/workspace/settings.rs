@@ -2,6 +2,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
+use crate::appearance::ThemeCatalog;
 use gpui_kit::base::Selectable as _;
 use gpui_kit::component::{
     button::{Button, ButtonVariants},
@@ -11,11 +12,12 @@ use gpui_kit::component::{
     ActiveTheme as _, Disableable, Sizable,
 };
 use gpui_kit::{prelude::*, *};
-use splitty_client_core::appearance::AppearanceSnapshot;
+use splitty_client_core::appearance::{AppearanceSnapshot, ColorScheme};
 use splitty_client_core::local_service::{
     NotificationSettingsRead, SettingsReconciled, SettingsWriteOutcome, SettingsWriteResult,
 };
 use splitty_client_core::settings::{SettingsDomain, SettingsEdit, SettingsField, SettingsValue};
+use std::rc::Rc;
 use uuid::Uuid;
 
 const APPEARANCE: &[SettingsField] = &[
@@ -30,6 +32,8 @@ const APPEARANCE: &[SettingsField] = &[
 ];
 const TERMINAL: &[SettingsField] = &[
     SettingsField::TerminalTheme,
+    SettingsField::TerminalThemeDark,
+    SettingsField::TerminalThemeLight,
     SettingsField::CloseOnExit,
     SettingsField::ScrollToBottom,
 ];
@@ -205,6 +209,7 @@ pub(super) struct SettingsView {
     section: Section,
     focus: FocusHandle,
     scroll: ScrollHandle,
+    themes: Rc<ThemeCatalog>,
     available_fonts: Vec<String>,
     selects: BTreeMap<SettingsField, Entity<SelectState<SearchableVec<String>>>>,
     choices: BTreeMap<SettingsField, Vec<(String, SettingsValue)>>,
@@ -217,6 +222,7 @@ impl EventEmitter<SettingsEvent> for SettingsView {}
 
 impl SettingsView {
     pub(super) fn new(
+        themes: Rc<ThemeCatalog>,
         mut available_fonts: Vec<String>,
         window: &mut Window,
         cx: &mut Context<Self>,
@@ -234,14 +240,7 @@ impl SettingsView {
             }
             let select = cx.new(|cx| {
                 SelectState::new(SearchableVec::new(Vec::<String>::new()), None, window, cx)
-                    .searchable(matches!(
-                        field,
-                        SettingsField::Theme
-                            | SettingsField::ThemeDark
-                            | SettingsField::ThemeLight
-                            | SettingsField::TerminalTheme
-                            | SettingsField::FontFamily
-                    ))
+                    .searchable(field.is_theme() || field == SettingsField::FontFamily)
             });
             subscriptions.push(cx.subscribe_in(
                 &select,
@@ -293,6 +292,7 @@ impl SettingsView {
             .detach();
         }
         Self {
+            themes,
             owner: None,
             snapshot: None,
             notification: None,
@@ -690,24 +690,16 @@ impl SettingsView {
             return Vec::new();
         };
         let metadata = snapshot.metadata();
+        if field.is_theme() {
+            return self.theme_options(field, snapshot);
+        }
         let values: Option<Vec<SettingsValue>> = match field {
-            SettingsField::Theme | SettingsField::ThemeDark | SettingsField::ThemeLight => snapshot
-                .themes()
-                .map(|names| names.iter().cloned().map(SettingsValue::Text).collect()),
-            SettingsField::TerminalTheme => snapshot.themes().map(|names| {
-                metadata
-                    .and_then(|metadata| metadata.default_value(field))
-                    .filter(|value| value == &SettingsValue::Text("default".into()))
-                    .into_iter()
-                    .chain(
-                        names
-                            .iter()
-                            .filter(|name| name.as_str() != "default")
-                            .cloned()
-                            .map(SettingsValue::Text),
-                    )
-                    .collect()
-            }),
+            SettingsField::Theme
+            | SettingsField::ThemeDark
+            | SettingsField::ThemeLight
+            | SettingsField::TerminalTheme
+            | SettingsField::TerminalThemeDark
+            | SettingsField::TerminalThemeLight => None,
             SettingsField::FontFamily => {
                 let mut fonts = self
                     .available_fonts
@@ -794,6 +786,100 @@ impl SettingsView {
             .collect()
     }
 
+    /// The catalog's themes or palettes for a field, labelled by name and
+    /// stored by identifier. A field for one mode offers that mode's entries
+    /// and the stored one. A terminal field also offers `default` where the
+    /// service knows the field.
+    fn theme_options(
+        &self,
+        field: SettingsField,
+        snapshot: &AppearanceSnapshot,
+    ) -> Vec<(String, SettingsValue)> {
+        let current = match snapshot.value(field) {
+            Some(SettingsValue::Text(current)) => current,
+            _ => String::new(),
+        };
+        let scheme = match field {
+            SettingsField::ThemeDark | SettingsField::TerminalThemeDark => Some(ColorScheme::Dark),
+            SettingsField::ThemeLight | SettingsField::TerminalThemeLight => {
+                Some(ColorScheme::Light)
+            }
+            _ => None,
+        };
+        let offered = |id: &str, entry: ColorScheme| {
+            scheme.is_none_or(|scheme| scheme == entry) || id == current
+        };
+        let mut entries: Vec<(String, String)> = if field.is_terminal_theme() {
+            self.themes
+                .palettes()
+                .iter()
+                .filter(|palette| {
+                    let scheme = if palette.is_dark() {
+                        ColorScheme::Dark
+                    } else {
+                        ColorScheme::Light
+                    };
+                    offered(&palette.id, scheme)
+                })
+                .map(|palette| (palette.name.clone(), palette.id.clone()))
+                .collect()
+        } else {
+            self.themes
+                .ui_themes()
+                .iter()
+                .filter(|theme| offered(&theme.id, theme.scheme))
+                .map(|theme| (theme.name.clone(), theme.id.clone()))
+                .collect()
+        };
+        entries.sort_by_cached_key(|(name, _)| name.to_lowercase());
+        let mut labels = std::collections::HashSet::new();
+        let default = (field.is_terminal_theme()
+            && snapshot
+                .metadata()
+                .is_some_and(|metadata| metadata.default_value(field).is_some()))
+        .then(|| "default".to_owned());
+        default
+            .into_iter()
+            .map(|id| (display_value(field, &SettingsValue::Text(id.clone())), id))
+            .chain(entries)
+            .map(|(name, id)| {
+                // The select tells entries apart by label.
+                let label = if labels.insert(name.clone()) {
+                    name
+                } else {
+                    format!("{name} ({id})")
+                };
+                (label, SettingsValue::Text(id))
+            })
+            .filter(|(_, value)| SettingsEdit::new(field, value.clone()).is_ok())
+            .collect()
+    }
+
+    /// Take a reloaded catalog and offer its themes.
+    pub(super) fn set_themes(
+        &mut self,
+        themes: Rc<ThemeCatalog>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.themes = themes;
+        for field in SettingsField::ALL {
+            if !field.is_theme() {
+                continue;
+            }
+            let choices = self.options(field);
+            let labels: Vec<String> = choices.iter().map(|(label, _)| label.clone()).collect();
+            self.choices.insert(field, choices);
+            if let Some(select) = self.selects.get(&field) {
+                select.update(cx, |select, cx| {
+                    select.set_items(SearchableVec::new(labels), window, cx)
+                });
+                self.restore_select(field, window, cx);
+            }
+        }
+        cx.notify();
+    }
+
     fn request(&mut self, field: SettingsField, value: SettingsValue, cx: &mut Context<Self>) {
         if !self.enabled(field) {
             return;
@@ -846,6 +932,8 @@ impl SettingsView {
                         | SettingsField::TabsShowMaximize
                         | SettingsField::TabsCloseButton
                         | SettingsField::TabsLocked
+                        | SettingsField::TerminalThemeDark
+                        | SettingsField::TerminalThemeLight
                 ) || metadata.default_value(field).is_some()
             })
         }) && (is_switch(field)
@@ -874,16 +962,20 @@ impl SettingsView {
                 if let Some(error) = snapshot.metadata_error() {
                     return Some(format!("Settings options unavailable: {error}"));
                 }
-                if matches!(
-                    field,
-                    SettingsField::Theme
-                        | SettingsField::ThemeDark
-                        | SettingsField::ThemeLight
-                        | SettingsField::TerminalTheme
-                ) {
-                    snapshot
-                        .themes_error()
-                        .map(|error| format!("Theme choices unavailable: {error}"))
+                // Files of the themes directory that could not be loaded.
+                let problems = self.themes.problems();
+                if field == SettingsField::Theme && !problems.is_empty() {
+                    let shown = problems.iter().take(3).cloned().collect::<Vec<_>>();
+                    let more = problems.len() - shown.len();
+                    Some(format!(
+                        "Not loaded from the themes directory: {}{}",
+                        shown.join("; "),
+                        if more > 0 {
+                            format!("; and {more} more")
+                        } else {
+                            String::new()
+                        }
+                    ))
                 } else {
                     None
                 }
@@ -1159,6 +1251,8 @@ fn field_label(field: SettingsField) -> &'static str {
         SettingsField::Zoom => "Display zoom",
         SettingsField::ZoomScope => "Zoom applies to",
         SettingsField::TerminalTheme => "Terminal colors",
+        SettingsField::TerminalThemeDark => "Terminal colors, dark",
+        SettingsField::TerminalThemeLight => "Terminal colors, light",
         SettingsField::CloseOnExit => "Close on exit",
         SettingsField::ScrollToBottom => "Scroll to bottom",
         SettingsField::DrawerPinned => "Show drawer",
@@ -1191,7 +1285,9 @@ fn field_description(field: SettingsField) -> &'static str {
         SettingsField::FontFamily => "Choose an installed font or the theme default",
         SettingsField::Zoom => "Scales the interface or terminals according to scope",
         SettingsField::ZoomScope => "Choose which part of this window scales",
-        SettingsField::TerminalTheme => "Default follows the interface theme",
+        SettingsField::TerminalTheme => "One palette, or one for each mode of the interface theme",
+        SettingsField::TerminalThemeDark => "Used with a dark interface theme",
+        SettingsField::TerminalThemeLight => "Used with a light interface theme",
         SettingsField::CloseOnExit => "When a terminal session ends",
         SettingsField::ScrollToBottom => {
             "Show a control that returns to the newest output while scrolled up"
@@ -1229,6 +1325,9 @@ fn display_value(field: SettingsField, value: &SettingsValue) -> String {
             "Theme default".into()
         }
         SettingsValue::Text(text) if field == SettingsField::TerminalTheme && text == "default" => {
+            "By interface mode".into()
+        }
+        SettingsValue::Text(text) if field.is_terminal_theme() && text == "default" => {
             "Follow interface theme".into()
         }
         SettingsValue::Text(text) => match (field, text.as_str()) {
@@ -1294,6 +1393,7 @@ mod wsl_tests {
 #[cfg(all(test, feature = "ui-test-support"))]
 mod tests {
     use super::{SettingsView, WriteState};
+    use crate::appearance::ThemeCatalog;
     use gpui_kit::{Entity, TestAppContext};
     use splitty_client_core::appearance::test_support::{settings_snapshot, Availability};
     use splitty_client_core::appearance::AppearanceSnapshot;
@@ -1301,6 +1401,7 @@ mod tests {
         SettingsReconciled, SettingsWriteOutcome, SettingsWriteResult,
     };
     use splitty_client_core::settings::{SettingsDomain, SettingsField, SettingsValue};
+    use std::rc::Rc;
     use std::sync::Arc;
     use uuid::Uuid;
 
@@ -1316,11 +1417,17 @@ mod tests {
     }
 
     #[test]
-    fn missing_metadata_or_catalog_keeps_confirmed_values_and_disables_only_dependent_fields() {
+    fn missing_metadata_keeps_confirmed_values_and_the_catalog_offers_themes_by_name() {
         let mut cx = TestAppContext::single();
         cx.update(gpui_kit::init);
-        let (view, window) = cx
-            .add_window_view(|window, cx| SettingsView::new(vec!["Test Mono".into()], window, cx));
+        let (view, window) = cx.add_window_view(|window, cx| {
+            SettingsView::new(
+                Rc::new(ThemeCatalog::load(None)),
+                vec!["Test Mono".into()],
+                window,
+                cx,
+            )
+        });
         let owner = Uuid::new_v4();
         window.update(|window, cx| {
             view.update(cx, |view, cx| view.set_owner(owner, window, cx));
@@ -1346,18 +1453,18 @@ mod tests {
             let selected = state.selects[&SettingsField::Theme].read(cx);
             assert_eq!(
                 selected.selected_value().map(String::as_str),
-                Some("splitty-dark")
+                Some("Splitty Dark")
             );
         });
         show(
             &view,
             window,
-            settings_snapshot(owner, 2, Availability::MissingThemes),
+            settings_snapshot(owner, 2, Availability::Full),
         );
         window.update(|_, cx| {
             let state = view.read(cx);
-            assert!(!state.enabled(SettingsField::Theme));
-            assert!(!state.enabled(SettingsField::TerminalTheme));
+            assert!(state.enabled(SettingsField::Theme));
+            assert!(state.enabled(SettingsField::TerminalTheme));
             assert!(state.enabled(SettingsField::Zoom));
             assert!(state.enabled(SettingsField::DrawerPinned));
             assert_eq!(
@@ -1365,14 +1472,60 @@ mod tests {
                 Vec::<String>::new(),
                 "no host is reconnected at start unless chosen"
             );
+            assert_eq!(state.status(SettingsField::Theme), None);
+            let choice = |field: SettingsField, label: &str| {
+                state.choices[&field]
+                    .iter()
+                    .find(|(candidate, _)| candidate == label)
+                    .map(|(_, value)| value.clone())
+            };
+            let text = |id: &str| Some(SettingsValue::Text(id.into()));
+            // Themes are offered by name and stored by identifier.
             assert_eq!(
-                state.snapshot.as_ref().unwrap().value(SettingsField::Theme),
-                Some(SettingsValue::Text("splitty-dark".into()))
+                choice(SettingsField::Theme, "Catppuccin Mocha"),
+                text("catppuccin-mocha")
             );
-            assert!(state
-                .status(SettingsField::Theme)
-                .unwrap()
-                .contains("Theme catalog unavailable"));
+            assert_eq!(
+                choice(SettingsField::Theme, "Splitty Light"),
+                text("splitty-light")
+            );
+            // A field for one mode offers that mode's entries.
+            assert_eq!(
+                choice(SettingsField::ThemeLight, "Splitty Light"),
+                text("splitty-light")
+            );
+            assert_eq!(choice(SettingsField::ThemeLight, "Catppuccin Mocha"), None);
+            assert_eq!(
+                choice(SettingsField::TerminalThemeDark, "Catppuccin Mocha"),
+                text("catppuccin-mocha")
+            );
+            assert_eq!(
+                choice(SettingsField::TerminalThemeDark, "Catppuccin Latte"),
+                None
+            );
+            // Terminal fields start with `default`.
+            assert_eq!(
+                state.choices[&SettingsField::TerminalTheme][0],
+                (
+                    "By interface mode".into(),
+                    SettingsValue::Text("default".into())
+                )
+            );
+            assert_eq!(
+                state.choices[&SettingsField::TerminalThemeLight][0],
+                (
+                    "Follow interface theme".into(),
+                    SettingsValue::Text("default".into())
+                )
+            );
+            let labels: std::collections::HashSet<_> = state.choices[&SettingsField::TerminalTheme]
+                .iter()
+                .map(|(label, _)| label)
+                .collect();
+            assert_eq!(
+                labels.len(),
+                state.choices[&SettingsField::TerminalTheme].len()
+            );
         });
     }
 
@@ -1380,8 +1533,9 @@ mod tests {
     fn rejected_and_uncertain_results_keep_confirmed_value_and_ignore_stale_identity() {
         let mut cx = TestAppContext::single();
         cx.update(gpui_kit::init);
-        let (view, window) =
-            cx.add_window_view(|window, cx| SettingsView::new(Vec::new(), window, cx));
+        let (view, window) = cx.add_window_view(|window, cx| {
+            SettingsView::new(Rc::new(ThemeCatalog::load(None)), Vec::new(), window, cx)
+        });
         let owner = Uuid::new_v4();
         window.update(|window, cx| {
             view.update(cx, |view, cx| view.set_owner(owner, window, cx));

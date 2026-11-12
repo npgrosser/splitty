@@ -465,7 +465,6 @@ impl LocalServiceClient {
                 let connection = self.connection_id;
                 let scheme = self.scheme;
                 let terminal_generation = self.terminal_generation;
-                let previous = self.last_appearance.clone();
                 self.pending = Some(Box::pin(async move {
                     let cancelled = || {
                         io::Error::new(io::ErrorKind::Interrupted, "local settings read cancelled")
@@ -503,7 +502,7 @@ impl LocalServiceClient {
                         Job::Read(Feature::Appearance, generation) => {
                             LocalServiceUpdate::Appearance(tokio::select! { biased;
                                 _ = cancel.notified() => Err(cancelled()),
-                                result = crate::appearance::local::read(&mut client, connection, generation, scheme, terminal_generation, previous, &mut observed) => result.map(Arc::new),
+                                result = crate::appearance::local::read(&mut client, connection, generation, scheme, terminal_generation, &mut observed) => result.map(Arc::new),
                             })
                         }
                         Job::Read(Feature::Profiles, generation) => {

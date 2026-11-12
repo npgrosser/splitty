@@ -150,7 +150,16 @@ impl Default for HomeConfig {
 #[serde(rename_all = "camelCase")]
 pub struct TerminalSettings {
     pub renderer: String,
+    /// The terminal palette: a name, or `default` to use `theme_dark` and
+    /// `theme_light` by the UI theme's mode.
     pub theme: String,
+    /// The palette while the UI theme is dark and `theme` is `default`: a
+    /// name, or `default` to follow the UI theme.
+    #[serde(default = "default_terminal_theme")]
+    pub theme_dark: String,
+    /// The same for a light UI theme.
+    #[serde(default = "default_terminal_theme")]
+    pub theme_light: String,
     pub close_on_exit: String,
     pub ligatures: bool,
     pub window_padding_balance: bool,
@@ -347,11 +356,17 @@ fn default_title_bar_color_mode() -> String {
     "tabBar".into()
 }
 
+fn default_terminal_theme() -> String {
+    "default".into()
+}
+
 impl Default for TerminalSettings {
     fn default() -> Self {
         Self {
             renderer: "xterm".into(),
             theme: "default".into(),
+            theme_dark: default_terminal_theme(),
+            theme_light: default_terminal_theme(),
             close_on_exit: "always".into(),
             ligatures: false,
             window_padding_balance: true,
@@ -475,8 +490,14 @@ impl HomeConfig {
         if self.terminal.renderer != "xterm" && self.terminal.renderer != "ghostty" {
             self.terminal.renderer = "xterm".into();
         }
-        if self.terminal.theme.is_empty() {
-            self.terminal.theme = "default".into();
+        for theme in [
+            &mut self.terminal.theme,
+            &mut self.terminal.theme_dark,
+            &mut self.terminal.theme_light,
+        ] {
+            if theme.is_empty() {
+                *theme = "default".into();
+            }
         }
         if !matches!(
             self.terminal.close_on_exit.as_str(),
@@ -997,6 +1018,31 @@ pub fn update_at(path: &Path, partial: Value) -> Result<HomeConfig, ConfigError>
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn the_terminal_palette_pair_defaults_persists_and_is_absent_in_older_files() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        // A file written before the pair existed.
+        fs::write(&path, "[terminal]\ntheme = 'default'\n").unwrap();
+        let cfg = load_from(&path);
+        assert_eq!(cfg.terminal.theme_dark, "default");
+        assert_eq!(cfg.terminal.theme_light, "default");
+        let defaults = &settings_metadata()["defaults"]["terminal"];
+        assert_eq!(defaults["themeDark"], "default");
+        assert_eq!(defaults["themeLight"], "default");
+
+        let updated = update_at(
+            &path,
+            serde_json::json!({"terminal": {"themeDark": "catppuccin-mocha", "themeLight": ""}}),
+        )
+        .unwrap();
+        assert_eq!(updated.terminal.theme_dark, "catppuccin-mocha");
+        // An empty name means the default.
+        assert_eq!(updated.terminal.theme_light, "default");
+        assert_eq!(load_from(&path).terminal.theme_dark, "catppuccin-mocha");
+        assert_eq!(updated.terminal.theme, "default");
+    }
 
     #[test]
     fn test_defaults() {

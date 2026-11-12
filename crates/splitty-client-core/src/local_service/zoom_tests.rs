@@ -299,8 +299,8 @@ async fn uncertain_write_is_not_retried_and_later_intent_reads_again() {
             uncertain: true,
             body: home(1.1),
         },
-        // Reconciliation is a read job between the two writes. Theme decoding
-        // fails independently; it must neither hide nor retry either mutation.
+        // Reconciliation is a read job between the two writes. Its metadata
+        // fails independently; that must neither hide nor retry either mutation.
         Exchange {
             operation: "home.get",
             status: 200,
@@ -308,7 +308,7 @@ async fn uncertain_write_is_not_retried_and_later_intent_reads_again() {
             body: home(1.1),
         },
         Exchange {
-            operation: "theme.get",
+            operation: "home.metadata",
             status: 500,
             uncertain: false,
             body: "{}".into(),
@@ -344,10 +344,12 @@ async fn uncertain_write_is_not_retried_and_later_intent_reads_again() {
     };
     assert_eq!(result.request_id, first);
     assert!(matches!(result.outcome, ZoomOutcome::Uncertain { .. }));
-    assert!(matches!(
-        next(&mut client).await,
-        LocalServiceUpdate::Appearance(Err(_))
-    ));
+    let LocalServiceUpdate::Appearance(Ok(reconciled)) = next(&mut client).await else {
+        panic!("missing reconciled appearance")
+    };
+    assert_eq!(reconciled.settings().zoom, 1.1);
+    assert!(reconciled.metadata_error().is_some());
+    drop(reconciled);
     let LocalServiceUpdate::Zoom(result) = next(&mut client).await else {
         panic!("missing second outcome")
     };
@@ -369,14 +371,9 @@ async fn queued_steps_are_one_read_and_one_write_and_the_refresh_follows_the_las
     let appearance = |level: f64| {
         [
             ("home.get", home(level)),
-            ("theme.get", theme()),
             (
                 "home.metadata",
                 splitty_core::config::settings_metadata().to_string(),
-            ),
-            (
-                "theme.list",
-                "[\"splitty-dark\",\"splitty-light\"]".to_owned(),
             ),
         ]
     };
@@ -554,13 +551,6 @@ async fn capacity_owner_saturation_and_pending_cancel_are_bounded() {
     assert!(!path.exists());
 }
 
-fn theme() -> String {
-    serde_json::to_string(&splitty_core::theme::resolve_theme(
-        "splitty-dark",
-        std::path::Path::new("/nonexistent-splitty-zoom-test"),
-    ))
-    .unwrap()
-}
 #[tokio::test]
 async fn uncertain_outcome_refresh_has_newer_generation_without_broadcast() {
     let (api, task, dir) = scripted(vec![
@@ -571,22 +561,10 @@ async fn uncertain_outcome_refresh_has_newer_generation_without_broadcast() {
             body: home(1.0),
         },
         Exchange {
-            operation: "theme.get",
-            status: 200,
-            uncertain: false,
-            body: theme(),
-        },
-        Exchange {
             operation: "home.metadata",
             status: 200,
             uncertain: false,
             body: splitty_core::config::settings_metadata().to_string(),
-        },
-        Exchange {
-            operation: "theme.list",
-            status: 200,
-            uncertain: false,
-            body: "[\"splitty-dark\",\"splitty-light\"]".into(),
         },
         Exchange {
             operation: "home.get",
@@ -613,22 +591,10 @@ async fn uncertain_outcome_refresh_has_newer_generation_without_broadcast() {
             body: home(1.1),
         },
         Exchange {
-            operation: "theme.get",
-            status: 200,
-            uncertain: false,
-            body: theme(),
-        },
-        Exchange {
             operation: "home.metadata",
             status: 200,
             uncertain: false,
             body: splitty_core::config::settings_metadata().to_string(),
-        },
-        Exchange {
-            operation: "theme.list",
-            status: 200,
-            uncertain: false,
-            body: "[\"splitty-dark\",\"splitty-light\"]".into(),
         },
     ])
     .await;
@@ -739,22 +705,10 @@ async fn drawer_visibility_confirms_only_service_value_and_refreshes_without_rep
             body: serde_json::to_string(&after).unwrap(),
         },
         Exchange {
-            operation: "theme.get",
-            status: 200,
-            uncertain: false,
-            body: theme(),
-        },
-        Exchange {
             operation: "home.metadata",
             status: 200,
             uncertain: false,
             body: splitty_core::config::settings_metadata().to_string(),
-        },
-        Exchange {
-            operation: "theme.list",
-            status: 200,
-            uncertain: false,
-            body: "[\"splitty-dark\",\"splitty-light\"]".into(),
         },
     ])
     .await;
@@ -807,22 +761,10 @@ async fn drawer_visibility_admits_one_and_distinguishes_failure_from_uncertainty
                 body: home(1.0),
             },
             Exchange {
-                operation: "theme.get",
-                status: 200,
-                uncertain: false,
-                body: theme(),
-            },
-            Exchange {
                 operation: "home.metadata",
                 status: 200,
                 uncertain: false,
                 body: splitty_core::config::settings_metadata().to_string(),
-            },
-            Exchange {
-                operation: "theme.list",
-                status: 200,
-                uncertain: false,
-                body: "[\"splitty-dark\",\"splitty-light\"]".into(),
             },
         ])
         .await;

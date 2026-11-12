@@ -20,6 +20,8 @@ pub enum SettingsField {
     Zoom,
     ZoomScope,
     TerminalTheme,
+    TerminalThemeDark,
+    TerminalThemeLight,
     CloseOnExit,
     ScrollToBottom,
     DrawerPinned,
@@ -43,7 +45,7 @@ pub enum SettingsField {
     NotificationProcessCrashed,
 }
 impl SettingsField {
-    pub const ALL: [Self; 28] = [
+    pub const ALL: [Self; 30] = [
         Self::ThemeMode,
         Self::Theme,
         Self::ThemeDark,
@@ -53,6 +55,8 @@ impl SettingsField {
         Self::Zoom,
         Self::ZoomScope,
         Self::TerminalTheme,
+        Self::TerminalThemeDark,
+        Self::TerminalThemeLight,
         Self::CloseOnExit,
         Self::ScrollToBottom,
         Self::DrawerPinned,
@@ -95,6 +99,8 @@ impl SettingsField {
             Self::Zoom => "appearance.zoom",
             Self::ZoomScope => "appearance.zoomScope",
             Self::TerminalTheme => "terminal.theme",
+            Self::TerminalThemeDark => "terminal.themeDark",
+            Self::TerminalThemeLight => "terminal.themeLight",
             Self::CloseOnExit => "terminal.closeOnExit",
             Self::ScrollToBottom => "terminal.scrollToBottom",
             Self::DrawerPinned => "drawer.pinned",
@@ -116,10 +122,22 @@ impl SettingsField {
             Self::NotificationProcessCrashed => "notifications.processCrashed",
         }
     }
-    pub(crate) fn is_theme(self) -> bool {
+    pub fn is_theme(self) -> bool {
         matches!(
             self,
-            Self::Theme | Self::ThemeDark | Self::ThemeLight | Self::TerminalTheme
+            Self::Theme
+                | Self::ThemeDark
+                | Self::ThemeLight
+                | Self::TerminalTheme
+                | Self::TerminalThemeDark
+                | Self::TerminalThemeLight
+        )
+    }
+    /// A terminal palette field, which also accepts `default`.
+    pub fn is_terminal_theme(self) -> bool {
+        matches!(
+            self,
+            Self::TerminalTheme | Self::TerminalThemeDark | Self::TerminalThemeLight
         )
     }
 }
@@ -369,7 +387,7 @@ mod tests {
                 .into_iter()
                 .filter(|field| field.domain() == SettingsDomain::Appearance)
                 .count(),
-            22
+            24
         );
     }
 }

@@ -3,6 +3,7 @@ use std::{env, fs, path::PathBuf};
 const VERSION: &str = "1.0.0";
 
 fn main() {
+    bundle_themes();
     println!("cargo:rerun-if-env-changed=GHOSTTY_VT_DIR");
 
     let prefix = env::var_os("GHOSTTY_VT_DIR")
@@ -120,4 +121,64 @@ END
     embed_resource::compile(&path, embed_resource::NONE)
         .manifest_required()
         .expect("compile the Windows resources");
+}
+
+/// Embed the theme files of `themes/` as two tables of `(name, text)`: the UI
+/// theme sets (`ui/**/*.json`) and the terminal palettes (`terminal/*/*`).
+/// Splitty's own files come first, so they keep their names against a
+/// third-party file of the same name.
+fn bundle_themes() {
+    let root =
+        PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").expect("Cargo sets it")).join("themes");
+    println!("cargo:rerun-if-changed={}", root.display());
+    let files = |directory: PathBuf| -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("cannot read {}: {error}", directory.display()))
+            .map(|entry| entry.expect("readable theme directory").path())
+            .filter(|path| path.is_file())
+            .collect();
+        files.sort();
+        files
+    };
+    let name = |path: &PathBuf| {
+        path.file_name()
+            .unwrap()
+            .to_str()
+            .expect("UTF-8 name")
+            .to_owned()
+    };
+    let entry = |name: &str, path: &PathBuf| {
+        format!(
+            "    ({name:?}, include_str!({:?})),\n",
+            path.to_str().expect("UTF-8 path")
+        )
+    };
+    let mut ui = String::new();
+    for path in files(root.join("ui"))
+        .into_iter()
+        .chain(files(root.join("ui/gpui-kit")))
+        .filter(|path| {
+            path.extension()
+                .is_some_and(|extension| extension == "json")
+        })
+    {
+        ui.push_str(&entry(&name(&path), &path));
+    }
+    let mut palettes = String::new();
+    for path in files(root.join("terminal/splitty"))
+        .into_iter()
+        .chain(files(root.join("terminal/iterm2")))
+        .filter(|path| !matches!(name(path).as_str(), "LICENSE" | "SOURCE.md"))
+    {
+        palettes.push_str(&entry(&name(&path), &path));
+    }
+    let out = PathBuf::from(env::var_os("OUT_DIR").expect("Cargo sets OUT_DIR"));
+    fs::write(
+        out.join("bundled_themes.rs"),
+        format!(
+            "pub static UI_THEME_SETS: &[(&str, &str)] = &[\n{ui}];\n\
+             pub static TERMINAL_PALETTES: &[(&str, &str)] = &[\n{palettes}];\n"
+        ),
+    )
+    .expect("write the bundled theme tables");
 }

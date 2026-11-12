@@ -237,7 +237,9 @@ More in [`docs/architecture.md`](docs/architecture.md).
 
 The settings (Ctrl+,) are saved in `config.toml` in `~/.config/splitty/`
 (macOS: `~/Library/Application Support/splitty/`). Custom themes go into a
-`themes/` folder next to it.
+`themes/` folder next to it: UI themes as GPUI Kit theme sets (`*.json`) and
+terminal palettes as Ghostty theme files. [Themes](docs/themes.md) describes
+both and what ships with the app.
 
 ## Security
 

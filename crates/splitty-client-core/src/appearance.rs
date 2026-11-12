@@ -1,14 +1,11 @@
-//! Read-only local appearance. Settings and theme resolution remain service-owned.
+//! Read-only local appearance. Settings remain service-owned; they name the UI
+//! theme and terminal palette, which the application resolves in its own catalog.
 //!
 //! A snapshot owns its decoded allocation leases through presentation. The local
 //! reader uses a separate API stream: its request helper must never consume the
 //! session stream, where unrelated frames carry terminal output and credits.
-use splitty_core::{
-    config::{AppearanceSettings, DrawerSettings, RemoteSettings},
-    theme::ResolvedTheme,
-};
+use splitty_core::config::{AppearanceSettings, DrawerSettings, RemoteSettings};
 use splitty_transport::budget::Charged;
-use std::sync::Arc;
 use uuid::Uuid;
 
 use crate::settings::{
@@ -35,6 +32,12 @@ pub fn terminal_font_data() -> Option<std::borrow::Cow<'static, [u8]>> {
     Some(std::borrow::Cow::Borrowed(include_bytes!(
         "../../../frontend/public/JetBrainsMonoNerdFontMono-Regular.ttf"
     )))
+}
+
+/// The directory of this computer whose files add UI themes and terminal
+/// palettes to the bundled ones.
+pub fn themes_dir() -> std::path::PathBuf {
+    splitty_core::config::themes_dir()
 }
 
 pub(crate) mod local;
@@ -95,14 +98,10 @@ pub struct AppearanceSnapshot {
     connection_id: Uuid,
     generation: u64,
     settings: Charged<HomePresentation>,
-    theme: Arc<Charged<ResolvedTheme>>,
-    terminal_theme: Option<Arc<Charged<ResolvedTheme>>>,
+    scheme: ColorScheme,
     terminal_generation: u64,
-    terminal_palette_error: Option<String>,
     metadata: Option<Charged<SettingsMetadata>>,
-    themes: Option<Charged<Vec<String>>>,
     metadata_error: Option<String>,
-    themes_error: Option<String>,
 }
 
 impl AppearanceSnapshot {
@@ -124,9 +123,6 @@ impl AppearanceSnapshot {
     pub fn metadata(&self) -> Option<&SettingsMetadata> {
         self.metadata.as_deref()
     }
-    pub fn themes(&self) -> Option<&[String]> {
-        self.themes.as_ref().map(|v| v.as_slice())
-    }
     pub fn metadata_error(&self) -> Option<&str> {
         self.metadata_error.as_deref()
     }
@@ -134,20 +130,8 @@ impl AppearanceSnapshot {
     pub fn editors(&self) -> &splitty_core::config::EditorSettings {
         &self.settings.editors
     }
-    pub fn themes_error(&self) -> Option<&str> {
-        self.themes_error.as_deref()
-    }
-    pub fn terminal_theme(&self) -> &ResolvedTheme {
-        self.terminal_theme
-            .as_deref()
-            .map(|t| &**t)
-            .unwrap_or(&self.theme)
-    }
     pub fn terminal_generation(&self) -> u64 {
         self.terminal_generation
-    }
-    pub fn terminal_palette_error(&self) -> Option<&str> {
-        self.terminal_palette_error.as_deref()
     }
     pub fn value(&self, field: SettingsField) -> Option<SettingsValue> {
         use SettingsField as F;
@@ -163,6 +147,8 @@ impl AppearanceSnapshot {
             F::Zoom => V::Number(a.zoom),
             F::ZoomScope => V::Text(a.zoom_scope.clone()),
             F::TerminalTheme => V::Text(self.terminal().theme().into()),
+            F::TerminalThemeDark => V::Text(self.terminal().theme_dark().into()),
+            F::TerminalThemeLight => V::Text(self.terminal().theme_light().into()),
             F::CloseOnExit => V::Text(self.terminal().close_on_exit().into()),
             F::ScrollToBottom => V::Bool(self.terminal().scroll_to_bottom()),
             F::DrawerPinned => V::Bool(self.drawer().pinned),
@@ -195,18 +181,11 @@ impl AppearanceSnapshot {
             .metadata()
             .ok_or_else(|| std::io::Error::other("Settings metadata is unavailable"))?;
         let field = edit.field();
+        // A theme name is checked against the application's catalog, which
+        // offers the choices; the service stores the name as it is.
         let valid = if field.is_theme() {
-            match edit.value() {
-                SettingsValue::Text(name)
-                    if field == SettingsField::TerminalTheme && name == "default" =>
-                {
-                    metadata.default_value(field).is_some()
-                }
-                SettingsValue::Text(name) => {
-                    self.themes().is_some_and(|names| names.contains(name))
-                }
-                _ => false,
-            }
+            matches!(edit.value(), SettingsValue::Text(_))
+                && metadata.default_value(field).is_some()
         } else if matches!(
             field,
             SettingsField::FontFamily
@@ -234,15 +213,13 @@ impl AppearanceSnapshot {
             ))
         }
     }
-    /// The resolved theme variant, which can differ from the OS preference.
-    pub fn scheme(&self) -> ColorScheme {
-        match self.theme.variant {
-            splitty_core::theme::Variant::Light => ColorScheme::Light,
-            splitty_core::theme::Variant::Dark => ColorScheme::Dark,
-        }
+    /// The operating system's preference this snapshot was read for.
+    pub fn os_scheme(&self) -> ColorScheme {
+        self.scheme
     }
-    pub fn theme(&self) -> &ResolvedTheme {
-        &self.theme
+    /// The name of the UI theme the settings select for that preference.
+    pub fn ui_theme(&self) -> &str {
+        theme_name(self.settings(), self.scheme)
     }
 }
 

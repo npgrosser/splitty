@@ -43,7 +43,7 @@ model {
     }
 
     gpui_appearance = component 'gpui_appearance' {
-      description 'Bounded UI font and zoom projection, independent terminal palettes and synchronized Kit semantic colors from service-owned appearance snapshots; palette changes preserve terminal typography and history.'
+      description 'Theme catalog of bundled and user files (toolkit theme sets, Ghostty-format terminal palettes), workspace chrome derived from the toolkit theme and its optional splitty block, terminal palette selection, and the bounded UI font and zoom projection from service-owned settings; palette changes preserve terminal typography and history.'
       metadata { module 'splitty_gpui::appearance' }
     }
 

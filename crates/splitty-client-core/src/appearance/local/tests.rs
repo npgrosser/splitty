@@ -1,4 +1,5 @@
 use super::*;
+use crate::appearance::theme_name;
 use crate::local_service::{LocalServiceClient, LocalServiceUpdate};
 use splitty_transport::wire;
 const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
@@ -154,10 +155,8 @@ async fn reads_keep_allocations_charged_and_session_events_separate() {
     assert_eq!(snapshot.settings().font_family, "test monospace");
     assert!(snapshot.drawer().pinned);
     assert_eq!(snapshot.drawer().sidebar_width, 200);
-    assert_eq!(
-        snapshot.theme().variant,
-        splitty_core::theme::Variant::Light
-    );
+    assert_eq!(snapshot.os_scheme(), ColorScheme::Light);
+    assert_eq!(snapshot.ui_theme(), "splitty-light");
     assert_eq!(snapshot.connection_id(), session.connection_id());
     let event = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
@@ -209,7 +208,7 @@ async fn cancelled_poll_retains_read_and_refresh_discards_superseded_generation(
     let result = snapshot(&mut reader).await;
     assert_eq!(result.generation(), 3);
     assert_eq!(result.drawer().sidebar_width, 340);
-    assert_eq!(result.theme().variant, splitty_core::theme::Variant::Light);
+    assert_eq!(result.os_scheme(), ColorScheme::Light);
     drop(result);
     reader.finish().await.unwrap();
     service.close().await.unwrap();
@@ -355,7 +354,7 @@ async fn read_error_is_reported_once_and_explicit_refresh_recovers() {
 }
 
 #[tokio::test]
-async fn editor_reads_service_defaults_limits_and_catalog_without_writes() {
+async fn editor_reads_service_defaults_and_limits_without_writes() {
     use crate::settings::{SettingsField as F, SettingsValue as V};
     let (service, path) = fixture();
     let api = Connector::default()
@@ -387,20 +386,29 @@ async fn editor_reads_service_defaults_limits_and_catalog_without_writes() {
     assert!(size.values().contains(&0.0));
     assert!(size.values().contains(&8.0));
     assert!(!size.values().contains(&7.0));
-    assert!(current
-        .themes()
-        .unwrap()
-        .iter()
-        .any(|name| name == "splitty-light"));
+    for field in [F::TerminalThemeDark, F::TerminalThemeLight] {
+        assert_eq!(
+            metadata.default_value(field),
+            Some(V::Text("default".into()))
+        );
+        assert_eq!(current.value(field), Some(V::Text("default".into())));
+    }
+    // A theme name is free text here: the application's catalog offers the choices.
+    for field in [F::ThemeDark, F::TerminalTheme, F::TerminalThemeLight] {
+        assert!(current
+            .validate_edit(
+                &crate::settings::SettingsEdit::new(field, V::Text("any-theme".into())).unwrap()
+            )
+            .is_ok());
+    }
     assert!(current.metadata_error().is_none());
-    assert!(current.themes_error().is_none());
     reader.finish().await.unwrap();
     service.close().await.unwrap();
     assert!(!path.exists());
 }
 
 #[tokio::test]
-async fn terminal_palette_is_independent_inherits_and_retains_last_valid_on_failure() {
+async fn terminal_palette_names_pass_through_unresolved() {
     let (service, path) = fixture();
     service.state.config.write().unwrap().terminal.theme = "splitty-light".into();
     let api = Connector::default()
@@ -410,34 +418,41 @@ async fn terminal_palette_is_independent_inherits_and_retains_last_valid_on_fail
     let owner = Uuid::new_v4();
     let mut reader = LocalServiceClient::new(api, owner, ColorScheme::Dark);
     let first = snapshot(&mut reader).await;
-    assert_eq!(first.theme().id.as_deref(), Some("splitty-dark"));
-    assert_eq!(first.terminal_theme().id.as_deref(), Some("splitty-light"));
-    assert!(first.terminal_palette_error().is_none());
+    assert_eq!(first.ui_theme(), "splitty-dark");
+    assert_eq!(first.terminal().theme(), "splitty-light");
+    assert_eq!(first.terminal().theme_dark(), "default");
+    assert_eq!(first.terminal().theme_light(), "default");
     service.state.config.write().unwrap().terminal.theme = "missing-palette".into();
     reader.refresh_settings(owner).unwrap();
     let missing = snapshot(&mut reader).await;
     assert_eq!(missing.terminal().theme(), "missing-palette");
-    assert_eq!(
-        missing.terminal_theme().id.as_deref(),
-        Some("splitty-light")
-    );
-    assert!(missing.terminal_palette_error().is_some());
+    assert_eq!(missing.ui_theme(), "splitty-dark");
     assert!(missing.terminal_generation() > first.terminal_generation());
-    service.state.config.write().unwrap().terminal.theme = "default".into();
+    {
+        let mut config = service.state.config.write().unwrap();
+        config.terminal.theme = "default".into();
+        config.terminal.theme_dark = "night-palette".into();
+        config.terminal.theme_light = "day-palette".into();
+    }
     reader.refresh_settings(owner).unwrap();
-    let inherited = snapshot(&mut reader).await;
-    assert_eq!(inherited.terminal_theme().id, inherited.theme().id);
+    let pair = snapshot(&mut reader).await;
+    assert_eq!(pair.terminal().theme(), "default");
+    assert_eq!(pair.terminal().theme_dark(), "night-palette");
+    assert_eq!(pair.terminal().theme_light(), "day-palette");
     reader.set_scheme(owner, ColorScheme::Light).unwrap();
     let light = snapshot(&mut reader).await;
-    assert_eq!(light.terminal_theme().id.as_deref(), Some("splitty-light"));
-    assert!(light.terminal_palette_error().is_none());
+    assert_eq!(light.os_scheme(), ColorScheme::Light);
+    assert_eq!(light.ui_theme(), "splitty-light");
+    assert_eq!(light.terminal().theme_dark(), "night-palette");
+    assert_eq!(light.terminal().theme_light(), "day-palette");
+    assert!(light.terminal_generation() > pair.terminal_generation());
     reader.finish().await.unwrap();
     service.close().await.unwrap();
     assert!(!path.exists());
 }
 
 #[tokio::test]
-async fn superseded_palette_does_not_replace_current_local_palette() {
+async fn superseded_read_does_not_replace_current_palette_name() {
     let (service, path) = fixture();
     let api = Connector::default()
         .embedded(service.state.clone(), Role::Main)
@@ -457,7 +472,6 @@ async fn superseded_palette_does_not_replace_current_local_palette() {
         latest.terminal_generation(),
         first.terminal_generation() + 2
     );
-    assert_eq!(latest.terminal_theme().id.as_deref(), Some("splitty-dark"));
     assert_eq!(latest.terminal().theme(), "splitty-dark");
     reader.finish().await.unwrap();
     service.close().await.unwrap();

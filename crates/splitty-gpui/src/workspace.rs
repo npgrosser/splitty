@@ -29,7 +29,7 @@ mod transfer;
 mod unread;
 mod viewer;
 
-use crate::appearance::NativeAppearance;
+use crate::appearance::{NativeAppearance, ThemeCatalog};
 use crate::terminal::{self, Terminal};
 use gpui_kit::assets::IconName;
 use gpui_kit::base::input::{Input, InputEvent, InputState};
@@ -1059,6 +1059,9 @@ pub struct Workspace {
     scroll_to_bottom: bool,
     /// Which editor opens what when a pane's process asks.
     editor_prefs: splitty_client_core::native_workspace::EditorSettings,
+    /// The themes and palettes the settings can name; reloaded with the
+    /// settings view.
+    themes: Rc<ThemeCatalog>,
     appearance_error: Option<String>,
     appearance_generation: u64,
     drawer_visible: bool,
@@ -1345,7 +1348,11 @@ impl Workspace {
         let ui_family = typography.sans.to_string();
         let mono_family = typography.mono.to_string();
         let available_fonts = window.text_system().all_font_names();
-        let settings = cx.new(|cx| SettingsView::new(available_fonts, window, cx));
+        let themes = Rc::new(ThemeCatalog::load(Some(
+            &splitty_client_core::appearance::themes_dir(),
+        )));
+        let settings_themes = themes.clone();
+        let settings = cx.new(|cx| SettingsView::new(settings_themes, available_fonts, window, cx));
         let settings_subscription = cx.subscribe_in(
             &settings,
             window,
@@ -1427,6 +1434,7 @@ impl Workspace {
                 visible_pending: false,
                 status: "Starting local workspace…".into(),
                 appearance: NativeAppearance::fallback(&ui_family),
+                themes,
                 tab_prefs: TabPrefs::default(),
                 scroll_to_bottom: true,
                 editor_prefs: Default::default(),
@@ -1562,6 +1570,7 @@ impl Workspace {
         let available_fonts = window.text_system().all_font_names();
         let mut next = NativeAppearance::from_snapshot(
             snapshot,
+            &self.themes,
             &available_fonts,
             &self.ui_family,
             &self.mono_family,
@@ -1588,7 +1597,7 @@ impl Workspace {
         if self.drawer_visible {
             self.drawer_overlay_open = false;
         }
-        next.apply_component_theme(snapshot.scheme(), cx);
+        next.apply_component_theme(cx);
         let mut failure = None;
         self.scroll_to_bottom = snapshot.terminal().scroll_to_bottom();
         let scroll_to_bottom = self.scroll_to_bottom;
@@ -1611,8 +1620,7 @@ impl Workspace {
         self.editor_prefs = snapshot.editors().clone();
         self.appearance = next;
         self.appearance_generation = snapshot.generation();
-        self.appearance_error =
-            failure.or_else(|| snapshot.terminal_palette_error().map(str::to_owned));
+        self.appearance_error = failure;
         self.settings.update(cx, |view, cx| {
             view.set_snapshot(snapshot.clone(), window, cx)
         });
@@ -1654,7 +1662,15 @@ impl Workspace {
         self.cancel_remote_create_follow();
         self.wheel_navigation.reset();
         self.sync_visible(cx);
-        self.settings.update(cx, |view, cx| view.focus(window, cx));
+        // Files added to the themes directory since the last visit are offered.
+        self.themes = Rc::new(ThemeCatalog::load(Some(
+            &splitty_client_core::appearance::themes_dir(),
+        )));
+        let themes = self.themes.clone();
+        self.settings.update(cx, |view, cx| {
+            view.set_themes(themes, window, cx);
+            view.focus(window, cx)
+        });
         cx.notify();
     }
 
@@ -5929,8 +5945,8 @@ impl Render for Workspace {
         }
         if let Some(error) = &self.appearance_error {
             messages.push(format!("Appearance: {error}"));
-        } else if let Some(notice) = self.appearance.notice {
-            messages.push(notice.to_owned());
+        } else if let Some(notice) = &self.appearance.notice {
+            messages.push(notice.clone());
         }
         if let Some(error) = &self.profiles_error {
             messages.push(format!("Profiles: {error}"));

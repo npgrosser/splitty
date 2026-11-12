@@ -1,10 +1,23 @@
-//! Convert service-owned theme values into the bounded native presentation subset.
-//! This adapter never reads settings files or changes terminal font metrics.
+//! The native presentation of the selected UI theme and terminal palette.
+//!
+//! A UI theme is a theme of the component toolkit, applied to its components
+//! as it is. The workspace chrome takes its own colors and sizes from the
+//! theme's optional `splitty` block and derives the rest from the toolkit
+//! colors. The terminal takes its colors from a palette in Ghostty's format.
+//! This module never writes settings or changes terminal font metrics.
 use crate::terminal::TerminalColors;
-use gpui_kit::component::theme::{Theme, ThemeColor, ThemeMode};
+use gpui_kit::component::highlighter::HighlightTheme;
+use gpui_kit::component::theme::{Theme, ThemeColor, ThemeConfig, ThemeMode};
 use gpui_kit::{px, rgb, App, Hsla, Rgba};
 use splitty_client_core::appearance::{AppearanceSnapshot, ColorScheme};
 use splitty_client_core::zoom::Zoom;
+use std::rc::Rc;
+
+mod catalog;
+mod palette;
+
+pub use catalog::{ChromeBlock, Maybe, ThemeCatalog, UiTheme};
+pub use palette::TerminalPalette;
 
 /// A solid border of the given width and color.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -36,33 +49,54 @@ pub struct NativeAppearance {
     pub accent: u32,
     pub font_family: String,
     pub font_size: f32,
-    /// Group tab bar sizing from the theme's `tab-height` and `tab-font-size`.
+    /// Group tab bar sizing.
     pub tab_height: f32,
     pub tab_font_size: f32,
-    /// The selected tab's line from the theme's `tab-accent-*` tokens; `None`
-    /// when the theme makes it transparent.
+    /// The selected tab's line; `None` when the theme has none.
     pub tab_accent: Option<TabAccent>,
-    /// Menus: the theme's `danger`, `danger-hover` and `border-radius`.
+    /// Menus: destructive entries and the corner radius.
     pub danger: u32,
     pub danger_hover: u32,
     pub radius: f32,
-    /// Status colors from the theme's `success` and `warning`, as host
-    /// connection dots use them.
+    /// Status colors, as host connection dots use them.
     pub success: u32,
     pub warning: u32,
     /// Translucent `0xRRGGBBAA` colors drawn over content: the drop marker's
-    /// fill (`hover-bg`) and menu shadows (`shadow`).
+    /// fill and menu shadows.
     pub hover_overlay: u32,
     pub shadow: u32,
-    /// The drop marker's border from `drag-over-border`, if the theme has one.
+    /// The drop marker's border, if the theme has one.
     pub drag_over_border: Option<DragOverBorder>,
     pub terminal: TerminalColors,
     pub selection_foreground: u32,
     pub selection_background: u32,
     pub zoom: Zoom,
-    pub notice: Option<&'static str>,
-    component_palette: ComponentPalette,
+    /// What of the selection could not be shown as asked.
+    pub notice: Option<String>,
+    /// The mode of the shown UI theme, which can differ from the system's.
+    pub scheme: ColorScheme,
+    /// The toolkit theme the components use; `None` keeps the toolkit default.
+    config: Option<Rc<ThemeConfig>>,
 }
+
+/// The theme names of the settings and the system's preference.
+#[derive(Clone, Copy, Debug)]
+pub struct ThemeSelection<'a> {
+    pub ui_theme: &'a str,
+    pub os_scheme: ColorScheme,
+    /// A palette name, or `default` for the pair below.
+    pub terminal_theme: &'a str,
+    /// The palettes by the UI theme's mode: a name, or `default` to follow
+    /// the UI theme.
+    pub terminal_theme_dark: &'a str,
+    pub terminal_theme_light: &'a str,
+    /// 0 for the theme's size.
+    pub font_size: i32,
+    /// Empty for the theme's family.
+    pub font_family: &'a str,
+}
+
+const DEFAULT_FONT_SIZE: f32 = 12.;
 
 impl NativeAppearance {
     pub fn fallback(ui_family: &str) -> Self {
@@ -96,159 +130,252 @@ impl NativeAppearance {
             selection_background: 0x345778,
             zoom: Zoom::from_values(1.0, "window"),
             notice: None,
-            component_palette: ComponentPalette::default(),
+            scheme: ColorScheme::Dark,
+            config: None,
         }
     }
 
     pub fn from_snapshot(
         snapshot: &AppearanceSnapshot,
+        catalog: &ThemeCatalog,
+        available_fonts: &[String],
+        ui_family: &str,
+        mono_family: &str,
+    ) -> Self {
+        let settings = snapshot.settings();
+        let terminal = snapshot.terminal();
+        let mut result = Self::resolve(
+            &ThemeSelection {
+                ui_theme: snapshot.ui_theme(),
+                os_scheme: snapshot.os_scheme(),
+                terminal_theme: terminal.theme(),
+                terminal_theme_dark: terminal.theme_dark(),
+                terminal_theme_light: terminal.theme_light(),
+                font_size: settings.font_size,
+                font_family: &settings.font_family,
+            },
+            catalog,
+            available_fonts,
+            ui_family,
+            mono_family,
+        );
+        result.zoom = Zoom::from_values(settings.zoom, &settings.zoom_scope);
+        result
+    }
+
+    /// The presentation of a selection. A name the catalog does not have
+    /// falls back to a default and is reported in `notice`; the stored
+    /// setting is not touched.
+    pub fn resolve(
+        selection: &ThemeSelection,
+        catalog: &ThemeCatalog,
         available_fonts: &[String],
         ui_family: &str,
         mono_family: &str,
     ) -> Self {
         let mut result = Self::fallback(ui_family);
-        let ui = &snapshot.theme().ui;
-        let terminal = &snapshot.terminal_theme().terminal;
-        let mut fallback_used = false;
-        let mut color = |value: &str, background: u32, fallback: u32| {
-            parse_color(value)
-                .map(|color| color.over(background))
-                .unwrap_or_else(|| {
-                    fallback_used = true;
-                    fallback
-                })
-        };
-        result.surface = color(&ui.surface_base, result.surface, result.surface);
-        result.raised = color(&ui.surface_raised, result.surface, result.raised);
-        result.overlay = color(&ui.surface_overlay, result.raised, result.overlay);
-        result.text = color(&ui.text_primary, result.surface, result.text);
-        result.secondary = color(&ui.text_secondary, result.surface, result.secondary);
-        result.muted = color(&ui.text_muted, result.surface, result.muted);
-        result.border = color(&ui.border_default, result.surface, result.border);
-        result.subtle_border = color(&ui.border_subtle, result.surface, result.subtle_border);
-        result.active = color(&ui.active_bg, result.raised, result.active);
-        result.hover = color(&ui.hover_bg, result.raised, result.hover);
-        result.danger = color(&ui.danger, result.overlay, result.danger);
-        result.danger_hover = color(&ui.danger_hover, result.overlay, result.danger_hover);
-        result.success = color(&ui.success, result.surface, result.success);
-        result.warning = color(&ui.warning, result.surface, result.warning);
-        result.accent = color(&ui.accent, result.surface, result.accent);
-        result.terminal.background =
-            color(&terminal.bg, result.surface, result.terminal.background);
-        let background = result.terminal.background;
-        result.terminal.foreground = color(&terminal.fg, background, result.terminal.foreground);
-        result.terminal.cursor = color(&terminal.cursor, background, result.terminal.cursor);
-        result.selection_background = color(
-            &terminal.selection_bg,
-            background,
-            result.selection_background,
-        );
-        result.selection_foreground = color(
-            &terminal.selection_fg,
-            result.selection_background,
-            result.terminal.foreground,
-        );
-        let ansi = [
-            &terminal.black,
-            &terminal.red,
-            &terminal.green,
-            &terminal.yellow,
-            &terminal.blue,
-            &terminal.magenta,
-            &terminal.cyan,
-            &terminal.white,
-            &terminal.bright_black,
-            &terminal.bright_red,
-            &terminal.bright_green,
-            &terminal.bright_yellow,
-            &terminal.bright_blue,
-            &terminal.bright_magenta,
-            &terminal.bright_cyan,
-            &terminal.bright_white,
-        ];
-        for (target, value) in result.terminal.ansi.iter_mut().zip(ansi) {
-            *target = color(value, background, *target);
-        }
-        let mut sizing = |value: &str, min: f32, max: f32, fallback: f32| {
-            theme_px(value, min, max).unwrap_or_else(|| {
-                fallback_used = true;
-                fallback
-            })
-        };
-        result.tab_height = sizing(&ui.tab_height, 16., 64., result.tab_height);
-        result.tab_font_size = sizing(&ui.tab_font_size, 8., 24., result.tab_font_size);
-        let accent_thickness = sizing(&ui.tab_accent_thickness, 0., 8., 2.);
-        result.radius = sizing(&ui.border_radius, 0., 24., result.radius);
-        result.tab_accent = tab_accent(
-            &ui.tab_accent_color,
-            accent_thickness,
-            &ui.tab_accent_position,
-            result.raised,
-        )
-        .unwrap_or_else(|| {
-            fallback_used = true;
-            None
+        let mut problems = Vec::new();
+        let theme = catalog.ui(selection.ui_theme).or_else(|| {
+            problems.push(format!(
+                "Theme “{}” is unavailable; the default theme is shown.",
+                selection.ui_theme
+            ));
+            catalog.default_ui(selection.os_scheme)
         });
-        let mut translucent = |value: &str, fallback: u32| {
-            parse_color(value).map(Color::rgba).unwrap_or_else(|| {
-                fallback_used = true;
-                fallback
-            })
+        let Some(theme) = theme else {
+            result.notice = Some(problems.join(" "));
+            return result;
         };
-        result.hover_overlay = translucent(&ui.hover_bg, result.hover_overlay);
-        result.shadow = translucent(&ui.shadow, result.shadow);
-        result.drag_over_border = drag_over_border(&ui.drag_over_border).unwrap_or_else(|| {
-            fallback_used = true;
-            None
-        });
-        let settings = snapshot.settings();
-        result.zoom = Zoom::from_values(settings.zoom, &settings.zoom_scope);
-        let (size, invalid_size) = chrome_font_size(settings.font_size, &ui.font_size);
-        result.font_size = size;
-        fallback_used |= invalid_size;
-        let family = if settings.font_family.trim().is_empty() {
-            &ui.font_family
+        result.scheme = theme.scheme;
+        result.config = Some(theme.config.clone());
+        let dark = theme.scheme == ColorScheme::Dark;
+        let mut kit = Theme::from(&*if dark {
+            ThemeColor::dark()
         } else {
-            &settings.font_family
-        };
-        match choose_font(family, available_fonts, ui_family, mono_family) {
-            Some(family) => result.font_family = family,
-            None => fallback_used = true,
+            ThemeColor::light()
+        });
+        kit.apply_config(&theme.config);
+        result.derive_chrome(&kit, dark);
+        let (theme_font_size, theme_font_family, valid) = result.apply_block(&theme.chrome);
+        if !valid {
+            problems.push(format!(
+                "Some `splitty` values of theme “{}” are unsupported; derived values are in use.",
+                theme.name
+            ));
         }
-        // Terminal colors remain exactly the selected palette.
-        (result.text, result.secondary, result.muted) =
-            chrome_text(result.text, result.secondary, result.muted, result.surface);
-        let mut token = |value: &str, background| {
-            let parsed = parse_color(value).map(|color| color.over(background));
-            fallback_used |= parsed.is_none();
-            parsed
+        // Primary text is kept readable on the surface, while secondary and
+        // muted text keep the theme's values: their low contrast is how a
+        // theme subdues idle entries against running and selected ones.
+        result.text = readable_rgb(result.text, result.surface);
+
+        result.font_size = if (8..=24).contains(&selection.font_size) {
+            selection.font_size as f32
+        } else {
+            theme_font_size.unwrap_or(DEFAULT_FONT_SIZE)
         };
-        result.component_palette = ComponentPalette {
-            surface: token(&ui.surface_base, result.surface),
-            raised: token(&ui.surface_raised, result.surface),
-            overlay: token(&ui.surface_overlay, result.raised),
-            text: token(&ui.text_primary, result.surface),
-            secondary: token(&ui.text_secondary, result.surface),
-            border: token(&ui.border_default, result.surface),
-            subtle_border: token(&ui.border_subtle, result.raised),
-            hover: token(&ui.hover_bg, result.raised),
-            active: token(&ui.active_bg, result.raised),
-            accent: token(&ui.accent, result.surface),
-            danger: token(&ui.danger, result.surface),
-            warning: token(&ui.warning, result.surface),
-            success: token(&ui.success, result.surface),
-            scrollbar: token(&ui.scrollbar, result.raised),
+        let family = if selection.font_family.trim().is_empty() {
+            theme_font_family
+        } else {
+            Some(selection.font_family)
         };
-        result.notice = fallback_used
-            .then_some("Some theme values are unsupported; native defaults are in use.");
+        if let Some(family) = family {
+            match choose_font(family, available_fonts, ui_family, mono_family) {
+                Some(family) => result.font_family = family,
+                None => problems.push("The interface font is not installed.".to_owned()),
+            }
+        }
+
+        match terminal_palette(selection, theme, catalog, &mut problems) {
+            Some(palette) => {
+                result.terminal = palette.colors;
+                result.selection_background = palette.selection_background.unwrap_or_else(|| {
+                    mix(palette.colors.background, palette.colors.foreground, 0.25)
+                });
+                result.selection_foreground = palette
+                    .selection_foreground
+                    .unwrap_or(palette.colors.foreground);
+            }
+            None => problems.push("No terminal palette is available.".to_owned()),
+        }
+        result.notice = (!problems.is_empty()).then(|| problems.join(" "));
         result
     }
 
-    /// Mode defaults are loaded before the product palette. `Theme::update`
-    /// synchronizes solid colors, render tokens and the Base layer together.
-    pub fn apply_component_theme(&self, scheme: ColorScheme, cx: &mut App) {
+    /// The chrome a theme without a `splitty` block gets from its toolkit
+    /// colors.
+    fn derive_chrome(&mut self, kit: &Theme, dark: bool) {
+        let colors = &kit.colors;
+        self.surface = solid(colors.background, if dark { 0 } else { 0xffffff });
+        self.raised = solid(colors.title_bar, self.surface);
+        self.overlay = solid(colors.popover, self.surface);
+        self.text = solid(colors.foreground, self.surface);
+        self.secondary = solid(colors.muted_foreground, self.surface);
+        self.muted = mix(self.secondary, self.surface, 0.35);
+        self.border = solid(colors.border, self.surface);
+        self.subtle_border = solid(colors.title_bar_border, self.raised);
+        self.active = solid(colors.accent, self.raised);
+        // A selected entry has to stand out from the surface it lies on.
+        if contrast(rgb(self.active).into(), rgb(self.raised).into()) < 1.08 {
+            self.active = mix(self.raised, self.text, 0.12);
+        }
+        self.hover = mix(self.raised, self.active, 0.5);
+        self.accent = solid(colors.primary, self.surface);
+        self.danger = solid(colors.danger, self.overlay);
+        self.danger_hover = mix(self.overlay, self.danger, 0.18);
+        self.success = solid(colors.success, self.surface);
+        self.warning = solid(colors.warning, self.surface);
+        self.radius = f32::from(kit.radius).clamp(0., 24.);
+        self.hover_overlay = (self.text << 8) | 0x0f;
+        self.shadow = if dark { 0x00000073 } else { 0x00000033 };
+        self.drag_over_border = None;
+        self.tab_height = 32.;
+        self.tab_font_size = 12.;
+        self.tab_accent = None;
+    }
+
+    /// Lay the theme's `splitty` block over the derived chrome. Returns the
+    /// block's font size and family and whether every present value was
+    /// supported; an unsupported one keeps its derived value.
+    fn apply_block<'a>(&mut self, block: &'a ChromeBlock) -> (Option<f32>, Option<&'a str>, bool) {
+        let mut valid = true;
+        let mut color = |target: &mut u32, value: &Option<String>, under: u32| {
+            if let Some(value) = value {
+                match parse_color(value) {
+                    Some(color) => *target = color.over(under),
+                    None => valid = false,
+                }
+            }
+        };
+        let surface = self.surface;
+        color(&mut self.surface, &block.surface, surface);
+        let surface = self.surface;
+        color(&mut self.raised, &block.raised, surface);
+        let raised = self.raised;
+        color(&mut self.overlay, &block.overlay, raised);
+        let overlay = self.overlay;
+        color(&mut self.text, &block.text, surface);
+        color(&mut self.secondary, &block.text_secondary, surface);
+        color(&mut self.muted, &block.text_muted, surface);
+        color(&mut self.border, &block.border, surface);
+        color(&mut self.subtle_border, &block.border_subtle, surface);
+        color(&mut self.active, &block.active, raised);
+        color(&mut self.hover, &block.hover, raised);
+        color(&mut self.accent, &block.accent, surface);
+        color(&mut self.danger, &block.danger, overlay);
+        color(&mut self.danger_hover, &block.danger_hover, overlay);
+        color(&mut self.success, &block.success, surface);
+        color(&mut self.warning, &block.warning, surface);
+        let mut translucent = |target: &mut u32, value: &Option<String>| {
+            if let Some(value) = value {
+                match parse_color(value) {
+                    Some(color) => *target = color.rgba(),
+                    None => valid = false,
+                }
+            }
+        };
+        translucent(&mut self.hover_overlay, &block.hover_overlay);
+        translucent(&mut self.shadow, &block.shadow);
+        let mut length = |target: &mut f32, value: Option<f32>, min: f32, max: f32| {
+            if let Some(value) = value {
+                if value.is_finite() && (min..=max).contains(&value) {
+                    *target = value;
+                } else {
+                    valid = false;
+                }
+            }
+        };
+        length(&mut self.tab_height, block.tab_height, 16., 64.);
+        length(&mut self.tab_font_size, block.tab_font_size, 8., 24.);
+        length(&mut self.radius, block.radius, 0., 24.);
+        let mut font_size = DEFAULT_FONT_SIZE;
+        length(&mut font_size, block.font_size, 8., 24.);
+        let font_size = block.font_size.map(|_| font_size);
+        let bounded = |value: f32| value.is_finite() && (0. ..=8.).contains(&value);
+        match &block.drag_over_border {
+            None => {}
+            Some(Maybe::Keyword(keyword)) if keyword == "none" => self.drag_over_border = None,
+            Some(Maybe::Value(border)) if bounded(border.width) => {
+                match parse_color(&border.color) {
+                    Some(color) => {
+                        self.drag_over_border =
+                            (border.width > 0. && color.alpha > 0.).then(|| DragOverBorder {
+                                width: border.width,
+                                color: color.over(0),
+                            })
+                    }
+                    None => valid = false,
+                }
+            }
+            Some(_) => valid = false,
+        }
+        match &block.tab_accent {
+            None => {}
+            Some(Maybe::Keyword(keyword)) if keyword == "none" => self.tab_accent = None,
+            Some(Maybe::Value(accent))
+                if bounded(accent.thickness)
+                    && matches!(accent.position.as_str(), "" | "top" | "bottom") =>
+            {
+                match parse_color(&accent.color) {
+                    Some(color) => {
+                        self.tab_accent =
+                            (accent.thickness > 0. && color.alpha > 0.).then(|| TabAccent {
+                                color: color.over(self.raised),
+                                thickness: accent.thickness,
+                                bottom: accent.position == "bottom",
+                            })
+                    }
+                    None => valid = false,
+                }
+            }
+            Some(_) => valid = false,
+        }
+        (font_size, block.font_family.as_deref(), valid)
+    }
+
+    /// Give the components the toolkit theme, with the chrome's font.
+    pub fn apply_component_theme(&self, cx: &mut App) {
         Theme::change(
-            match scheme {
+            match self.scheme {
                 ColorScheme::Light => ThemeMode::Light,
                 ColorScheme::Dark => ThemeMode::Dark,
             },
@@ -256,142 +383,73 @@ impl NativeAppearance {
             cx,
         );
         Theme::update(cx, |theme| {
-            self.component_palette.project(&mut theme.colors);
+            if let Some(config) = &self.config {
+                theme.apply_config(config);
+                // A theme without highlight colors takes the toolkit's for
+                // its mode, not those of the theme shown before.
+                if config.highlight.is_none() {
+                    theme.highlight_theme = if config.mode.is_dark() {
+                        HighlightTheme::default_dark()
+                    } else {
+                        HighlightTheme::default_light()
+                    };
+                }
+            }
             theme.font_family = self.font_family.clone().into();
             theme.font_size = px(16. * self.zoom.window_scale());
         });
     }
 }
 
-/// Validated product colors. Absent tokens retain the active Kit mode's
-/// defaults; no CSS or theme resolution belongs in individual controls.
-#[derive(Clone, Debug, Default)]
-struct ComponentPalette {
-    surface: Option<u32>,
-    raised: Option<u32>,
-    overlay: Option<u32>,
-    text: Option<u32>,
-    secondary: Option<u32>,
-    border: Option<u32>,
-    subtle_border: Option<u32>,
-    hover: Option<u32>,
-    active: Option<u32>,
-    accent: Option<u32>,
-    danger: Option<u32>,
-    warning: Option<u32>,
-    success: Option<u32>,
-    scrollbar: Option<u32>,
-}
-
-impl ComponentPalette {
-    fn project(&self, colors: &mut ThemeColor) {
-        let set = |target: &mut Hsla, value: Option<u32>| {
-            if let Some(value) = value {
-                *target = rgb(value).into();
-            }
-        };
-        set(&mut colors.background, self.surface);
-        set(&mut colors.foreground, self.text);
-        set(&mut colors.title_bar, self.raised);
-        set(&mut colors.title_bar_border, self.subtle_border);
-        set(&mut colors.popover, self.overlay);
-        set(&mut colors.popover_foreground, self.text);
-        set(&mut colors.sidebar, self.raised);
-        set(&mut colors.sidebar_foreground, self.text);
-        set(&mut colors.sidebar_border, self.subtle_border);
-        set(&mut colors.group_box, self.raised);
-        set(&mut colors.group_box_foreground, self.text);
-        set(&mut colors.secondary, self.raised);
-        set(&mut colors.secondary_foreground, self.text);
-        set(&mut colors.muted, self.raised);
-        set(&mut colors.muted_foreground, self.secondary);
-        set(&mut colors.border, self.border);
-        set(&mut colors.input, self.border);
-        set(&mut colors.accent, self.active);
-        set(&mut colors.accent_foreground, self.text);
-        set(&mut colors.primary, self.accent);
-        set(&mut colors.ring, self.accent);
-        set(&mut colors.caret, self.text);
-        set(&mut colors.danger, self.danger);
-        set(&mut colors.warning, self.warning);
-        set(&mut colors.success, self.success);
-        set(&mut colors.scrollbar_thumb, self.scrollbar);
-        set(&mut colors.scrollbar_thumb_hover, self.secondary);
-        set(&mut colors.list, self.surface);
-        set(&mut colors.list_head, self.raised);
-        set(&mut colors.list_even, self.raised);
-        set(&mut colors.list_hover, self.hover);
-        set(&mut colors.list_active, self.active);
-        set(&mut colors.list_active_border, self.accent);
-        set(&mut colors.selection, self.active);
-        colors.sidebar_accent = colors.accent;
-        colors.sidebar_accent_foreground = readable_text(colors.accent_foreground, colors.accent);
-        colors.sidebar_primary = colors.primary;
-        colors.sidebar_primary_foreground =
-            readable_text(colors.primary_foreground, colors.primary);
-
-        // A valid custom color can still make a label unreadable. Keep its
-        // requested surface and choose a contrasting foreground when needed.
-        colors.foreground = readable_text(colors.foreground, colors.background);
-        colors.popover_foreground = readable_text(colors.popover_foreground, colors.popover);
-        colors.sidebar_foreground = readable_text(colors.sidebar_foreground, colors.sidebar);
-        colors.group_box_foreground = readable_text(colors.group_box_foreground, colors.group_box);
-        colors.muted_foreground = readable_text(colors.muted_foreground, colors.background);
-        colors.accent_foreground = readable_text(colors.accent_foreground, colors.accent);
-        colors.secondary_foreground = readable_text(colors.secondary_foreground, colors.secondary);
-        colors.primary_foreground = readable_text(colors.primary_foreground, colors.primary);
-        colors.danger_foreground = readable_text(colors.danger_foreground, colors.danger);
-        colors.warning_foreground = readable_text(colors.warning_foreground, colors.warning);
-        colors.success_foreground = readable_text(colors.success_foreground, colors.success);
-
-        colors.button = colors.secondary;
-        colors.button_foreground = colors.secondary_foreground;
-        colors.button_hover = self
-            .hover
-            .map_or(colors.button_hover, |value| rgb(value).into());
-        colors.button_active = colors.accent;
-        colors.secondary_hover = colors.button_hover;
-        colors.secondary_active = colors.button_active;
-        colors.primary_hover = state_surface(colors.primary, colors.primary_foreground, 0.08);
-        colors.primary_active = state_surface(colors.primary, colors.primary_foreground, 0.16);
-        colors.danger_hover = state_surface(colors.danger, colors.danger_foreground, 0.08);
-        colors.danger_active = state_surface(colors.danger, colors.danger_foreground, 0.16);
-        colors.warning_hover = state_surface(colors.warning, colors.warning_foreground, 0.08);
-        colors.warning_active = state_surface(colors.warning, colors.warning_foreground, 0.16);
-        colors.success_hover = state_surface(colors.success, colors.success_foreground, 0.08);
-        colors.success_active = state_surface(colors.success, colors.success_foreground, 0.16);
-        colors.button_primary = colors.primary;
-        colors.button_primary_foreground = colors.primary_foreground;
-        colors.button_primary_hover = colors.primary_hover;
-        colors.button_primary_active = colors.primary_active;
-        colors.button_secondary = colors.secondary;
-        colors.button_secondary_foreground = colors.secondary_foreground;
-        colors.button_secondary_hover = colors.secondary_hover;
-        colors.button_secondary_active = colors.secondary_active;
-        colors.button_danger = colors.danger;
-        colors.button_danger_foreground = colors.danger_foreground;
-        colors.button_danger_hover = colors.danger_hover;
-        colors.button_danger_active = colors.danger_active;
-        colors.button_warning = colors.warning;
-        colors.button_warning_foreground = colors.warning_foreground;
-        colors.button_warning_hover = colors.warning_hover;
-        colors.button_warning_active = colors.warning_active;
-        colors.button_success = colors.success;
-        colors.button_success_foreground = colors.success_foreground;
-        colors.button_success_hover = colors.success_hover;
-        colors.button_success_active = colors.success_active;
-    }
-}
-
-fn state_surface(background: Hsla, foreground: Hsla, amount: f32) -> Hsla {
-    let black = rgb(0).into();
-    let white = rgb(0xffffff).into();
-    let target = if contrast(foreground, black) >= contrast(foreground, white) {
-        black
-    } else {
-        white
+/// The terminal palette of a selection, in this order: the named palette; the
+/// palette named for the UI theme's mode; the palette with the UI theme's
+/// name; the default palette of that mode.
+fn terminal_palette<'a>(
+    selection: &ThemeSelection,
+    theme: &UiTheme,
+    catalog: &'a ThemeCatalog,
+    problems: &mut Vec<String>,
+) -> Option<&'a TerminalPalette> {
+    let by_mode = match theme.scheme {
+        ColorScheme::Dark => selection.terminal_theme_dark,
+        ColorScheme::Light => selection.terminal_theme_light,
     };
-    blend(background, target, amount)
+    let chosen = [selection.terminal_theme, by_mode]
+        .into_iter()
+        .find(|name| *name != "default" && !name.is_empty());
+    chosen
+        .and_then(|name| {
+            let palette = catalog.palette(name);
+            if palette.is_none() {
+                problems.push(format!(
+                    "Terminal palette “{name}” is unavailable; the theme's palette is shown."
+                ));
+            }
+            palette
+        })
+        .or_else(|| catalog.palette_for_theme(&theme.id))
+        .or_else(|| catalog.default_palette(theme.scheme))
+}
+
+/// A toolkit color as `0xRRGGBB`, composed over `under` where it is translucent.
+fn solid(color: Hsla, under: u32) -> u32 {
+    let color = Rgba::from(color);
+    Color {
+        rgb: [color.r * 255., color.g * 255., color.b * 255.],
+        alpha: color.a,
+    }
+    .over(under)
+}
+
+/// `amount` of the way from `from` to `to`, per channel.
+fn mix(from: u32, to: u32, amount: f32) -> u32 {
+    let mut packed = 0;
+    for shift in [16, 8, 0] {
+        let a = ((from >> shift) & 255) as f32;
+        let b = ((to >> shift) & 255) as f32;
+        packed |= ((a + (b - a) * amount).round() as u32) << shift;
+    }
+    packed
 }
 
 fn blend(background: Hsla, foreground: Hsla, amount: f32) -> Hsla {
@@ -448,14 +506,6 @@ fn readable_text(requested: Hsla, background: Hsla) -> Hsla {
         }
     }
     blend(requested, target, high)
-}
-
-/// Workspace chrome text: primary text is kept readable on the surface, while
-/// secondary and muted text keep the theme's values. Their low contrast is how
-/// a theme subdues idle entries against running and selected ones, as in the
-/// web client; lifting them would erase that difference.
-fn chrome_text(text: u32, secondary: u32, muted: u32, surface: u32) -> (u32, u32, u32) {
-    (readable_rgb(text, surface), secondary, muted)
 }
 
 fn readable_rgb(requested: u32, background: u32) -> u32 {
@@ -549,75 +599,6 @@ fn bounded_number(value: &str, max: f32) -> Option<f32> {
     (value.is_finite() && (0. ..=max).contains(&value)).then_some(value)
 }
 
-/// A `drag-over-border` value: `none`, or `<width>px solid <color>`. `None`
-/// means unsupported, `Some(None)` no border.
-fn drag_over_border(value: &str) -> Option<Option<DragOverBorder>> {
-    let value = value.trim();
-    if value.is_empty() || value == "none" || value == "0" {
-        return Some(None);
-    }
-    let (width, rest) = value.split_once(char::is_whitespace)?;
-    let (style, color) = rest.trim_start().split_once(char::is_whitespace)?;
-    if style != "solid" {
-        return None;
-    }
-    let width = theme_px(width, 0., 8.)?;
-    let color = parse_color(color.trim())?;
-    Some((width > 0. && color.alpha > 0.).then(|| DragOverBorder {
-        width,
-        color: color.over(0),
-    }))
-}
-
-/// The selected tab's line, `Some(None)` for a transparent or zero-width line
-/// and `None` for an unsupported color.
-fn tab_accent(
-    color: &str,
-    thickness: f32,
-    position: &str,
-    raised: u32,
-) -> Option<Option<TabAccent>> {
-    let color = parse_color(color)?;
-    Some((color.alpha > 0. && thickness > 0.).then(|| TabAccent {
-        color: color.over(raised),
-        thickness,
-        bottom: position.trim() == "bottom",
-    }))
-}
-
-/// A theme length such as `28px` within `min..=max`.
-fn theme_px(value: &str, min: f32, max: f32) -> Option<f32> {
-    if value.len() > 32 {
-        return None;
-    }
-    let value = value.trim();
-    let number = if value == "0" {
-        "0"
-    } else {
-        value.strip_suffix("px")?
-    };
-    let number: f32 = number.trim().parse().ok()?;
-    (number.is_finite() && (min..=max).contains(&number)).then_some(number)
-}
-
-fn chrome_font_size(override_size: i32, theme_size: &str) -> (f32, bool) {
-    if (8..=24).contains(&override_size) {
-        return (override_size as f32, false);
-    }
-    if override_size == 0 && theme_size.len() <= 32 {
-        if let Some(size) = theme_size
-            .trim()
-            .strip_suffix("px")
-            .and_then(|value| value.trim().parse::<f32>().ok())
-        {
-            if size.is_finite() && (8. ..=24.).contains(&size) {
-                return (size, false);
-            }
-        }
-    }
-    (13., true)
-}
-
 fn choose_font(
     value: &str,
     available: &[String],
@@ -660,6 +641,21 @@ fn choose_font(
 mod tests {
     use super::*;
 
+    fn selection(ui_theme: &str) -> ThemeSelection<'_> {
+        ThemeSelection {
+            ui_theme,
+            os_scheme: ColorScheme::Dark,
+            terminal_theme: "default",
+            terminal_theme_dark: "default",
+            terminal_theme_light: "default",
+            font_size: 0,
+            font_family: "",
+        }
+    }
+    fn resolve(selection: &ThemeSelection, catalog: &ThemeCatalog) -> NativeAppearance {
+        NativeAppearance::resolve(selection, catalog, &[], "UI", "Mono")
+    }
+
     #[test]
     fn subdued_text_gains_readability_without_overtaking_primary_text() {
         let background = rgb(0x10151c).into();
@@ -670,77 +666,6 @@ mod tests {
         assert_eq!(readable_text(primary, background), primary);
         let packed: Hsla = rgb(readable_rgb(0x6b6b6b, 0x10151c)).into();
         assert!(contrast(packed, background) >= 4.5);
-    }
-
-    #[test]
-    fn chrome_keeps_subdued_theme_text_and_only_lifts_unreadable_primary_text() {
-        // splitty-classic-dark-gray: secondary #585858 and muted #484848 on
-        // #1e1e1e stay distinct from primary text and from each other.
-        assert_eq!(
-            chrome_text(0xa0a0a0, 0x585858, 0x484848, 0x1e1e1e),
-            (0xa0a0a0, 0x585858, 0x484848)
-        );
-        let (primary, _, _) = chrome_text(0x303030, 0x585858, 0x484848, 0x1e1e1e);
-        assert!(contrast(rgb(primary).into(), rgb(0x1e1e1e).into()) >= 4.5);
-    }
-
-    #[test]
-    fn component_palette_keeps_text_readable_across_modes_and_custom_surfaces() {
-        for defaults in [ThemeColor::light(), ThemeColor::dark()] {
-            for surface in [0x10151c, 0xf4f4f4, 0x765438] {
-                let palette = ComponentPalette {
-                    surface: Some(surface),
-                    raised: Some(surface),
-                    overlay: Some(surface),
-                    text: Some(surface), // deliberately invalid contrast
-                    secondary: Some(surface),
-                    accent: Some(0x76b8e8),
-                    danger: Some(0xff6666),
-                    warning: Some(0xffcc33),
-                    success: Some(0x448855),
-                    ..ComponentPalette::default()
-                };
-                let mut colors = *defaults;
-                palette.project(&mut colors);
-                assert_eq!(colors.background, Hsla::from(rgb(surface)));
-                for (foreground, background) in [
-                    (colors.foreground, colors.background),
-                    (colors.popover_foreground, colors.popover),
-                    (colors.sidebar_foreground, colors.sidebar),
-                    (colors.muted_foreground, colors.background),
-                    (colors.button_primary_foreground, colors.button_primary),
-                    (
-                        colors.button_primary_foreground,
-                        colors.button_primary_hover,
-                    ),
-                    (
-                        colors.button_primary_foreground,
-                        colors.button_primary_active,
-                    ),
-                    (colors.button_danger_foreground, colors.button_danger),
-                    (colors.button_warning_foreground, colors.button_warning),
-                    (colors.button_success_foreground, colors.button_success),
-                ] {
-                    assert!(contrast(foreground, background) >= 4.5);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn unsupported_component_tokens_keep_the_new_modes_palette() {
-        let palette = ComponentPalette::default();
-        for defaults in [ThemeColor::light(), ThemeColor::dark()] {
-            let mut colors = *defaults;
-            palette.project(&mut colors);
-            assert_eq!(colors.background, defaults.background);
-            assert_eq!(colors.popover, defaults.popover);
-            assert_eq!(colors.sidebar, defaults.sidebar);
-            assert_eq!(colors.primary, defaults.primary);
-            assert_eq!(colors.border, defaults.border);
-            assert_eq!(colors.input, defaults.input);
-            assert_eq!(colors.danger, defaults.danger);
-        }
     }
 
     #[test]
@@ -782,91 +707,216 @@ mod tests {
     }
 
     #[test]
-    fn chrome_defaults_use_theme_tokens_and_choose_available_family_names() {
-        assert_eq!(chrome_font_size(0, "12px"), (12., false));
-        assert_eq!(chrome_font_size(18, "nonsense"), (18., false));
-        assert_eq!(chrome_font_size(0, "2rem"), (13., true));
-        assert_eq!(chrome_font_size(-3, "12px"), (13., true));
-        let fonts = vec!["Noto Sans".into(), "DejaVu Sans Mono".into()];
-        let choose = |value| choose_font(value, &fonts, "Noto Sans", "DejaVu Sans Mono");
+    fn the_default_theme_keeps_its_chrome_and_terminal_colors() {
+        let catalog = ThemeCatalog::load(None);
+        let dark = resolve(&selection("splitty-dark"), &catalog);
+        assert_eq!(dark.notice, None);
+        assert_eq!(dark.scheme, ColorScheme::Dark);
         assert_eq!(
-            choose("'Missing', \"noto sans\", sans-serif"),
-            Some("Noto Sans".into())
+            (dark.surface, dark.raised, dark.overlay, dark.text),
+            (0x0f0f0f, 0x1a1a1a, 0x1e1e1e, 0xc8c8c8)
         );
-        assert_eq!(choose("system-ui"), Some("Noto Sans".into()));
-        assert_eq!(choose("monospace"), Some("DejaVu Sans Mono".into()));
-        assert_eq!(choose("Missing"), None);
-        assert_eq!(choose("\"unterminated"), None);
-        // Chrome changes cannot alter terminal colors or native font metrics:
-        // this adapter only exports chrome typography and RGB terminal input.
-        let fallback = NativeAppearance::fallback("Noto Sans");
-        assert_eq!(fallback.terminal, TerminalColors::default());
+        assert_eq!((dark.secondary, dark.muted), (0x6b6b6b, 0x505050));
+        assert_eq!(
+            (dark.active, dark.hover, dark.accent),
+            (0x313131, 0x282828, 0x63a0ff)
+        );
+        assert_eq!((dark.hover_overlay, dark.shadow), (0xffffff0f, 0x00000073));
+        assert_eq!(
+            (dark.tab_height, dark.tab_font_size, dark.radius),
+            (32., 12., 8.)
+        );
+        assert_eq!((dark.tab_accent, dark.drag_over_border), (None, None));
+        assert_eq!((dark.font_size, dark.font_family.as_str()), (12., "UI"));
+        assert_eq!(dark.terminal.background, 0x0f0f0f);
+        assert_eq!(dark.terminal.ansi[4], 0x63a0ff);
+        assert_eq!(
+            (dark.selection_background, dark.selection_foreground),
+            (0x2a2a2a, 0xc8c8c8)
+        );
+        let light = resolve(&selection("splitty-light"), &catalog);
+        assert_eq!(
+            (light.notice.as_deref(), light.scheme),
+            (None, ColorScheme::Light)
+        );
+        assert!(luminance(rgb(light.surface).into()) > luminance(rgb(light.text).into()));
+        assert!(luminance(rgb(light.terminal.background).into()) > 0.5);
     }
 
     #[test]
-    fn tab_sizing_and_accent_tokens_are_bounded_theme_values() {
-        assert_eq!(theme_px("28px", 16., 64.), Some(28.));
-        assert_eq!(theme_px(" 12.5px ", 8., 24.), Some(12.5));
-        assert_eq!(theme_px("0", 0., 8.), Some(0.));
-        assert_eq!(theme_px("2rem", 8., 24.), None);
-        assert_eq!(theme_px("200px", 16., 64.), None);
-        assert_eq!(theme_px("NaNpx", 0., 8.), None);
+    fn every_bundled_theme_resolves_with_readable_chrome_and_a_palette_of_its_mode() {
+        let catalog = ThemeCatalog::load(None);
+        for theme in catalog.ui_themes() {
+            let shown = resolve(&selection(&theme.id), &catalog);
+            assert_eq!(shown.notice, None, "{}", theme.id);
+            assert_eq!(shown.scheme, theme.scheme, "{}", theme.id);
+            assert!(
+                contrast(rgb(shown.text).into(), rgb(shown.surface).into()) >= 4.5,
+                "{}",
+                theme.id
+            );
+            let terminal_dark = luminance(rgb(shown.terminal.background).into())
+                < luminance(rgb(shown.terminal.foreground).into());
+            assert_eq!(
+                terminal_dark,
+                theme.scheme == ColorScheme::Dark,
+                "{}",
+                theme.id
+            );
+        }
+        // A third-party theme derives its chrome from the toolkit colors and
+        // takes the terminal palette of its own name.
+        let mocha = resolve(&selection("catppuccin-mocha"), &catalog);
+        assert_eq!(mocha.terminal.background, 0x1e1e2e);
+        assert_ne!(mocha.surface, NativeAppearance::fallback("UI").surface);
+        assert_eq!((mocha.tab_height, mocha.font_size), (32., 12.));
+        // Names that differ only in their separators still pair.
+        let tokyo = resolve(&selection("tokyo-night"), &catalog);
         assert_eq!(
-            tab_accent("#e0e0e0", 2., "bottom", 0x242424),
-            Some(Some(TabAccent {
-                color: 0xe0e0e0,
-                thickness: 2.,
-                bottom: true,
-            }))
+            tokyo.terminal.background,
+            catalog.palette("tokyonight").unwrap().colors.background
         );
-        assert_eq!(
-            tab_accent("#63a0ff", 2., "top", 0x1a1a1a).map(|line| line.map(|line| line.bottom)),
-            Some(Some(false))
-        );
-        assert_eq!(tab_accent("transparent", 2., "top", 0x1a1a1a), Some(None));
-        assert_eq!(tab_accent("#e0e0e0", 0., "top", 0x1a1a1a), Some(None));
-        assert_eq!(tab_accent("var(--x)", 2., "top", 0x1a1a1a), None);
+        for theme in catalog.ui_themes() {
+            let shown = resolve(&selection(&theme.id), &catalog);
+            assert!(
+                contrast(rgb(shown.active).into(), rgb(shown.raised).into()) >= 1.08,
+                "{}",
+                theme.id
+            );
+        }
     }
 
-    #[cfg(feature = "ui-test-support")]
     #[test]
-    fn status_tokens_come_from_the_theme_with_distinct_fallbacks() {
-        use splitty_client_core::appearance::test_support::{settings_snapshot, Availability};
-        let snapshot = settings_snapshot(uuid::Uuid::new_v4(), 1, Availability::Full);
-        let ui = &snapshot.theme().ui;
-        let native = NativeAppearance::from_snapshot(&snapshot, &[], "Sans", "Mono");
-        let expected = |value: &str| parse_color(value).unwrap().over(native.surface);
-        assert_eq!(native.success, expected(&ui.success));
-        assert_eq!(native.warning, expected(&ui.warning));
-        assert_ne!(native.success, native.warning);
-        // Without a theme the status colors stay apart from each other and
-        // from the danger color, so every host state keeps its own dot.
-        let fallback = NativeAppearance::fallback("Sans");
-        let colors = [fallback.success, fallback.warning, fallback.danger];
-        assert!(colors
+    fn the_terminal_palette_follows_the_setting_then_the_mode_pair_then_the_theme() {
+        let catalog = ThemeCatalog::load(None);
+        let background = |selection: &ThemeSelection| {
+            let shown = resolve(selection, &catalog);
+            (shown.terminal.background, shown.notice)
+        };
+        let of = |id: &str| catalog.palette(id).unwrap().colors.background;
+        let mut chosen = selection("splitty-dark");
+        chosen.terminal_theme_dark = "catppuccin-mocha";
+        chosen.terminal_theme_light = "catppuccin-latte";
+        assert_eq!(background(&chosen), (of("catppuccin-mocha"), None));
+        chosen.ui_theme = "splitty-light";
+        assert_eq!(background(&chosen), (of("catppuccin-latte"), None));
+        chosen.terminal_theme = "nord";
+        assert_eq!(background(&chosen), (of("nord"), None));
+        // An unavailable palette shows the theme's and says so.
+        chosen.terminal_theme = "no-such-palette";
+        let (shown, notice) = background(&chosen);
+        assert_eq!(shown, of("splitty-light"));
+        assert!(notice.unwrap().contains("no-such-palette"));
+        // A theme without a palette of its name takes the default of its mode.
+        let unpaired = catalog
+            .ui_themes()
             .iter()
-            .enumerate()
-            .all(|(index, color)| !colors[index + 1..].contains(color)));
+            .find(|theme| {
+                catalog.palette(&theme.id).is_none() && theme.scheme == ColorScheme::Light
+            })
+            .expect("a bundled light theme without a palette of its name");
+        assert_eq!(
+            background(&selection(&unpaired.id)),
+            (of("splitty-light"), None)
+        );
     }
 
     #[test]
-    fn drop_marker_and_shadow_tokens_keep_translucency_and_parse_borders() {
+    fn an_unavailable_theme_shows_the_default_of_the_system_mode_and_says_so() {
+        let catalog = ThemeCatalog::load(None);
+        let mut missing = selection("no-such-theme");
+        missing.os_scheme = ColorScheme::Light;
+        let shown = resolve(&missing, &catalog);
+        assert_eq!(shown.scheme, ColorScheme::Light);
         assert_eq!(
-            parse_color("rgba(255, 255, 255, 0.06)").map(Color::rgba),
-            Some(0xffffff0f)
+            shown.surface,
+            resolve(&selection("splitty-light"), &catalog).surface
         );
-        assert_eq!(parse_color("#000000").map(Color::rgba), Some(0x000000ff));
+        assert!(shown.notice.unwrap().contains("no-such-theme"));
+    }
+
+    #[test]
+    fn the_splitty_block_overrides_derived_chrome_within_bounds() {
+        let block: ChromeBlock = serde_json::from_value(serde_json::json!({
+            "surface": "#101010", "raised": "#ffffff80", "hover-overlay": "#00000020",
+            "tab-height": 28, "tab-font-size": 11, "radius": 0, "font-size": 14,
+            "font-family": "monospace",
+            "tab-accent": {"color": "#ff0000", "thickness": 2, "position": "bottom"},
+            "drag-over-border": {"width": 1, "color": "#00ff00"},
+        }))
+        .unwrap();
+        let mut shown = NativeAppearance::fallback("UI");
         assert_eq!(
-            drag_over_border("1px solid #585858"),
-            Some(Some(DragOverBorder {
+            shown.apply_block(&block),
+            (Some(14.), Some("monospace"), true)
+        );
+        assert_eq!((shown.surface, shown.raised), (0x101010, 0x888888));
+        assert_eq!(shown.hover_overlay, 0x00000020);
+        assert_eq!(
+            (shown.tab_height, shown.tab_font_size, shown.radius),
+            (28., 11., 0.)
+        );
+        assert_eq!(
+            shown.tab_accent,
+            Some(TabAccent {
+                color: 0xff0000,
+                thickness: 2.,
+                bottom: true
+            })
+        );
+        assert_eq!(
+            shown.drag_over_border,
+            Some(DragOverBorder {
                 width: 1.,
-                color: 0x585858,
-            }))
+                color: 0x00ff00
+            })
         );
-        assert_eq!(drag_over_border("none"), Some(None));
-        assert_eq!(drag_over_border(""), Some(None));
-        assert_eq!(drag_over_border("1px solid transparent"), Some(None));
-        assert_eq!(drag_over_border("1px dashed #585858"), None);
-        assert_eq!(drag_over_border("thin solid #585858"), None);
+
+        let unsupported: ChromeBlock = serde_json::from_value(serde_json::json!({
+            "surface": "var(--red)", "tab-height": 200, "font-size": 2,
+            "tab-accent": "dotted", "drag-over-border": {"width": 40, "color": "#fff"},
+            "accent": "#123456",
+        }))
+        .unwrap();
+        let derived = NativeAppearance::fallback("UI");
+        let mut shown = derived.clone();
+        assert_eq!(
+            shown.apply_block(&unsupported),
+            (Some(DEFAULT_FONT_SIZE), None, false)
+        );
+        assert_eq!(
+            (
+                shown.surface,
+                shown.tab_height,
+                shown.tab_accent,
+                shown.drag_over_border
+            ),
+            (derived.surface, derived.tab_height, None, None)
+        );
+        assert_eq!(shown.accent, 0x123456);
+    }
+
+    #[test]
+    fn fonts_come_from_the_setting_then_the_theme_and_must_be_installed() {
+        let catalog = ThemeCatalog::load(None);
+        let fonts = ["Inter".to_owned(), "JetBrains Mono".to_owned()];
+        let show = |selection: &ThemeSelection| {
+            NativeAppearance::resolve(selection, &catalog, &fonts, "UI", "Mono")
+        };
+        let mut chosen = selection("splitty-dark");
+        chosen.font_size = 16;
+        chosen.font_family = "'Missing Font', inter, sans-serif";
+        let shown = show(&chosen);
+        assert_eq!(
+            (shown.font_size, shown.font_family.as_str()),
+            (16., "Inter")
+        );
+        chosen.font_family = "ui-monospace";
+        assert_eq!(show(&chosen).font_family, "Mono");
+        chosen.font_size = 99;
+        chosen.font_family = "Missing Font";
+        let shown = show(&chosen);
+        assert_eq!((shown.font_size, shown.font_family.as_str()), (12., "UI"));
+        assert!(shown.notice.unwrap().contains("font"));
     }
 }

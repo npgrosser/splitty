@@ -36,12 +36,11 @@ model {
     native_workspace -> splitty.transport.negotiation 'Classify typed host preparation failures after retained setup completes'
     native_workspace -> splitty.remote.ssh 'Validate exact known host targets before deliberate connection'
     native_workspace -> splitty.transport.wire 'Validate host readiness and preserve charged transport close reasons'
-    native_workspace -> splitty.core.theme 'Verify independent appearance delivery during a pending hub read'
     local_service -> api_stream 'Keep one auxiliary stream and retained jobs across cancellation'
     local_service -> splitty.transport.budget 'Retain bounded assigned-backend version metadata'
     local_service -> splitty.core.native_api 'Use shared home settings, metadata and theme operation authority'
-    appearance -> api_stream 'Read existing appearance and theme contracts on either platform'
-    appearance -> splitty.core.native_api 'Use fixed typed home and theme operations'
+    appearance -> api_stream 'Read the existing appearance contracts on either platform'
+    appearance -> splitty.core.native_api 'Use fixed typed home operations'
     appearance -> splitty.server.embed 'Read the bundled terminal font from the embedded frontend assets'
     client_shell_profiles -> api_stream 'Read bounded profile snapshots on either platform'
     client_shell_profiles -> splitty.core.native_api 'Use the existing profiles operation'
@@ -59,7 +58,7 @@ model {
     }
 
     appearance = component 'appearance' {
-      description 'Charged local appearance and Drawer projection, theme resolution and catalog choices, and independent terminal palette source identity; UI appearance remains separate from terminal color selection.'
+      description 'Charged local appearance and Drawer projection: settings with the UI theme and terminal palette names and the OS preference they were read for. The application resolves the names in its own theme catalog.'
       metadata { module 'splitty_client_core::appearance' }
     }
 
@@ -205,7 +204,6 @@ model {
     local_service -> connection 'Verify settings broadcasts alongside real session delivery in tests'
     local_service -> splitty.core.shell_profiles 'Construct typed profile fixtures'
     local_service -> splitty.core.config 'Read typed notification switches and build isolated settings reply fixtures'
-    local_service -> splitty.core.theme 'Supply valid theme replies during reconciliation tests'
     local_service -> splitty.core.daemon 'Describe an owned fake native endpoint in tests'
     local_service -> splitty.core.protocol 'Use the current handshake version in fake-peer tests'
     local_service -> splitty.transport.wire 'Validate API reply kind and status'
@@ -218,7 +216,6 @@ model {
     appearance -> local_service 'Reuse bounded typed response decoding'
     appearance -> client_settings 'Project charged local settings through shared field and metadata contracts'
     appearance -> splitty.core.config 'Project existing appearance and Drawer preferences without write-on-load'
-    appearance -> splitty.core.theme 'Decode the service-resolved theme'
     appearance -> splitty.server.native 'Own one API-only stream and await its cleanup'
     appearance -> splitty.server.service 'Use fixed read-only operations and in-memory service fixtures'
     appearance -> splitty.transport.budget 'Retain typed snapshot allocation leases'

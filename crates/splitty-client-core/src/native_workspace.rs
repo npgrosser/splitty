@@ -2087,7 +2087,7 @@ mod close_tests {
                 .unwrap()
                 .unwrap();
         assert_eq!(snapshot.connection_id(), connection);
-        assert_eq!(snapshot.scheme(), ColorScheme::Dark);
+        assert_eq!(snapshot.os_scheme(), ColorScheme::Dark);
         appearance.settings_changed(uuid::Uuid::new_v4()).unwrap();
         assert!(
             tokio::time::timeout(Duration::from_millis(20), next_appearance(&mut appearance))
@@ -2255,7 +2255,7 @@ mod close_tests {
         let snapshot = refreshed_appearance.unwrap();
         assert_eq!(snapshot.connection_id(), model.connection_id());
         assert_eq!(snapshot.settings().font_family, "recovered");
-        assert_eq!(snapshot.scheme(), ColorScheme::Light);
+        assert_eq!(snapshot.os_scheme(), ColorScheme::Light);
         drop(snapshot);
         // A foreign scheme intent followed by a valid owner change must never
         // replace this window's local preference with the foreign choice.
@@ -2281,7 +2281,7 @@ mod close_tests {
             .unwrap();
         loop {
             if let Update::Appearance(snapshot) = next_update(&mut updates).await {
-                assert_eq!(snapshot.scheme(), ColorScheme::Dark);
+                assert_eq!(snapshot.os_scheme(), ColorScheme::Dark);
                 break;
             }
         }

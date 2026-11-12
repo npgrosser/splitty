@@ -84,7 +84,7 @@ async fn feature_generations_are_fair_and_os_changes_do_not_reload_profiles() {
     };
     let snapshot = result.unwrap();
     assert_eq!(snapshot.generation(), 3);
-    assert_eq!(snapshot.scheme(), ColorScheme::Light);
+    assert_eq!(snapshot.os_scheme(), ColorScheme::Light);
     drop(snapshot);
     reader.set_scheme(owner, ColorScheme::Dark).unwrap();
     assert!(matches!(

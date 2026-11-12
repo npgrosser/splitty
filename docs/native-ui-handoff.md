@@ -89,6 +89,16 @@ It is not real OpenSSH installation/update acceptance.
 - The Ghostty engine boundary remains separate from GPUI rendering. Existing
   web/xterm workarounds are not automatically native feature requirements.
 
+## Themes
+
+The app resolves UI themes and terminal palettes in its own catalog
+(`crates/splitty-gpui/src/appearance/`): GPUI Kit theme sets and Ghostty theme
+files, bundled from `crates/splitty-gpui/themes/` and read from the themes
+directory. The service stores only the names. [Themes](themes.md) describes the
+formats and the `splitty` block; `scripts/vendor-themes.py` refreshes the
+bundled third-party files. The Splitty themes in `themes/ui/splitty.json` and
+`themes/terminal/splitty/` are edited there directly.
+
 ## Packages, CI and release
 
 - Linux: `packaging/linux/native/build.sh` packs a deb, an rpm and a tar.gz

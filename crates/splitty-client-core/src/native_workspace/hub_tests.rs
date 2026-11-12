@@ -179,7 +179,7 @@ async fn passive_directory_refresh_keeps_local_worker_and_cleanup_independent() 
             }
             Update::Appearance(appearance)
                 if appearance.connection_id() == owner
-                    && appearance.theme().variant == splitty_core::theme::Variant::Light =>
+                    && appearance.os_scheme() == crate::appearance::ColorScheme::Light =>
             {
                 light = true
             }

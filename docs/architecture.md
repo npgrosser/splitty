@@ -480,11 +480,11 @@ Dropping the task drops its sole receiver and releases queued delivery leases.
 
 The same native runtime owns one auxiliary API-only local-service stream. After
 publishing the session owner, it polls stream setup and separately charged
-appearance/theme, shell-profile and notification-settings reads alongside terminal events and commands.
+appearance, shell-profile and notification-settings reads alongside terminal events and commands.
 The UI-free client settings module owns bounded field, value, edit and service
 metadata contracts shared by that mutation path and the native editor. Appearance
-keeps the charged theme and terminal-palette projection and its terminal
-presentation preferences; it does not own the shared edit vocabulary.
+keeps the charged settings projection with the theme and terminal palette names,
+the OS preference it was read for and its terminal presentation preferences; it does not own the shared edit vocabulary.
 Each feature has its own generation, dirty flag and result. Same-service settings
 events refresh all three; owner-checked OS preference changes refresh appearance only.
 Round-robin dirty reads prevent one feature from starving the others, and
@@ -523,7 +523,7 @@ captured pixel geometry is obsolete without replacing sessions, search queries
 or the canonical workspace layout.
 
 Drawer pinning shares the local presentation read: one charged `home.get`
-projection retains appearance and Drawer settings before theme resolution. The
+projection retains appearance and Drawer settings. The
 view restores `drawer.pinned`, edge-reveal policy and bounded saved width without
 a startup write. Transient edge reveal belongs to the window: the unpinned
 Drawer overlays the workspace without changing terminal geometry or writing
@@ -1371,8 +1371,8 @@ rejected or uncertain mutations are never replayed. Each field identifies its
 appearance or notification observation domain. Admission, acknowledgement
 validation, required readback generations and deferred delivery use that domain;
 an OS appearance refresh cannot settle or supersede a notification edit. A fresh
-successful home projection releases only its domain's uncertain fields, even if
-subsequent appearance theme resolution fails. Closing the workspace discards
+successful home projection releases only its domain's uncertain fields. Closing
+the workspace discards
 unsent work and joins owned cancellation.
 
 Notification observation retains six required effective booleans and at most four
@@ -1390,15 +1390,24 @@ field-specific pending or failure state. Switch and Reset callbacks retain the
 rendered local owner; Reset additionally rechecks that its exact default is still
 available. No optimistic control value changes the notification ledger.
 
-The local presentation snapshot carries metadata, theme choices and a separate
-terminal palette. Named theme resolution exposes the actual source identifier
-independently of its display name, so fallback cannot masquerade as the requested
-palette. Missing or mismatched identity preserves the last valid terminal
-colors. Palette changes update retained terminal engines without replacing
-sessions or history. The native appearance adapter applies the UI palette after
-Kit mode selection through the synchronized theme update API, keeping component
-tokens and Base colors aligned; it maintains readable foregrounds and mode
-defaults for unsupported values.
+The local presentation snapshot carries settings and metadata; it names the UI
+theme and the terminal palette and resolves neither. The application resolves
+both in its theme catalog: UI themes are theme sets in the component toolkit's
+JSON format and terminal palettes are files in Ghostty's theme format, bundled
+from `crates/splitty-gpui/themes/` by the build script and read from the themes
+directory at start and whenever the settings editor opens. Settings store an
+identifier derived from the display name, which is also what pairs a UI theme
+with the terminal palette of the same name. The toolkit theme goes to the
+components as it is. The workspace chrome takes its own colors and sizes from
+the theme's optional `splitty` object and derives every absent token from the
+toolkit colors, lifting primary text to a readable contrast. The terminal
+palette is the one `terminal.theme` names, else the one named for the UI theme's
+mode (`terminal.themeDark`, `terminal.themeLight`), else the one with the UI
+theme's identifier (ignoring `-`), else the default of that mode. A name the catalog lacks
+shows the next choice with a notice and leaves the setting alone. Palette
+changes update retained terminal engines without replacing sessions or history.
+The service's own theme module (`splitty_core::theme`, `theme.get`,
+`theme.list`) serves the web client only.
 ### Native functions added after the remote slice
 
 The native window has a command palette and a shortcut list (`workspace/palette.rs`): every command is a `Shortcut` or one of a few palette-only actions, run through the same `run_shortcut` as its key. Viewer panes (`workspace/viewer.rs`) ask the worker for a document with `ReadViewer`; `native_workspace/viewers.rs` reads it over the pane's own connection through `document.rs`, which now carries `ifVersion` and reports `viewer.unchanged` and `viewer.failed`. The window asks only for shown panes: at first, for a newer record, and every two seconds for a file. Terminal images come from the engine's render state (`Frame::images`, `Frame::image_pixels`) and are kept as textures per image generation; only the in-stream medium is enabled. `native_workspace/auto_forward.rs` implements `remote.autoForwardPorts` from the discovery lists the window already holds. `hub/shares.rs` is the client of the local service's reverse forwards; its stream is opened on first use. `NotificationCenter::take_fresh` hands newly admitted, unwatched facts to the window for notices and system notifications. The change `native-feature-gaps` lists what is still missing.

@@ -4,6 +4,11 @@ use serde::Deserialize;
 #[serde(rename_all = "camelCase")]
 pub struct TerminalPreferences {
     theme: String,
+    /// Absent on a service that predates the pair, which means `default`.
+    #[serde(default)]
+    theme_dark: Option<String>,
+    #[serde(default)]
+    theme_light: Option<String>,
     close_on_exit: String,
     /// Absent in older stored settings, which means shown.
     #[serde(default)]
@@ -12,6 +17,14 @@ pub struct TerminalPreferences {
 impl TerminalPreferences {
     pub fn theme(&self) -> &str {
         &self.theme
+    }
+    /// The palette for a dark UI theme while `theme` is `default`.
+    pub fn theme_dark(&self) -> &str {
+        self.theme_dark.as_deref().unwrap_or("default")
+    }
+    /// The palette for a light UI theme while `theme` is `default`.
+    pub fn theme_light(&self) -> &str {
+        self.theme_light.as_deref().unwrap_or("default")
     }
     pub fn close_on_exit(&self) -> &str {
         &self.close_on_exit
