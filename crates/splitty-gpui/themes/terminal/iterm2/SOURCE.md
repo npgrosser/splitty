@@ -1,7 +1,8 @@
 Terminal palettes from `ghostty/` of <https://github.com/mbadolato/iTerm2-Color-Schemes> at revision
 `a854824899d16b4e89aa7a773972af4e782ecbd6`, unchanged. The collection is under the MIT license (`LICENSE`).
 Only palettes whose own license permits redistribution without further
-conditions are included, as recorded in the collection's `licenses.yml`:
+conditions are included, as recorded in the collection's `licenses.yml`, and
+only those whose name is a file name on every system (Windows allows no `:`):
 
 | Palette | License | Source |
 |---|---|---|
@@ -11,7 +12,6 @@ conditions are included, as recorded in the collection's `licenses.yml`:
 | AlxPro Dark | MIT | https://github.com/al-xpro/alxpro-theme |
 | AlxPro Light | MIT | https://github.com/al-xpro/alxpro-theme |
 | Analog Heartbeat | MIT | https://terminalthemes.com/themes/analog-heartbeat |
-| Analog Heartbeat: Phosphor | MIT | https://terminalthemes.com/themes/analog-heartbeat-phosphor |
 | Andromeda | MIT | https://github.com/EliverLara/Andromeda |
 | Atelier Sulphurpool | MIT | https://atelierbram.mit-license.org/ |
 | Atom | WTFPL | https://github.com/bahlo/iterm-colors |
@@ -160,7 +160,6 @@ conditions are included, as recorded in the collection's `licenses.yml`:
 | Neobones Dark | MIT | https://github.com/zenbones-theme/zenbones.nvim |
 | Neobones Light | MIT | https://github.com/zenbones-theme/zenbones.nvim |
 | Neon Raincheck | MIT | https://terminalthemes.com/themes/neon-raincheck |
-| Neon Raincheck: After Hours | MIT | https://terminalthemes.com/themes/neon-raincheck-after-hours |
 | Nephrite Forest | MIT | https://github.com/Nephrite-theme/terminal |
 | Nephrite Jade | MIT | https://github.com/Nephrite-theme/terminal |
 | Nephrite Mint | MIT | https://github.com/Nephrite-theme/terminal |
@@ -180,7 +179,6 @@ conditions are included, as recorded in the collection's `licenses.yml`:
 | Overnight Slumber | MIT | https://github.com/cevr/overnight |
 | Oxocarbon | MIT | https://github.com/nyoom-engineering/oxocarbon.nvim |
 | Paper Crane | MIT | https://terminalthemes.com/themes/paper-crane |
-| Paper Crane: Midnight Ink | MIT | https://terminalthemes.com/themes/paper-crane-midnight-ink |
 | Paul Millr | MIT | https://github.com/paulmillr/dotfiles/tree/master/terminal |
 | Poimandres | MIT | https://github.com/drcmda/poimandres-theme |
 | Poimandres Darker | MIT | https://github.com/drcmda/poimandres-theme |

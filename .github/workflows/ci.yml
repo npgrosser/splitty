@@ -99,6 +99,14 @@ jobs:
         working-directory: frontend
         run: pnpm install --frozen-lockfile && pnpm build
 
+      # Git for Windows refuses a checkout that holds such a file.
+      - name: File names every system can check out
+        run: |
+          if git ls-files | grep -nE '[<>:"|?*\\]|[ .]$'; then
+            echo "these file names cannot be checked out on Windows" >&2
+            exit 1
+          fi
+
       # The architecture check (architecture/check) runs LikeC4 inside cargo test.
       - name: Install architecture tooling
         run: pnpm install --frozen-lockfile --dir architecture

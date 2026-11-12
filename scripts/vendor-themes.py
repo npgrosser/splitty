@@ -116,6 +116,10 @@ def vendor_palettes(repo: Path) -> None:
         license_, source = known.get(name, ("unknown", ""))
         if not file.is_file() or license_ not in ALLOWED:
             continue
+        # A palette is named by its file, and Windows cannot check out a
+        # file whose name holds one of these characters.
+        if any(char in name for char in '<>:"/\\|?*'):
+            continue
         shutil.copyfile(file, target / name)
         rows.append(f"| {name} | {license_} | {source} |")
     shutil.copyfile(repo / "LICENSE", target / "LICENSE")
@@ -123,7 +127,8 @@ def vendor_palettes(repo: Path) -> None:
         f"Terminal palettes from `ghostty/` of <{PALETTES_URL[:-4]}> at revision\n"
         f"`{revision(repo)}`, unchanged. The collection is under the MIT license (`LICENSE`).\n"
         "Only palettes whose own license permits redistribution without further\n"
-        "conditions are included, as recorded in the collection's `licenses.yml`:\n\n"
+        "conditions are included, as recorded in the collection's `licenses.yml`, and\n"
+        "only those whose name is a file name on every system (Windows allows no `:`):\n\n"
         "| Palette | License | Source |\n|---|---|---|\n" + "\n".join(rows) + "\n",
         encoding="utf-8",
     )
