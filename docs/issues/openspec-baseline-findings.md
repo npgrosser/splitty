@@ -448,6 +448,11 @@ that area touches them.
 - **workspace-model:** `move_pane` sizes (`resultingSizes`, `sourceResultingSizes`); successful `float_pane`/`dock_pane`/`move_float`; active-pane fallback
   in a stack; closing the last root pane; closing a floating pane; `newPaneIndex: 0`; `set_active_screen`;
   active-screen fallback on close.
+- **native window:** the view tests of `splitty-gpui` that need the `ui-test-support` feature (the unread and
+  program status marks in `workspace/unread/tests.rs`, the settings rows in `workspace/settings/notification_tests.rs`
+  and others gated on `cfg(all(test, feature = "ui-test-support"))`) run neither in `cargo test --workspace` nor in
+  CI, which only compiles the crate's targets without the feature; they run with
+  `cargo test -p splitty-gpui --features ui-test-support` (seen 2026-11-12).
 - **web frontend:** `RenderedDocument`'s fallback for engines without `adoptedStyleSheets` (the cleaned sheet
   serialized into a `<style>` of the shadow root and parsed again) has no test.
 - **mux-protocol:** everything except the binary frame layout: welcome contents, heartbeat, malformed input,
