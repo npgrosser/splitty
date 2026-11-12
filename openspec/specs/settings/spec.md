@@ -51,11 +51,11 @@ After a successful settings change, the server SHALL send `settings.changed` wit
 - **THEN** the effective settings omit them and all other valid fields remain usable
 
 ### Requirement: Experimental Native Local Appearance
-The experimental native workspace SHALL read local appearance through `home.get` and `theme.get`, applying appearance font overrides and resolved UI colors to workspace chrome without writing settings during reads. Terminal colors SHALL follow the selected native terminal palette. Unset chrome font overrides SHALL use resolved UI theme defaults. Automatic mode SHALL select the saved light or dark UI theme using the local OS preference. Remote settings SHALL NOT select application appearance.
+The experimental native workspace SHALL read local appearance settings through `home.get` and resolve the UI theme they name in its own theme catalog, applying appearance font overrides and the theme's colors to workspace chrome without writing settings during reads. It SHALL NOT request `theme.get` or `theme.list`. Terminal colors SHALL follow the selected native terminal palette. Unset chrome font overrides SHALL use the UI theme's defaults. Automatic mode SHALL select the saved light or dark UI theme using the local OS preference. A UI theme name the catalog does not have SHALL show the default theme of the OS preference and a notice, and SHALL NOT change the stored setting. Remote settings SHALL NOT select application appearance.
 
 #### Scenario: Startup appearance
 - **WHEN** the local appearance read succeeds
-- **THEN** workspace chrome uses the supported appearance font overrides or resolved UI theme defaults
+- **THEN** workspace chrome uses the supported appearance font overrides or the UI theme's defaults
 - **AND** existing and newly created terminals use the selected native terminal palette without recreating sessions or losing terminal history
 - **AND** loading appearance does not submit a settings mutation
 
@@ -66,8 +66,13 @@ The experimental native workspace SHALL read local appearance through `home.get`
 
 #### Scenario: Automatic local theme
 - **WHEN** automatic theme mode is configured and the local OS color preference changes
-- **THEN** the matching configured light or dark theme is requested from the local service
+- **THEN** the matching configured light or dark theme is shown
 - **AND** a remote service's settings cannot override that choice
+
+#### Scenario: Unavailable UI theme
+- **WHEN** the settings name a UI theme the catalog does not have
+- **THEN** the default theme of the OS preference is shown with a notice
+- **AND** the stored setting is unchanged
 
 ### Requirement: Appearance Refresh and Failure Isolation
 Native appearance refresh SHALL coalesce same-service `settings.changed` events, discard superseded results, preserve terminal event delivery and finish owned API work during shutdown. Read failures SHALL retain working defaults or the last valid appearance and expose a status while terminals remain usable. Unsupported presentation values SHALL use bounded native fallbacks.
@@ -152,7 +157,7 @@ Native Drawer updates SHALL retain connection and request identity, admit at mos
 - **AND** shutdown retains ownership until pending API cleanup is joined
 
 ### Requirement: Experimental Native Settings Editor
-The experimental native workspace SHALL offer an editor for the local service's supported Appearance, Terminal, and Workspace preferences. It SHALL read effective values through `home.get`, defaults and limits through `home.metadata`, and theme choices through `theme.list`. It SHALL submit only explicit supported changes through `home.update`; selecting a remote Screen SHALL NOT change the settings source.
+The experimental native workspace SHALL offer an editor for the local service's supported Appearance, Terminal, and Workspace preferences. It SHALL read effective values through `home.get` and defaults and limits through `home.metadata`, and SHALL offer the UI themes and terminal palettes of its theme catalog by display name, storing their identifiers. The catalog SHALL be read again when the editor opens. It SHALL submit only explicit supported changes through `home.update`; selecting a remote Screen SHALL NOT change the settings source.
 
 #### Scenario: Local source while viewing remote content
 - **WHEN** a remote Screen is selected and the native Settings editor opens
@@ -164,9 +169,13 @@ The experimental native workspace SHALL offer an editor for the local service's 
 - **AND** reset uses the local service's published default when available
 
 #### Scenario: Unavailable metadata or theme catalog
-- **WHEN** settings metadata or the theme catalog cannot be read
-- **THEN** already loaded effective settings remain visible and terminal use continues
+- **WHEN** settings metadata cannot be read, or a file of the themes directory cannot be loaded
+- **THEN** already loaded effective settings remain visible, terminal use continues, the remaining themes stay offered and the file is reported
 - **AND** controls that cannot establish valid choices or reset values do not submit guessed values
+
+#### Scenario: Theme file added while the application runs
+- **WHEN** a theme set or palette is placed in the themes directory and the Settings editor is opened afterwards
+- **THEN** the editor offers it without a restart
 
 ### Requirement: Native Settings Mutation Reconciliation
 Native settings mutations SHALL be identified with their local connection and request, admitted within a bounded queue, submitted at most once, and reconciled with the service's complete effective settings and `settings.changed`. A rejected, uncertain, or stale result SHALL NOT be shown as saved. The editor SHALL retain a visible error or uncertain state and refresh from the local service without replaying the write.
@@ -187,21 +196,55 @@ Native settings mutations SHALL be identified with their local connection and re
 - **AND** owned pending work is cancelled and joined without changing another service
 
 ### Requirement: Independent Native Terminal Palette
-The native workspace SHALL use the active UI theme's terminal colors when `terminal.theme` is `default`. When it names an available theme, the workspace SHALL use that theme's resolved terminal colors while keeping the selected UI theme for chrome. Palette-only changes SHALL update existing and future terminals without recreating sessions, losing terminal history, or changing native terminal font metrics.
+The native workspace SHALL choose the terminal palette in this order: the palette `terminal.theme` names; while that is `default`, the palette `terminal.themeDark` or `terminal.themeLight` names for the mode of the shown UI theme; while that is `default` too, the palette with the UI theme's identifier, ignoring `-`; otherwise the default palette of that mode. The service SHALL store `terminal.themeDark` and `terminal.themeLight` with the default `default`. A named palette SHALL be used while the selected UI theme stays in use for chrome. Palette-only changes SHALL update existing and future terminals without recreating sessions, losing terminal history, or changing native terminal font metrics.
 
 #### Scenario: Separate terminal choice
 - **WHEN** the user chooses an available terminal palette different from the UI theme
 - **THEN** terminal colors change and the workspace chrome retains its UI theme
 
+#### Scenario: Palette pair by mode
+- **WHEN** `terminal.theme` is `default`, `terminal.themeDark` and `terminal.themeLight` name palettes, and the shown UI theme changes between a dark and a light one
+- **THEN** terminal colors use the palette named for the UI theme's mode
+
 #### Scenario: Inherit current UI theme
-- **WHEN** the terminal palette is reset to `default` or automatic UI mode changes with `terminal.theme` set to `default`
-- **THEN** terminal colors follow the active UI theme
+- **WHEN** all three terminal palette settings are `default`
+- **THEN** terminal colors use the palette with the UI theme's identifier, or the default palette of the UI theme's mode where no such palette exists
 
 #### Scenario: Unavailable saved palette
-- **WHEN** a saved terminal theme is unavailable or its resolution fails
-- **THEN** the native workspace keeps the last valid terminal palette or the active UI theme's terminal colors, reports the problem, and does not overwrite the saved setting
+- **WHEN** a saved terminal palette name is not in the catalog
+- **THEN** the native workspace shows the palette it would show for `default`, reports the problem, and does not overwrite the saved setting
 
 #### Scenario: Resolved palette identity
-- **WHEN** a native client resolves an independently named terminal palette through `theme.get`
-- **THEN** the reply identifies its actual resolved source in `id`, separately from the display `name`, including the fallback source when applicable
-- **AND** an absent or mismatched identifier is reported as an unverifiable palette, preserving the last valid colors without rewriting settings
+- **WHEN** a terminal palette is selected by name
+- **THEN** the shown palette is the catalog entry with exactly that identifier
+- **AND** another palette is shown in its place only together with a notice, without rewriting settings
+
+#### Scenario: Service without the palette pair
+- **WHEN** the local service does not publish `terminal.themeDark` and `terminal.themeLight`
+- **THEN** both count as `default` and the editor does not offer to change them
+
+### Requirement: Native Theme Catalog
+The native workspace SHALL resolve UI themes and terminal palettes in a catalog of its own, made of the themes bundled with the application and the files of the themes directory (`themes/` in the configuration directory of the computer the application runs on). A UI theme SHALL be a theme of a theme set in the component toolkit's JSON format (`*.json`: a `themes` list whose entries have `name`, `mode` and `colors`). A terminal palette SHALL be a file in Ghostty's theme format: `palette = N=#rrggbb` for the ANSI colors 0 to 15, `background`, `foreground`, `cursor-color`, `selection-background` and `selection-foreground`; other keys SHALL be ignored, and a file without `background` and `foreground` is not a palette. In the themes directory, `*.toml` files SHALL be left to the web client, and every other file that is not a theme set SHALL be read as a terminal palette named by its file name.
+
+Settings SHALL store a theme by its identifier: the display name in lowercase with every run of characters other than ASCII letters and digits replaced by `-`, or the `id` of the theme's `splitty` object. A bundled theme SHALL keep its identifier against a file with the same one. The identifiers of the themes shipped before this catalog (`splitty-dark`, `splitty-light` and the others) SHALL keep selecting the same looks, as a UI theme and as a terminal palette of the same identifier.
+
+A UI theme MAY carry a `splitty` object with the workspace chrome's own tokens: `surface`, `raised`, `overlay`, `text`, `text-secondary`, `text-muted`, `border`, `border-subtle`, `active`, `hover`, `accent`, `danger`, `danger-hover`, `success`, `warning`, `hover-overlay`, `shadow`, `drag-over-border`, `tab-height`, `tab-font-size`, `tab-accent`, `radius`, `font-size` and `font-family`. Every absent token SHALL be derived from the theme's toolkit colors. An unsupported value SHALL keep its derived value and be reported, without rejecting the theme.
+
+Third-party themes bundled with the application SHALL be limited to those whose license permits redistribution without further conditions, and their license notices SHALL ship in the repository next to them.
+
+#### Scenario: Third-party theme without chrome tokens
+- **WHEN** the selected UI theme is a toolkit theme without a `splitty` object
+- **THEN** the application's components use the theme as it is and the workspace chrome uses colors derived from it
+
+#### Scenario: Stored identifier from an earlier version
+- **WHEN** the settings hold `splitty-dark` as the UI theme and `default` as the terminal palette
+- **THEN** the chrome and the terminal show the colors that theme had before the catalog
+
+#### Scenario: Files in the themes directory
+- **WHEN** the themes directory holds a theme set, a Ghostty theme file, a `*.toml` file and a file that is neither a theme set nor a palette
+- **THEN** the theme set's themes and the palette are offered with the bundled ones
+- **AND** the `*.toml` file is ignored and the other file is reported as not loaded
+
+#### Scenario: Unsupported chrome token
+- **WHEN** a theme's `splitty` object holds a value outside the supported form or range
+- **THEN** that token keeps its derived value, the theme is shown, and the problem is reported
