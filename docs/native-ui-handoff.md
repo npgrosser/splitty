@@ -164,9 +164,6 @@ marks.
   files with the others (draft `native-windows-one-backend`). The dialog on a
   first start with several distributions and the WSL settings section have
   not been seen in a real window.
-- Program status marks and notifications are tested against synthetic
-  `program_status.changed` events; they have not been seen in a real window
-  against a server that reports status.
 - Vendored platform tests are workspace-excluded and require their explicit
   documented regression command.
 - Real SSH daemon installation/update, individual Windows remote UX, broader
