@@ -8,6 +8,15 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`replay-terminal-modes` RTM-1/RTM-2** (2026-11-12, provisional, tbd; recorded in its proposal under "Decisions"):
+  - **RTM-1:** the mode tracker lives in the session layer, so after a daemon restart it is as complete as the keeper's buffer. The alternative, in the keeper, survives restarts but needs a keeper capability.
+  - **RTM-2:** the alternate screen is restored to its state at the oldest retained byte, every other mode to its last change before it; `?7`, `?1007`, `?2031` and `?2048` are tracked, `?2026` is never restored. The alternatives are the state at the oldest byte for every mode, or the last change for every mode.
+
+- **`program-status` PS-1 to PS-3** (2026-11-12, provisional, tbd; recorded in its proposal under "Provisional decisions"):
+  - **PS-1:** the server removes the status probe from the output it records and forwards, so no client or outer terminal answers it a second time. The alternative forwards it.
+  - **PS-2:** while a pane holds a status record, its bells and OSC notifications raise no notification of their own. The alternatives notify for both, or merge them within a short time.
+  - **PS-3:** `done` and `error` records stay on the server until the program replaces or clears them, a full reset or the session's end; a window's mark goes once the pane is seen. The alternative drops them after a time or at the next input.
+
 - **Native web look alignment** (2026-11-09, provisional, tbd; no OpenSpec change, recorded in `docs/gpui-spike.md`):
   - **WL-1:** secondary and muted chrome text keep the theme's values, and only primary text is lifted to 4.5:1. The alternative, lifting all text, erases the theme's idle/running distinction.
   - **WL-2:** the default terminal cursor is a bar (the web client's default; `CSI 0 q` restores it), and only the focused terminal shows a cursor.

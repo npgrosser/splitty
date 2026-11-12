@@ -1,6 +1,6 @@
 # Proposal
 
-> Draft created on 2026-11-12. Not planned yet. It is the third of three packages, after `session-stability-and-status` and `server-terminal-state`. Specs, design and tasks are written when this change is next; it will most likely be split into one change per stage. Related: `mcp-server`, `viewer-renderers`, `viewer-webview`, `viewer-sandboxed-html`, `terminal-intelligence` (its parser boundary was shaped for a later plugin interface), `notes-and-tags`.
+> Draft created on 2026-11-12. Not planned yet. It is the third of three packages, after the one split into `replay-terminal-modes`, `version-skew-smoke-test` and `program-status`, and after `server-terminal-state`. Specs, design and tasks are written when this change is next; it will most likely be split into one change per stage. Related: `mcp-server`, `viewer-renderers`, `viewer-webview`, `viewer-sandboxed-html`, `terminal-intelligence` (its parser boundary was shaped for a later plugin interface), `notes-and-tags`.
 
 ## Why
 

@@ -1,12 +1,12 @@
 # Proposal
 
-> Draft created on 2026-11-12. Not planned yet. It is the second of three packages, after `session-stability-and-status` (whose restored terminal modes this change replaces) and before `plugin-system`. Specs, design and tasks are written when this change is next. Related: `terminal-intelligence` (its design leaves a server-side emulator under review; this draft is that review's proposal), `mcp-server` (agents reading a pane's screen), `multi-attach`.
+> Draft created on 2026-11-12. Not planned yet. It is the second of three packages, after the one split into `replay-terminal-modes` (whose restored terminal modes this change replaces), `version-skew-smoke-test` and `program-status`, and before `plugin-system`. Specs, design and tasks are written when this change is next. Related: `terminal-intelligence` (its design leaves a server-side emulator under review; this draft is that review's proposal), `mcp-server` (agents reading a pane's screen), `multi-attach`.
 
 ## Why
 
 A client that attaches to a session gets the newest bytes of the session's output and interprets them from nothing. That is right while the buffer holds everything that shaped the terminal, and wrong without a sign once it does not:
 
-- Modes, screen contents and history set before the oldest retained byte are gone (`session-stability-and-status` restores the modes).
+- Modes, screen contents and history set before the oldest retained byte are gone (`replay-terminal-modes` restores the modes).
 - A program that repaints fills the buffer with repaints, so the retained output covers minutes of work instead of the history a user scrolls back to.
 - Historical output has effects when it is interpreted again: report requests, clipboard writes, notifications. Every client filters them by a list that each new sequence with an effect has to join, and the findings document lists the faults this has produced.
 - A full-screen program is correct only after the redraw a client forces once it is attached.

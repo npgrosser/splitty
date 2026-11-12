@@ -149,6 +149,12 @@ Line numbers refer to the tree at commit `b495e1c`.
   streams: the engine tracks a session from `create`/`attach` on, and the watchers that feed it run per stream
   (`protocol/dispatcher.rs`). Output, title and OSC 133 state are captured without a client, but a session nobody
   streams notifies nobody. Follow-up in `terminal-intelligence`.
+- **The BEL that ends an OSC the scanner does not read counts as a bell** (found by reading the code on 2026-11-12,
+  not reproduced): for an OSC number other than 0, 2 and 133 the scanner goes back to its idle state at the `;`
+  (`pty/osc.rs`, "Unknown OSC number"), so it counts the BEL that ends the sequence as a standalone bell and the
+  session's streams get a `bell` event. This holds for every BEL-terminated OSC 7, 8, 9, 777, 7501 or 21337; Claude
+  Code ends its OSC sequences with BEL. Not visible while the windows only log bells; `terminal-bell` would show it.
+  The scanner should read an unknown OSC to its end; `program-status` does this.
 - **Fixed in `cli-control`:** the lifecycle owner reports actual exit codes and signals, including when output EOF and process exit arrive in either order.
 - `close` does not kill the process, it only hangs up the terminal (SIGHUP to the shell and the foreground process
   group); processes that ignore SIGHUP survive, and until they exit they also keep the session's reader thread,

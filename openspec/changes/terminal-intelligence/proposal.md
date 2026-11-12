@@ -18,7 +18,7 @@ The roadmap describes three independent levels, built in the order 1 → 2 → 3
   - OSC 7 (working directory) parsing; the working directory currently comes from process polling only. OSC 0/2 titles are already parsed.
   - Spec the existing Level 1 behavior.
 - **Level 2 — app-specific parsers**
-  - Programs that report their own state with OSC 7501 need no parser; the `session-stability-and-status` change reads their reports. App parsers remain for programs that do not report.
+  - Programs that report their own state with OSC 7501 need no parser; the `program-status` change reads their reports. App parsers remain for programs that do not report.
   - A server-side parser registry selected by the foreground process name (detected with the existing process polling). The parser switches automatically when the foreground process changes (shell → vim → shell).
   - Parsers emit semantic app states, e.g. Claude Code waiting for input, waiting for tool approval or thinking, and the vim mode.
   - User-facing config in the home config file: built-in parsers are enabled by default and can be switched off per binary; matching is a glob on the binary name only.
