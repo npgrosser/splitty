@@ -917,7 +917,16 @@ fn bridge_session(sandbox: &Sandbox, bridge: &Build, pane: &Pane) {
         assert!(view.replied, "{what}: no reply to mux.status");
 
         let (transport, ended) = view.link.finish().await;
-        transport.unwrap_or_else(|error| panic!("{what}: {error}"));
+        // The bridge can end before the client's last frame is written; its
+        // exit below is what shows an orderly end (a finding under "Flaky
+        // tests" keeps the race).
+        if let Err(error) = transport {
+            assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe,
+                "{what}: {error}"
+            );
+        }
         assert!(
             ended.status.as_ref().is_ok_and(ExitStatus::success),
             "{what}: the bridge's exit\n{}",
