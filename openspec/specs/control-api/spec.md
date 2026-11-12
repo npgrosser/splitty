@@ -43,7 +43,7 @@ The control API SHALL read and modify the same workspace state that native and W
 - **THEN** the returned screen contains the new pane
 
 ### Requirement: Workspace and Screen Queries
-`GET /api/mux/state` SHALL return the complete workspace state, and `GET /api/mux/screen/{id}` SHALL return the state of a single screen, with payload shapes as described by `WorkspaceState` and `ScreenState` in `docs/protocol.ts`, except that no session carries its `scratchpad` (see `session-scratchpad`), no viewer pane's `text` document carries its text (see `viewer-panes`), and no viewer pane carries its `annotations` (see `viewer-annotations`). A request for an unknown screen id MUST answer status 404 with the JSON body `{"error": "screen not found"}`.
+`GET /api/mux/state` SHALL return the complete workspace state, and `GET /api/mux/screen/{id}` SHALL return the state of a single screen, with payload shapes as described by `WorkspaceState` and `ScreenState` in `docs/protocol.ts`, except that no session carries its `scratchpad` (see `session-scratchpad`), no viewer pane's `text` document carries its text (see `viewer-panes`), and no viewer pane carries its `annotations` (see `viewer-annotations`). A session that holds a root status record SHALL carry it as `programStatus` (see `program-status`). A request for an unknown screen id MUST answer status 404 with the JSON body `{"error": "screen not found"}`.
 
 #### Scenario: Existing screen
 - **WHEN** a client sends `GET /api/mux/screen/{id}` for an existing screen
@@ -64,6 +64,11 @@ The control API SHALL read and modify the same workspace state that native and W
 #### Scenario: Annotations omitted
 - **WHEN** a viewer pane holds annotations and a client sends `GET /api/mux/state` or `GET /api/mux/screen/{id}` for its screen
 - **THEN** the viewer pane appears with its `viewer` record but without `annotations`
+
+#### Scenario: Program status included
+- **WHEN** a session's program has reported `working` and a client sends `GET /api/mux/screen/{id}` for its screen
+- **THEN** the session appears with `programStatus` holding the state `working`
+- **AND** a session without a root status record appears without `programStatus`
 
 ### Requirement: Screen Summary List
 `GET /api/mux/screens` SHALL return a JSON array with one entry per screen in workspace screen order, each carrying `id`, `name`, `paneCount` and `active`, where `active` is true for exactly the workspace's active screen and false for all others.

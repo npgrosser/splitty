@@ -109,7 +109,7 @@ When a workspace operation creates a pane that needs a terminal (see `workspace-
 - **AND** a client that attaches to that id receives its output
 
 ### Requirement: Terminal Input
-The server SHALL write the UTF-8 bytes of the `data` field of an `input` message unchanged to the PTY of the session named by `id`. Any connection MAY send input to any existing session; it does not need to be streaming that session.
+The server SHALL write the UTF-8 bytes of the `data` field of an `input` message unchanged to the PTY of the session named by `id`. Any connection MAY send input to any existing session; it does not need to be streaming that session. Each input SHALL be written whole: bytes the server writes to a session on its own, such as the answer to a status probe (see `program-status`), come before or after it and never inside it.
 
 #### Scenario: Input reaches the process
 - **WHEN** a client sends `{"type":"input","id":"<sid>","data":"ls\r"}`
@@ -123,8 +123,12 @@ The server SHALL write the UTF-8 bytes of the `data` field of an `input` message
 - **WHEN** writing to the session's terminal fails
 - **THEN** the server sends an `error` event with the `sessionId` describing the write failure
 
+#### Scenario: Status probe answered during input
+- **WHEN** a client's input of 64 KiB is being written to a session while the server answers a status probe in it
+- **THEN** the process reads the answer before or after those bytes, not between two of them
+
 ### Requirement: Terminal Output Streaming
-The server SHALL deliver session output only to connections currently streaming that session, meaning connections that created it with `create` or attached it with `attach` and have not since detached, closed or disconnected. Output MUST be sent as binary output frames as defined in `mux-protocol` (Binary Terminal Output Frames), carrying the raw bytes exactly as read from the terminal.
+The server SHALL deliver session output only to connections currently streaming that session, meaning connections that created it with `create` or attached it with `attach` and have not since detached, closed or disconnected. Output MUST be sent as binary output frames as defined in `mux-protocol` (Binary Terminal Output Frames), carrying the raw bytes exactly as read from the terminal, except status probes, which the server answers itself and removes before it buffers or sends the output (see `program-status`, Probe Removed from the Output).
 
 #### Scenario: Output delivered as a binary frame
 - **WHEN** the process in session `abc` writes `hello` to its terminal while a client streams `abc`
@@ -133,6 +137,10 @@ The server SHALL deliver session output only to connections currently streaming 
 #### Scenario: Non-streaming connections receive nothing
 - **WHEN** a session produces output
 - **THEN** connections that have not created or attached that session receive no output frames for it
+
+#### Scenario: Status probe removed
+- **WHEN** the process in a streamed session writes `a`, `ESC ] 7501 ; ? BEL` and `b`
+- **THEN** the client receives `ab` and no part of the probe
 
 ### Requirement: Scrollback Buffer
 The server SHALL keep the most recent output of each session in a fixed-size buffer that discards its oldest bytes when full. The buffer size SHALL be 1 MiB unless the server process environment sets `SPLITTY_SCROLLBACK_SIZE` to a positive integer number of bytes; any other value falls back to the default.
@@ -263,7 +271,7 @@ While a connection streams a session, the server SHALL send `title` events that 
 - **THEN** the client receives a `title` event carrying that `oscTitle` without waiting for the next periodic check
 
 ### Requirement: Continuous Output Capture
-The server SHALL read each session's output continuously from the moment the session starts until its process exits, whether or not any connection streams the session. Output produced while no connection streams the session SHALL be appended to the scrollback buffer, title, prompt and terminal mode tracking SHALL keep running, and the session's process MUST NOT stall because no client reads its output.
+The server SHALL read each session's output continuously from the moment the session starts until its process exits, whether or not any connection streams the session. Output produced while no connection streams the session SHALL be appended to the scrollback buffer, title, prompt, terminal mode and program status tracking SHALL keep running, status probes SHALL be answered, and the session's process MUST NOT stall because no client reads its output.
 
 #### Scenario: Output while nobody streams
 - **WHEN** a session whose pane no client has open prints 10 KiB of output
@@ -276,6 +284,10 @@ The server SHALL read each session's output continuously from the moment the ses
 #### Scenario: Modes set while nobody streams
 - **WHEN** a program in a session that no connection streams enables mouse reporting and then prints more than the scrollback buffer holds
 - **THEN** a client that attaches afterwards receives the sequence that enables mouse reporting ahead of the buffered output
+
+#### Scenario: Status while nobody streams
+- **WHEN** a program in a session that no connection streams writes a status probe and then reports `blocked`
+- **THEN** the program reads the probe's answer, and a client that connects afterwards receives the `blocked` record right after `mux.welcome`
 
 ### Requirement: Terminal Modes in the Replay
 Ahead of a session's buffered output, a replay SHALL carry the sequences that put a fresh terminal into the modes that output starts in (see Tracked Terminal Modes): the alternate screen as it was at the oldest buffered byte, and every other mode as its last change before that byte left it. A mode changed within the buffered output is left to the replay. The kitty keyboard flags SHALL be restored as the normal screen's stack, then the switch to the alternate screen, then the alternate screen's stack. Synchronized output (`?2026`) SHALL NOT be restored.
@@ -337,7 +349,7 @@ The server SHALL follow, in each session's output from the first byte it records
 - **THEN** it does not count as enabling bracketed paste
 
 ### Requirement: Client Handling of Session Streams
-The server streams a session at most once per connection, so a client SHALL keep at most one `attach` for a session in flight on a connection, and SHALL send `detach` for a session only when none of its views shows that session or waits for it. Binary output frames for a session that arrive after the client sent `attach` and before the matching `attached` event are that session's buffered output; the client SHALL display them, in order, before any output that follows. When a view is replaced by another view for the same session while its attach is in flight, the new view SHALL take over that attach and receive its buffered output and all later output. Historical output SHALL NOT perform clipboard operations or produce replies to terminal report requests. Live output after `attached` SHALL retain its normal behavior even when buffered before a view is wired. The server SHALL filter clipboard operations and terminal report requests from replay before sending it over any transport. Clients SHALL retain their replay protection for older servers.
+The server streams a session at most once per connection, so a client SHALL keep at most one `attach` for a session in flight on a connection, and SHALL send `detach` for a session only when none of its views shows that session or waits for it. Binary output frames for a session that arrive after the client sent `attach` and before the matching `attached` event are that session's buffered output; the client SHALL display them, in order, before any output that follows. When a view is replaced by another view for the same session while its attach is in flight, the new view SHALL take over that attach and receive its buffered output and all later output. Historical output SHALL NOT perform clipboard operations or produce replies to terminal report requests, the status probe `OSC 7501 ; ?` among them. Live output after `attached` SHALL retain its normal behavior even when buffered before a view is wired. The server SHALL filter clipboard operations and terminal report requests from replay before sending it over any transport. Clients SHALL retain their replay protection for older servers.
 
 #### Scenario: Buffered output shown on attach
 - **WHEN** a client attaches a view to a session whose buffered output ends with a shell prompt
@@ -356,6 +368,10 @@ The server streams a session at most once per connection, so a client SHALL keep
 - **WHEN** historical output includes terminal color/status queries or OSC 52 clipboard operations, including across frame boundaries
 - **THEN** restoring the view neither sends their replies into the session nor changes the clipboard
 - **AND** live queries and clipboard writes after `attached` behave normally
+
+#### Scenario: Status probe in a replay from an older server
+- **WHEN** the replay of an older server, which forwards status probes, holds `ESC ] 7501 ; ? BEL`
+- **THEN** neither the web client nor `splitty attach` passes the probe on to a terminal that could answer it
 
 ### Requirement: Image Upload
 The server SHALL accept `{"type":"save_image","requestId":"<r>","data":"<base64>"}`, with `data` an image of at most 10 MiB encoded as standard base64. It SHALL store the image as a new file in `splitty/paste/` of the user's cache directory (`$XDG_CACHE_HOME`, else `~/.cache`), the directory with mode 0700 and the file with mode 0600, and answer `{"type":"image_saved","requestId":"<r>","path":"<absolute path>"}`. The server SHALL choose the file's name, `paste-<UTC date and time>-<random hex>` with the extension `.png`, `.jpg`, `.gif` or `.webp` from the image's leading bytes. Data that is not valid base64, is larger than 10 MiB or is not a PNG, JPEG, GIF or WebP image SHALL be answered with `{"type":"image_failed","requestId":"<r>","error":"<message>"}` and stored nowhere. Before it stores an image, the server SHALL remove the `paste-` files of that directory that are older than 24 hours, and then all but the newest 100.

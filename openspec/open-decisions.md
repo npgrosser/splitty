@@ -21,7 +21,7 @@ Each point names what holds now, the alternative, and where it is recorded.
   - **VS-4:** the test variables are `SPLITTY_TEST_RELEASED_BINARY` and `SPLITTY_TEST_REQUIRE_RELEASED_BINARY`, apart from the rollback smoke's `SPLITTY_TEST_PREVIOUS_BINARY`.
   - **VS-5:** the test does not assert that a setting only the newer build knows survives a downgrade, since today it does not (a finding under server-modes).
 
-- **`program-status` PS-1 to PS-17** (2026-11-12, provisional, tbd; recorded in its design under "Provisional decisions"):
+- **`program-status` PS-1 to PS-27** (2026-11-12, provisional, tbd; recorded in its design under "Provisional decisions"):
   - **PS-1:** the server removes the status probe from the output it records and forwards, so no client or outer terminal answers it a second time. The alternative forwards it.
   - **PS-2:** while a pane holds a status record, its bells and OSC notifications raise no notification of their own. The alternatives notify for both, or merge them within a short time.
   - **PS-3:** `done` and `error` records stay on the server until the program replaces or clears them, a full reset or the session's end; a window's mark goes once the pane is seen. The alternative drops them after a time or at the next input.
@@ -39,6 +39,17 @@ Each point names what holds now, the alternative, and where it is recorded.
   - **PS-15:** the root record is in the control API's mux state replies and in `list-panes`, not in the workspace state or screen snapshots. The alternatives are the workspace state with a nudge per change, or an endpoint of its own.
   - **PS-16:** the server strips bidirectional controls, invisible characters and line separators from `title` and `msg`. The alternative drops reports that contain them.
   - **PS-17:** tabs show working, blocked with its kind, done and failed; screens and host groups only blocked; what the user saw is kept in memory per window; unconnected or older hosts show nothing. The alternatives also mark screens for `done`/`error`, or persist what was seen.
+  - **PS-18:** outside a string, a BEL right after an ESC still counts as a bell, and the ESC begins a sequence with the next byte. The alternative lets the BEL end the ESC as nothing.
+  - **PS-19:** the OSC scanner does not track DCS, APC, PM or SOS strings, like the probe matcher: an OSC inside one (tmux passthrough) is read, a BEL inside one rings as before. The alternative skips those strings as the mode tracker does.
+  - **PS-20:** a new client's greeting sends the records the watcher last sent everyone; a change since its last check arrives with the next check, at most 100 ms later. The alternative reads every session for each greeting.
+  - **PS-21:** a `done`/failed mark counts as seen only when its pane is the watched (focused) pane, the unread rule. The alternative counts every pane shown on the screen.
+  - **PS-22:** the tab mark is a severity-colored dot with the kind and message in its tooltip, no text on the tab. The alternative is an icon or short text per state.
+  - **PS-23:** the window refuses a record whose text is over the protocol's limits and strips hidden characters; an invalid event or one past 4096 sessions per source changes nothing and shows a status line. The alternatives shorten text, drop silently, or evict the oldest session.
+  - **PS-24:** the window treats `kind` outside `blocked` and `progress` outside `working`/`blocked` as absent, as the server does. The alternative refuses such records.
+  - **PS-25:** wording of the states ("Working, N%", "Waiting for permission", …, "Done", "Failed"), notification titles "{screen}: {state}: {text}", and at most 4096 seen sessions per source. The alternatives are other words or no bound.
+  - **PS-26:** PS-2 applies while the session holds any root record, `idle` included. The alternative applies it only while the record is not `idle`.
+  - **PS-27:** a host screen not opened has no drawer row; the host group, the host's panel and the hosts list mark it, and the outgoing screen of a transition shows no marks. The alternative adds a drawer row per blocked screen not opened.
+  - Review note on PS-15: an unrestricted pane process reads every session's sanitized `msg` and `title` through `GET /api/mux/state` on the control socket, as it reads pane titles today; restricted grant sockets do not route mux endpoints.
 
 - **Native web look alignment** (2026-11-09, provisional, tbd; no OpenSpec change, recorded in `docs/gpui-spike.md`):
   - **WL-1:** secondary and muted chrome text keep the theme's values, and only primary text is lifted to 4.5:1. The alternative, lifting all text, erases the theme's idle/running distinction.

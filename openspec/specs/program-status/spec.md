@@ -1,10 +1,10 @@
-# Spec Delta
+# program-status Specification
 
 ## Purpose
 
 Programs in a session report their own state through the Program Status Protocol (OSC 7501, revision 0.4: https://www.superlogical.com/rex/docs/build/program-status). This capability covers how the server reads those reports into records per session, answers the protocol's probe and keeps it out of the output, and how a native window shows the records and notifies about them. The event that carries records to clients is in `mux-protocol`.
 
-## ADDED Requirements
+## Requirements
 
 ### Requirement: Status Reports
 The server SHALL read every report `OSC 7501 ; key=value:key=value`, ended by `ESC \` or BEL, in a session's output from the first byte it records, whether or not a connection streams the session. Pairs without `=` SHALL be skipped and unknown keys ignored; of a repeated key the last SHALL count. A report whose `state` is missing or is none of `idle`, `working`, `done`, `blocked`, `error` and `clear` SHALL be ignored.
@@ -199,10 +199,10 @@ A native window SHALL keep the root records each connection reports, scoped to t
 
 #### Scenario: Blocked pane on a screen not opened
 - **WHEN** a window is connected to a host, has not opened one of its screens, and a pane on that screen becomes `blocked`
-- **THEN** the host group and that screen in the drawer show that a pane is blocked
+- **THEN** the host group in the drawer shows that a pane is blocked, and the host's list of screens marks that screen
 
 #### Scenario: Done seen
-- **WHEN** a pane on another screen shows `done` and the user switches to that screen
+- **WHEN** a pane on another screen shows `done` and the user switches to that screen, where that pane has the focus
 - **THEN** the mark goes and does not return when the connection is replaced and reports the same record again
 
 #### Scenario: The same session id on two connections
