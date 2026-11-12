@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::mux::{ScreenInfo, ScreenState};
 use crate::pty::ports::ListeningPort;
+use crate::pty::status::ProgramStatus;
 
 // ---------------------------------------------------------------------------
 // Client → Server message types (used for request dispatching)
@@ -20,6 +21,8 @@ pub const MSG_INPUT: &str = "input";
 /// Standard base64 carrying terminal bytes that need not be UTF-8.
 pub const MSG_INPUT_BYTES: &str = "input_bytes";
 pub const INPUT_BYTES_CAPABILITY: &str = "terminal-input-bytes-v1";
+/// The server reads program status and sends `program_status.changed`.
+pub const PROGRAM_STATUS_CAPABILITY: &str = "program-status-v1";
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_INPUT_ENCODED_BYTES: usize = MAX_INPUT_BYTES.div_ceil(3) * 4;
 pub const MSG_RESIZE: &str = "resize";
@@ -311,6 +314,25 @@ pub enum ServerEvent {
         id: String,
         timestamp: i64,
         ports: Vec<ListeningPort>,
+    },
+
+    // -- Program status -----------------------------------------------------
+    /// A session's root program status record (`program-status-v1`), or
+    /// `null` once it went: to every connection after `mux.welcome` and when
+    /// the record changes, goes or its pane moves to another screen.
+    #[serde(rename = "program_status.changed", rename_all = "camelCase")]
+    ProgramStatusChanged {
+        id: String,
+        timestamp: i64,
+        session_id: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pane_id: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        screen_id: Option<String>,
+        status: Option<ProgramStatus>,
+        /// A window may notify about this change.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        notify: bool,
     },
 
     // -- Mux events ---------------------------------------------------------
@@ -804,6 +826,24 @@ impl ServerEvent {
             ports,
         }
     }
+
+    pub fn program_status_changed(
+        session_id: impl Into<String>,
+        location: Option<(String, String)>,
+        status: Option<ProgramStatus>,
+        notify: bool,
+    ) -> Self {
+        let (pane_id, screen_id) = location.unzip();
+        Self::ProgramStatusChanged {
+            id: generate_event_id(),
+            timestamp: now_millis(),
+            session_id: session_id.into(),
+            pane_id,
+            screen_id,
+            status,
+            notify,
+        }
+    }
 }
 
 // ===========================================================================
@@ -938,6 +978,50 @@ mod tests {
 
         let empty = serde_json::to_value(ServerEvent::ports_changed(Vec::new())).unwrap();
         assert_eq!(empty["ports"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn server_event_program_status_changed_serialization() {
+        use crate::pty::status::{BlockKind, StatusState};
+        let event = ServerEvent::program_status_changed(
+            "sess-1",
+            Some(("pane-1".into(), "screen-1".into())),
+            Some(ProgramStatus {
+                state: StatusState::Blocked,
+                kind: Some(BlockKind::Permission),
+                progress: None,
+                app: Some("claude-code".into()),
+                title: None,
+                msg: Some("Allow edit?".into()),
+                updated_at: 1_700_000_000_000,
+            }),
+            true,
+        );
+        let json = serde_json::to_value(&event).unwrap();
+        assert_eq!(json["type"], "program_status.changed");
+        assert_eq!(json["sessionId"], "sess-1");
+        assert_eq!(json["paneId"], "pane-1");
+        assert_eq!(json["screenId"], "screen-1");
+        assert_eq!(json["notify"], true);
+        assert_eq!(
+            json["status"],
+            serde_json::json!({
+                "state": "blocked",
+                "kind": "permission",
+                "app": "claude-code",
+                "msg": "Allow edit?",
+                "updatedAt": 1_700_000_000_000_u64,
+            })
+        );
+
+        let cleared = serde_json::to_value(ServerEvent::program_status_changed(
+            "sess-1", None, None, false,
+        ))
+        .unwrap();
+        assert!(cleared["status"].is_null(), "null, not absent: {cleared}");
+        for absent in ["paneId", "screenId", "notify"] {
+            assert!(cleared.get(absent).is_none(), "{absent}");
+        }
     }
 
     #[test]

@@ -37,6 +37,7 @@ mod managed_jobs;
 mod move_pane;
 mod mux_tabs;
 mod pane_state;
+mod program_status;
 mod pty_size;
 mod reviews;
 mod scratchpad;
@@ -50,13 +51,29 @@ pub(super) fn state(listen_addr: &str, dir: &Path) -> AppState {
 
 /// [`state`], with the listening ports found by `ports` when given.
 fn state_with(listen_addr: &str, dir: &Path, ports: Option<PortWatch>) -> AppState {
+    state_on(
+        listen_addr,
+        dir,
+        ports,
+        Arc::new(splitty_core::pty::terminal::LocalTerminals),
+    )
+}
+
+/// [`state_with`], with the sessions' terminals started by `terminals`.
+fn state_on(
+    listen_addr: &str,
+    dir: &Path,
+    ports: Option<PortWatch>,
+    terminals: Arc<dyn splitty_core::pty::terminal::TerminalFactory>,
+) -> AppState {
     use splitty_core::mux::effect_runner::{EffectRunner, EnvContext};
 
     let shell_profiles = Arc::new(RwLock::new(
         splitty_core::shell_profiles::ShellProfilesState::default(),
     ));
-    let pty = Arc::new(splitty_core::pty::manager::Manager::with_shell_profiles(
+    let pty = Arc::new(splitty_core::pty::manager::Manager::with_terminals(
         shell_profiles.clone(),
+        terminals,
     ));
     let mut dispatcher = splitty_core::protocol::dispatcher::Dispatcher::new(pty.clone());
     dispatcher.paste_dir = Some(dir.join("paste"));
@@ -100,6 +117,15 @@ fn state_with(listen_addr: &str, dir: &Path, ports: Option<PortWatch>) -> AppSta
         }),
         listen_addr: listen_addr.to_owned(),
     }
+}
+
+/// Options for the session `id` of a pane, running `script` in `/bin/sh`
+/// without shell integration, closed when it ends.
+fn command_opts(id: &str, script: &str) -> splitty_core::pty::CreateSessionOpts {
+    let mut opts = splitty_core::pty::testing::sh_opts(id, "");
+    opts.command = script.into();
+    opts.restore_mode = "close".into();
+    opts
 }
 
 /// `build_router` with the hub given.

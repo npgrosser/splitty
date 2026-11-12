@@ -284,6 +284,13 @@ interface SessionState {
    * GET /api/mux/state and /api/mux/screen/{id} leave it out.
    */
   scratchpad?: string;
+  /**
+   * The session's root program status record (ProgramStatusRecord), absent
+   * while it holds none. Only GET /api/mux/state and /api/mux/screen/{id}
+   * carry it; screen snapshots over the WebSocket leave it out, where
+   * ProgramStatusChanged carries the records.
+   */
+  programStatus?: ProgramStatusRecord;
 }
 
 // --- Screen (top-level) ---
@@ -899,7 +906,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1" and "viewer-annotations-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1" and "program-status-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -1014,6 +1021,64 @@ interface PortsChanged extends ServerEvent {
   ports: ListeningPort[];
 }
 
+// --- Program Status ---
+
+/**
+ * A session's root program status record: the last report without `id` of
+ * the Program Status Protocol (OSC 7501, revision 0.4) that a program in the
+ * session wrote, as Claude Code and Codex do. Child records (reports with an
+ * `id`) stay on the server. `working`, `blocked` and `idle` records end at
+ * an OSC 133 prompt mark, when the session stops being busy and when its
+ * output ends; `done` and `error` stay until the program replaces or clears
+ * them, a full reset or the end of the session.
+ */
+interface ProgramStatusRecord {
+  state: "idle" | "working" | "done" | "blocked" | "error";
+  /** Only with "blocked". */
+  kind?: "permission" | "question" | "auth";
+  /** 0..100, only with "working" and "blocked". */
+  progress?: number;
+  app?: string;
+  /**
+   * Decoded and sanitized plain text (no control characters, bidirectional
+   * controls, invisible characters or line separators): untrusted program
+   * text, shown as plain text and naming its pane.
+   */
+  title?: string;
+  msg?: string;
+  /** Unix milliseconds of the report, server clock. */
+  updatedAt: number;
+}
+
+/**
+ * The root record of a session, with the session's pane and screen when it
+ * has one; `status` null when the record went (cleared, ended) or the
+ * session was closed or removed. Sent right after mux.welcome (after
+ * PortsChanged) for each session that holds a root record, and to every
+ * connection, streaming the session or not, when a root record changes,
+ * goes, or its pane moves to another screen. The server checks every
+ * 100 ms while a client is connected, so a session's events are at least
+ * 100 ms apart and carry its latest record.
+ *
+ * `notify` marks an event a window may notify for: the record turned
+ * `blocked`, `done` or `error` or changed its kind or message, from live
+ * output, and the session's last marked event with that state is at least
+ * 10 seconds old. The greeting, the event for a moved pane and records
+ * rebuilt from output a session keeper had buffered are never marked.
+ *
+ * Only servers whose mux.welcome lists "program-status-v1" send it. Not a
+ * mux.* message. Through the hub (section 10) it is one of the host daemon's
+ * relayed messages. A client ignores server messages of a type it does not
+ * know.
+ */
+interface ProgramStatusChanged extends SessionEvent {
+  type: "program_status.changed";
+  paneId?: string;
+  screenId?: string;
+  status: ProgramStatusRecord | null;
+  notify?: true;
+}
+
 // --- Server-Initiated Commands ---
 
 /** Server-initiated command for the client to execute (e.g. from context menu). */
@@ -1065,6 +1130,8 @@ type ServerMessage =
   | MuxBusy
   // Listening ports
   | PortsChanged
+  // Program status
+  | ProgramStatusChanged
   // Commands
   | ServerCommand;
 
@@ -1770,6 +1837,8 @@ type ClientCommand =
  * `splitty list-screens`, etc. No session carries its scratchpad, no `text`
  * viewer document its text and no viewer pane its annotations,
  * `lastAnnotationNumber` or `reviewWait`, here and in GET /api/mux/screen/:id.
+ * Each session that holds a root program status record carries it as
+ * `programStatus`, here and in GET /api/mux/screen/:id.
  *
  * Response:
  *   200 WorkspaceState

@@ -1,7 +1,8 @@
 //! Per-connection service message loop, shared by every carrier.
 //!
 //! On admission, generates a client ID, sends a `mux.welcome` message with the
-//! screen list and the listening ports (`ports.changed`), then enters a
+//! screen list, the listening ports (`ports.changed`) and the sessions'
+//! program status records (`program_status.changed`), then enters a
 //! `tokio::select!` loop reading both client frames and the notification
 //! broadcast channel. Text messages are dispatched first to the `MuxHandler`,
 //! falling back to the core protocol dispatcher. Cleans up on disconnect.
@@ -23,7 +24,8 @@ use super::{ClientEntry, ClientState};
 ///
 /// This is the main message loop for a client:
 /// 1. Generate client ID
-/// 2. Send welcome message (with screen list), then the listening ports
+/// 2. Send welcome message (with screen list), then the listening ports and
+///    the program status records
 /// 3. Loop: read messages, dispatch to mux handler or protocol handler
 /// 4. On disconnect: cleanup
 pub(super) async fn run(
@@ -99,6 +101,7 @@ pub(super) async fn run(
     // must not fall into a gap between welcome and event subscription.
     mux_handler.send_welcome().await;
     super::ports::greet(&client_state, &sender).await;
+    super::program_status::greet(&client_state, &sender).await;
 
     // Heartbeat: ping every 15s, consider dead after 30s of silence
     let mut ping_interval = time::interval(Duration::from_secs(15));

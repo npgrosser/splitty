@@ -11,6 +11,8 @@
 //! - [`handler`] — per-connection message loop (upgrade, dispatch, cleanup).
 //! - [`mux_handler`] — handles `mux.*` protocol messages (op, resync).
 //! - [`ports`] — `ports.changed`, the ports processes of the sessions listen on.
+//! - [`program_status`] — `program_status.changed`, the sessions' program
+//!   status records.
 //! - [`reviews`] — waits for a review of a viewer pane and the windows'
 //!   answers to them.
 //! - [`sender`] — ordered client sender.
@@ -22,6 +24,7 @@ pub mod files;
 mod handler;
 mod mux_handler;
 pub mod ports;
+pub mod program_status;
 pub mod reviews;
 pub mod sender;
 pub mod viewer;
@@ -67,6 +70,8 @@ pub struct ClientState {
     pub server_mode: String,
     /// The listening ports of the sessions, as the clients know them.
     pub ports: ports::PortWatch,
+    /// The sessions' program status records, as the clients know them.
+    pub program_status: program_status::StatusWatch,
 }
 
 /// An independently connected service client.
@@ -116,6 +121,7 @@ impl ClientState {
             notify_tx,
             server_mode,
             ports,
+            program_status: program_status::StatusWatch::default(),
         }
     }
 

@@ -4,7 +4,10 @@
 //! through the reducer. Persistence behavior (whether screens survive disconnects)
 //! is determined by server mode, not per-screen ownership.
 
-use std::{collections::HashSet, sync::RwLock};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::RwLock,
+};
 
 use super::effects::Effect;
 use super::ops::{Op, ScreenOp};
@@ -238,6 +241,28 @@ impl Store {
                 .review_wait
                 .clone()
         })
+    }
+
+    /// The number of changes applied so far; it rises with every change.
+    pub fn change_count(&self) -> u64 {
+        *self.changes.borrow()
+    }
+
+    /// The pane and screen of each session a pane holds, read under one lock
+    /// without copying the workspace.
+    pub fn session_locations(&self) -> HashMap<SessionId, (PaneId, ScreenId)> {
+        let state = self.state.read().expect("workspace lock");
+        let mut locations = HashMap::new();
+        for screen in state.screens.values() {
+            for pane in screen.panes.values() {
+                if let Some(session) = &pane.session_id {
+                    locations
+                        .entry(session.clone())
+                        .or_insert_with(|| (pane.id.clone(), screen.id.clone()));
+                }
+            }
+        }
+        locations
     }
 
     /// Get the session ID for a pane (searches all screens).
