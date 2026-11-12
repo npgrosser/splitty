@@ -1,9 +1,10 @@
 //! A single terminal session: the session layer over a [`Terminal`].
 //!
 //! Handles shell resolution and the session's spec (program, environment,
-//! directory, size), scrollback buffering, OSC title scanning and the job log
-//! text. The terminal under it, in this process or in a session keeper, feeds
-//! all output from spawn to exit into the session; connections subscribe to it.
+//! directory, size), scrollback buffering, OSC title scanning, terminal mode
+//! tracking and the job log text. The terminal under it, in this process or in
+//! a session keeper, feeds all output from spawn to exit into the session;
+//! connections subscribe to it.
 
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -15,6 +16,7 @@ use portable_pty::CommandBuilder;
 use splitty_transport::queue;
 use tokio::sync::watch;
 
+use super::modes::ModeTracker;
 use super::osc::OscScanner;
 use super::procinfo;
 use super::ringbuffer::RingBuffer;
@@ -59,6 +61,9 @@ struct Output {
     /// in its receiver, never both and never neither.
     subscribers: Mutex<Subscribers>,
     scrollback: RingBuffer,
+    /// The modes the output leaves set, for the start of a subscriber's
+    /// snapshot.
+    modes: Mutex<ModeTracker>,
     text: Option<(Mutex<super::log_text::LogText>, RingBuffer)>,
     generation: String,
     changed: watch::Sender<u64>,
@@ -76,10 +81,15 @@ struct Subscribers {
 }
 
 impl Output {
-    /// Record one chunk: scrollback, title and prompt tracking, subscribers.
+    /// Record one chunk: scrollback, terminal modes, title and prompt
+    /// tracking, subscribers.
     fn record(&self, data: &[u8]) {
         let mut subscribers = self.subscribers.lock().unwrap();
         self.scrollback.write(data);
+        self.modes
+            .lock()
+            .expect("mode tracker lock")
+            .feed(data, self.scrollback.oldest());
         if let Some((parser, ring)) = &self.text {
             ring.write(&parser.lock().expect("log parser lock").push(data));
         }
@@ -157,9 +167,23 @@ impl Output {
 
     fn subscribe(&self, context: queue::Context) -> Subscription {
         let mut subscribers = self.subscribers.lock().unwrap();
+        // The modes the buffered output starts in go ahead of it, so a fresh
+        // terminal reads that output as the session's terminal did. A few
+        // hundred bytes at most, charged with the snapshot.
+        let restore = self
+            .modes
+            .lock()
+            .expect("mode tracker lock")
+            .restore(self.scrollback.oldest());
+        let length = restore.len() + self.scrollback.len();
         let snapshot = context
             .budget
-            .charge(self.scrollback.len(), false, || self.scrollback.read_all())
+            .charge(length, false, || {
+                let mut snapshot = Vec::with_capacity(length);
+                snapshot.extend_from_slice(&restore);
+                self.scrollback.read_all_into(&mut snapshot);
+                snapshot
+            })
             .unwrap_or_else(|_| {
                 context.close();
                 Default::default()
@@ -294,6 +318,7 @@ impl Session {
                 ended: false,
             }),
             scrollback: RingBuffer::new(buffer_size),
+            modes: Mutex::new(ModeTracker::new()),
             text: managed.then(|| {
                 (
                     Mutex::new(super::log_text::LogText::default()),
@@ -2205,6 +2230,86 @@ mod tests {
         session.close().unwrap();
     }
 
+    /// terminal-sessions, Terminal Modes in the Replay (Modes set before the
+    /// buffered output, Kitty keyboard flags of both screens, Synchronized
+    /// output is not restored), Attaching to an Existing Session (Replay after
+    /// the buffer wrapped) and Continuous Output Capture (Modes set while
+    /// nobody streams): a program sets its modes once, then prints more than
+    /// the scrollback holds while nobody subscribes; a later subscriber's
+    /// snapshot starts in those modes.
+    #[tokio::test]
+    async fn a_replay_starts_in_the_modes_set_before_the_buffered_output() {
+        if !pty_available() {
+            return;
+        }
+        let script = "printf '\\033[>1u\\033[?1049h\\033[>5u\\033[?2004h\\033[?1004h\
+            \\033[?1000h\\033[?1006h\\033[?1h\\033=\\033[?2026h'; \
+            head -c 20000 /dev/zero | tr '\\000' x; printf END; sleep 5";
+        let (mut spec, _) = build_spec(&sh_opts("modes", script), None, None).expect("spec");
+        spec.buffer_size = 4096;
+        let session = Session::with_terminal(
+            spec.session_id.clone(),
+            None,
+            false,
+            spec.buffer_size,
+            |feed| LocalTerminals.start(&spec, feed),
+        )
+        .expect("spawn sh");
+        let contains = |haystack: &[u8], needle: &[u8]| {
+            haystack
+                .windows(needle.len())
+                .any(|window| window == needle)
+        };
+
+        let printed = wait_until(TIMEOUT, || session.scrollback().ends_with(b"END")).await;
+        assert!(printed, "scrollback: {:?}", text(&session.scrollback()));
+        let snapshot = session.subscribe().snapshot.to_vec();
+        let scrollback = session.scrollback();
+        assert_eq!(
+            scrollback.len(),
+            4096,
+            "the program's modes left the buffer"
+        );
+        assert!(
+            !contains(&scrollback, b"\x1b["),
+            "the buffer holds no sequence"
+        );
+        assert!(
+            snapshot.ends_with(&scrollback),
+            "the snapshot ends with the buffered output"
+        );
+        let restore = &snapshot[..snapshot.len() - scrollback.len()];
+        assert!(
+            restore.starts_with(b"\x1b[>1u\x1b[?1049h\x1b[>5u"),
+            "normal screen's flags, the switch, the alternate screen's flags: {:?}",
+            text(restore)
+        );
+        for sequence in [
+            &b"\x1b[?2004h"[..],
+            b"\x1b[?1004h",
+            b"\x1b[?1000h",
+            b"\x1b[?1006h",
+            b"\x1b[?1h",
+            b"\x1b=",
+        ] {
+            assert!(
+                contains(restore, sequence),
+                "{:?} missing from {:?}",
+                text(sequence),
+                text(restore)
+            );
+        }
+        assert!(
+            !contains(restore, b"2026"),
+            "synchronized output restored: {:?}",
+            text(restore)
+        );
+        let mut filtered = snapshot.clone();
+        crate::pty::replay::filter_in_place(&mut filtered);
+        assert_eq!(filtered, snapshot, "the replay filter keeps the restore");
+        session.close().unwrap();
+    }
+
     /// A snapshot and its receiver line up exactly, even while output flows:
     /// once the output has ended, the two together equal the scrollback.
     #[tokio::test]
@@ -2442,18 +2547,31 @@ mod spec_tests {
         }
     }
 
+    /// Also terminal-sessions, Terminal Modes in the Replay (Session adopted
+    /// after a daemon restart): the modes are followed from the keeper's
+    /// oldest buffered byte on.
     #[test]
     fn an_adopted_session_fills_its_buffers_from_the_replay() {
         let session = Session::with_terminal("adopted".into(), None, false, 1024, |feed| {
-            feed.record(b"before\x1b]2;vim\x07");
+            feed.record(b"before\x1b[?2004h\x1b]2;vim\x07");
             Ok(Box::new(Replayed {
                 done: tokio::sync::watch::channel(false).1,
             }))
         })
         .expect("adopted");
-        assert_eq!(session.scrollback(), b"before\x1b]2;vim\x07");
+        assert_eq!(session.scrollback(), b"before\x1b[?2004h\x1b]2;vim\x07");
         assert_eq!(session.osc_title_watch().borrow().title, "vim");
         assert_eq!(session.shell_pid(), Some(4242));
+        assert_eq!(
+            session.subscribe().snapshot.as_slice(),
+            session.scrollback(),
+            "the buffer still holds the mode"
+        );
+
+        session.output.record(&[b'x'; 2048]);
+        let mut expected = b"\x1b[?2004h".to_vec();
+        expected.extend_from_slice(&[b'x'; 1024]);
+        assert_eq!(session.subscribe().snapshot.as_slice(), expected);
     }
 
     #[tokio::test]

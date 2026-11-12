@@ -93,24 +93,29 @@ impl RingBuffer {
 
     /// Returns a copy of all buffered data from oldest to newest.
     pub fn read_all(&self) -> Vec<u8> {
-        let inner = self.inner.lock().unwrap();
-        if inner.len == 0 {
-            return Vec::new();
-        }
+        let mut out = Vec::new();
+        self.read_all_into(&mut out);
+        out
+    }
 
-        let capacity = inner.buf.len();
-        let mut out = vec![0u8; inner.len];
-
-        if inner.len < capacity {
+    /// Appends all buffered data, from oldest to newest, to `out`.
+    pub fn read_all_into(&self, out: &mut Vec<u8>) {
+        let inner = self.inner.lock().expect("output ring lock");
+        out.reserve_exact(inner.len);
+        if inner.len < inner.buf.len() {
             // Buffer not full -- data starts at 0.
-            out.copy_from_slice(&inner.buf[..inner.len]);
+            out.extend_from_slice(&inner.buf[..inner.len]);
         } else {
             // Buffer full -- oldest data starts at w.
-            let first = capacity - inner.w;
-            out[..first].copy_from_slice(&inner.buf[inner.w..]);
-            out[first..].copy_from_slice(&inner.buf[..inner.w]);
+            out.extend_from_slice(&inner.buf[inner.w..]);
+            out.extend_from_slice(&inner.buf[..inner.w]);
         }
-        out
+    }
+
+    /// The output offset of the oldest buffered byte: every byte written
+    /// before it has been overwritten.
+    pub fn oldest(&self) -> u64 {
+        self.inner.lock().expect("output ring lock").oldest()
     }
 
     /// Take one bounded snapshot without consuming any reader's position.
@@ -258,6 +263,28 @@ mod tests {
     fn test_read_all_empty() {
         let rb = RingBuffer::new(8);
         assert_eq!(rb.read_all(), Vec::<u8>::new());
+        assert_eq!(rb.oldest(), 0);
+    }
+
+    #[test]
+    fn oldest_offset_and_read_into_follow_the_overwrites() {
+        let ring = RingBuffer::new(4);
+        ring.write(b"ab");
+        assert_eq!(ring.oldest(), 0);
+        let mut out = b"<".to_vec();
+        ring.read_all_into(&mut out);
+        assert_eq!(out, b"<ab");
+        ring.write(b"cdef");
+        assert_eq!(ring.oldest(), 2);
+        ring.write(b"0123456789");
+        assert_eq!(ring.oldest(), 12);
+        let mut out = b"<".to_vec();
+        ring.read_all_into(&mut out);
+        assert_eq!(out, b"<6789");
+        ring.write(b"x");
+        let mut out = Vec::new();
+        ring.read_all_into(&mut out);
+        assert_eq!((out.as_slice(), ring.oldest()), (&b"789x"[..], 13));
     }
 
     #[test]

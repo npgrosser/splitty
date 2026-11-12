@@ -8,6 +8,7 @@
 //! - `Session` -- a single PTY process with scrollback ring buffer and OSC title scanning.
 //! - `OscScanner` -- finite state machine that extracts OSC 0/2 title sequences from output.
 //! - `RingBuffer` -- circular byte buffer for caching scrollback data.
+//! - `modes` -- the terminal modes a session's output leaves set, restored ahead of a replay.
 //! - `procinfo` -- platform-specific process info lookups (/proc on Linux, ps/lsof on macOS).
 //! - `ports` -- the TCP ports the processes of sessions listen on (/proc on Linux).
 //! - `replay` -- historical output without report requests and clipboard writes, for terminal clients.
@@ -18,6 +19,7 @@ pub mod cli_path;
 pub(crate) mod lifecycle;
 mod log_text;
 pub mod manager;
+mod modes;
 pub mod osc;
 pub mod output;
 pub mod ports;
@@ -266,7 +268,8 @@ pub type BellEvent = Option<Instant>;
 /// subscribed, then every chunk produced after that. Together the two hold
 /// each byte from the oldest buffered one onwards exactly once.
 pub struct Subscription {
-    /// The scrollback buffer at the moment of subscribing.
+    /// The scrollback buffer at the moment of subscribing, preceded by the
+    /// sequences that put a fresh terminal into the modes it starts in.
     pub snapshot: splitty_transport::budget::Charged<Vec<u8>>,
     /// Output produced after the snapshot. Yields `None` once the session's
     /// output has ended, because its terminal closed.

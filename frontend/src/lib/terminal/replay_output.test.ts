@@ -31,6 +31,12 @@ describe("historical terminal output", () => {
     for (let split = 0; split <= text.length; split++) expect(replay(text, split)).toBe(text);
   });
 
+  it("preserves the terminal modes a server restores ahead of the buffered output", () => {
+    const text = "\x1b[>1u\x1b[?1049h\x1b[=5;1u\x1b[>3u\x1b[?1h\x1b=\x1b[?7l\x1b[?25l\x1b[?2004h"
+      + "\x1b[?1004h\x1b[?1007h\x1b[?2031h\x1b[?2048h\x1b[2 q\x1b[?1003h\x1b[?1006h\x1b[>4;2m$ ";
+    for (let split = 0; split <= text.length; split++) expect(replay(text, split)).toBe(text);
+  });
+
   it.each([
     ["an unfinished CSI", "\x1b[38;5"],
     ["an unfinished OSC", "\x1b]0;tit"],
