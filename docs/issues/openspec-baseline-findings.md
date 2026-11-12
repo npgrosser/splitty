@@ -214,11 +214,10 @@ Line numbers refer to the tree at commit `b495e1c`.
     but not the screen contents, scrolling region, tab stops, character sets or colors set before it. After a daemon
     restart modes older than the keeper's buffer are lost, and `splitty attach` straight to a keeper gets no restore
     (RTM-1).
-  - **The replay filters keep some report requests** (seen 2026-11-12): `csi_has_side_effect` in `pty/replay.rs`, and
-    `replay_output.ts` with the same rules, drop device attributes, status, mode and window reports, but not the
-    kitty keyboard query `CSI ? u`, XTVERSION (`CSI > q`) or the cell size report `CSI 16 t`. Programs send these at
-    startup (Claude Code sends the first two), so a replay of that output under `splitty attach` can make the
-    user's terminal type its answers into the session.
+  - **Fixed (2026-11-12): the replay filters kept some report requests.** `csi_has_side_effect` in
+    `pty/replay.rs`, and `replay_output.ts` with the same rules, now also drop the kitty keyboard query `CSI ? u`,
+    XTVERSION (`CSI > q`) and the cell size report `CSI 16 t`, which programs send at startup; replayed under
+    `splitty attach` they made the user's terminal type its answers into the session.
   - **`splitty attach` pops one kitty keyboard level on exit**: its reset sends `CSI < u` once
     (`cli/attach/terminal.rs`), so a program that pushed several levels leaves the outer terminal with the rest.
   - **XTSAVE and XTRESTORE are not tracked** (`CSI ? Pm s`, `CSI ? Pm r`): the mode tracker (`pty/modes.rs`)
@@ -458,11 +457,6 @@ that area touches them.
 - **workspace-model:** `move_pane` sizes (`resultingSizes`, `sourceResultingSizes`); successful `float_pane`/`dock_pane`/`move_float`; active-pane fallback
   in a stack; closing the last root pane; closing a floating pane; `newPaneIndex: 0`; `set_active_screen`;
   active-screen fallback on close.
-- **native window:** the view tests of `splitty-gpui` that need the `ui-test-support` feature (the unread and
-  program status marks in `workspace/unread/tests.rs`, the settings rows in `workspace/settings/notification_tests.rs`
-  and others gated on `cfg(all(test, feature = "ui-test-support"))`) run neither in `cargo test --workspace` nor in
-  CI, which only compiles the crate's targets without the feature; they run with
-  `cargo test -p splitty-gpui --features ui-test-support` (seen 2026-11-12).
 - **web frontend:** `RenderedDocument`'s fallback for engines without `adoptedStyleSheets` (the cleaned sheet
   serialized into a `<style>` of the shadow root and parsed again) has no test.
 - **mux-protocol:** everything except the binary frame layout: welcome contents, heartbeat, malformed input,
@@ -532,13 +526,10 @@ that area touches them.
   Elapsed") fail in most runs of `cargo test -p splitty-client-core --lib native_workspace`, also with every
   inherited `SPLITTY_*` variable removed. Not investigated further: shared state between the tests or deadlines too
   short under load.
-- **`splitty-remote`'s SSH option tests depend on the environment** (seen 2026-11-12): `askpass_program()` in
+- **Fixed (2026-11-12): `splitty-remote`'s SSH option tests depended on the environment.** `askpass_program()` in
   `crates/splitty-remote/src/ssh.rs` falls back to `SPLITTY_ASKPASS_PROGRAM`, which the desktop app sets for the
-  processes it starts, its terminal panes included. Run from such a pane, the options switch to `BatchMode=no` and
-  four tests fail (`bridge::tests::the_bridge_runs_the_hosts_server_over_a_stdio_only_connection`, the two
-  `ssh::tests` on stdio-only and forward-only connections, and
-  `tunnel::reverse::tests::the_reverse_command_owns_its_connection_and_carries_one_remote_forward`); with the
-  variable unset they pass. The tests should pin the askpass program or clear the variable.
+  processes it starts, its terminal panes included; run from such a pane, four tests saw `BatchMode=no` and failed.
+  The crate's tests no longer read the variable.
 - **Fixed (2026-11-06): fixture ports and the instance lock in `splitty-server`'s tests.** Seen since 2026-10-31
   in full runs under load, and in the release run of v0.2.1
   (`hub::forwards::tests::stop_during_rebuild_waits_for_setup_and_port_release`); each passed alone. The tests

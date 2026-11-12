@@ -1,6 +1,6 @@
 # Proposal
 
-> Draft created on 2026-11-12, as the fourth part of a package that otherwise became `replay-terminal-modes`, `version-skew-smoke-test` and `program-status`. Not planned yet; whether it goes ahead is to be decided. Specs, design and tasks are written when this change is next. Related: `session-keepers` and `server-modes` (where the daemon and the keepers run).
+> Draft created on 2026-11-12, as the fourth part of a package that otherwise became `replay-terminal-modes`, `version-skew-smoke-test` and `program-status`. Parked on 2026-11-12: not planned until an out-of-memory kill is seen to end sessions together, since the gain is limited to systems whose service manager ends whole scopes under memory pressure, hosts need lingering, and WSL needs systemd enabled. Specs, design and tasks are written when this change is next. Related: `session-keepers` and `server-modes` (where the daemon and the keepers run).
 
 ## Why
 
