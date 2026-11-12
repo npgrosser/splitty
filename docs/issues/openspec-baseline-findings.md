@@ -504,6 +504,17 @@ that area touches them.
 
 ## Flaky tests
 
+- **`splitty-client-core`'s native workspace tests fail now and then when the module runs in parallel** (seen
+  2026-11-12 under WSL 2, at `47f7e95` and later; each passes alone): one to three of
+  `native_workspace::close_tests::worker_maximize_filters_stale_visibility_and_size_reports_without_losing_output`
+  (assertion at `native_workspace.rs:1978`, a window opened from another source),
+  `close_tests::appearance_worker_failure_keeps_output_and_recovers_from_local_service`,
+  `hub_tests::passive_directory_refresh_keeps_local_worker_and_cleanup_independent`,
+  `hub_tests::pending_failed_hub_read_does_not_block_settings_or_terminal_output` and
+  `ports_tests::ports_slow_start_keeps_terminal_host_writes_and_passive_reads_responsive` ("Ports worker deadline:
+  Elapsed") fail in most runs of `cargo test -p splitty-client-core --lib native_workspace`, also with every
+  inherited `SPLITTY_*` variable removed. Not investigated further: shared state between the tests or deadlines too
+  short under load.
 - **`splitty-remote`'s SSH option tests depend on the environment** (seen 2026-11-12): `askpass_program()` in
   `crates/splitty-remote/src/ssh.rs` falls back to `SPLITTY_ASKPASS_PROGRAM`, which the desktop app sets for the
   processes it starts, its terminal panes included. Run from such a pane, the options switch to `BatchMode=no` and
