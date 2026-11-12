@@ -45,6 +45,7 @@ use std::{
     time::{Duration, Instant},
 };
 use uuid::Uuid;
+pub(crate) use window::daemon_version_from_ready;
 #[cfg(test)]
 pub(crate) use window::tests::remote_terminal_fixture;
 pub use window::{

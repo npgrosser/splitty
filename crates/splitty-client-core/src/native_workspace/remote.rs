@@ -42,6 +42,7 @@ pub(super) enum Step {
 struct Host<'a> {
     action: HostActionTarget,
     offer: Option<Arc<Charged<HostUpdateOffer>>>,
+    daemon_version: Option<Arc<Charged<String>>>,
     update_pending: bool,
     update_dispatched: bool,
     context: queue::Context,
@@ -92,6 +93,7 @@ impl<'a> Host<'a> {
         Ok(Self {
             action,
             offer: None,
+            daemon_version: None,
             update_pending: false,
             update_dispatched: update,
             context,
@@ -230,6 +232,8 @@ impl<'a> Host<'a> {
                 if !self.remote_ready && json["target"].as_str() == Some(self.action.target()) =>
             {
                 self.offer = HostUpdateOffer::from_ready(json, &self.context.budget)?;
+                self.daemon_version =
+                    crate::workspace::daemon_version_from_ready(json, &self.context.budget);
                 self.remote_ready = true;
                 self.was_ready = true;
                 Ok(false)
@@ -1219,6 +1223,7 @@ fn host_event(
             if host.remote_ready {
                 if let Some(state) = window.host_mut(&host.action) {
                     state.update_offer = host.offer.clone();
+                    state.daemon_version = host.daemon_version.clone();
                 }
                 out.changed = true;
             }

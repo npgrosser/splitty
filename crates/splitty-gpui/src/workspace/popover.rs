@@ -757,6 +757,7 @@ impl Workspace {
                     title,
                     alias,
                     state,
+                    daemon_version,
                     detail,
                     action,
                     ..
@@ -779,7 +780,11 @@ impl Workspace {
                             waiting.into()
                         } else {
                             match indicator {
-                                HostIndicator::Connected => state.into(),
+                                HostIndicator::Connected => super::hosts::state_with_version(
+                                    &state,
+                                    daemon_version.as_deref(),
+                                )
+                                .into(),
                                 HostIndicator::Connecting | HostIndicator::Reconnecting => {
                                     detail.into()
                                 }
@@ -2442,6 +2447,47 @@ mod view_tests {
                     !focus_visible(cx),
                     "a clicked control keeps no ring after its work is done"
                 )
+            });
+        });
+    }
+
+    // Level: in-process (the workspace view with a fixture model).
+    #[test]
+    fn the_host_panel_names_the_daemon_version_of_a_connected_host() {
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let (versioned, _) = model
+                .ui_test_remote_terminal_fixture("versioned.example.test")
+                .unwrap();
+            model
+                .ui_test_remote_terminal_fixture("plain.example.test")
+                .unwrap();
+            let action = model
+                .host(versioned.source_id())
+                .unwrap()
+                .action_target()
+                .clone();
+            model
+                .ui_test_host_daemon_version(
+                    &action,
+                    &serde_json::json!({"daemon":{"version":"0.3.2","protocol":1,"started":false}}),
+                )
+                .unwrap();
+            window.update(|_, cx| {
+                view.update(cx, |workspace, _| {
+                    workspace.model = Some(model);
+                    let status = |target: &str| {
+                        workspace
+                            .host_content(target)
+                            .status
+                            .map(|(text, _)| text.to_string())
+                    };
+                    assert_eq!(
+                        status("versioned.example.test").as_deref(),
+                        Some("Connected · v0.3.2")
+                    );
+                    assert_eq!(status("plain.example.test").as_deref(), Some("Connected"));
+                });
             });
         });
     }

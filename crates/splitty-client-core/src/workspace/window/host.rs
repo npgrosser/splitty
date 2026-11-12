@@ -71,8 +71,18 @@ pub struct HostPresentation {
     pub(crate) retry_available: bool,
     pub(crate) update_offer: Option<Arc<Charged<HostUpdateOffer>>>,
     pub(crate) update_state: HostUpdateState,
+    pub(crate) daemon_version: Option<Arc<Charged<String>>>,
 }
 impl HostPresentation {
+    /// The version the host's daemon reported when this attempt became ready;
+    /// `None` while the host is not connected. Untrusted host text, bounded to
+    /// 64 bytes without control characters.
+    pub fn daemon_version(&self) -> Option<&str> {
+        self.daemon_version
+            .as_deref()
+            .filter(|_| self.status == SourceStatus::Ready)
+            .map(|version| version.value.as_str())
+    }
     pub fn update_offer(&self) -> Option<&HostUpdateOffer> {
         self.update_offer.as_deref().map(|offer| &offer.value)
     }

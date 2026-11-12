@@ -129,6 +129,22 @@ session that holds a record raises no bell notification of its own. The
 outgoing Screen of a transition shows no dots, as it shows no scratchpad
 marks.
 
+## Versions
+
+The settings have a read-only About section (`workspace/settings.rs`): the
+app's version, the commit of the build where `SPLITTY_COMMIT` was set when it
+was compiled (the release and packaging builds), and the version of the
+window's local backend once its `build.get` reply arrived. A row whose value
+is unknown is left out. The Hosts list and the host's panel show the version
+of a connected host's daemon beside its state (`Connected · v0.3.2`). The
+client keeps it from the `daemon.version` of the attempt's `remote.ready`
+(`HostPresentation::daemon_version` in `splitty-client-core`), so it is known
+for every connected host, not only where an update is offered; a host that is
+connecting, offline or closing shows none, and so does one whose version was
+missing or malformed. Versions of a host or backend are shown as bounded
+plain text. The backend's commit and the daemon version of a host whose
+connection failed as incompatible are not shown outside the update offer.
+
 ## Packages, CI and release
 
 - Linux: `packaging/linux/native/build.sh` packs a deb, an rpm and a tar.gz

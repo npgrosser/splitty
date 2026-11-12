@@ -11,6 +11,7 @@ mod diagnostic;
 mod host;
 mod host_update;
 pub use host::{CatalogState, HostActionTarget, HostDiagnostic, HostPresentation};
+pub(crate) use host_update::daemon_version_from_ready;
 pub use host_update::{HostUpdateOffer, HostUpdatePlan, HostUpdateState};
 
 pub const MAX_REMOTE_SOURCES: usize = 8;
@@ -516,6 +517,7 @@ impl WindowWorkspace {
                 retry_available: false,
                 update_offer: None,
                 update_state: HostUpdateState::Idle,
+                daemon_version: None,
             },
             workspace: None,
             opening: true,
@@ -686,6 +688,7 @@ impl WindowWorkspace {
         source.presentation.retry_available = false;
         source.presentation.update_offer = None;
         source.presentation.update_state = HostUpdateState::Idle;
+        source.presentation.daemon_version = None;
         source.opening = true;
         Ok(())
     }

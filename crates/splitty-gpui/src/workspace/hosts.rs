@@ -394,6 +394,26 @@ pub(super) fn display(text: &str) -> String {
         .collect()
 }
 
+/// A version a backend reported, as bounded plain text: at most 64
+/// characters, with control and direction characters replaced. A version
+/// that starts with a digit reads `v0.3.2`; any other text stays as it is.
+pub(super) fn version_label(version: &str) -> String {
+    let text: String = display(version).chars().take(64).collect();
+    if text.starts_with(|first: char| first.is_ascii_digit()) {
+        format!("v{text}")
+    } else {
+        text
+    }
+}
+
+/// A host's connection state with its daemon's version, where one is known.
+pub(super) fn state_with_version(state: &str, daemon_version: Option<&str>) -> String {
+    match daemon_version {
+        Some(version) => format!("{state} · {version}"),
+        None => state.to_owned(),
+    }
+}
+
 #[derive(Clone)]
 pub(super) enum HostAction {
     Connect { owner: SourceToken, target: String },
@@ -409,6 +429,8 @@ pub(super) enum HostRow {
         target: String,
         title: String,
         state: String,
+        /// The version of the daemon a connected host runs, ready to show.
+        daemon_version: Option<Box<str>>,
         detail: String,
         action: Option<HostAction>,
         update: Option<HostActionTarget>,
@@ -1529,6 +1551,9 @@ impl Workspace {
                 target: target.clone(),
                 title,
                 state,
+                daemon_version: presentation
+                    .and_then(|host| host.daemon_version())
+                    .map(|version| version_label(version).into_boxed_str()),
                 detail,
                 action,
                 update,
@@ -1732,6 +1757,7 @@ impl Workspace {
                 target,
                 title,
                 state,
+                daemon_version,
                 detail,
                 action,
                 update,
@@ -1807,7 +1833,10 @@ impl Workspace {
                         .overflow_hidden()
                         .text_ellipsis()
                         .whitespace_nowrap()
-                        .child(format!("{state} · {detail}")),
+                        .child(format!(
+                            "{} · {detail}",
+                            state_with_version(state, daemon_version.as_deref())
+                        )),
                 );
                 let remembered = self.remembered_host_screens(target).len();
                 if let Some(owner) = owner.filter(|_| remembered > 0) {
@@ -3465,6 +3494,95 @@ mod tests {
             failure_status(true, "read failed"),
             "Refresh failed: read failed · showing cached observations"
         );
+    }
+
+    // Level: unit.
+    #[test]
+    fn a_reported_version_is_bounded_plain_text() {
+        use super::{state_with_version, version_label};
+        assert_eq!(version_label("0.3.2"), "v0.3.2");
+        assert_eq!(version_label("v0.3.2"), "v0.3.2");
+        assert_eq!(version_label("nightly"), "nightly");
+        assert_eq!(
+            version_label("0.3.2\u{1b}[31m\u{202e}"),
+            "v0.3.2\u{fffd}[31m\u{fffd}"
+        );
+        assert_eq!(version_label(&"é".repeat(80)).chars().count(), 64);
+        assert_eq!(
+            state_with_version("Connected", Some("v0.3.2")),
+            "Connected · v0.3.2"
+        );
+        assert_eq!(state_with_version("Connected", None), "Connected");
+    }
+
+    // Level: in-process (the workspace view with a fixture model).
+    #[cfg(feature = "ui-test-support")]
+    #[test]
+    fn a_connected_host_shows_its_daemon_version_and_others_show_none() {
+        use super::HostRow;
+        use serde_json::json;
+        use splitty_client_core::workspace::WindowWorkspace;
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            let (versioned, _) = model
+                .ui_test_remote_terminal_fixture("versioned.example.test")
+                .unwrap();
+            let (plain, _) = model
+                .ui_test_remote_terminal_fixture("plain.example.test")
+                .unwrap();
+            let (offline, _) = model
+                .ui_test_remote_terminal_fixture("offline.example.test")
+                .unwrap();
+            for key in [&versioned, &offline] {
+                let action = model.host(key.source_id()).unwrap().action_target().clone();
+                model
+                    .ui_test_host_daemon_version(
+                        &action,
+                        &json!({"daemon":{"version":"0.3.2","protocol":1,"started":false}}),
+                    )
+                    .unwrap();
+            }
+            let action = model
+                .host(plain.source_id())
+                .unwrap()
+                .action_target()
+                .clone();
+            model
+                .ui_test_host_daemon_version(
+                    &action,
+                    &json!({"daemon":{"version":"0.3.2\n","protocol":1,"started":false}}),
+                )
+                .unwrap();
+            model.disconnect(offline.source_id()).unwrap();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.model = Some(model);
+                    workspace.drawer_visible = true;
+                    workspace.show_hosts(window, cx);
+                    let shown: Vec<_> = workspace
+                        .project_host_rows()
+                        .into_iter()
+                        .filter_map(|row| match row {
+                            HostRow::Host {
+                                target,
+                                daemon_version,
+                                ..
+                            } => Some((target, daemon_version)),
+                            _ => None,
+                        })
+                        .collect();
+                    assert_eq!(
+                        shown,
+                        [
+                            ("offline.example.test".to_owned(), None),
+                            ("plain.example.test".to_owned(), None),
+                            ("versioned.example.test".to_owned(), Some("v0.3.2".into())),
+                        ]
+                    );
+                });
+                window.draw(cx).clear(cx);
+            });
+        });
     }
 
     #[test]

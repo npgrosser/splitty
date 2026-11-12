@@ -2717,6 +2717,7 @@ impl Workspace {
         self.reconcile_remote_create(&window_model);
         self.settings.update(cx, |view, cx| {
             view.set_owner(window_model.local_source().connection_id(), window, cx);
+            view.set_backend_version(window_model.backend_version(), cx);
         });
         let model = window_model
             .shown_key()

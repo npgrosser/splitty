@@ -222,6 +222,20 @@ impl WindowWorkspace {
         Ok(())
     }
 
+    /// Record the daemon version a host's `remote.ready` carried.
+    #[doc(hidden)]
+    pub fn ui_test_host_daemon_version(
+        &mut self,
+        action: &HostActionTarget,
+        ready: &serde_json::Value,
+    ) -> io::Result<()> {
+        self.host_mut(action)
+            .ok_or_else(|| invalid("host version fixture host changed"))?
+            .daemon_version =
+            host_update::daemon_version_from_ready(ready, &ConnectionBudget::default());
+        Ok(())
+    }
+
     #[doc(hidden)]
     pub fn ui_test_fail_backend_version(&mut self) {
         self.set_backend_version(

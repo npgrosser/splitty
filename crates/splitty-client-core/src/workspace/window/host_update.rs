@@ -58,6 +58,20 @@ impl HostUpdateOffer {
     }
 }
 
+/// The version the host's daemon reported in `remote.ready`, kept for display
+/// only. A missing or malformed value, or an exhausted budget, is no version;
+/// it never fails the connection.
+pub(crate) fn daemon_version_from_ready(
+    value: &serde_json::Value,
+    budget: &ConnectionBudget,
+) -> Option<Arc<Charged<String>>> {
+    let version = value["daemon"]["version"]
+        .as_str()
+        .filter(|version| valid_version(version))?;
+    let lease = budget.reserve(version.len(), false).ok()?;
+    Some(Arc::new(lease.charge(version.to_owned())))
+}
+
 pub(crate) fn valid_version(version: &str) -> bool {
     !version.is_empty() && version.len() <= 64 && !version.chars().any(char::is_control)
 }
@@ -275,6 +289,53 @@ mod tests {
         drop(plan);
         drop(window);
         assert_eq!(budget.used(), 0);
+    }
+    #[test]
+    fn ready_daemon_version_is_bounded_display_text_without_an_update() {
+        let budget = ConnectionBudget::default();
+        let version = daemon_version_from_ready(
+            &json!({"daemon":{"version":"0.3.2","protocol":1,"started":false}}),
+            &budget,
+        )
+        .unwrap();
+        assert_eq!(version.value, "0.3.2");
+        assert!(budget.used() > 0);
+        drop(version);
+        assert_eq!(budget.used(), 0);
+        for value in [
+            json!({}),
+            json!({"daemon":{}}),
+            json!({"daemon":{"version":7}}),
+            json!({"daemon":{"version":""}}),
+            json!({"daemon":{"version":"x".repeat(65)}}),
+            json!({"daemon":{"version":"0.3.2\u{1b}[31m"}}),
+        ] {
+            assert!(daemon_version_from_ready(&value, &budget).is_none());
+            assert_eq!(budget.used(), 0);
+        }
+    }
+    #[test]
+    fn a_host_names_its_daemon_version_only_while_connected_in_this_attempt() {
+        use crate::workspace::WindowWorkspace;
+        let mut window = WindowWorkspace::new(Uuid::new_v4());
+        let (key, _) = window
+            .ui_test_remote_terminal_fixture("version.test")
+            .unwrap();
+        let id = key.source_id();
+        assert_eq!(window.host(id).unwrap().daemon_version(), None);
+        let action = window.host(id).unwrap().action_target().clone();
+        window
+            .ui_test_host_daemon_version(&action, &json!({"daemon":{"version":"0.3.2"}}))
+            .unwrap();
+        assert_eq!(window.host(id).unwrap().daemon_version(), Some("0.3.2"));
+        window.disconnect(id).unwrap();
+        assert_eq!(window.host(id).unwrap().daemon_version(), None);
+        window.finish_attempt(id).unwrap();
+        window.retry(id).unwrap();
+        assert!(
+            window.host(id).unwrap().daemon_version.is_none(),
+            "a new attempt forgets the earlier daemon's version"
+        );
     }
     #[test]
     fn ready_offers_are_bounded_keeper_facts_not_version_policy() {

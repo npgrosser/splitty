@@ -81,6 +81,8 @@ enum Section {
     Notifications,
     /// Windows only, and only while several WSL distributions are installed.
     Wsl,
+    /// Read-only: what this build and its local backend are.
+    About,
 }
 
 impl Section {
@@ -100,6 +102,7 @@ impl Section {
             Self::Remote => "remote",
             Self::Notifications => "notifications",
             Self::Wsl => "wsl",
+            Self::About => "about",
         }
     }
 
@@ -111,6 +114,7 @@ impl Section {
             Self::Remote => "Remote",
             Self::Notifications => "Notifications",
             Self::Wsl => "WSL",
+            Self::About => "About",
         }
     }
 
@@ -121,7 +125,7 @@ impl Section {
             Self::Workspace => WORKSPACE,
             Self::Remote => REMOTE,
             Self::Notifications => NOTIFICATIONS,
-            Self::Wsl => &[],
+            Self::Wsl | Self::About => &[],
         }
     }
 
@@ -133,8 +137,38 @@ impl Section {
             Self::Remote => "Hosts and their ports",
             Self::Notifications => "Activity from other terminals",
             Self::Wsl => "The distribution local terminals run in",
+            Self::About => "This build and the local backend it uses",
         }
     }
+}
+
+/// The commit this build was made from, where the build was told one
+/// (`SPLITTY_COMMIT`, set by the release and packaging builds).
+fn build_commit() -> Option<&'static str> {
+    known_commit(option_env!("SPLITTY_COMMIT"))
+}
+
+/// A commit worth showing: absent, empty or non-hexadecimal text is no commit.
+fn known_commit(commit: Option<&'static str>) -> Option<&'static str> {
+    let commit = commit?.trim();
+    (commit.len() >= 7 && commit.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .then(|| commit.get(..commit.len().min(12)))
+        .flatten()
+}
+
+/// The rows of the About section: a row is there only when its value is known.
+fn about_rows(
+    commit: Option<&str>,
+    backend_version: Option<&str>,
+) -> Vec<(&'static str, &'static str, String)> {
+    let mut rows = vec![("version", "Version", env!("CARGO_PKG_VERSION").to_owned())];
+    if let Some(commit) = commit {
+        rows.push(("commit", "Commit", commit.to_owned()));
+    }
+    if let Some(version) = backend_version {
+        rows.push(("backend", "Local backend", version.to_owned()));
+    }
+    rows
 }
 
 /// The choice of the WSL distribution for local terminals. It is application
@@ -216,6 +250,8 @@ pub(super) struct SettingsView {
     choices: BTreeMap<SettingsField, Vec<(String, SettingsValue)>>,
     writes: BTreeMap<SettingsField, WriteState>,
     wsl: WslChoice,
+    /// The version the window's local backend reported, ready to show.
+    backend_version: Option<String>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -307,8 +343,41 @@ impl SettingsView {
             choices: BTreeMap::new(),
             writes: BTreeMap::new(),
             wsl,
+            backend_version: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// The version of the local backend the window is connected to, or none
+    /// while it has not been read.
+    pub(super) fn set_backend_version(&mut self, version: Option<&str>, cx: &mut Context<Self>) {
+        let version =
+            version.map(|version| super::hosts::display(version).chars().take(64).collect());
+        if self.backend_version != version {
+            self.backend_version = version;
+            cx.notify();
+        }
+    }
+
+    fn render_about(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut form = Form::new();
+        for (id, label, value) in about_rows(build_commit(), self.backend_version.as_deref()) {
+            form = form.child(
+                Field::new().label(label).child(
+                    div()
+                        .when(cfg!(all(test, feature = "ui-test-support")), |view| {
+                            view.debug_selector(|| format!("settings-about-{id}"))
+                        })
+                        .text_sm()
+                        .text_color(cx.theme().muted_foreground)
+                        .overflow_hidden()
+                        .text_ellipsis()
+                        .whitespace_nowrap()
+                        .child(value),
+                ),
+            );
+        }
+        form
     }
 
     /// Checks the distribution off the UI thread and remembers it for the
@@ -1102,7 +1171,8 @@ impl Render for SettingsView {
         let mut nav = div().flex().gap_1().flex_wrap();
         let sections = Section::ALL
             .into_iter()
-            .chain(self.wsl.offered().then_some(Section::Wsl));
+            .chain(self.wsl.offered().then_some(Section::Wsl))
+            .chain([Section::About]);
         for section in sections {
             let selected = self.section == section;
             nav = nav.child(
@@ -1236,6 +1306,9 @@ impl Render for SettingsView {
                             .child(form)
                             .when(self.section == Section::Wsl, |view| {
                                 view.child(self.render_wsl(cx))
+                            })
+                            .when(self.section == Section::About, |view| {
+                                view.child(self.render_about(cx))
                             }),
                     ),
             )
@@ -1367,6 +1440,43 @@ fn display_value(field: SettingsField, value: &SettingsValue) -> String {
 }
 
 #[cfg(test)]
+mod about_tests {
+    use super::{about_rows, known_commit};
+
+    // Level: unit.
+    #[test]
+    fn about_rows_name_only_what_the_build_and_the_backend_reported() {
+        let version = env!("CARGO_PKG_VERSION");
+        assert_eq!(
+            about_rows(None, None),
+            [("version", "Version", version.to_owned())]
+        );
+        assert_eq!(
+            about_rows(Some("0123abcd4567"), Some("0.3.2")),
+            [
+                ("version", "Version", version.to_owned()),
+                ("commit", "Commit", "0123abcd4567".to_owned()),
+                ("backend", "Local backend", "0.3.2".to_owned()),
+            ]
+        );
+    }
+
+    // Level: unit.
+    #[test]
+    fn a_commit_is_shown_shortened_and_only_when_the_build_knows_one() {
+        assert_eq!(known_commit(None), None);
+        assert_eq!(known_commit(Some("")), None);
+        assert_eq!(known_commit(Some("unknown")), None);
+        assert_eq!(known_commit(Some("abc")), None);
+        assert_eq!(known_commit(Some("0123abc")), Some("0123abc"));
+        assert_eq!(
+            known_commit(Some("0123456789abcdef0123456789abcdef01234567\n")),
+            Some("0123456789ab")
+        );
+    }
+}
+
+#[cfg(test)]
 mod wsl_tests {
     use super::WslChoice;
 
@@ -1419,6 +1529,83 @@ mod tests {
         window.update(|window, cx| {
             view.update(cx, |view, cx| view.set_snapshot(snapshot, window, cx));
             window.draw(cx).clear(cx);
+        });
+    }
+
+    // Level: in-process (view test in a test window).
+    #[test]
+    fn about_shows_the_app_version_and_the_backend_version_once_it_is_known() {
+        let mut cx = TestAppContext::single();
+        cx.update(gpui_kit::init);
+        let (view, window) = cx.add_window_view(|window, cx| {
+            SettingsView::new(Rc::new(ThemeCatalog::load(None)), Vec::new(), window, cx)
+        });
+        let draw = |window: &mut gpui_kit::VisualTestContext| {
+            window.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        draw(window);
+        assert!(window.debug_bounds("settings-nav-about").is_some());
+        assert!(window.debug_bounds("settings-about-version").is_none());
+        window.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.section = super::Section::About;
+                cx.notify();
+            });
+        });
+        draw(window);
+        assert!(window.debug_bounds("settings-about-version").is_some());
+        assert_eq!(
+            window.debug_bounds("settings-about-commit").is_some(),
+            super::build_commit().is_some(),
+            "a commit row needs a commit of the build"
+        );
+        assert!(window.debug_bounds("settings-about-backend").is_none());
+        window.update(|_, cx| {
+            view.update(cx, |view, cx| {
+                view.set_backend_version(Some("0.3.2\u{1b}[31m\u{202e}"), cx);
+                assert_eq!(
+                    view.backend_version.as_deref(),
+                    Some("0.3.2\u{fffd}[31m\u{fffd}"),
+                    "backend text is shown as plain text"
+                );
+                view.set_backend_version(Some("0.3.2"), cx);
+            });
+        });
+        draw(window);
+        assert!(window.debug_bounds("settings-about-backend").is_some());
+        window.update(|_, cx| {
+            view.update(cx, |view, cx| view.set_backend_version(None, cx));
+        });
+        draw(window);
+        assert!(window.debug_bounds("settings-about-backend").is_none());
+    }
+
+    // Level: in-process (the workspace view with a fixture model).
+    #[test]
+    fn the_window_hands_its_backend_version_to_the_settings() {
+        use splitty_client_core::workspace::WindowWorkspace;
+        crate::workspace::chrome::view_tests::with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            model.ui_test_local_screen_fixture("Work").unwrap();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.reconcile(model.clone(), window, cx);
+                    assert_eq!(workspace.settings.read(cx).backend_version, None);
+                });
+            });
+            // The ordinary update fixture records the backend's version 0.2.4.
+            model
+                .ui_test_host_update_fixture("about.example.test", false)
+                .unwrap();
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.reconcile(model, window, cx);
+                    assert_eq!(
+                        workspace.settings.read(cx).backend_version.as_deref(),
+                        Some("0.2.4")
+                    );
+                });
+            });
         });
     }
 
