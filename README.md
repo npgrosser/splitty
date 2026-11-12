@@ -104,7 +104,7 @@ the GitHub CLI, for example
 | System | File | Notes |
 |---|---|---|
 | Windows 10/11 (x64) | `Splitty_<version>_x64-setup.exe` | Local terminals run in WSL 2 (Ubuntu or Debian): the app uses the default distribution and installs its backend there. To update, run the newer installer; it replaces an installed earlier version, including the web app of earlier releases. |
-| macOS (Apple silicon) | `Splitty_<version>_aarch64.dmg` | Clear the quarantine flag after installing (below). |
+| macOS | `Splitty_<version>_aarch64.dmg` (Apple silicon) or `Splitty_<version>_x64.dmg` (Intel) | Clear the quarantine flag after installing (below). |
 | Linux (x86_64) | `splitty_<version>_amd64.deb`, `splitty-<version>-1.x86_64.rpm` or `splitty-<version>-linux-x86_64.tar.gz` | Install the deb (Debian, Ubuntu) or rpm (Fedora, openSUSE) with the system's package manager and start Splitty from the application menu or as `splitty-gpui`. The tar.gz runs from where it is unpacked: `./splitty-gpui`. |
 
 These are the native app. It draws its own interface on the GPU (Vulkan on
@@ -261,8 +261,6 @@ vulnerabilities privately through
 - On Windows, local terminals need WSL 2. Without a supported
   distribution the native app says so and does not start; the web app, built
   from source, opens remote hosts only.
-- The native macOS app is built for Apple silicon; Intel Macs need the web app,
-  built from source.
 - On a Mac host, Splitty doesn't detect listening ports yet; forward them by
   number.
 - In the web app, xterm.js can garble IME and dead-key input on macOS

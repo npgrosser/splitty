@@ -13,7 +13,7 @@ listed in [`CLAUDE.md`](../CLAUDE.md#checks).
 | Frontend (web app, browser) | Svelte 5, TypeScript, Vite, Tailwind CSS |
 | Terminal (web app, browser) | xterm.js with WebGL, ligatures, search, image support; ghostty-web |
 | Layout | dockview-core |
-| Desktop | Native app: GPUI with `libghostty-vt` (`crates/splitty-gpui`; Windows, macOS on Apple silicon, Linux). Legacy web app: Tauri v2 (Windows, macOS; Linux source build) and Electron (Linux: AppImage, deb, rpm) |
+| Desktop | Native app: GPUI with `libghostty-vt` (`crates/splitty-gpui`; Windows, macOS, Linux). Legacy web app: Tauri v2 (Windows, macOS; Linux source build) and Electron (Linux: AppImage, deb, rpm) |
 | Backend | Rust (Tokio, Axum) |
 | PTY | portable-pty |
 | Config | TOML (`~/.config/splitty/config.toml`) |
@@ -248,8 +248,8 @@ packaging/macos/native/build.sh        # or: make native-package
 
 It builds like the Linux script and writes
 `build/native-macos/Splitty_<version>_aarch64.dmg` (`x64` on an Intel Mac; the
-terminal library is built for the host, so the app is not universal and the
-release builds it for Apple silicon only). `Splitty.app` holds `splitty-gpui`
+terminal library is built for the host, so the app is not universal; the
+release builds one on a runner of each architecture). `Splitty.app` holds `splitty-gpui`
 and `splitty` in `Contents/MacOS`, `shell-integration/` in `Contents/Resources`
 with a link from `Contents/MacOS`, and is ad-hoc signed. Its bundle identifier
 is `com.splitty.native`; the web app keeps `com.splitty.app`. Both bundles are
@@ -398,7 +398,7 @@ with them and `SHA256SUMS` once all of them have built; a tag with a suffix
 | System | Package |
 |---|---|
 | Windows x64 | `Splitty_<version>_x64-setup.exe` |
-| macOS | `Splitty_<version>_aarch64.dmg` |
+| macOS | `Splitty_<version>_aarch64.dmg`, `Splitty_<version>_x64.dmg` |
 | Linux x86_64 | `splitty_<version>_amd64.deb`, `splitty-<version>-1.x86_64.rpm`, `splitty-<version>-linux-x86_64.tar.gz` |
 
 The release also carries the static servers (`splitty-wsl-x86_64.tar.gz`,

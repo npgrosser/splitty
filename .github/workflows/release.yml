@@ -7,7 +7,7 @@ name: Release
 # The release is published only once every platform has built and the last
 # release has run against this build (version-skew); a tag with a suffix
 # (`v0.2.0-rc.1`) becomes a prerelease. The binaries are not code-signed
-# (macOS builds are ad-hoc signed so they run on Apple Silicon); the README
+# (macOS builds are ad-hoc signed so they run on Apple silicon); the README
 # explains how to verify downloads.
 # cleanup-release-artifacts.yml removes the run's artifacts after success.
 # Failed builds retain their artifacts for three days for investigation.
@@ -198,11 +198,23 @@ jobs:
           retention-days: 3
 
   macos:
-    name: macOS
+    name: macOS (${{ matrix.arch }})
     # Waits for the static servers of the Windows workflow, like the Linux job.
     needs: windows
-    runs-on: macos-15
-    timeout-minutes: 75
+    # The app is built on a runner of its own architecture: Apple silicon
+    # and Intel each get a dmg.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: aarch64
+            server: darwin-aarch64
+          - runner: macos-15-intel
+            arch: x64
+            server: darwin-x86_64
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
     env:
       SPLITTY_REMOTE_PAYLOAD_X86_64: ${{ github.workspace }}/payloads/splitty-wsl-x86_64.tar.gz
       SPLITTY_REMOTE_PAYLOAD_AARCH64: ${{ github.workspace }}/payloads/splitty-wsl-aarch64.tar.gz
@@ -236,12 +248,12 @@ jobs:
 
       # The cross-built server for macOS hosts must run on a real Mac before
       # any client carries it.
-      - name: Run the macOS arm64 server
+      - name: Run the macOS server of this architecture
         working-directory: payloads
         run: |
-          mkdir darwin-aarch64
-          tar -xzf splitty-darwin-aarch64.tar.gz -C darwin-aarch64
-          darwin-aarch64/splitty --version
+          mkdir ${{ matrix.server }}
+          tar -xzf splitty-${{ matrix.server }}.tar.gz -C ${{ matrix.server }}
+          ${{ matrix.server }}/splitty --version
 
       - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
         with:
@@ -267,8 +279,8 @@ jobs:
           prefix=$(python3 scripts/bootstrap-libghostty-vt.py --check --prefix "$RUNNER_TEMP/splitty-ghostty-vt")
           echo "GHOSTTY_VT_DIR=$prefix" >> "$GITHUB_ENV"
 
-      # For this runner's architecture (Apple silicon): the terminal library
-      # is built for the host. It carries the servers for remote hosts named
+      # For this runner's architecture: the terminal library is built for
+      # the host. It carries the servers for remote hosts named
       # by SPLITTY_REMOTE_PAYLOAD_*.
       - name: Build native app
         env:
@@ -277,20 +289,20 @@ jobs:
           cargo build --locked --release -p splitty-gpui
           target/release/splitty-gpui --help
 
-      # Ad-hoc signed by the script; ships the arm64 server checked above as
-      # its `splitty` command.
+      # Ad-hoc signed by the script; ships the server checked above as its
+      # `splitty` command.
       - name: Build native dmg
         run: |
           packaging/macos/native/build.sh \
             --executable target/release/splitty-gpui \
-            --cli payloads/darwin-aarch64/splitty \
-            --shell-integration payloads/darwin-aarch64/shell-integration \
+            --cli payloads/${{ matrix.server }}/splitty \
+            --shell-integration payloads/${{ matrix.server }}/shell-integration \
             --out out
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: release-macos
-          path: out/*.dmg
+          name: release-macos-${{ matrix.arch }}
+          path: out/Splitty_*_${{ matrix.arch }}.dmg
           if-no-files-found: error
           retention-days: 3
 
@@ -332,11 +344,12 @@ jobs:
           collect downloads/remote-payload-aarch64/splitty-wsl-aarch64.tar.gz
           collect downloads/remote-payload-darwin/splitty-darwin-*.tar.gz
           collect downloads/release-linux/*
-          collect downloads/release-macos/*
+          collect downloads/release-macos-aarch64/*
+          collect downloads/release-macos-x64/*
           cd release
           # One of each; a missing or renamed package must not publish.
           for pattern in \
-            'Splitty_*_x64-setup.exe' 'Splitty_*_aarch64.dmg' \
+            'Splitty_*_x64-setup.exe' 'Splitty_*_aarch64.dmg' 'Splitty_*_x64.dmg' \
             'splitty_*_amd64.deb' 'splitty-*-1.x86_64.rpm' 'splitty-*-linux-x86_64.tar.gz' \
             'splitty-wsl-x86_64.tar.gz' 'splitty-wsl-aarch64.tar.gz' \
             'splitty-darwin-aarch64.tar.gz' 'splitty-darwin-x86_64.tar.gz'; do
