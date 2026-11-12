@@ -488,6 +488,13 @@ that area touches them.
 - **Fixed (2026-11-06): fixture ports and the instance lock in `splitty-server`'s tests.** Seen since 2026-10-31
   in full runs under load, and in the release run of v0.2.1
   (`hub::forwards::tests::stop_during_rebuild_waits_for_setup_and_port_release`); each passed alone. The tests
+- **`splitty-remote`'s SSH option tests depend on the environment** (seen 2026-11-12): `askpass_program()` in
+  `crates/splitty-remote/src/ssh.rs` falls back to `SPLITTY_ASKPASS_PROGRAM`, which the desktop app sets for the
+  processes it starts, its terminal panes included. Run from such a pane, the options switch to `BatchMode=no` and
+  four tests fail (`bridge::tests::the_bridge_runs_the_hosts_server_over_a_stdio_only_connection`, the two
+  `ssh::tests` on stdio-only and forward-only connections, and
+  `tunnel::reverse::tests::the_reverse_command_owns_its_connection_and_carries_one_remote_forward`); with the
+  variable unset they pass. The tests should pin the askpass program or clear the variable.
   of `http`, `hub::forwards` and `hub::reverse` had fixed ports (41001–41033) or ports the kernel handed out for
   port 0, and a port one test had just freed went to a parallel test before the first bound it again. They now
   take ports from one pool in `hub::testing::free_port` (from 20000 on, outside the kernel's automatic range,
