@@ -13,6 +13,9 @@ pub struct TerminalPreferences {
     /// Absent in older stored settings, which means shown.
     #[serde(default)]
     scroll_to_bottom: Option<bool>,
+    /// Absent in older stored settings, which means allowed.
+    #[serde(default)]
+    allow_osc52_write: Option<bool>,
 }
 impl TerminalPreferences {
     pub fn theme(&self) -> &str {
@@ -33,5 +36,31 @@ impl TerminalPreferences {
     /// newest rows.
     pub fn scroll_to_bottom(&self) -> bool {
         self.scroll_to_bottom.unwrap_or(true)
+    }
+    /// Whether a program in a terminal may write the system clipboard
+    /// (OSC 52). Reading it is never allowed.
+    pub fn allow_osc52_write(&self) -> bool {
+        self.allow_osc52_write.unwrap_or(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TerminalPreferences;
+
+    #[test]
+    fn clipboard_writes_are_allowed_unless_the_stored_settings_turn_them_off() {
+        let read = |terminal: serde_json::Value| {
+            serde_json::from_value::<TerminalPreferences>(terminal)
+                .expect("terminal settings")
+                .allow_osc52_write()
+        };
+        let stored = serde_json::json!({"theme": "default", "closeOnExit": "never"});
+        assert!(read(stored.clone()));
+        for allowed in [false, true] {
+            let mut stored = stored.clone();
+            stored["allowOsc52Write"] = allowed.into();
+            assert_eq!(read(stored), allowed);
+        }
     }
 }

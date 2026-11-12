@@ -198,6 +198,39 @@ pub struct Paste {
     pub reader: MimeReader,
     pub allow_unsafe: bool,
 }
+/// `GhosttyClipboardContent`: one MIME representation of a clipboard write,
+/// borrowed for the duration of the callback.
+#[repr(C)]
+pub struct ClipboardContent {
+    pub mime: StringView,
+    pub data: StringView,
+}
+/// `GhosttyClipboardWriteReply`, a sized struct.
+#[repr(C)]
+pub struct ClipboardWriteReply {
+    pub size: usize,
+    pub result: c_int,
+    pub remember: bool,
+}
+/// `GhosttyClipboardWrite`: frozen layout, borrowed for the duration of the
+/// callback. `ctx` belongs to the terminal.
+#[repr(C)]
+pub struct ClipboardWrite {
+    pub location: c_int,
+    pub contents: *const ClipboardContent,
+    pub contents_len: usize,
+    pub name: StringView,
+    pub granted: bool,
+    pub can_remember: bool,
+    pub ctx: *const c_void,
+    pub reply: Option<unsafe extern "C" fn(*const ClipboardWrite, *const ClipboardWriteReply)>,
+}
+/// `GhosttyTerminalClipboardWriteFn`.
+pub type ClipboardWriteFn = unsafe extern "C" fn(Handle, *mut c_void, *const ClipboardWrite);
+// GhosttyClipboardLocation and GhosttyClipboardWriteResult, int-typed C enums.
+pub const CLIPBOARD_LOCATION_STANDARD: c_int = 0;
+pub const CLIPBOARD_WRITE_SUCCESS: c_int = 0;
+pub const CLIPBOARD_WRITE_DENIED: c_int = 1;
 
 // Option/data discriminants from terminal.h, render.h, selection.h, and
 // formatter.h. Keeping their names separate prevents confusing equal numbers.
@@ -210,6 +243,7 @@ pub const OPT_PALETTE: c_int = 15;
 pub const OPT_IMAGE_LIMIT: c_int = 16;
 pub const OPT_SELECTION: c_int = 22;
 pub const OPT_DEFAULT_CURSOR_STYLE: c_int = 23;
+pub const OPT_CLIPBOARD_WRITE: c_int = 27;
 pub const OPT_SCROLLBACK_BYTES: c_int = 28;
 pub const OPT_SCROLLBACK_LINES: c_int = 29;
 pub const DATA_CURSOR_X: c_int = 3;

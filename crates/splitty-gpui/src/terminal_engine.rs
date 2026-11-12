@@ -13,6 +13,9 @@ use std::{cell::RefCell, ffi::c_void, marker::PhantomData, mem, ptr, rc::Rc};
 
 pub const MAX_INPUT: usize = 64 * 1024;
 const MAX_COPY: usize = 16 * 1024 * 1024;
+/// The largest text one clipboard write of a program may carry, as in the
+/// web client.
+pub const MAX_CLIPBOARD_WRITE: usize = 64 * 1024;
 const SCROLLBACK_BYTES: usize = 32 * 1024 * 1024;
 const SCROLLBACK_LINES: usize = 5000;
 /// The cursor shape until a program selects one with DECSCUSR, and the shape
@@ -176,11 +179,17 @@ impl Default for MouseGeometry {
     }
 }
 
+/// What the terminal's callbacks collect during one operation. `suppress`
+/// drops every effect of replayed output: replies and clipboard writes.
 #[derive(Default)]
 struct Replies {
     bytes: Vec<u8>,
     suppress: bool,
     overflow: bool,
+    /// Whether a program may write the clipboard at all.
+    clipboard_allowed: bool,
+    /// The last accepted clipboard write of the current operation.
+    clipboard: Option<String>,
 }
 
 /// Owns every native handle; the callback box's address survives moves of Engine.
@@ -298,6 +307,12 @@ impl Engine {
                 ffi::OPT_WRITE_PTY,
                 on_write as *const c_void,
             ))?;
+            let clipboard_write: ffi::ClipboardWriteFn = on_clipboard_write;
+            check(ffi::ghostty_terminal_set(
+                engine.terminal,
+                ffi::OPT_CLIPBOARD_WRITE,
+                clipboard_write as *const c_void,
+            ))?;
         }
         engine.option(ffi::OPT_SCROLLBACK_BYTES, &SCROLLBACK_BYTES)?;
         engine.option(ffi::OPT_SCROLLBACK_LINES, &SCROLLBACK_LINES)?;
@@ -307,7 +322,10 @@ impl Engine {
         install_png_decoder();
         // Images arrive in the terminal's own stream only: the file and
         // shared-memory media stay off, so a program cannot make the window
-        // read a file. No clipboard callbacks are installed.
+        // read a file. Of the clipboard callbacks only the write callback is
+        // installed, and it accepts nothing until `set_clipboard_writes`
+        // allows it; without a read callback the terminal answers no
+        // clipboard query, so a program never reads the clipboard.
         let disabled: u64 = IMAGE_STORAGE_BYTES;
         // SAFETY: the option takes a uint64_t; unsupported means compiled out.
         let result = unsafe {
@@ -353,6 +371,7 @@ impl Engine {
         replies.bytes.clear();
         replies.overflow = false;
         replies.suppress = suppress;
+        replies.clipboard = None;
     }
 
     fn end_effects(&mut self, result: Result<()>) -> Result<Vec<u8>> {
@@ -360,6 +379,7 @@ impl Engine {
         replies.suppress = false;
         if replies.overflow || result.is_err() {
             replies.bytes.clear();
+            replies.clipboard = None;
             result?;
             bail!("Terminal output exceeds the 64 KiB input limit");
         }
@@ -380,8 +400,26 @@ impl Engine {
         self.end_effects(Ok(()))
     }
 
+    /// Whether a program's clipboard write (OSC 52 and the other write
+    /// protocols of the terminal) is accepted. Off until set; kept by `reset`.
+    pub fn set_clipboard_writes(&mut self, allowed: bool) {
+        let replies = self.replies.get_mut();
+        replies.clipboard_allowed = allowed;
+        if !allowed {
+            replies.clipboard = None;
+        }
+    }
+
+    /// The text the last `feed` of live output asked to put on the standard
+    /// clipboard, once. Replayed output, other clipboards, empty or non-UTF-8
+    /// text and text over `MAX_CLIPBOARD_WRITE` never yield one.
+    pub fn take_clipboard_write(&mut self) -> Option<String> {
+        self.replies.get_mut().clipboard.take()
+    }
+
     pub fn reset(&mut self) -> Result<()> {
         let mut replacement = Self::new(self.cols, self.height)?;
+        replacement.set_clipboard_writes(self.replies.get_mut().clipboard_allowed);
         replacement.apply_colors(self.colors)?;
         replacement.resize(self.cols, self.height, self.cell_width, self.cell_height)?;
         let geometry = self.mouse_geometry;
@@ -1712,6 +1750,78 @@ unsafe extern "C" fn on_write(_: ffi::Handle, userdata: *mut c_void, data: *cons
     state
         .bytes
         .extend_from_slice(unsafe { std::slice::from_raw_parts(data, len) });
+}
+
+unsafe extern "C" fn on_clipboard_write(
+    _: ffi::Handle,
+    userdata: *mut c_void,
+    write: *const ffi::ClipboardWrite,
+) {
+    // SAFETY: userdata is Engine's stable RefCell box, as in on_write. The
+    // request and everything it points to are valid until this returns. No
+    // panicking borrow, indexing or reentrant VT call occurs here, and the
+    // only allocation is fallible, so nothing unwinds across the C boundary.
+    let state = unsafe { &*userdata.cast::<RefCell<Replies>>() };
+    let Some(write) = (unsafe { write.as_ref() }) else {
+        return;
+    };
+    // SAFETY: the request's own slices, borrowed for this call only.
+    let text = state
+        .try_borrow_mut()
+        .ok()
+        .filter(|state| state.clipboard_allowed && !state.suppress)
+        .and_then(|state| Some((state, unsafe { clipboard_text(write) }?)));
+    let result = if let Some((mut state, text)) = text {
+        state.clipboard = Some(text);
+        ffi::CLIPBOARD_WRITE_SUCCESS
+    } else {
+        ffi::CLIPBOARD_WRITE_DENIED
+    };
+    // OSC 52 has no acknowledgement and discards the reply; a protocol with
+    // one learns whether the text was accepted.
+    if let Some(reply) = write.reply {
+        let answer = ffi::ClipboardWriteReply {
+            size: mem::size_of::<ffi::ClipboardWriteReply>(),
+            result,
+            remember: false,
+        };
+        // SAFETY: called once, within the callback, with the request itself.
+        unsafe { reply(write, &answer) };
+    }
+}
+
+/// The plain text of a write to the standard clipboard, within the limit.
+///
+/// # Safety
+/// `write` and the arrays and strings it points to must be live.
+unsafe fn clipboard_text(write: &ffi::ClipboardWrite) -> Option<String> {
+    if write.location != ffi::CLIPBOARD_LOCATION_STANDARD
+        || write.contents.is_null()
+        || write.contents_len == 0
+    {
+        return None;
+    }
+    // SAFETY: the caller guarantees contents_len live entries.
+    let contents = unsafe { std::slice::from_raw_parts(write.contents, write.contents_len) };
+    let bytes = |view: &ffi::StringView| {
+        if view.ptr.is_null() || view.len == 0 {
+            return &[][..];
+        }
+        // SAFETY: a nonnull string of the request holds len live bytes.
+        unsafe { std::slice::from_raw_parts(view.ptr, view.len) }
+    };
+    let data = contents
+        .iter()
+        .find(|content| bytes(&content.mime).starts_with(b"text/plain"))
+        .map(|content| bytes(&content.data))?;
+    if data.is_empty() || data.len() > MAX_CLIPBOARD_WRITE {
+        return None;
+    }
+    let text = std::str::from_utf8(data).ok()?;
+    let mut owned = String::new();
+    owned.try_reserve_exact(text.len()).ok()?;
+    owned.push_str(text);
+    Some(owned)
 }
 
 unsafe extern "C" fn read_paste(

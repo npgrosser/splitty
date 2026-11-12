@@ -47,6 +47,11 @@ Keep temporary fixture paths short enough for Unix sockets.
 - One captured local/remote rename editor: double-click/F2/context menu;
   Enter/Blur commit, Escape cancels. Names change only after canonical readback.
   Hover actions have a fixed lane, preserving title hitboxes and a full tooltip.
+- OSC 52 clipboard writes of a program in a pane (`terminal_engine.rs`, the
+  terminal's write callback): live output only, the standard clipboard, at
+  most 64 KiB of UTF-8, and only while `terminal.allowOsc52Write` of the
+  window's own settings is on, for local and host panes alike. Clipboard
+  reads stay unanswered. There is no notice after a copy yet.
 
 Current checks: **268 client-core tests, 190 GPUI tests, 17 architecture tests**,
 strict touched-crate all-target Clippy, formatting and affected strict OpenSpec

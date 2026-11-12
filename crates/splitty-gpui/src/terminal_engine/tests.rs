@@ -235,15 +235,128 @@ fn selection_damage_and_scrolled_cursor_are_observable() -> Result<()> {
     Ok(())
 }
 
+fn base64(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut text = String::new();
+    for chunk in bytes.chunks(3) {
+        let group = chunk
+            .iter()
+            .chain([0, 0].iter())
+            .take(3)
+            .fold(0u32, |group, byte| (group << 8) | u32::from(*byte));
+        for digit in 0..4 {
+            if digit <= chunk.len() {
+                let index = usize::try_from((group >> (18 - 6 * digit)) & 63).unwrap_or(0);
+                text.push(char::from(ALPHABET[index]));
+            } else {
+                text.push('=');
+            }
+        }
+    }
+    text
+}
+
+fn osc52(selection: &str, text: &[u8], end: &str) -> Vec<u8> {
+    format!("\x1b]52;{selection};{}{end}", base64(text)).into_bytes()
+}
+
 #[test]
-fn clipboard_effects_stay_disabled() -> Result<()> {
+fn clipboard_writes_are_refused_until_allowed_and_reads_always() -> Result<()> {
     let mut engine = Engine::new(20, 3)?;
+    assert_eq!(osc52("c", b"hello", "\x07"), b"\x1b]52;c;aGVsbG8=\x07");
     assert!(engine
-        .feed(b"\x1b]52;c;aGVsbG8=\x07\x1b]52;c;?\x07", false)?
+        .feed(&osc52("c", b"hello", "\x07"), false)?
         .is_empty());
+    assert_eq!(engine.take_clipboard_write(), None);
+    for allowed in [false, true] {
+        engine.set_clipboard_writes(allowed);
+        assert!(engine.feed(b"\x1b]52;c;?\x07", false)?.is_empty());
+        assert!(engine.feed(b"\x1b]52;c;?\x1b\\", false)?.is_empty());
+        assert_eq!(engine.take_clipboard_write(), None);
+    }
     // No clipboard-read callback means mode 5522 still pastes literal text.
     engine.feed(b"\x1b[?5522h", false)?;
     assert_eq!(engine.paste("safe")?, b"safe");
+    Ok(())
+}
+
+#[test]
+fn an_allowed_clipboard_write_yields_its_text_once() -> Result<()> {
+    let mut engine = Engine::new(20, 3)?;
+    engine.set_clipboard_writes(true);
+    for end in ["\x07", "\x1b\\"] {
+        assert!(engine
+            .feed(&osc52("c", "grüße".as_bytes(), end), false)?
+            .is_empty());
+        assert_eq!(engine.take_clipboard_write().as_deref(), Some("grüße"));
+        assert_eq!(engine.take_clipboard_write(), None);
+    }
+    // The last write of one feed wins; a sequence split over feeds completes.
+    let mut two = osc52("c", b"first", "\x07");
+    two.extend(osc52("c", b"second", "\x07"));
+    engine.feed(&two, false)?;
+    assert_eq!(engine.take_clipboard_write().as_deref(), Some("second"));
+    let split = osc52("c", b"split", "\x07");
+    engine.feed(&split[..9], false)?;
+    assert_eq!(engine.take_clipboard_write(), None);
+    engine.feed(&split[9..], false)?;
+    assert_eq!(engine.take_clipboard_write().as_deref(), Some("split"));
+    // A write that nobody took does not outlive the next operation.
+    engine.feed(&osc52("c", b"stale", "\x07"), false)?;
+    engine.feed(b"x", false)?;
+    assert_eq!(engine.take_clipboard_write(), None);
+    // The permission survives a reset; turning it off refuses again.
+    engine.reset()?;
+    engine.feed(&osc52("c", b"after reset", "\x07"), false)?;
+    assert_eq!(
+        engine.take_clipboard_write().as_deref(),
+        Some("after reset")
+    );
+    engine.set_clipboard_writes(false);
+    engine.feed(&osc52("c", b"off", "\x07"), false)?;
+    assert_eq!(engine.take_clipboard_write(), None);
+    Ok(())
+}
+
+#[test]
+fn clipboard_writes_are_bounded_valid_live_and_for_the_standard_clipboard() -> Result<()> {
+    let mut engine = Engine::new(20, 3)?;
+    engine.set_clipboard_writes(true);
+    let largest = vec![b'a'; MAX_CLIPBOARD_WRITE];
+    engine.feed(&osc52("c", &largest, "\x07"), false)?;
+    assert_eq!(
+        engine.take_clipboard_write().map(String::into_bytes),
+        Some(largest)
+    );
+    let rejected: [Vec<u8>; 7] = [
+        osc52("c", &vec![b'a'; MAX_CLIPBOARD_WRITE + 1], "\x07"),
+        osc52("c", &[0xff, 0xfe], "\x07"),
+        osc52("c", b"", "\x07"),
+        b"\x1b]52;c;!!!not-base64\x07".to_vec(),
+        b"\x1b]52;c\x07".to_vec(),
+        osc52("p", b"primary", "\x07"),
+        osc52("s", b"selection", "\x07"),
+    ];
+    for bytes in &rejected {
+        assert!(engine.feed(bytes, false)?.is_empty());
+        assert_eq!(
+            engine.take_clipboard_write(),
+            None,
+            "{:?}",
+            String::from_utf8_lossy(&bytes[..bytes.len().min(24)])
+        );
+    }
+    // Replayed output never reaches the clipboard, whole or completed live.
+    engine.feed(&osc52("c", b"replayed", "\x07"), true)?;
+    assert_eq!(engine.take_clipboard_write(), None);
+    engine.feed(b"\x1b]52;c;?\x07", true)?;
+    assert_eq!(engine.take_clipboard_write(), None);
+    // The terminal reports an empty or unknown selection parameter as the
+    // standard clipboard.
+    for selection in ["", "q"] {
+        engine.feed(&osc52(selection, b"default", "\x07"), false)?;
+        assert_eq!(engine.take_clipboard_write().as_deref(), Some("default"));
+    }
     Ok(())
 }
 
@@ -389,6 +502,14 @@ fn pinned_c_abi_layouts_match_64_bit_headers() {
     layout!(ffi::Writer, 16, 8);
     layout!(ffi::MimeReader, 16, 8);
     layout!(ffi::Paste, 56, 8);
+    layout!(ffi::ClipboardContent, 32, 8);
+    layout!(ffi::ClipboardWriteReply, 16, 8);
+    layout!(ffi::ClipboardWrite, 64, 8);
+    assert_eq!(mem::offset_of!(ffi::ClipboardWrite, contents), 8);
+    assert_eq!(mem::offset_of!(ffi::ClipboardWrite, name), 24);
+    assert_eq!(mem::offset_of!(ffi::ClipboardWrite, can_remember), 41);
+    assert_eq!(mem::offset_of!(ffi::ClipboardWrite, reply), 56);
+    assert_eq!(mem::offset_of!(ffi::ClipboardWriteReply, remember), 12);
     layout!(ffi::RenderCursor, 24, 8);
     layout!(ffi::RenderColors, 792, 8);
     assert_eq!(mem::offset_of!(ffi::RenderCursor, visual_style), 20);

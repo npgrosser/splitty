@@ -614,6 +614,9 @@ pub struct Terminal {
     scrollbar_shown: bool,
     scrollbar_hide: Option<Task<()>>,
     scroll_to_bottom: bool,
+    /// Whether a program's clipboard write (OSC 52) reaches the system
+    /// clipboard: the setting `terminal.allowOsc52Write`. Off until set.
+    clipboard_writes: bool,
     /// The rows below the viewport the control last showed.
     scroll_bottom_shown: Option<u64>,
     /// The control on its way out, with the count it had.
@@ -683,6 +686,7 @@ impl Terminal {
             scrollbar_shown: false,
             scrollbar_hide: None,
             scroll_to_bottom: true,
+            clipboard_writes: false,
             scroll_bottom_shown: None,
             scroll_bottom_leaving: None,
             focus_out_subscription: None,
@@ -853,6 +857,16 @@ impl Terminal {
         if let Some(reply) = self.output(result) {
             self.send_bytes(reply);
         }
+        // The engine yields a write only for live output and only while
+        // writes are allowed; nothing is ever read back to the program.
+        let copied = self
+            .engine
+            .as_mut()
+            .and_then(Engine::take_clipboard_write)
+            .filter(|_| self.clipboard_writes);
+        if let Some(text) = copied {
+            cx.write_to_clipboard(ClipboardItem::new_string(text));
+        }
         if self.engine.is_none() {
             return;
         }
@@ -891,6 +905,7 @@ impl Terminal {
             engine.reset()
         } else {
             Engine::new(self.size.cols, self.size.rows).and_then(|mut engine| {
+                engine.set_clipboard_writes(self.clipboard_writes);
                 engine.apply_colors(self.colors)?;
                 self.engine = Some(engine);
                 Ok(())
@@ -976,6 +991,15 @@ impl Terminal {
             return None;
         }
         engine.scrollback().ok()
+    }
+
+    /// Apply `terminal.allowOsc52Write`: off, the engine refuses a program's
+    /// clipboard write; on, the text of a write in live output is copied.
+    pub(crate) fn set_clipboard_writes(&mut self, allowed: bool) {
+        self.clipboard_writes = allowed;
+        if let Some(engine) = self.engine.as_mut() {
+            engine.set_clipboard_writes(allowed);
+        }
     }
 
     pub(crate) fn set_scroll_to_bottom(&mut self, shown: bool, cx: &mut Context<Self>) {
@@ -2896,6 +2920,44 @@ mod presentation_tests {
             window.draw(cx).clear(cx);
             presentation
         })
+    }
+
+    #[test]
+    fn a_program_writes_the_clipboard_only_live_and_while_the_setting_allows_it() {
+        with_view(|window, view, commands| {
+            let terminal = window.update(|_, cx| view.read(cx).terminal.clone());
+            let clipboard = |window: &mut VisualTestContext| {
+                window.update(|_, cx| cx.read_from_clipboard().and_then(|item| item.text()))
+            };
+            let feed = |window: &mut VisualTestContext, bytes: &[u8], replay: bool| {
+                window.update(|_, cx| {
+                    terminal.update(cx, |terminal, cx| terminal.feed(bytes, replay, cx))
+                });
+            };
+            window.update(|_, cx| {
+                cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string("kept".into()))
+            });
+            let sent = commands.borrow().len();
+            // "one", "two" and "three" as OSC 52 writes to the standard clipboard.
+            // Off, as a view starts and as the setting can leave it.
+            feed(window, b"\x1b]52;c;b25l\x07", false);
+            assert_eq!(clipboard(window).as_deref(), Some("kept"));
+            window.update(|_, cx| {
+                terminal.update(cx, |terminal, _| terminal.set_clipboard_writes(true))
+            });
+            // Replayed output never copies; a query is not answered.
+            feed(window, b"\x1b]52;c;dHdv\x07", true);
+            feed(window, b"\x1b]52;c;?\x07", false);
+            assert_eq!(clipboard(window).as_deref(), Some("kept"));
+            feed(window, b"\x1b]52;c;dHdv\x1b\\", false);
+            assert_eq!(clipboard(window).as_deref(), Some("two"));
+            window.update(|_, cx| {
+                terminal.update(cx, |terminal, _| terminal.set_clipboard_writes(false))
+            });
+            feed(window, b"\x1b]52;c;dGhyZWU=\x07", false);
+            assert_eq!(clipboard(window).as_deref(), Some("two"));
+            assert_eq!(commands.borrow().len(), sent, "nothing goes to the program");
+        });
     }
 
     #[test]
