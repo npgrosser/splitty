@@ -93,7 +93,10 @@ export class ReplayOutput {
       return /^\x1b\[[?>=]?[\d;]*c$/.test(sequence)
         || /^\x1b\[\??[\d;]*n$/.test(sequence)
         || /^\x1b\[\??[\d;]*\$p$/.test(sequence)
-        || /^\x1b\[(?:1[134589]|2[01])t$/.test(sequence);
+        || /^\x1b\[(?:1[1345689]|2[01])t$/.test(sequence)
+        // The kitty keyboard query and the version report (XTVERSION).
+        || sequence === "\x1b[?u"
+        || /^\x1b\[>[\d;]*q$/.test(sequence);
     }
     return /^\x1bP[+$]q/.test(sequence) || sequence === '\x1bZ';
   }

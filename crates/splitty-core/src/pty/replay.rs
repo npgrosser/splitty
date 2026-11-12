@@ -212,8 +212,8 @@ fn osc_has_side_effect(body: &[u8]) -> bool {
     color && body.contains(&b'?')
 }
 
-/// Device attributes, status and cursor reports, mode reports and window
-/// reports. `body` holds what follows `ESC [`, the final byte included.
+/// Device attributes, status and cursor reports, mode reports, window
+/// reports, the kitty keyboard query and the version report. `body` holds what follows `ESC [`, the final byte included.
 fn csi_has_side_effect(body: &[u8]) -> bool {
     let Some((&last, rest)) = body.split_last() else {
         return false;
@@ -236,8 +236,12 @@ fn csi_has_side_effect(body: &[u8]) -> bool {
         // `CSI Ps t` with the report variants of the window operations.
         b't' => matches!(
             rest,
-            b"11" | b"13" | b"14" | b"15" | b"18" | b"19" | b"20" | b"21"
+            b"11" | b"13" | b"14" | b"15" | b"16" | b"18" | b"19" | b"20" | b"21"
         ),
+        // `CSI ? u`: the kitty keyboard protocol's query of its flags.
+        b'u' => rest == b"?",
+        // `CSI > Ps q`: the terminal's name and version (XTVERSION).
+        b'q' => rest.strip_prefix(b">").is_some_and(digits),
         _ => false,
     }
 }
@@ -308,6 +312,10 @@ mod tests {
             "\x1b[>0c",
             "\x1b[?2026$p",
             "\x1b[18t",
+            "\x1b[16t",
+            "\x1b[?u",
+            "\x1b[>q",
+            "\x1b[>0q",
             "\x1bP$qm\x1b\\",
             "\x1bZ",
             "\x05",

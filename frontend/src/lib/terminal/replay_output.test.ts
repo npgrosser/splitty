@@ -18,6 +18,7 @@ describe("historical terminal output", () => {
     "\x1b]52;c;Y29waWVk\x07", "\x1b]52;c;Y29waWVk\x1b\\", "\x1b]52;c;?\x07",
     "\x1b]4;0;?\x07", "\x1b[6n", "\x1b[?6n", "\x1b[c",
     "\x1b[>0c", "\x1b[?2026$p", "\x1b[18t", "\x1bP$qm\x1b\\",
+    "\x1b[16t", "\x1b[?u", "\x1b[>q", "\x1b[>0q",
   ])("removes %j even across frame boundaries", (query) => {
     const text = `Grüße${query}❯ `;
     for (let split = 0; split <= encoder.encode(text).length; split++) {
