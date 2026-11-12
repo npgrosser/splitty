@@ -12,8 +12,8 @@ Splitty knows what runs in a pane only as busy or not: the foreground process is
 - **Unknown sequences**: the scanner reads an OSC it does not interpret to its end. Today it stops at the number, so the BEL that ends such a sequence counts as a bell (see terminal-sessions in the findings), and Claude Code ends its OSC sequences with BEL.
 - **Answering the probe**: the server answers `OSC 7501 ; ?` on the session's input, once per probe in live output, and never for a probe in output it reads again (a daemon that adopts a keeper's buffer). The answer is queued on the input before the output that carried the probe reaches any client, between two of a client's writes and never inside one. Programs send primary device attributes (`CSI c`) right after the probe and take an earlier answer to it as no support; Claude Code does, waits up to 2 seconds and, without an answer, reports nothing for the rest of its run. A session is then reported with no client connected, and several clients of one session do not each answer.
 - **The probe stays out of the stream** (PS-1): the server removes the probe from the output it records and forwards, so neither a client's emulator nor, under `splitty attach`, the user's own terminal can answer it a second time; a second answer would reach the program as typed text. The replay filters (for `splitty attach` and in the web client) drop the probe as well, for output recorded before this change.
-- **On the wire**: a session's records are sent with `created` and `attached` and as an event when they change, the way the OSC 133 state is, behind a capability. Older clients ignore the event. How records reach a client for sessions it does not stream is for the design (see below).
-- **Notifications**: a root record that becomes `blocked`, `done` or `error` in a pane the user is not watching raises a notification through the existing path, with the record's message as text and a limit on how often one pane may notify. Settings get a switch like the other notification types. While a pane holds a status record, its bells and, once `terminal-bell` maps them, its OSC notifications raise no notification of their own (PS-2): a program that reports its state sends those as well, and the record says more. `done` and `error` stay on the server until the program replaces or clears them, a full reset or the end of the session; a window drops its mark for them once the user has seen the pane, as it does for an unread notification (PS-3).
+- **On the wire**: a session's root record reaches every connection as one event, `program_status.changed`, with the session's pane and screen, behind the capability `program-status-v1`, also for sessions the connection does not stream; a new connection gets the records held right after `mux.welcome` (PS-4, PS-5). Older clients ignore the event. The control API's mux state replies carry the record as well.
+- **Notifications**: the server marks the event `notify` when a root record becomes `blocked`, `done` or `error` from live output, at most once per session and state in a while, and the window adds a notification for a pane the user is not watching, with the record's message as text (PS-6, PS-7). Settings get a switch like the other notification types, `notifications.programStatus`. While a pane holds a status record, its bells and, once `terminal-bell` maps them, its OSC notifications raise no notification of their own (PS-2): a program that reports its state sends those as well, and the record says more. `done` and `error` stay on the server until the program replaces or clears them, a full reset or the end of the session; a window drops its mark for them once the user has seen the pane, as it does for an unread notification (PS-3).
 - **In the native window**: a pane's tab shows its program's state (working, blocked with its kind, done, failed), and screens and host groups show that a pane in them is blocked.
 - **For the CLI**: `splitty list-panes` shows each pane's root record, so an agent that started other agents in panes can see which one waits.
 
@@ -31,14 +31,15 @@ Out of scope:
 
 ### Modified Capabilities
 
-- `terminal-sessions`: "Continuous Output Capture" (status is tracked while no connection streams the session) and the server writing to a session's input on its own for the probe's answer.
-- `mux-protocol` or `client-connections`: the capability and the status event.
+- `terminal-sessions`: "Terminal Input" (the server's own answer between a client's writes), "Terminal Output Streaming" (the probe removed), "Continuous Output Capture" (status tracked while no connection streams the session) and "Client Handling of Session Streams".
+- `mux-protocol`: the capability and the status event.
+- `control-api`: the record in the mux state replies.
 - `cli`: the record in `list-panes`.
 - `settings`: the notification switch.
 
 ## Impact
 
-- Server: the OSC scanner (`pty/osc.rs`), which also learns to skip an OSC it does not interpret; the session's output record, state and watch channels (`pty/session.rs`); the probe's removal and answer on the session's output and input paths; the replay filters (`pty/replay.rs`, `frontend/src/lib/terminal/replay_output.ts`); protocol events and `docs/protocol.ts`; the notification engine (`protocol/notify.rs`); `list-panes`.
+- Server: the OSC scanner (`pty/osc.rs`), which also learns to skip an OSC it does not interpret; the session's output record, state and watch channels (`pty/session.rs`); the probe's removal and answer on the session's output and input paths; the replay filters (`pty/replay.rs`, `frontend/src/lib/terminal/replay_output.ts`); a status watcher next to the ports watcher of the server's client sessions, with the `notify` mark (the notification engine tracks only streamed sessions); protocol events and `docs/protocol.ts`; the mux state replies and `list-panes`.
 - Native client: the notification ledger of `splitty-client-core` (status notifications, and a pane's bells left out while it holds a record), tab and drawer marks in `splitty-gpui`.
 - Hosts: status records come from the host's daemon; nothing new crosses the connection but the event.
 - Tests: unit tests of the report parser and of a BEL that ends an unknown OSC; an in-process test with a real PTY where a program writes the probe and `CSI c` and reads the server's answer first, with no answer for a probe in output read again; the dispatcher's event and attach state; the ledger's notifications and marks.
@@ -60,8 +61,4 @@ Taken on 2026-11-12, open to the maintainer's review and listed in `openspec/ope
 
 ## Open questions for the design
 
-- How records reach a client for sessions it does not stream (panes on screens not shown, host groups not opened), and with them notifications for such sessions: with the workspace's session state, or a status subscription per connection.
-- How a program's other output changes once its probe is answered (a program may stop drawing its status into the title), and what Codex does with an answer. To be checked against installed versions.
-- How child records (subagents) are shown in the first version, if at all, and whether `done` notifies or only `blocked` and `error`.
-- The status protocol is young (four revisions in two weeks) and may change; which revision the first version follows.
-- Whether a status record can also be set through the control API, for a local tool that learns a program's state out of band, and which source wins when both report. Reading agents' own data stays outside the server either way.
+Answered in `design.md` ("Open questions of the proposal") by the provisional decisions PS-4 to PS-17.

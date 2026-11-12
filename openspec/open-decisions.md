@@ -21,10 +21,24 @@ Each point names what holds now, the alternative, and where it is recorded.
   - **VS-4:** the test variables are `SPLITTY_TEST_RELEASED_BINARY` and `SPLITTY_TEST_REQUIRE_RELEASED_BINARY`, apart from the rollback smoke's `SPLITTY_TEST_PREVIOUS_BINARY`.
   - **VS-5:** the test does not assert that a setting only the newer build knows survives a downgrade, since today it does not (a finding under server-modes).
 
-- **`program-status` PS-1 to PS-3** (2026-11-12, provisional, tbd; recorded in its proposal under "Provisional decisions"):
+- **`program-status` PS-1 to PS-17** (2026-11-12, provisional, tbd; recorded in its design under "Provisional decisions"):
   - **PS-1:** the server removes the status probe from the output it records and forwards, so no client or outer terminal answers it a second time. The alternative forwards it.
   - **PS-2:** while a pane holds a status record, its bells and OSC notifications raise no notification of their own. The alternatives notify for both, or merge them within a short time.
   - **PS-3:** `done` and `error` records stay on the server until the program replaces or clears them, a full reset or the session's end; a window's mark goes once the pane is seen. The alternative drops them after a time or at the next input.
+  - **PS-4:** records reach clients as one event `program_status.changed` to every connection, with pane and screen, and the held records right after `mux.welcome`; not in `created` or `attached`. The alternatives are fields in `created`/`attached` or a status subscription per connection.
+  - **PS-5:** only the root record is sent and shown; child records stay on the server for `clear` and the limit. The alternatives send all records or let a blocked child mark its pane.
+  - **PS-6:** `done` notifies like `blocked` and `error`, under one switch `notifications.programStatus` that defaults to on. The alternatives are marks only for `done` or one switch per state.
+  - **PS-7:** the server marks `notify` for a root record turning `blocked`, `done` or `error` (or changing kind or message) from live output, at most once per session and state in 10 seconds; the window applies watched panes and settings. The alternative lets each window derive notifications with its own limit.
+  - **PS-8:** revision 0.4; the probe's answer lists no states or kinds and ends with the probe's terminator. The alternatives list them, or always end with `ESC \`.
+  - **PS-9:** no control-API setter for a record in the first version. The alternative is `POST /api/session/{id}/status`, with the program's own reports winning.
+  - **PS-10:** at most 64 records per session (the root never evicted), one event per session every 100 ms, 16 waiting answers per session, a hold-back of at most 9 bytes. The alternative is the protocol's 256 records with plain least-recently-used eviction.
+  - **PS-11:** the byte 0x9d no longer begins an OSC (it is a UTF-8 continuation byte). The alternative keeps it for OSC 0, 2 and 133.
+  - **PS-12:** PS-2 is applied in the window's notification ledger. The alternative is the server marking a recording session's bell events.
+  - **PS-13:** output a keeper buffered before the daemon connected rebuilds records but gets no answers and marks no notifications. The alternative starts adopted sessions without records.
+  - **PS-14:** `working`, `blocked` and `idle` end at OSC 133 `A`, when the pane's session stops being busy (sampled every 500 ms), and at the end of output. The alternatives end them whenever the session is not busy, or only at OSC 133 `A` and the end of output.
+  - **PS-15:** the root record is in the control API's mux state replies and in `list-panes`, not in the workspace state or screen snapshots. The alternatives are the workspace state with a nudge per change, or an endpoint of its own.
+  - **PS-16:** the server strips bidirectional controls, invisible characters and line separators from `title` and `msg`. The alternative drops reports that contain them.
+  - **PS-17:** tabs show working, blocked with its kind, done and failed; screens and host groups only blocked; what the user saw is kept in memory per window; unconnected or older hosts show nothing. The alternatives also mark screens for `done`/`error`, or persist what was seen.
 
 - **Native web look alignment** (2026-11-09, provisional, tbd; no OpenSpec change, recorded in `docs/gpui-spike.md`):
   - **WL-1:** secondary and muted chrome text keep the theme's values, and only primary text is lifted to 4.5:1. The alternative, lifting all text, erases the theme's idle/running distinction.
