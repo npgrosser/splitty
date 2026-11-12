@@ -854,7 +854,17 @@ impl Workspace {
                         .enabled(known && !opening)
                     };
                     entry = entry.icon(IconName::Terminal);
-                    if let Some(detail) = screen_detail(&detail) {
+                    let detail = screen_detail(&detail);
+                    let detail = if self.host_screen_blocked(target, &id) {
+                        let waiting = super::program_status::WAITING;
+                        Some(detail.map_or_else(
+                            || waiting.to_owned(),
+                            |detail| format!("{waiting} · {detail}"),
+                        ))
+                    } else {
+                        detail
+                    };
+                    if let Some(detail) = detail {
                         entry = entry.detail(detail);
                     }
                     content.entries.push(entry);
@@ -1642,7 +1652,13 @@ impl Workspace {
                                 .child(entry.label.clone()),
                         )
                         .when_some(entry.detail.clone(), |label, detail| {
-                            label.child(menu_style::detail(colors, detail))
+                            let selector = format!("popover-{}-detail-{detail}", entry.key);
+                            label.child(
+                                menu_style::detail(colors, detail)
+                                    .when(cfg!(all(test, feature = "ui-test-support")), |detail| {
+                                        detail.debug_selector(move || selector.clone())
+                                    }),
+                            )
                         }),
                 );
             let key = entry.key.clone();

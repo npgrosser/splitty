@@ -2868,3 +2868,6 @@ mod windows_startup_tests {
 
 #[cfg(all(test, not(target_os = "windows")))]
 mod ports_tests;
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod program_status_tests;

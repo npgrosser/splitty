@@ -295,6 +295,12 @@ async fn notification_settings_read_is_owned_coalesced_and_refreshes_independent
         initial.default_value(SettingsField::NotificationEnabled),
         Some(crate::settings::SettingsValue::Bool(true))
     );
+    for read in [
+        initial.value(SettingsField::NotificationProgramStatus),
+        initial.default_value(SettingsField::NotificationProgramStatus),
+    ] {
+        assert_eq!(read, Some(crate::settings::SettingsValue::Bool(true)));
+    }
     assert!(initial.metadata_error().is_none());
 
     {

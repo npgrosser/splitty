@@ -29,6 +29,7 @@ fn value(settings: &NotificationSettings, field: SettingsField) -> Option<Settin
         SettingsField::NotificationProcessFinished => settings.process_finished,
         SettingsField::NotificationProcessExited => settings.process_exited,
         SettingsField::NotificationProcessCrashed => settings.process_crashed,
+        SettingsField::NotificationProgramStatus => settings.program_status,
         _ => return None,
     }))
 }
@@ -139,7 +140,8 @@ pub(super) async fn read(client: &mut ApiStream) -> io::Result<NotificationSnaps
             ));
         }
         let home = crate::local_service::decode::<HomeNotifications>(client, &reply)?;
-        // Six required booleans prove compatible edit choices, without metadata.
+        // Six required booleans prove compatible edit choices, without
+        // metadata; `programStatus` reads as on from a server without it.
         home.notifications.clone()
     };
     let metadata = async {
@@ -161,6 +163,12 @@ pub(super) async fn read(client: &mut ApiStream) -> io::Result<NotificationSnaps
                 }
                 match metadata.default_value(field) {
                     Some(SettingsValue::Bool(default)) => Some((field, default)),
+                    // A server that does not know the switch has it on.
+                    None if field == SettingsField::NotificationProgramStatus
+                        && metadata.lacks_default(field) =>
+                    {
+                        Some((field, true))
+                    }
                     _ => None,
                 }
             })

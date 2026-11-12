@@ -99,6 +99,25 @@ formats and the `splitty` block; `scripts/vendor-themes.py` refreshes the
 bundled third-party files. The Splitty themes in `themes/ui/splitty.json` and
 `themes/terminal/splitty/` are edited there directly.
 
+## Program status
+
+Each source keeps the root records (OSC 7501) its current connection reports
+once its `mux.welcome` listed `program-status-v1`
+(`crates/splitty-client-core/src/workspace/program_status.rs`); a host that is
+older or not connected shows nothing. The window
+(`crates/splitty-gpui/src/workspace/program_status.rs`) puts a dot on a pane's
+tab for a working, waiting, done or failed program, with the state and the
+record's message as its tooltip. A Drawer Screen and a host group caption show
+a waiting pane, also for a host's Screens the window has not opened; the host's
+panel and the Hosts list word such a Screen as "Waiting". A done or failed dot
+goes once the pane is watched, the same rule as for unread notifications, and
+returns only for a newer record; what was seen is kept in memory per window.
+Reports the server marked `notify` become notifications under
+`notifications.programStatus` (a row in the notification settings), and a
+session that holds a record raises no bell notification of its own. The
+outgoing Screen of a transition shows no dots, as it shows no scratchpad
+marks.
+
 ## Packages, CI and release
 
 - Linux: `packaging/linux/native/build.sh` packs a deb, an rpm and a tar.gz
@@ -145,6 +164,9 @@ bundled third-party files. The Splitty themes in `themes/ui/splitty.json` and
   files with the others (draft `native-windows-one-backend`). The dialog on a
   first start with several distributions and the WSL settings section have
   not been seen in a real window.
+- Program status marks and notifications are tested against synthetic
+  `program_status.changed` events; they have not been seen in a real window
+  against a server that reports status.
 - Vendored platform tests are workspace-excluded and require their explicit
   documented regression command.
 - Real SSH daemon installation/update, individual Windows remote UX, broader

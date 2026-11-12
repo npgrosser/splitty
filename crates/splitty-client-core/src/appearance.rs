@@ -167,7 +167,8 @@ impl AppearanceSnapshot {
             | F::NotificationDesktop
             | F::NotificationProcessFinished
             | F::NotificationProcessExited
-            | F::NotificationProcessCrashed => return None,
+            | F::NotificationProcessCrashed
+            | F::NotificationProgramStatus => return None,
         })
     }
     pub(crate) fn validate_edit(&self, edit: &SettingsEdit) -> std::io::Result<()> {

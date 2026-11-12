@@ -964,6 +964,12 @@ impl SourceRuntime {
                             .is_some_and(|caps| caps.iter().any(|cap| cap == "viewer-v1")),
                     );
                     workspace.set_tab_selection_supported(supports_tab_selection);
+                    workspace.set_program_status_supported(
+                        json["capabilities"].as_array().is_some_and(|caps| {
+                            caps.iter()
+                                .any(|cap| cap == crate::workspace::PROGRAM_STATUS_CAPABILITY)
+                        }),
+                    );
                     workspace.set_tab_placement_supported(
                         json["capabilities"].as_array().is_some_and(|capabilities| {
                             capabilities
@@ -1016,6 +1022,18 @@ impl SourceRuntime {
                 Some("ports.changed") => {
                     if let Some(model) = &mut model {
                         match model.observe_ports(
+                            source,
+                            json,
+                            &self.client.sender().context().budget,
+                        ) {
+                            Ok(accepted) => out.changed |= accepted,
+                            Err(error) => out.push(Update::Status(error.to_string())),
+                        }
+                    }
+                }
+                Some("program_status.changed") => {
+                    if let Some(model) = &mut model {
+                        match model.observe_program_status(
                             source,
                             json,
                             &self.client.sender().context().budget,

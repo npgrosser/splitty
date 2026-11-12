@@ -13,6 +13,7 @@ mod palette;
 mod pane_command;
 mod popover;
 mod ports;
+mod program_status;
 mod prompt;
 mod remote_screen_create;
 mod scratchpad;
@@ -51,9 +52,9 @@ use splitty_client_core::notifications::NotificationCenter;
 use splitty_client_core::shell_profiles::ShellProfilesSnapshot;
 use splitty_client_core::workspace::{
     Axis, CloseIdentity, ClosePlan, CloseTarget, FloatingActionOutcome, LayoutKey, LayoutNode,
-    MovePlacement, PaneActionTarget, PaneDrag, PaneKey, RemoteScreenCreateRequest, ScreenKey,
-    ScreenModel, ScreenTransferOutcome, ScreenTransferTarget, SourceId, SourceToken,
-    SourceWorkspace, TabStep, TerminalToken, WindowWorkspace,
+    MovePlacement, PaneActionTarget, PaneDrag, PaneKey, ProgramStatusSeen,
+    RemoteScreenCreateRequest, ScreenKey, ScreenModel, ScreenTransferOutcome, ScreenTransferTarget,
+    SourceId, SourceToken, SourceWorkspace, TabStep, TerminalToken, WindowWorkspace,
 };
 use splitty_client_core::zoom::{PresentedZoom, Zoom, ZoomAction, ZoomOutcome, ZoomResult};
 use std::{
@@ -1116,6 +1117,7 @@ pub struct Workspace {
     _activation_subscription: Subscription,
     _notification_visibility_subscription: Subscription,
     notifications: NotificationCenter,
+    program_status_seen: ProgramStatusSeen,
     notification_settings_generation: u64,
     notification_settings_error: Option<String>,
     notification_window_active: bool,
@@ -1486,6 +1488,7 @@ impl Workspace {
                 _activation_subscription: activation_subscription,
                 _notification_visibility_subscription: notification_visibility_subscription,
                 notifications: NotificationCenter::default(),
+                program_status_seen: ProgramStatusSeen::default(),
                 notification_settings_generation: 0,
                 notification_settings_error: None,
                 notification_window_active: window.is_window_active(),
@@ -2697,6 +2700,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.notifications.reconcile(&window_model);
+        self.program_status_seen.reconcile(&window_model);
         self.prepare_screen_motion(&window_model, window, cx);
         self.ports_owner_changed(window_model.local_source().source_token(), window, cx);
         self.revoke_missing_terminal_links(&window_model);
@@ -5332,6 +5336,7 @@ impl Workspace {
                                         })
                                     }),
                             )
+                            .children(self.render_tab_status(&pane_key, cx))
                             .when(has_scratchpad, |tab| {
                                 tab.child(
                                     Button::new(SharedString::from(format!(

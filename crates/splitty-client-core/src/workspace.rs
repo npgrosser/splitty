@@ -3,6 +3,11 @@ mod catalog;
 mod identity;
 mod ports;
 pub use ports::{ObservedPort, PortObservation};
+mod program_status;
+pub use program_status::{
+    BlockedKind, ProgramState, ProgramStatus, ProgramStatusSeen, MAX_STATUS_SESSIONS,
+    PROGRAM_STATUS_CAPABILITY, STATUS_TEXT_CHARS,
+};
 mod window;
 use crate::{
     connection::{invalid, MAX_ATTACHMENTS},

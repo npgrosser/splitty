@@ -57,7 +57,8 @@ fn edit(field: F) -> SettingsEdit {
             | F::NotificationDesktop
             | F::NotificationProcessFinished
             | F::NotificationProcessExited
-            | F::NotificationProcessCrashed => V::Bool(false),
+            | F::NotificationProcessCrashed
+            | F::NotificationProgramStatus => V::Bool(false),
         },
     )
     .unwrap()
@@ -655,6 +656,51 @@ async fn notifications_keep_values_and_edit_choices_when_appearance_or_reset_met
         assert!(read.result().is_ok());
         std::fs::remove_dir_all(dir).unwrap();
     }
+}
+
+#[tokio::test]
+async fn an_older_server_without_the_program_status_switch_reads_it_as_on() {
+    let mut home: serde_json::Value = serde_json::from_str(&home(1.0)).unwrap();
+    let mut metadata = splitty_core::config::settings_metadata();
+    for notifications in [
+        &mut home["notifications"],
+        &mut metadata["defaults"]["notifications"],
+    ] {
+        assert!(notifications
+            .as_object_mut()
+            .unwrap()
+            .remove("programStatus")
+            .is_some());
+    }
+    metadata["defaults"]["notifications"]["processExited"] = true.into();
+    let (api, task, dir) = scripted(vec![
+        exchange("home.get", home.to_string()),
+        exchange("home.metadata", metadata.to_string()),
+    ])
+    .await;
+    let mut client = LocalServiceClient::new(api, Uuid::new_v4(), ColorScheme::Dark);
+    client.dirty = [false, false, true];
+    let LocalServiceUpdate::NotificationSettings(read) = raw_next(&mut client).await else {
+        panic!("notification read missing")
+    };
+    assert!(read.result().unwrap().program_status);
+    assert_eq!(
+        read.value(F::NotificationProgramStatus),
+        Some(V::Bool(true))
+    );
+    assert_eq!(
+        read.default_value(F::NotificationProgramStatus),
+        Some(V::Bool(true))
+    );
+    assert_eq!(
+        read.default_value(F::NotificationProcessExited),
+        Some(V::Bool(true)),
+        "the other defaults are the server's"
+    );
+    assert!(read.metadata_error().is_none());
+    client.finish().await.unwrap();
+    task.await.unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
 }
 
 #[tokio::test]

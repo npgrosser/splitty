@@ -728,8 +728,16 @@ operation reconnects a host or queues terminal input for replay.
 
 The UI-free `NotificationCenter` retains at most 100 small owned notification
 records per window. It borrows the existing charged event only while classifying
-four notification fact types, accepts only the source's current connection token,
-and applies effective notification settings before retention. Titles are bounded
+five notification fact types, accepts only the source's current connection token,
+and applies effective notification settings before retention. The fifth is a
+`program_status.changed` marked `notify` from a connection whose `mux.welcome`
+listed `program-status-v1`: under `notifications.programStatus` it becomes a
+warning for `blocked`, a success for `done` and an error for `error`, titled with
+the Screen's name, the record's state and its shortened plain `msg` or `title`,
+and it adds nothing for the watched pane. The `bell` and `notification` events of
+a session whose source holds a root record for it add no notification of their
+own; until bells and OSC notifications are classified, this rule has no visible
+effect. Titles are bounded
 plain text with window-supplied remote host attribution; bodies, arbitrary JSON
 and transport leases are never retained. The UI supplies the watched pane and
 reads source-qualified count, newest-title and severity projections. The GPUI
@@ -1381,9 +1389,11 @@ successful home projection releases only its domain's uncertain fields. Closing
 the workspace discards
 unsent work and joins owned cancellation.
 
-Notification observation retains six required effective booleans and at most four
+Notification observation retains seven effective booleans and at most seven
 optional service-default booleans after releasing charged home and metadata
-replies. These typed values establish compatible explicit edit choices without
+replies. Six are required; `programStatus` reads as on from a server that does
+not send it, and so does its default when the metadata's notification group
+lacks it. These typed values establish compatible explicit edit choices without
 appearance or metadata availability. Reset requires an exact published default;
 metadata failure preserves effective switches and disables only unavailable
 resets. Failed reads retain same-owner last-good evidence, while owner replacement
@@ -1391,7 +1401,7 @@ starts without edit authority. Notification mutation acknowledgements validate
 only the notification projection; controls and unread policy receive effective
 values from subsequent authoritative reads, never mutation reply values.
 The retained Settings view receives both observations even while closed, keeps
-completion generations per domain, and presents four notification switches with
+completion generations per domain, and presents seven notification switches with
 field-specific pending or failure state. Switch and Reset callbacks retain the
 rendered local owner; Reset additionally rechecks that its exact default is still
 available. No optimistic control value changes the notification ledger.

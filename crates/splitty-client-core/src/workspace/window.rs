@@ -630,6 +630,7 @@ impl WindowWorkspace {
             workspace.ready = false;
             workspace.remote_creation_lost();
             workspace.clear_port_observation();
+            workspace.clear_program_status();
         }
         Ok(())
     }
@@ -699,6 +700,7 @@ impl WindowWorkspace {
             workspace.ready = false;
             workspace.remote_creation_lost();
             workspace.clear_port_observation();
+            workspace.clear_program_status();
         }
         Ok(())
     }

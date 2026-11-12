@@ -508,3 +508,73 @@ fn notification_controls_keep_last_good_values_and_fence_uncertainty_and_old_own
         }
     });
 }
+
+#[test]
+fn program_status_row_reads_toggles_and_resets_its_switch() {
+    with_view(|window, view| {
+        let (owner, mut commands) = setup(window, &view);
+        let field = SettingsField::NotificationProgramStatus;
+        assert_eq!(field.path(), "notifications.programStatus");
+        // The reads above carry no `programStatus`: an older server's switch is on.
+        window.update(|_, cx| {
+            let settings = view.read(cx).settings.read(cx);
+            assert_eq!(settings.value(field), Some(SettingsValue::Bool(true)));
+            assert!(settings.enabled(field));
+        });
+        click(window, "settings-reset-notifications.programStatus", false);
+        while let Ok(command) = commands.try_recv() {
+            assert!(
+                !matches!(command.kind(), Command::UpdateSettings { .. }),
+                "a switch at its default has nothing to reset"
+            );
+        }
+        click(window, "settings-control-notifications.programStatus", true);
+        let id = request(&mut commands, owner, field, false);
+        assert!(commands.try_recv().is_err(), "one native switch request");
+        deliver(
+            window,
+            &view,
+            Update::SettingsWrite(SettingsWriteResult::ui_test_fixture(
+                owner.connection_id(),
+                id,
+                field,
+                3,
+                SettingsWriteOutcome::Confirmed,
+            )),
+        );
+        let off = |generation| {
+            NotificationSettingsRead::ui_test_with_defaults(
+                owner.connection_id(),
+                generation,
+                serde_json::from_value(json!({
+                    "enabled":true,"toasts":true,"desktop":false,"processFinished":true,
+                    "processExited":false,"processCrashed":true,"programStatus":false
+                }))
+                .unwrap(),
+                serde_json::from_value(json!({
+                    "enabled":true,"toasts":false,"desktop":true,"processFinished":false,
+                    "processExited":false,"processCrashed":true,"programStatus":true
+                }))
+                .unwrap(),
+            )
+        };
+        deliver(
+            window,
+            &view,
+            Update::NotificationSettings {
+                owner,
+                read: off(3),
+            },
+        );
+        window.update(|_, cx| {
+            let settings = view.read(cx).settings.read(cx);
+            assert_eq!(settings.value(field), Some(SettingsValue::Bool(false)));
+            assert!(settings.enabled(field));
+            let values = settings.notification.as_ref().unwrap().result().unwrap();
+            assert!(values.enabled && !values.program_status);
+        });
+        click(window, "settings-reset-notifications.programStatus", false);
+        request(&mut commands, owner, field, true);
+        assert!(commands.try_recv().is_err(), "one reset request");
+    });
+}

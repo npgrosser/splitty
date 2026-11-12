@@ -81,7 +81,7 @@ const PANE_GLOW_CORE: f32 = 6.;
 const PANE_GLOW_BLUR: f32 = 4.;
 const PANE_GLOW_OPACITY: f32 = 0.6;
 /// `.drawer-pane-badge`: a 6 px unread dot.
-const PANE_BADGE: f32 = 6.;
+pub(super) const PANE_BADGE: f32 = 6.;
 /// `.drawer-pane-stack`: `padding-left: 9px` after the pane indent, with a
 /// 1.5 px rail inset 4 px from both ends and rounded by 1 px.
 const STACK_PADDING_LEFT: f32 = 9.;
@@ -3070,6 +3070,9 @@ impl Workspace {
                                 });
                             });
                     row = row.child(div().flex_1().min_w_0().child(select_button));
+                }
+                if self.screen_blocked(&key) {
+                    row = row.child(self.render_blocked_mark(format!("drawer-blocked-{key}"), cx));
                 }
                 if let Some(summary) = unread_summary {
                     let count = self.notifications.unread_count(&key);

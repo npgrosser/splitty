@@ -2092,6 +2092,7 @@ impl Workspace {
                 route,
                 opened,
             } => {
+                let blocked = self.host_screen_blocked(target, id);
                 let mut entry = div()
                     .id(SharedString::from(format!(
                         "host-screen:{}:{target}:{}:{id}",
@@ -2141,6 +2142,14 @@ impl Workspace {
                                             .whitespace_nowrap()
                                             .child(detail.clone()),
                                     )
+                                    .when(blocked, |view| {
+                                        view.child(
+                                            div()
+                                                .flex_none()
+                                                .text_color(cx.theme().warning)
+                                                .child(super::program_status::WAITING),
+                                        )
+                                    })
                                     .when(*opened, |view| {
                                         view.child(
                                             div()

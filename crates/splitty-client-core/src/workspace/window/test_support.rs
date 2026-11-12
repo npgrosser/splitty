@@ -46,6 +46,24 @@ impl WindowWorkspace {
         Ok(())
     }
 
+    /// Apply one `program_status.changed` through the production validator,
+    /// as a source whose welcome listed the capability.
+    #[doc(hidden)]
+    pub fn ui_test_program_status(
+        &mut self,
+        id: SourceId,
+        event: &serde_json::Value,
+    ) -> io::Result<bool> {
+        let mut source = self
+            .source_mut(id)
+            .ok_or_else(|| invalid("fixture source missing"))?;
+        if !source.program_status_supported() {
+            source.set_program_status_supported(true);
+        }
+        let owner = source.source_token();
+        source.observe_program_status(owner, event, &ConnectionBudget::default())
+    }
+
     /// The host reports these Screens now; opened ones it lacks are missing.
     #[doc(hidden)]
     pub fn ui_test_remote_catalog(&mut self, id: SourceId, screens: &[&str]) -> io::Result<()> {

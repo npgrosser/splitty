@@ -3,7 +3,7 @@ use crate::workspace::chrome::view_tests::with_view;
 use crate::workspace::{Command, Destination, Update, WorkerCommand, Workspace};
 use gpui_kit::{Entity, Modifiers, VisualTestContext, WindowVisibility};
 use serde_json::json;
-use splitty_client_core::workspace::{SourceToken, WindowWorkspace};
+use splitty_client_core::workspace::{SourceId, SourceToken, WindowWorkspace};
 use tokio::runtime::Runtime;
 use tokio::sync::mpsc;
 use uuid::Uuid;
@@ -503,5 +503,299 @@ fn notification_control_changes_badges_only_after_authoritative_readback() {
             Some(event(&rt, owner, "Still disabled", "s-p1", "error")),
         );
         window.update(|_, cx| assert_eq!(view.read(cx).notifications.unread_count(&screen), 0));
+    });
+}
+
+fn status_event(
+    session: &str,
+    pane: &str,
+    screen: &str,
+    status: serde_json::Value,
+) -> serde_json::Value {
+    let id = format!("status-{session}-{}", status["updatedAt"]);
+    json!({"type":"program_status.changed","id":id,"timestamp":1,
+        "sessionId":session,"paneId":pane,"screenId":screen,"status":status,"notify":true})
+}
+
+/// The worker applies a report to the window's model, publishes the model,
+/// then the event.
+fn report(
+    rt: &Runtime,
+    window: &mut VisualTestContext,
+    view: &Entity<Workspace>,
+    model: &mut WindowWorkspace,
+    source: SourceToken,
+    event: serde_json::Value,
+) {
+    model
+        .ui_test_program_status(source.source_id(), &event)
+        .unwrap();
+    deliver(
+        window,
+        view,
+        Some(Update::Workspace(Box::new(model.clone()))),
+    );
+    let event = rt
+        .block_on(Event::ui_test_json(source.connection_id(), &event))
+        .unwrap();
+    deliver(
+        window,
+        view,
+        Some(Update::Event {
+            source,
+            event: Box::new(event),
+        }),
+    );
+}
+
+fn has(window: &mut VisualTestContext, selector: String) -> bool {
+    window
+        .debug_bounds(Box::leak(selector.into_boxed_str()))
+        .is_some()
+}
+
+#[test]
+fn program_status_marks_tabs_by_state_and_drops_a_watched_done() {
+    let rt = Runtime::new().unwrap();
+    with_view(|window, view| {
+        let mut model = model(Uuid::new_v4());
+        let owner = model.lifecycle_token();
+        let local = owner.source_id();
+        let screen = model.local_source().screen_key("work");
+        let pane = model.local_source().pane_key("p1");
+        let mut commands = setup(window, &view, model.clone());
+        let states = ["idle", "working", "blocked", "done", "error"];
+        let marks = |window: &mut VisualTestContext, pane: &str| {
+            states
+                .iter()
+                .filter(|state| has(window, format!("tab-status-{pane}-{state}")))
+                .copied()
+                .collect::<Vec<_>>()
+        };
+        for (at, (record, mark, summary)) in [
+            (
+                json!({"state":"working","progress":40}),
+                "working",
+                "Working, 40%",
+            ),
+            (
+                json!({"state":"blocked","kind":"permission","msg":"Allow edit?"}),
+                "blocked",
+                "Waiting for permission: Allow edit?",
+            ),
+            (json!({"state":"done","title":"Edit"}), "done", "Done: Edit"),
+            (json!({"state":"error"}), "error", "Failed"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut record = record;
+            record["updatedAt"] = json!(at + 1);
+            report(
+                &rt,
+                window,
+                &view,
+                &mut model,
+                owner,
+                status_event("s-p1", "p1", "work", record),
+            );
+            assert_eq!(marks(window, "p1"), [mark]);
+            assert!(marks(window, "p0").is_empty());
+            assert_eq!(
+                has(window, format!("drawer-blocked-{screen}")),
+                mark == "blocked",
+                "only a waiting pane marks its Screen"
+            );
+            window.update(|_, cx| {
+                assert_eq!(
+                    view.read(cx)
+                        .tab_program_status(&pane)
+                        .map(|status| status.summary())
+                        .as_deref(),
+                    Some(summary)
+                );
+            });
+        }
+        report(
+            &rt,
+            window,
+            &view,
+            &mut model,
+            owner,
+            status_event("s-p1", "p1", "work", json!({"state":"idle","updatedAt":5})),
+        );
+        assert!(
+            marks(window, "p1").is_empty(),
+            "an idle program shows nothing"
+        );
+        // The window was not watched: blocked, done and error notified.
+        window.update(|_, cx| assert_eq!(view.read(cx).notifications.unread_count(&screen), 3));
+
+        // The switch silences the notifications, not the marks.
+        let off = NotificationSettingsRead::ui_test_fixture(
+            owner.connection_id(),
+            3,
+            Ok(serde_json::from_value(json!({
+                "enabled":true,"desktop":false,"toasts":false,"processFinished":true,
+                "processExited":true,"processCrashed":true,"programStatus":false
+            }))
+            .unwrap()),
+        );
+        deliver(
+            window,
+            &view,
+            Some(Update::NotificationSettings { owner, read: off }),
+        );
+        report(
+            &rt,
+            window,
+            &view,
+            &mut model,
+            owner,
+            status_event("s-p1", "p1", "work", json!({"state":"done","updatedAt":6})),
+        );
+        assert_eq!(marks(window, "p1"), ["done"]);
+        window.update(|_, cx| assert_eq!(view.read(cx).notifications.unread_count(&screen), 0));
+
+        // An active window watches its focused pane only.
+        window.update(|window, _| window.activate_window());
+        window.executor().run_until_parked();
+        redraw(window);
+        assert_eq!(marks(window, "p1"), ["done"]);
+        model.source_mut(local).unwrap().focus_pane("p1");
+        deliver(
+            window,
+            &view,
+            Some(Update::Workspace(Box::new(model.clone()))),
+        );
+        assert!(
+            marks(window, "p1").is_empty(),
+            "a watched done loses its mark"
+        );
+        window.deactivate_window();
+        window.executor().run_until_parked();
+        deliver(
+            window,
+            &view,
+            Some(Update::Workspace(Box::new(model.clone()))),
+        );
+        assert!(marks(window, "p1").is_empty(), "the seen record stays seen");
+        report(
+            &rt,
+            window,
+            &view,
+            &mut model,
+            owner,
+            status_event("s-p1", "p1", "work", json!({"state":"error","updatedAt":7})),
+        );
+        assert_eq!(marks(window, "p1"), ["error"], "a newer record shows again");
+        while let Ok(command) = commands.try_recv() {
+            assert!(
+                !matches!(
+                    command.kind(),
+                    Command::Select { .. } | Command::SwitchScreen(_)
+                ),
+                "marks never move the window"
+            );
+        }
+    });
+}
+
+#[test]
+fn a_blocked_pane_on_a_host_screen_not_opened_marks_that_screen_and_the_host_group() {
+    let rt = Runtime::new().unwrap();
+    with_view(|window, view| {
+        let mut model = model(Uuid::new_v4());
+        let local = model.lifecycle_token();
+        let local_screen = model.local_source().screen_key("work");
+        let (remote_screen, route) = model.ui_test_remote_terminal_fixture("badge.test").unwrap();
+        let remote = route.source_token();
+        let host: SourceId = remote.source_id();
+        model
+            .ui_test_remote_catalog(host, &["work", "review"])
+            .unwrap();
+        let mut commands = setup(window, &view, model.clone());
+        assert!(!has(window, format!("drawer-host-blocked-{host}")));
+
+        // The same session id on the local source marks only the local pane.
+        report(
+            &rt,
+            window,
+            &view,
+            &mut model,
+            local,
+            status_event(
+                "s-p0",
+                "p0",
+                "work",
+                json!({"state":"blocked","kind":"question","updatedAt":1}),
+            ),
+        );
+        assert!(has(window, format!("drawer-blocked-{local_screen}")));
+        assert!(!has(window, format!("drawer-host-blocked-{host}")));
+        assert!(!has(window, format!("drawer-blocked-{remote_screen}")));
+
+        report(
+            &rt,
+            window,
+            &view,
+            &mut model,
+            remote,
+            status_event(
+                "s-review",
+                "p9",
+                "review",
+                json!({"state":"blocked","kind":"question","msg":"Which branch?","updatedAt":2}),
+            ),
+        );
+        // A Screen the host does not list marks nothing.
+        report(
+            &rt,
+            window,
+            &view,
+            &mut model,
+            remote,
+            status_event(
+                "s-gone",
+                "p8",
+                "gone",
+                json!({"state":"blocked","updatedAt":3}),
+            ),
+        );
+        assert!(has(window, format!("drawer-host-blocked-{host}")));
+        assert!(!has(window, format!("drawer-blocked-{remote_screen}")));
+        window.update(|_, cx| {
+            let workspace = view.read(cx);
+            assert!(workspace.host_screen_blocked("badge.test", "review"));
+            assert!(!workspace.host_screen_blocked("badge.test", "work"));
+            assert!(!workspace.host_screen_blocked("badge.test", "gone"));
+        });
+        while commands.try_recv().is_ok() {}
+        let caption = window
+            .debug_bounds(Box::leak(format!("drawer-host-{host}").into_boxed_str()))
+            .unwrap()
+            .center();
+        window.simulate_click(caption, Modifiers::default());
+        window.run_until_parked();
+        redraw(window);
+        assert!(
+            has(window, "popover-screen-review-detail-Waiting".into()),
+            "the host's panel words the Screen not opened as waiting"
+        );
+        assert!(has(window, "popover-screen-work-detail-1 pane".into()));
+        assert!(
+            commands.try_recv().is_err(),
+            "showing a mark connects and opens nothing"
+        );
+
+        // A host that is not connected shows no status.
+        model.disconnect(host).unwrap();
+        deliver(window, &view, Some(Update::Workspace(Box::new(model))));
+        window.update(|_, cx| {
+            let workspace = view.read(cx);
+            assert!(!workspace.source_blocked(host));
+            assert!(!workspace.host_screen_blocked("badge.test", "review"));
+            assert!(workspace.source_blocked(local.source_id()));
+        });
     });
 }

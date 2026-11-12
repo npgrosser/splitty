@@ -266,6 +266,14 @@ pub struct NotificationSettings {
     pub process_finished: bool,
     pub process_exited: bool,
     pub process_crashed: bool,
+    /// Notifications for program status reports (OSC 7501). On when stored
+    /// settings or an older server's reply do not have it.
+    #[serde(default = "default_program_status")]
+    pub program_status: bool,
+}
+
+fn default_program_status() -> bool {
+    true
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -467,6 +475,7 @@ impl Default for NotificationSettings {
             process_finished: true,
             process_exited: false,
             process_crashed: true,
+            program_status: default_program_status(),
         }
     }
 }
@@ -1095,6 +1104,7 @@ mod tests {
         assert!(cfg.notifications.process_finished);
         assert!(!cfg.notifications.process_exited);
         assert!(cfg.notifications.process_crashed);
+        assert!(cfg.notifications.program_status);
         assert!(!cfg.remote.auto_forward_ports);
     }
 
@@ -1473,6 +1483,58 @@ mod tests {
         let json_response = serde_json::to_value(&reloaded).unwrap();
         let notifs = json_response.get("notifications").unwrap();
         assert_eq!(notifs.get("toasts").unwrap(), true);
+    }
+
+    #[test]
+    fn program_status_switch_defaults_on_for_older_settings_and_persists_off() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config.toml");
+        // Settings stored before the switch existed.
+        fs::write(
+            &path,
+            "[notifications]\nenabled = true\ntoasts = false\ndesktop = false\n\
+             process_finished = true\nprocess_exited = false\nprocess_crashed = true\n",
+        )
+        .unwrap();
+        let cfg = load_from(&path);
+        assert!(cfg.notifications.program_status);
+        assert_eq!(
+            serde_json::to_value(&cfg).unwrap()["notifications"]["programStatus"],
+            true
+        );
+        // A reply of a server that does not know the switch reads it as on.
+        let reply: NotificationSettings = serde_json::from_value(serde_json::json!({
+            "enabled": true, "toasts": false, "desktop": false,
+            "processFinished": true, "processExited": false, "processCrashed": true
+        }))
+        .unwrap();
+        assert!(reply.program_status);
+        assert_eq!(
+            settings_metadata()["defaults"]["notifications"]["programStatus"],
+            true
+        );
+
+        let updated = update_at(
+            &path,
+            serde_json::json!({"notifications": {"programStatus": false}}),
+        )
+        .unwrap();
+        assert!(!updated.notifications.program_status);
+        assert!(fs::read_to_string(&path)
+            .unwrap()
+            .contains("program_status = false"));
+        let reloaded = load_from(&path);
+        assert!(!reloaded.notifications.program_status);
+        assert!(reloaded.notifications.enabled && reloaded.notifications.process_crashed);
+        let err = update_at(
+            &path,
+            serde_json::json!({"notifications": {"programStatus": "off"}}),
+        )
+        .unwrap_err();
+        assert!(matches!(
+            err,
+            ConfigError::InvalidField { field, .. } if field == "notifications.programStatus"
+        ));
     }
 
     #[test]

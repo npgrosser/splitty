@@ -25,7 +25,8 @@ impl Workspace {
 
     pub(super) fn refresh_notification_watch(&mut self, cx: &mut Context<Self>) {
         if let Some(pane) = self.watched_notification_pane() {
-            if self.notifications.mark_read(&pane) {
+            let read = self.notifications.mark_read(&pane);
+            if read | self.see_program_status(&pane) {
                 cx.notify();
             }
         }

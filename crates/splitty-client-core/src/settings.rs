@@ -43,9 +43,11 @@ pub enum SettingsField {
     NotificationProcessFinished,
     NotificationProcessExited,
     NotificationProcessCrashed,
+    /// Program status reports (OSC 7501) of panes the user is not watching.
+    NotificationProgramStatus,
 }
 impl SettingsField {
-    pub const ALL: [Self; 30] = [
+    pub const ALL: [Self; 31] = [
         Self::ThemeMode,
         Self::Theme,
         Self::ThemeDark,
@@ -76,6 +78,7 @@ impl SettingsField {
         Self::NotificationProcessFinished,
         Self::NotificationProcessExited,
         Self::NotificationProcessCrashed,
+        Self::NotificationProgramStatus,
     ];
     pub fn domain(self) -> SettingsDomain {
         match self {
@@ -84,7 +87,8 @@ impl SettingsField {
             | Self::NotificationDesktop
             | Self::NotificationProcessFinished
             | Self::NotificationProcessExited
-            | Self::NotificationProcessCrashed => SettingsDomain::Notifications,
+            | Self::NotificationProcessCrashed
+            | Self::NotificationProgramStatus => SettingsDomain::Notifications,
             _ => SettingsDomain::Appearance,
         }
     }
@@ -120,6 +124,7 @@ impl SettingsField {
             Self::NotificationProcessFinished => "notifications.processFinished",
             Self::NotificationProcessExited => "notifications.processExited",
             Self::NotificationProcessCrashed => "notifications.processCrashed",
+            Self::NotificationProgramStatus => "notifications.programStatus",
         }
     }
     pub fn is_theme(self) -> bool {
@@ -177,7 +182,8 @@ impl SettingsEdit {
                 | F::NotificationDesktop
                 | F::NotificationProcessFinished
                 | F::NotificationProcessExited
-                | F::NotificationProcessCrashed,
+                | F::NotificationProcessCrashed
+                | F::NotificationProgramStatus,
             ) => true,
             (SettingsValue::List(hosts), F::ReconnectHosts) => {
                 hosts.len() <= 64
@@ -261,6 +267,15 @@ impl SettingsMetadata {
             serde_json::from_value(self.defaults.get(group)?.get(key)?.clone()).ok()?;
         SettingsEdit::new(field, value.clone()).ok()?;
         Some(value)
+    }
+    /// The metadata names no default for `field` at all, as the metadata of
+    /// a server that does not know the field.
+    pub(crate) fn lacks_default(&self, field: SettingsField) -> bool {
+        field.path().split_once('.').is_some_and(|(group, key)| {
+            self.defaults
+                .get(group)
+                .is_some_and(|group| group.is_object() && group.get(key).is_none())
+        })
     }
     pub fn choices(&self, field: SettingsField) -> Option<&[String]> {
         let choices = &self.limits.get(field.path())?.choices;
@@ -361,6 +376,7 @@ mod tests {
             (F::NotificationProcessFinished, "processFinished"),
             (F::NotificationProcessExited, "processExited"),
             (F::NotificationProcessCrashed, "processCrashed"),
+            (F::NotificationProgramStatus, "programStatus"),
         ];
         for (field, key) in fields {
             assert_eq!(field.domain(), SettingsDomain::Notifications);

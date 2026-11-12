@@ -144,6 +144,9 @@ impl Workspace {
         });
         let caption_group = group.clone();
         let caption_anchor = anchor.clone();
+        let blocked = self
+            .source_blocked(source)
+            .then(|| self.render_blocked_mark(format!("drawer-host-blocked-{source}"), cx));
         let caption = self.host_drag_caption(group.clone(), cx).child(
             super::drawer::drawer_control(
                 SharedString::from(format!("drawer-host-{source}")),
@@ -187,6 +190,7 @@ impl Workspace {
                             .text_ellipsis()
                             .child(title),
                     )
+                    .children(blocked)
                     .when_some(indicator.note(), |caption, note| {
                         caption.child(
                             div()

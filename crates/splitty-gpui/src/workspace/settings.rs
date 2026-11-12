@@ -56,6 +56,7 @@ const NOTIFICATIONS: &[SettingsField] = &[
     SettingsField::NotificationProcessFinished,
     SettingsField::NotificationProcessExited,
     SettingsField::NotificationProcessCrashed,
+    SettingsField::NotificationProgramStatus,
 ];
 
 fn is_switch(field: SettingsField) -> bool {
@@ -734,7 +735,8 @@ impl SettingsView {
             | SettingsField::NotificationDesktop
             | SettingsField::NotificationProcessFinished
             | SettingsField::NotificationProcessExited
-            | SettingsField::NotificationProcessCrashed => None,
+            | SettingsField::NotificationProcessCrashed
+            | SettingsField::NotificationProgramStatus => None,
             SettingsField::ThemeMode
             | SettingsField::ZoomScope
             | SettingsField::CloseOnExit
@@ -1272,6 +1274,7 @@ fn field_label(field: SettingsField) -> &'static str {
         SettingsField::NotificationProcessFinished => "Process finished",
         SettingsField::NotificationProcessExited => "Process exited",
         SettingsField::NotificationProcessCrashed => "Process crashed",
+        SettingsField::NotificationProgramStatus => "Program status",
     }
 }
 
@@ -1313,6 +1316,9 @@ fn field_description(field: SettingsField) -> &'static str {
         SettingsField::NotificationProcessFinished => "When a process finishes",
         SettingsField::NotificationProcessExited => "When a terminal session ends normally",
         SettingsField::NotificationProcessCrashed => "When a terminal session ends with an error",
+        SettingsField::NotificationProgramStatus => {
+            "When a program waits for you, is done or failed"
+        }
     }
 }
 

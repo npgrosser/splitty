@@ -2,7 +2,8 @@
 use crate::{
     connection::Event,
     workspace::{
-        PaneKey, ScreenKey, SourceId, SourceKind, SourceToken, SourceWorkspace, WindowWorkspace,
+        PaneKey, ProgramState, ProgramStatus, ScreenKey, SourceId, SourceKind, SourceToken,
+        SourceWorkspace, WindowWorkspace,
     },
 };
 use serde_json::Value;
@@ -32,6 +33,8 @@ enum Kind {
     Exited,
     Crashed,
     Generic,
+    /// A program's own report that it waits, is done or failed (OSC 7501).
+    ProgramStatus,
 }
 impl Kind {
     fn enabled(self, settings: &NotificationSettings) -> bool {
@@ -40,6 +43,7 @@ impl Kind {
                 Self::Finished => settings.process_finished,
                 Self::Exited => settings.process_exited,
                 Self::Crashed => settings.process_crashed,
+                Self::ProgramStatus => settings.program_status,
                 Self::Idle | Self::Generic => true,
             }
     }
@@ -184,7 +188,15 @@ impl NotificationCenter {
         {
             return false;
         }
-        let Some((kind, severity, title)) = classify(value) else {
+        let classified = match value.get("type").and_then(Value::as_str) {
+            Some("program_status.changed") => program_status(source, value),
+            // A pane whose program reports its status tells through it
+            // instead (PS-2); only the bells and OSC notifications of a
+            // session without a root record notify on their own.
+            Some("bell" | "notification") if reports_status(source, value) => None,
+            _ => classify(value),
+        };
+        let Some((kind, severity, title)) = classified else {
             return false;
         };
         if !kind.enabled(settings) {
@@ -222,6 +234,10 @@ impl NotificationCenter {
         let read = captured
             .as_ref()
             .is_some_and(|(captured, _)| watched == Some(&captured.pane));
+        // The watched pane shows its status on its tab.
+        if read && matches!(kind, Kind::ProgramStatus) {
+            return false;
+        }
         let (captured, binding) = match captured {
             Some((captured, binding)) => (Some(captured), Some(binding)),
             None => (None, None),
@@ -351,6 +367,41 @@ fn hidden(c: char) -> bool {
 }
 fn plain_text(value: &str, limit: usize) -> String {
     value.chars().filter(|c| !hidden(*c)).take(limit).collect()
+}
+fn reports_status(source: &SourceWorkspace, value: &Value) -> bool {
+    value
+        .get("sessionId")
+        .and_then(Value::as_str)
+        .is_some_and(|session| source.session_program_status(session).is_some())
+}
+/// A `program_status.changed` the server marked `notify`, of a connection
+/// that announced program status, for a waiting, done or failed program.
+fn program_status(source: &SourceWorkspace, value: &Value) -> Option<(Kind, Severity, String)> {
+    if !source.program_status_supported() || value.get("notify") != Some(&Value::Bool(true)) {
+        return None;
+    }
+    let status = ProgramStatus::parse(value.get("status")?)?;
+    let severity = match status.state() {
+        ProgramState::Blocked => Severity::Warning,
+        ProgramState::Done => Severity::Success,
+        ProgramState::Error => Severity::Error,
+        ProgramState::Idle | ProgramState::Working => return None,
+    };
+    let session = value.get("sessionId")?.as_str()?;
+    let named = value.get("screenId").and_then(Value::as_str);
+    let summary = status.summary();
+    let title = match source
+        .event_screen(session, named)
+        .and_then(|screen| source.screen_label(screen))
+    {
+        Some(screen) => format!("{screen}: {summary}"),
+        None => summary,
+    };
+    Some((
+        Kind::ProgramStatus,
+        severity,
+        plain_text(&title, MAX_TITLE_CHARS),
+    ))
 }
 fn classify(value: &Value) -> Option<(Kind, Severity, String)> {
     let text = |field| {
