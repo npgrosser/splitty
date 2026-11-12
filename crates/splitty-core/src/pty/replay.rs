@@ -1,7 +1,8 @@
 //! Historical terminal output for a client that renders it in a real terminal
 //! (`splitty attach`): requests for terminal reports and clipboard writes are
 //! removed, so replaying the scrollback neither types the terminal's answers
-//! into the session nor overwrites a newer copy. Every other sequence, also a
+//! into the session nor overwrites a newer copy. The program status probe
+//! counts as such a request. Every other sequence, also a
 //! color setter, a title or a hyperlink, is kept.
 //!
 //! The same rules as the web client's `frontend/src/lib/terminal/replay_output.ts`.
@@ -191,8 +192,14 @@ fn has_side_effect(sequence: &[u8]) -> bool {
     }
 }
 
-/// Clipboard operations, and queries of the dynamic and palette colors.
+/// Clipboard operations, queries of the dynamic and palette colors, and the
+/// program status probe (`OSC 7501 ; ?`), which a current server answers
+/// itself and removes from the output, but an older one forwarded. `body`
+/// holds what follows `ESC ]`, the terminator included.
 fn osc_has_side_effect(body: &[u8]) -> bool {
+    if body == b"7501;?\x07" || body == b"7501;?\x1b\\" {
+        return true;
+    }
     let Some(separator) = body.iter().position(|&b| b == b';') else {
         return false;
     };
@@ -311,6 +318,33 @@ mod tests {
                     replay(&text, split),
                     "Grüße❯ ".as_bytes(),
                     "{query:?} split at {split}"
+                );
+            }
+        }
+    }
+
+    /// terminal-sessions, Client Handling of Session Streams (Status probe in
+    /// a replay from an older server): the probe with either terminator is
+    /// dropped, also split across frames, while a status report passes.
+    #[test]
+    fn the_status_probe_is_removed_and_a_status_report_kept() {
+        for probe in ["\x1b]7501;?\x07", "\x1b]7501;?\x1b\\"] {
+            let text = format!("a{probe}b");
+            for split in 0..=text.len() {
+                assert_eq!(replay(&text, split), b"ab", "{probe:?} split at {split}");
+            }
+        }
+        for kept in [
+            "\x1b]7501;state=done\x07",
+            "\x1b]7501;state=working:app=claude-code\x1b\\",
+            "\x1b]7501;?:states=working\x07",
+        ] {
+            let text = format!("a{kept}b");
+            for split in 0..=text.len() {
+                assert_eq!(
+                    replay(&text, split),
+                    text.as_bytes(),
+                    "{kept:?} split at {split}"
                 );
             }
         }

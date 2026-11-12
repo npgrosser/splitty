@@ -6,9 +6,12 @@
 //!
 //! - `Manager` -- the production `Backend` implementation backed by real PTYs.
 //! - `Session` -- a single PTY process with scrollback ring buffer and OSC title scanning.
-//! - `OscScanner` -- finite state machine that extracts OSC 0/2 title sequences from output.
+//! - `OscScanner` -- finite state machine that reads every OSC to its end and finds titles,
+//!   OSC 133 prompts, program status reports, full resets and bells.
 //! - `RingBuffer` -- circular byte buffer for caching scrollback data.
 //! - `modes` -- the terminal modes a session's output leaves set, restored ahead of a replay.
+//! - `probe` -- the program status probe, answered by the server and removed from the output.
+//! - `status` -- program status records (OSC 7501) per session.
 //! - `procinfo` -- platform-specific process info lookups (/proc on Linux, ps/lsof on macOS).
 //! - `ports` -- the TCP ports the processes of sessions listen on (/proc on Linux).
 //! - `replay` -- historical output without report requests and clipboard writes, for terminal clients.
@@ -23,11 +26,13 @@ mod modes;
 pub mod osc;
 pub mod output;
 pub mod ports;
+pub mod probe;
 pub mod procinfo;
 pub mod replay;
 pub mod ringbuffer;
 pub mod session;
 pub mod startup;
+pub mod status;
 pub mod terminal;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
@@ -354,6 +359,19 @@ pub trait SessionHandle: Send + Sync {
     /// engine. True for the first caller only, however many streams see the
     /// exit.
     fn claim_exit_report(&self) -> bool;
+    /// The revision of the session's root program status record, which
+    /// changes with the record; one atomic read.
+    fn program_status_revision(&self) -> u64 {
+        0
+    }
+    /// The session's root program status record (`program-status`).
+    fn program_status(&self) -> status::RootStatus {
+        status::RootStatus::default()
+    }
+    /// The program in the session's shell ended, so the shell is the
+    /// foreground process again: its `working`, `blocked` and `idle` records
+    /// go.
+    fn end_program_status(&self) {}
 }
 
 /// Manages the lifecycle of terminal sessions.

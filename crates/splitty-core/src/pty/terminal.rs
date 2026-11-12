@@ -21,6 +21,13 @@ const READ_CHUNK: usize = 32 * 1024;
 pub trait Feed: Send + Sync {
     /// The next chunk of output.
     fn record(&self, data: &[u8]);
+    /// The next chunk of output read again: output a session keeper had
+    /// buffered before this process connected to it. It is recorded as any
+    /// other, but no status probe in it is answered and no status change in
+    /// it notifies.
+    fn record_again(&self, data: &[u8]) {
+        self.record(data);
+    }
     /// The terminal closed: no output follows.
     fn end(&self);
 }

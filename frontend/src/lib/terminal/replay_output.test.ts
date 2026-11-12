@@ -56,6 +56,21 @@ describe("historical terminal output", () => {
     for (let split = 0; split <= text.length; split++) expect(replay(text, split)).toBe(text);
   });
 
+  it.each(["\x1b]7501;?\x07", "\x1b]7501;?\x1b\\"])(
+    "removes the status probe %j of an older server, also across frames",
+    (probe) => {
+      const text = `a${probe}b`;
+      for (let split = 0; split <= text.length; split++) expect(replay(text, split)).toBe("ab");
+    },
+  );
+
+  it("keeps status reports", () => {
+    for (const report of ["\x1b]7501;state=done\x07", "\x1b]7501;state=working:app=codex\x1b\\"]) {
+      const text = `a${report}b`;
+      for (let split = 0; split <= text.length; split++) expect(replay(text, split)).toBe(text);
+    }
+  });
+
   it("hands on a sequence the replay ends in, which live output ends", () => {
     expect(replay("prompt\x1b[38;2;153", 8)).toBe("prompt\x1b[38;2;153");
     expect(replay("prompt\x1b]11;", 8)).toBe("prompt\x1b]11;");

@@ -170,6 +170,11 @@ async fn a_program_that_cannot_start_is_an_error_and_an_unusable_directory_falls
     session.close().expect("close");
 }
 
+/// Also program-status, Output Read Again After Adoption (Restart after an
+/// answered probe, Record rebuilt after a restart, the session half): the
+/// program probes, reads the answer and reports `blocked` before the release;
+/// after the adoption it reads no second answer, and the adopted session holds
+/// the `blocked` record, marked as read again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn released_keepers_are_adopted_with_their_output_and_process() {
     if !pty_available() {
@@ -180,10 +185,19 @@ async fn released_keepers_are_adopted_with_their_output_and_process() {
     let session = program(
         &first,
         "kept-adopt",
-        "printf before; read x; printf \"after $x\"; exit 4",
+        "stty raw -echo; printf '\\033]7501;?\\007'; \
+         a=$(dd bs=9 count=1 2>/dev/null | od -An -tx1 | tr -d ' \\n'); printf 'first:%s;' \"$a\"; \
+         printf '\\033]7501;state=blocked:kind=permission\\007'; printf before; \
+         read x; printf 'after:'; printf '%s' \"$x\" | od -An -tx1 | tr -d ' \\n'; printf ':end'; \
+         exit 4",
     )
     .await;
     assert!(wait_until(TIMEOUT, || shows(&session, "before")).await);
+    assert!(
+        shows(&session, "first:1b5d373530313b3f07;"),
+        "answered once: {}",
+        String::from_utf8_lossy(&session.scrollback())
+    );
     let pid = session.shell_pid();
     first.release_all();
     drop(session);
@@ -219,9 +233,140 @@ async fn released_keepers_are_adopted_with_their_output_and_process() {
         "the replay"
     );
     assert!(second.get("kept-adopt").is_some());
+    let status = adopted.program_status();
+    let record = status.record.expect("the record rebuilt from the replay");
+    assert_eq!(record.state, crate::pty::status::StatusState::Blocked);
+    assert_eq!(record.kind, Some(crate::pty::status::BlockKind::Permission));
+    assert!(status.read_again, "marked as read again");
+    assert!(!shows(&adopted, "7501;?"), "the probe is not in the replay");
 
+    // A second answer would reach the program ahead of this input.
+    tokio::time::sleep(Duration::from_secs(1)).await;
     adopted.write(b"again\n").await.expect("input");
-    assert!(wait_until(TIMEOUT, || shows(&adopted, "after again")).await);
+    assert!(
+        wait_until(TIMEOUT, || shows(&adopted, ":end")).await,
+        "{}",
+        String::from_utf8_lossy(&adopted.scrollback())
+    );
+    assert!(
+        shows(&adopted, "after:616761696e:end"),
+        "no second answer: {}",
+        String::from_utf8_lossy(&adopted.scrollback())
+    );
     assert!(wait_until(TIMEOUT, || *adopted.done().borrow()).await);
     assert_eq!(adopted.process_result().and_then(|r| r.exit_code), Some(4));
+    assert_eq!(
+        adopted.program_status().record,
+        None,
+        "blocked ends with the output"
+    );
+}
+
+/// What the kept terminal handed its feed: each chunk, and whether it was
+/// read again.
+#[derive(Default)]
+struct Chunks(std::sync::Mutex<Vec<(bool, Vec<u8>)>>);
+
+impl crate::pty::terminal::Feed for Chunks {
+    fn record(&self, data: &[u8]) {
+        self.0.lock().unwrap().push((false, data.to_vec()));
+    }
+    fn record_again(&self, data: &[u8]) {
+        self.0.lock().unwrap().push((true, data.to_vec()));
+    }
+    fn end(&self) {}
+}
+
+/// program-status, Output Read Again After Adoption: a frame that straddles
+/// the keeper's `buffer_end` is split there; the bytes below it are read
+/// again, a probe in the live part is live output. Frames resent below the
+/// offset already recorded are skipped as before.
+#[test]
+fn a_frame_straddling_the_buffer_end_is_split_there() {
+    let chunks = Arc::new(Chunks::default());
+    let shared = super::Shared {
+        session_id: "straddle".into(),
+        socket: PathBuf::new(),
+        pid: None,
+        stream: std::sync::Mutex::new(None),
+        next_seq: std::sync::atomic::AtomicU32::new(1),
+        pending: std::sync::Mutex::new(Default::default()),
+        foreground: std::sync::atomic::AtomicU32::new(0),
+        done_tx: tokio::sync::watch::channel(false).0,
+        result: std::sync::Mutex::new(None),
+        state: std::sync::Mutex::new(super::ClientState {
+            offset: 100,
+            again_end: 110,
+            ..Default::default()
+        }),
+        feed: chunks.clone(),
+    };
+    let frame = |offset: u64, data: &[u8]| super::Frame::Output {
+        offset,
+        data: data.to_vec(),
+    };
+    // 95..100 was recorded already; 100..110 is buffered; the probe is live.
+    shared.handle(frame(95, b"old!!buffered\x1b]7501;?\x07"));
+    shared.handle(frame(105, b"resent"));
+    shared.handle(frame(120, b"live"));
+    assert_eq!(
+        *chunks.0.lock().unwrap(),
+        vec![
+            (true, b"buffered\x1b]".to_vec()),
+            (false, b"7501;?\x07".to_vec()),
+            (false, b"live".to_vec()),
+        ]
+    );
+}
+
+/// program-status, Probe Answer Order (Large input) through a kept terminal:
+/// input larger than a frame goes to the keeper in several frames, all within
+/// one hold of the session's input gate, so a probe answer queued meanwhile
+/// is written after them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_answer_lands_around_large_input_in_several_frames() {
+    if !pty_available() {
+        return;
+    }
+    let (dir, keepers) = keepers_dir();
+    let stored = dir.path().join("stored");
+    let size = 2 * super::MAX_INPUT_FRAME + 4096;
+    let answer = b"\x1b]7501;?\x07";
+    let session = crate::pty::session::Session::start(
+        sh_opts(
+            "kept-large-input",
+            &format!(
+                "stty raw -echo; printf ready; sleep 1; printf '\\033]7501;?\\007'; \
+                 head -c {} > '{}'; printf stored; sleep 5",
+                size + answer.len(),
+                stored.display()
+            ),
+        ),
+        None,
+        &Keepers::new(keepers.clone(), Arc::new(ThreadLauncher)),
+    )
+    .expect("ordinary session");
+    assert!(
+        wait_until(TIMEOUT, || String::from_utf8_lossy(&session.scrollback())
+            .contains("ready"))
+        .await
+    );
+    let input = vec![b'x'; size];
+    session.write(&input).await.expect("large input");
+    assert!(
+        wait_until(Duration::from_secs(20), || String::from_utf8_lossy(
+            &session.scrollback()
+        )
+        .contains("stored"))
+        .await
+    );
+    let read = std::fs::read(&stored).expect("what the program read");
+    assert_eq!(read.len(), size + answer.len());
+    assert!(
+        (read.starts_with(answer) && read[answer.len()..] == input[..])
+            || (read.ends_with(answer) && read[..size] == input[..]),
+        "the answer inside the input"
+    );
+    assert!(read.ends_with(answer), "queued while the input was written");
+    session.close().expect("close");
 }

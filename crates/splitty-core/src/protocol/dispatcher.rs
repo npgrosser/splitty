@@ -3092,4 +3092,129 @@ mod tests {
         );
         backend.close_all();
     }
+
+    fn bells(sender: &MockSender) -> usize {
+        sender
+            .events()
+            .iter()
+            .filter(|event| matches!(event, ServerEvent::Bell { .. }))
+            .count()
+    }
+
+    /// program-status, OSC Sequences Read to Their End (Unknown OSC ended by
+    /// BEL, Notification OSC ended by BEL, Bell after an OSC, UTF-8 text
+    /// before a bell): the BEL that ends an OSC sends no `bell` event, a BEL
+    /// after it and after a UTF-8 character does.
+    #[tokio::test]
+    async fn only_a_bel_that_ends_no_osc_is_a_bell_event() {
+        if !pty_available() {
+            return;
+        }
+        let backend = Arc::new(PtyBackend::new());
+        backend
+            .create(sh_opts(
+                "osc-bells",
+                "sleep 0.3; printf '\\033]21337;status=working\\007\\033]9;done\\007'; \
+                 printf one; sleep 0.5; printf '\\033]8;;https://example.com\\007two\\007'; \
+                 sleep 0.5; printf '\\303\\235\\007three'; sleep 5",
+            ))
+            .await
+            .expect("spawn sh");
+        let dispatcher = Arc::new(Dispatcher::new(backend.clone()));
+        let sender = Arc::new(MockSender::new());
+        let conn = dispatcher.new_connection(sender.clone());
+        conn.handle(&attach("osc-bells")).await;
+        let shows = |marker: &str| text(&sender.output("osc-bells")).contains(marker);
+
+        assert!(wait_until(Duration::from_secs(5), || shows("one")).await);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(bells(&sender), 0, "OSC 21337 and OSC 9 ring no bell");
+        assert!(wait_until(Duration::from_secs(5), || shows("two")).await);
+        assert!(wait_until(Duration::from_secs(5), || bells(&sender) == 1).await);
+        assert!(wait_until(Duration::from_secs(5), || shows("three")).await);
+        assert!(wait_until(Duration::from_secs(5), || bells(&sender) == 2).await);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(bells(&sender), 2, "{:?}", sender.events());
+
+        conn.close();
+        backend.close_all();
+    }
+
+    /// program-status, Probe Removed from the Output (Probe not forwarded,
+    /// splitty attach) and Probe Answer Order (Client answers the device
+    /// attributes request), terminal-sessions, Terminal Output Streaming
+    /// (Status probe removed): a client receives the output without the
+    /// probe, live and in a later replay, and the program reads the probe's
+    /// answer ahead of the client's reply to the `CSI c` that follows it.
+    #[tokio::test]
+    async fn the_probe_is_not_forwarded_and_its_answer_goes_first() {
+        if !pty_available() {
+            return;
+        }
+        let backend = Arc::new(PtyBackend::new());
+        backend
+            .create(sh_opts(
+                "probe-stream",
+                "stty -echo; sleep 0.3; printf 'a\\033]7501;?\\007b'; sleep 5",
+            ))
+            .await
+            .expect("spawn sh");
+        let dispatcher = Arc::new(Dispatcher::new(backend.clone()));
+        let live = Arc::new(MockSender::new());
+        let conn = dispatcher.new_connection(live.clone());
+        conn.handle(&attach("probe-stream")).await;
+        assert!(
+            wait_until(Duration::from_secs(5), || live.output("probe-stream")
+                == b"ab")
+            .await,
+            "{:?}",
+            text(&live.output("probe-stream"))
+        );
+        let later = Arc::new(MockSender::new());
+        let replay = dispatcher.new_connection(later.clone());
+        replay.handle(&attach("probe-stream")).await;
+        assert_eq!(later.output("probe-stream"), b"ab", "the replay");
+        conn.close();
+        replay.close();
+
+        backend
+            .create(sh_opts(
+                "probe-order",
+                "stty raw -echo min 0 time 20; printf '\\033]7501;?\\033\\\\\\033[c'; \
+                 printf 'GOT:'; cat | od -An -tx1 | tr -d ' \\n'; printf ':END'; sleep 5",
+            ))
+            .await
+            .expect("spawn sh");
+        let sender = Arc::new(MockSender::new());
+        let conn = dispatcher.new_connection(sender.clone());
+        conn.handle(&attach("probe-order")).await;
+        assert!(
+            wait_until(Duration::from_secs(5), || text(
+                &sender.output("probe-order")
+            )
+            .contains("\x1b[c"))
+            .await
+        );
+        conn.handle(&input("probe-order", b"\x1b[?62c")).await;
+        assert!(
+            wait_until(Duration::from_secs(10), || text(
+                &sender.output("probe-order")
+            )
+            .contains(":END"))
+            .await,
+            "{:?}",
+            text(&sender.output("probe-order"))
+        );
+        let output = text(&sender.output("probe-order"));
+        assert!(!output.contains("7501"), "{output:?}");
+        let got =
+            &output[output.find("GOT:").expect("marker") + 4..output.find(":END").expect("marker")];
+        assert_eq!(
+            got, "1b5d373530313b3f1b5c1b5b3f363263",
+            "the answer, then the reply"
+        );
+
+        conn.close();
+        backend.close_all();
+    }
 }

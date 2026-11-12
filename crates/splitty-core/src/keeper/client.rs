@@ -174,6 +174,10 @@ struct Shared {
 struct ClientState {
     /// The offset of the next byte expected from the keeper.
     offset: u64,
+    /// The keeper's offsets below this one hold output it had buffered before
+    /// this process connected to it: the session reads them again, without
+    /// answering status probes or notifying of status changes.
+    again_end: u64,
     exited: bool,
     output_ended: bool,
     acknowledged: bool,
@@ -225,7 +229,8 @@ impl KeptTerminal {
             Err(error) => return Err(keeper(error)),
         };
         mine.set_read_timeout(None).map_err(keeper)?;
-        Self::begin(socket, *hello, mine, 0, feed).map_err(keeper)
+        // A new session's output is all live.
+        Self::begin(socket, *hello, mine, 0, 0, feed).map_err(keeper)
     }
 
     fn begin(
@@ -233,6 +238,7 @@ impl KeptTerminal {
         hello: Hello,
         stream: UnixStream,
         offset: u64,
+        again_end: u64,
         feed: Arc<dyn Feed>,
     ) -> io::Result<Self> {
         let reader = stream.try_clone()?;
@@ -248,6 +254,7 @@ impl KeptTerminal {
             result: Mutex::new(None),
             state: Mutex::new(ClientState {
                 offset,
+                again_end,
                 ..ClientState::default()
             }),
             feed,
@@ -307,17 +314,27 @@ impl Shared {
     fn handle(&self, frame: Frame) {
         match frame {
             Frame::Output { offset, data } => {
-                let data = {
+                let (skip, split) = {
                     let mut state = self.state.lock().expect("keeper client");
                     let end = offset + u64::try_from(data.len()).unwrap_or(0);
                     if end <= state.offset {
                         return;
                     }
-                    let skip = usize::try_from(state.offset.saturating_sub(offset)).unwrap_or(0);
+                    let start = offset.max(state.offset);
+                    let skip = usize::try_from(start - offset).unwrap_or(0).min(data.len());
                     state.offset = end;
-                    data[skip.min(data.len())..].to_vec()
+                    // A frame may straddle the end of the output read again.
+                    let again = usize::try_from(state.again_end.saturating_sub(start))
+                        .unwrap_or(usize::MAX)
+                        .min(data.len() - skip);
+                    (skip, skip + again)
                 };
-                self.feed.record(&data);
+                if split > skip {
+                    self.feed.record_again(&data[skip..split]);
+                }
+                if data.len() > split {
+                    self.feed.record(&data[split..]);
+                }
             }
             Frame::OutputEnded => {
                 let first = {
@@ -374,9 +391,9 @@ impl Shared {
             if stream.set_read_timeout(Some(ANSWER_TIMEOUT)).is_err() {
                 continue;
             }
-            if !matches!(wire::read_frame(&mut stream), Ok(Some(Frame::Hello(_)))) {
+            let Ok(Some(Frame::Hello(hello))) = wire::read_frame(&mut stream) else {
                 continue;
-            }
+            };
             let claim = Frame::Claim {
                 takeover: true,
                 from: Some(from),
@@ -405,6 +422,12 @@ impl Shared {
             let Ok(writer) = stream.try_clone() else {
                 continue;
             };
+            // What the keeper buffered while this process was not connected
+            // is read again, as at an adoption.
+            {
+                let mut state = self.state.lock().expect("keeper client");
+                state.again_end = state.again_end.max(hello.buffer_end);
+            }
             *self.stream.lock().expect("keeper stream") = Some(writer);
             return Some(stream);
         }
@@ -542,9 +565,18 @@ pub struct Adoption {
 }
 
 impl Adoption {
-    /// Run a session on the keeper, fed from where the claim resumed.
+    /// Run a session on the keeper, fed from where the claim resumed. The
+    /// output the keeper had buffered when it said hello is read again.
     pub fn run(self, feed: Arc<dyn Feed>) -> io::Result<KeptTerminal> {
-        KeptTerminal::begin(self.socket, self.hello, self.stream, self.from, feed)
+        let again_end = self.hello.buffer_end;
+        KeptTerminal::begin(
+            self.socket,
+            self.hello,
+            self.stream,
+            self.from,
+            again_end,
+            feed,
+        )
     }
 }
 

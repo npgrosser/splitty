@@ -78,6 +78,9 @@ export class ReplayOutput {
   private hasSideEffect(): boolean {
     const sequence = String.fromCharCode(...this.pending.slice(0, 256));
     if (this.pending[1] === 0x5d) {
+      // The program status probe: a current server answers and removes it,
+      // an older one forwarded it.
+      if (sequence === "\x1b]7501;?\x07" || sequence === "\x1b]7501;?\x1b\\") return true;
       // Clipboard writes must not overwrite newer copies on resume.
       if (/^\x1b\]52;/.test(sequence)) return true;
       // OSC dynamic/palette color queries. Color setters,

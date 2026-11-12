@@ -2,14 +2,24 @@
 //!
 //! Handles shell resolution and the session's spec (program, environment,
 //! directory, size), scrollback buffering, OSC title scanning, terminal mode
-//! tracking and the job log text. The terminal under it, in this process or in
-//! a session keeper, feeds all output from spawn to exit into the session;
-//! connections subscribe to it.
+//! tracking, program status records and the job log text. The terminal under
+//! it, in this process or in a session keeper, feeds all output from spawn to
+//! exit into the session; connections subscribe to it.
+//!
+//! The status probe (`OSC 7501 ; ?`) is removed from the output first, before
+//! anything records or forwards it, and its answer is queued on the session's
+//! input. Every write to the terminal goes through one input gate, held for
+//! the whole write: a writer first writes the queued answers, then its own
+//! bytes, and a task writes answers while nobody else writes. So an answer
+//! lands between two writes, never inside one, and ahead of any input a
+//! client sends after it received the output that carried the probe.
 
+use std::borrow::Cow;
+use std::collections::VecDeque;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use portable_pty::CommandBuilder;
@@ -17,10 +27,12 @@ use splitty_transport::queue;
 use tokio::sync::watch;
 
 use super::modes::ModeTracker;
-use super::osc::OscScanner;
+use super::osc::{OscFinding, OscScanner, SemanticAction};
+use super::probe::ProbeMatcher;
 use super::procinfo;
 use super::ringbuffer::RingBuffer;
 use super::startup::build_command_args;
+use super::status::{RootStatus, StatusStore};
 use super::terminal::{Feed, LocalTerminals, SessionSpec, Terminal, TerminalFactory};
 use super::{
     BellEvent, CreateSessionOpts, OscTitleEvent, PtyError, SemanticEvent, SemanticEventInner,
@@ -28,6 +40,10 @@ use super::{
 };
 
 const DEFAULT_SCROLLBACK_SIZE: usize = 1 << 20; // 1 MB
+
+/// The status probe answers that wait for the input gate at most; a probe
+/// beyond them gets no answer.
+pub const MAX_WAITING_ANSWERS: usize = 16;
 
 /// The size of a session's scrollback: `SPLITTY_SCROLLBACK_SIZE` bytes when
 /// that is a positive number, else 1 MiB.
@@ -49,9 +65,58 @@ pub struct Session {
     exit_reported: AtomicBool,
     /// Shared with the terminal, which feeds it.
     output: Arc<Output>,
+    /// Shared with the output, which queues the probe answers.
+    input: Arc<Input>,
     osc_rx: watch::Receiver<OscTitleEvent>,
     semantic_rx: watch::Receiver<SemanticEvent>,
     bell_rx: watch::Receiver<BellEvent>,
+}
+
+/// The session's input: one gate every write to the terminal holds, and the
+/// status probe answers waiting for it.
+struct Input {
+    gate: tokio::sync::Mutex<()>,
+    answers: Mutex<VecDeque<&'static [u8]>>,
+    /// Wakes the task that writes answers while nobody else writes.
+    wake: tokio::sync::Notify,
+    closed: AtomicBool,
+}
+
+impl Input {
+    fn new() -> Self {
+        Self {
+            gate: tokio::sync::Mutex::new(()),
+            answers: Mutex::new(VecDeque::new()),
+            wake: tokio::sync::Notify::new(),
+            closed: AtomicBool::new(false),
+        }
+    }
+
+    /// Queue an answer; false when [`MAX_WAITING_ANSWERS`] wait already.
+    fn queue(&self, answer: &'static [u8]) -> bool {
+        let mut answers = self.answers.lock().expect("probe answers");
+        if answers.len() >= MAX_WAITING_ANSWERS {
+            return false;
+        }
+        answers.push_back(answer);
+        drop(answers);
+        self.wake.notify_one();
+        true
+    }
+
+    fn next(&self) -> Option<&'static [u8]> {
+        self.answers.lock().expect("probe answers").pop_front()
+    }
+
+    #[cfg(test)]
+    fn waiting(&self) -> usize {
+        self.answers.lock().expect("probe answers").len()
+    }
+
+    fn close(&self) {
+        self.closed.store(true, Ordering::SeqCst);
+        self.wake.notify_one();
+    }
 }
 
 /// What the session records for every chunk of its terminal's output.
@@ -60,6 +125,7 @@ struct Output {
     /// takes its snapshot, so every byte lands in a subscriber's snapshot or
     /// in its receiver, never both and never neither.
     subscribers: Mutex<Subscribers>,
+    input: Arc<Input>,
     scrollback: RingBuffer,
     /// The modes the output leaves set, for the start of a subscriber's
     /// snapshot.
@@ -72,19 +138,54 @@ struct Output {
     semantic_state: Mutex<SemanticState>,
     semantic_tx: watch::Sender<SemanticEvent>,
     bell_tx: watch::Sender<BellEvent>,
+    status: Mutex<StatusStore>,
+    /// The root record's revision, for a check without the lock.
+    status_revision: AtomicU64,
 }
 
 struct Subscribers {
     senders: Vec<queue::Sender<Arc<[u8]>>>,
     /// Set at EOF: later subscribers get the snapshot and an ended receiver.
     ended: bool,
+    /// Removes the status probes before anything else sees the output.
+    probe: ProbeMatcher,
+}
+
+/// Unix milliseconds, server clock.
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|elapsed| u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
 }
 
 impl Output {
-    /// Record one chunk: scrollback, terminal modes, title and prompt
-    /// tracking, subscribers.
+    /// Record one chunk of live output.
     fn record(&self, data: &[u8]) {
+        self.record_from(data, false);
+    }
+
+    /// Remove the status probes, queue their answers unless the output is
+    /// read again, and record the rest.
+    fn record_from(&self, data: &[u8], read_again: bool) {
         let mut subscribers = self.subscribers.lock().unwrap();
+        let (data, probes): (Cow<'_, [u8]>, _) = subscribers.probe.filter(data);
+        if !read_again {
+            for probe in probes {
+                if !self.input.queue(probe.answer()) {
+                    tracing::debug!("a status probe got no answer: too many wait");
+                }
+            }
+        }
+        if !data.is_empty() {
+            self.record_locked(&mut subscribers, &data, read_again);
+        }
+    }
+
+    /// Record a chunk without probes, under the output lock: scrollback,
+    /// terminal modes, log text, title, prompt and status tracking,
+    /// subscribers.
+    fn record_locked(&self, subscribers: &mut Subscribers, data: &[u8], read_again: bool) {
         self.scrollback.write(data);
         self.modes
             .lock()
@@ -93,7 +194,7 @@ impl Output {
         if let Some((parser, ring)) = &self.text {
             ring.write(&parser.lock().expect("log parser lock").push(data));
         }
-        self.scan(data);
+        self.scan(data, read_again);
         let mut chunk = None;
         // Acquire the first recipient's allowance before allocating. A stalled
         // recipient closes independently while capture and other readers run.
@@ -107,8 +208,9 @@ impl Output {
             .send_modify(|version| *version = version.wrapping_add(1));
     }
 
-    /// Feed the OSC scanner and publish title, OSC 133 and bell updates.
-    fn scan(&self, data: &[u8]) {
+    /// Feed the OSC scanner, apply what it found in the order of the output,
+    /// and publish title, OSC 133, status and bell updates.
+    fn scan(&self, data: &[u8], read_again: bool) {
         let Ok(mut osc) = self.osc.lock() else { return };
         if osc.feed(data) {
             let _ = self.osc_tx.send(OscTitleEvent {
@@ -116,26 +218,54 @@ impl Output {
                 changed_at: Instant::now(),
             });
         }
-        let actions = osc.drain_semantic();
-        if !actions.is_empty() {
-            if let Ok(mut state) = self.semantic_state.lock() {
-                for action in actions {
-                    state.apply(&action);
+        let mut bell = false;
+        for finding in osc.drain() {
+            match finding {
+                OscFinding::Title => {}
+                OscFinding::Semantic(action) => {
+                    if action == SemanticAction::PromptStart {
+                        self.change_status(StatusStore::end_program);
+                    }
+                    if let Ok(mut state) = self.semantic_state.lock() {
+                        state.apply(&action);
+                    }
                     let _ = self.semantic_tx.send(Some(SemanticEventInner {
                         action,
                         timestamp: Instant::now(),
                     }));
                 }
+                OscFinding::Status(payload) => {
+                    let now = now_millis();
+                    self.change_status(|store| store.apply(&payload, read_again, now));
+                }
+                OscFinding::FullReset => self.change_status(StatusStore::reset),
+                OscFinding::Bell => bell = true,
             }
         }
-        if osc.drain_bell() > 0 {
+        if bell {
             let _ = self.bell_tx.send(Some(Instant::now()));
         }
     }
 
-    /// The terminal closed: end every subscription once it has drained.
+    /// Change the status records and publish the root record's revision.
+    fn change_status(&self, change: impl FnOnce(&mut StatusStore) -> bool) {
+        let mut store = self.status.lock().expect("status records");
+        if change(&mut store) {
+            self.status_revision
+                .store(store.revision(), Ordering::Release);
+        }
+    }
+
+    /// The terminal closed: end every subscription once it has drained, and
+    /// the records of the program with it.
     fn end(&self) {
         let mut subscribers = self.subscribers.lock().unwrap();
+        // A beginning of the probe the output ended in was none.
+        let held = subscribers.probe.finish();
+        if !held.is_empty() {
+            self.record_locked(&mut subscribers, &held, false);
+        }
+        self.change_status(StatusStore::end_program);
         if let Some((parser, ring)) = &self.text {
             ring.write(&parser.lock().expect("log parser lock").finish());
         }
@@ -199,6 +329,10 @@ impl Output {
 impl Feed for Output {
     fn record(&self, data: &[u8]) {
         Output::record(self, data);
+    }
+
+    fn record_again(&self, data: &[u8]) {
+        Output::record_from(self, data, true);
     }
 
     fn end(&self) {
@@ -292,7 +426,7 @@ impl Session {
 
                 if let Some(session) = session_weak.upgrade() {
                     let cmd_bytes = format!("{}\n", command);
-                    let _ = session.terminal.write(cmd_bytes.as_bytes()).await;
+                    let _ = SessionHandle::write(session.as_ref(), cmd_bytes.as_bytes()).await;
                 }
             });
         }
@@ -312,11 +446,14 @@ impl Session {
         let (osc_tx, osc_rx) = watch::channel(OscTitleEvent::default());
         let (semantic_tx, semantic_rx) = watch::channel(None);
         let (bell_tx, bell_rx) = watch::channel(None);
+        let input = Arc::new(Input::new());
         let output = Arc::new(Output {
             subscribers: Mutex::new(Subscribers {
                 senders: Vec::new(),
                 ended: false,
+                probe: ProbeMatcher::new(),
             }),
+            input: Arc::clone(&input),
             scrollback: RingBuffer::new(buffer_size),
             modes: Mutex::new(ModeTracker::new()),
             text: managed.then(|| {
@@ -332,9 +469,11 @@ impl Session {
             semantic_state: Mutex::new(SemanticState::default()),
             semantic_tx,
             bell_tx,
+            status: Mutex::new(StatusStore::new()),
+            status_revision: AtomicU64::new(0),
         });
         let terminal = start(Arc::clone(&output) as Arc<dyn Feed>)?;
-        Ok(Arc::new(Session {
+        let session = Arc::new(Session {
             id,
             shell_profile_id,
             shell_profile_fallback_reason: std::sync::OnceLock::new(),
@@ -342,10 +481,42 @@ impl Session {
             managed,
             exit_reported: AtomicBool::new(false),
             output,
+            input: Arc::clone(&input),
             osc_rx,
             semantic_rx,
             bell_rx,
-        }))
+        });
+        // Without a runtime (a synchronous test) answers wait for the next
+        // write.
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            runtime.spawn(write_answers_while_idle(Arc::downgrade(&session), input));
+        }
+        Ok(session)
+    }
+
+    /// Write the queued probe answers; the caller holds the input gate.
+    async fn write_answers(&self) {
+        while let Some(answer) = self.input.next() {
+            if let Err(error) = self.terminal.write(answer).await {
+                tracing::warn!(session = %self.id, "a status probe answer was not written: {error}");
+            }
+        }
+    }
+}
+
+/// Write a session's probe answers whenever one is queued, holding its input
+/// gate, until the session is gone.
+async fn write_answers_while_idle(session: Weak<Session>, input: Arc<Input>) {
+    loop {
+        input.wake.notified().await;
+        if input.closed.load(Ordering::SeqCst) {
+            return;
+        }
+        let Some(session) = session.upgrade() else {
+            return;
+        };
+        let _gate = session.input.gate.lock().await;
+        session.write_answers().await;
     }
 }
 
@@ -558,6 +729,8 @@ impl SessionHandle for Session {
     }
 
     async fn write(&self, data: &[u8]) -> io::Result<()> {
+        let _gate = self.input.gate.lock().await;
+        self.write_answers().await;
         self.terminal.write(data).await
     }
 
@@ -688,6 +861,18 @@ impl SessionHandle for Session {
     fn claim_exit_report(&self) -> bool {
         !self.exit_reported.swap(true, Ordering::SeqCst)
     }
+
+    fn program_status_revision(&self) -> u64 {
+        self.output.status_revision.load(Ordering::Acquire)
+    }
+
+    fn program_status(&self) -> RootStatus {
+        self.output.status.lock().expect("status records").root()
+    }
+
+    fn end_program_status(&self) {
+        self.output.change_status(StatusStore::end_program);
+    }
 }
 
 impl Drop for Session {
@@ -695,6 +880,7 @@ impl Drop for Session {
     /// when dropping it closed the PTY; a released one leaves its program
     /// running.
     fn drop(&mut self) {
+        self.input.close();
         let _ = self.terminal.close();
     }
 }
@@ -2230,6 +2416,84 @@ mod tests {
         session.close().unwrap();
     }
 
+    /// program-status, Status Reports (Report while nobody streams): a report
+    /// of a program in a session nobody subscribes to sets the root record.
+    #[tokio::test]
+    async fn a_report_while_nobody_subscribes_sets_the_root_record() {
+        if !pty_available() {
+            return;
+        }
+        let session = spawn(
+            "status-unwatched",
+            r"printf '\033]7501;state=working:app=claude-code\007'; printf done; sleep 5",
+        );
+        assert!(wait_until(TIMEOUT, || text(&session.scrollback()).contains("done")).await);
+        let root = session.program_status();
+        let record = root.record.expect("a root record");
+        assert_eq!(record.state, crate::pty::status::StatusState::Working);
+        assert_eq!(record.app.as_deref(), Some("claude-code"));
+        assert!(!root.read_again);
+        assert_eq!(session.program_status_revision(), root.revision);
+        assert!(
+            text(&session.scrollback()).contains("\x1b]7501;state=working"),
+            "reports stay in the output"
+        );
+        session.close().unwrap();
+    }
+
+    /// What a program reads from its terminal within a second of writing
+    /// `probe` and `CSI c`, as hex, with `subscribers` subscribed and nobody
+    /// answering the device attributes request.
+    async fn read_after_probe(id: &str, probe: &str, subscribers: usize) -> String {
+        let script = format!(
+            "stty raw -echo min 0 time 10; printf '{probe}\\033[c'; printf 'GOT:'; \
+             cat | od -An -tx1 | tr -d ' \\n'; printf ':END'; sleep 5"
+        );
+        let session = spawn(id, &script);
+        let subscriptions: Vec<_> = (0..subscribers).map(|_| session.subscribe()).collect();
+        assert!(
+            wait_until(TIMEOUT, || text(&session.scrollback()).contains(":END")).await,
+            "{}",
+            text(&session.scrollback())
+        );
+        let output = text(&session.scrollback());
+        assert!(
+            !output.contains("7501"),
+            "the probe was removed: {output:?}"
+        );
+        assert!(output.contains("\x1b[c"), "the rest is forwarded");
+        drop(subscriptions);
+        session.close().unwrap();
+        let start = output.find("GOT:").expect("marker") + 4;
+        let end = output.find(":END").expect("marker");
+        output[start..end].to_owned()
+    }
+
+    /// program-status, Probe Answer (Probe without a client, Probe ended by
+    /// BEL, Two clients stream the session) and terminal-sessions, Continuous
+    /// Output Capture (Status while nobody streams, the answer): the program
+    /// reads one answer, ended as its probe was.
+    #[tokio::test]
+    async fn a_probe_is_answered_once_with_its_terminator() {
+        if !pty_available() {
+            return;
+        }
+        let st = "1b5d373530313b3f1b5c";
+        let bel = "1b5d373530313b3f07";
+        assert_eq!(
+            read_after_probe("probe-st", r"\033]7501;?\033\\", 0).await,
+            st
+        );
+        assert_eq!(
+            read_after_probe("probe-bel", r"\033]7501;?\007", 0).await,
+            bel
+        );
+        assert_eq!(
+            read_after_probe("probe-two", r"\033]7501;?\007", 2).await,
+            bel
+        );
+    }
+
     /// terminal-sessions, Terminal Modes in the Replay (Modes set before the
     /// buffered output, Kitty keyboard flags of both screens, Synchronized
     /// output is not restored), Attaching to an Existing Session (Replay after
@@ -2459,6 +2723,12 @@ mod tests {
 mod spec_tests {
     use super::*;
 
+    use std::time::Duration;
+
+    use crate::pty::testing::wait_until;
+
+    const TIMEOUT: Duration = Duration::from_secs(10);
+
     fn opts() -> CreateSessionOpts {
         CreateSessionOpts {
             id: "spec-1".into(),
@@ -2572,6 +2842,237 @@ mod spec_tests {
         let mut expected = b"\x1b[?2004h".to_vec();
         expected.extend_from_slice(&[b'x'; 1024]);
         assert_eq!(session.subscribe().snapshot.as_slice(), expected);
+    }
+
+    /// The writes a [`Recording`] terminal took, in order.
+    type Writes = Arc<Mutex<Vec<Vec<u8>>>>;
+
+    /// A terminal that records every write, in pieces of at most 4 KiB with a
+    /// yield between them, as a PTY takes large input.
+    struct Recording {
+        writes: Writes,
+        done: tokio::sync::watch::Receiver<bool>,
+    }
+
+    #[async_trait]
+    impl Terminal for Recording {
+        fn pid(&self) -> Option<u32> {
+            None
+        }
+        async fn write(&self, data: &[u8]) -> io::Result<()> {
+            for piece in data.chunks(4096) {
+                self.writes.lock().unwrap().push(piece.to_vec());
+                tokio::task::yield_now().await;
+                tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+            }
+            Ok(())
+        }
+        fn resize(&self, _cols: u16, _rows: u16) -> io::Result<()> {
+            Ok(())
+        }
+        fn close(&self) -> io::Result<()> {
+            Ok(())
+        }
+        async fn stop(&self) -> io::Result<crate::pty::ProcessResult> {
+            Err(io::Error::other("not managed"))
+        }
+        fn done(&self) -> tokio::sync::watch::Receiver<bool> {
+            self.done.clone()
+        }
+        fn result(&self) -> Option<crate::pty::ProcessResult> {
+            None
+        }
+        fn foreground_pgid(&self) -> Option<u32> {
+            None
+        }
+    }
+
+    fn recording(id: &str) -> (Arc<Session>, Writes) {
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let terminal = Recording {
+            writes: Arc::clone(&writes),
+            done: tokio::sync::watch::channel(false).1,
+        };
+        let session =
+            Session::with_terminal(id.into(), None, false, 1 << 16, |_| Ok(Box::new(terminal)))
+                .expect("session");
+        (session, writes)
+    }
+
+    fn state(session: &Session) -> Option<crate::pty::status::StatusState> {
+        session.program_status().record.map(|record| record.state)
+    }
+
+    const PROBE_ST: &[u8] = b"\x1b]7501;?\x1b\\";
+
+    /// program-status, Status Record Lifetime (Done survives the prompt,
+    /// Report after a prompt mark in one read, Full reset, Alternate screen)
+    /// and Status Records: the records follow the output in its order.
+    #[test]
+    fn status_records_follow_the_output_in_order() {
+        use crate::pty::status::StatusState::{Done, Working};
+        let session = Session::with_terminal("records".into(), None, false, 4096, |_| {
+            Ok(Box::new(Replayed {
+                done: tokio::sync::watch::channel(false).1,
+            }))
+        })
+        .expect("session");
+        let output = &session.output;
+        output.record(b"\x1b]7501;state=working\x07");
+        assert_eq!(state(&session), Some(Working));
+        output.record(b"\x1b]133;A\x07");
+        assert_eq!(state(&session), None, "a prompt mark ends working");
+
+        output.record(b"\x1b]133;A\x07\x1b]7501;state=working\x07");
+        assert_eq!(state(&session), Some(Working), "in the order of the output");
+        let revision = session.program_status_revision();
+        for kept in [&b"\x1b[!p"[..], b"\x1b[?1049h", b"text\x1b[?1049l"] {
+            output.record(kept);
+            assert_eq!(state(&session), Some(Working), "{kept:?}");
+        }
+        session.resize(100, 40).expect("resize");
+        assert_eq!(state(&session), Some(Working), "a resize");
+        assert_eq!(session.program_status_revision(), revision);
+
+        output.record(b"\x1b]7501;state=done\x1b\\\x1b]133;A\x07");
+        assert_eq!(state(&session), Some(Done), "done survives the prompt");
+        output.record(b"\x1bc");
+        assert_eq!(state(&session), None, "a full reset ends all");
+
+        output.record(b"\x1b]7501;state=done\x07");
+        output.end();
+        assert_eq!(state(&session), Some(Done), "done survives the end");
+        let ended = Session::with_terminal("ended".into(), None, false, 4096, |feed| {
+            feed.record(b"\x1b]7501;state=blocked:kind=permission\x07");
+            feed.end();
+            Ok(Box::new(Replayed {
+                done: tokio::sync::watch::channel(true).1,
+            }))
+        })
+        .expect("session");
+        assert_eq!(state(&ended), None, "blocked ends with the output");
+    }
+
+    /// program-status, Probe Removed from the Output: the scrollback, the
+    /// replay and the mode tracking get the output without the probe, at the
+    /// same offsets.
+    #[test]
+    fn the_probe_reaches_neither_the_buffers_nor_the_modes() {
+        let session = Session::with_terminal("probe-buffers".into(), None, false, 16, |feed| {
+            feed.record(b"a\x1b]7501;?\x07\x1b[?2004hb");
+            Ok(Box::new(Replayed {
+                done: tokio::sync::watch::channel(false).1,
+            }))
+        })
+        .expect("session");
+        assert_eq!(session.scrollback(), b"a\x1b[?2004hb");
+        assert_eq!(session.input.waiting(), 1, "answered at the next write");
+        // Fifteen more bytes push `a` and the mode out of the 16-byte buffer.
+        // The replay restores the mode from the tracker, whose offset for it
+        // (1, not 10) matches the buffer's.
+        session.output.record(b"0123456789abcde");
+        assert_eq!(
+            session.subscribe().snapshot.as_slice(),
+            b"\x1b[?2004hb0123456789abcde"
+        );
+    }
+
+    /// program-status, Probe Answer (Probe split between reads): one answer
+    /// however the probe is split.
+    #[tokio::test]
+    async fn a_probe_split_between_reads_is_answered_once() {
+        for split in 0..=PROBE_ST.len() {
+            let (session, writes) = recording("probe-split");
+            session.output.record(&PROBE_ST[..split]);
+            session.output.record(&PROBE_ST[split..]);
+            session.output.record(b"after");
+            assert!(
+                wait_until(TIMEOUT, || writes.lock().unwrap().len() == 1).await,
+                "split at {split}"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert_eq!(*writes.lock().unwrap(), vec![PROBE_ST.to_vec()]);
+            assert_eq!(session.scrollback(), b"after", "split at {split}");
+        }
+    }
+
+    /// program-status, Probe Answer: at most sixteen answers wait; while the
+    /// gate is held by a write, a seventeenth probe gets none.
+    #[tokio::test]
+    async fn a_probe_beyond_sixteen_waiting_answers_gets_none() {
+        let (session, writes) = recording("probe-limit");
+        let gate = session.input.gate.lock().await;
+        for _ in 0..=MAX_WAITING_ANSWERS {
+            session.output.record(PROBE_ST);
+        }
+        assert_eq!(session.input.waiting(), MAX_WAITING_ANSWERS);
+        drop(gate);
+        assert!(
+            wait_until(TIMEOUT, || writes.lock().unwrap().len()
+                == MAX_WAITING_ANSWERS)
+            .await
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert_eq!(writes.lock().unwrap().len(), MAX_WAITING_ANSWERS);
+        assert_eq!(session.input.waiting(), 0);
+    }
+
+    /// program-status, Probe Answer Order (Large input) and terminal-sessions,
+    /// Terminal Input (Status probe answered during input): an answer queued
+    /// while 64 KiB of input are written goes after them, never between two of
+    /// their pieces; one queued before goes ahead of them.
+    #[tokio::test]
+    async fn large_input_is_written_whole_around_an_answer() {
+        let input = vec![b'x'; 64 * 1024];
+        let (session, writes) = recording("probe-input");
+        let writer = {
+            let session = Arc::clone(&session);
+            let input = input.clone();
+            tokio::spawn(async move { SessionHandle::write(session.as_ref(), &input).await })
+        };
+        assert!(wait_until(TIMEOUT, || writes.lock().unwrap().len() >= 2).await);
+        session.output.record(PROBE_ST);
+        writer.await.expect("writer").expect("input");
+        assert!(wait_until(TIMEOUT, || writes.lock().unwrap().len() == 17).await);
+        let recorded = writes.lock().unwrap().clone();
+        assert_eq!(recorded[..16].concat(), input, "the input in one piece");
+        assert_eq!(recorded[16], PROBE_ST, "the answer after it");
+
+        // Queued before the input: written ahead of it by the same write.
+        let (session, writes) = recording("probe-before");
+        let gate = session.input.gate.lock().await;
+        session.output.record(PROBE_ST);
+        drop(gate);
+        SessionHandle::write(session.as_ref(), b"reply")
+            .await
+            .expect("input");
+        assert_eq!(
+            writes.lock().unwrap()[..2],
+            [PROBE_ST.to_vec(), b"reply".to_vec()]
+        );
+    }
+
+    /// program-status, Output Read Again After Adoption: a probe in output
+    /// read again is removed but not answered, and its records are marked.
+    #[tokio::test]
+    async fn output_read_again_answers_no_probe_and_marks_its_records() {
+        let (session, writes) = recording("read-again");
+        let feed: &dyn Feed = session.output.as_ref();
+        feed.record_again(b"a\x1b]7501;?\x07\x1b]7501;state=blocked:kind=permission\x07");
+        let root = session.program_status();
+        assert!(root.read_again);
+        assert_eq!(
+            root.record.map(|record| record.state),
+            Some(crate::pty::status::StatusState::Blocked)
+        );
+        feed.record(b"b\x1b]7501;?\x07");
+        assert!(wait_until(TIMEOUT, || writes.lock().unwrap().len() == 1).await);
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert_eq!(writes.lock().unwrap().len(), 1, "only the live probe");
+        assert!(
+            String::from_utf8_lossy(&session.scrollback()).starts_with("a\x1b]7501;state=blocked")
+        );
+        assert!(!String::from_utf8_lossy(&session.scrollback()).contains(";?"));
     }
 
     #[tokio::test]

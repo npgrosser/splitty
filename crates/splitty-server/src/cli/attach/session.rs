@@ -412,8 +412,9 @@ mod tests {
     #[tokio::test]
     async fn the_replay_asks_the_terminal_nothing_and_live_output_is_unchanged() {
         let mut client = Harness::start(DetachKey::default());
+        // An older server forwards the status probe; the replay drops it too.
         client
-            .attach(b"old\x1b]11;?\x07\x1b]52;c;eA==\x07 prompt")
+            .attach(b"old\x1b]11;?\x07\x1b]52;c;eA==\x07\x1b]7501;?\x1b\\ prompt")
             .await;
         client.server_sends_output(SID, b"\x1b]11;?\x07");
         client.server_sends(json!({"type": "closed", "sessionId": SID, "exitCode": 0}));
