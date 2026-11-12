@@ -1,14 +1,24 @@
 name: Windows installers
 
 # Builds the static servers every desktop app carries (the x86_64 one is also
-# the Windows apps' WSL backend) and the two Windows installers: the native
-# app (crates/splitty-gpui, packaging/windows/native) and the legacy web app
-# (Tauri, installed as "Splitty Web").
+# the Windows apps' WSL backend) and the Windows installer of the native app
+# (crates/splitty-gpui, packaging/windows/native). The legacy web app (Tauri,
+# installed as "Splitty Web") is built only on request and is not released.
 
 on:
   workflow_dispatch:
+    inputs:
+      web:
+        description: Also build the legacy web app's installer
+        type: boolean
+        default: false
   # Called by release.yml for tagged releases.
   workflow_call:
+    inputs:
+      web:
+        description: Also build the legacy web app's installer
+        type: boolean
+        default: false
 
 # Third-party actions are pinned to commit SHAs; Dependabot keeps the pins and
 # their version comments current.
@@ -266,6 +276,7 @@ jobs:
 
   web:
     name: Web app NSIS installer (Tauri)
+    if: ${{ inputs.web }}
     needs: [payload, smoke]
     runs-on: windows-2025
     timeout-minutes: 60

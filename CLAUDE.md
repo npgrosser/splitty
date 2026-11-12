@@ -8,7 +8,7 @@ The rules for building live in a few places and hold for work without an OpenSpe
 - `docs/issues/openspec-baseline-findings.md`: known bugs, stale docs and test gaps.
 - `openspec/open-decisions.md`: provisional decisions waiting for the maintainer's review.
 - `roadmap/README.md` (German): order and milestones; the next milestone is listed under "Als Nächstes".
-- `docs/native-ui-handoff.md`: state, packages and open work of the native app (`crates/splitty-gpui`), the default desktop app; read before continuing native UI changes. The web shells (Tauri, Electron) are legacy and keep building.
+- `docs/native-ui-handoff.md`: state, packages and open work of the native app (`crates/splitty-gpui`), the default desktop app; read before continuing native UI changes. The web shells (Tauri, Electron) are legacy: they keep building in CI and are not released.
 
 ## Tests
 

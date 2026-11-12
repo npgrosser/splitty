@@ -9,7 +9,7 @@
 
 - [x] 2.1 Windows: NSIS installer of the native app built by `packaging/windows` locally and in CI; replaces the earlier web app in place.
 - [x] 2.2 Linux: deb, rpm and tar.gz of the native app. macOS: dmg of the native app for Apple Silicon.
-- [x] 2.3 Legacy web shells keep building and are released under a "Web" name.
+- [x] 2.3 Legacy web shells keep building in CI and are not released (v0.3.0 was the last release with their packages).
 
 ## 3. CI, release and docs
 

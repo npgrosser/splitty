@@ -1,6 +1,6 @@
 # Local desktop packages
 
-The local build is the native app (`crates/splitty-gpui`), the package a release publishes under the plain name for each system. The legacy web apps (Tauri, Electron; "Web" in their release names) are built locally only when requested; `docs/development.md` names their builds.
+The local build is the native app (`crates/splitty-gpui`), the only package a release publishes for each system. The legacy web apps (Tauri, Electron) are not released and are built locally only when requested; `docs/development.md` names their builds.
 
 Detect WSL before treating `uname -s = Linux` as a Linux desktop. Use the companion `scripts/downloads.py` probe. Do not change `HOME`, `home` or `CODEX_HOME` to stage builds. Paths with spaces and apostrophes need proper quoting; prefer argument arrays/PowerShell `-File` over interpolated command strings.
 
@@ -72,7 +72,7 @@ It builds the frontend, the pinned terminal library (unless `GHOSTTY_VT_DIR` nam
 
 Inspect the app executable's architecture with `file`/`lipo -info`, verify the bundle version, and copy the DMG to the macOS Downloads folder. Do not install into `/Applications` or stop a running app merely to produce a download.
 
-The legacy web app (only when requested) is `packaging/macos/build.sh` (`--universal` for the release's universal DMG); it builds missing payloads itself and writes under `target/release/bundle/dmg/` or `target/universal-apple-darwin/release/bundle/dmg/`.
+The legacy web app (only when requested) is `packaging/macos/build.sh` (`--universal` for a universal DMG); it builds missing payloads itself and writes under `target/release/bundle/dmg/` or `target/universal-apple-darwin/release/bundle/dmg/`.
 
 ## Native Linux
 

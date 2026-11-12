@@ -278,7 +278,8 @@ cache behavior, alternative distributions and fast iteration options, and
 
 ## The web app's packages
 
-The legacy shells keep their builds:
+The legacy shells are not released (v0.3.0 was the last release with their
+packages); CI keeps them building, and they build locally:
 
 ```bash
 make build/splitty        # server and CLI binary (embeds the frontend)
@@ -291,8 +292,7 @@ make dmg                  # macOS disk image (Tauri)
 ### macOS (Tauri)
 
 The macOS web app carries the servers it installs on remote hosts (Linux and macOS,
-x86_64 and aarch64). One script builds them from the checkout, as the release
-does, and then the ad-hoc signed app; `make build/Splitty.app` and `make dmg`
+x86_64 and aarch64). One script builds them from the checkout and then the ad-hoc signed app; `make build/Splitty.app` and `make dmg`
 run it. It needs Xcode's command line tools, Rust (rustup), Node.js and pnpm:
 
 ```bash
@@ -395,23 +395,23 @@ the version files, builds the packages below and publishes the GitHub release
 with them and `SHA256SUMS` once all of them have built; a tag with a suffix
 (`v0.2.0-rc.1`) becomes a prerelease.
 
-| System | Native app | Legacy web app |
-|---|---|---|
-| Windows x64 | `Splitty_<version>_x64-setup.exe` | `Splitty-Web_<version>_x64-setup.exe` (Tauri) |
-| macOS | `Splitty_<version>_aarch64.dmg` | `Splitty-Web_<version>_universal.dmg` (Tauri) |
-| Linux x86_64 | `splitty_<version>_amd64.deb`, `splitty-<version>-1.x86_64.rpm`, `splitty-<version>-linux-x86_64.tar.gz` | `splitty-web_<version>_amd64.deb`, `splitty-web-<version>.x86_64.rpm`, `Splitty-Web-<version>-x86_64.AppImage` (Electron) |
+| System | Package |
+|---|---|
+| Windows x64 | `Splitty_<version>_x64-setup.exe` |
+| macOS | `Splitty_<version>_aarch64.dmg` |
+| Linux x86_64 | `splitty_<version>_amd64.deb`, `splitty-<version>-1.x86_64.rpm`, `splitty-<version>-linux-x86_64.tar.gz` |
 
 The release also carries the static servers (`splitty-wsl-x86_64.tar.gz`,
-`splitty-wsl-aarch64.tar.gz`, `splitty-darwin-<arch>.tar.gz`). The web apps'
-files are renamed when the workflow collects them; the bundlers' own names
-(`Splitty Web_…-setup.exe`, `Splitty_…_universal.dmg`, `splitty-electron…`)
-appear only in local builds. The publish job stops if two files share a name
-or an expected package is missing.
+`splitty-wsl-aarch64.tar.gz`, `splitty-darwin-<arch>.tar.gz`). The publish job
+stops if two files share a name or an expected package is missing. The
+Windows workflow builds the web app's installer only when started by hand
+with its `web` input.
 
 The Windows installers are per-user setups: run a newer one over an installed
 Splitty to update it, and uninstall it from Windows' installed apps. The
 **Windows installers** workflow (`windows-tauri.yml`), started by hand, builds
-the static servers and both installers for any commit, as workflow artifacts.
+the static servers and the native installer for any commit, as workflow
+artifacts; its `web` input adds the web app's installer.
 
 For a branch preview without a release tag, set a distinct prerelease such as
 `0.2.0-dev.1` in `Cargo.toml`, `crates/splitty-tauri/tauri.conf.json` and

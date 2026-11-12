@@ -114,33 +114,11 @@ Linux, Wayland or X11) and needs no browser engine. The deb and rpm install to
 
 ### The web app
 
-The earlier desktop app, which shows the web interface in a system web view or
-in Electron, is still built and released. Use it on an Intel Mac, on Windows
-without WSL (there it opens remote hosts only), or where the native app does
-not run.
-
-| System | File | Notes |
-|---|---|---|
-| Windows 10/11 (x64) | `Splitty-Web_<version>_x64-setup.exe` | Installs as "Splitty Web" beside the native app. |
-| macOS (Apple silicon and Intel) | `Splitty-Web_<version>_universal.dmg` | Its app is also named `Splitty.app`; in `/Applications` it takes the place of the native app. |
-| Linux (x86_64) | `splitty-web_<version>_amd64.deb`, `splitty-web-<version>.x86_64.rpm` or `Splitty-Web-<version>-x86_64.AppImage` | The package inside the deb and rpm is `splitty-electron`; it installs beside the native package. The AppImage runs directly. |
-
-The Linux web app uses Electron's bundled Chromium for a consistent runtime
-across distributions and to avoid WebKitGTK compatibility and rendering trouble.
-It uses its own title bar by default. You can enable the native title bar in
-Settings and restart the app; an existing saved choice is preserved.
-
-### Checking a download
-
-The binaries are not code-signed, so Windows SmartScreen and macOS Gatekeeper
-warn about them, and Smart App Control, where it is on, blocks them. Check the
-download against `SHA256SUMS` from the release:
-
-```bash
-sha256sum -c SHA256SUMS --ignore-missing     # macOS: shasum -a 256 <file>
-```
-
-On macOS, then clear the quarantine flag:
+The earlier desktop app, which shows the web interface in a system web view
+(Tauri) or in Electron, is no longer released; v0.3.0 was the last release with
+its packages. Its code stays in the repository and builds
+[from source](#building-from-source). An Intel Mac and Windows without WSL
+(where it opens remote hosts only) need it.
 
 ```bash
 xattr -dr com.apple.quarantine /Applications/Splitty.app
@@ -279,9 +257,10 @@ vulnerabilities privately through
 
 - The binaries are not code-signed (see [Install](#install)).
 - On Windows, local terminals need WSL 2. Without a supported
-  distribution the native app says so and does not start; the web app opens
-  remote hosts only.
-- The native macOS app is built for Apple silicon; Intel Macs use the web app.
+  distribution the native app says so and does not start; the web app, built
+  from source, opens remote hosts only.
+- The native macOS app is built for Apple silicon; Intel Macs need the web app,
+  built from source.
 - On a Mac host, Splitty doesn't detect listening ports yet; forward them by
   number.
 - In the web app, xterm.js can garble IME and dead-key input on macOS

@@ -2,9 +2,8 @@ name: Release
 
 # Builds every artifact for a `v*` tag and publishes them as a GitHub release
 # with SHA256SUMS and, for a public repository, build provenance attestations.
-# Each platform gets the native app (crates/splitty-gpui) as its default
-# package and the legacy web app (Tauri on Windows and macOS, Electron on
-# Linux) with "Web" in its file name.
+# Each platform gets the native app (crates/splitty-gpui). The legacy web
+# apps (Tauri, Electron) are not released; ci.yml keeps them building.
 # The release is published only once every platform has built; a tag with a
 # suffix (`v0.2.0-rc.1`) becomes a prerelease. The binaries are not code-signed
 # (macOS builds are ad-hoc signed so they run on Apple Silicon); the README
@@ -98,15 +97,14 @@ jobs:
         with:
           node-version: 24
           cache: pnpm
-          cache-dependency-path: |
-            frontend/pnpm-lock.yaml
-            frontend-electron/pnpm-lock.yaml
+          cache-dependency-path: frontend/pnpm-lock.yaml
 
+      # The server linked into the native app embeds the frontend's assets.
       - name: Build frontend
         working-directory: frontend
         run: pnpm install --frozen-lockfile && pnpm build
 
-      # rpmbuild packs both rpms; the rest is what the native app builds
+      # rpmbuild packs the rpm; the rest is what the native app builds
       # against (docs/gpui-spike.md).
       - name: Install rpm tooling and native app build libraries
         timeout-minutes: 10
@@ -125,8 +123,7 @@ jobs:
           prefix=$(python3 scripts/bootstrap-libghostty-vt.py --check)
           echo "GHOSTTY_VT_DIR=$prefix" >> "$GITHUB_ENV"
 
-      # The static x86_64 server and CLI: the `splitty` command both apps
-      # ship, and the Electron app's local backend.
+      # The static x86_64 server and CLI: the `splitty` command the app ships.
       - name: Unpack the static x86_64 server
         run: |
           mkdir -p payloads/x86_64
@@ -160,42 +157,6 @@ jobs:
           app=$(echo "$RUNNER_TEMP"/native-unpacked/splitty-*-linux-x86_64)
           "$app/splitty-gpui" --help
           "$app/splitty" --version
-
-      # The packages run the static x86_64 server: a fine local backend, and
-      # as a client it installs itself on x86_64 hosts and the servers it
-      # carries on aarch64 and macOS hosts.
-      - name: Build Electron AppImage, deb and rpm
-        run: |
-          mkdir -p target/release
-          install -m 0755 payloads/x86_64/splitty target/release/splitty
-          cd frontend-electron
-          pnpm install --frozen-lockfile
-          # The publish job owns the release; electron-builder must not
-          # upload anything itself when it sees a tag in CI.
-          pnpm run dist --publish never
-
-      # electron-builder names its files Splitty-<version>.AppImage,
-      # splitty-electron_<version>_amd64.deb and
-      # splitty-electron-<version>.x86_64.rpm; the release files say "Web".
-      # The package inside the deb and rpm stays `splitty-electron`.
-      - name: Collect artifacts
-        run: |
-          shopt -s nullglob
-          legacy=(frontend-electron/dist/Splitty-*.AppImage frontend-electron/dist/splitty-electron_*_amd64.deb frontend-electron/dist/splitty-electron-*.x86_64.rpm)
-          if [ "${#legacy[@]}" -ne 3 ]; then
-            echo "expected one AppImage, deb and rpm in frontend-electron/dist, found: ${legacy[*]}" >&2
-            exit 1
-          fi
-          for file in "${legacy[@]}"; do
-            name=$(basename "$file")
-            case "$name" in
-              *.AppImage) name="Splitty-Web-${name#Splitty-}"; name="${name%.AppImage}-x86_64.AppImage" ;;
-              *.deb) name="splitty-web_${name#splitty-electron_}" ;;
-              *.rpm) name="splitty-web-${name#splitty-electron-}" ;;
-            esac
-            cp "$file" "out/$name"
-          done
-          ls -l out
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -263,8 +224,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
-          targets: aarch64-apple-darwin,x86_64-apple-darwin
 
+      # The server linked into the native app embeds the frontend's assets.
       - name: Build frontend
         working-directory: frontend
         run: pnpm install --frozen-lockfile && pnpm build
@@ -293,26 +254,6 @@ jobs:
             --cli payloads/darwin-aarch64/splitty \
             --shell-integration payloads/darwin-aarch64/shell-integration \
             --out out
-
-      # Ad-hoc signed through tauri.macos.conf.json.
-      - name: Build universal web app dmg
-        working-directory: crates/splitty-tauri
-        run: ../../frontend/node_modules/.bin/tauri build --target universal-apple-darwin --bundles dmg
-
-      # The bundler names it Splitty_<version>_universal.dmg; the release
-      # file says "Web".
-      - name: Collect artifacts
-        run: |
-          shopt -s nullglob
-          native=(out/Splitty_*_aarch64.dmg)
-          web=(target/universal-apple-darwin/release/bundle/dmg/Splitty_*_universal.dmg)
-          if [ "${#native[@]}" -ne 1 ] || [ "${#web[@]}" -ne 1 ]; then
-            echo "expected one native and one universal dmg, found: ${native[*]} ${web[*]}" >&2
-            exit 1
-          fi
-          name=$(basename "${web[0]}")
-          cp "${web[0]}" "out/Splitty-Web_${name#Splitty_}"
-          ls -l out
 
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -351,10 +292,8 @@ jobs:
               cp "$file" "release/$name"
             done
           }
-          # The native app and the legacy web app (Splitty-Web_*).
           collect downloads/splitty-windows-x64-native/*.exe
-          collect downloads/splitty-windows-x64-web/*.exe
-          # The static Linux servers and CLIs: x86_64 (the Windows apps' WSL
+          # The static Linux servers and CLIs: x86_64 (the Windows app's WSL
           # backend, carrying the others for remote hosts) and aarch64; and
           # the servers for macOS hosts.
           collect downloads/wsl-payload/splitty-wsl-x86_64.tar.gz
@@ -365,10 +304,8 @@ jobs:
           cd release
           # One of each; a missing or renamed package must not publish.
           for pattern in \
-            'Splitty_*_x64-setup.exe' 'Splitty-Web_*_x64-setup.exe' \
-            'Splitty_*_aarch64.dmg' 'Splitty-Web_*_universal.dmg' \
+            'Splitty_*_x64-setup.exe' 'Splitty_*_aarch64.dmg' \
             'splitty_*_amd64.deb' 'splitty-*-1.x86_64.rpm' 'splitty-*-linux-x86_64.tar.gz' \
-            'Splitty-Web-*-x86_64.AppImage' 'splitty-web_*_amd64.deb' 'splitty-web-*.x86_64.rpm' \
             'splitty-wsl-x86_64.tar.gz' 'splitty-wsl-aarch64.tar.gz' \
             'splitty-darwin-aarch64.tar.gz' 'splitty-darwin-x86_64.tar.gz'; do
             # shellcheck disable=SC2086 # the pattern is meant to expand
