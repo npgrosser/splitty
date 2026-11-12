@@ -80,7 +80,7 @@ model {
     // Sessions
 
     pty = component 'pty' {
-      description 'PTY sessions: the session layer (the spec of a session with installation-local CLI discovery and child PATH, scrollback, subscriptions, OSC parsing, job log text, process info) over a terminal (terminal: the trait, its factory, the PTY in this process with its reader thread and lifecycle; a daemon\'s terminals are keepers), shared display-title derivation and replay filters (streaming for terminal clients, in-place for server snapshots), and the scan of the TCP ports the processes of sessions listen on (/proc on Linux: loopback and wildcard listeners of each shell\'s process tree), and the owner of a TCP connection by its addresses (connection_owner, for the relay on a host).'
+      description 'PTY sessions: the session layer (the spec of a session with installation-local CLI discovery and child PATH, scrollback, subscriptions, the status probe matcher whose fixed answers go through one input gate per session with all other input, the OSC scanner that reads every OSC to its end, program status records from OSC 7501 reports (status: at most 64 per session, the root never evicted, ended at prompt marks, at the end of the output and when the session stops being busy), job log text, process info) over a terminal (terminal: the trait, its factory, the PTY in this process with its reader thread and lifecycle; a daemon\'s terminals are keepers), shared display-title derivation and replay filters (streaming for terminal clients, in-place for server snapshots), and the scan of the TCP ports the processes of sessions listen on (/proc on Linux: loopback and wildcard listeners of each shell\'s process tree), and the owner of a TCP connection by its addresses (connection_owner, for the relay on a host).'
       metadata {
         module 'splitty_core::pty'
         spec 'terminal-sessions'
@@ -104,7 +104,7 @@ model {
     }
 
     keeper = component 'keeper' {
-      description 'Session keepers: the keeper process that owns one daemon session\'s PTY and program and outlives the daemon (blocking threads, an offset ring, one controller at a time with takeover, exit retention), its framed protocol over a private Unix socket (wire), the keepers directory with the peer checks of both sides (dir), and the controller side (client): the process launcher, the daemon\'s terminal factory with the fallback to a local terminal, the kept terminal with reconnect, finding and taking over running keepers.'
+      description 'Session keepers: the keeper process that owns one daemon session\'s PTY and program and outlives the daemon (blocking threads, an offset ring, one controller at a time with takeover, exit retention), its framed protocol over a private Unix socket (wire), the keepers directory with the peer checks of both sides (dir), and the controller side (client): the process launcher, the daemon\'s terminal factory with the fallback to a local terminal, the kept terminal with reconnect, which hands the output below its hello\'s buffer_end to the session as output read again (no probe answers, no notifications), finding and taking over running keepers.'
       metadata {
         module 'splitty_core::keeper'
         spec 'session-keepers'
@@ -131,7 +131,7 @@ model {
     effect_runner -> splitty.transport.queue 'SessionHandle test double uses the bounded subscription contract'
     protocol -> mux 'ScreenInfo, ScreenState'
     protocol -> effect_runner 'EnvContext'
-    protocol -> pty 'Backend, SessionHandle, Session, OSC events, ListeningPort; pty::testing in tests'
+    protocol -> pty 'Backend, SessionHandle, Session, OSC events, ListeningPort, ProgramStatus; pty::testing in tests'
     daemon -> config 'config_dir, owner-only files'
     daemon -> mux 'WorkspaceState, Effect, SessionStatus'
     daemon -> ids 'JobId in persistence and no-replay fixtures'
