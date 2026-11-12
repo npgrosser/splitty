@@ -95,6 +95,14 @@ splitty list-screens
 splitty send-keys --pane <id> "make test\n"
 ```
 
+`list-panes` prints one tab-separated line per pane: its id, title, working directory, `session=<id>` and `status=` with the program status the pane's program last reported through OSC 7501, as Claude Code and Codex do: `working`, `blocked` with its kind, `done`, `error` or `idle`, and `-` without one. Control characters in a cell show as `�`.
+
+```text
+3f9a…	claude	/home/me/project	session=8c21…	status=blocked:permission
+```
+
+With `--json` each pane also carries its session's record as `programStatus` (`state`, `kind`, `progress`, `app`, `title`, `msg`, `updatedAt`; see `docs/protocol.ts`), absent without one.
+
 ## Visible background jobs for agents
 
 `splitty agent guide` prints the installed CLI's short agent workflow guide, even

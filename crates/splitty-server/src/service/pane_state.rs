@@ -74,6 +74,12 @@ impl Observer {
                 };
                 let display_title = info.display_title(&osc, &home);
                 let busy = !exited && info.busy();
+                if entry.busy && !busy {
+                    // The shell is the foreground process again: the program
+                    // that ran ended, and its working, blocked and idle status
+                    // records end with it (program-status).
+                    session.end_program_status();
+                }
                 let status = if exited {
                     splitty_core::mux::SessionStatus::Exited
                 } else {

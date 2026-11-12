@@ -655,6 +655,28 @@ fn without_annotations(screen: &mut mux::ScreenState) {
     }
 }
 
+/// Each session's root program status record as `programStatus`
+/// (`program-status`): these replies carry it, the workspace state and its
+/// snapshots do not.
+fn with_program_status(state: &ServiceState, screen: &mut Value) {
+    let Some(sessions) = screen.get_mut("sessions").and_then(Value::as_object_mut) else {
+        return;
+    };
+    let backend = state.client_state.dispatcher.backend();
+    for (id, session) in sessions.iter_mut() {
+        let Some(record) = backend
+            .get(id)
+            .and_then(|session| session.program_status().record)
+        else {
+            continue;
+        };
+        if let (Some(session), Ok(record)) = (session.as_object_mut(), serde_json::to_value(record))
+        {
+            session.insert("programStatus".into(), record);
+        }
+    }
+}
+
 pub(crate) async fn get_mux_state(state: &ServiceState) -> Payload<Value> {
     // Nor the text a viewer pane shows (`viewer-panes`); windows read it with
     // `viewer.read` over their own connection.
@@ -663,7 +685,13 @@ pub(crate) async fn get_mux_state(state: &ServiceState) -> Payload<Value> {
         without_scratchpads(screen);
         without_annotations(screen);
     }
-    Payload(serde_json::to_value(&ws).unwrap_or(json!({})))
+    let mut ws = serde_json::to_value(&ws).unwrap_or(json!({}));
+    if let Some(screens) = ws.get_mut("screens").and_then(Value::as_object_mut) {
+        for screen in screens.values_mut() {
+            with_program_status(state, screen);
+        }
+    }
+    Payload(ws)
 }
 
 pub(crate) async fn get_mux_screen(state: &ServiceState, id: String) -> Reply {
@@ -673,7 +701,9 @@ pub(crate) async fn get_mux_screen(state: &ServiceState, id: String) -> Reply {
             let mut screen = screen.without_viewer_texts();
             without_scratchpads(&mut screen);
             without_annotations(&mut screen);
-            Payload(serde_json::to_value(&screen).unwrap_or(json!({}))).into_reply()
+            let mut screen = serde_json::to_value(&screen).unwrap_or(json!({}));
+            with_program_status(state, &mut screen);
+            Payload(screen).into_reply()
         }
         None => (
             StatusCode::NOT_FOUND,

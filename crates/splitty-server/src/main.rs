@@ -1227,28 +1227,12 @@ async fn async_main() {
                 if json {
                     println!(
                         "{}",
-                        serde_json::to_string_pretty(
-                            &screen_data.get("panes").unwrap_or(&serde_json::json!({}))
-                        )
-                        .unwrap()
+                        serde_json::to_string_pretty(&cli::panes::panes_json(&screen_data))
+                            .unwrap()
                     );
                 } else {
-                    if let Some(panes) = screen_data.get("panes").and_then(|v| v.as_object()) {
-                        for (id, pane) in panes {
-                            let title = pane.get("title").and_then(|v| v.as_str()).unwrap_or("-");
-                            let cwd = pane.get("cwd").and_then(|v| v.as_str()).unwrap_or("-");
-                            let session = pane
-                                .get("sessionId")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("-");
-                            println!(
-                                "{}\t{}\t{}\tsession={}",
-                                cli::display_cell(id),
-                                cli::display_cell(title),
-                                cli::display_cell(cwd),
-                                cli::display_cell(session)
-                            );
-                        }
+                    for line in cli::panes::pane_lines(&screen_data) {
+                        println!("{line}");
                     }
                 }
                 Ok(())

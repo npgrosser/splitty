@@ -6,6 +6,7 @@ mod discovery;
 pub mod download;
 pub mod editor;
 pub mod jobs;
+pub mod panes;
 pub mod review;
 pub mod socket;
 pub mod viewer;
