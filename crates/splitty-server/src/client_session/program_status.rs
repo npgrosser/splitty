@@ -18,7 +18,7 @@
 //! [`NOTIFY_INTERVAL`] old. The greeting and the event for a moved pane are
 //! never marked; a window decides whether a marked event notifies.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -129,12 +129,12 @@ impl Watching {
     fn check(&mut self, client_state: &ClientState, now: Instant, quiet: bool) -> Vec<ServerEvent> {
         self.locate(client_state);
         let mut events = Vec::new();
-        let mut present = Vec::new();
+        let mut present = HashSet::new();
         for session in client_state.dispatcher.backend().sessions() {
             let id = session.session_id().to_string();
             let location = self.locations.get(&SessionId::from(id.as_str())).cloned();
             let tracker = self.sessions.entry(id.clone()).or_default();
-            present.push(id.clone());
+            present.insert(id.clone());
             let moved = tracker.location != location;
             tracker.location = location.clone();
             if tracker.revision != session.program_status_revision() {
