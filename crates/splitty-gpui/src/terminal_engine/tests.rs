@@ -499,6 +499,8 @@ fn pinned_c_abi_layouts_match_64_bit_headers() {
     layout!(ffi::ScrollValue, 16, 8);
     layout!(ffi::Scroll, 24, 8);
     layout!(ffi::Scrollbar, 24, 8);
+    layout!(ffi::ModeConfig, 4, 2);
+    assert_eq!(mem::offset_of!(ffi::ModeConfig, value), 2);
     layout!(ffi::Writer, 16, 8);
     layout!(ffi::MimeReader, 16, 8);
     layout!(ffi::Paste, 56, 8);
@@ -906,5 +908,209 @@ fn scrollback_position_follows_relative_and_absolute_scrolling() -> Result<()> {
     assert_eq!(engine.scrollback()?.behind(), 6);
     engine.scroll_to_row(u64::MAX)?;
     assert_eq!(engine.scrollback()?.behind(), 0);
+    Ok(())
+}
+
+/// Unit (engine): the terminal reports synchronized output as supported.
+#[test]
+fn synchronized_output_is_reported_as_a_supported_mode() -> Result<()> {
+    let mut engine = Engine::new(20, 3)?;
+    assert_eq!(engine.feed(b"\x1b[?2026$p", false)?, b"\x1b[?2026;2$y");
+    engine.feed(b"\x1b[?2026h", false)?;
+    assert_eq!(engine.feed(b"\x1b[?2026$p", false)?, b"\x1b[?2026;1$y");
+    Ok(())
+}
+
+/// Unit (engine): an update between set and reset of the mode reaches the
+/// frame only with the reset, however the output is split across feeds.
+#[test]
+fn a_synchronized_update_reaches_the_frame_when_the_mode_is_reset() -> Result<()> {
+    let mut engine = Engine::new(20, 3)?;
+    engine.feed(b"old\r\nstatus", false)?;
+    assert_eq!(screen(&mut engine)?, ["old", "status", ""]);
+    let before = engine.frame()?.cursor;
+
+    engine.feed(b"\x1b[?20", false)?;
+    engine.feed(b"26h\x1b[H\x1b[2Jnew", false)?;
+    assert!(engine.frame_held());
+    assert_eq!(screen(&mut engine)?, ["old", "status", ""]);
+    let held = engine.frame()?.cursor;
+    assert_eq!((held.col, held.row), (before.col, before.row));
+    engine.feed(b"\r\n\r\nstatus\x1b[?2026", false)?;
+    assert_eq!(screen(&mut engine)?, ["old", "status", ""]);
+
+    engine.feed(b"l", false)?;
+    assert!(!engine.frame_held());
+    assert_eq!(screen(&mut engine)?, ["new", "", "status"]);
+    let after = engine.frame()?.cursor;
+    assert_eq!((after.col, after.row), (6, 2));
+    Ok(())
+}
+
+/// Unit (engine): a whole update inside one feed, and output without the
+/// mode, are in the next frame.
+#[test]
+fn output_outside_a_synchronized_update_is_in_the_next_frame() -> Result<()> {
+    let mut engine = Engine::new(20, 3)?;
+    engine.feed(b"plain", false)?;
+    assert!(!engine.frame_held());
+    assert_eq!(screen(&mut engine)?[0], "plain");
+    engine.feed(b"\x1b[?2026h\x1b[2J\x1b[Hwhole\x1b[?2026l", false)?;
+    assert!(!engine.frame_held());
+    assert_eq!(screen(&mut engine)?[0], "whole");
+    engine.feed(b" more", false)?;
+    assert_eq!(screen(&mut engine)?[0], "whole more");
+    Ok(())
+}
+
+/// Unit (engine): without a frame from before the update there is nothing
+/// to hold. A set sequence split across feeds captures none by itself.
+#[test]
+fn a_first_frame_is_never_held() -> Result<()> {
+    let mut engine = Engine::new(20, 3)?;
+    engine.feed(b"\x1b[?2026", false)?;
+    engine.feed(b"hfirst", false)?;
+    assert!(!engine.frame_held());
+    assert_eq!(screen(&mut engine)?[0], "first");
+    engine.feed(b" frame", false)?;
+    assert!(!engine.frame_held());
+    Ok(())
+}
+
+/// Unit (engine): a released hold shows the update as far as it got, and
+/// the mode staying on does not hold again until a program sets it anew.
+#[test]
+fn a_released_frame_stays_released_until_the_mode_is_set_again() -> Result<()> {
+    let mut engine = Engine::new(20, 3)?;
+    screen(&mut engine)?;
+    engine.feed(b"\x1b[?2026hone", false)?;
+    assert_eq!(screen(&mut engine)?[0], "");
+    engine.release_frame();
+    assert_eq!(screen(&mut engine)?[0], "one");
+    engine.feed(b" two", false)?;
+    assert!(!engine.frame_held());
+    assert_eq!(screen(&mut engine)?[0], "one two");
+    // The next update is held again, and known as another one.
+    engine.feed(b"\x1b[?2026l\x1b[?2026h three", false)?;
+    let first = engine.held_frame();
+    assert!(first.is_some());
+    assert_eq!(screen(&mut engine)?[0], "one two");
+    engine.feed(b" four", false)?;
+    assert_eq!(engine.held_frame(), first);
+    engine.feed(b"\x1b[?2026l\x1b[?2026h five", false)?;
+    assert!(engine.held_frame().is_some_and(|next| Some(next) != first));
+    assert_eq!(screen(&mut engine)?[0], "one two three four");
+    engine.feed(b"\x1b[?2026l", false)?;
+    assert_eq!(engine.held_frame(), None);
+    Ok(())
+}
+
+/// Unit (engine): the held frame is the screen from before the update, also
+/// when no frame was taken since the output before it, and it keeps the
+/// damage of that output.
+#[test]
+fn a_held_frame_shows_the_output_from_before_the_update() -> Result<()> {
+    let mut engine = Engine::new(20, 3)?;
+    screen(&mut engine)?;
+    engine.feed(
+        b"one\x1b[?2026h\r\ntwo\x1b[?2026l\x1b[?2026h\r\nthree",
+        false,
+    )?;
+    assert!(engine.frame_held());
+    assert_eq!(screen(&mut engine)?, ["one", "two", ""]);
+    engine.feed(b"\x1b[?2026l!", false)?;
+    engine.feed(b"\x1b[?2026h\x1b[2J", false)?;
+    {
+        let mut frame = engine.frame()?;
+        let mut dirty = Vec::new();
+        while let Some(row) = frame.next_row()? {
+            dirty.push(row.dirty);
+        }
+        assert!(!dirty[0] && dirty[2], "{dirty:?}");
+        frame.finish()?;
+    }
+    assert_eq!(screen(&mut engine)?, ["one", "two", "three!"]);
+
+    // A change of the whole screen before an update stays a full redraw.
+    engine.feed(b"\x1b[?2026l\x1b[?1049h", false)?;
+    engine.feed(b"\x1b[?2026hmore", false)?;
+    assert!(engine.frame()?.full_dirty);
+    Ok(())
+}
+
+/// Unit (engine): a resize, a full reset by the program and the engine's
+/// reset each end a hold.
+#[test]
+fn resize_and_reset_release_a_held_frame() -> Result<()> {
+    let mut engine = Engine::new(20, 3)?;
+    screen(&mut engine)?;
+    engine.feed(b"\x1b[?2026hresized", false)?;
+    assert!(engine.frame_held());
+    engine.resize(30, 4, 8, 16)?;
+    assert!(!engine.frame_held());
+    assert_eq!(screen(&mut engine)?[0], "resized");
+    // The resize reset the mode, so later output is not part of an update.
+    engine.feed(b"!", false)?;
+    assert_eq!(screen(&mut engine)?[0], "resized!");
+
+    engine.feed(b"\x1b[?2026h", false)?;
+    assert!(engine.frame_held());
+    engine.feed(b"\x1bcris", false)?;
+    assert!(!engine.frame_held());
+    assert_eq!(screen(&mut engine)?[0], "ris");
+
+    engine.feed(b"\x1b[?2026h", false)?;
+    assert!(engine.frame_held());
+    engine.reset()?;
+    assert!(!engine.frame_held());
+    engine.feed(b"fresh", false)?;
+    assert_eq!(screen(&mut engine)?[0], "fresh");
+    Ok(())
+}
+
+/// Unit (engine): scrolling, selecting, new colors and a search query show
+/// the terminal as it is, and the scrollback position follows the frame.
+#[test]
+fn local_changes_release_a_held_frame() -> Result<()> {
+    let mut engine = Engine::new(20, 3)?;
+    engine.feed(b"1\r\n2\r\n3\r\n4", false)?;
+    screen(&mut engine)?;
+    let shown = engine.shown_scrollback()?;
+    assert_eq!(shown.map(|shown| shown.total), Some(4));
+
+    engine.feed(b"\x1b[?2026h\r\n5", false)?;
+    assert!(engine.frame_held());
+    assert_eq!(engine.shown_scrollback()?, shown);
+    assert_eq!(engine.scrollback()?.total, 5);
+    engine.scroll(1)?;
+    assert!(!engine.frame_held());
+    assert_eq!(screen(&mut engine)?, ["2", "3", "4"]);
+    assert_eq!(engine.shown_scrollback()?.map(|shown| shown.total), Some(5));
+    engine.scroll_bottom()?;
+
+    let hold = |engine: &mut Engine| -> Result<()> {
+        engine.feed(b"\x1b[?2026l", false)?;
+        screen(engine)?;
+        engine.feed(b"\x1b[?2026hx", false)?;
+        assert!(engine.frame_held());
+        Ok(())
+    };
+    hold(&mut engine)?;
+    engine.select_start(0, 0, false)?;
+    assert!(!engine.frame_held());
+
+    hold(&mut engine)?;
+    engine.apply_colors(ColorConfig {
+        background: 0x10_20_30,
+        ..ColorConfig::default()
+    })?;
+    assert!(!engine.frame_held());
+
+    hold(&mut engine)?;
+    engine.set_search_query("x")?;
+    assert!(!engine.frame_held());
+    engine.feed(b"\x1b[?2026l", false)?;
+    engine.feed(b"\x1b[?2026hy", false)?;
+    assert!(!engine.frame_held(), "a set query holds no frame");
     Ok(())
 }

@@ -198,6 +198,13 @@ pub struct Paste {
     pub reader: MimeReader,
     pub allow_unsafe: bool,
 }
+/// `GhosttyTerminalModeConfig`: frozen layout. `mode` goes in, `value`
+/// comes out of a `DATA_MODE` query.
+#[repr(C)]
+pub struct ModeConfig {
+    pub mode: u16,
+    pub value: bool,
+}
 /// `GhosttyClipboardContent`: one MIME representation of a clipboard write,
 /// borrowed for the duration of the callback.
 #[repr(C)]
@@ -254,6 +261,10 @@ pub const DATA_CURSOR_VISIBLE: c_int = 7;
 pub const DATA_KITTY_FLAGS: c_int = 8;
 pub const DATA_SCROLLBAR: c_int = 9;
 pub const DATA_SELECTION: c_int = 31;
+pub const DATA_MODE: c_int = 37;
+/// `GHOSTTY_MODE_SYNCHRONIZED_OUTPUT` (modes.h): DEC private mode 2026 as a
+/// packed `GhosttyMode`, whose bit 15 is clear for a private mode.
+pub const MODE_SYNCHRONIZED_OUTPUT: u16 = 2026;
 pub const RENDER_DIRTY: c_int = 3;
 pub const RENDER_ROWS: c_int = 4;
 pub const RENDER_CURSOR: c_int = 18;

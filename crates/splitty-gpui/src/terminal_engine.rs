@@ -192,6 +192,9 @@ struct Replies {
     clipboard: Option<String>,
 }
 
+/// `CSI ? 2026 h` as programs write it: synchronized output begins.
+const SYNCHRONIZED_SET: &[u8] = b"\x1b[?2026h";
+
 /// Owns every native handle; the callback box's address survives moves of Engine.
 /// Rc's marker makes thread confinement explicit even if handle types change.
 pub struct Engine {
@@ -217,6 +220,17 @@ pub struct Engine {
     cell_height: u32,
     text: Vec<u8>,
     colors: ColorConfig,
+    /// Synchronized output (DEC private mode 2026) as the last feed or
+    /// resize left it.
+    synchronized: bool,
+    /// A program's update is in progress and `frame` shows the state from
+    /// before it. Set when a feed turns the mode on; see `frame_held`.
+    held: bool,
+    /// Counts the holds, to tell one from the next.
+    holds: u64,
+    /// The viewport's place in the history as the last updated frame had
+    /// it, `None` on the alternate screen; unset before a first frame.
+    shown_history: Option<Option<Scrollback>>,
     _thread: PhantomData<Rc<()>>,
 }
 
@@ -248,6 +262,10 @@ impl Engine {
             cell_height: 0,
             text: vec![0; 64],
             colors: ColorConfig::default(),
+            synchronized: false,
+            held: false,
+            holds: 0,
+            shown_history: None,
             _thread: PhantomData,
         };
         // SAFETY: each constructor receives a fresh output slot and the default
@@ -362,8 +380,86 @@ impl Engine {
     pub fn apply_colors(&mut self, colors: ColorConfig) -> Result<()> {
         if self.colors != colors {
             self.install_colors(colors)?;
+            self.release_frame();
         }
         Ok(())
+    }
+
+    /// Whether synchronized output (DEC private mode 2026) is set.
+    fn synchronized_output(&self) -> Result<bool> {
+        let mut mode = ffi::ModeConfig {
+            mode: ffi::MODE_SYNCHRONIZED_OUTPUT,
+            value: false,
+        };
+        // SAFETY: terminal.h documents an initialized GhosttyTerminalModeConfig
+        // as the in/out value of this data key.
+        check(unsafe {
+            ffi::ghostty_terminal_get(
+                self.terminal,
+                ffi::DATA_MODE,
+                ptr::from_mut(&mut mode).cast(),
+            )
+        })?;
+        Ok(mode.value)
+    }
+
+    /// Follow the mode after the terminal changed: turning it on begins a
+    /// hold, finding it off ends one. A mode that stays on across the change
+    /// neither begins a hold again nor extends one that was released.
+    /// Nothing is held without a frame from before the update, or while a
+    /// search query is set: its matches lie on the rows of the terminal as
+    /// it is.
+    fn follow_synchronized_output(&mut self) -> Result<()> {
+        let on = self.synchronized_output()?;
+        let begins =
+            on && !self.synchronized && self.shown_history.is_some() && !self.search.active();
+        if begins {
+            self.holds = self.holds.wrapping_add(1);
+        }
+        self.held = on && (self.held || begins);
+        self.synchronized = on;
+        Ok(())
+    }
+
+    /// Whether `frame` shows the state from before a synchronized update
+    /// (between `CSI ? 2026 h` and `CSI ? 2026 l`) instead of the terminal as
+    /// it is. A resize ends the hold, as the terminal resets the mode then,
+    /// and so do `reset`, `release_frame`, new colors, a search query and
+    /// the local changes a frame shows: scrolling and selecting.
+    ///
+    /// The engine has no clock: the view ends a hold that lasts too long with
+    /// `release_frame`.
+    pub fn frame_held(&self) -> bool {
+        self.held
+    }
+
+    /// A number for the hold in place, another one for each update that
+    /// begins: the view counts an update's time from when this changes.
+    pub fn held_frame(&self) -> Option<u64> {
+        self.held.then_some(self.holds)
+    }
+
+    /// End the hold: the next frame shows the terminal as it is, also in the
+    /// middle of an update. The next time a program sets the mode holds again.
+    pub fn release_frame(&mut self) {
+        self.held = false;
+    }
+
+    /// The viewport's place in the history of the screen the last frame
+    /// showed: the current one unless the frame is held. None on the
+    /// alternate screen, which has no history to move through.
+    pub fn shown_scrollback(&self) -> Result<Option<Scrollback>> {
+        match self.shown_history {
+            Some(shown) if self.frame_held() => Ok(shown),
+            _ => self.history(),
+        }
+    }
+
+    fn history(&self) -> Result<Option<Scrollback>> {
+        if self.is_alternate_screen()? {
+            return Ok(None);
+        }
+        self.scrollback().map(Some)
     }
 
     fn begin_effects(&mut self, suppress: bool) {
@@ -392,12 +488,55 @@ impl Engine {
             self.search.invalidate();
         }
         self.begin_effects(replay);
+        // Output that sets the mode is written in two steps, to capture the
+        // screen from before the update: without that a held frame would be
+        // the one of the last paint, which updates following each other
+        // faster than paints would leave behind. Only the plain sequence is
+        // looked for; in any other spelling the last painted frame is held.
+        let mut rest = bytes;
+        let mut result = Ok(());
+        while let Some(at) = rest
+            .windows(SYNCHRONIZED_SET.len())
+            .position(|window| window == SYNCHRONIZED_SET)
+        {
+            let (before, update) = rest.split_at(at);
+            self.write(before);
+            result = result.and(self.capture_before_update());
+            let (set, after) = update.split_at(SYNCHRONIZED_SET.len());
+            self.write(set);
+            rest = after;
+        }
+        self.write(rest);
+        let result = result.and_then(|()| self.follow_synchronized_output());
+        self.end_effects(result)
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
         // SAFETY: exclusive terminal access, live input slice for this synchronous
         // call, and no RefCell borrow held while the callback accesses its box.
         unsafe {
             ffi::ghostty_terminal_vt_write(self.terminal, bytes.as_ptr(), bytes.len());
         }
-        self.end_effects(Ok(()))
+    }
+
+    /// Bring the render state up to the terminal before an update begins. A
+    /// mode that is already set means an update is in progress: nothing is
+    /// captured in the middle of one.
+    fn capture_before_update(&mut self) -> Result<()> {
+        // An update that ended in this feed is seen here, so the one that
+        // follows is held as a new one.
+        self.follow_synchronized_output()?;
+        if self.synchronized {
+            return Ok(());
+        }
+        self.update_render_state()
+    }
+
+    fn update_render_state(&mut self) -> Result<()> {
+        // SAFETY: both handles are live and exclusively borrowed.
+        check(unsafe { ffi::ghostty_render_state_update(self.render, self.terminal) })?;
+        self.shown_history = Some(self.history()?);
+        Ok(())
     }
 
     /// Whether a program's clipboard write (OSC 52 and the other write
@@ -454,6 +593,8 @@ impl Engine {
             self.cell_width = cell_width;
             self.cell_height = cell_height;
         }
+        // The terminal resets the mode on a resize, which ends a hold.
+        let result = result.and_then(|()| self.follow_synchronized_output());
         self.end_effects(result)
     }
 
@@ -510,6 +651,7 @@ impl Engine {
         // SAFETY: the tagged union is constructed only by the two methods above.
         check(unsafe { ffi::ghostty_terminal_scroll_viewport(self.terminal, scroll) })?;
         self.search.invalidate();
+        self.release_frame();
         Ok(())
     }
 
@@ -964,6 +1106,8 @@ impl Engine {
     }
 
     fn selection_event(&mut self, kind: i32, cell: Option<(u16, u16)>, word: bool) -> Result<()> {
+        // A selection is drawn by the frame, so it shows the terminal as it is.
+        self.release_frame();
         let mut event = Owned::new(ffi::ghostty_selection_gesture_event_free);
         // SAFETY: the event and untracked references remain local to this call.
         // No terminal mutation occurs between resolving a point and applying it.
@@ -1143,8 +1287,13 @@ impl Engine {
         let mut cursor: ffi::RenderCursor = unsafe { mem::zeroed() };
         cursor.size = mem::size_of::<ffi::RenderCursor>();
         let mut dirty = 0i32;
+        // A held frame reads the render state as the last update left it: a
+        // copy of rows, cursor, colors and image placements that does not
+        // follow the terminal.
+        if !self.frame_held() {
+            self.update_render_state()?;
+        }
         unsafe {
-            check(ffi::ghostty_render_state_update(self.render, self.terminal))?;
             check(ffi::ghostty_render_state_get(
                 self.render,
                 ffi::RENDER_COLORS,

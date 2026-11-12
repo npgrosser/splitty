@@ -132,6 +132,9 @@ const SCROLL_BOTTOM_IN: Duration = Duration::from_millis(150);
 const SCROLL_BOTTOM_OUT: Duration = Duration::from_millis(200);
 /// How long after the last zoom step of a burst the PTY learns its size.
 const SIZE_REPORT_HOLD: Duration = Duration::from_millis(120);
+/// How long a program's synchronized update (DEC private mode 2026) may keep
+/// its output from the screen, counted from the moment it began.
+const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_secs(1);
 /// The web client's terminal font size; display zoom scales it.
 const BASE_FONT_SIZE: f32 = 14.;
 /// Provisional row height until layout measures the face: rows use the
@@ -596,6 +599,9 @@ pub struct Terminal {
     /// Zoom steps are arriving: the size is reported when this runs out.
     size_report_hold: Option<Task<()>>,
     resized_pixel_cell: Option<(u32, u32)>,
+    /// The engine holds the frame from before a synchronized update: this
+    /// releases it when that update, known by its number, takes too long.
+    held_frame_release: Option<(u64, Task<()>)>,
     face: Font,
     size: Size,
     generation: u64,
@@ -670,6 +676,7 @@ impl Terminal {
             size_report_pending: false,
             size_report_hold: None,
             resized_pixel_cell: None,
+            held_frame_release: None,
             // GPUI font lookup takes concrete family names, not CSS generic families.
             face: font(terminal_family(cx)),
             size,
@@ -882,7 +889,35 @@ impl Terminal {
             self.smoke_tail.drain(..start);
         }
         self.search_wake(cx);
+        self.watch_held_frame(cx);
         cx.notify();
+    }
+
+    /// Keep one timer per synchronized update. A program that never ends its
+    /// update, or a session that ends inside one, shows its output when the
+    /// timer runs out; an update that ended takes its timer along.
+    fn watch_held_frame(&mut self, cx: &mut Context<Self>) {
+        let Some(hold) = self.engine.as_ref().and_then(Engine::held_frame) else {
+            self.held_frame_release = None;
+            return;
+        };
+        if matches!(self.held_frame_release, Some((watched, _)) if watched == hold) {
+            return;
+        }
+        let release = cx.spawn(async move |this, cx| {
+            cx.background_executor()
+                .timer(SYNCHRONIZED_UPDATE_TIMEOUT)
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.held_frame_release = None;
+                if let Some(engine) = this.engine.as_mut() {
+                    engine.release_frame();
+                }
+                this.content_revision = this.content_revision.wrapping_add(1);
+                cx.notify();
+            });
+        });
+        self.held_frame_release = Some((hold, release));
     }
 
     pub fn reset(&mut self, generation: u64, cx: &mut Context<Self>) {
@@ -901,6 +936,7 @@ impl Terminal {
         self.scroll_remainder = 0.;
         self.scroll_remainder_x = 0.;
         self.scroll_route = None;
+        self.held_frame_release = None;
         let result = if let Some(engine) = self.engine.as_mut() {
             engine.reset()
         } else {
@@ -986,11 +1022,7 @@ impl Terminal {
     /// The viewport's place in the scrollback; none on the alternate screen,
     /// which has no history to move through.
     fn scrollback(&self) -> Option<Scrollback> {
-        let engine = self.engine.as_ref()?;
-        if engine.is_alternate_screen().unwrap_or(true) {
-            return None;
-        }
-        engine.scrollback().ok()
+        self.engine.as_ref()?.shown_scrollback().ok().flatten()
     }
 
     /// Apply `terminal.allowOsc52Write`: off, the engine refuses a program's
@@ -1858,6 +1890,8 @@ impl Terminal {
             }
             self.content_revision += 1;
             self.search_wake(cx);
+            // The resize ended a hold; its timer must not cut the next short.
+            self.watch_held_frame(cx);
             if size_changed {
                 if self.size_report_hold.is_some() {
                     self.size_report_pending = true;
@@ -2837,13 +2871,13 @@ mod paste_tests {
 #[cfg(all(test, feature = "ui-test-support"))]
 mod presentation_tests {
     use super::{links, Command, LinkOrigin, Terminal, TerminalPresentation};
-    use crate::terminal_engine::{LinkHit, LinkKind};
+    use crate::terminal_engine::{Engine, LinkHit, LinkKind};
     use gpui_kit::{
         div, point, prelude::*, px, size, AppContext, Context, Entity, IntoElement, Modifiers,
         MouseButton, ScrollDelta, ScrollEvent, ScrollSource, TestAppContext, TouchPhase,
         VisualTestContext, Window,
     };
-    use std::{cell::RefCell, rc::Rc};
+    use std::{cell::RefCell, rc::Rc, time::Duration};
 
     struct Fixture {
         terminal: Entity<Terminal>,
@@ -2957,6 +2991,66 @@ mod presentation_tests {
             feed(window, b"\x1b]52;c;dGhyZWU=\x07", false);
             assert_eq!(clipboard(window).as_deref(), Some("two"));
             assert_eq!(commands.borrow().len(), sent, "nothing goes to the program");
+        });
+    }
+
+    /// In-process (view): a synchronized update is painted when it ends, or
+    /// when it lasted too long; a reset leaves neither a hold nor its timer.
+    #[test]
+    fn a_synchronized_update_is_painted_when_it_ends_or_takes_too_long() {
+        with_view(|window, view, _| {
+            let terminal = window.update(|_, cx| view.read(cx).terminal.clone());
+            // Rows shaped so far, and whether the painted frame is held.
+            let paint = |window: &mut VisualTestContext| {
+                window.update(|window, cx| {
+                    window.draw(cx).clear(cx);
+                    let terminal = terminal.read(cx);
+                    assert!(terminal.painted_current());
+                    (
+                        terminal.shaped_rows,
+                        terminal.engine.as_ref().is_some_and(Engine::frame_held),
+                    )
+                })
+            };
+            let feed = |window: &mut VisualTestContext, bytes: &[u8]| {
+                window.update(|_, cx| {
+                    terminal.update(cx, |terminal, cx| terminal.feed(bytes, false, cx))
+                });
+            };
+            let wait = |window: &mut VisualTestContext, time: Duration| {
+                window.executor().advance_clock(time);
+                window.run_until_parked();
+            };
+            let (before, held) = paint(window);
+            assert!(!held);
+
+            feed(window, b"\x1b[?2026h\x1b[2J\x1b[Hhalf");
+            assert_eq!(paint(window), (before, true), "nothing new is drawn");
+            feed(window, b" and whole\x1b[?2026l");
+            let (ended, held) = paint(window);
+            assert!(ended > before && !held, "the update is drawn at its end");
+            window.update(|_, cx| assert!(terminal.read(cx).held_frame_release.is_none()));
+
+            feed(window, b"\x1b[?2026h\r\nnever ended");
+            wait(
+                window,
+                super::SYNCHRONIZED_UPDATE_TIMEOUT - Duration::from_millis(1),
+            );
+            assert_eq!(paint(window), (ended, true));
+            wait(window, Duration::from_millis(2));
+            window.update(|_, cx| assert!(terminal.read(cx).held_frame_release.is_none()));
+            let (released, held) = paint(window);
+            assert!(released > ended && !held, "the timeout shows the output");
+
+            feed(window, b"\x1b[?2026l");
+            feed(window, b"\x1b[?2026hagain");
+            assert!(paint(window).1);
+            window.update(|_, cx| {
+                terminal.update(cx, |terminal, cx| terminal.reset(1, cx));
+                let terminal = terminal.read(cx);
+                assert!(!terminal.engine.as_ref().is_some_and(Engine::frame_held));
+                assert!(terminal.held_frame_release.is_none());
+            });
         });
     }
 

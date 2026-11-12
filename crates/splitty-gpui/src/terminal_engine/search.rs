@@ -177,6 +177,10 @@ impl SearchState {
         self.revision = self.revision.wrapping_add(1);
         self.dirty |= self.index.is_some();
     }
+    /// A query is set: its matches are found in the terminal as it is now.
+    pub(super) fn active(&self) -> bool {
+        self.index.is_some()
+    }
 }
 
 impl Engine {
@@ -196,6 +200,7 @@ impl Engine {
             self.search.progress = SearchProgress::Limited;
             return Ok(());
         }
+        self.release_frame();
         self.search.query = query.to_owned();
         let mut index = Index {
             raw: ptr::null_mut(),

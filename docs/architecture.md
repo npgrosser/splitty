@@ -817,7 +817,11 @@ WSL-side success alone is not evidence of Windows endpoint reachability.
 The terminal view owns a thread-confined Ghostty VT engine behind an owned Rust
 wrapper; the wrapper contains the C interface and hands the view bounded render
 snapshots. Cached glyph shaping and change-driven GPUI notifications avoid
-reshaping unchanged cells and repainting an idle window. The retained `--probe`
+reshaping unchanged cells and repainting an idle window. While a program has
+synchronized output set (DEC private mode 2026), a paint shows the snapshot from
+before the update began; the mode's reset, a resize, a reset, a local scroll or
+selection, or one second since the update began bring the terminal's state back
+into the frame. The retained `--probe`
 fixture shows the earlier single terminal and native Markdown document; `--smoke`
 exercises that fixture. Received native frames and decoded messages keep their
 delivery charges through bounded UI queues, and versioned document reads stay

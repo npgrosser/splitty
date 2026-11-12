@@ -52,6 +52,12 @@ Keep temporary fixture paths short enough for Unix sockets.
   most 64 KiB of UTF-8, and only while `terminal.allowOsc52Write` of the
   window's own settings is on, for local and host panes alike. Clipboard
   reads stay unanswered. There is no notice after a copy yet.
+- Synchronized output (DEC private mode 2026, `terminal_engine.rs`): between
+  a program's `CSI ? 2026 h` and `CSI ? 2026 l` the view paints the frame from
+  before the update, so output that arrives in several chunks, as from a
+  host, never shows half drawn. The hold ends with the mode's reset, a
+  resize, a reset, a scroll or selection in the view, a search query, or one
+  second after it began (`SYNCHRONIZED_UPDATE_TIMEOUT` in `terminal.rs`).
 
 Current checks: **268 client-core tests, 190 GPUI tests, 17 architecture tests**,
 strict touched-crate all-target Clippy, formatting and affected strict OpenSpec
