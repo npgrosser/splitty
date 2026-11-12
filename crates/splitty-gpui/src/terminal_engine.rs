@@ -63,6 +63,24 @@ pub enum CursorShape {
     Hollow,
 }
 
+/// The viewport within the active screen: `rows` visible rows that start
+/// `offset` rows below the oldest of `total` rows.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Scrollback {
+    pub total: u64,
+    pub offset: u64,
+    pub rows: u64,
+}
+
+impl Scrollback {
+    /// Rows below the viewport; zero while it shows the newest rows.
+    pub fn behind(&self) -> u64 {
+        self.total
+            .saturating_sub(self.rows)
+            .saturating_sub(self.offset)
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Cursor {
     pub col: u16,
@@ -414,6 +432,39 @@ impl Engine {
         self.scroll_to(ffi::Scroll {
             tag: 1,
             value: ffi::ScrollValue { padding: [0; 2] },
+        })
+    }
+
+    /// Where the viewport is in the active screen's rows.
+    pub fn scrollback(&self) -> Result<Scrollback> {
+        // SAFETY: the zeroed output matches the scrollbar data key's layout.
+        let mut scrollbar: ffi::Scrollbar = unsafe { mem::zeroed() };
+        check(unsafe {
+            ffi::ghostty_terminal_get(
+                self.terminal,
+                ffi::DATA_SCROLLBAR,
+                ptr::from_mut(&mut scrollbar).cast(),
+            )
+        })?;
+        Ok(Scrollback {
+            total: scrollbar.total,
+            offset: scrollbar.offset,
+            rows: scrollbar.len,
+        })
+    }
+
+    /// Put the viewport's first row at `offset` rows from the oldest row;
+    /// an offset past the newest rows stops at the bottom.
+    pub fn scroll_to_row(&mut self, offset: u64) -> Result<()> {
+        let now = self.scrollback()?;
+        let offset = offset.min(now.total.saturating_sub(now.rows));
+        if offset == now.offset {
+            return Ok(());
+        }
+        let delta = isize::try_from(i128::from(offset) - i128::from(now.offset))?;
+        self.scroll_to(ffi::Scroll {
+            tag: 2,
+            value: ffi::ScrollValue { delta },
         })
     }
 

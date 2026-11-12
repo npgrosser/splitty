@@ -766,3 +766,24 @@ fn clearing_the_screen_takes_a_kitty_image_away() -> Result<()> {
     assert!(engine.frame()?.images()?.is_empty());
     Ok(())
 }
+
+#[test]
+fn scrollback_position_follows_relative_and_absolute_scrolling() -> Result<()> {
+    let mut engine = Engine::new(20, 3)?;
+    let start = engine.scrollback()?;
+    assert_eq!((start.rows, start.behind()), (3, 0));
+    engine.feed(b"1\r\n2\r\n3\r\n4\r\n5\r\n6\r\n7\r\n8", false)?;
+    let bottom = engine.scrollback()?;
+    assert_eq!((bottom.total, bottom.offset, bottom.behind()), (8, 5, 0));
+    engine.scroll(2)?;
+    assert_eq!(engine.scrollback()?.behind(), 2);
+    engine.scroll_to_row(0)?;
+    assert_eq!(engine.scrollback()?.offset, 0);
+    assert_eq!(engine.scrollback()?.behind(), 5);
+    // Output below a scrolled viewport leaves it where it is.
+    engine.feed(b"\r\n9", false)?;
+    assert_eq!(engine.scrollback()?.behind(), 6);
+    engine.scroll_to_row(u64::MAX)?;
+    assert_eq!(engine.scrollback()?.behind(), 0);
+    Ok(())
+}
