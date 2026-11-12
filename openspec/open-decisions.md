@@ -14,6 +14,13 @@ Each point names what holds now, the alternative, and where it is recorded.
   - **RTM-3:** the alternate screen's kitty keyboard stack is restored only when the replay starts on the alternate screen. The alternative rebuilds it also when the replay starts on the normal screen, by switching there and back around it.
   - **RTM-4:** where terminals differ, the tracker follows xterm: a soft reset leaves bracketed paste and focus reports alone, and resetting a mouse encoding not in effect changes nothing. The alternative follows terminals whose soft reset clears those too and whose encoding reset always returns to the default.
 
+- **`version-skew-smoke-test` VS-1 to VS-5** (2026-11-12, provisional, tbd; recorded in its proposal under "Decisions"):
+  - **VS-1:** the released build is the static `splitty` in the release's `splitty-wsl-x86_64.tar.gz`, not the desktop bundle.
+  - **VS-2:** "before a release" is a job of the release workflow that the publish job waits for; the CI run of the release commit would not stop a release.
+  - **VS-3:** the link to a host is covered without SSH, through either build's `remote-bridge`; `connect` and a client updating a host are left for a later step with the private SSH server of `tests/remote_connect.rs`.
+  - **VS-4:** the test variables are `SPLITTY_TEST_RELEASED_BINARY` and `SPLITTY_TEST_REQUIRE_RELEASED_BINARY`, apart from the rollback smoke's `SPLITTY_TEST_PREVIOUS_BINARY`.
+  - **VS-5:** the test does not assert that a setting only the newer build knows survives a downgrade, since today it does not (a finding under server-modes).
+
 - **`program-status` PS-1 to PS-3** (2026-11-12, provisional, tbd; recorded in its proposal under "Provisional decisions"):
   - **PS-1:** the server removes the status probe from the output it records and forwards, so no client or outer terminal answers it a second time. The alternative forwards it.
   - **PS-2:** while a pane holds a status record, its bells and OSC notifications raise no notification of their own. The alternatives notify for both, or merge them within a short time.
