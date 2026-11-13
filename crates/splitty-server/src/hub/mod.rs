@@ -1017,38 +1017,6 @@ mod tests {
             json!({"version":1,"forwards":[{"target":"vm1","remote":8080,"local":9090,
                 "enabled":false,"lastError":{"code":"local_port_conflict","message":"occupied"}}]})
         );
-        let op = |row: HostPreference| {
-            value(&crate::service::operations::host_preferences_reply(
-                splitty_remote::hosts::HostPreferences {
-                    version: 1,
-                    hosts: vec![row],
-                },
-            ))["hosts"][0]
-                .clone()
-        };
-        assert_eq!(
-            value(&crate::service::operations::host_order_reply(HostOrder {
-                version: 1,
-                order: vec!["vm1".into(), "vm2".into()],
-            })),
-            json!({"version":1,"order":["vm1","vm2"]})
-        );
-        assert_eq!(
-            op(HostPreference {
-                target: "vm1".into(),
-                alias: Some("Build".into()),
-                hidden: false,
-            }),
-            json!({"target":"vm1","alias":"Build"})
-        );
-        assert_eq!(
-            op(HostPreference {
-                target: "vm2".into(),
-                alias: None,
-                hidden: true,
-            }),
-            json!({"target":"vm2","hidden":true})
-        );
         let dir = tempfile::tempdir().expect("temporary directory");
         let host = splitty_core::native_api::remembered::HostScreens::new(
             "vm1",

@@ -130,6 +130,7 @@ model {
     protocol -> splitty.transport.budget 'Keep replay snapshots and image/upload decode workers charged until consumption'
     effect_runner -> splitty.transport.queue 'SessionHandle test double uses the bounded subscription contract'
     protocol -> mux 'ScreenInfo, ScreenState'
+    protocol -> template 'Template in the mux.template_extracted answer'
     protocol -> effect_runner 'EnvContext'
     protocol -> pty 'Backend, SessionHandle, Session, OSC events, ListeningPort, ProgramStatus; pty::testing in tests'
     daemon -> config 'config_dir, owner-only files'

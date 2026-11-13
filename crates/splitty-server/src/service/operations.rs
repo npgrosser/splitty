@@ -1325,3 +1325,50 @@ pub(crate) async fn post_editor_open(
         Err(e) => error(e),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hub::{HostOrder, HostPreference};
+    use serde_json::json;
+
+    /// The host metadata replies keep the JSON the hub's records had.
+    #[test]
+    fn host_replies_keep_their_json() {
+        fn value(reply: &impl serde::Serialize) -> serde_json::Value {
+            serde_json::to_value(reply).expect("serialize")
+        }
+        let row = |row: HostPreference| {
+            value(&host_preferences_reply(
+                splitty_remote::hosts::HostPreferences {
+                    version: 1,
+                    hosts: vec![row],
+                },
+            ))["hosts"][0]
+                .clone()
+        };
+        assert_eq!(
+            value(&host_order_reply(HostOrder {
+                version: 1,
+                order: vec!["vm1".into(), "vm2".into()],
+            })),
+            json!({"version":1,"order":["vm1","vm2"]})
+        );
+        assert_eq!(
+            row(HostPreference {
+                target: "vm1".into(),
+                alias: Some("Build".into()),
+                hidden: false,
+            }),
+            json!({"target":"vm1","alias":"Build"})
+        );
+        assert_eq!(
+            row(HostPreference {
+                target: "vm2".into(),
+                alias: None,
+                hidden: true,
+            }),
+            json!({"target":"vm2","hidden":true})
+        );
+    }
+}

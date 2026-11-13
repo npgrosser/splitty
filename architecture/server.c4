@@ -143,6 +143,7 @@ model {
     service -> splitty.core.config 'Home settings, metadata and validation'
     service -> splitty.core.shell_profiles 'Shell profile state'
     service -> splitty.core.template 'Template store'
+    service -> splitty.remote.hosts 'Project host metadata records into the shared reply types'
     service -> jobs 'Trusted-user and scoped job operations with serialization under authorization guards'
     service -> splitty.core.ids 'Screen, pane and job identifiers'
     service -> splitty.core.protocol 'Client commands, server events and size policy'
