@@ -13,8 +13,9 @@ An explicit browser gateway SHALL accept `/ws/remote` upgrades with `ticket` and
 4. send `remote.ready`;
 5. relay every application message between the client stream and the host daemon unchanged, text as text and binary as binary, in order.
 
-Before the relay the hub SHALL send only these application text messages:
-- `{"type": "remote.progress", "step", "message"}`, with `step` one of `install`, `daemon`, `started` and `bridge`;
+Preparation progress SHALL travel once per stream. The steps are `install`, `daemon`, `update`, `started` and `bridge`, in this order. On a native host stream the hub SHALL report them only as transport progress reports during preparation, before the stream is accepted; such reports MAY also carry a phase that is not a step, such as `connecting`. On a browser `/ws/remote` socket the gateway SHALL translate those reports into `{"type": "remote.progress", "step", "message"}` text messages, at most one per step and only for a step later than the last one sent, and SHALL send no `remote.progress` it did not translate.
+
+Before the relay the hub SHALL send only these application text messages, on a native host stream after its acceptance and on a browser socket after the translated progress:
 - exactly one `{"type": "remote.ready", "target", "daemon": {"version", "protocol", "keepsSessions", "started"}, "screens": [{"id", "name", "panes"}]}`, where `keepsSessions` is the handshake's (see `remote-hosts`, Remote Handshake);
 - or `{"type": "remote.error", "code", "message", "hint"?}`, after which it SHALL close the socket. `code` is one of `invalid_target`, `host_key`, `auth`, `unreachable`, `unsupported_host`, `install`, `daemon`, `incompatible`, `migration_unavailable`, `bridge` and `internal`.
 
@@ -25,6 +26,14 @@ The ready message SHALL include `update: {available, keepsSessions, toVersion?}`
 #### Scenario: Connect a host without Splitty
 - **WHEN** a client opens `/ws/remote?target=vm1` with a valid ticket and `vm1` has no Splitty
 - **THEN** it receives `remote.progress` messages for the install and the daemon start, then `remote.ready` with `started` true, then the host daemon's `mux.welcome`
+
+#### Scenario: Progress on a native host stream
+- **WHEN** a native main client opens a host stream for a host without Splitty
+- **THEN** it receives transport progress reports for the install and the daemon start during preparation, and after acceptance `remote.ready` is the first application message, followed by the host daemon's `mux.welcome`, without a `remote.progress` text
+
+#### Scenario: Hub of the previous release
+- **WHEN** a native client or the gateway opens a host stream through a hub of the previous release, which repeats its progress as `remote.progress` text after acceptance
+- **THEN** the reader ignores every `remote.progress` text before `remote.ready`, so each step is shown once, from the transport progress reports; no capability is involved
 
 #### Scenario: Unknown host key
 - **WHEN** `ssh` to the target fails host key verification
