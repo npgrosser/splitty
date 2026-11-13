@@ -103,6 +103,15 @@ Keep temporary fixture paths short enough for Unix sockets.
   and ignore snapshots below the version their own save is expected to
   become; the two-second hold after a save is left only for services
   without versions.
+- Viewer annotations take their anchors and the review from the pane's
+  service (`viewer-reviews-v1`): `workspace/viewer/notes.rs` sends
+  `Command::AnchorViewer` when the version shown or the annotations' targets
+  change and `Command::ReviewViewer` when it copies, sends or answers a
+  review; `native_workspace/viewers.rs` answers with `Update::ViewerAnchors`
+  and `Update::ViewerReview`. An annotation without an anchor for the
+  version shown is listed at its recorded lines without a mark. A host
+  without the capability gets a notes panel that asks for its update. The
+  notes have no view tests yet.
 
 Current checks: **268 client-core tests, 190 GPUI tests, 17 architecture tests**,
 strict touched-crate all-target Clippy, formatting and affected strict OpenSpec

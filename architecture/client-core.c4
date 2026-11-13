@@ -90,7 +90,7 @@ model {
     native_workspace -> splitty.transport.admission 'Type the forbidden fixture Screen bridge admission'
     native_workspace -> client_ports 'Compose identified local-owner forwarding commands, passive invalidation and joined cancellation'
     native_workspace -> client_document 'Read the documents of shown viewer panes on the connection that holds them'
-    native_workspace -> client_annotations 'Carry annotation changes and review verdicts to the Screen that holds the viewer pane'
+    native_workspace -> client_annotations 'Carry annotation changes and review verdicts to the Screen that holds the viewer pane, and bring back its server\'s anchors and reviews'
     connection -> client_annotations 'Name the verdict of a review answer'
     client_annotations -> splitty.core.mux 'Use the annotation records of the shared mux state'
     client_ports -> client_workspace 'Validate immutable source and terminal origins and join connection-owned discovery'
@@ -123,7 +123,7 @@ model {
     }
 
     client_annotations = component 'client_annotations' {
-      description 'Pure annotation anchoring by quote, passage targets and the review text handed to a terminal or a waiting process.'
+      description 'Passage targets of selections, the server\'s anchors as passages of the shown document, and how the server\'s review is handed to a terminal or a waiting process.'
       metadata { module 'splitty_client_core::annotations' }
     }
 
