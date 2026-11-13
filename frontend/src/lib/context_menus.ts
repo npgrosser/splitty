@@ -15,6 +15,7 @@ import { getScreens, type Screen } from "../stores/screens.svelte.ts";
 import { scratchpadOf, toggleScratchpad } from "./scratchpad.ts";
 import type { AnnotationKind } from "./protocol/types.ts";
 import type { TerminalSession } from "./terminal/terminal_session.ts";
+import { isViewerPanel } from "./viewer/panel.ts";
 import { MAX_TEXT_BYTES, isViewerCwd, utf8Length, viewerTitle } from "./viewer/limits.ts";
 
 // ── Pane Context Menu ──
@@ -324,7 +325,8 @@ export function moveToScreenItem(
 
 /** The directory actions belong to the selected terminal's connection. */
 function terminalDirectoryItems(api: DockviewApi, paneId: string): ContextMenuItem[] {
-  if (!paneId.startsWith("terminal-")) return [];
+  // The pane's kind is its component; ids carry no meaning (workspace-model).
+  if (isViewerPanel(api.getPanel(paneId))) return [];
   const cwd = sessionForPane(api, paneId)?.lastCwd;
   const editor = editorMenuItem(api, paneId);
   const ssh = sshPathMenuItem(api, paneId);

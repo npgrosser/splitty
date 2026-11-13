@@ -18,7 +18,7 @@ function randomHex(bytes: number): string {
   return Array.from(buf, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
-/** A new terminal pane id. The `terminal-` prefix marks terminal panes (`context_menus.ts`). */
+/** A new terminal pane id. The prefix is cosmetic: a pane's kind is its component, never its id. */
 export function newPaneId(): string {
   return `terminal-${randomHex(8)}`;
 }

@@ -76,6 +76,35 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
+describe("directory actions by pane kind", () => {
+  function panelScreen(id: string, component: string) {
+    const api = {
+      id: `dv-${id}`,
+      getPanel: (pane: string) => (pane === id ? { params: {}, view: { contentComponent: component } } : undefined),
+    } as unknown as DockviewApi;
+    const server = fakeServer("local", "label");
+    const binding = new ScreenBinding(`screen-${id}`, server.conn, "screen-same");
+    const session = new TerminalSession(server.conn.sessions, `session-${id}`, fakeEmulator());
+    session.wire();
+    session.lastCwd = "/srv/project";
+    binding.linkPane(id, session.id);
+    registerScreenApi(api, binding);
+    APIs.push(api);
+    servers.push(server);
+    return api;
+  }
+  // A pane's kind is its component: the native app and the CLI name panes freely.
+  it.each(["3f2c9a52-7c1e-4f55-9a0b-0d6a5c6e1b11", "pane-7", "terminal-1"])("offers them for the terminal pane %s", (id) => {
+    const labels = paneMenuItems(id, panelScreen(id, "terminal")).map((item) => item.label);
+    expect(labels).toContain("Copy Working Directory");
+    expect(labels).toContain("Open Folder in");
+  });
+  it("offers none for a viewer pane, whatever its id", () => {
+    const labels = paneMenuItems("terminal-looks-like-one", panelScreen("terminal-looks-like-one", "viewer")).map((item) => item.label);
+    expect(labels).not.toContain("Copy Working Directory");
+  });
+});
+
 for (const kind of ["pane", "tab"] as const) describe(`${kind} remote editor action`, () => {
   it("uses the selected connection despite colliding pane/session ids and opens only on click", () => {
     screen("local", "/local");
