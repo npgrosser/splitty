@@ -5,66 +5,26 @@
 //! without `hub-host-state-v1` is only read.
 use super::valid_target;
 use crate::api_stream::{decode, ApiStream};
-use serde::{Deserialize, Serialize};
+pub use splitty_core::native_api::remembered::RememberedScreen;
 use splitty_core::native_api::{
-    remembered::{HostScreen, HostScreens},
+    remembered::{HostScreen, HostScreens, Remembered, FORMAT, MAX_ID, MAX_NAME, MAX_SCREENS},
     Operation,
 };
 use std::{future::Future, io, pin::Pin, sync::Arc, time::Duration};
 use tokio::time::Instant;
 
-const FORMAT: u32 = 1;
-/// The service's own limits; a list beyond them is refused as a whole.
-const MAX_SCREENS: usize = 200;
-const MAX_ID: usize = 256;
-const MAX_NAME: usize = 200;
 /// A failed read or write is not repeated before this has passed.
 const RETRY: Duration = Duration::from_secs(5);
 /// How often a write is tried before its edits are given up.
 const ATTEMPTS: u8 = 3;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct RememberedScreen {
-    pub target: String,
-    pub screen_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Written by clients that mix local and remote Screens in one list.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub position: Option<u32>,
-    /// The host was closed in the window: offered again, not reopened at start.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub closed: bool,
-}
-impl RememberedScreen {
-    pub fn new(target: &str, screen_id: &str, name: Option<&str>) -> Self {
-        Self {
-            target: target.into(),
-            screen_id: screen_id.into(),
-            name: name.map(|name| name.chars().take(MAX_NAME).collect()),
-            position: None,
-            closed: false,
-        }
-    }
-    pub fn closed(mut self) -> Self {
-        self.closed = true;
-        self
-    }
-    /// The same Screen under the same name; its place in a mixed list is
-    /// another client's concern.
-    fn same(&self, other: &Self) -> bool {
-        self.target == other.target
-            && self.screen_id == other.screen_id
-            && self.name == other.name
-            && self.closed == other.closed
-    }
-}
-
-#[derive(Serialize, Deserialize)]
-struct Document {
-    version: u32,
-    screens: Vec<RememberedScreen>,
+/// The same Screen under the same name; its place in a mixed list is
+/// another client's concern.
+fn same(one: &RememberedScreen, other: &RememberedScreen) -> bool {
+    one.target == other.target
+        && one.screen_id == other.screen_id
+        && one.name == other.name
+        && one.closed == other.closed
 }
 
 /// The list as the local service last returned it.
@@ -147,7 +107,7 @@ impl RememberedClient {
     /// queued edits are written. Unknown before the first read.
     fn settled(&self, target: &str, screens: &[RememberedScreen]) -> bool {
         let same = |held: &[&RememberedScreen]| {
-            held.len() == screens.len() && held.iter().zip(screens).all(|(a, b)| a.same(b))
+            held.len() == screens.len() && held.iter().zip(screens).all(|(a, b)| same(a, b))
         };
         for edits in [&self.edits, &self.writing] {
             if let Some((_, edit)) = edits.iter().find(|(host, _)| host == target) {
@@ -273,7 +233,7 @@ fn checked(
     if reply.uncertain {
         return Err(invalid());
     }
-    let document = decode::<Document>(client, reply)?;
+    let document = decode::<Remembered>(client, reply)?;
     if document.version != FORMAT || document.screens.len() > MAX_SCREENS {
         return Err(invalid());
     }
@@ -358,7 +318,7 @@ mod tests {
 
     #[test]
     fn a_closed_host_is_remembered_but_not_among_the_hosts_to_reconnect() {
-        let list: Document = serde_json::from_value(json!({"version": 1, "screens": [
+        let list: Remembered = serde_json::from_value(json!({"version": 1, "screens": [
             {"target": "vm1", "screenId": "a"},
             {"target": "vm2", "screenId": "x", "closed": true},
             {"target": "vm1", "screenId": "b", "name": "logs"},
@@ -377,7 +337,7 @@ mod tests {
             serde_json::to_value(&closed).unwrap(),
             json!({"target": "vm2", "screenId": "x", "closed": true})
         );
-        assert!(!closed.same(&RememberedScreen::new("vm2", "x", None)));
+        assert!(!same(&closed, &RememberedScreen::new("vm2", "x", None)));
         assert_eq!(
             serde_json::to_value(RememberedScreen::new("vm1", "a", None)).unwrap(),
             json!({"target": "vm1", "screenId": "a"}),

@@ -7,9 +7,9 @@
 
 ## 2. Hub reply types
 
-- [ ] 2.1 Unit: pin the JSON of the remembered Screens, forward, forward preference, reverse forward, reverse preference and host-metadata replies as the server builds them today.
-- [ ] 2.2 Move the reply types into `splitty_core::native_api` (`remembered`, `forwards`, `reverse`, `hosts`); the server builds its replies from them, client-core decodes them and drops its copies and its use of `splitty_remote::hosts` records.
-- [ ] 2.3 Unit (client-core): replies with unknown fields still decode.
+- [x] 2.1 Unit: pin the JSON of the remembered Screens, forward, forward preference, reverse forward, reverse preference and host-metadata replies as the server builds them today.
+- [x] 2.2 Move the reply types into `splitty_core::native_api` (`remembered`, `forwards`, `reverse`, `hosts`); the server builds its replies from them, client-core decodes them and drops its copies and its use of `splitty_remote::hosts` records.
+- [x] 2.3 Unit (client-core): replies with unknown fields still decode.
 
 ## 3. Ad hoc server messages
 

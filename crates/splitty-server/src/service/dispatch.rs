@@ -139,13 +139,15 @@ impl State {
             Operation::HostForget => {
                 op::host_preference_response(hub.forget_host(body).map(|()| None))
             }
-            Operation::HostPreferencesGet => Payload(hub.host_preferences()).into_reply(),
+            Operation::HostPreferencesGet => {
+                Payload(op::host_preferences_reply(hub.host_preferences())).into_reply()
+            }
             Operation::HostPreferencesUpdate => {
                 op::host_preference_response(hub.update_host_preference(body).map(Some))
             }
-            Operation::HostOrderGet => Payload(hub.host_order()).into_reply(),
+            Operation::HostOrderGet => Payload(op::host_order_reply(hub.host_order())).into_reply(),
             Operation::HostOrderUpdate => match hub.set_host_order(body) {
-                Ok(order) => Payload(order).into_reply(),
+                Ok(order) => Payload(op::host_order_reply(order)).into_reply(),
                 Err(error) => op::host_preference_response(Err(error)),
             },
             Operation::RemoteScreensGet => Payload(hub.remembered_screens()).into_reply(),

@@ -233,12 +233,12 @@ pub(super) async fn write(client: &mut ApiStream, job: &Job) -> (HostManagementR
         );
     }
     let valid = if op == Operation::HostOrderUpdate {
-        decode::<splitty_remote::hosts::HostOrder>(client, &reply)
+        decode::<splitty_core::native_api::hosts::HostOrder>(client, &reply)
             .is_ok_and(|row| row.version == 1 && job.request.order.as_ref() == Some(&row.order))
     } else if op == Operation::HostForget {
         reply.status == 204 && reply.body.is_empty()
     } else {
-        decode::<splitty_remote::hosts::HostPreference>(client, &reply).is_ok_and(|row| {
+        decode::<splitty_core::native_api::hosts::HostPreference>(client, &reply).is_ok_and(|row| {
             row.target == job.request.target
                 && (job.request.action != HostManagementAction::Connect || !row.hidden)
                 && job.request.alias.as_ref().is_none_or(|alias| {

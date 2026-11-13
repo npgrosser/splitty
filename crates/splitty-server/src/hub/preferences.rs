@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use splitty_remote::{hosts, ssh::SshTarget};
 
 use super::forwards::{ForwardError, Key, MAX_PER_HOST};
@@ -15,43 +15,45 @@ pub const FILE: &str = "remote-forwards.json";
 pub const MAX_TOTAL: usize = 256;
 pub const MAX_LABEL: usize = 200;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub use splitty_core::native_api::forwards::{
+    ForwardPreferences as Preferences, SavedError, SavedForward,
+};
+
+/// The rules as the file holds them: unknown fields are refused, and so is
+/// `lastError`, which only the API attaches.
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SavedForward {
-    pub target: String,
-    pub remote: u16,
-    pub local: u16,
-    pub label: String,
-    pub enabled: bool,
-    /// Only the API attaches errors. They are never accepted from disk.
-    #[serde(
-        rename = "lastError",
-        skip_deserializing,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub last_error: Option<SavedError>,
+struct Stored {
+    version: u32,
+    forwards: Vec<StoredForward>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct SavedError {
-    pub code: String,
-    pub message: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hint: Option<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Preferences {
-    pub version: u32,
-    pub forwards: Vec<SavedForward>,
+struct StoredForward {
+    target: String,
+    remote: u16,
+    local: u16,
+    label: String,
+    enabled: bool,
 }
 
-impl Default for Preferences {
-    fn default() -> Self {
+impl From<Stored> for Preferences {
+    fn from(stored: Stored) -> Self {
         Self {
-            version: 1,
-            forwards: Vec::new(),
+            version: stored.version,
+            forwards: stored
+                .forwards
+                .into_iter()
+                .map(|row| SavedForward {
+                    target: row.target,
+                    remote: row.remote,
+                    local: row.local,
+                    label: row.label,
+                    enabled: row.enabled,
+                    last_error: None,
+                })
+                .collect(),
         }
     }
 }
@@ -64,7 +66,7 @@ pub struct Store {
 impl Store {
     pub fn new(path: PathBuf) -> Self {
         let document = match fs::read(path.join(FILE)) {
-            Ok(bytes) => match serde_json::from_slice::<Preferences>(&bytes) {
+            Ok(bytes) => match serde_json::from_slice::<Stored>(&bytes).map(Preferences::from) {
                 Ok(mut document) if valid(&document) => {
                     document
                         .forwards

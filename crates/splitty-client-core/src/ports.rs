@@ -8,7 +8,11 @@ use crate::{
     workspace::{SourceToken, TerminalToken, WindowWorkspace},
 };
 pub(crate) use runtime::{PortsClient, PortsEvent};
-use serde::Deserialize;
+// The local hub's replies (`native_api::forwards`), as this module reads them.
+use splitty_core::native_api::forwards::{
+    ForwardInfo as ActiveForward, ForwardPreferences as Preferences, ForwardState as ActiveState,
+    SavedForward,
+};
 use splitty_remote::ssh::SshTarget;
 use splitty_transport::budget::{Charged, Lease};
 use std::{
@@ -262,41 +266,6 @@ pub enum ForwardState {
     Up,
     Rebuilding,
 }
-#[derive(Debug, Deserialize)]
-struct ActiveForward {
-    target: String,
-    remote: u16,
-    local: u16,
-    state: ActiveState,
-}
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-enum ActiveState {
-    Up,
-    Down,
-}
-#[derive(Debug, Deserialize)]
-struct SavedForward {
-    target: String,
-    remote: u16,
-    local: u16,
-    label: String,
-    enabled: bool,
-    #[serde(rename = "lastError")]
-    last_error: Option<SavedError>,
-}
-#[derive(Debug, Deserialize)]
-struct SavedError {
-    code: String,
-    message: String,
-    hint: Option<String>,
-}
-#[derive(Debug, Deserialize)]
-struct Preferences {
-    version: u32,
-    forwards: Vec<SavedForward>,
-}
-
 /// Independent last-good service resources. Discovery is joined only at presentation time.
 #[derive(Clone, Debug)]
 pub struct ForwardSnapshot {

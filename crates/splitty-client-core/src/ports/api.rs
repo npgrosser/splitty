@@ -1,6 +1,7 @@
 //! Existing LocalHub wire contracts; no persistence or SSH ownership.
 use super::*;
 use crate::api_stream::{decode, ApiStream};
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use splitty_core::native_api::Operation;
 use splitty_transport::{budget::Charged, wire};
@@ -349,5 +350,10 @@ mod tests {
         }
         assert_eq!(saved.forwards[0].label, "App\nPreview");
         assert!(saved.forwards[1].last_error.is_some());
+        // A newer service's fields are not this client's concern.
+        let newer: Preferences = serde_json::from_str(r#"{"version":1,"forwards":[{"target":"new","remote":3001,"local":4174,"label":"API","enabled":true,"restoredAt":5}],"updated":1}"#).unwrap();
+        validate_saved(&newer.forwards[0]).unwrap();
+        let active: Vec<ActiveForward> = serde_json::from_str(r#"[{"target":"new","remote":3001,"local":4174,"url":"http://localhost:4174/","state":"up","since":5}]"#).unwrap();
+        validate_active(&active).unwrap();
     }
 }

@@ -146,8 +146,12 @@ that implementation; the transport never imports domain operations. The native
 `ApiStream` adapter and `LocalServiceClient` reuse it for settings, profiles, zoom
 and templates without consuming terminal events or duplicating scheduling.
 The shared catalog also owns `native_api::directory`, the unchanged merged-host
-response shape. The hub projects its persistence records into this contract;
-native clients do not depend on server storage types.
+response shape, and the hub's other replies: remembered remote Screens
+(`native_api::remembered`), forwards and their rules (`forwards`), shared local
+ports (`reverse`) and host metadata (`hosts`). The hub projects its persistence
+records into these contracts and keeps its files' records and strict checks to
+itself; the reply types ignore unknown fields, and native clients do not depend
+on server storage types.
 Every `mux.welcome` capability name is defined once in `core::protocol::capability`,
 which also assembles the welcome's list in its fixed order; the session handler only
 says whether the connection is a local main one with a hub, and clients test the

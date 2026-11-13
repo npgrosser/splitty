@@ -4,9 +4,11 @@
 //! when their host connects. Nothing here reacts to a host's messages.
 use super::valid_target;
 use crate::api_stream::{decode, ApiStream};
-use serde::Deserialize;
 use serde_json::{json, Map, Value};
-use splitty_core::native_api::Operation;
+use splitty_core::native_api::{
+    reverse::{ForwardState, ReverseInfo, ReversePreferences},
+    Operation,
+};
 use std::{collections::VecDeque, future::Future, io, pin::Pin, sync::Arc};
 
 const MAX_SAVED: usize = 256;
@@ -141,33 +143,6 @@ impl SharesSnapshot {
     pub fn read_error(&self) -> Option<&str> {
         self.read_error.as_deref()
     }
-}
-
-#[derive(Deserialize)]
-struct Active {
-    target: String,
-    remote: u16,
-    local: u16,
-    #[serde(default)]
-    state: String,
-}
-#[derive(Deserialize)]
-struct Saved {
-    target: String,
-    remote: u16,
-    local: u16,
-    enabled: bool,
-    #[serde(default, rename = "lastError")]
-    last_error: Option<Failure>,
-}
-#[derive(Deserialize)]
-struct Failure {
-    message: String,
-}
-#[derive(Deserialize)]
-struct Preferences {
-    version: u32,
-    forwards: Vec<Saved>,
 }
 
 type Outcome = (io::Result<Vec<Share>>, Option<String>);
@@ -404,12 +379,12 @@ async fn read(client: &mut ApiStream) -> io::Result<Vec<Share>> {
         .request(Operation::ReverseList, Map::new())
         .await
         .map_err(|_| lost())?;
-    let active = decode::<Vec<Active>>(client, &reply)?;
+    let active = decode::<Vec<ReverseInfo>>(client, &reply)?;
     let reply = client
         .request(Operation::ReversePreferencesGet, Map::new())
         .await
         .map_err(|_| lost())?;
-    let saved = decode::<Preferences>(client, &reply)?;
+    let saved = decode::<ReversePreferences>(client, &reply)?;
     if saved.version != 1 || saved.forwards.len() > MAX_SAVED || active.len() > MAX_SAVED {
         return Err(invalid());
     }
@@ -440,7 +415,7 @@ async fn read(client: &mut ApiStream) -> io::Result<Vec<Share>> {
         if forward.remote == 0 || forward.local == 0 {
             return Err(invalid());
         }
-        let state = if forward.state == "down" {
+        let state = if forward.state == ForwardState::Down {
             ShareState::Rebuilding
         } else {
             ShareState::Up

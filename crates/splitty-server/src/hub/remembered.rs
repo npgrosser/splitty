@@ -20,64 +20,54 @@ use std::fs;
 use std::io;
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use splitty_remote::hosts;
 use splitty_remote::ssh::SshTarget;
 
 /// The file in the configuration directory.
 pub const FILE: &str = "remote-screens.json";
 
-/// The format version of the file and of the API's documents.
-pub const FORMAT: u32 = 1;
+pub use splitty_core::native_api::remembered::{
+    Remembered, RememberedScreen, FORMAT, MAX_ID, MAX_NAME, MAX_SCREENS,
+};
 
-/// How many screens the list holds at most.
-pub const MAX_SCREENS: usize = 200;
-
-/// The longest screen id, in characters.
-pub const MAX_ID: usize = 256;
-
-/// The longest name, in characters: the client's cap on names.
-pub const MAX_NAME: usize = 200;
-
-/// The remembered list, as the file holds it and the API sends and takes it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The list as the file holds it and a client sends it, with unknown fields
+/// refused; replies are [`Remembered`].
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct Remembered {
-    pub version: u32,
-    pub screens: Vec<RememberedScreen>,
+struct Strict {
+    version: u32,
+    screens: Vec<StrictScreen>,
 }
 
-impl Remembered {
-    fn empty() -> Self {
-        Self {
-            version: FORMAT,
-            screens: Vec::new(),
+/// One entry of [`Strict`].
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StrictScreen {
+    target: String,
+    screen_id: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    position: Option<u32>,
+    #[serde(default)]
+    closed: bool,
+}
+
+impl From<StrictScreen> for RememberedScreen {
+    fn from(screen: StrictScreen) -> Self {
+        RememberedScreen {
+            target: screen.target,
+            screen_id: screen.screen_id,
+            name: screen.name,
+            position: screen.position,
+            closed: screen.closed,
         }
     }
 }
 
-/// A remote screen the client shows: its host, its id on the host, and what
-/// the client needs to show it before the host is connected.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct RememberedScreen {
-    pub target: String,
-    pub screen_id: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// Its place among the window's screens, local ones included.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub position: Option<u32>,
-    /// Its host was closed in the client: the screen is offered again, but
-    /// not reopened without being asked for.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub closed: bool,
-}
-
-impl RememberedScreen {
-    fn same_screen(&self, other: &Self) -> bool {
-        self.target == other.target && self.screen_id == other.screen_id
-    }
+fn same_screen(one: &RememberedScreen, other: &RememberedScreen) -> bool {
+    one.target == other.target && one.screen_id == other.screen_id
 }
 
 /// Why a list cannot be remembered.
@@ -105,14 +95,15 @@ pub fn read(config_dir: &Path) -> Remembered {
         .and_then(|bytes| serde_json::from_slice::<Unchecked>(&bytes).ok())
         .filter(|file| file.version == FORMAT)
     else {
-        return Remembered::empty();
+        return Remembered::default();
     };
     let mut screens: Vec<RememberedScreen> = Vec::new();
     for entry in file.screens {
-        let Ok(screen) = serde_json::from_value::<RememberedScreen>(entry) else {
+        let Ok(screen) = serde_json::from_value::<StrictScreen>(entry).map(RememberedScreen::from)
+        else {
             continue;
         };
-        if check_screen(&screen).is_ok() && !screens.iter().any(|seen| seen.same_screen(&screen)) {
+        if check_screen(&screen).is_ok() && !screens.iter().any(|seen| same_screen(seen, &screen)) {
             screens.push(screen);
         }
     }
@@ -128,8 +119,12 @@ pub fn read(config_dir: &Path) -> Remembered {
 /// their caps, and each (target, screen id) once.
 pub fn check(document: serde_json::Value) -> Result<Remembered, RememberError> {
     let invalid = RememberError::Invalid;
-    let remembered: Remembered = serde_json::from_value(document)
+    let remembered: Strict = serde_json::from_value(document)
         .map_err(|error| invalid(format!("not a list of remote screens: {error}")))?;
+    let remembered = Remembered {
+        version: remembered.version,
+        screens: remembered.screens.into_iter().map(Into::into).collect(),
+    };
     if remembered.version != FORMAT {
         return Err(invalid(format!(
             "version {} instead of {FORMAT}",
@@ -146,7 +141,7 @@ pub fn check(document: serde_json::Value) -> Result<Remembered, RememberError> {
         check_screen(screen).map_err(|reason| invalid(format!("screens[{index}]: {reason}")))?;
         if remembered.screens[..index]
             .iter()
-            .any(|seen| seen.same_screen(screen))
+            .any(|seen| same_screen(seen, screen))
         {
             return Err(invalid(format!(
                 "screens[{index}]: screen {:?} of {} is listed twice",
@@ -482,7 +477,7 @@ mod tests {
     fn a_written_list_reads_back_owner_only() {
         let dir = tempfile::tempdir().expect("dir");
         let config = dir.path().join("splitty");
-        assert_eq!(read(&config), Remembered::empty(), "no file yet");
+        assert_eq!(read(&config), Remembered::default(), "no file yet");
 
         let remembered = Remembered {
             version: FORMAT,
@@ -510,7 +505,7 @@ mod tests {
         ] {
             let dir = tempfile::tempdir().expect("dir");
             fs::write(dir.path().join(FILE), corrupt).expect("write");
-            assert_eq!(read(dir.path()), Remembered::empty(), "{corrupt}");
+            assert_eq!(read(dir.path()), Remembered::default(), "{corrupt}");
         }
     }
 

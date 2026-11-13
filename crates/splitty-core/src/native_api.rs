@@ -5,7 +5,10 @@
 //! Domain validation is performed by the shared operation after admission.
 
 pub mod directory;
+pub mod forwards;
+pub mod hosts;
 pub mod remembered;
+pub mod reverse;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

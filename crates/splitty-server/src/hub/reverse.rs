@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use splitty_remote::hosts;
 use splitty_remote::ssh::SshTarget;
 use splitty_remote::tunnel::{backoff, ReverseTunnelError};
@@ -25,47 +25,41 @@ use super::{Connector, Forwarding, HubError};
 /// own: `remote-forwards.json` is read with unknown fields refused.
 pub const FILE: &str = "remote-reverse-forwards.json";
 
-/// An active reverse forward, for `GET /api/remote/reverse-forwards`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ReverseInfo {
-    pub target: String,
-    /// The host's port.
-    pub remote: u16,
-    /// The port here.
-    pub local: u16,
-    pub state: ForwardState,
-}
+pub use splitty_core::native_api::reverse::{ReverseInfo, ReversePreferences, SavedReverse};
 
-/// A remembered reverse forward.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// The rules as the file holds them: unknown fields are refused, and so is
+/// `lastError`, which only the API attaches.
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct SavedReverse {
-    pub target: String,
-    pub remote: u16,
-    pub local: u16,
-    pub enabled: bool,
-    /// Only the API attaches errors. They are never accepted from disk.
-    #[serde(
-        rename = "lastError",
-        skip_deserializing,
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub last_error: Option<SavedError>,
+struct Stored {
+    version: u32,
+    forwards: Vec<StoredReverse>,
 }
 
-/// The rules, for `GET /api/remote/reverse-forward-preferences` and the file.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct ReversePreferences {
-    pub version: u32,
-    pub forwards: Vec<SavedReverse>,
+struct StoredReverse {
+    target: String,
+    remote: u16,
+    local: u16,
+    enabled: bool,
 }
 
-impl Default for ReversePreferences {
-    fn default() -> Self {
+impl From<Stored> for ReversePreferences {
+    fn from(stored: Stored) -> Self {
         Self {
-            version: 1,
-            forwards: Vec::new(),
+            version: stored.version,
+            forwards: stored
+                .forwards
+                .into_iter()
+                .map(|row| SavedReverse {
+                    target: row.target,
+                    remote: row.remote,
+                    local: row.local,
+                    enabled: row.enabled,
+                    last_error: None,
+                })
+                .collect(),
         }
     }
 }
@@ -716,7 +710,9 @@ struct Store {
 impl Store {
     fn new(path: PathBuf) -> Self {
         let document = match fs::read(path.join(FILE)) {
-            Ok(bytes) => match serde_json::from_slice::<ReversePreferences>(&bytes) {
+            Ok(bytes) => match serde_json::from_slice::<Stored>(&bytes)
+                .map(ReversePreferences::from)
+            {
                 Ok(mut document) if valid(&document) => {
                     document
                         .forwards

@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use splitty_core::ids::*;
 use splitty_core::mux::{self, Direction, ScreenOp};
+use splitty_core::native_api::hosts as native_hosts;
 use splitty_core::template::TemplateStore;
 use std::collections::HashMap;
 
@@ -67,12 +68,38 @@ pub(crate) fn update_catalog(hub: &Hub, document: Value) -> Reply {
     }
 }
 
+/// Host metadata replies are the shared reply types
+/// (`native_api::hosts`), not the hub's file records.
+pub(crate) fn host_order_reply(order: crate::hub::HostOrder) -> native_hosts::HostOrder {
+    native_hosts::HostOrder {
+        version: order.version,
+        order: order.order,
+    }
+}
+
+fn host_preference_reply(row: crate::hub::HostPreference) -> native_hosts::HostPreference {
+    native_hosts::HostPreference {
+        target: row.target,
+        alias: row.alias,
+        hidden: row.hidden,
+    }
+}
+
+pub(crate) fn host_preferences_reply(
+    all: splitty_remote::hosts::HostPreferences,
+) -> native_hosts::HostPreferences {
+    native_hosts::HostPreferences {
+        version: all.version,
+        hosts: all.hosts.into_iter().map(host_preference_reply).collect(),
+    }
+}
+
 pub(crate) fn host_preference_response(
     result: Result<Option<crate::hub::HostPreference>, crate::hub::PreferenceError>,
 ) -> Reply {
     use crate::hub::PreferenceError;
     match result {
-        Ok(Some(row)) => Payload(row).into_reply(),
+        Ok(Some(row)) => Payload(host_preference_reply(row)).into_reply(),
         Ok(None) => StatusCode::NO_CONTENT.into_reply(),
         Err(error) => {
             let status = match &error {

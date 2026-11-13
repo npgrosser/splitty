@@ -7,7 +7,6 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, Weak};
 
-use serde::Serialize;
 use splitty_remote::ssh::{SshTarget, TargetError};
 use splitty_remote::tunnel::{self, backoff, PortForward, PortReservation};
 use tokio::sync::{oneshot, Mutex as AsyncMutex};
@@ -18,21 +17,7 @@ use super::{Connector, Forwarding, HubError};
 
 pub const MAX_PER_HOST: usize = 32;
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct ForwardInfo {
-    pub target: String,
-    pub remote: u16,
-    pub local: u16,
-    pub url: String,
-    pub state: ForwardState,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ForwardState {
-    Up,
-    Down,
-}
+pub use splitty_core::native_api::forwards::{ForwardInfo, ForwardState};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ForwardError {

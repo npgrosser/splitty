@@ -939,6 +939,136 @@ mod tests {
         serde_json::to_value(message).expect("serialize")
     }
 
+    /// The hub's replies keep the JSON clients have read (`docs/protocol.ts`).
+    #[test]
+    fn replies_keep_their_json() {
+        use preferences::SavedError;
+        use serde_json::json;
+        fn value(reply: &impl serde::Serialize) -> serde_json::Value {
+            serde_json::to_value(reply).expect("serialize")
+        }
+        let error = SavedError {
+            code: "local_port_conflict".into(),
+            message: "occupied".into(),
+            hint: Some("close it".into()),
+        };
+        assert_eq!(
+            value(&vec![ForwardInfo {
+                target: "vm1".into(),
+                remote: 3000,
+                local: 4173,
+                url: "http://localhost:4173/".into(),
+                state: ForwardState::Up,
+            }]),
+            json!([{"target":"vm1","remote":3000,"local":4173,
+                    "url":"http://localhost:4173/","state":"up"}])
+        );
+        assert_eq!(
+            value(&Preferences {
+                version: 1,
+                forwards: vec![
+                    SavedForward {
+                        target: "vm1".into(),
+                        remote: 3000,
+                        local: 4173,
+                        label: "App".into(),
+                        enabled: true,
+                        last_error: Some(error.clone()),
+                    },
+                    SavedForward {
+                        target: "vm1".into(),
+                        remote: 3001,
+                        local: 3001,
+                        label: String::new(),
+                        enabled: false,
+                        last_error: None,
+                    },
+                ],
+            }),
+            json!({"version":1,"forwards":[
+                {"target":"vm1","remote":3000,"local":4173,"label":"App","enabled":true,
+                 "lastError":{"code":"local_port_conflict","message":"occupied","hint":"close it"}},
+                {"target":"vm1","remote":3001,"local":3001,"label":"","enabled":false}
+            ]})
+        );
+        assert_eq!(
+            value(&vec![ReverseInfo {
+                target: "vm1".into(),
+                remote: 8080,
+                local: 9090,
+                state: ForwardState::Down,
+            }]),
+            json!([{"target":"vm1","remote":8080,"local":9090,"state":"down"}])
+        );
+        assert_eq!(
+            value(&ReversePreferences {
+                version: 1,
+                forwards: vec![SavedReverse {
+                    target: "vm1".into(),
+                    remote: 8080,
+                    local: 9090,
+                    enabled: false,
+                    last_error: Some(SavedError {
+                        hint: None,
+                        ..error.clone()
+                    }),
+                }],
+            }),
+            json!({"version":1,"forwards":[{"target":"vm1","remote":8080,"local":9090,
+                "enabled":false,"lastError":{"code":"local_port_conflict","message":"occupied"}}]})
+        );
+        let op = |row: HostPreference| {
+            value(&crate::service::operations::host_preferences_reply(
+                splitty_remote::hosts::HostPreferences {
+                    version: 1,
+                    hosts: vec![row],
+                },
+            ))["hosts"][0]
+                .clone()
+        };
+        assert_eq!(
+            value(&crate::service::operations::host_order_reply(HostOrder {
+                version: 1,
+                order: vec!["vm1".into(), "vm2".into()],
+            })),
+            json!({"version":1,"order":["vm1","vm2"]})
+        );
+        assert_eq!(
+            op(HostPreference {
+                target: "vm1".into(),
+                alias: Some("Build".into()),
+                hidden: false,
+            }),
+            json!({"target":"vm1","alias":"Build"})
+        );
+        assert_eq!(
+            op(HostPreference {
+                target: "vm2".into(),
+                alias: None,
+                hidden: true,
+            }),
+            json!({"target":"vm2","hidden":true})
+        );
+        let dir = tempfile::tempdir().expect("temporary directory");
+        let host = splitty_core::native_api::remembered::HostScreens::new(
+            "vm1",
+            vec![
+                splitty_core::native_api::remembered::HostScreen::new("s1", Some("api".into())),
+                splitty_core::native_api::remembered::HostScreen::new("s2", None),
+            ],
+            true,
+        );
+        let mut list = remembered::read(dir.path());
+        remembered::replace_host(&mut list, &host);
+        assert_eq!(
+            value(&list),
+            json!({"version":1,"screens":[
+                {"target":"vm1","screenId":"s1","name":"api","closed":true},
+                {"target":"vm1","screenId":"s2","closed":true}
+            ]})
+        );
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn incompatible_update_offer_requires_the_discovered_matching_replacement() {
