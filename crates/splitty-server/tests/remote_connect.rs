@@ -3657,3 +3657,334 @@ async fn a_shared_port_reaches_a_local_service_from_the_host_through_real_ssh() 
     }
     hub.wait_without_ssh();
 }
+
+/// The lab's host under a name whose host key is not yet known and whose key
+/// has a passphrase: OpenSSH asks first to trust the host key, then for the
+/// passphrase. `StrictHostKeyChecking ask` writes the trusted key.
+const PROMPTED: &str = "splittyprompted";
+const PASSPHRASE: &str = "lab passphrase";
+
+/// A process's environment variable, if it is readable.
+fn environment_of(pid: i32, name: &str) -> Option<String> {
+    let environ = fs::read(format!("/proc/{pid}/environ")).ok()?;
+    let prefix = format!("{name}=");
+    environ
+        .split(|byte| *byte == 0)
+        .find_map(|entry| entry.strip_prefix(prefix.as_bytes()))
+        .map(|value| String::from_utf8_lossy(value).into_owned())
+}
+
+/// `pid`'s parent.
+fn parent_of(pid: i32) -> Option<i32> {
+    let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(") ")?
+        .1
+        .split_whitespace()
+        .nth(1)?
+        .parse()
+        .ok()
+}
+
+/// The askpass helpers OpenSSH started for `target`, waiting on a question.
+fn askpass_helpers(target: &str) -> Vec<i32> {
+    fs::read_dir("/proc")
+        .expect("/proc")
+        .filter_map(|entry| entry.ok()?.file_name().to_str()?.parse::<i32>().ok())
+        .filter(|pid| {
+            environment_of(*pid, "SPLITTY_BROWSER_ASKPASS").as_deref() == Some("1")
+                && environment_of(*pid, "SPLITTY_ASKPASS_TARGET").as_deref() == Some(target)
+                && fs::read_to_string(format!("/proc/{}/comm", parent_of(*pid).unwrap_or(0)))
+                    .is_ok_and(|comm| comm.trim() == "ssh")
+        })
+        .collect()
+}
+
+impl Lab {
+    /// Add [`PROMPTED`] to the lab: a key with [`PASSPHRASE`] the host
+    /// accepts, and a known-hosts file of its own that starts empty.
+    fn add_prompted_host(&self) {
+        let d = self.dir.path();
+        let keygen = Command::new("ssh-keygen")
+            .args(["-q", "-t", "ed25519", "-N", PASSPHRASE, "-f"])
+            .arg(d.join("promptkey"))
+            .output()
+            .expect("ssh-keygen");
+        assert!(keygen.status.success(), "ssh-keygen\n{}", describe(&keygen));
+        let mut authorized = fs::OpenOptions::new()
+            .append(true)
+            .open(d.join("authorized_keys"))
+            .expect("authorized_keys");
+        authorized
+            .write_all(&fs::read(d.join("promptkey.pub")).expect("public key"))
+            .expect("authorize the key");
+        let user =
+            String::from_utf8_lossy(&Command::new("id").arg("-un").output().expect("id").stdout)
+                .trim()
+                .to_owned();
+        let d_str = d.display();
+        let mut config = fs::OpenOptions::new()
+            .append(true)
+            .open(d.join("ssh_config"))
+            .expect("ssh_config");
+        write!(
+            config,
+            "Host {PROMPTED}\n  User {user}\n  IdentityFile {d_str}/promptkey\n  IdentitiesOnly yes\n  \
+             UserKnownHostsFile {d_str}/prompted_known_hosts\n  StrictHostKeyChecking ask\n  \
+             ProxyCommand {d_str}/proxy.sh\n"
+        )
+        .expect("ssh_config");
+    }
+}
+
+/// remote-hosts, SSH Questions Of The Local Service, as the Windows desktop
+/// app runs it: an app-owned `desktop-backend --owner` over inherited pipes,
+/// whose host connection's `ssh` runs the backend's own executable as its
+/// askpass helper. The app's connection with local hub authority is told with
+/// `ssh.prompts.changed`, reads the host-key confirmation and the passphrase
+/// with `ssh.prompts.get` and answers them with `ssh.prompts.answer`; the
+/// host stream then becomes ready, also after an answer that took longer than
+/// a handshake frame may. A wrong passphrase is asked again, and a cancelled
+/// question fails the open.
+///
+/// Why a smoke test: in-process tests publish questions with a stand-in
+/// helper inside the test process. Only the real binary in owner mode shows
+/// that the backend names itself as `SSH_ASKPASS` without a program from the
+/// app, that OpenSSH without a terminal runs that helper process, and that its
+/// question reaches the owner's client and its answer reaches OpenSSH.
+#[test]
+fn an_owned_backend_asks_its_ssh_questions_over_the_owner_connection() {
+    let Some(lab) = lab() else { return };
+    lab.add_prompted_host();
+    let payload = lab.payload();
+    let d = lab.dir.path();
+    let home = d.join("client-home");
+    let run = d.join("client-run");
+    fs::create_dir_all(home.join(".ssh")).expect("client home");
+    fs::create_dir_all(&run).expect("client runtime directory");
+    fs::set_permissions(&run, fs::Permissions::from_mode(0o700)).expect("chmod");
+    let mut command = lab.client(&[
+        "desktop-backend",
+        "--transport",
+        "native-v1",
+        "--backend",
+        "embedded",
+        "--owner",
+    ]);
+    command
+        .env("SPLITTY_REMOTE_PAYLOAD", &payload)
+        .env("HOME", &home)
+        .env("XDG_DATA_HOME", home.join(".local/share"))
+        .env("XDG_RUNTIME_DIR", &run)
+        // As under `wsl.exe` from the desktop app: no askpass from outside,
+        // no display.
+        .env_remove("SPLITTY_ASKPASS_PROGRAM")
+        .env_remove("SSH_ASKPASS")
+        .env_remove("SSH_ASKPASS_REQUIRE")
+        .env_remove("DISPLAY")
+        .env_remove("SPLITTY_TOKEN")
+        .env_remove("SPLITTY_SERVER")
+        .env_remove("SPLITTY_SOCK")
+        .env_remove("SPLITTY_AGENT_SOCK")
+        .env_remove("SPLITTY_PANE_ID")
+        .env_remove("SPLITTY_SCREEN_ID")
+        .env_remove("SPLITTY_SESSION_ID")
+        // A separate, owned group lets teardown also end an in-flight
+        // ssh/ProxyCommand, even when an assertion unwinds the test.
+        .process_group(0);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        use splitty_remote::owner::{Connection, Owner};
+        use splitty_transport::{queue, wire::Kind};
+        async fn request(
+            connection: &mut Connection,
+            operation: &str,
+            args: serde_json::Value,
+        ) -> (u16, serde_json::Value) {
+            let reply = connection
+                .request(
+                    operation.into(),
+                    args.as_object().unwrap().clone(),
+                    Some(WAIT),
+                )
+                .await
+                .unwrap();
+            let body = serde_json::from_str(&reply.body).unwrap_or(serde_json::Value::Null);
+            (reply.status, body)
+        }
+        async fn next_json(connection: &mut Connection) -> serde_json::Value {
+            loop {
+                let frame = tokio::time::timeout(WAIT, connection.recv())
+                    .await
+                    .expect("a frame before the deadline")
+                    .expect("an open connection");
+                if frame.frame.kind == Kind::Text {
+                    return frame.frame.decode().unwrap();
+                }
+            }
+        }
+        /// After `ssh.prompts.changed` on `events`, the one pending question.
+        async fn question(events: &mut Connection, api: &mut Connection) -> serde_json::Value {
+            loop {
+                let event = next_json(events).await;
+                if event["type"] != "ssh.prompts.changed" {
+                    continue;
+                }
+                let (status, prompts) =
+                    request(api, "ssh.prompts.get", serde_json::json!({})).await;
+                assert_eq!(status, 200, "{prompts}");
+                if let Some(prompt) = prompts.as_array().and_then(|list| list.first()) {
+                    assert_eq!(prompts.as_array().unwrap().len(), 1, "{prompts}");
+                    assert_eq!(prompt["target"], PROMPTED, "{prompts}");
+                    return prompt.clone();
+                }
+            }
+        }
+        async fn answer(api: &mut Connection, prompt: &serde_json::Value, answer: Option<&str>) {
+            let (status, reply) = request(
+                api,
+                "ssh.prompts.answer",
+                serde_json::json!({"body": {"id": prompt["id"], "answer": answer}}),
+            )
+            .await;
+            assert_eq!(status, 200, "{reply}");
+            assert_eq!(reply["accepted"], true, "{reply}");
+        }
+
+        let owner = Owner::spawn(tokio::process::Command::from(command), 1)
+            .await
+            .unwrap();
+        let mut events = owner
+            .open_context(None, false, queue::Context::default(), |_| {})
+            .await
+            .unwrap();
+        let welcome = next_json(&mut events).await;
+        assert_eq!(welcome["type"], "mux.welcome", "{welcome}");
+        assert!(
+            welcome["capabilities"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!("ssh-prompts-v1")),
+            "{welcome}"
+        );
+        let mut api = owner
+            .open_context(None, false, queue::Context::default(), |_| {})
+            .await
+            .unwrap();
+        let (status, prompts) = request(&mut api, "ssh.prompts.get", serde_json::json!({})).await;
+        assert_eq!((status, prompts), (200, serde_json::json!([])));
+
+        let target = splitty_remote::ssh::SshTarget::parse(PROMPTED).unwrap();
+        let opening = {
+            let owner = owner.clone();
+            let target = target.clone();
+            tokio::spawn(async move {
+                let mut steps = Vec::new();
+                let result = owner
+                    .open_context(Some(target), false, queue::Context::default(), |progress| {
+                        steps.push(format!("{:?}", *progress));
+                    })
+                    .await;
+                (result, steps)
+            })
+        };
+
+        let trust = question(&mut events, &mut api).await;
+        assert_eq!(trust["confirm"], true, "{trust}");
+        // The waiting helper is the backend's own executable, started by an
+        // `ssh` of the backend that names it as a forced askpass program.
+        let backend = i32::try_from(owner.id().unwrap()).unwrap();
+        let executable = fs::canonicalize(env!("CARGO_BIN_EXE_splitty")).unwrap();
+        let helpers = askpass_helpers(PROMPTED);
+        assert_eq!(helpers.len(), 1, "one waiting helper: {helpers:?}");
+        let helper = helpers[0];
+        assert_eq!(
+            fs::read_link(format!("/proc/{helper}/exe")).unwrap(),
+            executable
+        );
+        let ssh = parent_of(helper).unwrap();
+        assert_eq!(parent_of(ssh), Some(backend), "the backend's own ssh");
+        assert_eq!(
+            environment_of(ssh, "SSH_ASKPASS").map(PathBuf::from),
+            Some(executable.clone())
+        );
+        assert_eq!(
+            environment_of(ssh, "SSH_ASKPASS_REQUIRE").as_deref(),
+            Some("force")
+        );
+        assert!(
+            environment_of(ssh, "DISPLAY").is_some(),
+            "older OpenSSH needs DISPLAY"
+        );
+        // Reading a question takes longer than any handshake frame may.
+        tokio::time::sleep(splitty_transport::wire::HANDSHAKE_TIMEOUT + Duration::from_secs(1))
+            .await;
+        answer(&mut api, &trust, Some("yes")).await;
+        let passphrase = question(&mut events, &mut api).await;
+        assert_eq!(passphrase["confirm"], false, "{passphrase}");
+        assert!(
+            passphrase["prompt"]
+                .as_str()
+                .unwrap()
+                .starts_with("Enter passphrase for key"),
+            "{passphrase}"
+        );
+        answer(&mut api, &passphrase, Some("wrong")).await;
+        let again = question(&mut events, &mut api).await;
+        assert_ne!(again["id"], passphrase["id"], "{again}");
+        answer(&mut api, &again, Some(PASSPHRASE)).await;
+
+        let (host, steps) = tokio::time::timeout(Duration::from_secs(120), opening)
+            .await
+            .expect("the host opens")
+            .unwrap();
+        assert!(
+            steps.iter().any(|step| step.contains("bridge")),
+            "{steps:?}"
+        );
+        let mut host = host.expect("the host stream is ready");
+        let ready = next_json(&mut host).await;
+        assert_eq!(ready["type"], "remote.ready", "{ready}");
+        assert_eq!(ready["target"], PROMPTED, "{ready}");
+        let welcome = next_json(&mut host).await;
+        assert_eq!(welcome["type"], "mux.welcome", "{welcome}");
+        assert!(lab.installed_server().is_file(), "installed on the host");
+        assert!(
+            fs::read_to_string(d.join("prompted_known_hosts"))
+                .is_ok_and(|known| known.contains(PROMPTED)),
+            "the confirmed host key is recorded"
+        );
+        host.finish().await.unwrap();
+
+        // Settled questions are gone; a cancelled one fails the next open.
+        let (_, prompts) = request(&mut api, "ssh.prompts.get", serde_json::json!({})).await;
+        assert_eq!(prompts, serde_json::json!([]));
+        let opening = {
+            let owner = owner.clone();
+            tokio::spawn(async move {
+                owner
+                    .open_context(Some(target), false, queue::Context::default(), |_| {})
+                    .await
+            })
+        };
+        let passphrase = question(&mut events, &mut api).await;
+        answer(&mut api, &passphrase, None).await;
+        let error = tokio::time::timeout(Duration::from_secs(120), opening)
+            .await
+            .expect("the cancelled open ends")
+            .unwrap()
+            .err()
+            .expect("a cancelled question fails the open");
+        assert!(error.to_string().contains(r#""code":"auth""#), "{error}");
+
+        api.finish().await.unwrap();
+        events.finish().await.unwrap();
+        tokio::time::timeout(Duration::from_secs(10), owner.close_result())
+            .await
+            .unwrap()
+            .unwrap();
+    });
+}
