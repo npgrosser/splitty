@@ -435,6 +435,46 @@ impl Forwards {
     }
 }
 
+impl Forwards {
+    /// `remote.autoForwardPorts`: forward `port` of `target`, which appeared
+    /// there, unless it has a forward (opening, up or being rebuilt), its
+    /// saved rule is paused, or a restore or automatic open of it is
+    /// scheduled already. Returns whether this call scheduled one. The task
+    /// rechecks inside the key's lane and opens as an automatic request.
+    pub(super) fn open_automatically(&self, target: &str, port: u16) -> bool {
+        let Ok((target, key)) = key(target, i64::from(port)) else {
+            return false;
+        };
+        {
+            let mut state = lock(&self.shared.state);
+            if state.slots.contains_key(&key)
+                || state.preferences.get(&key).is_some_and(|row| !row.enabled)
+                || !state.restoring.insert(key.clone())
+            {
+                return false;
+            }
+        }
+        let shared = self.shared.clone();
+        let pending = Pending {
+            shared: shared.clone(),
+            key: key.clone(),
+        };
+        let task = tokio::spawn(async move {
+            let _pending = pending;
+            let lane = shared.lane(&key);
+            let _ordered = lane.lock().await;
+            if lock(&shared.state).slots.contains_key(&key) {
+                return;
+            }
+            let _ = shared.open_ordered(&target, &key, None, false, false).await;
+        });
+        let mut tasks = lock(&self.operations);
+        tasks.retain(|task| !task.is_finished());
+        tasks.push(task);
+        true
+    }
+}
+
 impl Drop for Forwards {
     fn drop(&mut self) {
         for task in lock(&self.operations).drain(..) {

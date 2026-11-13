@@ -161,6 +161,7 @@ impl Hub {
         self.observe_handshake(target.as_str(), &screens);
         self.forwards.restore(target.as_str());
         self.reverses.restore(target.as_str());
+        let mut ports = self.auto_forwards.watch(target.as_str());
         loop {
             tokio::select! { biased;
                 _ = &mut shutdown => break Ok(()),
@@ -174,6 +175,7 @@ impl Hub {
                     if !matches!(message.frame.kind, Kind::Text | Kind::Binary | Kind::Reply) {
                         break Err(io::Error::new(io::ErrorKind::InvalidData, "unexpected host event"));
                     }
+                    self.observe_ports(&mut ports, &message.frame);
                     if let Err(error) = crate::native::relay::forward(&client.sender, &message.frame) { break Err(error); }
                 }
             }
@@ -874,5 +876,96 @@ mod tests {
             2,
             "denied input must never prepare another host"
         );
+    }
+
+    /// What a host's daemon sends, through the scripted bridge.
+    async fn host_says(peer: &mut Peer, event: &str) {
+        let input = json!({"type":"input","id":"__emit__","data":event});
+        peer.sender.json(Kind::Text, &input).unwrap();
+        let echoed = json_message(peer).await;
+        assert_eq!(echoed, serde_json::from_str::<Value>(event).unwrap());
+    }
+
+    /// A `ports.changed` as a daemon writes it, its tag first.
+    fn ports(list: &[(u16, &str)]) -> String {
+        let ports: Vec<String> = list
+            .iter()
+            .map(|(port, process)| {
+                format!(r#"{{"port":{port},"sessionId":"s1","process":"{process}"}}"#)
+            })
+            .collect();
+        format!(
+            r#"{{"type":"ports.changed","id":"e1","timestamp":1,"ports":[{}]}}"#,
+            ports.join(",")
+        )
+    }
+
+    // remote-screens, Automatic Port Forwarding: the hub forwards a port that
+    // appears on a host once for all streams of the host, never a paused
+    // rule, and nothing while the setting is off.
+    #[tokio::test]
+    async fn the_hub_forwards_appearing_ports_once_for_all_streams_of_a_host() {
+        let dir = tempfile::tempdir().unwrap();
+        let host = ScriptedHost::new(dir.path());
+        let settings = Arc::new(std::sync::RwLock::new(
+            splitty_core::config::HomeConfig::default(),
+        ));
+        settings.write().unwrap().remote.auto_forward_ports = true;
+        let hub = Arc::new(
+            Hub::new(Box::new(host.clone()), dir.path().join("config"), None)
+                .with_settings(settings.clone()),
+        );
+        let [vite, paused, later] = [(); 3].map(|()| crate::hub::testing::free_port());
+        hub.save_forward_with_restore("vm1", paused.into(), None, None, Some(false))
+            .await
+            .unwrap();
+        let (mut first, first_task) = open(hub.clone(), "vm1").await;
+        prelude(&mut first, "vm1").await;
+        let (mut second, second_task) = open(hub.clone(), "vm1").await;
+        prelude(&mut second, "vm1").await;
+        let forwards = || {
+            host.asked()
+                .into_iter()
+                .filter(|call| call.starts_with("forward "))
+                .collect::<Vec<_>>()
+        };
+
+        // The first list of each stream is a baseline.
+        host_says(&mut first, &ports(&[(22, "sshd")])).await;
+        host_says(&mut second, &ports(&[(22, "sshd")])).await;
+        let appeared = ports(&[(22, "sshd"), (vite, "vite"), (paused, "api")]);
+        host_says(&mut first, &appeared).await;
+        host_says(&mut second, &appeared).await;
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !hub.forwards().iter().any(|forward| forward.remote == vite) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the appeared port is forwarded");
+        assert_eq!(forwards(), [format!("forward vm1 {vite} at {vite}")]);
+        assert!(!hub
+            .forward_preferences()
+            .forwards
+            .iter()
+            .any(|row| row.enabled));
+
+        // Off: what appears is not forwarded, also not after turning it on.
+        settings.write().unwrap().remote.auto_forward_ports = false;
+        let off = ports(&[
+            (22, "sshd"),
+            (vite, "vite"),
+            (paused, "api"),
+            (later, "ruby"),
+        ]);
+        host_says(&mut first, &off).await;
+        settings.write().unwrap().remote.auto_forward_ports = true;
+        host_says(&mut first, &off).await;
+        assert_eq!(forwards().len(), 1);
+
+        first.shutdown().await;
+        second.shutdown().await;
+        first_task.await.unwrap().unwrap();
+        second_task.await.unwrap().unwrap();
     }
 }

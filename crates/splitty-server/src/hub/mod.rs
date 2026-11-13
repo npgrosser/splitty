@@ -23,8 +23,11 @@
 //! (`remembered`), their last observed directories (`catalog`), forwards
 //! ports of hosts on request (`forwards`) and shares ports of this machine
 //! with hosts on request (`reverse`), each with an `ssh` of its own that
-//! lives until the forward is stopped.
+//! lives until the forward is stopped. With `remote.autoForwardPorts` it
+//! reads the `ports.changed` it relays and forwards the ports that appear
+//! (`auto_forward`); every other relayed message stays unread.
 
+mod auto_forward;
 mod catalog;
 mod connector;
 mod directory;
@@ -74,6 +77,11 @@ pub use reverse::{ReverseInfo, ReversePreferences, SavedReverse};
 /// This server's version: the one it installs on hosts, and the one
 /// `update=1` brings a host's daemon to.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Announced in `mux.welcome` on local main connections: the hub forwards
+/// the ports that appear on hosts with `remote.autoForwardPorts` itself, so
+/// a client keeps no automatic forwarding of its own.
+pub const AUTO_FORWARD_CAPABILITY: &str = "hub-auto-forward-v1";
 
 /// The close code of a relaying socket whose host side ended. The client
 /// treats it like a dropped connection and reconnects.
@@ -293,6 +301,10 @@ pub struct Hub {
     domain: Arc<admission::Domain>,
     backends: Mutex<HashMap<String, Weak<admission::Backend>>>,
     authentication: splitty_remote::askpass::Sessions,
+    auto_forwards: auto_forward::AutoForwards,
+    /// The service's settings, for `remote.autoForwardPorts`; without them
+    /// nothing is forwarded automatically.
+    settings: Option<Arc<std::sync::RwLock<splitty_core::config::HomeConfig>>>,
 }
 
 impl Hub {
@@ -322,7 +334,39 @@ impl Hub {
             domain: admission::Domain::new(),
             backends: Mutex::default(),
             authentication: splitty_remote::askpass::Sessions::default(),
+            auto_forwards: auto_forward::AutoForwards::default(),
+            settings: None,
         }
+    }
+
+    /// Read `remote.autoForwardPorts` from the service's current settings.
+    pub fn with_settings(
+        mut self,
+        settings: Arc<std::sync::RwLock<splitty_core::config::HomeConfig>>,
+    ) -> Self {
+        self.settings = Some(settings);
+        self
+    }
+
+    fn auto_forward_enabled(&self) -> bool {
+        self.settings.as_ref().is_some_and(|settings| {
+            settings
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .remote
+                .auto_forward_ports
+        })
+    }
+
+    /// Follow a frame a relay to `target` carries to its client.
+    fn observe_ports(
+        &self,
+        watch: &mut auto_forward::Watch,
+        frame: &splitty_transport::codec::Frame,
+    ) {
+        watch.observe(frame, self.auto_forward_enabled(), |target, port| {
+            self.forwards.open_automatically(target, port)
+        });
     }
 
     /// The hub of the user the server runs as: the system `ssh`, the
@@ -628,7 +672,10 @@ impl Hub {
                 self.observe_handshake(target.as_str(), &screens);
                 self.forwards.restore(target.as_str());
                 self.reverses.restore(target.as_str());
-                relay(target.as_str(), sink, stream, bridge, first, early).await;
+                let mut ports = self.auto_forwards.watch(target.as_str());
+                let observe =
+                    |frame: &splitty_transport::codec::Frame| self.observe_ports(&mut ports, frame);
+                relay(target.as_str(), sink, stream, bridge, first, early, observe).await;
             }
         }
     }
@@ -1042,6 +1089,7 @@ async fn relay(
     bridge: NativeBridge,
     first: Charged<Incoming>,
     early: Vec<Charged<Message>>,
+    mut observe: impl FnMut(&splitty_transport::codec::Frame),
 ) {
     let to_host = bridge.sender();
     let budget = to_host.context().budget.clone();
@@ -1049,6 +1097,7 @@ async fn relay(
     let downstream = async {
         let mut frame = first;
         loop {
+            observe(&frame.frame);
             let message = match message_of(&frame, &budget) {
                 Ok(message) => message,
                 Err(error) => {

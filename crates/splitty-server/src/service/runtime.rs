@@ -185,7 +185,8 @@ fn assemble(
     ));
     let env = dispatcher.env.clone();
 
-    let hub = Arc::new(hub);
+    let config = Arc::new(RwLock::new(config));
+    let hub = Arc::new(hub.with_settings(config.clone()));
     let client_state = Arc::new(
         client_session::ClientState::new(
             mux_store.clone(),
@@ -205,7 +206,7 @@ fn assemble(
         hub,
         mux_store,
         client_state,
-        config: Arc::new(RwLock::new(config)),
+        config,
         config_path,
         shell_profiles,
         server_config: Arc::new(RwLock::new(server_config)),

@@ -95,6 +95,11 @@ try:
         else:
             assert kind == 1 and struct.unpack(">I", body[:4])[0] == generation
             control(10, {"generation": generation, "receipt": body[-16:].hex()})
+            message = json.loads(body[4:-16])
+            if message.get("type") == "input" and message.get("id") == "__emit__":
+                # The test speaks for the daemon: its data goes out as an event.
+                data(1, message["data"].encode())
+                continue
             data(1, body[4:-16])
             if json.loads(body[4:-16]).get("type") == "input":
                 data(2, bytes([0, 1, 2, 255]))

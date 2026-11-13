@@ -1378,6 +1378,47 @@ async fn a_host_side_that_ends_closes_the_socket_with_4001() {
     assert_eq!(close_code(&mut socket).await, HOST_LOST);
 }
 
+/// remote-screens, Automatic Port Forwarding: a port that appears in a
+/// host's `ports.changed` on a browser's relay is forwarded by the hub.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_hub_forwards_a_port_that_appears_on_a_browser_relay() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let mut config = splitty_core::config::HomeConfig::default();
+    config.remote.auto_forward_ports = true;
+    let settings = Arc::new(std::sync::RwLock::new(config));
+    let served = Served::start(hub(&host, dir.path()).with_settings(settings), dir.path()).await;
+    let mut socket = served.open("vm1").await;
+    let (_, ready) = until_outcome(&mut socket).await;
+    assert_eq!(ready["type"], "remote.ready", "{ready}");
+    assert_eq!(next(&mut socket).await, Message::text(WELCOME));
+    let port = crate::hub::testing::free_port();
+    for ports in [
+        String::new(),
+        format!(r#"{{"port":{port},"process":"vite"}}"#),
+    ] {
+        let event =
+            format!(r#"{{"type":"ports.changed","id":"e1","timestamp":1,"ports":[{ports}]}}"#);
+        let input = json!({"type":"input","id":"__emit__","data":event});
+        socket
+            .send(Message::text(input.to_string()))
+            .await
+            .expect("send");
+        assert_eq!(next(&mut socket).await, Message::text(event));
+    }
+    let forward = tokio::time::timeout(WAIT, async {
+        loop {
+            if let Some(forward) = served.hub.forwards().into_iter().find(|f| f.remote == port) {
+                break forward;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the appeared port is forwarded");
+    assert_eq!(through(forward.local), format!("forwarded {port}"));
+}
+
 /// An invalid target is answered on the socket, and no host is asked.
 #[tokio::test]
 async fn an_invalid_target_is_refused_without_reaching_a_host() {

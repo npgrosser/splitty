@@ -268,6 +268,10 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
         .as_array()
         .unwrap()
         .contains(&json!("hub-host-decisions-v1")));
+    assert!(welcome["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(crate::hub::AUTO_FORWARD_CAPABILITY)));
     for (index, screens) in [json!([{"id":"s1","name":"Renamed","panes":2}]), json!([])]
         .into_iter()
         .enumerate()
@@ -327,6 +331,10 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
         .as_array()
         .unwrap()
         .contains(&json!("hub-host-decisions-v1")));
+    assert!(!remote_welcome["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(crate::hub::AUTO_FORWARD_CAPABILITY)));
     state.hub.set_host_order(json!({"order":["vm1"]})).unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(50), async {
