@@ -48,11 +48,13 @@ Keep temporary fixture paths short enough for Unix sockets.
   host-owned default names, bounded canonical observation and revocable follow.
   Detach preserves host work; reconnect never replays creation. The service
   stores a host's Screens when a connection to it becomes ready; while the host
-  is connected, the window reports the stored Screens its live catalog no
-  longer lists (terminated, closed with the last pane) with `hub.catalog.observe`
-  (`native_workspace/host_catalog.rs`), so a reconnect does not list them while
-  the host is not ready. Only removals are reported: a live catalog has no
-  pane counts.
+  is connected, the window reports its live catalog whenever it differs from
+  the stored Screens (new, renamed, terminated, closed with the last pane) with
+  `hub.catalog.observe` (`native_workspace/host_catalog.rs`), so a reconnect
+  does not list removed ones while the host is not ready. The report has no
+  pane counts; the service keeps its stored ones (`hub-host-state-v1`; an
+  older service is sent nothing). Remembered remote Screens are written per
+  host (`remoteScreens.updateHost`); an older service is only read.
 - Ports: the window shows detected ports, forwards and saved rules and starts
   forwards only on explicit actions. `remote.autoForwardPorts` is the
   service's (`hub-auto-forward-v1`, `splitty_server::hub::auto_forward`); the

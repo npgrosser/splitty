@@ -1005,7 +1005,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1", "ssh-prompts-v1" and "hub-auto-forward-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1", "screen-names-v1", "template-names-v1" and "scratchpad-versions-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1", "ssh-prompts-v1", "hub-auto-forward-v1" and "hub-host-state-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1", "screen-names-v1", "template-names-v1" and "scratchpad-versions-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -2265,11 +2265,25 @@ interface RemoteProgress {
   message: string;
 }
 
+/**
+ * The hub's plan for an ordinary update of the host's daemon. An available
+ * update keeps every session (the hub offers none that ends one), so a window
+ * offers one only when `available` and `keepsSessions` are both true, names
+ * `toVersion` as the version the host gets, and counts no screens or panes
+ * that end. `toVersion` is present whenever `available` is true; older hubs
+ * omit it, and the window names the local server's version instead.
+ */
+interface UpdatePlan {
+  available: boolean;
+  keepsSessions: boolean;
+  toVersion?: string;
+}
+
 /** Sent once, right before the host daemon's first message. */
 interface RemoteReady {
   type: "remote.ready";
-  /** Hub comparison; absent only on older hubs. */
-  update?: { available: boolean; keepsSessions: boolean };
+  /** Hub decision; absent only on older hubs. */
+  update?: UpdatePlan;
   /** The target as the hub validated it. */
   target: string;
   daemon: {
@@ -2311,7 +2325,7 @@ type RemoteErrorCode =
 interface RemoteError {
   type: "remote.error";
   retryable: boolean;
-  update?: { available: boolean; keepsSessions: boolean };
+  update?: UpdatePlan;
   code: RemoteErrorCode;
   message: string;
   /** What the user can do, where there is something. */
@@ -2446,6 +2460,7 @@ interface RemoteHostOrder {
 /**
  * GET /api/remote/screens
  * PUT /api/remote/screens
+ * PUT /api/remote/screens/host   (native remoteScreens.updateHost; hub-host-state-v1)
  *
  * The client's list of open remote screens, remembered across restarts by
  * the local server in `remote-screens.json` in its configuration directory
@@ -2457,9 +2472,22 @@ interface RemoteHostOrder {
  * list, and entries of a hand-edited file that break the rules below are
  * left out.
  *
- * PUT replaces the whole list with the body (`Content-Type:
- * application/json`) and answers with the list as stored. A body that breaks
- * a rule is refused as a whole and nothing is written:
+ * PUT /api/remote/screens/host is how windows write: the body
+ * (RememberedHostScreens) names one host, and the server replaces only that
+ * host's entries, in the place of its first one (a new host goes last), with
+ * `closed` on each when the body sets it; an empty `screens` forgets the host.
+ * The replacement runs under the server's lock on the list it holds, so
+ * windows that show different hosts never undo each other's entries. At most
+ * 200 entries are kept. A window writes only the hosts it shows or showed: a
+ * host whose last screen leaves the window is forgotten, a host the window
+ * closed keeps its screens as `closed`. No window brings back `closed`
+ * entries at start. Without hub-host-state-v1 a window writes nothing.
+ * The body is refused (400) under the rules below for its target and screens.
+ *
+ * PUT /api/remote/screens replaces the whole list with the body
+ * (`Content-Type: application/json`) and answers with the list as stored; it
+ * remains for older clients. A body that breaks a rule is refused as a whole
+ * and nothing is written:
  *   - `version` is 1, and there are no other fields;
  *   - at most 200 screens;
  *   - `target` passes the SSH target validation as it is (no blanks around it);
@@ -2491,12 +2519,22 @@ interface RememberedScreen {
   closed?: boolean;
 }
 
+/** The body of PUT /api/remote/screens/host; no other fields. */
+interface RememberedHostScreens {
+  target: string;
+  screens: { screenId: string; name?: string; position?: number }[];
+  /** The host was closed in the window. */
+  closed?: boolean;
+}
+
 /**
  * GET /api/remote/catalog
  * PUT /api/remote/catalog   { target: string, screens: CatalogScreen[] }
  *
  * Last observed screen directories, separate from remembered open screens.
- * These routes only read/write local metadata; neither contacts a host nor
+ * Windows report observations with hub.catalog.observe and read the merged
+ * directory (remote.directory.get); these routes remain for older clients,
+ * under the same rules. They only read/write local metadata; neither contacts a host nor
  * creates or opens a screen. Authentication and origin/Fetch Metadata guards
  * are the same as for the other API routes; absent from the control socket.
  *
@@ -2518,6 +2556,9 @@ interface RememberedScreen {
  * Each host has at most 200 screens with unique ids of 1–256 characters,
  * optional names of at most 200 characters, and nonnegative integral pane
  * counts. A client cannot supply lastSeen or a document version in a PUT.
+ * An observation lists the host's screens as they are now. A screen without
+ * `panes` (hub-host-state-v1) keeps the count stored for it; one without a
+ * stored count is left out until an observation gives one.
  *
  * Response:
  *   GET 200 RemoteCatalog
@@ -3066,6 +3107,7 @@ export type NativeCall =
   | { operation: "hostOrder.update"; args: { body: unknown; } }
   | { operation: "remoteScreens.get"; args?: { } }
   | { operation: "remoteScreens.update"; args: { body: unknown; } }
+  | { operation: "remoteScreens.updateHost"; args: { body: unknown; } }
   | { operation: "catalog.get"; args?: { } }
   | { operation: "catalog.update"; args: { body: unknown; } }
   | { operation: "forward.list"; args?: { } }
@@ -3288,8 +3330,12 @@ interface SshPromptsChanged { type: "ssh.prompts.changed" }
 interface HubCatalogObservation {
   type: "hub.catalog.observe";
   target: string;
-  screens: { id: string; name?: string; panes: number }[];
+  /** `panes` may be omitted with hub-host-state-v1 (see PUT /api/remote/catalog). */
+  screens: { id: string; name?: string; panes?: number }[];
 }
+/** hub-host-state-v1 (local main connections): the hub writes remembered
+ * screens per host (PUT /api/remote/screens/host, remoteScreens.updateHost)
+ * and takes observations without pane counts. */
 /**
  * serverDerivedPaneState: ordinary terminal panes follow the owning server's
  * terminal.closeOnExit policy (always / graceful / never); managed jobs remain.
