@@ -100,7 +100,12 @@ fn state_on(
         service: Arc::new(crate::service::State {
             instance: crate::service::new_instance(),
             owner_shutdown: Arc::new(tokio::sync::Notify::new()),
-            hub: Arc::new(crate::hub::Hub::system()),
+            // Hosts and their remembered Screens stay in the test's directory.
+            hub: Arc::new(Hub::new(
+                Box::new(ScriptedHost::new(dir)),
+                dir.join("config"),
+                None,
+            )),
             mux_store,
             client_state,
             config: Arc::new(RwLock::new(splitty_core::config::HomeConfig::default())),
