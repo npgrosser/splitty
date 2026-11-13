@@ -42,7 +42,7 @@ async fn managed_jobs_routes_enforce_transport_scope_and_payload_bounds() {
     }
     let dir = tempfile::tempdir().expect("fixture");
     let state = job_state(dir.path());
-    let tcp = super::super::build_router(state.clone());
+    let tcp = browser_router(&state);
     let owner = super::super::build_control_router(state.clone());
     let (status, grant) = call(
         &owner,

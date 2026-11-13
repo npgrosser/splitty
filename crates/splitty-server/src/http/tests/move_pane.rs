@@ -62,7 +62,13 @@ async fn a_cli_move_nudges_both_screens_and_a_moved_shell_still_splits() {
     let host = ScriptedHost::new(dir.path());
     let served =
         Served::start_with(hub(&host, dir.path()), |addr| shell_state(addr, dir.path())).await;
-    let app = router(&served.state, hub(&host, dir.path()));
+    // The CLI's own gateway over the same service.
+    let cli = AppState {
+        listen_addr: ADDR.into(),
+        allowed_origins: Arc::new(allowed_origins(ADDR)),
+        ..served.state.clone()
+    };
+    let app = router(&cli, hub(&host, dir.path()));
     let mut ui = served.open_local().await;
     message_type(&mut ui, "mux.welcome").await;
 

@@ -21,7 +21,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream};
 use tower::ServiceExt;
 
-use super::{allowed_origins, apply_middleware, routes, session::SessionStore, AppState};
+use super::{allowed_origins, routes, session::SessionStore, AppState};
 use crate::client_session::ports::{PortWatch, Scan};
 use crate::hub::testing::{free_port, Prepare, ScriptedHost, WELCOME};
 use crate::hub::{Hub, HOST_LOST, VERSION};
@@ -134,11 +134,21 @@ fn command_opts(id: &str, script: &str) -> splitty_core::pty::CreateSessionOpts 
     opts
 }
 
-/// `build_router` with the hub given.
+/// The browser gateway `serve` builds, with the hub given: every `/api`
+/// route becomes a native request to the in-process service of `state`.
 fn router(state: &AppState, hub: Hub) -> axum::Router {
     let mut state = state.clone();
     Arc::make_mut(&mut state.service).hub = Arc::new(hub);
-    apply_middleware(routes::api_routes_with(state.service.hub.clone()), &state).with_state(state)
+    browser_router(&state)
+}
+
+/// The browser gateway `serve` builds over the service of `state`, with the
+/// browser credentials of `state`.
+fn browser_router(state: &AppState) -> axum::Router {
+    super::gateway::router(
+        super::gateway::Backend::embedded(state.service.clone()),
+        axum::extract::FromRef::from_ref(state),
+    )
 }
 
 /// A hub with `host`, recording its recent hosts in `dir/config`.
@@ -297,6 +307,14 @@ fn api(method: &str, path: &str, body: Option<&serde_json::Value>) -> Request<Bo
     .expect("request")
 }
 
+/// `request` as a client of the gateway on `listen_addr` sends it.
+fn at(listen_addr: &str, mut request: Request<Body>) -> Request<Body> {
+    request
+        .headers_mut()
+        .insert("host", listen_addr.parse().expect("host"));
+    request
+}
+
 /// The status and the JSON body of the answer to `request`.
 async fn exchange(
     router: &axum::Router,
@@ -375,7 +393,11 @@ async fn remembered_screens_are_kept_in_the_configuration_directory() {
     not_json
         .headers_mut()
         .insert("content-type", "application/json".parse().expect("value"));
-    assert_eq!(status(&router, not_json).await, StatusCode::BAD_REQUEST);
+    // A body that is not JSON never reaches the service (the gateway's 422).
+    assert_eq!(
+        status(&router, not_json).await,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
     assert_eq!(
         exchange(&router, api("GET", SCREENS, None)).await,
         (StatusCode::OK, list.clone()),
@@ -665,10 +687,14 @@ async fn remote_catalog_rejects_invalid_updates_without_writing() {
     broken
         .headers_mut()
         .insert("content-type", "application/json".parse().expect("header"));
-    assert_eq!(status(&app, broken).await, StatusCode::BAD_REQUEST);
+    assert_eq!(
+        status(&app, broken).await,
+        StatusCode::UNPROCESSABLE_ENTITY
+    );
     assert_eq!(
         status(&app, api("PUT", CATALOG, None)).await,
-        StatusCode::UNSUPPORTED_MEDIA_TYPE
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "no body"
     );
     assert_eq!(std::fs::read(&file).expect("file"), saved);
     assert!(host.asked().is_empty());
@@ -2891,7 +2917,7 @@ async fn forward_preferences_stay_passive_across_authentication_and_reconstructi
 }
 
 #[tokio::test]
-async fn forward_preferences_return_json_for_malformed_json_and_preserve_415() {
+async fn forward_preferences_return_json_for_malformed_json() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let router = router(&state(ADDR, dir.path()), hub(&host, dir.path()));
@@ -2899,18 +2925,12 @@ async fn forward_preferences_return_json_for_malformed_json_and_preserve_415() {
         let mut request = api(method, PREFERENCES, Some(&json!({})));
         *request.body_mut() = Body::from("{");
         let (code, body) = exchange(&router, request).await;
-        assert_eq!(code, StatusCode::BAD_REQUEST);
+        assert_eq!(code, StatusCode::UNPROCESSABLE_ENTITY);
         assert!(body["error"].is_string());
-        let mut request = api(method, PREFERENCES, Some(&json!({})));
-        request
-            .headers_mut()
-            .insert("content-type", "text/plain".parse().expect("type"));
-        assert_eq!(
-            status(&router, request).await,
-            StatusCode::UNSUPPORTED_MEDIA_TYPE
-        );
+        assert_eq!(body["uncertain"], false);
     }
     assert!(host.asked().is_empty());
+    assert!(!dir.path().join("config").exists());
 }
 
 /// control-api, Build Info: the WSL distribution only when the server runs in one.

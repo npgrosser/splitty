@@ -36,7 +36,7 @@ async fn conditional_daemon_shutdown_is_owner_only_and_bound_to_the_accepting_in
             .await
             .is_err()
     );
-    let browser = crate::http::build_router(state.clone());
+    let browser = browser_router(&state);
     assert_eq!(
         browser
             .oneshot(request(&state.instance))
@@ -321,7 +321,7 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
             stored.as_array().unwrap().len()
         );
         assert_eq!(serde_json::to_value(&native).unwrap(), native_wire);
-        let router = crate::http::build_router(state.clone());
+        let router = browser_router(&state);
         let (status, http_wire) =
             exchange(&router, api("GET", "/api/remote/directory", None)).await;
         assert_eq!(status, StatusCode::OK);
@@ -593,7 +593,7 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
     // Backend authority remains useful on the same assigned Remote stream.
     // Compare a real template mutation/read and domain failures with browser
     // dispatch; these must not be mistaken for forbidden local-hub operations.
-    let browser = crate::http::build_router(state.clone());
+    let browser = browser_router(&state);
     let template = json!({"name":"Remote template","panes":{"shell":{"command":"printf remote"}},"layout":{"slot":"shell"}});
     for (operation, args, method, path, body) in [
         ("home.get", json!({}), "GET", "/api/home/settings", None),
@@ -654,7 +654,17 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
     assert!(host.asked().is_empty());
     peer.shutdown().await;
     server.await.unwrap().unwrap();
-    assert!(state.client_state.clients.lock().unwrap().is_empty());
+    // The gateway's API carrier is a client of the service until it is dropped.
+    drop(browser);
+    assert!(
+        splitty_core::pty::testing::wait_until(WAIT, || state
+            .client_state
+            .clients
+            .lock()
+            .unwrap()
+            .is_empty())
+        .await
+    );
 }
 
 #[tokio::test]
@@ -866,7 +876,7 @@ pub(super) async fn native(
 async fn settings_metadata_and_rejection_match_http_and_native() {
     let dir = tempfile::tempdir().expect("dir");
     let state = state(ADDR, dir.path());
-    let browser = crate::http::build_router(state.clone());
+    let browser = browser_router(&state);
     let (status, metadata) =
         exchange(&browser, api("GET", "/api/home/settings/metadata", None)).await;
     assert_eq!(status, StatusCode::OK);
@@ -911,7 +921,7 @@ async fn queries_errors_and_service_identity_match_browser_and_native() {
     let host = ScriptedHost::new(dir.path());
     let mut state = state(ADDR, dir.path());
     Arc::make_mut(&mut state.service).hub = Arc::new(hub(&host, dir.path()));
-    let browser = crate::http::build_router(state.clone());
+    let browser = browser_router(&state);
     // A custom source may deliberately share a built-in display name. The
     // resolved identifier must describe the actual source on both adapters.
     std::fs::create_dir_all(&state.themes_dir).unwrap();
@@ -1359,7 +1369,7 @@ async fn native_jobs_keep_shared_idempotency_ownership_and_error_contracts() {
     }
     let dir = tempfile::tempdir().expect("dir");
     let state = state(ADDR, dir.path());
-    let browser = crate::http::build_router(state.clone());
+    let browser = browser_router(&state);
     let launch = json!({"requestId":splitty_core::ids::JobId::new(),"argv":["/bin/sh","-c","read line"],"cwd":dir.path(),"placement":{"kind":"screen"},"background":true});
     let (status, launched) = native(&state, Operation::JobLaunch, json!({"body":launch})).await;
     assert_eq!(status, StatusCode::CREATED, "{launched}");
@@ -1416,13 +1426,13 @@ async fn a_native_reverse_request_cannot_share_a_fresh_browser_gateway() {
     let dir = tempfile::tempdir().expect("dir");
     let host = ScriptedHost::new(dir.path());
     let served = Served::start(hub(&host, dir.path()), dir.path()).await;
-    let browser = crate::http::build_router(served.state.clone());
+    let browser = browser_router(&served.state);
     // Building another gateway must not replace the first port's exclusion.
     let other_listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("second gateway listener");
     let other_address = other_listener.local_addr().expect("address");
-    let _other_gateway = crate::http::build_router(AppState {
+    let _other_gateway = browser_router(&AppState {
         listen_addr: other_address.to_string(),
         ..served.state.clone()
     });
@@ -1445,7 +1455,11 @@ async fn a_native_reverse_request_cannot_share_a_fresh_browser_gateway() {
         assert_eq!(result.1["code"], "local_port_reserved");
         assert_eq!(
             result,
-            exchange(&browser, api(method, path, Some(&body))).await
+            exchange(
+                &browser,
+                at(&served.state.listen_addr, api(method, path, Some(&body)))
+            )
+            .await
         );
     }
     assert!(
@@ -1881,7 +1895,7 @@ async fn template_extraction_matches_native_and_http_and_control_cannot_apply_or
             .dispatch_screen(&"empty".into(), op)
             .unwrap();
     }
-    let browser = crate::http::build_router(state.clone());
+    let browser = browser_router(&state);
     let owner = crate::http::build_control_router(state.clone());
     let (mut peer, task) = framed(&state, Role::Remote).await;
     for (id, screen_id, expected) in [(1, "screen", 200), (2, "missing", 404), (3, "empty", 400)] {
@@ -1940,7 +1954,7 @@ async fn template_extraction_matches_native_and_http_and_control_cannot_apply_or
 async fn a_save_by_name_answers_alike_over_http_and_native() {
     let dir = tempfile::tempdir().expect("dir");
     let state = state(ADDR, dir.path());
-    let browser = crate::http::build_router(state.clone());
+    let browser = browser_router(&state);
     let template = |name: &str| json!({"name": name, "panes": {"shell": {"command": "make"}}, "layout": {"slot": "shell"}});
     let save =
         |name: &str, overwrite: bool| json!({"template": template(name), "overwrite": overwrite});
