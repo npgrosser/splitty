@@ -60,7 +60,7 @@ The server SHALL choose the program to run in this order: (1) the requested `she
 - **THEN** session creation fails as described in Session Creation Failure
 
 ### Requirement: Startup Command and Restore Mode
-When `create` includes a non-empty `command`, the server SHALL run it according to `restoreMode`: `replay` (also the default for an empty or unrecognized value) starts the shell normally and types the command followed by a newline into the terminal shortly after start; `shell` runs the command through the shell and then continues with an interactive shell; `close` runs the command through the shell and lets the session end when the command ends. The `shell` and `close` modes MUST only be used for `sh`, `bash`, `zsh`, `dash` and `ksh`; for any other shell the server SHALL fall back to `replay`.
+When `create` includes a `command` with a character other than whitespace, the server SHALL run it according to `restoreMode`: `replay` (also the default for an empty or unrecognized value) starts the shell normally and types the command followed by a newline into the terminal shortly after start; `shell` runs the command through the shell and then continues with an interactive shell; `close` runs the command through the shell and lets the session end when the command ends. The `shell` and `close` modes MUST only be used for `sh`, `bash`, `zsh`, `dash` and `ksh`; for any other shell the server SHALL fall back to `replay`. A `command` that is empty or holds only whitespace SHALL be no command, whatever `restoreMode` says.
 
 #### Scenario: Replay mode types the command
 - **WHEN** a client creates a session with `command` `make build` and `restoreMode` `replay`
@@ -77,6 +77,10 @@ When `create` includes a non-empty `command`, the server SHALL run it according 
 #### Scenario: Unsupported shell falls back to replay
 - **WHEN** a client creates a fish session with a `command` and `restoreMode` `shell`
 - **THEN** the command is typed into the running shell as in `replay` mode
+
+#### Scenario: Blank command
+- **WHEN** a client creates a session with `command` consisting of two spaces and `restoreMode` `close`
+- **THEN** the shell starts interactively as without a command, and nothing is typed into the terminal
 
 ### Requirement: Working Directory
 The server SHALL start the session in the requested working directory, resolved as follows: a relative `dir` is joined onto `root` when `root` is given; a leading `~` expands to the server user's home directory; an empty, missing or non-directory path falls back to the home directory.
