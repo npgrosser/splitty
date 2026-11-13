@@ -135,7 +135,7 @@ When the user creates a screen on a host whose `remote.ready` lists screens that
 ### Requirement: Remembered Remote Screens
 The server SHALL keep the client's list of open remote screens in `remote-screens.json` in its configuration directory, written atomically with mode 0600. The file holds `{"version": 1, "screens": [{"target", "screenId", "name"?, "position"?}]}`, each target valid (see `access-control`, Remote Access Through SSH Tunnel), each (target, screenId) once. `GET /api/remote/screens` SHALL return the list, empty when the file is missing or unreadable. `PUT /api/remote/screens` SHALL replace it and SHALL reject a body that does not have that shape. Both routes have the authentication of the other `/api` routes and are not served on the control socket.
 
-A client SHALL write the list after every change to its remote screens. On start, it SHALL restore the saved references and order, displayed within their host groups as described by Remote Screens In The Window. The saved position format SHALL remain compatible with existing mixed lists. It SHALL connect a remembered screen's host only when the screen becomes visible or when that host is connected anyway. A remembered screen that its host no longer has SHALL be shown as missing, with an action to remove it.
+A client SHALL write the list after every change to its remote screens. On start, it SHALL restore the saved references and order, displayed within their host groups as described by Remote Screens In The Window. The saved position format SHALL remain compatible with existing mixed lists. It SHALL connect a remembered screen's host only when the screen becomes visible, when that host is connected anyway, or, once at the window's start, when the setting `remote.reconnectHosts` lists the host. A remembered screen that its host no longer has SHALL be shown as missing, with an action to remove it.
 
 #### Scenario: Restart
 - **WHEN** the window shows a remote screen of `vm1` and the app is restarted
@@ -144,6 +144,10 @@ A client SHALL write the list after every change to its remote screens. On start
 #### Scenario: Unreachable host at start
 - **WHEN** a remembered screen's host is unreachable when the app starts
 - **THEN** the local screens are usable at once, and the remote screen shows its host as offline only when it is opened
+
+#### Scenario: Host reconnected at start
+- **WHEN** `remote.reconnectHosts` lists `vm1` but not `vm2`, and a window starts with remembered screens of both
+- **THEN** the window connects `vm1` at once and brings back its screens, while `vm2` stays unconnected until the user opens one of its screens
 
 ### Requirement: Screens On Hosts
 The client SHALL retain host groups for recently connected hosts even when they have no open screens and are disconnected. It SHALL show the last observed names and pane counts of unopened screens, marking disconnected observations as last seen rather than live. Expanding a disconnected host SHALL connect and refresh its directory without creating a screen. Opening an existing screen SHALL add a reference to it; it SHALL NOT recreate a screen missing on the host. The group SHALL also offer creation of a new screen. Reading the directory at startup SHALL NOT connect its hosts.
@@ -260,11 +264,25 @@ The experimental native workspace SHALL retain observations for the exact curren
 - **AND** inspection and rejected observations submit no forwarding mutation
 
 ### Requirement: Automatic Port Forwarding
-The setting `remote.autoForwardPorts` SHALL be off by default. When it is on, the client SHALL forward every port that appears on a connected host without a click and without a notice, except a disabled saved mapping. Automatic requests SHALL use `automatic: true`, preserve saved local ports and respect the server's `forward_paused` refusal. They SHALL NOT create saved rules, resume a stopped rule or silently remap a saved-port conflict.
+The setting `remote.autoForwardPorts` SHALL be off by default. When it is on, the hub SHALL forward every port that appears in a host's `ports.changed` on a connection it relays, without a click and without a notice. A connection's first list, including the first after a reconnect, SHALL count as already listening; lists SHALL be followed while the setting is off, so that turning it on forwards only what appears afterwards. A port SHALL NOT be forwarded automatically when it has a forward (opening, up or being rebuilt), when its saved mapping is disabled, or when it was forwarded automatically for the same process while the host stayed connected through at least one relay; several windows connected to one host SHALL cause at most one forward. Automatic forwards SHALL preserve saved local ports and SHALL NOT create saved rules, resume a stopped rule or silently remap a saved-port conflict. They SHALL appear in the active forwards and `hub.changed` like any other. With no client connection to a host there is no discovery, and nothing SHALL be forwarded for it.
+
+A local service that forwards automatically SHALL announce `hub-auto-forward-v1` in `mux.welcome` on its local main connections. Clients SHALL NOT send automatic forward requests of their own; they only show the forwards the hub reports. `POST /api/remote/forwards` SHALL keep accepting `automatic: true` from older clients.
 
 #### Scenario: Default
 - **WHEN** a port appears on a connected host and the setting has its default value
 - **THEN** no forward is opened until the user asks for one
+
+#### Scenario: A port appears with the setting on
+- **WHEN** the setting is on, a window is connected to `vm1` and `vite` starts listening on port 5173 there
+- **THEN** the hub forwards 5173 without a notice and the window lists it as forwarded
+
+#### Scenario: Two windows on one host
+- **WHEN** two windows are connected to `vm1` and a port appears there with the setting on
+- **THEN** exactly one forward of that port is opened
+
+#### Scenario: Stopped by the user
+- **WHEN** the user stops an automatic forward and the same program listens on the port again while the host stays connected
+- **THEN** it is not forwarded again; another program on that port is
 
 #### Scenario: Automatic forwarding respects a pause
 - **WHEN** automatic forwarding is enabled and a port reappears after its saved mapping was stopped, including a request from a window with stale state
@@ -273,6 +291,10 @@ The setting `remote.autoForwardPorts` SHALL be off by default. When it is on, th
 #### Scenario: Automatic forwarding uses saved port
 - **WHEN** automatic forwarding attempts an enabled saved mapping whose local port is occupied
 - **THEN** the attempt reports `local_port_conflict` and preserves the mapping, while an unrelated new unsaved port can still be forwarded without being remembered
+
+#### Scenario: Older local service
+- **WHEN** a client's local service does not announce `hub-auto-forward-v1`
+- **THEN** no port is forwarded automatically, the setting stays editable, and the client sends no automatic request in its place
 
 ### Requirement: Host Screen Directory Cache
 The local server SHALL persist the last observed screen directory per host separately from the remembered open-screen list. `GET /api/remote/catalog` SHALL return `{version:1,hosts:[{target,lastSeen,screens:[{id,name?,panes}]}]}`. `PUT /api/remote/catalog` SHALL accept `{target,screens}`, replace only that host's directory and return its stored entry with `lastSeen` in Unix seconds. A successful empty list SHALL replace a previous nonempty one. These APIs SHALL neither connect nor send commands to a remote host.
