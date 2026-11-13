@@ -4,6 +4,7 @@ use super::transfer::{self, EditorChoice, EditorSubmenu, TransferChoice, Transfe
 use super::*;
 use crate::terminal::{ContextMenuRequest, LocalAction};
 use gpui_kit::base::DeferredPopover;
+use splitty_client_core::native_workspace::PathKind;
 
 #[cfg(all(test, feature = "ui-test-support"))]
 mod tests;
@@ -531,7 +532,10 @@ impl Workspace {
         };
         editors
             .iter()
-            .map(|&choice| (choice, transfer::editor_uri(choice, remote_target, &cwd)))
+            .map(|&choice| {
+                let uri = transfer::editor_uri(choice, remote_target, &cwd, PathKind::Folder);
+                (choice, uri.ok())
+            })
             .collect()
     }
 
@@ -978,9 +982,11 @@ impl Workspace {
             self.model.as_ref().filter(|_| remote).and_then(|model| {
                 model.source_target(menu.target.route.source_token().source_id())
             });
-        match transfer::editor_uri(choice, remote_target, &cwd) {
-            Some(uri) => Self::open_editor(choice, &uri, &cwd, remote, cx),
-            None => self.status = format!("Cannot open folder in {}", choice.label()),
+        match transfer::editor_uri(choice, remote_target, &cwd, PathKind::Folder) {
+            Ok(uri) => Self::open_editor(choice, &uri, &cwd, remote, cx),
+            Err(reason) => {
+                self.status = format!("Cannot open folder in {}: {reason}", choice.label())
+            }
         }
         cx.notify();
     }

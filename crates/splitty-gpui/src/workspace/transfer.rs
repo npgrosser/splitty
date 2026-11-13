@@ -3,6 +3,9 @@
 //! Entries, order and keyboard behavior follow the web client's tab menu.
 use super::*;
 use gpui_kit::base::DeferredPopover;
+use splitty_client_core::native_workspace::{
+    local_editor_uri, remote_editor_uri, HandoffEditor, PathKind,
+};
 
 #[cfg(all(test, feature = "ui-test-support"))]
 mod view_tests;
@@ -68,6 +71,14 @@ impl EditorChoice {
             Self::VsCode => "vscode",
             Self::Zed => "zed",
             Self::Sftp => "sftp",
+        }
+    }
+
+    fn handoff(self) -> HandoffEditor {
+        match self {
+            Self::VsCode => HandoffEditor::VsCode,
+            Self::Zed => HandoffEditor::Zed,
+            Self::Sftp => HandoffEditor::Sftp,
         }
     }
 }
@@ -193,87 +204,18 @@ pub(super) fn ssh_path(target: &str, cwd: &str) -> Option<String> {
     })
 }
 
-fn encode_byte(byte: u8, out: &mut String) {
-    const HEX: &[u8; 16] = b"0123456789ABCDEF";
-    out.push('%');
-    out.push(char::from(HEX[usize::from(byte >> 4)]));
-    out.push(char::from(HEX[usize::from(byte & 0x0f)]));
-}
-
-fn encode_component(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        if byte.is_ascii_alphanumeric() || b"-._~".contains(&byte) {
-            out.push(char::from(byte));
-        } else {
-            encode_byte(byte, &mut out);
-        }
-    }
-    out
-}
-
-fn encode_path(path: &str) -> String {
-    let mut encoded = path
-        .split('/')
-        .map(encode_component)
-        .collect::<Vec<_>>()
-        .join("/");
-    if !path.ends_with('/') {
-        encoded.push('/');
-    }
-    encoded
-}
-
+/// The URI that hands `path`, a file or a folder, to `choice`: on the host
+/// the window reaches as `remote_target`, else on this computer or the WSL
+/// distribution of the local backend. The error says why there is none.
 pub(super) fn editor_uri(
     choice: EditorChoice,
     remote_target: Option<&str>,
-    cwd: &str,
-) -> Option<String> {
-    if cwd.is_empty()
-        || cwd.len() > MAX_CWD_BYTES
-        || !cwd.starts_with('/')
-        || cwd.starts_with("//")
-        || cwd.contains('\\')
-        || cwd.chars().any(char::is_control)
-        || cwd.split('/').any(|part| part == "." || part == "..")
-    {
-        return None;
-    }
-    let encoded_path = encode_path(cwd);
-    if let Some(target) = remote_target {
-        if target.is_empty() || target.chars().any(char::is_control) {
-            return None;
-        }
-        Some(match choice {
-            EditorChoice::VsCode => format!(
-                "vscode://vscode-remote/ssh-remote+{}{encoded_path}",
-                encode_component(target)
-            ),
-            EditorChoice::Zed => format!("zed://ssh/{target}{encoded_path}"),
-            EditorChoice::Sftp => format!("sftp://{target}{encoded_path}"),
-        })
-    } else {
-        local_editor_uri(choice, crate::startup::wsl_distro(), &encoded_path)
-    }
-}
-
-/// A local path is a path of the WSL distribution when the backend runs in
-/// one: VS Code opens it through its WSL remote, and Zed has no URL for it.
-fn local_editor_uri(
-    choice: EditorChoice,
-    wsl_distro: Option<&str>,
-    encoded_path: &str,
-) -> Option<String> {
-    match (choice, wsl_distro) {
-        (EditorChoice::VsCode, None) => Some(format!("vscode://file{encoded_path}")),
-        (EditorChoice::VsCode, Some(distro)) => (!distro.is_empty()
-            && distro.len() <= 64
-            && distro
-                .bytes()
-                .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte)))
-        .then(|| format!("vscode://vscode-remote/wsl+{distro}{encoded_path}")),
-        (EditorChoice::Zed, None) => Some(format!("zed://file{encoded_path}")),
-        (EditorChoice::Zed, Some(_)) | (EditorChoice::Sftp, _) => None,
+    path: &str,
+    kind: PathKind,
+) -> Result<String, String> {
+    match remote_target {
+        Some(target) => remote_editor_uri(target, path, choice.handoff(), kind),
+        None => local_editor_uri(path, crate::startup::wsl_distro(), choice.handoff(), kind),
     }
 }
 
@@ -1078,34 +1020,6 @@ mod menu_tests {
         assert_eq!(step(&items, None, "down"), Some("a"));
         assert_eq!(step(&items, Some(&"gone"), "up"), Some("c"));
         assert_eq!(step::<&str>(&[], None, "down"), None);
-    }
-}
-
-#[cfg(test)]
-mod editor_tests {
-    use super::{local_editor_uri, EditorChoice};
-
-    #[test]
-    fn a_local_path_in_wsl_opens_through_the_wsl_remote_of_vs_code() {
-        let path = "/home/user/project/";
-        assert_eq!(
-            local_editor_uri(EditorChoice::VsCode, None, path).as_deref(),
-            Some("vscode://file/home/user/project/")
-        );
-        assert_eq!(
-            local_editor_uri(EditorChoice::VsCode, Some("Ubuntu-24.04"), path).as_deref(),
-            Some("vscode://vscode-remote/wsl+Ubuntu-24.04/home/user/project/")
-        );
-        assert_eq!(
-            local_editor_uri(EditorChoice::VsCode, Some("Bad Name/.."), path),
-            None
-        );
-        assert_eq!(
-            local_editor_uri(EditorChoice::Zed, Some("Ubuntu"), path),
-            None
-        );
-        assert!(local_editor_uri(EditorChoice::Zed, None, path).is_some());
-        assert_eq!(local_editor_uri(EditorChoice::Sftp, None, path), None);
     }
 }
 

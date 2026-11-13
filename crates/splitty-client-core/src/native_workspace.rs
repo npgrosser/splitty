@@ -1,5 +1,6 @@
 //! Own the local service and route workspace intents on one ordered connection.
 mod auto_forward;
+mod editor_uri;
 mod editors;
 mod files;
 mod host_catalog;
@@ -31,6 +32,7 @@ use crate::{
     zoom::{ZoomAction, ZoomResult},
     Event,
 };
+pub use editor_uri::{local_editor_uri, remote_editor_uri, HandoffEditor};
 pub use editors::{
     preferred_editor, AppEditor, EditorOutcome, EditorRequest, EditorSettings, EditorUpdate,
     PathKind,

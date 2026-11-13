@@ -248,16 +248,23 @@ impl Workspace {
             AppEditor::VsCode => super::transfer::EditorChoice::VsCode,
             AppEditor::Zed => super::transfer::EditorChoice::Zed,
         };
-        let Some(uri) = super::transfer::editor_uri(choice, target.as_deref(), &request.path)
-        else {
-            self.answer_editor(source, &request.request_id, EditorOutcome::Failed, cx);
-            return self.file_failure(
-                format!("editor-{}", request.request_id),
-                source,
-                "Cannot open in editor",
-                "The path is not one an editor can be given.".into(),
-                cx,
-            );
+        let uri = match super::transfer::editor_uri(
+            choice,
+            target.as_deref(),
+            &request.path,
+            request.kind,
+        ) {
+            Ok(uri) => uri,
+            Err(reason) => {
+                self.answer_editor(source, &request.request_id, EditorOutcome::Failed, cx);
+                return self.file_failure(
+                    format!("editor-{}", request.request_id),
+                    source,
+                    "Cannot open in editor",
+                    reason,
+                    cx,
+                );
+            }
         };
         let what = match request.kind {
             PathKind::File => "file",
@@ -1197,7 +1204,7 @@ mod tests {
 
 #[cfg(all(test, feature = "ui-test-support"))]
 mod view_tests {
-    use super::{FileUpdate, StoreItem};
+    use super::{FileUpdate, NoticeKind, StoreItem};
     use crate::workspace::chrome::view_tests::with_view;
     use crate::workspace::Command;
     use gpui_kit::{px, size, Modifiers, MouseButton, VisualTestContext};
@@ -1476,6 +1483,20 @@ mod view_tests {
                 assert!(
                     receiver.try_recv().is_err(),
                     "showing a request answers nothing"
+                );
+                // A file opens as a file: its URI ends without a slash.
+                let uri = window.update(|_, cx| {
+                    view.read(cx)
+                        .file_notices
+                        .iter()
+                        .find_map(|notice| match &notice.kind {
+                            NoticeKind::Editor { uri, .. } => Some(uri.clone()),
+                            _ => None,
+                        })
+                });
+                assert_eq!(
+                    uri.as_deref(),
+                    Some("vscode://vscode-remote/ssh-remote+vm.test/srv/app/main.rs")
                 );
                 click(window, button);
                 assert_eq!(answered(&mut receiver), (id, outcome));
