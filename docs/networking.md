@@ -82,6 +82,11 @@ upstream HTTP address for that assignment. Opening
 a browser gateway does not change a daemon's lifetime. Closing the last browser
 tab does not, by itself, stop the gateway or its selected backend.
 
+The gateway reaches its backend only as a native client: each `/api` route is an
+operation of the native catalog, `/ws` a native client connection and
+`/ws/remote`, where the backend may open hosts, a native host stream of its hub.
+The server has no second HTTP API or WebSocket relay for browsers.
+
 `splitty daemon start` opens private Unix endpoints, not HTTP. `splitty serve`
 creates an embedded workspace with its own lifetime; `splitty serve --daemon`
 explicitly selects the independent daemon. `splitty connect HOST` exposes only
