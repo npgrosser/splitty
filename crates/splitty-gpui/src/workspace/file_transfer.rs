@@ -7,8 +7,8 @@ use super::*;
 use crate::terminal::PastedFile;
 use gpui_kit::component::input::TextareaState;
 use splitty_client_core::native_workspace::{
-    preferred_editor, quote_path, AppEditor, EditorOutcome, EditorUpdate, FileUpdate, PathKind,
-    StoreItem,
+    file_route, preferred_editor, quote_path, AppEditor, EditorOutcome, EditorUpdate, FileRoute,
+    FileUpdate, PathKind, StoreItem,
 };
 
 /// A paste of fewer bytes shows no progress.
@@ -29,6 +29,31 @@ const NOTICE_BUTTON: f32 = 24.;
 enum StoreOrigin {
     Paste,
     Drop(Option<String>),
+}
+
+/// How files pasted or dropped into a pane of `local` (this computer's own
+/// server) or a host's reach it. The local server reads this app's paths
+/// unless it runs in WSL, where a Windows path means nothing to its shell.
+fn route_files(local: bool, files: &[PastedFile], dropped: bool) -> FileRoute {
+    let all_paths = files.iter().all(|file| matches!(file, PastedFile::Path(_)));
+    file_route(
+        local,
+        crate::startup::wsl_distro().is_none(),
+        all_paths,
+        dropped,
+    )
+}
+
+/// This computer's paths of `files`, quoted for a shell, separated by spaces.
+fn own_paths(files: &[PastedFile]) -> String {
+    files
+        .iter()
+        .filter_map(|file| match file {
+            PastedFile::Path(path) => Some(quote_path(&path.to_string_lossy())),
+            PastedFile::Image { .. } => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 pub(super) enum StoreTarget {
@@ -426,17 +451,9 @@ impl Workspace {
             return;
         };
         let local = source.source_id() == model.local_source().source_id();
-        if local && files.iter().all(|file| matches!(file, PastedFile::Path(_))) {
-            // A file of this computer is already where a local pane runs.
-            let paths: Vec<_> = files
-                .iter()
-                .filter_map(|file| match file {
-                    PastedFile::Path(path) => Some(quote_path(&path.to_string_lossy())),
-                    PastedFile::Image { .. } => None,
-                })
-                .collect();
+        if route_files(local, &files, false) == FileRoute::OwnPaths {
             terminal.update(cx, |terminal, cx| {
-                terminal.paste_text(&paths.join(" "));
+                terminal.paste_text(&own_paths(&files));
                 cx.notify();
             });
             return;
@@ -474,8 +491,9 @@ impl Workspace {
         self.store_pasted_files(source, files, StoreTarget::Scratchpad { key, input }, cx);
     }
 
-    /// Files dropped onto a terminal. A local pane takes their paths; a
-    /// host's pane gets them only after the user's Send.
+    /// Files dropped onto a terminal. A local pane takes their paths where
+    /// its server reads this computer's files, else they are stored as a
+    /// paste's; a host's pane gets them only after the user's Send.
     pub(super) fn drop_files_into_terminal(
         &mut self,
         route: TerminalToken,
@@ -491,7 +509,8 @@ impl Workspace {
             return;
         };
         let files: Vec<_> = paths.into_iter().map(PastedFile::Path).collect();
-        if source.source_id() == model.local_source().source_id() {
+        let local = source.source_id() == model.local_source().source_id();
+        if route_files(local, &files, true) != FileRoute::AskThenStore {
             return self.paste_files_into_terminal(route, terminal, files, cx);
         }
         let directory = model
@@ -536,18 +555,22 @@ impl Workspace {
         else {
             return;
         };
-        if source.source_id() == model.local_source().source_id() {
-            // A file of this computer is already where a local pane runs.
-            let text = files
-                .iter()
-                .filter_map(|file| match file {
-                    PastedFile::Path(path) => Some(quote_path(&path.to_string_lossy())),
-                    PastedFile::Image { .. } => None,
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
-            let _ = input.update(cx, |input, cx| input.insert(text, window, cx));
-            return;
+        let local = source.source_id() == model.local_source().source_id();
+        match route_files(local, &files, true) {
+            FileRoute::OwnPaths => {
+                let text = own_paths(&files);
+                let _ = input.update(cx, |input, cx| input.insert(text, window, cx));
+                return;
+            }
+            FileRoute::Store => {
+                return self.store_pasted_files(
+                    source,
+                    files,
+                    StoreTarget::Scratchpad { key, input },
+                    cx,
+                );
+            }
+            FileRoute::AskThenStore => {}
         }
         let directory = model
             .source(source.source_id())

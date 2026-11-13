@@ -134,6 +134,37 @@ fn stored_path(value: &Value) -> Option<String> {
         .then(|| path.to_owned())
 }
 
+/// How files pasted or dropped into a terminal or a scratchpad reach it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FileRoute {
+    /// Insert the files' own paths: the pane's server reads this computer's
+    /// files where they are.
+    OwnPaths,
+    /// Store the files on the pane's server and insert the stored paths,
+    /// without asking: they stay on this computer.
+    Store,
+    /// Ask before the files leave this computer, then store them.
+    AskThenStore,
+}
+
+/// The route for files into a pane. `local` is a pane of this computer's
+/// own server; `shares_filesystem` says whether that server reads this
+/// app's paths as they are, which a server in WSL does not: a Windows path
+/// means nothing to its shell. `all_paths` is false when an item is only
+/// data, as a clipboard image is.
+pub fn file_route(
+    local: bool,
+    shares_filesystem: bool,
+    all_paths: bool,
+    dropped: bool,
+) -> FileRoute {
+    match (local, dropped) {
+        (true, _) if shares_filesystem && all_paths => FileRoute::OwnPaths,
+        (true, _) | (false, false) => FileRoute::Store,
+        (false, true) => FileRoute::AskThenStore,
+    }
+}
+
 /// Keep plain paths; quote anything a shell would split or expand.
 pub fn quote_path(path: &str) -> String {
     if !path.is_empty()
@@ -1059,6 +1090,27 @@ mod tests {
         names.sort();
         assert_eq!(names, ["report (1).pdf", "report.pdf"]);
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A local pane takes this computer's paths only where its server reads
+    /// them; a pane of a server in WSL gets the files stored, as a host's
+    /// pane does, but without the question a host's drop asks.
+    #[test]
+    fn files_reach_a_pane_where_its_server_can_read_them() {
+        use super::{file_route, FileRoute};
+        for dropped in [false, true] {
+            assert_eq!(file_route(true, true, true, dropped), FileRoute::OwnPaths);
+            assert_eq!(file_route(true, true, false, dropped), FileRoute::Store);
+            assert_eq!(file_route(true, false, true, dropped), FileRoute::Store);
+            assert_eq!(file_route(true, false, false, dropped), FileRoute::Store);
+        }
+        for shares in [false, true] {
+            assert_eq!(file_route(false, shares, true, false), FileRoute::Store);
+            assert_eq!(
+                file_route(false, shares, true, true),
+                FileRoute::AskThenStore
+            );
+        }
     }
 
     #[test]
