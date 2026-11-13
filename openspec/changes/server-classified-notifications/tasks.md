@@ -9,7 +9,7 @@
 
 ## 2. Native client
 
-- [ ] 2.1 `splitty-client-core/src/notifications.rs`: read `notice` (severity, title, setting, suppressed), fall back to the generic notice without it, apply the window's switches to arriving events only, record a watched pane's notification as read without a notice for every kind; remove the client-side classification, the program status and bell rules and the kind table. Unit tests in `notifications/tests.rs`.
+- [ ] 2.1 `splitty-client-core/src/notifications.rs`: read `notice` (severity, title, setting, suppressed), fall back to the generic notice without it, apply the window's switches (a switch turned off also removes the records it governs), record a watched pane's notification as read without a notice for every kind; remove the client-side classification, the program status and bell rules and the kind table. Unit tests in `notifications/tests.rs`.
 
 ## 3. Web client
 

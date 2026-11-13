@@ -1,13 +1,18 @@
 //! Bounded window-local notification facts, independent of transport readiness.
+//!
+//! The server classifies each notification event (`notice`, `mux-protocol`,
+//! Classified Notification Events); the window keeps only unread state,
+//! which pane it shows, its own switches and the host's name in the title.
 use crate::{
     connection::Event,
     workspace::{
-        PaneKey, ProgramState, ProgramStatus, ScreenKey, SourceId, SourceKind, SourceToken,
-        SourceWorkspace, WindowWorkspace,
+        PaneKey, ScreenKey, SourceId, SourceKind, SourceToken, SourceWorkspace, WindowWorkspace,
     },
 };
+use serde::Deserialize;
 use serde_json::Value;
 use splitty_core::config::NotificationSettings;
+use splitty_core::protocol::notice::Setting;
 use std::collections::VecDeque;
 
 const MAX_RECORDS: usize = 100;
@@ -26,28 +31,6 @@ pub enum Severity {
     Error,
 }
 
-#[derive(Clone, Copy)]
-enum Kind {
-    Finished,
-    Idle,
-    Exited,
-    Crashed,
-    Generic,
-    /// A program's own report that it waits, is done or failed (OSC 7501).
-    ProgramStatus,
-}
-impl Kind {
-    fn enabled(self, settings: &NotificationSettings) -> bool {
-        settings.enabled
-            && match self {
-                Self::Finished => settings.process_finished,
-                Self::Exited => settings.process_exited,
-                Self::Crashed => settings.process_crashed,
-                Self::ProgramStatus => settings.program_status,
-                Self::Idle | Self::Generic => true,
-            }
-    }
-}
 struct Captured {
     pane: PaneKey,
     session: String,
@@ -60,8 +43,9 @@ struct Binding {
 struct Record {
     source: SourceId,
     id: String,
-    kind: Kind,
     severity: Severity,
+    /// The switch the notice named.
+    setting: Option<Setting>,
     title: String,
     captured: Option<Captured>,
     binding: Option<Binding>,
@@ -89,11 +73,13 @@ pub struct FreshNotification {
 impl NotificationCenter {
     /// Apply only an already owner/generation-accepted settings result. A failed
     /// read does not call this method and therefore preserves the last good value.
+    /// A switch turned off also removes the records it governs.
     pub fn apply_settings(&mut self, settings: &NotificationSettings) -> bool {
         let changed = self.settings.as_ref() != Some(settings);
         self.settings = Some(settings.clone());
         let before = self.records.len();
-        self.records.retain(|record| record.kind.enabled(settings));
+        self.records
+            .retain(|record| switched_on(settings, record.setting));
         changed || before != self.records.len()
     }
 
@@ -188,18 +174,15 @@ impl NotificationCenter {
         {
             return false;
         }
-        let classified = match value.get("type").and_then(Value::as_str) {
-            Some("program_status.changed") => program_status(source, value),
-            // A pane whose program reports its status tells through it
-            // instead (PS-2); only the bells and OSC notifications of a
-            // session without a root record notify on their own.
-            Some("bell" | "notification") if reports_status(source, value) => None,
-            _ => classify(value),
-        };
-        let Some((kind, severity, title)) = classified else {
+        let Some(Notice {
+            severity,
+            title,
+            setting,
+        }) = notice(value)
+        else {
             return false;
         };
-        if !kind.enabled(settings) {
+        if !switched_on(settings, setting) {
             return false;
         }
         let title = if source.kind() == SourceKind::Remote {
@@ -234,10 +217,6 @@ impl NotificationCenter {
         let read = captured
             .as_ref()
             .is_some_and(|(captured, _)| watched == Some(&captured.pane));
-        // The watched pane shows its status on its tab.
-        if read && matches!(kind, Kind::ProgramStatus) {
-            return false;
-        }
         let (captured, binding) = match captured {
             Some((captured, binding)) => (Some(captured), Some(binding)),
             None => (None, None),
@@ -257,8 +236,8 @@ impl NotificationCenter {
         self.records.push_back(Record {
             source: owner.source_id(),
             id: id.into(),
-            kind,
             severity,
+            setting,
             title,
             captured,
             binding,
@@ -368,89 +347,77 @@ fn hidden(c: char) -> bool {
 fn plain_text(value: &str, limit: usize) -> String {
     value.chars().filter(|c| !hidden(*c)).take(limit).collect()
 }
-fn reports_status(source: &SourceWorkspace, value: &Value) -> bool {
-    value
-        .get("sessionId")
-        .and_then(Value::as_str)
-        .is_some_and(|session| source.session_program_status(session).is_some())
+/// What the window shows for an event.
+struct Notice {
+    severity: Severity,
+    title: String,
+    setting: Option<Setting>,
 }
-/// A `program_status.changed` the server marked `notify`, of a connection
-/// that announced program status, for a waiting, done or failed program.
-fn program_status(source: &SourceWorkspace, value: &Value) -> Option<(Kind, Severity, String)> {
-    if !source.program_status_supported() || value.get("notify") != Some(&Value::Bool(true)) {
+
+/// The event's notice, unless it is suppressed or malformed. Without one
+/// (a server without `notification-notices-v1`) a notification event gets a
+/// generic notice and `program_status.changed` none.
+fn notice(value: &Value) -> Option<Notice> {
+    let Some(notice) = value.get("notice") else {
+        return generic(value);
+    };
+    if notice
+        .get("suppressed")
+        .is_some_and(|reason| !reason.is_null())
+    {
         return None;
     }
-    let status = ProgramStatus::parse(value.get("status")?)?;
-    let severity = match status.state() {
-        ProgramState::Blocked => Severity::Warning,
-        ProgramState::Done => Severity::Success,
-        ProgramState::Error => Severity::Error,
-        ProgramState::Idle | ProgramState::Working => return None,
+    let severity = match notice.get("severity").and_then(Value::as_str) {
+        Some("error") => Severity::Error,
+        Some("warning") => Severity::Warning,
+        Some("success") => Severity::Success,
+        _ => Severity::Info,
     };
-    let session = value.get("sessionId")?.as_str()?;
-    let named = value.get("screenId").and_then(Value::as_str);
-    let summary = status.summary();
-    let title = match source
-        .event_screen(session, named)
-        .and_then(|screen| source.screen_label(screen))
-    {
-        Some(screen) => format!("{screen}: {summary}"),
-        None => summary,
-    };
-    Some((
-        Kind::ProgramStatus,
+    // A switch this window does not know governs nothing here.
+    let setting = notice
+        .get("setting")
+        .and_then(|setting| Setting::deserialize(setting).ok());
+    Some(Notice {
         severity,
-        plain_text(&title, MAX_TITLE_CHARS),
-    ))
+        title: plain_text(notice.get("title")?.as_str()?, MAX_TITLE_CHARS),
+        setting,
+    })
 }
-fn classify(value: &Value) -> Option<(Kind, Severity, String)> {
-    let text = |field| {
-        plain_text(
-            value.get(field).and_then(Value::as_str).unwrap_or_default(),
-            MAX_TITLE_CHARS,
-        )
-    };
-    let (kind, severity, title) = match value.get("type")?.as_str()? {
-        "process.finished" => (
-            Kind::Finished,
-            Severity::Info,
-            format!("{} finished", text("process")),
-        ),
-        "process.idle" => {
-            let process = text("process");
-            let title = if process.is_empty() {
-                "Command finished".into()
-            } else {
-                format!("{process} is waiting")
-            };
-            (Kind::Idle, Severity::Info, title)
-        }
-        "session.exited" => {
-            let code = i32::try_from(value.get("exitCode")?.as_i64()?).ok()?;
-            let process = text("process");
-            let process = if process.is_empty() {
-                "session"
-            } else {
-                &process
-            };
-            if code == 0 {
-                (Kind::Exited, Severity::Info, format!("{process} exited"))
-            } else {
-                (Kind::Crashed, Severity::Error, format!("{process} failed"))
-            }
-        }
-        "notification" => {
-            let severity = match value.get("severity").and_then(Value::as_str) {
-                Some("error") => Severity::Error,
-                Some("warning") => Severity::Warning,
-                Some("success") => Severity::Success,
-                _ => Severity::Info,
-            };
-            (Kind::Generic, severity, text("title"))
-        }
+
+fn generic(value: &Value) -> Option<Notice> {
+    match value.get("type")?.as_str()? {
+        "process.finished" | "process.idle" | "session.exited" | "notification" => {}
         _ => return None,
+    }
+    let process = plain_text(
+        value
+            .get("process")
+            .and_then(Value::as_str)
+            .unwrap_or_default(),
+        MAX_TITLE_CHARS,
+    );
+    let title = if process.is_empty() {
+        "Session activity".to_owned()
+    } else {
+        plain_text(&format!("Activity in {process}"), MAX_TITLE_CHARS)
     };
-    Some((kind, severity, plain_text(&title, MAX_TITLE_CHARS)))
+    Some(Notice {
+        severity: Severity::Info,
+        title,
+        setting: None,
+    })
+}
+
+/// Whether the window's switches let a notice with `setting` through.
+fn switched_on(settings: &NotificationSettings, setting: Option<Setting>) -> bool {
+    settings.enabled
+        && match setting {
+            Some(Setting::ProcessFinished) => settings.process_finished,
+            Some(Setting::ProcessExited) => settings.process_exited,
+            Some(Setting::ProcessCrashed) => settings.process_crashed,
+            Some(Setting::ProgramStatus) => settings.program_status,
+            None => true,
+        }
 }
 
 #[cfg(test)]

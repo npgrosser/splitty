@@ -48,7 +48,7 @@ A session SHALL exit user-initiated when the server closed it while its program 
 - **THEN** it carries no notice
 
 ### Requirement: Notifications in the Window
-A window SHALL add a notification for an event with a notice that is not suppressed, while `notifications.enabled` and the switch the notice names are on in the window's settings, and SHALL take its kind, severity and title from the notice; a notification of a host's event SHALL be prefixed with the host's name. It SHALL add nothing for a suppressed notice. A notification for the pane the user watches (the focused pane of the shown screen, in a focused window) SHALL be recorded as read and show no notice in the window or from the system. The switches SHALL govern arriving events only; notifications already in the window SHALL stay until they are read or dismissed.
+A window SHALL add a notification for an event with a notice that is not suppressed, while `notifications.enabled` and the switch the notice names are on in the window's settings, and SHALL take its kind, severity and title from the notice; a notification of a host's event SHALL be prefixed with the host's name. It SHALL add nothing for a suppressed notice. A notification for the pane the user watches (the focused pane of the shown screen, in a focused window) SHALL be recorded as read and show no notice in the window or from the system. Turning a switch off SHALL also remove the notifications the window holds that it governs, and turning it on again SHALL NOT bring them back.
 
 #### Scenario: Own pane closed
 - **WHEN** the user closes a pane whose shell still runs
@@ -64,4 +64,4 @@ A window SHALL add a notification for an event with a notice that is not suppres
 
 #### Scenario: Switch turned off later
 - **WHEN** a window holds an unread `process.finished` notification and the user turns `notifications.processFinished` off
-- **THEN** the notification stays until the user reads or dismisses it
+- **THEN** the notification goes and does not return when the switch is turned on again

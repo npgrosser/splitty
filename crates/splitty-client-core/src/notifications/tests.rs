@@ -43,8 +43,14 @@ fn fixture() -> (WindowWorkspace, NotificationCenter, ScreenKey) {
     center.apply_settings(&settings());
     (window, center, screen)
 }
+/// An event the server classified, governed by no switch but `enabled`.
 fn event(id: &str, session: &str, severity: &str) -> Value {
-    json!({"type":"notification","id":id,"sessionId":session,"severity":severity,"title":format!("event {id}")})
+    json!({"type":"process.idle","id":id,"sessionId":session,"process":"task",
+        "notice":{"kind":"process.idle","severity":severity,"title":format!("event {id}")}})
+}
+/// `event_type` with the notice `notice`.
+fn noticed(event_type: &str, id: &str, notice: Value) -> Value {
+    json!({"type":event_type,"id":id,"sessionId":"s0","process":"task","notice":notice})
 }
 fn admit(
     center: &mut NotificationCenter,
@@ -57,29 +63,48 @@ fn admit(
     center.observe_json(window, owner, value, watched, "Build host")
 }
 
+/// mux-protocol, Classified Notification Events and Notifications in the
+/// Window: the server's notice decides kind, severity and title; a window
+/// adds nothing for a suppressed one, a switch turned off also removes what
+/// it governs, and the watched pane's is recorded as read without a notice.
 #[test]
-fn classification_settings_and_watched_read_share_one_bounded_policy() {
+fn notices_settings_and_watched_read_share_one_bounded_policy() {
     let (window, mut center, screen) = fixture();
     let owner = window.lifecycle_token();
     let p0 = window.local_source().pane_key("p0");
     let p1 = window.local_source().pane_key("p1");
-    for (id, event_type, code, severity) in [
-        ("finished", "process.finished", 0, Severity::Info),
-        ("idle", "process.idle", 0, Severity::Info),
-        ("exited", "session.exited", 0, Severity::Info),
-        ("crashed", "session.exited", 1, Severity::Error),
+    for (id, event_type, severity, setting) in [
+        ("finished", "process.finished", "info", "processFinished"),
+        ("exited", "session.exited", "info", "processExited"),
+        ("crashed", "session.exited", "error", "processCrashed"),
     ] {
-        assert!(admit(
-            &mut center,
-            &window,
-            owner,
-            &json!({"type":event_type,"id":id,"sessionId":"s0","process":"task","exitCode":code,"userInitiated":true}),
-            None
-        ));
-        assert_eq!(center.records.back().unwrap().severity, severity);
+        let value = noticed(
+            event_type,
+            id,
+            json!({"kind":event_type,"severity":severity,"title":format!("task {id}"),"setting":setting}),
+        );
+        assert!(admit(&mut center, &window, owner, &value, None));
     }
-    assert_eq!(center.unread_count(&screen), 4);
+    assert_eq!(center.records.back().unwrap().severity, Severity::Error);
+    assert_eq!(center.unread_titles(&screen).next(), Some("task crashed"));
+    assert_eq!(center.unread_count(&screen), 3);
     assert_eq!(center.severity(&p0), Some(Severity::Error));
+    assert_eq!(center.take_fresh().len(), 3);
+
+    // Own pane closed, or a program that reports its status: nothing.
+    for (id, reason) in [("closed", "user-initiated"), ("covered", "program-status")] {
+        let value = noticed(
+            "session.exited",
+            id,
+            json!({"kind":"session.crashed","severity":"error","title":"zsh failed",
+                "setting":"processCrashed","suppressed":reason}),
+        );
+        assert!(!admit(&mut center, &window, owner, &value, None), "{id}");
+    }
+    assert!(center.take_fresh().is_empty());
+    assert_eq!(center.unread_count(&screen), 3);
+
+    // The watched pane's notification arrives read and shows no notice.
     assert!(admit(
         &mut center,
         &window,
@@ -87,6 +112,7 @@ fn classification_settings_and_watched_read_share_one_bounded_policy() {
         &event("watched", "s1", "warning"),
         Some(&p1)
     ));
+    assert!(center.take_fresh().is_empty());
     assert_eq!(center.severity(&p1), None);
     assert!(admit(
         &mut center,
@@ -109,37 +135,59 @@ fn classification_settings_and_watched_read_share_one_bounded_policy() {
         &event("crashed", "s0", "error"),
         None
     ));
-    assert_eq!(center.unread_count(&screen), 0);
 
+    // Switches turned off remove what they govern and stop new ones.
+    assert!(admit(
+        &mut center,
+        &window,
+        owner,
+        &noticed(
+            "process.finished",
+            "kept",
+            json!({"kind":"process.finished","severity":"info","title":"kept","setting":"processFinished"})
+        ),
+        None
+    ));
     let mut switches = settings();
     switches.process_finished = false;
     switches.process_exited = false;
     switches.process_crashed = false;
+    let held = center.records.len();
     assert!(center.apply_settings(&switches));
-    assert_eq!(center.records.len(), 3); // idle and two generic records.
-    for kind in ["process.finished", "session.exited"] {
-        assert!(!admit(
-            &mut center,
-            &window,
-            owner,
-            &json!({"type":kind,"id":kind,"sessionId":"s0","exitCode":0}),
-            None
-        ));
+    assert_eq!(center.records.len(), held - 4); // finished, exited, crashed, kept.
+    assert_eq!(center.unread_count(&screen), 0);
+    for (id, setting) in [
+        ("finished2", "processFinished"),
+        ("exited2", "processExited"),
+        ("crashed2", "processCrashed"),
+    ] {
+        let value = noticed(
+            "session.exited",
+            id,
+            json!({"kind":"session.exited","severity":"info","title":id,"setting":setting}),
+        );
+        assert!(!admit(&mut center, &window, owner, &value, None), "{id}");
     }
+    // No switch, or one this window does not know: only `enabled` counts.
     assert!(admit(
         &mut center,
         &window,
         owner,
-        &json!({"type":"process.idle","id":"idle2","sessionId":"s0"}),
+        &event("idle2", "s0", "info"),
         None
     ));
     assert!(admit(
         &mut center,
         &window,
         owner,
-        &event("generic", "s0", "nonsense"),
+        &noticed(
+            "process.finished",
+            "future",
+            json!({"kind":"later","severity":"nonsense","title":"future","setting":"later"})
+        ),
         None
     ));
+    assert_eq!(center.records.back().unwrap().severity, Severity::Info);
     assert_eq!(center.unread_count(&screen), 2);
     switches.enabled = false;
     assert!(center.apply_settings(&switches));
@@ -153,6 +201,43 @@ fn classification_settings_and_watched_read_share_one_bounded_policy() {
     ));
     center.apply_settings(&settings());
     assert_eq!(center.unread_count(&screen), 0); // no resurrection.
+}
+
+/// mux-protocol, Notification Notices Capability (Older server): an event
+/// without a notice gets the generic one, governed by `enabled` only, and
+/// a status change or a bell none.
+#[test]
+fn an_older_server_gets_a_generic_notice() {
+    let (window, mut center, screen) = fixture();
+    let owner = window.lifecycle_token();
+    let mut off = settings();
+    off.process_finished = false;
+    off.process_crashed = false;
+    center.apply_settings(&off);
+    for (id, value) in [
+        (
+            "finished",
+            json!({"type":"process.finished","id":"finished","sessionId":"s0","process":"cargo"}),
+        ),
+        (
+            "closed",
+            json!({"type":"session.exited","id":"closed","sessionId":"s0","exitCode":1,"userInitiated":true}),
+        ),
+    ] {
+        assert!(admit(&mut center, &window, owner, &value, None), "{id}");
+        assert_eq!(center.records.back().unwrap().severity, Severity::Info);
+    }
+    assert_eq!(
+        center.unread_titles(&screen).collect::<Vec<_>>(),
+        ["Session activity", "Activity in cargo"]
+    );
+    for value in [
+        json!({"type":"bell","id":"bell","sessionId":"s0"}),
+        json!({"type":"program_status.changed","id":"status","sessionId":"s0","notify":true,
+            "status":{"state":"blocked","updatedAt":1}}),
+    ] {
+        assert!(!admit(&mut center, &window, owner, &value, None), "{value}");
+    }
 }
 
 #[test]
@@ -180,15 +265,21 @@ fn limits_reject_ambiguous_ids_and_bound_plain_text_without_payload_copies() {
         &json!({"type":"notification","id":7}),
         None
     ));
-    assert!(!admit(
-        &mut center,
-        &window,
-        owner,
-        &json!({"type":"session.exited","id":"bad","exitCode":"1"}),
-        None
-    ));
+    for notice in [
+        json!({"title":1}),
+        json!("notice"),
+        json!({"severity":"error"}),
+    ] {
+        assert!(!admit(
+            &mut center,
+            &window,
+            owner,
+            &noticed("session.exited", "bad", notice),
+            None
+        ));
+    }
     let mut value = event("long", "s0", "warning");
-    value["title"] = json!(format!("\u{202e}\x1b{}\n", "界".repeat(10_000)));
+    value["notice"]["title"] = json!(format!("\u{202e}\x1b{}\n", "界".repeat(10_000)));
     value["body"] = json!("discard".repeat(100_000));
     assert!(admit(&mut center, &window, owner, &value, None));
     let title = center.unread_titles(&screen).next().unwrap();
@@ -491,134 +582,86 @@ async fn opaque_ui_event_fixture_joins_peers_before_releasing_held_credit() {
     assert_eq!(center.unread_count(&screen), 1);
 }
 
-fn status_event(id: &str, session: &str, screen: Option<&str>, status: Value) -> Value {
+/// A `program_status.changed` marked `notify`, with the notice the server
+/// built for it.
+fn status_event(id: &str, session: &str, severity: &str, title: &str) -> Value {
     json!({"type":"program_status.changed","id":id,"timestamp":1,"sessionId":session,
-        "paneId":"p9","screenId":screen,"status":status,"notify":true})
-}
-fn observe_status(window: &mut WindowWorkspace, owner: SourceToken, value: &Value) {
-    assert_eq!(
-        window.source(owner.source_id()).unwrap().source_token(),
-        owner
-    );
-    assert!(window
-        .ui_test_program_status(owner.source_id(), value)
-        .unwrap());
+        "paneId":"p9","screenId":"work","status":{"state":"blocked","updatedAt":5},"notify":true,
+        "notice":{"kind":"program-status","severity":severity,"title":title,"setting":"programStatus"}})
 }
 
+/// program-status, Status Notifications in the Window: a marked event
+/// notifies with the server's notice, prefixed with the host; the watched
+/// pane's is read, the switch stops new ones and keeps the others, and a
+/// pane with a record rings and finishes commands without notifying.
 #[test]
-fn program_status_notifies_for_unwatched_panes_by_its_switch_and_quiets_their_bells() {
+fn program_status_notifies_by_its_notice_and_switch() {
     let (mut window, mut center, local_screen) = fixture();
     let local = window.lifecycle_token();
     let (remote_screen, route) = window
         .ui_test_remote_terminal_fixture("me@192.0.2.1")
         .unwrap();
     let remote = route.source_token();
-    window
-        .ui_test_remote_catalog(remote.source_id(), &["work", "Review"])
-        .unwrap();
-    let permission = json!({"state":"blocked","kind":"permission",
-        "msg":"Allow edit?","title":"Edit","updatedAt":5});
-    let unopened = status_event("blocked", "s-review", Some("Review"), permission.clone());
-    observe_status(&mut window, remote, &unopened);
-    // An older host's events notify nobody, also when marked.
-    let mut older = window.clone();
-    older
-        .source_mut(remote.source_id())
-        .unwrap()
-        .set_program_status_supported(false);
-    assert!(!admit(&mut center, &older, remote, &unopened, None));
+    let title = "Review: Waiting for permission: Allow edit?";
 
     // A host pane on a Screen the window has not opened.
+    let unopened = status_event("blocked", "s-review", "warning", title);
     assert!(admit(&mut center, &window, remote, &unopened, None));
     let fresh = center.take_fresh();
     assert_eq!(fresh.len(), 1);
     assert_eq!(fresh[0].severity, Severity::Warning);
-    assert_eq!(
-        fresh[0].title,
-        "Build host: Review: Waiting for permission: Allow edit?"
-    );
+    assert_eq!(fresh[0].title, format!("Build host: {title}"));
     assert_eq!(fresh[0].screen, None);
-    // A bound host pane names its opened Screen and counts as unread there.
-    let bound = status_event(
-        "bound",
-        route.session_id(),
-        Some("work"),
-        permission.clone(),
-    );
-    observe_status(&mut window, remote, &bound);
+    // A bound host pane counts as unread on its opened Screen.
+    let bound = status_event("bound", route.session_id(), "warning", "work: Waiting");
     assert!(admit(&mut center, &window, remote, &bound, None));
     assert_eq!(
         center.unread_titles(&remote_screen).next(),
-        Some("Build host: work: Waiting for permission: Allow edit?")
+        Some("Build host: work: Waiting")
     );
     assert_eq!(center.severity(&route.pane_key()), Some(Severity::Warning));
-    // The watched pane gets none.
-    let watched = status_event(
-        "watched",
-        route.session_id(),
-        Some("work"),
-        permission.clone(),
-    );
-    assert!(!admit(
+    assert_eq!(center.take_fresh().len(), 1);
+    // The watched pane's arrives read, without a notice.
+    let watched = status_event("watched", route.session_id(), "error", "work: Failed");
+    assert!(admit(
         &mut center,
         &window,
         remote,
         &watched,
         Some(&route.pane_key())
     ));
-    // Unmarked events and other states get none; done and failed do.
-    let mut unmarked = status_event("unmarked", "s0", None, permission.clone());
-    unmarked.as_object_mut().unwrap().remove("notify");
-    for (id, status) in [
-        ("working", json!({"state":"working","updatedAt":6})),
-        ("idle", json!({"state":"idle","updatedAt":6})),
-    ] {
-        assert!(!admit(
-            &mut center,
-            &window,
-            local,
-            &status_event(id, "s0", None, status),
-            None
-        ));
-    }
-    observe_status(&mut window, local, &unmarked);
+    assert!(center.take_fresh().is_empty());
+    assert_eq!(center.severity(&route.pane_key()), Some(Severity::Warning));
+    // Unmarked events carry no notice and add none.
+    let mut unmarked = status_event("unmarked", "s0", "info", "x");
+    let object = unmarked.as_object_mut().unwrap();
+    object.remove("notify");
+    object.remove("notice");
     assert!(!admit(&mut center, &window, local, &unmarked, None));
-    for (id, state, severity, text) in [
-        ("done", "done", Severity::Success, "Work: Done: Edit"),
-        ("error", "error", Severity::Error, "Work: Failed: Edit"),
-    ] {
-        assert!(admit(
-            &mut center,
-            &window,
-            local,
-            &status_event(
-                id,
-                "s0",
-                Some("work"),
-                json!({"state":state,"title":"Edit","updatedAt":7})
-            ),
-            None
-        ));
-        let record = center.records.back().unwrap();
-        assert_eq!((record.severity, record.title.as_str()), (severity, text));
-    }
-    assert_eq!(center.unread_count(&local_screen), 2);
-
-    // A pane holding a root record neither rings nor notifies on its own.
-    for (id, value) in [
-        ("bell", json!({"type":"bell","id":"bell","sessionId":"s0"})),
-        (
-            "osc",
-            json!({"type":"notification","id":"osc","sessionId":"s0","title":"done"}),
-        ),
-    ] {
-        assert!(!admit(&mut center, &window, local, &value, None), "{id}");
-    }
     assert!(admit(
         &mut center,
         &window,
         local,
-        &json!({"type":"notification","id":"osc-s1","sessionId":"s1","title":"done"}),
+        &status_event("done", "s0", "success", "Work: Done: Edit"),
+        None
+    ));
+    assert_eq!(center.unread_count(&local_screen), 1);
+
+    // A pane holding a root record: its bell is no notification, and the
+    // server suppresses its finished commands.
+    assert!(!admit(
+        &mut center,
+        &window,
+        local,
+        &json!({"type":"bell","id":"bell","sessionId":"s0"}),
+        None
+    ));
+    assert!(!admit(
+        &mut center,
+        &window,
+        local,
+        &json!({"type":"process.idle","id":"idle","sessionId":"s0","process":"claude",
+            "notice":{"kind":"process.idle","severity":"info","title":"claude is waiting","suppressed":"program-status"}}),
         None
     ));
 
@@ -626,13 +669,13 @@ fn program_status_notifies_for_unwatched_panes_by_its_switch_and_quiets_their_be
     let hostile = status_event(
         "hostile",
         "s-review",
-        Some("Review"),
-        json!({"state":"blocked","msg":"ok\u{202e}txt\u{1b}[2J\u{2066}.exe","updatedAt":8}),
+        "warning",
+        "Review: Waiting: ok\u{202e}txt\u{1b}[2J\u{2066}.exe",
     );
     assert!(admit(&mut center, &window, remote, &hostile, None));
-    let title = &center.records.back().unwrap().title;
-    assert_eq!(title, "Build host: Review: Waiting: oktxt[2J.exe");
-    assert!(!title.chars().any(hidden));
+    let text = &center.records.back().unwrap().title;
+    assert_eq!(text, "Build host: Review: Waiting: oktxt[2J.exe");
+    assert!(!text.chars().any(hidden));
 
     // The switch off: no notification, earlier ones go.
     let mut off = settings();
@@ -641,12 +684,25 @@ fn program_status_notifies_for_unwatched_panes_by_its_switch_and_quiets_their_be
     assert!(center
         .records
         .iter()
-        .all(|record| !matches!(record.kind, Kind::ProgramStatus)));
+        .all(|record| record.setting != Some(Setting::ProgramStatus)));
     assert!(!admit(
         &mut center,
         &window,
         remote,
-        &status_event("off", "s-review", Some("Review"), permission),
+        &status_event("off", "s-review", "warning", title),
         None
     ));
+    // The pane's tab still shows its status: the workspace keeps the record.
+    observe_status(
+        &mut window,
+        local,
+        &status_event("tab", "s0", "warning", title),
+    );
+    assert!(window.local_source().session_program_status("s0").is_some());
+}
+
+fn observe_status(window: &mut WindowWorkspace, owner: SourceToken, value: &Value) {
+    assert!(window
+        .ui_test_program_status(owner.source_id(), value)
+        .unwrap());
 }

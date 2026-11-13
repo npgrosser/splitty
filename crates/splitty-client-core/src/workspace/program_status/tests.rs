@@ -191,7 +191,6 @@ fn a_host_screen_not_opened_is_marked_through_the_events_screen_only_when_listed
     assert_eq!(source.program_status_screen("s-other"), Some("other"));
     assert_eq!(source.program_status_pane("s-other"), Some("pane-s-other"));
     assert_eq!(source.program_status_screen("s-gone"), None);
-    assert_eq!(source.screen_label("other").as_deref(), Some("other"));
     // A pane the window has bound marks its own Screen, whatever the event names.
     assert!(observe(
         &mut window,

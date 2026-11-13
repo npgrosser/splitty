@@ -353,29 +353,6 @@ impl SourceWorkspace {
     fn status_screen<'a>(&'a self, session: &str, entry: &'a Entry) -> Option<&'a str> {
         self.event_screen(session, entry.screen.as_deref())
     }
-    /// A Screen's name as the Drawer shows it, for text that names it.
-    pub(crate) fn screen_label(&self, screen: &str) -> Option<String> {
-        let catalog = self.live_catalog().unwrap_or_default();
-        let (index, info) = catalog
-            .iter()
-            .enumerate()
-            .find(|(_, info)| info.id.as_str() == screen)
-            .or_else(|| {
-                self.screens()
-                    .iter()
-                    .enumerate()
-                    .find(|(_, info)| info.id.as_str() == screen)
-            })?;
-        let name = info
-            .name
-            .as_deref()
-            .map(|name| plain_text(name, MAX_ID_BYTES))
-            .filter(|name| !name.is_empty());
-        Some(name.unwrap_or_else(|| match self.kind() {
-            super::SourceKind::Local => format!("Screen {}", index + 1),
-            super::SourceKind::Remote => "Unnamed Screen".into(),
-        }))
-    }
     /// The Screens of this source that hold a pane whose program is blocked,
     /// whether or not the window opened them.
     pub fn blocked_screens(&self) -> HashSet<&str> {

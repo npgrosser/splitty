@@ -48,7 +48,7 @@ fn event(rt: &Runtime, source: SourceToken, id: &str, session: &str, severity: &
             source.connection_id(),
             &json!({
                 "type":"notification","id":id,"timestamp":1,"sessionId":session,
-                "title":id,"severity":severity
+                "notice":{"kind":"process.idle","title":id,"severity":severity}
             }),
         ))
         .unwrap();
@@ -513,8 +513,21 @@ fn status_event(
     status: serde_json::Value,
 ) -> serde_json::Value {
     let id = format!("status-{session}-{}", status["updatedAt"]);
-    json!({"type":"program_status.changed","id":id,"timestamp":1,
-        "sessionId":session,"paneId":pane,"screenId":screen,"status":status,"notify":true})
+    let mut event = json!({"type":"program_status.changed","id":id,"timestamp":1,
+        "sessionId":session,"paneId":pane,"screenId":screen,"status":status});
+    // The server marks and classifies only these states.
+    let severity = match event["status"]["state"].as_str() {
+        Some("blocked") => Some("warning"),
+        Some("done") => Some("success"),
+        Some("error") => Some("error"),
+        _ => None,
+    };
+    if let Some(severity) = severity {
+        event["notify"] = json!(true);
+        event["notice"] = json!({"kind":"program-status","severity":severity,
+            "title":format!("{screen}: status"),"setting":"programStatus"});
+    }
+    event
 }
 
 /// The worker applies a report to the window's model, publishes the model,
