@@ -21,7 +21,7 @@ On Windows the native window stores every file pasted or dropped into a local pa
 
 - `splitty-client-core`: `native_workspace::files` gains the per-path decision.
 - `splitty-gpui`: `workspace/file_transfer.rs` splits a paste or drop into referenced and stored files for a local pane in WSL.
-- Docs: `docs/native-ui-handoff.md`.
+- Docs: `docs/architecture.md` (the native file transfer paragraph).
 
 ## Architecture impact
 

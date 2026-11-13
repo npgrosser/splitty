@@ -37,7 +37,7 @@ pub use editors::{
     preferred_editor, AppEditor, EditorOutcome, EditorRequest, EditorSettings, EditorUpdate,
     PathKind,
 };
-pub use files::{file_route, quote_path, FileRoute, FileUpdate, StoreItem};
+pub use files::{file_route, quote_path, wsl_file, FileRoute, FileUpdate, StoreItem, WslFile};
 pub use presence::{
     PtySize, SizePolicy, WindowPresence, WindowPresenceCell, ACTIVITY_INTERVAL, MAX_PTY_COLS,
     MAX_PTY_ROWS,

@@ -165,6 +165,44 @@ pub fn file_route(
     }
 }
 
+/// What a local pane of a server in WSL gets for one file of this computer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum WslFile {
+    /// The file lives in the server's distribution: insert this Linux path.
+    Linux(String),
+    /// Store the file on the server, as any file of this computer.
+    Store,
+}
+
+/// The way into a local pane for the file at `path` (as this computer names
+/// it), when the local server runs in the WSL distribution `distro`. Explorer
+/// names that distribution's files `\\wsl.localhost\<distro>\<rest>` or
+/// `\\wsl$\<distro>\<rest>`; such a path of `distro`, in any case, is the
+/// Linux path `/<rest>`. Every other path, a drive letter's included, is
+/// stored.
+pub fn wsl_file(path: &str, distro: Option<&str>) -> WslFile {
+    let separator = |c: char| c == '\\' || c == '/';
+    let Some(distro) = distro.filter(|distro| !distro.is_empty()) else {
+        return WslFile::Store;
+    };
+    let Some(unc) = path
+        .strip_prefix(separator)
+        .and_then(|path| path.strip_prefix(separator))
+    else {
+        return WslFile::Store;
+    };
+    let mut parts = unc.split(separator);
+    let host = parts.next().unwrap_or_default();
+    if !host.eq_ignore_ascii_case("wsl.localhost") && !host.eq_ignore_ascii_case("wsl$") {
+        return WslFile::Store;
+    }
+    if parts.next().map(str::to_lowercase) != Some(distro.to_lowercase()) {
+        return WslFile::Store;
+    }
+    let rest: Vec<&str> = parts.filter(|part| !part.is_empty()).collect();
+    WslFile::Linux(format!("/{}", rest.join("/")))
+}
+
 /// Keep plain paths; quote anything a shell would split or expand.
 pub fn quote_path(path: &str) -> String {
     if !path.is_empty()
@@ -1170,6 +1208,73 @@ mod tests {
             Some("report.pdf")
         );
         assert_eq!(download_name("\u{202e}\u{2067}"), None);
+    }
+
+    #[test]
+    fn files_of_the_local_distribution_are_referenced_by_their_linux_path() {
+        use super::{wsl_file, WslFile};
+        let linux = |path: &str| WslFile::Linux(path.to_owned());
+        let ubuntu = Some("Ubuntu-24.04");
+        assert_eq!(
+            wsl_file(r"\\wsl.localhost\Ubuntu-24.04\home\user\spec.pdf", ubuntu),
+            linux("/home/user/spec.pdf")
+        );
+        assert_eq!(
+            wsl_file(r"\\wsl$\Ubuntu-24.04\home\user\spec.pdf", ubuntu),
+            linux("/home/user/spec.pdf")
+        );
+        assert_eq!(
+            wsl_file(r"\\WSL.LocalHost\ubuntu-24.04\Home\User\Spec.PDF", ubuntu),
+            linux("/Home/User/Spec.PDF"),
+            "host and distribution in any case, the rest as it is"
+        );
+        assert_eq!(
+            wsl_file(r"\\Wsl$\UBUNTU-24.04\tmp\x", ubuntu),
+            linux("/tmp/x")
+        );
+        assert_eq!(
+            wsl_file(
+                r"\\wsl.localhost\Ubuntu-24.04\home\user\My Report 1.pdf",
+                ubuntu
+            ),
+            linux("/home/user/My Report 1.pdf")
+        );
+        assert_eq!(
+            wsl_file(r"\\wsl$\Ubuntu-24.04\home\jörg\Übersicht 日本.md", ubuntu),
+            linux("/home/jörg/Übersicht 日本.md")
+        );
+        assert_eq!(
+            wsl_file("//wsl.localhost/Ubuntu-24.04/home/user/a", ubuntu),
+            linux("/home/user/a")
+        );
+        // The share root is the distribution's root.
+        assert_eq!(wsl_file(r"\\wsl$\Ubuntu-24.04", ubuntu), linux("/"));
+        assert_eq!(
+            wsl_file(r"\\wsl.localhost\Ubuntu-24.04\", ubuntu),
+            linux("/")
+        );
+        for stored in [
+            r"\\wsl.localhost\Debian\home\user\spec.pdf",
+            r"\\wsl$\Ubuntu\home\user\spec.pdf",
+            r"\\wsl$\Ubuntu-24.04.1\home",
+            r"C:\Users\user\spec.pdf",
+            r"C:\Users\user\My Report.pdf",
+            r"\\fileserver\Ubuntu-24.04\home",
+            r"\\?\UNC\wsl.localhost\Ubuntu-24.04\home",
+            r"\\wsl$\",
+            r"\\wsl$",
+            r"\\\Ubuntu-24.04\home",
+            "/home/user/spec.pdf",
+            "",
+        ] {
+            assert_eq!(wsl_file(stored, ubuntu), WslFile::Store, "{stored}");
+        }
+        assert_eq!(
+            wsl_file(r"\\wsl$\Ubuntu-24.04\home", None),
+            WslFile::Store,
+            "a server outside WSL"
+        );
+        assert_eq!(wsl_file(r"\\wsl$\\home", Some("")), WslFile::Store);
     }
 
     #[test]

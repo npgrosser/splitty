@@ -8,8 +8,8 @@ use crate::terminal::PastedFile;
 use gpui_kit::component::input::TextareaState;
 use splitty_client_core::annotations::SentEntry;
 use splitty_client_core::native_workspace::{
-    file_route, preferred_editor, quote_path, AppEditor, EditorOutcome, EditorUpdate, FileRoute,
-    FileUpdate, PathKind, StoreItem,
+    file_route, preferred_editor, quote_path, wsl_file, AppEditor, EditorOutcome, EditorUpdate,
+    FileRoute, FileUpdate, PathKind, StoreItem, WslFile,
 };
 
 /// A paste of fewer bytes shows no progress.
@@ -34,7 +34,8 @@ enum StoreOrigin {
 
 /// How files pasted or dropped into a pane of `local` (this computer's own
 /// server) or a host's reach it. The local server reads this app's paths
-/// unless it runs in WSL, where a Windows path means nothing to its shell.
+/// unless it runs in WSL, where a Windows path means nothing to its shell
+/// (files of its own distribution still go by path: [`split_wsl_files`]).
 fn route_files(local: bool, files: &[PastedFile], dropped: bool) -> FileRoute {
     let all_paths = files.iter().all(|file| matches!(file, PastedFile::Path(_)));
     file_route(
@@ -43,6 +44,36 @@ fn route_files(local: bool, files: &[PastedFile], dropped: bool) -> FileRoute {
         all_paths,
         dropped,
     )
+}
+
+/// For a pane of the local server when it runs in the WSL distribution
+/// `distro`: the files of that distribution go in by their Linux paths and
+/// the rest is stored. Returns the text to insert now, the quoted Linux paths
+/// separated by spaces and followed by one when files are left, and the files
+/// to store in their order. Without `distro` every file is left to store.
+fn split_wsl_files(distro: Option<&str>, files: Vec<PastedFile>) -> (String, Vec<PastedFile>) {
+    let mut linux = Vec::new();
+    let mut store = Vec::new();
+    for file in files {
+        let referenced = match &file {
+            PastedFile::Path(path) => path.to_str().map(|path| wsl_file(path, distro)),
+            PastedFile::Image { .. } => None,
+        };
+        match referenced {
+            Some(WslFile::Linux(path)) => linux.push(quote_path(&path)),
+            Some(WslFile::Store) | None => store.push(file),
+        }
+    }
+    let mut text = linux.join(" ");
+    if !text.is_empty() && !store.is_empty() {
+        text.push(' ');
+    }
+    (text, store)
+}
+
+/// [`split_wsl_files`] for a pane of `local` (this computer's own server).
+fn local_wsl_files(local: bool, files: Vec<PastedFile>) -> (String, Vec<PastedFile>) {
+    split_wsl_files(local.then(crate::startup::wsl_distro).flatten(), files)
 }
 
 /// This computer's paths of `files`, quoted for a shell, separated by spaces.
@@ -480,6 +511,17 @@ impl Workspace {
             });
             return;
         }
+        // Files of the WSL distribution the local server runs in go by path.
+        let (text, files) = local_wsl_files(local, files);
+        if !text.is_empty() {
+            terminal.update(cx, |terminal, cx| {
+                terminal.paste_text(&text);
+                cx.notify();
+            });
+        }
+        if files.is_empty() {
+            return;
+        }
         self.store_pasted_files(
             source,
             files,
@@ -585,6 +627,13 @@ impl Workspace {
                 return;
             }
             FileRoute::Store => {
+                let (text, files) = local_wsl_files(local, files);
+                if !text.is_empty() {
+                    let _ = input.update(cx, |input, cx| input.insert(text, window, cx));
+                }
+                if files.is_empty() {
+                    return;
+                }
                 return self.store_pasted_files(
                     source,
                     files,
@@ -1260,7 +1309,49 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_bytes, percent};
+    use super::{format_bytes, percent, split_wsl_files};
+    use crate::terminal::PastedFile;
+
+    /// A paste into a local pane of a server in WSL: files of its
+    /// distribution go by path, the rest is stored in its order.
+    #[test]
+    fn files_of_the_local_distribution_are_inserted_and_the_rest_stored() {
+        let path = |path: &str| PastedFile::Path(path.into());
+        let paths = |files: &[PastedFile]| -> Vec<String> {
+            files
+                .iter()
+                .map(|file| match file {
+                    PastedFile::Path(path) => path.to_string_lossy().into_owned(),
+                    PastedFile::Image { .. } => "image".into(),
+                })
+                .collect()
+        };
+        let image = PastedFile::Image {
+            extension: "png",
+            bytes: vec![1],
+        };
+        let batch = vec![
+            path(r"C:\Users\user\a.pdf"),
+            path(r"\\wsl.localhost\Ubuntu\home\user\My Notes.md"),
+            image,
+            path(r"\\wsl$\Debian\home\user\b.txt"),
+            path(r"\\WSL$\ubuntu\tmp\c.txt"),
+        ];
+        let (text, store) = split_wsl_files(Some("Ubuntu"), batch);
+        assert_eq!(text, "'/home/user/My Notes.md' /tmp/c.txt ");
+        assert_eq!(
+            paths(&store),
+            [
+                r"C:\Users\user\a.pdf",
+                "image",
+                r"\\wsl$\Debian\home\user\b.txt"
+            ]
+        );
+        let (text, store) = split_wsl_files(Some("Ubuntu"), vec![path(r"\\wsl$\Ubuntu\home\x")]);
+        assert_eq!((text.as_str(), store.len()), ("/home/x", 0));
+        let (text, store) = split_wsl_files(None, vec![path(r"\\wsl$\Ubuntu\home\x")]);
+        assert_eq!((text.as_str(), store.len()), ("", 1));
+    }
 
     #[test]
     fn sizes_and_progress_read_as_people_say_them() {
