@@ -1414,7 +1414,10 @@ The native pending view uses the shared Rust projection without speculative sess
 Each server owns the effective home settings in `config.toml`. The same config layer
 provides defaults, field limits and atomic PATCH validation to HTTP and native UI
 operations. Clients read `/api/home/settings/metadata` when available and use its
-values for controls and reset actions. A successful settings or shell-profile write
+values for controls and reset actions. The native client validates an edit
+against those limits only; for a server without metadata it falls back to the
+built-in ranges and choices (`splitty_client_core::settings::fallback_limits`)
+and edits no field such a server may not know (`SettingsField::needs_metadata`). A successful settings or shell-profile write
 broadcasts the complete `settings.changed` object to every connected window on
 that server; a failed write leaves both persistent and running values alone. Shell
 profile selection and fallback run on the server, with the effective profile and

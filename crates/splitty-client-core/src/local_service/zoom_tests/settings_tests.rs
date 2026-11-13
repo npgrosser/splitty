@@ -247,13 +247,14 @@ fn patches_are_single_fields_and_font_gap_is_not_admitted() {
         assert_eq!(body.len(), 1);
         assert_eq!(body.values().next().unwrap().as_object().unwrap().len(), 1);
     }
-    for value in [1.0, 7.0, 8.5, 25.0, f64::NAN] {
+    // Ranges are the server's; an edit only has the field's shape.
+    for value in [8.5, -1.0, f64::NAN, f64::INFINITY] {
         assert!(SettingsEdit::new(F::FontSize, V::Number(value)).is_err());
     }
 }
 
 #[tokio::test]
-async fn missing_metadata_preserves_home_and_disables_dependent_writes() {
+async fn missing_metadata_preserves_home_and_keeps_compatible_writes() {
     for missing_metadata in [true, false] {
         let mut exchanges = appearance_exchanges();
         if missing_metadata {
@@ -266,12 +267,19 @@ async fn missing_metadata_preserves_home_and_disables_dependent_writes() {
         let snapshot = client.last_appearance.as_ref().unwrap();
         assert_eq!(snapshot.settings().zoom, 1.0);
         assert_eq!(snapshot.metadata_error().is_some(), missing_metadata);
-        for field in [F::Theme, F::TerminalThemeDark, F::FontSize] {
+        // Without metadata, the fields every server knows are written within
+        // the fallback limits; one such a server may not know is not.
+        for (field, refused) in [
+            (F::Theme, false),
+            (F::FontSize, false),
+            (F::TerminalThemeDark, missing_metadata),
+        ] {
             assert_eq!(
                 client
                     .enqueue_settings(owner, Uuid::new_v4(), edit(field))
                     .is_err(),
-                missing_metadata
+                refused,
+                "{field:?}"
             );
         }
         client.finish().await.unwrap();

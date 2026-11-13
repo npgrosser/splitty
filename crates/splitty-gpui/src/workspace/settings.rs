@@ -777,7 +777,6 @@ impl SettingsView {
         let Some(snapshot) = &self.snapshot else {
             return Vec::new();
         };
-        let metadata = snapshot.metadata();
         if field.is_theme() {
             return self.theme_options(field, snapshot);
         }
@@ -829,12 +828,11 @@ impl SettingsView {
             | SettingsField::CloseOnExit
             | SettingsField::EditorFile
             | SettingsField::EditorFolder
-            | SettingsField::TabsCloseButton => metadata
-                .and_then(|metadata| metadata.choices(field))
+            | SettingsField::TabsCloseButton => snapshot
+                .choices(field)
                 .map(|choices| choices.iter().cloned().map(SettingsValue::Text).collect()),
-            SettingsField::FontSize | SettingsField::Zoom | SettingsField::DrawerWidth => metadata
-                .and_then(|metadata| metadata.limits(field))
-                .and_then(|limits| {
+            SettingsField::FontSize | SettingsField::Zoom | SettingsField::DrawerWidth => {
+                snapshot.limits(field).and_then(|limits| {
                     if !limits.values().is_empty() {
                         return Some(
                             limits
@@ -865,7 +863,8 @@ impl SettingsView {
                             })
                             .collect(),
                     )
-                }),
+                })
+            }
         };
         values
             .unwrap_or_default()
@@ -1007,24 +1006,14 @@ impl SettingsView {
         if field.domain() == SettingsDomain::Notifications {
             return self.value(field).is_some();
         }
+        // A server without metadata takes the fields every server knows,
+        // within the fallback limits.
         self.snapshot.as_ref().is_some_and(|snapshot| {
-            snapshot.metadata().is_some_and(|metadata| {
-                !matches!(
-                    field,
-                    SettingsField::FontFamily
-                        | SettingsField::DrawerPinned
-                        | SettingsField::ScrollToBottom
-                        | SettingsField::ReconnectHosts
-                        | SettingsField::AutoForwardPorts
-                        | SettingsField::TabsShowSplit
-                        | SettingsField::TabsShowFloat
-                        | SettingsField::TabsShowMaximize
-                        | SettingsField::TabsCloseButton
-                        | SettingsField::TabsLocked
-                        | SettingsField::TerminalThemeDark
-                        | SettingsField::TerminalThemeLight
-                ) || metadata.default_value(field).is_some()
-            })
+            snapshot
+                .metadata()
+                .map_or(!field.needs_metadata(), |metadata| {
+                    !field.needs_metadata() || metadata.default_value(field).is_some()
+                })
         }) && (is_switch(field)
             || field == SettingsField::ReconnectHosts
             || self
@@ -1049,7 +1038,9 @@ impl SettingsView {
                 }
                 let snapshot = self.snapshot.as_ref()?;
                 if let Some(error) = snapshot.metadata_error() {
-                    return Some(format!("Settings options unavailable: {error}"));
+                    return Some(format!(
+                        "The server named no settings limits, so built-in ones apply: {error}"
+                    ));
                 }
                 // Files of the themes directory that could not be loaded.
                 let problems = self.themes.problems();
@@ -1654,9 +1645,21 @@ mod tests {
                 state.snapshot.as_ref().unwrap().value(SettingsField::Theme),
                 Some(SettingsValue::Text("splitty-dark".into()))
             );
-            assert!(SettingsField::ALL
+            // settings, Older server without metadata: the fields every
+            // server knows stay editable within the fallback limits; the
+            // ones it may not know are not.
+            for field in SettingsField::ALL {
+                if field.domain() == SettingsDomain::Appearance {
+                    assert_eq!(state.enabled(field), !field.needs_metadata(), "{field:?}");
+                }
+            }
+            let sizes: Vec<_> = state.choices[&SettingsField::FontSize]
                 .iter()
-                .all(|field| !state.enabled(*field)));
+                .map(|(_, value)| value.clone())
+                .collect();
+            assert_eq!(sizes.first(), Some(&SettingsValue::Number(0.0)));
+            assert_eq!(sizes.get(1), Some(&SettingsValue::Number(8.0)));
+            assert_eq!(sizes.last(), Some(&SettingsValue::Number(24.0)));
             assert!(state
                 .status(SettingsField::Theme)
                 .unwrap()

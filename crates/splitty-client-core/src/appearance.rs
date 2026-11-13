@@ -9,7 +9,7 @@ use splitty_transport::budget::Charged;
 use uuid::Uuid;
 
 use crate::settings::{
-    SettingsDomain, SettingsEdit, SettingsField, SettingsMetadata, SettingsValue,
+    SettingsDomain, SettingsEdit, SettingsField, SettingsLimits, SettingsMetadata, SettingsValue,
 };
 
 mod terminal_preferences;
@@ -115,6 +115,20 @@ impl AppearanceSnapshot {
     pub fn metadata(&self) -> Option<&SettingsMetadata> {
         self.metadata.as_deref()
     }
+    /// The limits of `field`: the server's metadata, else, for a server
+    /// without metadata, the client's fallback (`settings::fallback_limits`).
+    pub fn limits(&self, field: SettingsField) -> Option<&SettingsLimits> {
+        match self.metadata() {
+            Some(metadata) => metadata.limits(field),
+            None => crate::settings::fallback_limits(field),
+        }
+    }
+    /// The allowed texts of a field of choices, from [`Self::limits`].
+    pub fn choices(&self, field: SettingsField) -> Option<&[String]> {
+        self.limits(field)
+            .map(SettingsLimits::choices)
+            .filter(|choices| !choices.is_empty())
+    }
     pub fn metadata_error(&self) -> Option<&str> {
         self.metadata_error.as_deref()
     }
@@ -170,32 +184,27 @@ impl AppearanceSnapshot {
                 "Not an appearance setting",
             ));
         }
-        let metadata = self
-            .metadata()
-            .ok_or_else(|| std::io::Error::other("Settings metadata is unavailable"))?;
         let field = edit.field();
         // A theme name is checked against the application's catalog, which
-        // offers the choices; the service stores the name as it is.
+        // offers the choices; the service stores the name as it is. A field
+        // the server may not know is edited only where its metadata names
+        // it; ranges and choices are the metadata's, or for a server without
+        // metadata the client's fallback.
+        let metadata = self.metadata();
+        // Without metadata the client cannot tell whether the server knows
+        // a newer field, and edits none of them.
+        let known = metadata.is_some() || !field.needs_metadata();
         let valid = if field.is_theme() {
             matches!(edit.value(), SettingsValue::Text(_))
-                && metadata.default_value(field).is_some()
-        } else if matches!(
-            field,
-            SettingsField::FontFamily
-                | SettingsField::DrawerPinned
-                | SettingsField::ScrollToBottom
-                | SettingsField::ReconnectHosts
-                | SettingsField::AutoForwardPorts
-                | SettingsField::TabsShowSplit
-                | SettingsField::TabsShowFloat
-                | SettingsField::TabsShowMaximize
-                | SettingsField::TabsLocked
-        ) {
-            metadata.default_value(field).is_some()
+                && known
+                && metadata.is_none_or(|metadata| metadata.default_value(field).is_some())
+        } else if crate::settings::fallback_limits(field).is_some() {
+            known
+                && self
+                    .limits(field)
+                    .is_some_and(|limits| limits.accepts(edit.value()))
         } else {
-            metadata
-                .limits(field)
-                .is_some_and(|limits| limits.accepts(edit.value()))
+            metadata.is_some_and(|metadata| metadata.default_value(field).is_some())
         };
         if valid {
             Ok(())
@@ -224,5 +233,101 @@ fn theme_name(settings: &AppearanceSettings, scheme: ColorScheme) -> &str {
         }
     } else {
         &settings.theme
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use splitty_transport::budget::ConnectionBudget;
+
+    /// A snapshot of default settings with `metadata`, or none.
+    fn snapshot(metadata: Option<serde_json::Value>) -> AppearanceSnapshot {
+        let budget = ConnectionBudget::default();
+        let settings = HomePresentation {
+            appearance: AppearanceSettings::default(),
+            drawer: DrawerSettings::default(),
+            terminal: serde_json::from_value(
+                serde_json::json!({"theme": "default", "closeOnExit": "graceful"}),
+            )
+            .unwrap(),
+            remote: Default::default(),
+            native_tabs: Default::default(),
+            editors: Default::default(),
+        };
+        let metadata = metadata.map(|value| {
+            let metadata = serde_json::from_value::<SettingsMetadata>(value).unwrap();
+            budget.charge(0, false, || metadata).unwrap()
+        });
+        AppearanceSnapshot {
+            connection_id: Uuid::new_v4(),
+            generation: 1,
+            settings: budget.charge(0, false, || settings).unwrap(),
+            scheme: ColorScheme::Dark,
+            terminal_generation: 1,
+            metadata_error: metadata.is_none().then(|| "unavailable".to_owned()),
+            metadata,
+        }
+    }
+
+    fn accepts(snapshot: &AppearanceSnapshot, field: SettingsField, value: SettingsValue) -> bool {
+        SettingsEdit::new(field, value)
+            .and_then(|edit| snapshot.validate_edit(&edit))
+            .is_ok()
+    }
+
+    /// settings, Server-specific defaults and limits: a server that widens
+    /// a limit or adds an editor is taken at its word.
+    #[test]
+    fn edits_follow_the_servers_limits() {
+        use SettingsField as F;
+        use SettingsValue as V;
+        let mut metadata = splitty_core::config::settings_metadata();
+        metadata["limits"]["appearance.fontSize"] =
+            serde_json::json!({"min": 0, "max": 32, "step": 1});
+        metadata["limits"]["drawer.sidebarWidth"] =
+            serde_json::json!({"min": 100, "max": 600, "step": 10});
+        metadata["limits"]["appearance.zoom"] =
+            serde_json::json!({"min": 0.25, "max": 4, "step": 0.25});
+        metadata["limits"]["editors.file"] =
+            serde_json::json!({"values": ["vscode", "zed", "helix"]});
+        let wide = snapshot(Some(metadata));
+        assert!(accepts(&wide, F::FontSize, V::Number(30.0)));
+        assert!(accepts(&wide, F::DrawerWidth, V::Number(500.0)));
+        assert!(accepts(&wide, F::Zoom, V::Number(4.0)));
+        assert!(accepts(&wide, F::EditorFile, V::Text("helix".into())));
+        assert!(!accepts(&wide, F::FontSize, V::Number(33.0)));
+        assert!(!accepts(&wide, F::EditorFile, V::Text("emacs".into())));
+        assert!(!accepts(&wide, F::FontSize, V::Number(8.5)));
+
+        let current = snapshot(Some(splitty_core::config::settings_metadata()));
+        for value in [7.0, 25.0] {
+            assert!(!accepts(&current, F::FontSize, V::Number(value)));
+        }
+        assert!(accepts(&current, F::FontSize, V::Number(0.0)));
+        assert!(!accepts(&current, F::EditorFile, V::Text("helix".into())));
+    }
+
+    /// settings, Older server without metadata: compatible updates go on
+    /// within the fallback limits; fields such a server may not know stay
+    /// unedited.
+    #[test]
+    fn without_metadata_the_fallback_limits_apply() {
+        use SettingsField as F;
+        use SettingsValue as V;
+        let old = snapshot(None);
+        assert!(accepts(&old, F::FontSize, V::Number(18.0)));
+        assert!(accepts(&old, F::Zoom, V::Number(1.5)));
+        assert!(accepts(&old, F::EditorFolder, V::Text("zed".into())));
+        assert!(accepts(&old, F::Theme, V::Text("splitty-light".into())));
+        assert!(!accepts(&old, F::FontSize, V::Number(30.0)));
+        assert!(!accepts(&old, F::EditorFile, V::Text("helix".into())));
+        assert!(!accepts(
+            &old,
+            F::TerminalThemeDark,
+            V::Text("splitty-dark".into())
+        ));
+        assert!(!accepts(&old, F::DrawerPinned, V::Bool(false)));
+        assert!(!accepts(&old, F::TabsCloseButton, V::Text("always".into())));
     }
 }

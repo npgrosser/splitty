@@ -145,6 +145,26 @@ impl SettingsField {
             Self::TerminalTheme | Self::TerminalThemeDark | Self::TerminalThemeLight
         )
     }
+    /// A field that is edited only where the server's metadata names its
+    /// default, which shows that the server knows it: without metadata the
+    /// client cannot tell, and edits nothing of it.
+    pub fn needs_metadata(self) -> bool {
+        matches!(
+            self,
+            Self::FontFamily
+                | Self::DrawerPinned
+                | Self::ScrollToBottom
+                | Self::ReconnectHosts
+                | Self::AutoForwardPorts
+                | Self::TabsShowSplit
+                | Self::TabsShowFloat
+                | Self::TabsShowMaximize
+                | Self::TabsCloseButton
+                | Self::TabsLocked
+                | Self::TerminalThemeDark
+                | Self::TerminalThemeLight
+        )
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize, serde::Serialize)]
@@ -157,8 +177,16 @@ pub enum SettingsValue {
     List(Vec<String>),
 }
 
-/// One explicit field intent. Construction admits only bounded native values;
-/// published metadata/catalog and the service remain authoritative.
+/// The largest number a settings value may have before the server's limits
+/// or the fallback ones are asked.
+const MAX_SETTING_NUMBER: f64 = 1_000_000.0;
+/// The longest choice a value or a metadata entry may have.
+const MAX_CHOICE_BYTES: usize = 128;
+
+/// One explicit field intent. Construction admits only values of the field's
+/// shape, bounded; the server's metadata, or the fallback limits for a
+/// server without it, decide the range (`AppearanceSnapshot::validate_edit`),
+/// and the service remains authoritative.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SettingsEdit {
     field: SettingsField,
@@ -195,24 +223,24 @@ impl SettingsEdit {
                             && !hosts[..index].contains(host)
                     })
             }
-            (SettingsValue::Number(n), F::FontSize) => {
-                *n == 0.0 || (n.fract() == 0.0 && (8.0..=24.0).contains(n))
+            // Ranges and choices are the server's (`SettingsMetadata`), or
+            // the fallback for a server without metadata (`fallback_limits`);
+            // a value only has the field's shape here.
+            (SettingsValue::Number(n), F::FontSize | F::DrawerWidth) => {
+                n.fract() == 0.0 && (0.0..=MAX_SETTING_NUMBER).contains(n)
             }
-            (SettingsValue::Number(n), F::Zoom) => n.is_finite() && (0.5..=3.0).contains(n),
-            (SettingsValue::Number(n), F::DrawerWidth) => {
-                n.fract() == 0.0 && (150.0..=400.0).contains(n)
+            (SettingsValue::Number(n), F::Zoom) => {
+                n.is_finite() && (0.0..=MAX_SETTING_NUMBER).contains(n)
             }
-            (SettingsValue::Text(s), F::ThemeMode) => matches!(s.as_str(), "auto" | "fixed"),
-            (SettingsValue::Text(s), F::ZoomScope) => matches!(s.as_str(), "window" | "terminals"),
-            (SettingsValue::Text(s), F::TabsCloseButton) => {
-                matches!(s.as_str(), "always" | "active")
-            }
-            (SettingsValue::Text(s), F::EditorFile | F::EditorFolder) => {
-                matches!(s.as_str(), "vscode" | "zed")
-            }
-            (SettingsValue::Text(s), F::CloseOnExit) => {
-                matches!(s.as_str(), "always" | "never" | "graceful")
-            }
+            (
+                SettingsValue::Text(s),
+                F::ThemeMode
+                | F::ZoomScope
+                | F::TabsCloseButton
+                | F::EditorFile
+                | F::EditorFolder
+                | F::CloseOnExit,
+            ) => !s.is_empty() && s.len() <= MAX_CHOICE_BYTES && !s.chars().any(char::is_control),
             (SettingsValue::Text(s), F::FontFamily) => {
                 s.len() <= 4096 && !s.chars().any(char::is_control)
             }
@@ -300,6 +328,45 @@ impl SettingsMetadata {
         Ok(())
     }
 }
+
+/// The limits of a server without settings metadata: the ranges and choices
+/// such a server takes. A server with metadata is asked instead, so that a
+/// limit it widens or an editor it adds is taken as it is.
+pub fn fallback_limits(field: SettingsField) -> Option<&'static SettingsLimits> {
+    use SettingsField as F;
+    static LIMITS: std::sync::LazyLock<BTreeMap<SettingsField, SettingsLimits>> =
+        std::sync::LazyLock::new(|| {
+            let range = |min: f64, max: f64, step: f64, values: Vec<f64>| SettingsLimits {
+                min: Some(min),
+                max: Some(max),
+                step: Some(step),
+                values,
+                choices: Vec::new(),
+            };
+            let choices = |values: &[&str]| SettingsLimits {
+                min: None,
+                max: None,
+                step: None,
+                values: Vec::new(),
+                choices: values.iter().map(|value| (*value).to_owned()).collect(),
+            };
+            let font_sizes = std::iter::once(0.0)
+                .chain((8..=24).map(f64::from))
+                .collect();
+            BTreeMap::from([
+                (F::FontSize, range(0.0, 24.0, 1.0, font_sizes)),
+                (F::Zoom, range(0.5, 3.0, 0.1, Vec::new())),
+                (F::DrawerWidth, range(150.0, 400.0, 10.0, Vec::new())),
+                (F::ThemeMode, choices(&["fixed", "auto"])),
+                (F::ZoomScope, choices(&["window", "terminals"])),
+                (F::TabsCloseButton, choices(&["always", "active"])),
+                (F::EditorFile, choices(&["vscode", "zed"])),
+                (F::EditorFolder, choices(&["vscode", "zed"])),
+                (F::CloseOnExit, choices(&["always", "never", "graceful"])),
+            ])
+        });
+    LIMITS.get(&field)
+}
 #[derive(Debug)]
 pub struct SettingsLimits {
     min: Option<f64>,
@@ -320,6 +387,10 @@ impl SettingsLimits {
     }
     pub fn values(&self) -> &[f64] {
         &self.values
+    }
+    /// The allowed texts of a field of choices.
+    pub fn choices(&self) -> &[String] {
+        &self.choices
     }
     pub(crate) fn accepts(&self, value: &SettingsValue) -> bool {
         match value {
