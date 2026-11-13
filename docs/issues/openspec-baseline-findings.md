@@ -551,6 +551,11 @@ that area touches them.
 
 ## Flaky tests
 
+- **Fixed (2026-11-13): the askpass change-feed test read another test's notification.** Seen once, in the
+  release run of v0.4.0 (`askpass::tests::publishing_and_settling_a_question_move_the_change_feed`,
+  `crates/splitty-remote/src/askpass.rs`): the change feed is the process's, so a question of a parallel test
+  moved it before this test's own question was listed, and the test took a question id from an empty list. It
+  now waits for its broker's list first. A process has one broker outside tests.
 - **Fixed (2026-11-13): the `--open` smoke test read the launcher's file before it was written.** Seen once, in
   the release run of v0.4.0 (`explicit_serve_open_and_token_options_stay_gateway_local`,
   `crates/splitty-server/tests/http_surface.rs`): the test waited for the file the fake browser launcher appends

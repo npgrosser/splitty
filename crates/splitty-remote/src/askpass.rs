@@ -635,7 +635,10 @@ mod tests {
         let mut changes = changes();
         changes.borrow_and_update();
         // Answered: the published question and its settlement each notify.
+        // The feed is the process's: another test's question moves it too, so
+        // this broker's own list says when its question is there.
         let stream = connect(&broker, broker.token.clone());
+        wait_for(&broker, 1);
         wait_changed(&mut changes);
         let id = broker
             .pending
