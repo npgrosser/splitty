@@ -21,11 +21,11 @@ model {
   }
 
   splitty = system 'Splitty' {
-    description 'Terminal multiplexer: the Rust server is the source of truth for screens, layouts and terminal sessions; the web frontend and the desktop shells are its clients.'
+    description 'Terminal multiplexer: the Rust server is the source of truth for screens, layouts and terminal sessions; the native desktop app, the web frontend and the legacy desktop shell are its clients.'
 
     core = container 'splitty-core' {
       technology 'Rust library, crates/splitty-core'
-      description 'Workspace model and its reducer, PTY sessions, the session protocol and notifications, daemon state, configuration, themes and templates. Transport-agnostic; linked into the splitty binary and, on macOS and Linux, into the desktop app.'
+      description 'Workspace model and its reducer, PTY sessions, the session protocol and notifications, daemon state, configuration, themes and templates. Transport-agnostic; linked into the splitty binary, the native app (through splitty-client-core) and the legacy desktop app.'
     }
 
     server = container 'splitty binary' {
@@ -33,9 +33,9 @@ model {
       description 'The `splitty` command: one terminal service with shared operations and independent client session loops, HTTP/WebSocket adapters, embedded and daemon lifetimes; the CLI with its control commands; the control socket for processes in panes; SSH host connections and deliberate forwarding.'
     }
 
-    desktop = container 'Desktop app' {
+    desktop = container 'Legacy desktop app' {
       technology 'Rust, Tauri 2, crates/splitty-tauri (splitty-gui)'
-      description 'Native window around the web frontend. On macOS and Linux it always owns an embedded server; on Windows it starts the server inside WSL 2 and binds its lifetime through a stdio bridge. Opens hosts in remote windows through owned SSH exec pipes, on Windows also without WSL.'
+      description 'Legacy web shell, built in CI and not released: a native window around the web frontend. On macOS and Linux it always owns an embedded server; on Windows it starts the server inside WSL 2 and binds its lifetime through a stdio bridge. Opens hosts in remote windows through owned SSH exec pipes, on Windows also without WSL.'
     }
 
     web = container 'Web frontend' {
@@ -55,12 +55,12 @@ model {
 
     client_core = container 'splitty-client-core' {
       technology 'Rust library, crates/splitty-client-core'
-      description 'Experimental UI-free native client: connection-scoped session delivery, viewer document and annotation state, and an embedded service adapter.'
+      description 'UI-free native client of the native desktop app: connection-scoped session delivery, the local and host workspace model, settings, viewer document and annotation state. On Linux and macOS it starts the server in-process (the embedded service) and talks to it over the same framed pipe and handshake a remote client uses; on Windows it starts the server in WSL 2 and does not link it.'
     }
 
     gpui = container 'splitty-gpui' {
       technology 'Rust, GPUI, crates/splitty-gpui'
-      description 'Phase-0 native desktop probe for terminal and Markdown panes, with a separate offscreen web-engine experiment.'
+      description 'The native desktop app and default desktop app: one window over the local service and opened hosts, with terminal, viewer and Markdown panes. Uses only splitty-client-core among the workspace crates; a separate offscreen web-engine experiment stays behind a feature.'
     }
 
     mcp = container 'MCP server' {
@@ -92,7 +92,16 @@ model {
     technology 'WebSocket'
   }
   splitty.desktop -> splitty.web 'shows'
+  user -> splitty.gpui 'works in screens, panes and terminals'
   splitty.gpui -> splitty.client_core 'uses the native client and embedded service'
+  splitty.client_core -> splitty.server 'links the server and starts it in-process on Linux and macOS (the embedded service), then connects over its native framed pipe'
+  splitty.gpui -> wsl 'chooses the distribution and installs the backend that ships beside the executable in' {
+    technology 'wsl.exe'
+  }
+  splitty.client_core -> wsl 'starts the server in, on Windows, and talks to it over native frames' {
+    technology 'wsl.exe, stdio'
+  }
+  splitty.gpui -> splitty.config_files 'reads UI themes and terminal palettes from the themes directory'
   splitty.desktop -> wsl 'starts the server in' {
     technology 'wsl.exe, stdio'
   }

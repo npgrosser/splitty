@@ -1,4 +1,4 @@
-// The GPUI native desktop development window and retained fixture probe.
+// The native desktop app (GPUI), the default desktop app, and its retained fixture probe.
 
 model {
   extend splitty.gpui {

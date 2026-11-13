@@ -49,7 +49,7 @@ views {
 
   view gpui of splitty.gpui {
     title 'splitty-gpui components'
-    description 'The phase-0 native desktop probe and the client core it uses.'
+    description 'The native desktop app and the client core it uses.'
     include splitty.gpui.*, splitty.gpui.* -> splitty.client_core.*
   }
 

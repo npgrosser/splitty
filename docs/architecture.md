@@ -172,8 +172,14 @@ forward stopped. Result handling still requires the exact pending mapping/reques
 and the Core's verified one-shot handle. Settled or duplicate results cannot
 reopen a browser or overwrite an already recorded dispatch outcome.
 
-The development-only `splitty-gpui` window uses `splitty-client-core` as a UI-free
-adapter over one native connection per source and an isolated owned service. The explicit
+The native app `splitty-gpui`, the default desktop app, uses `splitty-client-core` as a UI-free
+adapter over one native connection per source and an isolated owned service. It names no other
+crate of the workspace. Client-core links the server only on Linux and macOS, to start it
+in-process (`embedded`) and connect to it over the same framed pipe and handshake a remote
+client uses (`connection`, `api_stream`); every other module reaches the service through those
+streams, and ending the service is one call of the server's runtime. The architecture check
+enforces both (`architecture/README.md`, "What the test checks"); tests may build services
+of their own anywhere. The explicit
 `native_workspace` module owns the worker, command/update API and bounded retries
 for attachment, visibility and size controls; GPUI only submits intents and
 consumes updates. This runtime retries safe control admission, never user input
