@@ -1451,15 +1451,20 @@ async fn explicit_serve_open_and_token_options_stay_gateway_local() {
     let server = TestServer::start_options(&["--open", "--oneshot-token"]);
     let opened = server._home.path().join("opened");
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !opened.exists() {
+    // The launcher's redirect creates the file before it writes the URL.
+    let url = loop {
+        let url = std::fs::read_to_string(&opened).unwrap_or_default();
+        if url.ends_with('\n') {
+            break url;
+        }
         assert!(
             Instant::now() < deadline,
             "--open did not invoke the browser launcher"
         );
         tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    };
     assert_eq!(
-        std::fs::read_to_string(&opened).unwrap().trim(),
+        url.trim(),
         format!(
             "http://127.0.0.1:{}/?bootstrap={}&desktop=1",
             server.port, server.bootstrap
