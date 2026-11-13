@@ -47,7 +47,7 @@ fn event(rt: &Runtime, source: SourceToken, id: &str, session: &str, severity: &
         .block_on(Event::ui_test_json(
             source.connection_id(),
             &json!({
-                "type":"notification","id":id,"timestamp":1,"sessionId":session,
+                "type":"process.idle","id":id,"timestamp":1,"sessionId":session,
                 "notice":{"kind":"process.idle","title":id,"severity":severity}
             }),
         ))

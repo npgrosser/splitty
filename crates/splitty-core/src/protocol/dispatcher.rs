@@ -417,14 +417,12 @@ impl Connection {
             });
         }
 
-        // Spawn semantic event watcher (OSC 133)
-        {
-            let notify_clone = self.dispatcher.notify.clone();
-            let sender_clone = Arc::clone(&self.sender);
+        // Spawn semantic event watcher (OSC 133) for the notification engine
+        if let Some(notify) = self.dispatcher.notify.clone() {
             let session_clone = Arc::clone(&session);
             let cancel_clone = cancel.clone();
             tokio::spawn(async move {
-                watch_semantic(session_clone, sender_clone, cancel_clone, notify_clone).await;
+                watch_semantic(session_clone, cancel_clone, notify).await;
             });
         }
 
@@ -510,14 +508,12 @@ impl Connection {
             });
         }
 
-        // Spawn semantic event watcher (OSC 133)
-        {
-            let notify_clone = self.dispatcher.notify.clone();
-            let sender_clone = Arc::clone(&self.sender);
+        // Spawn semantic event watcher (OSC 133) for the notification engine
+        if let Some(notify) = self.dispatcher.notify.clone() {
             let session_clone = Arc::clone(&session);
             let cancel_clone = cancel.clone();
             tokio::spawn(async move {
-                watch_semantic(session_clone, sender_clone, cancel_clone, notify_clone).await;
+                watch_semantic(session_clone, cancel_clone, notify).await;
             });
         }
 
@@ -1085,12 +1081,12 @@ async fn watch_title(
     }
 }
 
-/// Background task that reacts to OSC 133 semantic events and forwards them to clients.
+/// Background task that hands OSC 133 semantic events to the notification
+/// engine. The boundaries are not sent to clients: no window reads them.
 async fn watch_semantic(
     session: Arc<dyn SessionHandle>,
-    sender: Arc<dyn Sender>,
     cancel: CancellationToken,
-    notify: Option<Arc<Mutex<NotificationEngine>>>,
+    notify: Arc<Mutex<NotificationEngine>>,
 ) {
     let mut rx = session.semantic_watch();
     let mut done_rx = session.done();
@@ -1107,28 +1103,13 @@ async fn watch_semantic(
                     None => continue, // Skip the initial synthetic None
                 };
 
-                // Map action to wire format
-                let (action_str, exit_code) = match &event.action {
-                    crate::pty::osc::SemanticAction::PromptStart => ("A", None),
-                    crate::pty::osc::SemanticAction::InputStart => ("B", None),
-                    crate::pty::osc::SemanticAction::OutputStart => ("C", None),
-                    crate::pty::osc::SemanticAction::CommandFinished { exit_code } => ("D", *exit_code),
-                };
-
-                let _ = sender.send(&ServerEvent::semantic_boundary(
-                    sid.clone(), action_str.to_string(), exit_code,
-                ));
-
-                // Notify engine about semantic events; a program that
-                // reports its status tells through it instead.
-                if let Some(ref notify_engine) = notify {
-                    let reports_status = matches!(
-                        event.action,
-                        crate::pty::osc::SemanticAction::CommandFinished { .. }
-                    ) && session.program_status().record.is_some();
-                    let engine = notify_engine.lock().unwrap();
-                    engine.on_semantic_event(&sid, &event.action, reports_status);
-                }
+                // A program that reports its status tells through it instead.
+                let reports_status = matches!(
+                    event.action,
+                    crate::pty::osc::SemanticAction::CommandFinished { .. }
+                ) && session.program_status().record.is_some();
+                let engine = notify.lock().unwrap();
+                engine.on_semantic_event(&sid, &event.action, reports_status);
             }
         }
     }

@@ -862,17 +862,10 @@ interface TitleChanged extends SessionEvent {
   oscTitle?: string;
 }
 
-/**
- * OSC 133 semantic prompt event.
- * Emitted when the shell reports a prompt/input/output/command-finished boundary.
- */
-interface SemanticBoundary extends SessionEvent {
-  type: "osc133";
-  /** Semantic action: "A" (prompt), "B" (input), "C" (output), "D" (finished). */
-  action: "A" | "B" | "C" | "D";
-  /** Exit code of the finished command (only present when action is "D"). */
-  exitCode?: number;
-}
+// OSC 133 prompt boundaries are not sent as events: the server uses them for
+// `process.idle`, the semantic snapshot of `created`/`attached` and program
+// status. Earlier servers also sent each boundary as an `osc133` event, which
+// no window read.
 
 /** Terminal bell (BEL character, 0x07). */
 interface Bell extends SessionEvent {
@@ -966,21 +959,6 @@ interface SessionExited extends SessionEvent {
   process?: string;
   command?: string;
   userInitiated: boolean;
-  notice?: Notice;
-}
-
-// --- Generic Notification (fallback) ---
-
-/**
- * Generic notification for cases where no specific event type exists. The
- * server sends none today; a window treats it like the events above.
- */
-interface NotificationMessage extends ServerEvent {
-  type: "notification";
-  severity: NotificationSeverity;
-  title: string;
-  body?: string;
-  sessionId?: string;
   notice?: Notice;
 }
 
@@ -1215,15 +1193,12 @@ type ServerMessage =
   | UploadFailed
   // Session stream
   | TitleChanged
-  | SemanticBoundary
   | Bell
   | SessionSize
   // Process events
   | ProcessFinished
   | ProcessIdle
   | SessionExited
-  // Notification (generic fallback)
-  | NotificationMessage
   // Mux
   | MuxWelcome
   | TemplateExtracted
@@ -2168,9 +2143,8 @@ type ClientCommand =
  * on it: unread state, the pane it shows, its switches and presentation
  * (toast, badge, system notification).
  *
- * The generic `notification` type (with severity, title) is reserved as
- * a fallback for messages that have no specific semantic event type
- * (e.g. "Server shutting down").
+ * There is no generic `notification` type: a window notifies only for the
+ * classified events above.
  */
 
 // ============================================================================
@@ -2205,7 +2179,7 @@ type ClientCommand =
  * 9.2 Why Not All Binary?
  *
  * Binary frames work because output has no structure — raw bytes go 1:1
- * into the terminal emulator. Structured events (title, bell, osc133)
+ * into the terminal emulator. Structured events (title, bell, size)
  * need JSON serialization regardless. Wrapping JSON inside a binary frame
  * adds complexity with no performance benefit.
  *

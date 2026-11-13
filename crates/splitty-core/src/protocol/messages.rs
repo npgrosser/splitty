@@ -241,16 +241,6 @@ pub enum ServerEvent {
         osc_title: Option<String>,
     },
 
-    #[serde(rename = "osc133", rename_all = "camelCase")]
-    SemanticBoundary {
-        id: String,
-        timestamp: i64,
-        session_id: String,
-        action: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        exit_code: Option<i32>,
-    },
-
     #[serde(rename = "bell", rename_all = "camelCase")]
     Bell {
         id: String,
@@ -307,22 +297,6 @@ pub enum ServerEvent {
         #[serde(skip_serializing_if = "Option::is_none")]
         command: Option<String>,
         user_initiated: bool,
-        /// What a window shows for it (`notification-notices-v1`).
-        #[serde(skip_serializing_if = "Option::is_none")]
-        notice: Option<super::notice::Notice>,
-    },
-
-    // -- Generic notification (fallback) ------------------------------------
-    #[serde(rename = "notification", rename_all = "camelCase")]
-    Notification {
-        id: String,
-        timestamp: i64,
-        severity: String,
-        title: String,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        body: Option<String>,
-        #[serde(skip_serializing_if = "Option::is_none")]
-        session_id: Option<String>,
         /// What a window shows for it (`notification-notices-v1`).
         #[serde(skip_serializing_if = "Option::is_none")]
         notice: Option<super::notice::Notice>,
@@ -611,20 +585,6 @@ impl ServerEvent {
             display_title,
             busy,
             osc_title,
-        }
-    }
-
-    pub fn semantic_boundary(
-        session_id: impl Into<String>,
-        action: String,
-        exit_code: Option<i32>,
-    ) -> Self {
-        Self::SemanticBoundary {
-            id: generate_event_id(),
-            timestamp: now_millis(),
-            session_id: session_id.into(),
-            action,
-            exit_code,
         }
     }
 
@@ -1201,17 +1161,6 @@ mod tests {
         assert_eq!(json["cmdline"], "cargo build");
         assert_eq!(json["notice"]["title"], "cargo finished");
         assert_eq!(json["notice"]["setting"], "processFinished");
-    }
-
-    #[test]
-    fn server_event_semantic_boundary_serialization() {
-        let event = ServerEvent::semantic_boundary("sess-b", "D".into(), Some(0));
-        let json = serde_json::to_value(&event).unwrap();
-
-        assert_eq!(json["type"], "osc133");
-        assert_eq!(json["sessionId"], "sess-b");
-        assert_eq!(json["action"], "D");
-        assert_eq!(json["exitCode"], 0);
     }
 
     #[test]

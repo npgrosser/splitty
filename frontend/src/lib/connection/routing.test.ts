@@ -189,7 +189,7 @@ const hostileMessages: [string, (s: FakeSocket) => void][] = [
   ["snapshot of a screen the window does not show", (s) => s.message({ type: "mux.screen_snapshot", screen: snapshot("screen-2") })],
   ["nudge for screen-1", (s) => s.message({ type: "mux.nudge", reason: "x", screenId: "screen-1" })],
   ["process.finished for sess-1", (s) => s.message({ type: "process.finished", sessionId: "sess-1", process: "make" })],
-  ["notification for sess-1", (s) => s.message({ type: "notification", sessionId: "sess-1", severity: "error", title: "evil" })],
+  ["session.exited for sess-1", (s) => s.message({ type: "session.exited", sessionId: "sess-1", exitCode: 1, userInitiated: false })],
   ["pane.close of terminal-1", (s) => s.message({ type: "command", command: { type: "pane.close", paneId: "terminal-1" } })],
   ["pane.close of a pane only the local screen has", (s) => s.message({ type: "command", command: { type: "pane.close", paneId: "terminal-local" } })],
   ["pane.split without a pane while the local screen is active", (s) => s.message({ type: "command", command: { type: "pane.split", direction: "right" } })],
@@ -310,7 +310,7 @@ describe("a hostile second connection reusing the local ids", () => {
 describe("crafted strings", () => {
   it("stay plain data with length caps", async () => {
     const crafted = `<img src=x onerror=alert(1)>\u001b[31m‮${"y".repeat(5000)}`;
-    w.host.socket.message({ id: "n-crafted", type: "notification", sessionId: "sess-1", notice: { kind: crafted, severity: "<script>", title: crafted, setting: crafted } });
+    w.host.socket.message({ id: "n-crafted", type: "process.finished", sessionId: "sess-1", notice: { kind: crafted, severity: "<script>", title: crafted, setting: crafted } });
     const snapshots: ScreenState[] = [];
     w.host.conn.mux.setHandlers({ onSnapshot: (s) => snapshots.push(s) });
     w.host.socket.message({ type: "mux.screen_snapshot", screen: { ...snapshot("screen-1"), name: crafted } });

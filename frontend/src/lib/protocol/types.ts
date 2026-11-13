@@ -204,7 +204,6 @@ export interface ViewerReviewAnswered extends ServerEvent { type: "viewer.review
 // --- Server -> Client: Session Stream Events ---
 
 export interface TitleChanged extends SessionEvent { type: "title"; title: string; cwd: string; cmdline?: string; baseShell: boolean; oscTitle?: string; displayTitle?: string; busy?: boolean }
-export interface SemanticBoundary extends SessionEvent { type: "osc133"; action: string; exitCode?: number }
 export interface Bell extends SessionEvent { type: "bell" }
 export type SizePolicy = "active" | "latest" | "smallest";
 /** The session's PTY size as its server's size policy set it (`pty-size-v1`). */
@@ -242,17 +241,6 @@ export interface ProgramStatusChanged extends ServerEvent {
   screenId?: string;
   status: Record<string, unknown> | null;
   notify?: boolean;
-  notice?: Notice;
-}
-
-// --- Server -> Client: Notification (generic fallback) ---
-
-export interface NotificationMessage extends ServerEvent {
-  type: "notification";
-  severity: NotificationSeverity;
-  title: string;
-  body?: string;
-  sessionId?: string;
   notice?: Notice;
 }
 
@@ -307,7 +295,6 @@ export type OutgoingMessage =
   | ViewerReviewAnswered
   // Session stream
   | TitleChanged
-  | SemanticBoundary
   | Bell
   | SessionSize
   // Process events
@@ -315,8 +302,6 @@ export type OutgoingMessage =
   | ProcessIdle
   | SessionExited
   | ProgramStatusChanged
-  // Notification
-  | NotificationMessage
   // Mux
   | { type: "mux.template_extracted"; requestId: string; template?: Template; error?: string }
   | { type: "mux.close_assessed"; requestId: string; assessment?: CloseAssessment; error?: string }

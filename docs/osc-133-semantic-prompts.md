@@ -1,5 +1,10 @@
 # Enhancement Proposal: OSC 133 Semantic Prompts for Splitty
 
+> Status: implemented, with one part removed later. The server no longer forwards each
+> boundary as an `osc133` event (section 3.3, step 3): no window read it. The scanner, the
+> per-session semantic state sent with `created`/`attached`, `process.idle` and the program
+> status use the boundaries on the server.
+
 ## Context
 
 Splitty currently detects application state (e.g. "Claude Code is waiting for input") by
@@ -160,6 +165,8 @@ specific escape sequences. Adding OSC 133 is ~50 more lines of FSM logic. The sp
 ```
 
 ### 3.3 What does the backend send to clients?
+
+(Superseded: the `osc133` events below were removed; see the status note at the top.)
 
 **Decision: Forward parsed OSC 133 events as structured messages. No invented protocol.**
 

@@ -50,7 +50,9 @@ export function getRevision(): number {
 const SEVERITIES: readonly NotificationSeverity[] = ["info", "success", "warning", "error"];
 const SWITCHES: readonly NotificationSwitch[] = ["processFinished", "processExited", "processCrashed", "programStatus"];
 /** The events an older server sends that a window notifies about. */
-const NOTIFYING = new Set(["process.finished", "process.idle", "session.exited", "notification"]);
+const NOTIFYING = new Set(["process.finished", "process.idle", "session.exited"]);
+/** The events a server classifies; no server builds the generic `notification`. */
+const CLASSIFIED = new Set([...NOTIFYING, "program_status.changed"]);
 
 interface Notice { kind: string; severity: NotificationSeverity; title: string; setting?: NotificationSwitch }
 
@@ -60,6 +62,7 @@ interface Notice { kind: string; severity: NotificationSeverity; title: string; 
  * generic notice and `program_status.changed` none.
  */
 function noticeOf(msg: OutgoingMessage): Notice | null {
+  if (!CLASSIFIED.has(msg.type)) return null;
   const raw = (msg as { notice?: unknown }).notice;
   if (raw === undefined) {
     if (!NOTIFYING.has(msg.type)) return null;

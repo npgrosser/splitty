@@ -235,6 +235,14 @@ fn an_older_server_gets_a_generic_notice() {
         json!({"type":"bell","id":"bell","sessionId":"s0"}),
         json!({"type":"program_status.changed","id":"status","sessionId":"s0","notify":true,
             "status":{"state":"blocked","updatedAt":1}}),
+        // mux-protocol, Notification Notices Capability (Generic
+        // notification event): no server builds one, with or without notice.
+        json!({"type":"notification","id":"generic","sessionId":"s0","title":"build"}),
+        noticed(
+            "notification",
+            "generic-notice",
+            json!({"kind":"process.idle","severity":"error","title":"build"}),
+        ),
     ] {
         assert!(!admit(&mut center, &window, owner, &value, None), "{value}");
     }
@@ -262,7 +270,7 @@ fn limits_reject_ambiguous_ids_and_bound_plain_text_without_payload_copies() {
         &mut center,
         &window,
         owner,
-        &json!({"type":"notification","id":7}),
+        &json!({"type":"process.idle","id":7}),
         None
     ));
     for notice in [
@@ -356,7 +364,7 @@ fn sources_offline_facts_and_unknown_sessions_never_cross_bind() {
         &mut center,
         &window,
         remote,
-        &json!({"type":"notification","id":"unscoped","title":"global"}),
+        &json!({"type":"session.exited","id":"unscoped","exitCode":0}),
         None
     ));
     snapshot(&mut window, remote, "work", &[("p0", "s0"), ("p1", "s1")]);

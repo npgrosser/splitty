@@ -356,8 +356,15 @@ struct Notice {
 
 /// The event's notice, unless it is suppressed or malformed. Without one
 /// (a server without `notification-notices-v1`) a notification event gets a
-/// generic notice and `program_status.changed` none.
+/// generic notice and `program_status.changed` none. Other events, also a
+/// `notification`, which no server builds, carry none.
 fn notice(value: &Value) -> Option<Notice> {
+    if !matches!(
+        value.get("type")?.as_str()?,
+        "process.finished" | "process.idle" | "session.exited" | "program_status.changed"
+    ) {
+        return None;
+    }
     let Some(notice) = value.get("notice") else {
         return generic(value);
     };
@@ -386,7 +393,7 @@ fn notice(value: &Value) -> Option<Notice> {
 
 fn generic(value: &Value) -> Option<Notice> {
     match value.get("type")?.as_str()? {
-        "process.finished" | "process.idle" | "session.exited" | "notification" => {}
+        "process.finished" | "process.idle" | "session.exited" => {}
         _ => return None,
     }
     let process = plain_text(

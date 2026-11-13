@@ -10,7 +10,7 @@ Terminal emulators traditionally do not know what happens in their sessions. Spl
 
 The roadmap describes three independent levels, built in the order 1 → 2 → 3. When this change is next it will most likely be split into one change per level.
 
-**Already implemented** (March 2026, `f4fa994`, `41396c7`, design in `docs/osc-133-semantic-prompts.md`): OSC 133 A/B/C/D parsing on the server, a per-session semantic state (phase, last exit code, command count) sent with `created`/`attached`, `osc133` events to streaming clients, `process.idle` on command completion (10 s cooldown), and auto-injected bash/zsh integration without rc-file changes. The title-icon idle heuristic the roadmap calls the "first generic app parser" was removed in favor of OSC 133. None of this is specced yet.
+**Already implemented** (March 2026, `f4fa994`, `41396c7`, design in `docs/osc-133-semantic-prompts.md`): OSC 133 A/B/C/D parsing on the server, a per-session semantic state (phase, last exit code, command count) sent with `created`/`attached`, `osc133` events to streaming clients (removed later: no window read them), `process.idle` on command completion (10 s cooldown), and auto-injected bash/zsh integration without rc-file changes. The title-icon idle heuristic the roadmap calls the "first generic app parser" was removed in favor of OSC 133. None of this is specced yet.
 
 - **Level 1 — finish shell integration**
   - Keep semantic tracking running while no client streams a session. Today the scanner sits in the client read path, so a command that finishes while the window is closed is missed, contrary to the documented design.

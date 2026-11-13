@@ -165,4 +165,13 @@ describe("server notices", () => {
     expect(unread("host:vm1")).toEqual([]);
     h.detach();
   });
+
+  // mux-protocol, Notification Notices Capability: Generic notification event.
+  it("add nothing for a generic notification event, with or without a notice", () => {
+    const h = host();
+    h.socket.message({ type: "notification", id: next("generic"), sessionId: "sess-1", severity: "error", title: "build" });
+    h.socket.message({ type: "notification", id: next("generic"), sessionId: "sess-1", notice: { kind: "process.idle", severity: "error", title: "build" } });
+    expect(unread("host:vm1")).toEqual([]);
+    h.detach();
+  });
 });
