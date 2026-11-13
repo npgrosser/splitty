@@ -625,7 +625,9 @@ alone leaves the local workspace and its terminals alive.
 The same `LocalServiceClient` admits one identified template-library job alongside
 settings and zoom work, with a fair turn between library requests. The template
 module owns charged immutable drafts and catalog data; it reuses authenticated
-list/load/extract/create/delete operations and never reads files directly. Save
+list/load/create/delete operations and never reads files directly. Extraction is
+asked on the shown Screen's own session connection, local or on a host, and its
+draft comes back to the same dialog. Save
 filters the reviewed draft rather than extracting again and sends it by name
 through `template.create`; the service names the file, and an existing one comes
 back as `OverwriteRequired`, saved over only by an explicit choice with
@@ -1449,7 +1451,7 @@ Applying onto an existing Screen that holds panes or sessions needs `replaceConf
 
 The frontend’s `lib/template_intent.ts` projects the same wire intent into an optimistic snapshot, rendered through `ScreenViews` and `screen_snapshot.ts`. A new screen queues that snapshot before mount, without a throwaway pane. Template panes wait for the mux spawn result, including results that arrived before mount, and never fall back to a direct create. Deterministic template node/floating IDs keep subsequent floating operations aligned before resync. Rejected intents resync the old screen; a rejected new screen is removed from the window. `server-templates-v1` gates both apply and extract and offers an older host's update.
 
-Extraction runs on the target server. The effect runner reads current process titles/directories and actual profile selection, then pure mux conversion prunes viewers, normalizes remaining splits and relativizes directories within an optional root. Empty or viewer-only tiled layouts return an error. Authenticated `POST /api/templates/extract/screen` and native `template.extract` share this operation; `mux.extract_template` / `mux.template_extracted` expose the same read on a screen's session connection, including browser hub connections. The template YAML store format is unchanged.
+Extraction runs on the target server. The effect runner reads current process titles/directories and actual profile selection, then pure mux conversion prunes viewers, normalizes remaining splits and relativizes directories within an optional root. Empty or viewer-only tiled layouts return an error. Both windows extract with `mux.extract_template` / `mux.template_extracted` on the Screen's own session connection, local Screens and host Screens alike, including browser hub connections. Authenticated `POST /api/templates/extract/screen` and native `template.extract` share the same read (`EffectRunner::extract_screen`) and stay, deprecated, for native windows of earlier releases, which used them for local Screens. The template YAML store format is unchanged.
 
 Saving by name is the store's: `template::file_name` derives the file name from the template's name, and `FileStore::save_named` writes a complete temporary file and makes it appear under that name with a hard link, which fails when the file exists (an exclusive create where the file system has no hard links), or replaces it by rename with `overwrite`. `POST /api/templates` and native `template.create` answer with the file name, or 409 with the existing one, and `template-names-v1` announces them; both windows send only the name. A blank or whitespace-only command is no command, both in the template's launch data and in the PTY's startup arguments.
 

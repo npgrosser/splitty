@@ -108,7 +108,7 @@ model {
     client_ports -> client_hub 'Reuse the bounded scripted native API peer for acknowledgement regression tests'
 
     client_templates = component 'client_templates' {
-      description 'Bounded immutable charged template drafts/catalogs and explicit list/load/extract/save/delete jobs; no workspace policy or direct file storage.'
+      description 'Bounded immutable charged template drafts/catalogs and explicit list/load/save/delete jobs (extraction is a session command on the Screen\'s connection); no workspace policy or direct file storage.'
       metadata { module 'splitty_client_core::templates' }
     }
 
@@ -165,7 +165,6 @@ model {
     }
 
     client_templates -> local_service 'Reuse charged API response decoding'
-    client_templates -> connection 'Validate captured extraction Screen identifiers'
     client_templates -> appearance 'Use isolated real-service fixtures for library tests'
     client_templates -> splitty.core.template 'Reuse template data, storage contract and command filtering'
     client_templates -> splitty.core.mux 'Reject drafts that cannot produce the supported canonical layout'

@@ -83,6 +83,22 @@ impl EffectRunner {
         }
     }
 
+    /// Extract the store's Screen `screen_id`, for `mux.extract_template` and
+    /// the deprecated `template.extract` alike (`mux-protocol`, Template
+    /// Extraction Over Session Connections).
+    pub fn extract_screen(
+        &self,
+        store: &super::Store,
+        screen_id: &crate::ids::ScreenId,
+        name: String,
+        root: &str,
+    ) -> Result<crate::template::Template, super::MuxError> {
+        let screen = store
+            .get_screen(screen_id)
+            .ok_or_else(|| super::MuxError::ScreenNotFound(screen_id.clone()))?;
+        self.extract_template(screen, name, root)
+    }
+
     /// Observe process metadata outside the pure conversion before extraction.
     pub fn extract_template(
         &self,

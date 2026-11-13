@@ -1915,6 +1915,24 @@ async fn template_extraction_matches_native_and_http_and_control_cannot_apply_or
             assert_eq!(http.1["panes"]["pane"]["dir"], "./src");
             assert_eq!(http.1["panes"]["pane"]["restore_mode"], "close");
         }
+        // control-api, Template Extraction Endpoint (Window of an earlier
+        // release): the deprecated operation answers what a current window
+        // gets on the Screen's session connection.
+        let request = format!("session-{id}");
+        let mut message = body.clone();
+        message["type"] = json!("mux.extract_template");
+        message["requestId"] = json!(request);
+        peer.sender
+            .json(splitty_transport::wire::Kind::Text, &message)
+            .unwrap();
+        let session = next_text(&mut peer, "mux.template_extracted").await;
+        assert_eq!(session["requestId"], request.as_str());
+        match expected {
+            200 => assert_eq!(session["template"], http.1),
+            // The endpoint keeps its own text for a missing screen.
+            404 => assert_eq!(session["error"], "screen missing not found"),
+            _ => assert_eq!(session["error"], http.1["error"]),
+        }
         assert_eq!(
             exchange(
                 &owner,

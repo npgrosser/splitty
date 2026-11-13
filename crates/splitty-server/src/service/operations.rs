@@ -500,26 +500,25 @@ pub(crate) struct ExtractTemplateRequest {
     root: String,
 }
 
+/// `template.extract`, deprecated: windows of earlier releases extract their
+/// local Screens with it, current ones use `mux.extract_template`
+/// (`control-api`, Template Extraction Endpoint).
 pub(crate) async fn extract_template(
     state: &ServiceState,
     request: ExtractTemplateRequest,
 ) -> Reply {
-    let Some(screen) = state
-        .mux_store
-        .get_screen(&ScreenId::from(request.screen_id.as_str()))
-    else {
-        return (
+    match state.client_state.effect_runner.extract_screen(
+        &state.mux_store,
+        &ScreenId::from(request.screen_id.as_str()),
+        request.name,
+        &request.root,
+    ) {
+        Ok(template) => Payload(template).into_reply(),
+        Err(splitty_core::mux::MuxError::ScreenNotFound(_)) => (
             StatusCode::NOT_FOUND,
             Payload(json!({"error": "screen not found"})),
         )
-            .into_reply();
-    };
-    match state
-        .client_state
-        .effect_runner
-        .extract_template(screen, request.name, &request.root)
-    {
-        Ok(template) => Payload(template).into_reply(),
+            .into_reply(),
         Err(error) => (
             StatusCode::BAD_REQUEST,
             Payload(json!({"error": error.to_string()})),

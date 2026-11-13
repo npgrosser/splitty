@@ -93,27 +93,6 @@ async fn inner(
             .await?;
             draft(client, owner, id, &reply)
         }
-        TemplateApiRequest::Extract {
-            screen_id,
-            name,
-            root,
-        } => {
-            // Empty extraction names are UI drafts, while shared applicability
-            // requires a name. Supply a stable draft label without changing storage.
-            let name = if name.trim().is_empty() {
-                "Untitled".to_owned()
-            } else {
-                name
-            };
-            let reply = read(
-                client,
-                Operation::TemplateExtract,
-                args(json!({"body":{"screenId":screen_id,"name":name,"root":root}})),
-                cancel,
-            )
-            .await?;
-            draft(client, owner, id, &reply)
-        }
         TemplateApiRequest::Save {
             draft,
             name,

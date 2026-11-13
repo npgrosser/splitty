@@ -134,16 +134,12 @@ impl MuxHandler {
                 let screen_id = value.get("screenId").and_then(Value::as_str).unwrap_or("");
                 let name = value.get("name").and_then(Value::as_str).unwrap_or("");
                 let root = value.get("root").and_then(Value::as_str).unwrap_or("");
-                let result = self
-                    .store
-                    .get_screen(&ScreenId::from(screen_id))
-                    .ok_or_else(|| {
-                        splitty_core::mux::MuxError::ScreenNotFound(ScreenId::from(screen_id))
-                    })
-                    .and_then(|screen| {
-                        self.effect_runner
-                            .extract_template(screen, name.into(), root)
-                    });
+                let result = self.effect_runner.extract_screen(
+                    &self.store,
+                    &ScreenId::from(screen_id),
+                    name.into(),
+                    root,
+                );
                 let response = match result {
                     Ok(template) => {
                         serde_json::json!({"type":"mux.template_extracted", "requestId":request_id, "template":template})

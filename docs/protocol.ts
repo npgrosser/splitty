@@ -614,9 +614,10 @@ interface ApplyTemplateOp {
    * window sets it only after the user agreed to the replacement. */
   replaceConfirmed?: true;
 }
-/** Same read as POST /api/templates/extract/screen and native template.extract.
- * API body omits type/requestId; response is Template (404 missing, 400 empty).
- * Session form keeps browser hub extraction on the screen's own connection. */
+/** How both windows extract a Screen, local or on a host: on the Screen's own
+ * connection. The same read as the deprecated POST /api/templates/extract/screen
+ * and native template.extract, kept for windows of earlier releases; their body
+ * omits type/requestId and the response is a Template (404 missing, 400 empty). */
 interface ExtractTemplate { type: "mux.extract_template"; requestId: string; screenId: string; name?: string; root?: string }
 interface TemplateExtracted { type: "mux.template_extracted"; requestId: string; template?: Template; error?: string }
 

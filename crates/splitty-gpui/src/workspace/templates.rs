@@ -50,18 +50,27 @@ enum TemplateMode {
     },
 }
 
+/// What the dialog waits for: the local service's template library, or an
+/// extraction on the shown Screen's own connection (`mux-protocol`, Template
+/// Extraction Over Session Connections).
+#[derive(Clone, Debug)]
+pub(super) enum Pending {
+    Library(TemplateApiRequest),
+    Extract,
+}
+
 pub(super) struct TemplateDialog {
     owner: Uuid,
     source: SourceToken,
     mode: TemplateMode,
     catalog: Option<Arc<TemplateCatalogSnapshot>>,
-    pub(super) pending: Option<(Uuid, TemplateApiRequest)>,
+    pub(super) pending: Option<(Uuid, Pending)>,
     error: Option<String>,
     scroll: ScrollHandle,
 }
 
 impl TemplateDialog {
-    fn accept(&mut self, owner: Uuid, request: Uuid) -> Option<TemplateApiRequest> {
+    fn accept(&mut self, owner: Uuid, request: Uuid) -> Option<Pending> {
         if self.owner != owner || !self.pending.as_ref().is_some_and(|(id, _)| *id == request) {
             return None;
         }
@@ -227,7 +236,7 @@ impl Workspace {
             },
         )) {
             Ok(()) => {
-                dialog.pending = Some((request_id, request));
+                dialog.pending = Some((request_id, Pending::Library(request)));
                 dialog.error = None;
             }
             Err(error) => dialog.error = Some(format!("Request not sent: {error}")),
@@ -261,7 +270,10 @@ impl Workspace {
         let request = Some(request);
         match result.outcome {
             TemplateApiOutcome::Catalog(catalog) => {
-                if !matches!(request.as_ref(), Some(TemplateApiRequest::List)) {
+                if !matches!(
+                    request.as_ref(),
+                    Some(Pending::Library(TemplateApiRequest::List))
+                ) {
                     dialog.error = Some("Unexpected template list reply".into());
                     cx.notify();
                     return;
@@ -272,7 +284,7 @@ impl Workspace {
             TemplateApiOutcome::Draft(draft) => {
                 if !matches!(
                     request.as_ref(),
-                    Some(TemplateApiRequest::Extract { .. } | TemplateApiRequest::Load { .. })
+                    Some(Pending::Extract | Pending::Library(TemplateApiRequest::Load { .. }))
                 ) {
                     dialog.error = Some("Unexpected template draft reply".into());
                     cx.notify();
@@ -281,28 +293,30 @@ impl Workspace {
                 let name =
                     cx.new(|cx| InputState::new(window, cx).default_value(draft.name().to_owned()));
                 let commands = names_with_commands(&draft).into_iter().collect();
-                dialog.mode =
-                    if matches!(request.as_ref(), Some(TemplateApiRequest::Extract { .. })) {
-                        TemplateMode::Save {
-                            draft,
-                            name: name.clone(),
-                            commands,
-                        }
-                    } else {
-                        let root = cx.new(|cx| InputState::new(window, cx));
-                        root.update(cx, |input, cx| input.focus(window, cx));
-                        TemplateMode::Apply {
-                            draft,
-                            root,
-                            target: TargetChoice::NewScreen,
-                        }
-                    };
+                dialog.mode = if matches!(request.as_ref(), Some(Pending::Extract)) {
+                    TemplateMode::Save {
+                        draft,
+                        name: name.clone(),
+                        commands,
+                    }
+                } else {
+                    let root = cx.new(|cx| InputState::new(window, cx));
+                    root.update(cx, |input, cx| input.focus(window, cx));
+                    TemplateMode::Apply {
+                        draft,
+                        root,
+                        target: TargetChoice::NewScreen,
+                    }
+                };
                 if let TemplateMode::Save { name, .. } = &dialog.mode {
                     name.update(cx, |name, cx| name.focus(window, cx));
                 }
             }
             TemplateApiOutcome::Saved { slug } => {
-                if !matches!(request.as_ref(), Some(TemplateApiRequest::Save { .. })) {
+                if !matches!(
+                    request.as_ref(),
+                    Some(Pending::Library(TemplateApiRequest::Save { .. }))
+                ) {
                     dialog.error = Some("Unexpected template save reply".into());
                     cx.notify();
                     return;
@@ -314,7 +328,10 @@ impl Workspace {
                 self.template_api(TemplateApiRequest::List, cx);
             }
             TemplateApiOutcome::Deleted { slug } => {
-                if !matches!(request.as_ref(), Some(TemplateApiRequest::Delete { .. })) {
+                if !matches!(
+                    request.as_ref(),
+                    Some(Pending::Library(TemplateApiRequest::Delete { .. }))
+                ) {
                     dialog.error = Some("Unexpected template delete reply".into());
                     cx.notify();
                     return;
@@ -326,9 +343,7 @@ impl Workspace {
                 self.template_api(TemplateApiRequest::List, cx);
             }
             TemplateApiOutcome::OverwriteRequired { slug } => {
-                if let Some(request) =
-                    request.filter(|request| matches!(request, TemplateApiRequest::Save { .. }))
-                {
+                if let Some(Pending::Library(request @ TemplateApiRequest::Save { .. })) = request {
                     dialog.mode = TemplateMode::Overwrite { request, slug };
                     dialog.error = None;
                     self.focus.focus(window, cx);
@@ -428,46 +443,29 @@ impl Workspace {
         let Some(dialog) = self.template_dialog.as_mut() else {
             return;
         };
-        if shown != dialog.source {
-            // A host reads its own Screen; the local service keeps the result.
-            if dialog.pending.is_some() {
-                return;
-            }
-            let request_id = Uuid::new_v4();
-            match self.commands.try_send(WorkerCommand::new(
-                shown,
-                Command::ExtractTemplate {
-                    owner: dialog.owner,
-                    request_id,
-                    screen: screen_id.clone(),
-                    name: name.clone(),
-                    root: root.clone(),
-                },
-            )) {
-                Ok(()) => {
-                    dialog.pending = Some((
-                        request_id,
-                        TemplateApiRequest::Extract {
-                            screen_id,
-                            name,
-                            root,
-                        },
-                    ));
-                    dialog.error = None;
-                }
-                Err(error) => dialog.error = Some(format!("Request not sent: {error}")),
-            }
-            cx.notify();
+        // The Screen's own service reads it, the local one's or a host's; the
+        // local service keeps the result.
+        if dialog.pending.is_some() {
             return;
         }
-        self.template_api(
-            TemplateApiRequest::Extract {
-                screen_id,
+        let request_id = Uuid::new_v4();
+        match self.commands.try_send(WorkerCommand::new(
+            shown,
+            Command::ExtractTemplate {
+                owner: dialog.owner,
+                request_id,
+                screen: screen_id,
                 name,
                 root,
             },
-            cx,
-        );
+        )) {
+            Ok(()) => {
+                dialog.pending = Some((request_id, Pending::Extract));
+                dialog.error = None;
+            }
+            Err(error) => dialog.error = Some(format!("Request not sent: {error}")),
+        }
+        cx.notify();
     }
 
     fn template_save(&mut self, cx: &mut Context<Self>) {
@@ -1486,7 +1484,7 @@ fn field_label(colors: &NativeAppearance, text: &'static str) -> Div {
 
 #[cfg(test)]
 mod tests {
-    use super::{modal_key, ModalKey, TemplateDialog, TemplateMode};
+    use super::{modal_key, ModalKey, Pending, TemplateDialog, TemplateMode};
     use gpui_kit::ScrollHandle;
     use splitty_client_core::templates::TemplateApiRequest;
     use uuid::Uuid;
@@ -1510,7 +1508,7 @@ mod tests {
             source: splitty_client_core::workspace::SourceWorkspace::new(owner).source_token(),
             mode: TemplateMode::Library,
             catalog: None,
-            pending: Some((second, TemplateApiRequest::List)),
+            pending: Some((second, Pending::Library(TemplateApiRequest::List))),
             error: None,
             scroll: ScrollHandle::new(),
         };
@@ -1518,8 +1516,65 @@ mod tests {
         assert!(dialog.accept(Uuid::new_v4(), second).is_none());
         assert!(matches!(
             dialog.accept(owner, second),
-            Some(TemplateApiRequest::List)
+            Some(Pending::Library(TemplateApiRequest::List))
         ));
         assert!(dialog.accept(owner, second).is_none());
+    }
+
+    /// mux-protocol, Template Extraction Over Session Connections (Extract a
+    /// local screen): saving a local Screen asks the local service's session
+    /// connection, as for a host's Screen, and never the template library.
+    #[cfg(feature = "ui-test-support")]
+    #[test]
+    fn a_local_screen_is_extracted_on_its_session_connection() {
+        use crate::workspace::chrome::view_tests::with_view;
+        use crate::workspace::{Command, Destination};
+        use splitty_client_core::workspace::WindowWorkspace;
+        use tokio::sync::mpsc;
+
+        with_view(|window, view| {
+            let mut model = WindowWorkspace::new(Uuid::new_v4());
+            model.ui_test_local_screen_fixture("Work").unwrap();
+            let local = model.lifecycle_token();
+            let (sender, mut commands) = mpsc::channel(64);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.commands = sender;
+                    workspace.destination = Destination::Screens;
+                    workspace.reconcile(model, window, cx);
+                    workspace.toggle_templates(window, cx);
+                });
+            });
+            // Opening the dialog asks the library for its list; take it as
+            // answered.
+            let mut listed = false;
+            while let Ok(command) = commands.try_recv() {
+                listed |= matches!(command.kind(), Command::TemplateApi { .. });
+            }
+            assert!(listed);
+            window.update(|window, cx| {
+                view.update(cx, |workspace, cx| {
+                    workspace.template_dialog.as_mut().unwrap().pending = None;
+                    workspace.template_extract(window, cx);
+                    workspace.template_extract_submit(cx);
+                });
+            });
+            let command = commands.try_recv().expect("extraction command");
+            assert_eq!(command.source_token(), Some(local));
+            assert!(
+                matches!(
+                    command.kind(),
+                    Command::ExtractTemplate { screen, name, .. } if screen == "work" && name == "Work"
+                ),
+                "local extraction asks the template library instead"
+            );
+            assert!(commands.try_recv().is_err());
+            window.update(|_, cx| {
+                assert!(matches!(
+                    view.read(cx).template_dialog.as_ref().unwrap().pending,
+                    Some((_, Pending::Extract))
+                ));
+            });
+        });
     }
 }

@@ -278,3 +278,124 @@ async fn templates_new_replace_partial_launch_keep_other_pty_and_join_cleanup() 
     assert!(pty.sessions().is_empty());
     let _ = std::fs::remove_dir_all(path);
 }
+
+/// mux-protocol, Template Extraction Over Session Connections (Extract a
+/// local screen): a Screen of the local service is extracted on its session
+/// connection, from the authoritative Screen and relative to the root, and
+/// the answer is the draft the window reviews.
+#[tokio::test]
+async fn a_local_screen_is_extracted_on_its_session_connection() {
+    if !splitty_core::pty::testing::pty_available() {
+        return;
+    }
+    use splitty_core::{
+        ids::{PaneId, ScreenId},
+        mux::Op,
+    };
+    let (runtime, path) = crate::appearance::local::tests::fixture();
+    let state = runtime.state.clone();
+    let service = crate::EmbeddedService::from_runtime(runtime);
+    let (tx, rx) = mpsc::channel(64);
+    let (out, mut updates) = mpsc::channel(64);
+    let worker = tokio::spawn(run_service(
+        service,
+        rx,
+        out,
+        Arc::new(AtomicBool::new(false)),
+        Arc::new(AtomicBool::new(false)),
+        ColorScheme::Dark,
+    ));
+    let model = loop {
+        if let Update::Workspace(m) = next(&mut updates).await {
+            if m.local_source().routes().len() == 1
+                && m.local_source()
+                    .routes()
+                    .iter()
+                    .all(|r| m.local_source().session_ready(&r.session_id))
+            {
+                break local_projection(&m);
+            }
+        }
+    };
+    let screen = ScreenId::from("extract");
+    state
+        .mux_store
+        .dispatch(Op::CreateScreen {
+            name: Some("Extract".into()),
+            screen_id: Some(screen.clone()),
+            new_pane_id: Some(PaneId::from("extract-pane")),
+            shell_profile_id: None,
+        })
+        .unwrap();
+    let session = state
+        .mux_store
+        .get_screen(&screen)
+        .unwrap()
+        .sessions
+        .keys()
+        .next()
+        .unwrap()
+        .clone();
+    state
+        .mux_store
+        .dispatch(Op::UpdateSessionMetadata {
+            session_id: session,
+            display_title: String::new(),
+            cwd: "/project/src".into(),
+            busy: false,
+            exited: false,
+            exit_code: None,
+            close: false,
+        })
+        .unwrap();
+    let request_id = Uuid::new_v4();
+    let owner = model.connection_id();
+    tx.send(Command::new(
+        model.source_token(),
+        CommandKind::ExtractTemplate {
+            owner,
+            request_id,
+            screen: "extract".into(),
+            name: "Extracted".into(),
+            root: "/project".into(),
+        },
+    ))
+    .await
+    .unwrap();
+    let draft = loop {
+        if let Update::TemplateApi(result) = next(&mut updates).await {
+            if result.request_id == request_id {
+                assert_eq!(result.connection_id, owner);
+                let TemplateApiOutcome::Draft(draft) = result.outcome else {
+                    panic!("extracted draft: {:?}", result.outcome)
+                };
+                break draft;
+            }
+        }
+    };
+    assert_eq!(draft.name(), "Extracted");
+    assert_eq!(draft.template().panes["extract-pane"].dir, "./src");
+    drop(draft);
+    tx.send(Command {
+        source: Some(model.source_token()),
+        kind: CommandKind::RequestClose {
+            plan: model.assess_close(100, CloseTarget::Window).unwrap(),
+            confirmed: true,
+        },
+    })
+    .await
+    .unwrap();
+    loop {
+        if matches!(
+            next(&mut updates).await,
+            Update::WindowCloseApproved {
+                request_id: 100,
+                ..
+            }
+        ) {
+            break;
+        }
+    }
+    worker.await.unwrap().unwrap();
+    let _ = std::fs::remove_dir_all(path);
+}

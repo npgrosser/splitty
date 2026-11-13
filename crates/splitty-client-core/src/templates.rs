@@ -72,16 +72,14 @@ impl TemplateCatalogSnapshot {
         &self.entries
     }
 }
+/// A request to the local service's template library. Extraction is asked on
+/// the Screen's own connection instead (`CommandKind::ExtractTemplate`;
+/// `mux-protocol`, Template Extraction Over Session Connections).
 #[derive(Clone, Debug)]
 pub enum TemplateApiRequest {
     List,
     Load {
         slug: String,
-    },
-    Extract {
-        screen_id: String,
-        name: String,
-        root: String,
     },
     /// Save under `name`; the service names the file (`templates`, Saved
     /// Template Names) and, without `overwrite_confirmed`, answers
@@ -181,16 +179,6 @@ impl TemplateApiRequest {
         match self {
             Self::List => {}
             Self::Load { slug: value } | Self::Delete { slug: value } => slug(value)?,
-            Self::Extract {
-                screen_id,
-                name,
-                root,
-            } => {
-                crate::connection::identifier(screen_id)?;
-                if name.len() > 256 || root.len() > 4096 {
-                    return Err(invalid("Template extraction input exceeds limit"));
-                }
-            }
             Self::Save {
                 draft,
                 name,

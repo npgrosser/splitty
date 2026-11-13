@@ -190,53 +190,6 @@ async fn library_save_load_overwrite_delete_uses_reviewed_content_and_fair_setti
         TemplateApiOutcome::Deleted { .. }
     ));
     assert!(runtime.state.template_store.get("review-v1-2").is_err());
-    // Extraction reads the authoritative Screen and target-side relative root.
-    use splitty_core::{
-        ids::{PaneId, ScreenId},
-        mux::Op,
-    };
-    let screen = ScreenId::from("extract");
-    runtime
-        .state
-        .mux_store
-        .dispatch(Op::CreateScreen {
-            name: Some("Extract".into()),
-            screen_id: Some(screen.clone()),
-            new_pane_id: Some(PaneId::from("extract-pane")),
-            shell_profile_id: None,
-        })
-        .unwrap();
-    let state = runtime.state.mux_store.get_screen(&screen).unwrap();
-    let session = state.sessions.keys().next().unwrap().clone();
-    runtime
-        .state
-        .mux_store
-        .dispatch(Op::UpdateSessionMetadata {
-            session_id: session,
-            display_title: String::new(),
-            cwd: "/project/src".into(),
-            busy: false,
-            exited: false,
-            exit_code: None,
-            close: false,
-        })
-        .unwrap();
-    client
-        .enqueue_template(
-            owner,
-            Uuid::new_v4(),
-            TemplateApiRequest::Extract {
-                screen_id: "extract".into(),
-                name: "Extracted".into(),
-                root: "/project".into(),
-            },
-        )
-        .unwrap();
-    let TemplateApiOutcome::Draft(extracted) = result(&mut client).await.outcome else {
-        panic!("extracted draft")
-    };
-    assert_eq!(extracted.template().panes["extract-pane"].dir, "./src");
-    drop(extracted);
     drop(draft);
     client.finish().await.unwrap();
     assert_eq!(budget.used(), 0);
