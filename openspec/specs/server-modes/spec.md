@@ -246,7 +246,7 @@ A daemon SHALL persist the workspace to `state.json` in the Splitty configuratio
 - **THEN** the viewer pane comes back without the wait, and the waiting command has ended with an error
 
 ### Requirement: Workspace Restore On Daemon Start
-When a daemon starts and a readable `state.json` exists, it SHALL restore that workspace, keeping the screen, pane, and session identifiers. If the file is missing or cannot be parsed, the daemon SHALL start with an empty workspace.
+When a daemon starts and a readable `state.json` exists, it SHALL restore that workspace, keeping the screen, pane, and session identifiers. If the file is missing or cannot be parsed, the daemon SHALL start with an empty workspace. A pane of the legacy role `webview` SHALL be removed as if it had been closed, keeping the rest of its Screen's layout; a Screen left without panes SHALL be removed.
 
 #### Scenario: Restart restores layout
 - **WHEN** a daemon is stopped and started again
@@ -255,6 +255,14 @@ When a daemon starts and a readable `state.json` exists, it SHALL restore that w
 #### Scenario: Corrupt state file
 - **WHEN** `state.json` contains invalid JSON at daemon start
 - **THEN** the daemon starts with an empty workspace
+
+#### Scenario: Legacy web pane
+- **WHEN** `state.json` holds a Screen with a terminal pane and a `webview` pane split side by side
+- **THEN** the daemon restores the Screen with the terminal pane alone in its layout, with its session and identifiers
+
+#### Scenario: Older host's web pane in a window
+- **WHEN** a host of an earlier release sends a Screen holding a pane of the role `webview`
+- **THEN** the window reads that pane as a terminal pane and keeps the Screen's layout as the host sent it
 
 ### Requirement: Session Respawn On Daemon Start
 When a daemon restores a workspace, it SHALL start a new process for every ordinary pane that is bound to a session not recorded as exited and whose keeper the daemon has not adopted (see `session-keepers`). The new process SHALL keep that session's identifier, command, and shell or shell profile, and SHALL start in the session's recorded working directory, or the pane's if the session has none. Sessions recorded with neither a shell nor a shell profile SHALL use the current default shell profile. Output from before the restart SHALL NOT be restored for a respawned session. A session that fails to start SHALL be logged and SHALL NOT prevent the daemon from serving or the other sessions from starting. Managed-job sessions SHALL never be respawned, including when their recorded state was `starting` or `running`. An unfinished job whose keeper the daemon does not adopt SHALL become `interrupted` with an unknown exit result and SHALL report its old output unavailable; a job whose keeper it adopts SHALL keep running (see Grant And Client Lifetimes Are Independent). Terminal jobs SHALL retain their recorded outcome.
