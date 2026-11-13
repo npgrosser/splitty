@@ -130,9 +130,10 @@ Local and remote terminals have the
 2. Split with **Cmd/Alt+D** and **Cmd/Alt+Shift+D**, open a tab with
    **Cmd/Alt+T** and a screen with **Ctrl+Shift+Space**. **Ctrl+B** opens the
    drawer when it is unpinned.
-3. For a remote screen, click the arrow next to **New screen** in the drawer
-   and choose **On a host…**. Connect to a new host once with plain `ssh`
-   first to accept its key.
+3. For a remote screen, open **Hosts** at the bottom of the drawer (or
+   **Connect to Host…** in the command palette), pick a host and choose
+   **New Screen**. Connect to a new host once with plain `ssh` first to
+   accept its key.
 4. **Cmd/Alt+Shift+P** opens the command palette with everything else, and
    **Ctrl+,** the settings.
 
