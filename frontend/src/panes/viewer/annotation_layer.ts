@@ -3,15 +3,19 @@
  * selection toolbar, the form, the list column and the hand-over of the
  * review, for the document the pane's view shows (`viewer_view.ts`).
  *
- * Each annotation anchors by its quote in the text of its own view: the
- * source, or the rendered view's text, which is rendered for its text alone
- * while the source is shown. A rendered passage of a document that is shown
- * only as source anchors in the source. Anchoring runs again whenever the
- * annotations, the document's version or the view change. The passage is
- * marked in its own view, and its lines in the other one: a bar beside the
- * source lines, a mark on the covering blocks of a rendered Markdown
- * document. A rendered HTML page names no lines, so its passages show only
- * in its rendered view.
+ * The pane's server anchors every annotation in the document's source
+ * (`server_reviews.ts`): the window asks for the anchors whenever the
+ * document's version or the annotations' targets change, and an annotation
+ * the answer for the version shown does not place yet is listed at its
+ * recorded lines without a mark or a note (SBR-9 of server-built-reviews).
+ * An annotation taken from the rendered view anchors in the rendered view's
+ * text, which only the window has, while the document renders: the window
+ * anchors it there, rendered for its text alone while the source is shown,
+ * and hands what it found to the review (SBR-5). The passage is marked in
+ * its own view, and its lines in the other one: a bar beside the source
+ * lines, a mark on the covering blocks of a rendered Markdown document. A
+ * rendered HTML page names no lines, so its passages show only in its
+ * rendered view.
  *
  * A passage that changed is anchored where it most likely is now and marked
  * in its own style; resolved annotations are marked only while the user
@@ -27,13 +31,15 @@
  * further clicks go through the others (`mark_hits.ts`). A click that ends a
  * selection, a double click and a click on a link do what they did.
  *
- * Sending the review marks what it held as handed over and keeps it (D4 of
- * review-threads); a process waiting for the review is answered from the
- * pane's banner (`review_banner.ts`).
+ * The server writes the review when the user sends, copies, saves or answers
+ * with it. Sending the review marks what it held as handed over and keeps it
+ * (D4 of review-threads); a process waiting for the review is answered from
+ * the pane's banner (`review_banner.ts`).
  *
- * Annotations are offered while the pane's server keeps them and the
- * document is text; an image or a binary file shows the list only while it
- * holds annotations.
+ * Annotations are offered while the pane's server keeps, anchors and reviews
+ * them and the document is text; an image or a binary file shows the list
+ * only while it holds annotations. A server that keeps annotations but writes
+ * no reviews needs an update, and the list says so (SBR-8).
  */
 
 import type { ContextMenuItem } from "../../stores/ui.svelte.ts";
@@ -41,7 +47,7 @@ import type { AnnotationKind, AnnotationTarget, ReviewOutcome, ReviewWait, SentE
 import { anchorer, sourceLines, targetAt, type Anchor, type Anchoring, type LineRange, type QuoteTarget } from "../../lib/viewer/anchoring.ts";
 import {
   ANNOTATION_LINE_LIMIT, ANNOTATION_TEXT_LIMIT, MIN_QUOTE_CHARS, isBlank, isDeletion, isOpen, newAnnotationId, newReplyId, ownOf,
-  pendingEntries, registerAnnotationList, reviewSelection, sameContent, type ViewerAnnotations,
+  registerAnnotationList, reviewSelection, sameContent, type ViewerAnnotations,
 } from "../../lib/viewer/annotations.ts";
 import { utf8Length } from "../../lib/viewer/limits.ts";
 import { pickMark, type MarkHit, type MarkPick } from "../../lib/viewer/mark_hits.ts";
@@ -50,7 +56,8 @@ import {
   type SendForm,
 } from "../../lib/viewer/handover.ts";
 import type { BlockMark, BoundaryRange, RenderedDocument, RenderedMark, RenderedText } from "../../lib/viewer/render.ts";
-import { compareListPlaces, reviewFileName, reviewMarkdown, type ListPlace, type ReviewDocument, type ReviewEntry } from "../../lib/viewer/review.ts";
+import { compareListPlaces, reviewFileName, type ListPlace, type ReviewDocument } from "../../lib/viewer/review.ts";
+import { utf16Offsets, type Anchored, type PaneReviews, type RenderedPassage } from "../../lib/viewer/server_reviews.ts";
 import type { SourceMark, SourceView } from "../../lib/viewer/source_view.ts";
 import { AnnotationForm, type FormDraft } from "./annotation_form.ts";
 import { AnnotationList, type ListEntry, type ListHeader } from "./annotation_list.ts";
@@ -91,8 +98,12 @@ export interface AnnotationLayerOptions {
   readonly paneId: string;
   /** The id of the pane's screen on its server, now. */
   screenId(): string;
-  /** Whether the pane's server keeps annotations. */
+  /** Whether the pane's server keeps annotations, anchors them and writes their review. */
   available(): boolean;
+  /** Whether the pane's server keeps annotations but needs an update to anchor them and write their review. */
+  outdated?(): boolean;
+  /** The anchors and reviews the pane's server works out. */
+  readonly reviews: PaneReviews;
   /** The document as the review names it. */
   readonly document: ReviewDocument;
   readonly handover: ReviewHandover;
@@ -155,6 +166,10 @@ interface Placed {
   readonly anchor?: Anchor;
   /** Anchored at the passage its quote most likely became. */
   readonly changed?: boolean;
+  /** Anchored by the window in its rendered view's text, found or not. */
+  readonly byWindow?: boolean;
+  /** Not anchored yet in the version shown. */
+  readonly pending?: boolean;
 }
 
 /** A review ready to go, and what it held of each of the user's pending entries. */
@@ -162,8 +177,6 @@ interface Prepared {
   readonly review: Review;
   /** The annotations it holds. */
   readonly count: number;
-  /** No annotation was pending: it holds every open one again. */
-  readonly again: boolean;
   /** Per pending entry of the user it holds, the entry as it read then; an entry changed since stays pending. */
   readonly entries: ReadonlyMap<string, SentEntry>;
 }
@@ -172,9 +185,15 @@ interface Anchorers {
   readonly version: string | undefined;
   readonly shown: AnnotatedContent["shown"];
   readonly sourceText: string | undefined;
-  readonly source?: (target: QuoteTarget) => Anchoring;
   readonly sourceLines?: LineRange;
   rendered?: ((target: QuoteTarget) => Anchoring) | null;
+}
+
+/** The server's anchors for a version of the source text, by annotation, with the target each was made for. */
+interface Served {
+  readonly version: string;
+  readonly text: string;
+  readonly byId: ReadonlyMap<string, { readonly target: AnnotationTarget; readonly anchor?: Anchor; readonly changed?: boolean }>;
 }
 
 interface Selected {
@@ -209,6 +228,31 @@ function hoverName(annotation: ViewerAnnotation): string {
   return annotation.number !== undefined ? `#${annotation.number} · ${kind}` : kind;
 }
 
+function sameTarget(a: AnnotationTarget, b: AnnotationTarget): boolean {
+  return a.view === b.view && a.quote === b.quote && a.prefix === b.prefix && a.suffix === b.suffix
+    && a.startLine === b.startLine && a.endLine === b.endLine;
+}
+
+/**
+ * The server's anchors for `targets` as offsets of the window's source text,
+ * which holds the text the server anchored in; a range that falls inside a
+ * character, which no server sends, leaves its annotation unanchored.
+ */
+function servedAnchors(answer: Anchored, text: string, targets: ReadonlyMap<string, AnnotationTarget>): Served {
+  const found = answer.anchors.filter((each) => targets.has(each.id) && (each.state === "anchored" || each.state === "changed"));
+  const offsets = utf16Offsets(text, found.flatMap((each) => [each.start!, each.end!]));
+  const byId = new Map<string, { target: AnnotationTarget; anchor?: Anchor; changed?: boolean }>();
+  found.forEach((each, index) => {
+    const [start, end] = [offsets[2 * index], offsets[2 * index + 1]];
+    if (start === undefined || end === undefined) return;
+    byId.set(each.id, { target: targets.get(each.id)!, anchor: { start, end, startLine: each.startLine!, endLine: each.endLine! }, changed: each.state === "changed" });
+  });
+  for (const each of answer.anchors) {
+    if (each.state === "lost" && targets.has(each.id)) byId.set(each.id, { target: targets.get(each.id)! });
+  }
+  return { version: answer.version, text, byId };
+}
+
 function linesLabel(start: number, end: number): string {
   return start === end ? `Line ${start}` : `Lines ${start}-${end}`;
 }
@@ -238,8 +282,7 @@ function readsAs(entry: SentEntry | undefined, held: SentEntry): boolean {
   if (!entry || entry.id !== held.id || entry.kind !== held.kind || entry.body !== held.body || entry.replacement !== held.replacement) return false;
   const [a, b] = [entry.target, held.target];
   if (!a || !b) return a === b;
-  return a.view === b.view && a.quote === b.quote && a.prefix === b.prefix && a.suffix === b.suffix
-    && a.startLine === b.startLine && a.endLine === b.endLine;
+  return sameTarget(a, b);
 }
 
 /** Whether `text` holds at least `count` characters, counted as code points. */
@@ -287,6 +330,10 @@ export class AnnotationLayer {
   /** The store's list the annotations were placed from; the same array while it is unchanged. */
   private listed: readonly ViewerAnnotation[] | undefined;
   private anchorers: Anchorers | undefined;
+  /** The server's last anchors, and what anchors were asked for last: a version and the annotations' targets. */
+  private served: Served | undefined;
+  private asked: string | undefined;
+  private anchorRequest = 0;
   private active: string | undefined;
   /** While the marks are hidden, the annotation chosen since, whose passage is marked. */
   private revealed: string | undefined;
@@ -482,39 +529,6 @@ export class AnnotationLayer {
     };
   }
 
-  /**
-   * The review of the pane's annotations as they are anchored now (D4 of
-   * review-threads): the open ones with an entry of the user not handed
-   * over, or every open one when none is. An answer to a waiting process
-   * states its verdict, and an approval holds only the pending ones (D1 and
-   * D4 of review-verdict).
-   */
-  private review(verdict?: ReviewOutcome): Prepared {
-    this.anchorAll();
-    const content = this.content();
-    const open = this.placed.filter((placed) => isOpen(placed.annotation));
-    const selection = this.selection(open.map((placed) => placed.annotation), verdict);
-    const chosen = new Set(selection.annotations.map((annotation) => annotation.id));
-    const entries: ReviewEntry[] = [];
-    const pending = new Map<string, SentEntry>();
-    for (const placed of open) {
-      if (!chosen.has(placed.annotation.id)) continue;
-      entries.push(this.reviewEntry(placed, content));
-      for (const id of pendingEntries(placed.annotation)) {
-        const entry = entryOf(placed.annotation, id);
-        if (entry) pending.set(id, entry);
-      }
-    }
-    const { document, paneId } = this.options;
-    const answer = verdict ? { verdict, ...(this.waitChanged ? { changedDuringWait: true } : {}) } : {};
-    return {
-      review: { text: reviewMarkdown(document, entries, { paneId, ...answer }), fileName: reviewFileName(document) },
-      count: entries.length,
-      again: selection.again,
-      entries: pending,
-    };
-  }
-
   destroy(): void {
     this.destroyed = true;
     clearTimeout(this.toolbarTimer);
@@ -536,18 +550,50 @@ export class AnnotationLayer {
     this.applyMarks();
     this.renderList();
     this.renderBanner();
+    this.askAnchors();
+  }
+
+  /**
+   * Ask the server for the anchors of the version shown when it or the
+   * annotations' targets changed since the last request; an edit of a remark
+   * or a reply asks for nothing. An answer about another version than the
+   * one shown waits for the window's own read of that version.
+   */
+  private askAnchors(): void {
+    if (!this.options.available()) return;
+    const { version, sourceText } = this.content();
+    if (version === undefined || sourceText === undefined) return;
+    const targets = new Map<string, AnnotationTarget>();
+    for (const annotation of this.listed ?? []) if (annotation.target) targets.set(annotation.id, annotation.target);
+    if (targets.size === 0) return;
+    const key = JSON.stringify([version, [...targets]]);
+    if (key === this.asked) return;
+    this.asked = key;
+    const request = ++this.anchorRequest;
+    // The store tells of a change before it sends it: the request follows it on the connection.
+    queueMicrotask(() => {
+      if (this.destroyed || request !== this.anchorRequest) return;
+      this.options.reviews.anchor(this.options.paneId).then((answer) => {
+        if (this.destroyed || request !== this.anchorRequest) return;
+        const now = this.content();
+        if (answer.version !== now.version || now.sourceText === undefined) return;
+        this.served = servedAnchors(answer, now.sourceText, targets);
+        this.refresh();
+      }, () => {
+        // The annotations stay where they were recorded until the next change asks again.
+      });
+    });
   }
 
   private anchorersFor(content: AnnotatedContent): Anchorers {
     const known = this.anchorers;
     if (known && known.version === content.version && known.shown === content.shown && known.sourceText === content.sourceText) return known;
     const text = content.sourceText;
-    const lines = text !== undefined ? sourceLines(text) : undefined;
     this.anchorers = {
       version: content.version,
       shown: content.shown,
       sourceText: text,
-      ...(text !== undefined && lines ? { source: anchorer(text, lines), sourceLines: lines } : {}),
+      ...(text !== undefined ? { sourceLines: sourceLines(text) } : {}),
     };
     return this.anchorers;
   }
@@ -565,27 +611,34 @@ export class AnnotationLayer {
     const content = this.content();
     const anchorers = this.anchorersFor(content);
     this.listed = this.options.store.list(this.options.paneId);
+    const available = this.options.available();
+    const served = this.served && this.served.version === content.version && this.served.text === content.sourceText ? this.served : undefined;
     const placed = this.listed.map((annotation, index): Placed => {
       const target = annotation.target;
       if (!target) return { annotation, place: { state: "general", index } };
+      const recorded = { state: "stale" as const, startLine: target.startLine, endLine: target.endLine, index };
       let view: "source" | "rendered" | undefined;
       let anchoring = STALE;
-      const rendered = target.view === "rendered" ? this.renderedAnchorer(content, anchorers) : null;
+      let byWindow = false;
+      const rendered = available && target.view === "rendered" ? this.renderedAnchorer(content, anchorers) : null;
       if (rendered) {
         view = "rendered";
+        byWindow = true;
         anchoring = rendered(target);
-      } else if (anchorers.source) {
+      } else if (content.sourceText !== undefined) {
+        const found = served?.byId.get(annotation.id);
+        if (!found || !sameTarget(found.target, target)) return { annotation, place: recorded, pending: true };
         view = "source";
-        anchoring = anchorers.source(target);
+        if (found.anchor) anchoring = found.changed ? { state: "changed", anchor: found.anchor, score: 0 } : { state: "anchored", anchor: found.anchor };
       }
       if (anchoring.state !== "stale") {
         const anchor = anchoring.anchor;
         return {
-          annotation, view, anchor, changed: anchoring.state === "changed",
+          annotation, view, anchor, changed: anchoring.state === "changed", byWindow,
           place: { state: "anchored", view, offset: anchor.start, startLine: anchor.startLine, endLine: anchor.endLine, index },
         };
       }
-      return { annotation, place: { state: "stale", startLine: target.startLine, endLine: target.endLine, index } };
+      return { annotation, place: recorded, byWindow };
     });
     placed.sort((a, b) => compareListPlaces(a.place, b.place));
     this.placed = placed;
@@ -761,8 +814,13 @@ export class AnnotationLayer {
 
   private listShown(): boolean {
     const count = this.options.store.count(this.options.paneId);
-    if (!this.options.available() && count === 0) return false;
+    if (!this.options.available() && !this.outdated() && count === 0) return false;
     return this.choice === "open" || (this.choice !== "closed" && count > 0);
+  }
+
+  /** The pane's server keeps annotations but needs an update for them. */
+  private outdated(): boolean {
+    return !this.options.available() && !!this.options.outdated?.();
   }
 
   private toggleList(): void {
@@ -791,7 +849,7 @@ export class AnnotationLayer {
       kind: annotation.kind,
       deletion: isDeletion(annotation),
       where: this.where(placed),
-      state: !annotation.target ? "general" : !anchor ? "stale" : changed ? "changed" : "anchored",
+      state: !annotation.target ? "general" : placed.pending ? "pending" : !anchor ? "stale" : changed ? "changed" : "anchored",
       resolved: !isOpen(annotation),
       sent: !!annotation.sent,
       quote: annotation.target?.quote,
@@ -830,7 +888,8 @@ export class AnnotationLayer {
     const available = this.options.available();
     const shown = this.listShown();
     this.list.setShown(shown);
-    this.listButton.hidden = !available && total === 0;
+    const outdated = this.outdated();
+    this.listButton.hidden = !available && !outdated && total === 0;
     this.listButton.textContent = open === 0 ? "Annotations" : open === 1 ? "1 Annotation" : `${open} Annotations`;
     this.listButton.title = shown ? "Hide the annotations" : "Show the annotations";
     this.listButton.setAttribute("aria-pressed", String(shown));
@@ -842,10 +901,11 @@ export class AnnotationLayer {
       open,
       resolved: total - open,
       ...this.sendLabel(again && open > 0),
-      sendable: open > 0,
+      sendable: available && open > 0,
       writable,
       movable: writable && this.readSelection()?.state === "passage",
       resolvedShown: this.resolvedShown,
+      ...(outdated ? { notice: "The Splitty of this pane's server does not anchor annotations or write their review. Update Splitty there to annotate this document." } : {}),
     };
     this.list.render(header, this.placed.map((placed) => this.entryOf(placed)), this.active);
   }
@@ -994,38 +1054,45 @@ export class AnnotationLayer {
 
   // ── The Review ──
 
-  private reviewEntry(placed: Placed, content: AnnotatedContent): ReviewEntry {
-    const { annotation, view, anchor, changed } = placed;
-    const { number, kind, body, replacement, target } = annotation;
-    const replies = (annotation.replies ?? []).map((reply) => ({
-      author: reply.author,
-      ...(reply.from?.title ? { title: reply.from.title } : {}),
-      body: reply.body,
-    }));
-    const own = { ...(number !== undefined ? { number } : {}), kind, body, replies };
-    if (!target) return own;
-    const page = (view ?? target.view) === "rendered" && content.format === "html";
-    const state = !anchor ? "stale" as const : changed ? "changed" as const : "anchored" as const;
-    // A changed passage, and one not found, are named by the lines they were annotated on.
-    const lines = page ? null
-      : state === "anchored" ? { start: anchor!.startLine, end: anchor!.endLine }
-      : { start: target.startLine, end: target.endLine };
-    return { ...own, replacement, passage: { quote: target.quote, lines, state } };
+  /**
+   * What the window found in its rendered view for the annotations taken
+   * from it, which the server cannot anchor (SBR-5): their state, current
+   * lines and offset, and for a page without source lines no lines in the
+   * review.
+   */
+  private renderedPassages(): RenderedPassage[] {
+    const unlined = this.content().format === "html";
+    return this.placed.flatMap((placed): RenderedPassage[] => {
+      if (!placed.byWindow) return [];
+      const { anchor, changed, annotation } = placed;
+      const passage: RenderedPassage = anchor
+        ? { id: annotation.id, state: changed ? "changed" : "anchored", startLine: clampLine(anchor.startLine), endLine: Math.max(clampLine(anchor.startLine), clampLine(anchor.endLine)), offset: anchor.start }
+        : { id: annotation.id, state: "lost" };
+      return [unlined ? { ...passage, unlined: true } : passage];
+    });
   }
 
-  /** The annotations a review holds: for an approval only the pending ones, else the review's selection. */
-  private selection(open: readonly ViewerAnnotation[], verdict?: ReviewOutcome): { readonly annotations: readonly ViewerAnnotation[]; readonly again: boolean } {
-    const selection = reviewSelection(open);
-    return verdict === "approved" && selection.again ? { annotations: [], again: false } : selection;
-  }
-
-  /** The review, once the annotations it holds have the numbers the server gives them. */
+  /**
+   * The review the server writes of the pane's annotations (D4 of
+   * review-threads; SBR-2 of server-built-reviews): the open ones with an
+   * entry of the user not handed over, or every open one when none is; an
+   * answer to a waiting process states its verdict, and an approval holds
+   * only the pending ones. The server reads the annotations after this
+   * window's earlier changes, so a comment saved just before is in it.
+   */
   private async prepareReview(verdict?: ReviewOutcome): Promise<Prepared> {
-    const { store, paneId } = this.options;
+    const { document, paneId } = this.options;
     this.refresh();
-    const open = this.placed.filter((placed) => isOpen(placed.annotation)).map((placed) => placed.annotation);
-    await store.whenNumbered(paneId, this.selection(open, verdict).annotations.map((annotation) => annotation.id));
-    return this.review(verdict);
+    const reviewed = await this.options.reviews.review({
+      paneId,
+      ...(verdict ? { verdict, ...(this.waitChanged ? { changedDuringWait: true } : {}) } : {}),
+      passages: this.renderedPassages(),
+    });
+    return {
+      review: { text: reviewed.text, fileName: reviewFileName(document) },
+      count: reviewed.count,
+      entries: new Map(reviewed.entries.map((entry) => [entry.id, entry])),
+    };
   }
 
   /**
@@ -1055,11 +1122,12 @@ export class AnnotationLayer {
     this.options.showMenu(items, rect.left, rect.bottom);
   }
 
-  private targetItems(form: SendForm, review?: Review): ContextMenuItem[] {
+  private targetItems(form: SendForm): ContextMenuItem[] {
     const targets = this.targets();
     if (targets.length === 0) return [{ label: "No terminal pane on this screen", action: () => {}, disabled: true }];
     return targets.map((target) => {
-      const problem = form === "scratchpad" && review ? scratchpadProblem(review, target) : undefined;
+      // Whether the review fits the scratchpad is known once the server wrote it.
+      const problem = form === "scratchpad" && !target.scratchpad ? scratchpadProblem({ text: "", fileName: "" }, target) : undefined;
       return {
         label: target.title,
         action: () => void this.send(target, form),
@@ -1069,11 +1137,10 @@ export class AnnotationLayer {
   }
 
   private handoverItems(): ContextMenuItem[] {
-    const { review } = this.review();
     return [
       { label: "Send To", action: () => {}, children: this.targetItems("paste") },
       { label: "Send as File To", action: () => {}, children: this.targetItems("file") },
-      { label: "Append to Scratchpad Of", action: () => {}, children: this.targetItems("scratchpad", review) },
+      { label: "Append to Scratchpad Of", action: () => {}, children: this.targetItems("scratchpad") },
       { label: "", action: () => {}, separator: true },
       { label: "Copy as Markdown", action: () => void this.copy() },
       { label: "Save as File", action: () => void this.download() },
@@ -1089,16 +1156,27 @@ export class AnnotationLayer {
     else this.showMenuAt(anchor, this.targetItems("paste"));
   }
 
+  /** The server's review, or undefined after telling the user why there is none. */
+  private async writtenReview(): Promise<Prepared | undefined> {
+    try {
+      return await this.prepareReview();
+    } catch (error) {
+      if (!this.destroyed) this.options.notices.error("The review could not be written", error instanceof Error ? error.message : undefined);
+      return undefined;
+    }
+  }
+
   private async send(target: ReviewTarget, form: SendForm): Promise<void> {
-    const prepared = await this.prepareReview();
-    if (prepared.count === 0 || this.destroyed) return;
+    const prepared = await this.writtenReview();
+    if (!prepared || prepared.count === 0 || this.destroyed) return;
     if (await sendReview(prepared.review, target, form, this.options.notices)) this.markHandedOver(prepared);
   }
 
   private async copy(): Promise<void> {
-    const { review } = await this.prepareReview();
+    const prepared = await this.writtenReview();
+    if (!prepared) return;
     try {
-      await this.options.writeClipboard(review.text);
+      await this.options.writeClipboard(prepared.review.text);
       this.options.notices.info("The review is in the clipboard");
     } catch (error) {
       this.options.notices.error("The review could not be copied", error instanceof Error ? error.message : undefined);
@@ -1106,8 +1184,9 @@ export class AnnotationLayer {
   }
 
   private async download(): Promise<void> {
-    const { review } = await this.prepareReview();
-    this.options.download(review.fileName, new Blob([review.text], { type: "text/markdown" }));
+    const prepared = await this.writtenReview();
+    if (!prepared) return;
+    this.options.download(prepared.review.fileName, new Blob([prepared.review.text], { type: "text/markdown" }));
   }
 
   // ── Waiting For A Review ──

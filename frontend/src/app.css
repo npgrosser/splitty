@@ -789,6 +789,7 @@ body,
 
 .viewer-annotations[hidden],
 .viewer-annotations-empty[hidden],
+.viewer-annotations-notice[hidden],
 .viewer-annotations-add[hidden],
 .viewer-annotations-list[hidden],
 .viewer-annotations-resolved[hidden],
@@ -1336,6 +1337,12 @@ body,
 .viewer-annotations-empty {
   margin: 2px 10px 6px;
   color: var(--splitty-text-muted);
+  line-height: 1.5;
+}
+
+.viewer-annotations-notice {
+  margin: 6px 10px;
+  color: var(--splitty-text-secondary);
   line-height: 1.5;
 }
 

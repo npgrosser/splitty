@@ -530,26 +530,6 @@ describe("ViewerAnnotations", () => {
     expect(sent).toEqual([]);
   });
 
-  it("resolves once its annotations have the numbers the server gave them, or after a while", async () => {
-    store.snapshot(screen({ v1: [] }));
-    const own = question();
-    store.put("screen-1", "v1", [own]);
-    let numbered = false;
-    const waiting = store.whenNumbered("v1", [own.id]).then(() => { numbered = true; });
-    await Promise.resolve();
-    expect(numbered).toBe(false);
-    store.snapshot(screen({ v1: [{ ...own, number: 4 }] }));
-    await waiting;
-    expect(store.get("v1", own.id)?.number).toBe(4);
-
-    const other = comment();
-    store.put("screen-1", "v1", [other]);
-    const late = store.whenNumbered("v1", [other.id], 500);
-    vi.advanceTimersByTime(500);
-    await expect(late).resolves.toBeUndefined();
-    await expect(store.whenNumbered("v1", [own.id, "ann-ffffffffffffffff"])).resolves.toBeUndefined();
-  });
-
   describe("replies", () => {
     // viewer-annotations, Threads: The user answers an agent.
     it("shows the user's reply after the agent's at once, sends it, and keeps it over an older snapshot", () => {

@@ -92,7 +92,7 @@ describe("ViewerPaneRenderer", { timeout: 30_000 }, () => {
     const plan = viewer("v1", "/home/me/app/PLAN.md");
     const annotated: PaneState = { ...plan, viewer: { ...plan.viewer!, annotations: [annotation] } };
     const agent: PaneState = { id: "t1", role: "terminal", title: "claude", sessionId: "sess-1" };
-    const { screen } = await open(row(slot("main", ["t1"]), slot("docs", ["v1"])), [agent, annotated], ["viewer-v1", "viewer-annotations-v1"]);
+    const { screen } = await open(row(slot("main", ["t1"]), slot("docs", ["v1"])), [agent, annotated], ["viewer-v1", "viewer-annotations-v1", "viewer-reviews-v1"]);
     const { TerminalSession } = await import("../lib/terminal/terminal_session.ts");
     const { fakeEmulator } = await import("../lib/testing/fake_server.ts");
     const emulator = fakeEmulator();
@@ -110,6 +110,15 @@ describe("ViewerPaneRenderer", { timeout: 30_000 }, () => {
     expect(send.textContent).toBe("Send");
     send.click();
 
+    // The pane's server writes the review.
+    await vi.waitFor(() => expect(screen.socket.sentOfType("viewer.review")).toHaveLength(1));
+    const [asked] = screen.socket.sentOfType("viewer.review");
+    expect(asked).toMatchObject({ paneId: "v1" });
+    const held = { id: annotation.id, kind: "comment", body: "Why three?", target: annotation.target };
+    screen.socket.message({
+      type: "viewer.reviewed", requestId: asked.requestId, paneId: "v1", version: "1", count: 1, entries: [held],
+      text: "# Review of PLAN.md\n\nDocument: /home/me/app/PLAN.md\n\n## #1 Line 1, comment\n> retry three times\n\nWhy three?\n",
+    });
     await vi.waitFor(() => expect(screen.socket.sentOfType("input")).toHaveLength(1));
     expect(screen.socket.sentOfType("input")[0]).toMatchObject({ id: "sess-1", data: expect.stringMatching(/^# Review of PLAN\.md\n/) });
     expect(screen.socket.sentOfType("input")[0].data).toContain("## #1 Line 1, comment");

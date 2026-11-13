@@ -103,6 +103,10 @@ export type IncomingMessage =
   // approval may and a request for changes must carry.
   // Answered by `viewer.review_answered` to this connection only.
   | ViewerReviewAnswer
+  // The anchors and the review of a viewer pane's annotations (`viewer-reviews-v1`),
+  // answered by `viewer.anchored` / `viewer.reviewed` or `viewer.failed` to this connection only.
+  | { type: "viewer.anchor"; requestId: string; paneId: string }
+  | ViewerReviewRequest
   // Mux messages
   | { type: "mux.op"; screenId: string; op: MuxOperation }
   | { type: "mux.resync"; screenId: string }
@@ -174,6 +178,26 @@ export interface ViewerReviewAnswer {
   /** The review: optional with `approved` (its notes), required with `changes_requested`. */
   review?: string;
 }
+/** A window asks for the review of viewer pane `paneId` (`viewer-reviews-v1`). */
+export interface ViewerReviewRequest {
+  type: "viewer.review";
+  requestId: string;
+  paneId: string;
+  verdict?: ReviewOutcome;
+  changedDuringWait?: boolean;
+  /** What the window found in its rendered view for annotations taken from it. */
+  passages?: { id: string; state: "anchored" | "changed" | "lost"; startLine?: number; endLine?: number; offset?: number; unlined?: true }[];
+}
+/** The anchors of a pane's annotations in the source of document version `version`, in the order of its list; ranges in UTF-8 bytes. */
+export interface ViewerAnchored extends ServerEvent {
+  type: "viewer.anchored";
+  requestId: string;
+  paneId: string;
+  version: string;
+  anchors: { id: string; state: "anchored" | "changed" | "lost" | "general"; start?: number; end?: number; startLine?: number; endLine?: number }[];
+}
+/** The review the server wrote for a pane, with the user's entries it holds that were not handed over. */
+export interface ViewerReviewed extends ServerEvent { type: "viewer.reviewed"; requestId: string; paneId: string; version: string; text: string; count: number; entries: SentEntry[] }
 /** The server's acknowledgement of one `viewer.review_answer`; `accepted` only for the answer that settled the wait. */
 export interface ViewerReviewAnswered extends ServerEvent { type: "viewer.review_answered"; paneId: string; waitId: string; accepted: boolean }
 
@@ -278,6 +302,8 @@ export type OutgoingMessage =
   | ViewerChunk
   | ViewerUnchanged
   | ViewerFailed
+  | ViewerAnchored
+  | ViewerReviewed
   | ViewerReviewAnswered
   // Session stream
   | TitleChanged

@@ -19,6 +19,7 @@ import type { ConnSocket } from "../protocol/socket.ts";
 import type { CloseAssessment, CloseScope, MuxOperation, OpenViewerOp, ScreenInfo, ScreenState, OutgoingMessage, ViewerPlacement, Template } from "../protocol/types.ts";
 import { plainText, MAX_TEXT } from "../protocol/untrusted.ts";
 import { ANNOTATIONS_CAPABILITY, ANNOTATION_OPS } from "../viewer/annotations.ts";
+import { REVIEWS_CAPABILITY } from "../viewer/server_reviews.ts";
 import { VIEWER_CAPABILITY } from "../viewer/limits.ts";
 import { closeAssessment, screenList, screenState } from "./incoming.ts";
 
@@ -80,6 +81,8 @@ export class MuxClient {
   viewers = false;
   /** Whether the server keeps annotations on viewer panes (`viewer-annotations`, Annotations Capability); without it the window offers none. */
   annotations = false;
+  /** Whether the server anchors annotations and writes their review (`viewer-reviews-v1`); without it the window offers no annotations either. */
+  viewerReviews = false;
   templates = false;
   /** Whether the server says what a close would end (`mux-protocol`, Close Assessment). */
   closeAssessments = false;
@@ -266,6 +269,7 @@ export class MuxClient {
         this.viewers = Array.isArray(msg.capabilities) && msg.capabilities.includes(VIEWER_CAPABILITY);
         this.templates = Array.isArray(msg.capabilities) && msg.capabilities.includes("server-templates-v1");
         this.annotations = Array.isArray(msg.capabilities) && msg.capabilities.includes(ANNOTATIONS_CAPABILITY);
+        this.viewerReviews = Array.isArray(msg.capabilities) && msg.capabilities.includes(REVIEWS_CAPABILITY);
         this.closeAssessments = Array.isArray(msg.capabilities) && msg.capabilities.includes(CLOSE_ASSESSMENT_CAPABILITY);
         this.screenNames = Array.isArray(msg.capabilities) && msg.capabilities.includes(SCREEN_NAMES_CAPABILITY);
         this.welcomed = true;

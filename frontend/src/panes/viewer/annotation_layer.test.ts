@@ -2,9 +2,12 @@
 import { EditorView } from "@codemirror/view";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AnnotationReply, MuxOperation, ReviewWait, ScreenState, ViewerAnnotation, ViewerRecord } from "../../lib/protocol/types.ts";
-import { CONTEXT_CHARS } from "../../lib/viewer/anchoring.ts";
-import { ViewerAnnotations } from "../../lib/viewer/annotations.ts";
+import { CONTEXT_CHARS, anchorer, sourceText } from "../../lib/viewer/anchoring.ts";
+import { ViewerAnnotations, isOpen, pendingEntries, reviewSelection } from "../../lib/viewer/annotations.ts";
+import { compareListPlaces, safeText, type ListPlace } from "../../lib/viewer/review.ts";
+import type { Anchored, PaneReviews, Reviewed, ReviewRequest, ServerAnchor } from "../../lib/viewer/server_reviews.ts";
 import type { ReviewAnswerRequest, ReviewTarget } from "../../lib/viewer/handover.ts";
+import type { SentEntry } from "../../lib/protocol/types.ts";
 import type { BoundaryRange } from "../../lib/viewer/render.ts";
 import type { ContextMenuItem } from "../../stores/ui.svelte.ts";
 import { ViewerView } from "../viewer_view.ts";
@@ -48,6 +51,124 @@ function screenWith(annotations: ViewerAnnotation[]): ScreenState {
   } as unknown as ScreenState;
 }
 
+/** The document as the pane's server reads it now: the last one a window read. */
+let onDisk: { text: string; version: string } | undefined;
+
+const utf8 = (text: string) => encoder.encode(text).length;
+
+/** A user's entry of `annotation` as `mark_sent` names it. */
+function sentEntry(annotation: ViewerAnnotation, id: string): SentEntry | undefined {
+  if (id === annotation.id) {
+    const { kind, body, replacement, target } = annotation;
+    return { id, kind, ...(body === undefined ? {} : { body }), ...(replacement === undefined ? {} : { replacement }), ...(target ? { target } : {}) };
+  }
+  const reply = annotation.replies?.find((each) => each.id === id && each.author === "user");
+  return reply ? { id, body: reply.body } : undefined;
+}
+
+/**
+ * The anchors and reviews of the pane's server (`viewer.anchor`,
+ * `viewer.review`), as far as the window's part goes: every annotation
+ * anchored in the source of the document on disk, ranges in UTF-8 bytes,
+ * the window's rendered passages taken for annotations of the rendered view,
+ * and a review in the server's form of what the window hands over. The
+ * server's own rules are tested in `splitty-core` (`mux::review`).
+ */
+class FakeReviews implements PaneReviews {
+  readonly requests: ReviewRequest[] = [];
+  /** Answers to anchor requests wait until released. */
+  holdAnchors = false;
+  /** The pane's document. */
+  source: ViewerRecord["source"] = PLAN_RECORD.source;
+  private held: (() => void)[] = [];
+
+  constructor(private readonly server: PaneServer) {}
+
+  releaseAnchors(): void {
+    this.holdAnchors = false;
+    for (const release of this.held.splice(0)) release();
+  }
+
+  private anchors(): { version: string; anchors: (ServerAnchor & { offset?: number })[] } {
+    const document = onDisk!;
+    const text = sourceText(document.text);
+    const anchor = anchorer(text);
+    return {
+      version: document.version,
+      anchors: this.server.annotations.map((annotation): ServerAnchor & { offset?: number } => {
+        if (!annotation.target) return { id: annotation.id, state: "general" };
+        const found = anchor(annotation.target);
+        if (found.state === "stale") return { id: annotation.id, state: "lost" };
+        const { start, end, startLine, endLine } = found.anchor;
+        return { id: annotation.id, state: found.state, start: utf8(text.slice(0, start)), end: utf8(text.slice(0, end)), startLine, endLine, offset: start };
+      }),
+    };
+  }
+
+  anchor(paneId: string): Promise<Anchored> {
+    const answer = () => {
+      const { version, anchors } = this.anchors();
+      return { paneId, version, anchors: anchors.map(({ offset: _offset, ...anchor }) => anchor) };
+    };
+    if (!this.holdAnchors) return Promise.resolve(answer());
+    return new Promise((resolve) => this.held.push(() => resolve(answer())));
+  }
+
+  async review(request: ReviewRequest): Promise<Reviewed> {
+    this.requests.push(request);
+    const { version, anchors } = this.anchors();
+    const annotations = this.server.annotations;
+    const passages = new Map((request.passages ?? []).map((passage) => [passage.id, passage]));
+    const placed = annotations.map((annotation, index) => {
+      const target = annotation.target;
+      const window = target?.view === "rendered" ? passages.get(annotation.id) : undefined;
+      const served = anchors[index];
+      const state = window?.state ?? served.state;
+      const lines = state === "anchored" || state === "changed"
+        ? { start: window?.startLine ?? served.startLine!, end: window?.endLine ?? served.endLine! }
+        : undefined;
+      const place: ListPlace = state === "general" ? { state: "general", index }
+        : lines ? { state: "anchored", view: window ? "rendered" : "source", offset: window?.offset ?? served.offset, startLine: lines.start, endLine: lines.end, index }
+        : { state: "stale", startLine: target!.startLine, endLine: target!.endLine, index };
+      return { annotation, state, lines, unlined: !!window?.unlined, place };
+    }).sort((a, b) => compareListPlaces(a.place, b.place));
+    const open = placed.filter((each) => isOpen(each.annotation));
+    const selection = reviewSelection(open.map((each) => each.annotation));
+    const held = request.verdict === "approved" && selection.again ? [] : open.filter((each) => selection.annotations.includes(each.annotation));
+    const source = this.source;
+    const sections = source.kind === "file"
+      ? [`# Review of ${source.path.slice(source.path.lastIndexOf("/") + 1)}`, `Document: ${source.path}`]
+      : [`# Review of ${source.title}`];
+    if (request.verdict) sections.push(request.verdict === "approved" ? "Verdict: approved" : "Verdict: changes requested");
+    if (request.verdict && request.changedDuringWait) {
+      sections.push("Note: the document changed during the review; lines and quotes refer to the version shown when the review was answered.");
+    }
+    const replies = (annotation: ViewerAnnotation) => (annotation.replies ?? [])
+      .map((reply) => `${reply.author === "user" ? "User" : `Agent (${reply.from?.title ?? ""})`}: ${safeText(reply.body)}`);
+    const general = held.filter((each) => !each.annotation.target && each.annotation.body);
+    if (general.length > 0) {
+      sections.push("## General comments", general.map(({ annotation }) => [`- #${annotation.number} ${safeText(annotation.body!)}`, ...replies(annotation).map((line) => `  ${line}`)].join("\n\n")).join("\n"));
+    }
+    for (const { annotation, state, lines, unlined } of held) {
+      const target = annotation.target;
+      if (!target) continue;
+      // A changed passage, and one not found, are named by the lines they were annotated on.
+      const shown = state === "anchored" && lines ? lines : { start: target.startLine, end: target.endLine };
+      const where = unlined ? "Passage" : shown.start === shown.end ? `Line ${shown.start}` : `Lines ${shown.start}-${shown.end}`;
+      const kind = annotation.kind === "comment" ? "comment" : annotation.replacement ? "suggested change" : "suggested deletion";
+      const note = state === "changed" ? " (passage changed in the current version)" : state === "lost" ? " (passage not found in the current version)" : "";
+      const parts = [`## #${annotation.number} ${where}, ${kind}${note}\n> ${safeText(target.quote)}`];
+      if (annotation.body) parts.push(safeText(annotation.body));
+      if (annotation.kind === "change" && annotation.replacement) parts.push(`Replace with:\n\`\`\`\n${annotation.replacement}\n\`\`\``);
+      parts.push(...replies(annotation));
+      sections.push(parts.join("\n\n"));
+    }
+    if (held.length > 0) sections.push(`Reply in a thread: splitty comments reply ${request.paneId} <number> '<text>'`);
+    const entries = held.flatMap(({ annotation }) => pendingEntries(annotation).flatMap((id) => sentEntry(annotation, id) ?? []));
+    return { paneId: request.paneId, version, text: `${sections.join("\n\n")}\n`, count: held.length, entries };
+  }
+}
+
 /**
  * The pane's server as far as annotations go: it applies the operations of
  * its windows by its rules, numbering each new annotation, and answers a
@@ -58,6 +179,7 @@ function screenWith(annotations: ViewerAnnotation[]): ScreenState {
 class PaneServer {
   readonly ops: MuxOperation[] = [];
   annotations: ViewerAnnotation[] = [];
+  readonly reviews = new FakeReviews(this);
   /** The server rejects every operation: it keeps the workspace as it is. */
   refusing = false;
   private last = 0;
@@ -179,6 +301,7 @@ afterEach(() => {
   for (const server of servers) server.dispose();
   views = [];
   servers = [];
+  onDisk = undefined;
   vi.restoreAllMocks();
   document.body.replaceChildren();
 });
@@ -216,6 +339,8 @@ interface Setup {
   text?: string;
   mode?: "rendered" | "source";
   available?: boolean;
+  /** The server keeps annotations but writes no reviews. */
+  outdated?: boolean;
   origin?: ReviewTarget;
   terminals?: ReviewTarget[];
   state?: ViewerViewState;
@@ -236,11 +361,14 @@ function setup(params: Setup = {}) {
   const download = vi.fn<(name: string, blob: Blob) => void>();
   let origin = params.origin;
   const record = params.record ?? PLAN_RECORD;
+  server.reviews.source = record.source;
   const options: AnnotationLayerOptions = {
     store,
     paneId: "v1",
     screenId: () => "screen-1",
     available: () => params.available ?? true,
+    ...(params.outdated ? { outdated: () => true } : {}),
+    reviews: server.reviews,
     document: record.source.kind === "file" ? { kind: "file", path: record.source.path } : { kind: "text", title: record.source.title },
     handover: { origin: () => origin, terminals: () => params.terminals ?? [] },
     notices,
@@ -265,8 +393,15 @@ function setup(params: Setup = {}) {
   return { shown, store, server, notices, showMenu, writeClipboard, download, setOrigin: (target: ReviewTarget | undefined) => { origin = target; } };
 }
 
+/** A read of the document: the file on disk is `text` in `version` from now on. */
 function read(text: string, version = "v1") {
+  onDisk = { text, version };
   return { document: { bytes: encoder.encode(text), version }, reading: false };
+}
+
+/** Let the server's anchors for the version shown arrive. */
+async function anchored(): Promise<void> {
+  for (let i = 0; i < 5; i++) await Promise.resolve();
 }
 
 const query = <T extends Element = HTMLElement>(view: ViewerView, selector: string) => view.element.querySelector<T & HTMLElement>(selector);
@@ -586,12 +721,17 @@ describe("making annotations", () => {
   });
 
   // viewer-annotations, Anchoring By Quote: Moved to another passage.
-  it("Moved to another passage: gives an annotation not found the selected passage", () => {
+  it("Moved to another passage: gives an annotation not found the selected passage", async () => {
     const { shown, store, server } = setup({ text: PLAN });
     server.serve([{
       id: "ann-0000000000000001", number: 1, kind: "comment", body: "Gone?", sent: true,
       target: { view: "source", quote: "no such passage", prefix: "", suffix: "", startLine: 2, endLine: 2 },
     }]);
+    // Until the server's anchors come, it stands at its recorded lines without a note.
+    expect(entry(shown, 1).dataset.state).toBe("pending");
+    expect(whereOf(shown)).toEqual(["Line 2"]);
+    expect(entry(shown, 1).querySelector(".viewer-annotation-not-found")).toBeNull();
+    await anchored();
     const item = entry(shown, 1);
     expect(item.dataset.state).toBe("stale");
     expect(item.querySelector(".viewer-annotation-not-found")!.textContent).toBe("not found");
@@ -606,6 +746,7 @@ describe("making annotations", () => {
     // Its passage changed: it is pending again.
     expect(moved.annotations[0]).not.toHaveProperty("sent");
     expect(store.list("v1")[0].number).toBe(1);
+    await anchored();
     expect(entry(shown, 1).dataset.state).toBe("anchored");
     expect(entry(shown, 1).querySelector(".viewer-annotation-not-found")).toBeNull();
     expect(whereOf(shown)).toEqual(["Line 12"]);
@@ -747,8 +888,9 @@ describe("threads", () => {
   });
 
   // viewer-annotations, Resolving A Thread: Resolved after the agent's answer.
-  it("Resolved after the agent's answer: folds it among the resolved ones with its replies, and marks it no longer", () => {
+  it("Resolved after the agent's answer: folds it among the resolved ones with its replies, and marks it no longer", async () => {
     const { shown, store, server } = answered();
+    await anchored();
     expect(marked(shown)).toEqual(["Step 3 of the plan.", "retry three times"]);
     const resolve = entry(shown, 1).querySelector<HTMLButtonElement>(".viewer-annotation-resolve")!;
     expect(resolve.textContent).toBe("Resolve");
@@ -779,8 +921,9 @@ describe("threads", () => {
   });
 
   // viewer-annotations, Resolving A Thread: Reopened.
-  it("Reopened: open again with its number and replies, and marked again", () => {
+  it("Reopened: open again with its number and replies, and marked again", async () => {
     const { shown, store, server } = answered();
+    await anchored();
     click(entry(shown, 1), ".viewer-annotation-resolve");
     const reopen = entry(shown, 1).querySelector<HTMLButtonElement>(".viewer-annotation-resolve")!;
     expect(reopen.textContent).toBe("Reopen");
@@ -805,6 +948,7 @@ describe("marks", () => {
     comment(first.shown, "retry three times", "Why three?");
     await numbered(first.store);
     server.broadcast();
+    await anchored();
     expect(marked(second.shown)).toEqual(["retry three times"]);
 
     // The eye in the pane's bar, beside the list's button.
@@ -827,6 +971,7 @@ describe("marks", () => {
     const state = first.shown.viewState();
     expect(state).toMatchObject({ hideMarks: true });
     const next = setup({ text: PLAN, server, store: first.store, state }).shown;
+    await anchored();
     expect(marked(next)).toEqual([]);
     next.annotationMenu()!.toggleMarks();
     expect(marked(next)).toEqual(["retry three times"]);
@@ -854,9 +999,10 @@ describe("marks", () => {
     expect(marked(shown)).toEqual([]);
   });
 
-  it("marks the passages of resolved annotations only while the user shows them", () => {
+  it("marks the passages of resolved annotations only while the user shows them", async () => {
     const { shown, server } = setup({ text: PLAN });
     server.serve([{ id: "ann-0000000000000001", number: 1, kind: "comment", body: "Why three?", target: RETRY, status: "resolved" }]);
+    await anchored();
     expect(marked(shown)).toEqual([]);
     const show = query<HTMLButtonElement>(shown, ".viewer-annotations-show-resolved")!;
     expect(show.disabled).toBe(false);
@@ -874,6 +1020,7 @@ describe("marks", () => {
     comment(shown, "retry three times", "Why three?");
     await numbered(store);
     shown.update(read(`Step 0 of the plan.\n${PLAN.replace("retry three times", "retry it three times")}`, "v2"));
+    await anchored();
     const [item] = entries(shown);
     expect(item.dataset.state).toBe("changed");
     expect(item.classList.contains("changed")).toBe(true);
@@ -885,7 +1032,7 @@ describe("marks", () => {
 
     handoverMenu(shown, showMenu).find((each) => each.label === "Copy as Markdown")!.action();
     await vi.waitFor(() => expect(writeClipboard).toHaveBeenCalledTimes(1));
-    expect(writeClipboard.mock.calls[0][0]).toContain("## #1 Line 30, comment (passage changed since)\n> retry three times\n\nWhy three?");
+    expect(writeClipboard.mock.calls[0][0]).toContain("## #1 Line 30, comment (passage changed in the current version)\n> retry three times\n\nWhy three?");
   });
 
   // viewer-annotations, Annotations In The Pane: From the rendered view to the source.
@@ -906,12 +1053,13 @@ describe("marks", () => {
     expect(whereOf(shown)).toEqual(["Line 5"]);
   });
 
-  it("marks the blocks of a source passage in the rendered view", () => {
+  it("marks the blocks of a source passage in the rendered view", async () => {
     const { shown } = setup({ text: RENDERED_PLAN, mode: "source" });
     selectSource(shown, "The first step.");
     shown.annotationMenu()!.annotate("comment");
     write(shown, "Comment", "Which step?");
     pressKey(shown, { key: "Enter", ctrlKey: true });
+    await anchored();
     shown.toggleMode();
     const root = query(shown, ".viewer-rendered")!.shadowRoot!;
     expect([...root.querySelectorAll("[data-splitty-mark]")].map((block) => block.textContent)).toEqual(["The first step."]);
@@ -1075,15 +1223,17 @@ describe("annotations in the pane", () => {
   });
 
   // viewer-annotations, Anchoring By Quote: Lines inserted above the passage, The passage removed.
-  it("follows the passage through new versions and keeps one that is gone", () => {
+  it("follows the passage through new versions and keeps one that is gone", async () => {
     const { shown } = setup({ text: PLAN });
     comment(shown, "retry three times", "Why three?");
 
     shown.update(read(`${filler(101, 110)}\n${PLAN}`, "v2"));
+    await anchored();
     expect(whereOf(shown)).toEqual(["Line 40"]);
     expect(marked(shown)).toEqual(["retry three times"]);
 
     shown.update(read(PLAN.replace("retry three times", "give up"), "v3"));
+    await anchored();
     expect(whereOf(shown)).toEqual(["Line 30"]);
     expect(entries(shown)[0].dataset.state).toBe("stale");
     expect(entries(shown)[0].querySelector(".viewer-annotation-not-found")!.textContent).toBe("not found");
@@ -1091,6 +1241,7 @@ describe("annotations in the pane", () => {
     expect(query(shown, ".cm-viewer-marked")).toBeNull();
 
     shown.update(read(PLAN, "v4"));
+    await anchored();
     expect(whereOf(shown)).toEqual(["Line 30"]);
     expect(entries(shown)[0].dataset.state).toBe("anchored");
   });
@@ -1607,5 +1758,114 @@ describe("waiting for a review", () => {
   it("shows no banner where the server keeps no annotations", () => {
     const { shown } = setup({ text: PLAN, record: WAITING, answer: async () => true, available: false });
     expect(banner(shown).hidden).toBe(true);
+  });
+});
+
+// server-built-reviews: the server anchors and writes the review; the window maps and hands over.
+describe("the server's anchors and review", () => {
+  // viewer-annotations, Anchoring By Quote: anchors arrive asynchronously (SBR-7, SBR-9).
+  it("takes anchors only for the version shown, and asks again with the window's next read", async () => {
+    const { shown, server } = setup({ text: PLAN });
+    server.reviews.holdAnchors = true;
+    server.serve([{ id: "ann-0000000000000001", number: 1, kind: "comment", body: "Why three?", target: RETRY }]);
+    // The server reads a newer version than the window shows.
+    const newer = `${filler(101, 110)}\n${PLAN}`;
+    onDisk = { text: newer, version: "v2" };
+    server.reviews.releaseAnchors();
+    await anchored();
+    expect(entries(shown)[0].dataset.state).toBe("pending");
+    expect(whereOf(shown)).toEqual(["Line 30"]);
+    expect(marked(shown)).toEqual([]);
+
+    shown.update(read(newer, "v2"));
+    await anchored();
+    expect(entries(shown)[0].dataset.state).toBe("anchored");
+    expect(whereOf(shown)).toEqual(["Line 40"]);
+    expect(marked(shown)).toEqual(["retry three times"]);
+  });
+
+  // mux-protocol, Review Texts And Anchors: Ranges in the source.
+  it("maps the server's byte ranges into a source text with characters beyond ASCII", async () => {
+    const text = "# Größe\n\nÄnderungen 😀 retry three times, then stop.\n";
+    const { shown, server } = setup({ text });
+    server.serve([{
+      id: "ann-0000000000000001", number: 1, kind: "comment", body: "Why three?",
+      target: { view: "source", quote: "retry three times", prefix: "Änderungen 😀 ", suffix: ", then stop.", startLine: 3, endLine: 3 },
+    }]);
+    await anchored();
+    expect(marked(shown)).toEqual(["retry three times"]);
+    expect(whereOf(shown)).toEqual(["Line 3"]);
+  });
+
+  // mux-protocol, Review Texts And Anchors: Passages of a rendered view.
+  it("hands the review the passages it found in the rendered view, and none of the source", async () => {
+    const { shown, server, writeClipboard } = setup({ text: RENDERED_PLAN, mode: "rendered" });
+    selectRendered(shown, "retry three times");
+    shown.annotationMenu()!.annotate("comment");
+    write(shown, "Comment", "Make it configurable.");
+    pressKey(shown, { key: "Enter", ctrlKey: true });
+    server.serve([...server.annotations, {
+      id: "ann-0000000000000009", number: 9, kind: "comment", body: "Which step?",
+      target: { view: "source", quote: "The first step.", prefix: "", suffix: "", startLine: 3, endLine: 3 },
+    }]);
+    query<HTMLButtonElement>(shown, ".viewer-annotations-copy")!.click();
+    await vi.waitFor(() => expect(writeClipboard).toHaveBeenCalledTimes(1));
+    const [rendered] = server.annotations;
+    expect(server.reviews.requests).toEqual([{ paneId: "v1", passages: [{ id: rendered.id, state: "anchored", startLine: 5, endLine: 5, offset: expect.any(Number) }] }]);
+    expect(writeClipboard.mock.calls[0][0]).toContain("## #1 Line 5, comment\n> retry three times");
+    expect(writeClipboard.mock.calls[0][0]).toContain("## #9 Line 3, comment\n> The first step.");
+  });
+
+  it("names a rendered HTML page's passages as unlined", async () => {
+    const { shown, server, writeClipboard } = setup({
+      record: { source: { kind: "file", path: "/home/me/app/report.html" }, revision: 1 },
+      text: "<!doctype html><html><body><h1>Report</h1><p>All checks passed.</p></body></html>\n",
+      mode: "rendered",
+    });
+    selectRendered(shown, "All checks passed");
+    shown.annotationMenu()!.annotate("comment");
+    write(shown, "Comment", "Which checks?");
+    pressKey(shown, { key: "Enter", ctrlKey: true });
+    query<HTMLButtonElement>(shown, ".viewer-annotations-copy")!.click();
+    await vi.waitFor(() => expect(writeClipboard).toHaveBeenCalledTimes(1));
+    expect(server.reviews.requests[0].passages).toEqual([expect.objectContaining({ state: "anchored", unlined: true })]);
+  });
+
+  it("says when the server could not write the review, and hands nothing over", async () => {
+    const agent = terminal("t1", "claude");
+    const { shown, server, notices } = setup({ text: PLAN, origin: agent.target });
+    comment(shown, "retry three times", "Why three?");
+    vi.spyOn(server.reviews, "review").mockRejectedValue(new Error("The pane's document is too large."));
+    query<HTMLButtonElement>(shown, ".viewer-annotations-send-main")!.click();
+    await vi.waitFor(() => expect(notices.error).toHaveBeenCalledWith("The review could not be written", "The pane's document is too large."));
+    expect(agent.pasted).toEqual([]);
+    expect(server.sent("mark_sent")).toEqual([]);
+  });
+
+  // viewer-annotations, The Review and Annotations Capability: Older host (SBR-8).
+  it("Older host: shows the annotations it holds without marks, offers no annotation, review or verdict, and says it needs an update", async () => {
+    const { shown, server } = setup({ text: PLAN, record: WAITING, answer: async () => true, available: false, outdated: true });
+    server.serve([{ id: "ann-0000000000000001", number: 1, kind: "comment", body: "Why three?", target: RETRY }]);
+    await anchored();
+    expect(shown.annotationMenu()).toBeUndefined();
+    expect(query(shown, ".viewer-bar-annotations")!.hidden).toBe(false);
+    expect(listHidden(shown)).toBe(false);
+    expect(query(shown, ".viewer-annotations-notice")!.textContent).toContain("Update Splitty there");
+    expect(query<HTMLButtonElement>(shown, ".viewer-annotations-send-main")!.disabled).toBe(true);
+    expect(query<HTMLButtonElement>(shown, ".viewer-annotations-copy")!.disabled).toBe(true);
+    expect(query<HTMLButtonElement>(shown, ".viewer-annotations-more")!.disabled).toBe(true);
+    expect(query(shown, ".viewer-annotations-add")!.hidden).toBe(true);
+    expect(marked(shown)).toEqual([]);
+    expect(query(shown, ".viewer-review-wait")!.hidden).toBe(true);
+    expect(server.reviews.requests).toEqual([]);
+  });
+
+  it("Older host: offers the list with its note even without annotations", () => {
+    const { shown } = setup({ text: PLAN, available: false, outdated: true });
+    expect(query(shown, ".viewer-bar-annotations")!.hidden).toBe(false);
+    query<HTMLButtonElement>(shown, ".viewer-bar-annotations")!.click();
+    expect(listHidden(shown)).toBe(false);
+    expect(query(shown, ".viewer-annotations-notice")!.hidden).toBe(false);
+    expect(query(shown, ".viewer-annotations-empty")!.hidden).toBe(true);
   });
 });

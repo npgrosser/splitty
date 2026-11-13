@@ -721,27 +721,6 @@ export class ViewerAnnotations {
   }
 
   /**
-   * Resolves once every annotation of `ids` that the pane still shows has the
-   * number the server gives it, or after `timeoutMs`.
-   */
-  whenNumbered(paneId: string, ids: readonly string[], timeoutMs = ANNOTATION_SETTLE_MS): Promise<void> {
-    const wanted = new Set(ids);
-    const numbered = () => this.list(paneId).every((annotation) => !wanted.has(annotation.id) || annotation.number !== undefined);
-    if (numbered()) return Promise.resolve();
-    return new Promise((resolve) => {
-      const done = () => {
-        clearTimeout(timer);
-        unsubscribe();
-        resolve();
-      };
-      const timer = setTimeout(done, timeoutMs);
-      const unsubscribe = this.subscribe(() => {
-        if (numbered()) done();
-      });
-    });
-  }
-
-  /**
    * The server rejected an annotation operation of this window: the pane's
    * own changes go, and its next snapshot shows what the server holds.
    */

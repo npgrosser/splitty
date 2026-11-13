@@ -7,6 +7,7 @@ import { ScreenBinding } from "../lib/connection/screen_binding.ts";
 import type { LayoutNode, PaneState, ScreenState, ViewerRecord } from "../lib/protocol/types.ts";
 import { testScreen, type TerminalStandIn, type TestScreen } from "../lib/testing/screen_layout.ts";
 import { ANNOTATIONS_CAPABILITY } from "../lib/viewer/annotations.ts";
+import { REVIEWS_CAPABILITY } from "../lib/viewer/server_reviews.ts";
 import { VIEWER_CAPABILITY } from "../lib/viewer/limits.ts";
 import { viewerRecordOf } from "../lib/viewer/panel.ts";
 import { showContextMenu } from "../stores/ui.svelte.ts";
@@ -293,7 +294,7 @@ describe("snapshots applied in place", () => {
   // viewer-annotations: another window's annotation reaches the pane's list
   // and marks, and the layout stays as it is.
   it("keeps every panel and the shown document when only a viewer's annotations change", { timeout: 30_000 }, async () => {
-    const screen = open([VIEWER_CAPABILITY, ANNOTATIONS_CAPABILITY]);
+    const screen = open([VIEWER_CAPABILITY, ANNOTATIONS_CAPABILITY, REVIEWS_CAPABILITY]);
     const { api, binding } = screen;
     const layout = row(slot("left", ["t1"]), slot("right", ["v1"]));
     // As the connection's snapshot handler does: the annotations first, then the layout.

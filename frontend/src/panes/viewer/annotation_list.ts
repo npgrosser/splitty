@@ -44,9 +44,10 @@ export interface ListEntry {
   readonly where: string;
   /**
    * Found by its quote, found as the passage it most likely became, not found
-   * in the current version, or a general comment.
+   * in the current version, a general comment, or not anchored yet in the
+   * version shown, which names its recorded lines without a note.
    */
-  readonly state: "anchored" | "changed" | "stale" | "general";
+  readonly state: "anchored" | "changed" | "stale" | "general" | "pending";
   readonly resolved: boolean;
   /** The user handed the annotation itself over to an agent. */
   readonly sent: boolean;
@@ -69,6 +70,8 @@ export interface ListHeader {
   /** Whether a passage is selected that an annotation can move to. */
   readonly movable: boolean;
   readonly resolvedShown: boolean;
+  /** A note above the list, such as that the server needs an update for annotations. */
+  readonly notice?: string;
 }
 
 export interface AnnotationListActions {
@@ -399,6 +402,7 @@ export class AnnotationList {
   private readonly resolvedSummary: HTMLElement;
   private readonly resolvedList: HTMLOListElement;
   private readonly empty: HTMLElement;
+  private readonly notice: HTMLElement;
   private readonly views = new Map<string, EntryView>();
   private active: string | undefined;
 
@@ -436,7 +440,9 @@ export class AnnotationList {
     this.resolvedGroup.append(this.resolvedSummary, this.resolvedList);
     this.resolvedGroup.hidden = true;
     this.empty = element(doc, "p", "viewer-annotations-empty", "No annotations yet. Select a passage to annotate it, or add a general comment.");
-    scroll.append(this.openList, this.resolvedGroup, this.empty);
+    this.notice = element(doc, "p", "viewer-annotations-notice");
+    this.notice.hidden = true;
+    scroll.append(this.notice, this.openList, this.resolvedGroup, this.empty);
     this.addButton = button(doc, "viewer-annotations-add", "Add Comment", "Add a comment on the whole document", () => this.actions.addComment());
     this.element.append(header, options, scroll, this.addButton);
     // The column's own menu: none. The pane's would act on the document.
@@ -464,11 +470,13 @@ export class AnnotationList {
     this.sendButton.title = header.sendTitle;
     this.sendButton.disabled = !header.sendable;
     this.copyButton.disabled = !header.sendable;
-    this.moreButton.disabled = header.open + header.resolved === 0;
+    this.moreButton.disabled = header.open + header.resolved === 0 || !!header.notice;
     this.resolvedMarksButton.setAttribute("aria-pressed", String(header.resolvedShown));
     this.resolvedMarksButton.disabled = header.resolved === 0;
     this.addButton.hidden = !header.writable;
-    this.empty.hidden = entries.length > 0;
+    this.notice.hidden = !header.notice;
+    this.notice.textContent = header.notice ?? "";
+    this.empty.hidden = entries.length > 0 || !!header.notice;
 
     const listed = new Set(entries.map((entry) => entry.id));
     for (const [id, view] of this.views) {

@@ -20,6 +20,7 @@ import { Scratchpads } from "../scratchpad.ts";
 import { ViewerAnnotations } from "../viewer/annotations.ts";
 import { ViewerDocuments } from "../viewer/documents.ts";
 import { ReviewAnswers } from "../viewer/handover.ts";
+import { ViewerReviews } from "../viewer/server_reviews.ts";
 import { parseCommand } from "./routing.ts";
 import { applyServerSettings } from "../settings.ts";
 import { loadShellProfiles } from "../shell_profiles.ts";
@@ -51,6 +52,8 @@ export class ServerConnection {
   readonly annotations: ViewerAnnotations;
   /** Its answers to processes that wait for a review of a viewer pane (`viewer-annotations`). */
   readonly reviews: ReviewAnswers;
+  /** The anchors and reviews its server works out for its viewer panes (`viewer-reviews-v1`). */
+  readonly viewerReviews: ViewerReviews;
   private readonly commandHandlers = new Set<(command: ClientCommand) => void>();
   private unsubscribe: () => void;
   private unsubscribeFailures: () => void;
@@ -75,6 +78,7 @@ export class ServerConnection {
     });
     this.unsubscribeFailures = this.mux.onOpFailed((failure) => this.annotations.failed(failure));
     this.reviews = new ReviewAnswers(socket);
+    this.viewerReviews = new ViewerReviews(socket);
     this.unsubscribe = socket.onMessage((msg) => {
       if (msg.type === "settings.changed" && this.key === "local") {
         applyServerSettings(msg.settings);
@@ -106,6 +110,7 @@ export class ServerConnection {
     this.viewers.dispose();
     this.annotations.dispose();
     this.reviews.dispose();
+    this.viewerReviews.dispose();
     this.sessions.dispose();
     this.attachments.dispose();
   }
