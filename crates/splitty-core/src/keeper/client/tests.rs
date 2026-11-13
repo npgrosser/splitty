@@ -233,6 +233,11 @@ async fn released_keepers_are_adopted_with_their_output_and_process() {
         "the replay"
     );
     assert!(second.get("kept-adopt").is_some());
+    // A chunk is in the scrollback before its status reports are applied.
+    assert!(
+        wait_until(TIMEOUT, || adopted.program_status().record.is_some()).await,
+        "the record rebuilt from the replay"
+    );
     let status = adopted.program_status();
     let record = status.record.expect("the record rebuilt from the replay");
     assert_eq!(record.state, crate::pty::status::StatusState::Blocked);

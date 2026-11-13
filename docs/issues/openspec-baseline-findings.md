@@ -561,9 +561,11 @@ that area touches them.
   `crates/splitty-server/tests/http_surface.rs`): the test waited for the file the fake browser launcher appends
   the URL to and read it as soon as it existed; the shell's redirect creates the file before `printf` writes, so
   the test compared an empty text. It now waits for the complete line.
-- **A released keeper's record can miss its replay** (seen once on 2026-11-13, in a full workspace run under
-  load): `keeper::client::tests::released_keepers_are_adopted_with_their_output_and_process` in `splitty-core`
-  failed with "the record rebuilt from the replay" and passed three times alone; not investigated.
+- **Fixed (2026-11-13): the keeper adoption test read the status record before it was applied.** Seen twice on
+  2026-11-13 in full runs (`keeper::client::tests::released_keepers_are_adopted_with_their_output_and_process`,
+  `splitty-core`, "the record rebuilt from the replay"): a chunk of output is in the scrollback before its status
+  reports are applied (`Output::record_locked`, `crates/splitty-core/src/pty/session.rs`), and the test read the
+  record as soon as the scrollback showed the replay. It now waits for the record.
 - **Ending a native bridge can report a broken pipe** (seen 2026-11-12 in the release runs of v0.3.5 and v0.3.6;
   on two CPU cores in most runs, also at the commit that added the test, rarely on more): in
   `tests/version_skew.rs`, `the_clients_of_one_build_use_the_daemon_of_the_other` sends `detach` and finishes its
