@@ -8,6 +8,13 @@ Each point names what holds now, the alternative, and where it is recorded.
 
 ## Points
 
+- **`server-close-assessment` SCA-2 to SCA-6** (2026-11-13, provisional, tbd; recorded in the change's proposal, behavior in the `mux-protocol`, `templates`, `session-scratchpad`, `viewer-annotations` and `client-connections` specs):
+  - **SCA-2:** managed job panes are not counted as running programs by the close assessment. Alternative: count a running job like any busy terminal.
+  - **SCA-3:** without `close-assessment-v1`, or when the assessment fails or times out (five seconds), every close asks a generic confirmation, idle ones included; the clients keep no rule of their own for older servers. Alternative: keep the previous client rules as a fallback.
+  - **SCA-4:** the server refuses replacing a non-empty Screen by a template without `replaceConfirmed: true`, so an older window that replaces a Screen on a newer server is refused until it is updated. Alternative: accept the replacement without the flag from windows that do not announce the capability.
+  - **SCA-5:** the browser page no longer asks on `beforeunload`, since closing a tab ends no sessions; the desktop shell's quit still asks from the assessment. Alternative: keep a browser prompt while a local embedded server would end work.
+  - **SCA-6:** the native window waits for the server's answer before it prompts or closes, and the execution-time check compares identities and the client's own pending state without asking the server again. Alternative: a second assessment right before the close is submitted.
+
 - **`remove-electron-shell` RES-1/RES-2/RES-3/RES-4** (2026-11-13, provisional, tbd; recorded in the change's proposal):
   - **RES-1:** `make uninstall-electron` goes with the other Electron targets; `docs/development.md` names the two files an earlier `make install-electron` left. Alternative: keep the uninstall target for a release or two.
   - **RES-2:** the hidden `splitty remote-hosts --json` and `splitty connect --json`, whose main consumer was the Electron shell, stay as `cli` specifies them, for scripts and launchers. Alternative: remove `remote-hosts` with a REMOVED delta in `cli`.

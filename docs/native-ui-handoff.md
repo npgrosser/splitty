@@ -76,6 +76,15 @@ Keep temporary fixture paths short enough for Unix sockets.
   process exited on such a service, or another client closed the pane) offers
   "New terminal", which also works on a host Screen. Their look is covered by
   view tests of structure only, not by a rendered image.
+- Pane, tab, Screen and window closes and the template review ask the
+  service what the close ends (`mux.assess_close`, `close-assessment-v1`)
+  before they prompt: `Workspace::assess_then_decide` in `workspace.rs` sends
+  `Command::AssessClose`, the source runtime answers with
+  `Update::CloseAssessed` (`CloseImpact::Unknown` without the capability, on
+  failure or after five seconds), and the prompt is worded from the answer,
+  scratchpads and annotations included. The close plan keeps only the
+  identity and pending-state checks. View tests answer the assessment with
+  `answer_close_assessment`, a fake service built from the model's snapshots.
 
 Current checks: **268 client-core tests, 190 GPUI tests, 17 architecture tests**,
 strict touched-crate all-target Clippy, formatting and affected strict OpenSpec
