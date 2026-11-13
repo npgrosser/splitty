@@ -27,7 +27,7 @@ The server sends `process.finished`, `process.idle`, `session.exited` and `progr
 
 ## Architecture impact
 
-none: the classification lives in `splitty-core`'s protocol module, which every component involved already uses; no component or dependency between components changes.
+no component or dependency changes: the classification lives in `splitty-core`'s protocol module (`protocol::notice`); the descriptions of `core.protocol` and `client_notifications` and the label of `client_notifications -> splitty.core.protocol` (now also production: the switch names) change; `docs/architecture.md` describes the notice in the notification center paragraph.
 
 ## Decisions
 

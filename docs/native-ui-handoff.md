@@ -169,9 +169,10 @@ a waiting pane, also for a host's Screens the window has not opened; the host's
 panel and the Hosts list word such a Screen as "Waiting". A done or failed dot
 goes once the pane is watched, the same rule as for unread notifications, and
 returns only for a newer record; what was seen is kept in memory per window.
-Reports the server marked `notify` become notifications under
-`notifications.programStatus` (a row in the notification settings), and a
-session that holds a record raises no bell notification of its own. The
+Reports the server marked `notify` carry the server's notice and become
+notifications under `notifications.programStatus` (a row in the notification
+settings); the server suppresses the finished-command notices of a session that
+holds a record, and bells are no notification. The
 outgoing Screen of a transition shows no dots, as it shows no scratchpad
 marks.
 

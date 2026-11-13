@@ -138,7 +138,7 @@ model {
     }
 
     client_notifications = component 'client_notifications' {
-      description 'Window-local bounded notification facts, shared settings gates, current-source admission independent of send readiness, sanitized titles, source-scoped deduplication and unread queries, and canonical logical-session badge reconciliation across reconnect without event replay or retained transport leases. Program status reports the server marked to notify become warnings, successes or errors under their own switch, naming the Screen and host; a session that reports program status raises no bell or terminal notification of its own.'
+      description 'Window-local bounded notification facts, shared settings gates, current-source admission independent of send readiness, sanitized titles, source-scoped deduplication and unread queries, and canonical logical-session badge reconciliation across reconnect without event replay or retained transport leases. The server classifies each event (notice: kind, severity, title, governing switch, suppression); the window applies its own switches, prefixes the host, records a notice for the watched pane as read, and gives the events of an older server a generic notice.'
       metadata { module 'splitty_client_core::notifications' }
     }
     connection -> splitty.transport.queue 'Build bounded real carrier events for production-view fixtures'
@@ -147,7 +147,7 @@ model {
     client_notifications -> splitty.core.config 'Use effective notification switches without copied defaults'
     client_notifications -> appearance 'Reuse the isolated local-service fixture for event ownership tests'
     client_notifications -> embedded 'Verify real event delivery and joined cleanup without a process harness'
-    client_notifications -> splitty.core.protocol 'Send an existing typed notification through the fixture live bus'
+    client_notifications -> splitty.core.protocol 'Read the notice switch names; send an existing typed notification through the fixture live bus'
 
     client_workspace = component 'client_workspace' {
       description 'Source-qualified view keys and immutable execution tokens; common local all-catalog or remote explicit-open SourceWorkspace collections, WindowWorkspace global selection, exact displayed retained-terminal focus admission including offline sources, and aggregate admission, side-effect-free local or live-opened remote Screen rename validation, capability-gated service-owned local Screen order with mutation-watermarked catalog refresh and window-owned remote reference order available offline, bounded host-update offers and captured confirmation facts, canonical tiled/floating Screen projections, bounded coherent cross-Screen route collection, exact captured remote creation with per-host unresolved reservations and no-replay observation across connection replacement, revocable follow consumed at final selection, captured transfer, floating action and exact tab placement settlement, ordered relative Screen and captured group navigation, captured template replacement with separate pending presentation and full-scope close impact assessment. Each source also keeps the program status root records of its current connection after a greeting that announced them, bounded, charged and cleared with the connection, resolved only to the bound panes and listed Screens of that source; the window keeps in memory which done or failed records the user saw.'

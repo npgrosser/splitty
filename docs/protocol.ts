@@ -876,27 +876,70 @@ interface SessionSize extends SessionEvent {
 
 // --- Process Events ---
 //
-// These are first-class event types — NOT wrapped in a notification envelope.
-// The frontend derives severity, display text, and presentation from the
-// event data. The server sends facts, not presentation decisions.
+// These are first-class event types, not wrapped in a notification envelope.
+// A server whose mux.welcome lists "notification-notices-v1" classifies each
+// one for the windows in `notice` (mux-protocol, Classified Notification
+// Events); a window keeps only unread state, which pane it shows, its own
+// `notifications.*` switches and the host's name in the title.
 
-/** Foreground process returned to shell (baseShell false→true). */
+type NotificationSeverity = "info" | "success" | "warning" | "error";
+
+/**
+ * What a window shows for a notification event. Untrusted host data: the
+ * title is shown as plain text; an unknown `severity` reads as `info`, an
+ * unknown `setting` governs nothing, and any `suppressed` means no
+ * notification. Without `notice` (an older server) a window shows an `info`
+ * notification "Activity in <process>" or "Session activity", governed by
+ * `notifications.enabled` only.
+ */
+interface Notice {
+  kind: "process.finished" | "process.idle" | "session.exited" | "session.crashed" | "program-status";
+  severity: NotificationSeverity;
+  /** Plain text, at most 500 characters. */
+  title: string;
+  /** The `notifications.*` switch, besides `enabled`, that governs it. */
+  setting?: "processFinished" | "processExited" | "processCrashed" | "programStatus";
+  /**
+   * Why no window notifies: `user-initiated` for a session the server closed
+   * while its program ran, `program-status` for a session that holds a root
+   * program status record.
+   */
+  suppressed?: "user-initiated" | "program-status";
+}
+
+/**
+ * Foreground process returned to shell (baseShell false→true).
+ * notice: kind "process.finished", info, "<process> finished", setting
+ * "processFinished".
+ */
 interface ProcessFinished extends SessionEvent {
   type: "process.finished";
   process: string;
   cmdline?: string;
+  notice?: Notice;
 }
 
-/** Shell command finished — app is waiting for input (detected via OSC 133 D). */
+/**
+ * Shell command finished — app is waiting for input (detected via OSC 133 D).
+ * notice: kind "process.idle", info, "<process> is waiting" or "Command
+ * finished"; suppressed "program-status" while the session holds a root
+ * program status record.
+ */
 interface ProcessIdle extends SessionEvent {
   type: "process.idle";
   process: string;
   exitCode?: number;
+  notice?: Notice;
 }
 
 /**
- * PTY session exited. Covers both clean exits and crashes.
- * Frontend derives severity from exitCode (0 = info, nonzero = error).
+ * PTY session exited. Covers both clean exits and crashes. `userInitiated`:
+ * the server closed the session while its program ran (a connection's
+ * `close`, a closed pane or screen).
+ * notice: exit code 0 kind "session.exited", info, "<process> exited",
+ * setting "processExited"; otherwise kind "session.crashed", error,
+ * "<process> failed", setting "processCrashed" ("session" when no process
+ * is known); suppressed "user-initiated" with `userInitiated`.
  */
 interface SessionExited extends SessionEvent {
   type: "session.exited";
@@ -904,17 +947,14 @@ interface SessionExited extends SessionEvent {
   process?: string;
   command?: string;
   userInitiated: boolean;
+  notice?: Notice;
 }
 
 // --- Generic Notification (fallback) ---
 
-type NotificationSeverity = "info" | "success" | "warning" | "error";
-
 /**
- * Generic notification for cases where no specific event type exists.
- * Example: "Server shutting down", "Disk space low", etc.
- *
- * For process/session events, use the specific types above instead.
+ * Generic notification for cases where no specific event type exists. The
+ * server sends none today; a window treats it like the events above.
  */
 interface NotificationMessage extends ServerEvent {
   type: "notification";
@@ -922,6 +962,7 @@ interface NotificationMessage extends ServerEvent {
   title: string;
   body?: string;
   sessionId?: string;
+  notice?: Notice;
 }
 
 // --- Mux Events ---
@@ -945,7 +986,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" and "ssh-prompts-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1" and "close-assessment-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" and "ssh-prompts-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1" and "notification-notices-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -1104,6 +1145,11 @@ interface ProgramStatusRecord {
  * output, and the session's last marked event with that state is at least
  * 10 seconds old. The greeting, the event for a moved pane and records
  * rebuilt from output a session keeper had buffered are never marked.
+ * Exactly a marked event carries `notice` ("notification-notices-v1"): kind
+ * "program-status", warning for `blocked`, success for `done`, error for
+ * `error`, setting "programStatus", titled with the screen (its name, else
+ * "Screen <n>" by the catalog), the state in words and the record's `msg`,
+ * else its `title`.
  *
  * Only servers whose mux.welcome lists "program-status-v1" send it. Not a
  * mux.* message. Through the hub (section 10) it is one of the host daemon's
@@ -1116,6 +1162,7 @@ interface ProgramStatusChanged extends SessionEvent {
   screenId?: string;
   status: ProgramStatusRecord | null;
   notify?: true;
+  notice?: Notice;
 }
 
 // --- Server-Initiated Commands ---
@@ -2077,10 +2124,12 @@ type ClientCommand =
  *
  * Session-scoped events additionally carry `sessionId`.
  *
- * The server sends facts — the frontend decides presentation (severity,
- * toast vs badge, display text). Process events like `process.finished`
- * and `session.exited` are first-class event types, NOT wrapped in a
- * generic notification envelope.
+ * Process events like `process.finished` and `session.exited` are
+ * first-class event types, NOT wrapped in a generic notification envelope.
+ * The server classifies them for the windows (`notice`: kind, severity,
+ * title, governing switch, suppression); a window decides only what depends
+ * on it: unread state, the pane it shows, its switches and presentation
+ * (toast, badge, system notification).
  *
  * The generic `notification` type (with severity, title) is reserved as
  * a fallback for messages that have no specific semantic event type
