@@ -228,8 +228,19 @@ fn assemble(
 }
 
 impl Runtime {
-    /// Embedded service ownership ends here, including managed jobs.
+    /// Service ownership ends here: every client's streams are closed, then
+    /// managed jobs and terminals shut down.
     pub async fn close(&self) -> std::io::Result<()> {
+        for client in self
+            .state
+            .client_state
+            .clients
+            .lock()
+            .expect("service clients")
+            .values()
+        {
+            client.sender.close();
+        }
         let ((), result) = tokio::join!(
             self.state.client_state.jobs.shutdown(),
             self.pty.shutdown(false)

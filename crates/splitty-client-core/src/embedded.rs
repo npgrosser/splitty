@@ -180,16 +180,6 @@ async fn shutdown(
     scratch: Option<std::path::PathBuf>,
 ) -> io::Result<()> {
     let result = if let Some(runtime) = runtime {
-        for client in runtime
-            .state
-            .client_state
-            .clients
-            .lock()
-            .expect("service clients")
-            .values()
-        {
-            client.sender.close();
-        }
         runtime.close().await
     } else {
         Ok(())

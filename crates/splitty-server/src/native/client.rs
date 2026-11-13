@@ -701,6 +701,53 @@ mod tests {
         runtime.close().await.unwrap();
     }
 
+    /// The embedded service of the native client ends through the runtime's
+    /// `close` alone: it closes the streams of every connected client.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn runtime_close_closes_every_client_stream() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = crate::service::runtime::build_in(
+            "embedded",
+            None,
+            Arc::new(splitty_core::pty::terminal::LocalTerminals),
+            &directory.path().join("control.sock"),
+            crate::service::runtime::Home {
+                config_dir: directory.path().join("config"),
+                ssh_dir: None,
+                connector: Box::new(crate::hub::testing::ScriptedHost::new(directory.path())),
+            },
+        );
+        let connector = Connector::isolated();
+        let client = connector
+            .embedded(runtime.state.clone(), Role::Main)
+            .await
+            .unwrap();
+        let sender = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let registered = runtime
+                    .state
+                    .client_state
+                    .clients
+                    .lock()
+                    .unwrap()
+                    .values()
+                    .next()
+                    .map(|client| client.sender.clone());
+                if let Some(sender) = registered {
+                    break sender;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("the session client registers");
+        assert!(!*sender.closing().borrow());
+        runtime.close().await.unwrap();
+        assert!(*sender.closing().borrow());
+        drop(client);
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn admitted_host_stream_uses_fixed_target_context_and_progress() {
