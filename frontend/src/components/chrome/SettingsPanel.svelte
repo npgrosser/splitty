@@ -3,6 +3,7 @@
   import { settings } from "../../stores/settings.svelte.ts";
   import { getSettingsError } from "../../lib/settings.ts";
   import { apiFetch } from "../../lib/protocol/http.ts";
+  import { listThemeNames } from "../../lib/theme.ts";
   import { getDesktopPlatform, isDesktop, shellKind } from "../../lib/platform.ts";
   import "./settings/settings.css";
 
@@ -33,10 +34,7 @@
 
   // -- Fetch themes and build info --
   onMount(() => {
-    apiFetch("/api/themes")
-      .then((r) => r.ok ? r.json() : [])
-      .then((data: string[]) => { colorThemes = data; })
-      .catch(() => {});
+    listThemeNames().then((names) => { colorThemes = names; });
 
     apiFetch("/api/build")
       .then((r) => r.ok ? r.json() : null)

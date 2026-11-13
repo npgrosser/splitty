@@ -73,8 +73,6 @@ Line numbers refer to the tree at commit `b495e1c`.
 - The embedded Tauri server never removes its control socket file (`splitty-tauri/src/lib.rs:402`); the
   standalone server does (`main.rs:538`, `main.rs:1088`).
 - Panes get `SPLITTY_SOCK` even when the socket could not be created (`main.rs:391-394`).
-- The frontend calls `/api/config` (`frontend/src/lib/terminal_config.ts:21`) and `/api/themes`
-  (`SettingsPanel.svelte:34`); neither route exists.
 - **`terminal.allowOsc52Write` is never saved** (found on 2026-10-13 while adding `remote.autoForwardPorts`).
   The server's settings have no such field (`config/settings.rs`, `TerminalSettings`), so `PATCH
   /api/home/settings` drops it and answers without it, and the frontend's merge puts the default back: the toggle

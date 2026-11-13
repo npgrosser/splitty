@@ -210,6 +210,18 @@ export function getXtermTheme(): Record<string, string> {
   };
 }
 
+/** The names of the themes the server offers (`theme.list`); empty when it cannot be asked. */
+export async function listThemeNames(): Promise<string[]> {
+  try {
+    const res = await apiFetch("/api/home/themes");
+    if (!res.ok) return [];
+    const names: unknown = await res.json();
+    return Array.isArray(names) ? names.filter((name): name is string => typeof name === "string") : [];
+  } catch {
+    return [];
+  }
+}
+
 export async function loadTheme(): Promise<ResolvedTheme> {
   if (resolved) return resolved;
   try {

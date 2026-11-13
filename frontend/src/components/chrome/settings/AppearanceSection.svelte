@@ -3,8 +3,7 @@
   import { updateSetting, defaults, numericLimit, isAllowed, selectValue, inputNumber, type ThemeMode, type ZoomScope } from "../../../lib/settings.ts";
   import { ZOOM_STEPS, zoomLabel } from "../../../lib/zoom.ts";
   import { isMac } from "../../../lib/shortcuts.ts";
-  import { reloadTheme, resolveActiveThemeName } from "../../../lib/theme.ts";
-  import { apiFetch } from "../../../lib/protocol/http.ts";
+  import { listThemeNames, reloadTheme, resolveActiveThemeName } from "../../../lib/theme.ts";
   import { isDesktop, shellKind } from "../../../lib/platform.ts";
   import SettingRow from "./SettingRow.svelte";
   import SettingsSection from "./SettingsSection.svelte";
@@ -19,9 +18,7 @@
   let themeNames = $state<string[]>([]);
 
   $effect(() => {
-    apiFetch("/api/home/themes")
-      .then((r) => r.json())
-      .then((names: string[]) => { themeNames = names; });
+    listThemeNames().then((names) => { themeNames = names; });
   });
 
   const s = $derived(settings());
