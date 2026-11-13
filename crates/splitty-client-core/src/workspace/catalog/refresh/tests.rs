@@ -528,3 +528,122 @@ fn remote_external_move_to_unopened_screen_never_adopts_destination_or_late_rout
     assert_eq!(model.screens().len(), 1);
     assert_eq!(model.session_for("r"), Some("s-r"));
 }
+
+/// `snap`, with each session showing `title`, at `revision`.
+fn titled(id: &str, panes: &[&str], title: &str, revision: u64) -> Value {
+    let mut event = snap(id, panes);
+    event["screen"]["revision"] = json!(revision);
+    for session in event["screen"]["sessions"]
+        .as_object_mut()
+        .unwrap()
+        .values_mut()
+    {
+        session["displayTitle"] = json!(title);
+    }
+    event
+}
+
+/// A host source with `a` showing `p` and `b` showing `q`, both opened and
+/// settled by a coherent refresh.
+fn settled_remote() -> (WorkspaceRefresh, SourceWorkspace) {
+    let mut model = remote_model(&["a", "b"]);
+    model.open_existing("b").unwrap();
+    model.open_existing("a").unwrap();
+    let mut refresh = WorkspaceRefresh::default();
+    opening(&mut refresh, &mut model, &["a", "b"]);
+    stage(&mut refresh, &mut model, "a", &["p"]);
+    stage(&mut refresh, &mut model, "b", &["q"]);
+    assert!(ending(&mut refresh, &mut model, &["a", "b"]).coherent_refresh);
+    for screen in model.models.values_mut() {
+        // The flush that sent the reads cleared them.
+        screen.resync_pending = false;
+    }
+    assert!(!refresh.needs_flush(&model));
+    (refresh, model)
+}
+
+#[test]
+fn host_metadata_read_of_one_screen_keeps_the_routes_and_their_generation() {
+    let (mut refresh, mut model) = settled_remote();
+    let generation = model.route_generation();
+    model.mark_screen_metadata_dirty("a");
+    assert!(refresh.needs_flush(&model), "the worker reads the Screen");
+    assert!(
+        !refresh.needs_coherent(&model),
+        "a metadata change alone does not refresh every opened Screen"
+    );
+    for (revision, title) in [(3, "Working"), (4, "Working."), (5, "Working..")] {
+        let connection = model.connection_id;
+        let delta = refresh
+            .apply_snapshot(
+                &mut model,
+                connection,
+                &titled("a", &["p"], title, revision),
+            )
+            .unwrap();
+        assert!(delta.snapshot_changed && !delta.coherent_refresh);
+        assert!(delta.added.is_empty() && delta.removed.is_empty());
+        assert!(!refresh.observation_active(), "no coherent refresh begins");
+        let snapshot = model.screen("a").unwrap().snapshot().unwrap();
+        assert_eq!(
+            snapshot.sessions[&"s-p".into()].display_title.as_deref(),
+            Some(title)
+        );
+    }
+    assert_eq!(model.route_generation(), generation);
+    assert_eq!(model.session_for("p"), Some("s-p"));
+    assert_eq!(model.session_for("q"), Some("s-q"));
+}
+
+#[test]
+fn host_metadata_read_that_shows_a_layout_change_refreshes_coherently() {
+    // A pane closed on exit, a split another client made and a pane moved in
+    // from another opened Screen all change the read Screen's layout.
+    for panes in [&[][..], &["p", "n"][..], &["p", "q"][..]] {
+        let (mut refresh, mut model) = settled_remote();
+        let generation = model.route_generation();
+        model.mark_screen_metadata_dirty("a");
+        let connection = model.connection_id;
+        let delta = refresh
+            .apply_snapshot(&mut model, connection, &titled("a", panes, "exited", 3))
+            .unwrap();
+        assert!(delta.snapshot_changed && !delta.coherent_refresh);
+        assert!(refresh.observation_active(), "{panes:?} begins the refresh");
+        assert_eq!(
+            model.session_for("p"),
+            Some("s-p"),
+            "routes stay until it commits"
+        );
+        assert_eq!(model.route_generation(), generation);
+    }
+}
+
+#[test]
+fn host_metadata_change_waits_for_the_coherent_refresh_while_routes_are_unsettled() {
+    let (refresh, mut model) = settled_remote();
+    model.mark_screen_metadata_dirty("a");
+    model.mark_screen_dirty("b");
+    assert!(
+        refresh.needs_coherent(&model),
+        "a structural nudge takes the metadata read along"
+    );
+    let (refresh, mut model) = settled_remote();
+    model.mark_screen_metadata_dirty("a");
+    model.mark_catalog_dirty();
+    assert!(refresh.needs_coherent(&model));
+    let (refresh, mut model) = settled_remote();
+    model.mark_screen_metadata_dirty("a");
+    model.reconciling = true;
+    assert!(
+        refresh.needs_coherent(&model),
+        "an unsettled source recovers through the coherent refresh"
+    );
+}
+
+#[test]
+fn local_metadata_nudge_reads_its_screen_as_before() {
+    let mut model = model();
+    model.mark_screen_metadata_dirty("a");
+    assert!(model.screen("a").unwrap().resync_pending);
+    assert!(!model.screen("a").unwrap().metadata_pending);
+}

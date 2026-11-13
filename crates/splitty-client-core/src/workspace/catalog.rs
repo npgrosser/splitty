@@ -724,6 +724,31 @@ impl SourceWorkspace {
         }
     }
 
+    /// A `session_metadata` nudge: a program in one of the Screen's panes
+    /// changed its title, working directory or foreground process. The local
+    /// source reads that Screen again as for any nudge; a host source reads it
+    /// alone instead of refreshing all its routes, and falls back to that
+    /// refresh when the read shows more than metadata (a pane that closed on
+    /// exit sends the same nudge).
+    pub fn mark_screen_metadata_dirty(&mut self, id: &str) {
+        let remote = self.kind() == SourceKind::Remote;
+        if let Some(screen) = self.models.get_mut(id) {
+            if remote {
+                screen.metadata_pending = true;
+            } else {
+                screen.resync_pending = true;
+            }
+        }
+    }
+
+    /// Whether a host source's routes are settled, so that one Screen's
+    /// metadata may be read again without the coherent refresh: no catalog
+    /// read, creation, transfer, floating action, template or tab placement
+    /// is waiting for one.
+    pub(super) fn metadata_reads_admissible(&self) -> bool {
+        self.route_observation_complete() && self.pending_placement.is_none()
+    }
+
     pub fn apply_catalog(&mut self, connection: Uuid, event: &Value) -> io::Result<WorkspaceDelta> {
         let watermark = self.catalog_in_flight;
         let result = self.apply_catalog_inner(connection, event);
@@ -1021,6 +1046,7 @@ impl SourceWorkspace {
                     screen.reset_connection(connection);
                     screen.set_tab_selection_supported(false);
                     screen.resync_pending = false;
+                    screen.metadata_pending = false;
                 }
                 next.models = screens;
                 next

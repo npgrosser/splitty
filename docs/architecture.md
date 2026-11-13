@@ -329,9 +329,10 @@ dimensions. Connection or session replacement revokes the old executable view.
 The worker reports a session only at a size its view measured in the current
 route generation, never a placeholder, and sets `redraw` only on the first
 report after an attach. A host source refreshes its routes after every layout
-operation and every metadata nudge (a program's title, working directory or
-foreground process changed), so its views report again at unchanged sizes;
-those reports leave the PTY, and the programs in it, alone. A refresh does not
+operation, so its views report again at unchanged sizes; those reports leave
+the PTY, and the programs in it, alone. A metadata nudge (a program's title,
+working directory or foreground process changed) does not refresh the routes,
+as the `mux.workspace_resync` paragraph below describes. A refresh does not
 `hide` a shown pane that keeps its session: the connection's last report stands
 until the window's visibility for the new routes arrives, so another connection
 showing the session at a different size never gets the PTY in between. The
@@ -646,8 +647,15 @@ the separately dispatched native API request path is not a mutation barrier.
 One outstanding refresh and a dirty follow-up coalesce requests. A local mutation
 watermark prevents an older catalog response from retiring a newly submitted
 Screen or its pending terminal. Existing mutation nudges refresh the catalog;
-known-Screen `session_metadata` nudges only refresh that Screen. Later active-screen
-hints do not replace a valid window-local choice.
+known-Screen `session_metadata` nudges only refresh that Screen. A host source,
+which otherwise observes every change through the coherent refresh of all its
+opened Screens, also reads only that Screen for such a nudge while its routes
+are settled (no catalog read, creation, transfer, floating action, template or
+tab placement pending), keeping its routes and their generation. The host
+sends the same nudge when a pane closes on exit, so a read that shows another
+layout, name or pane/session pairing than the Screen had starts the coherent
+refresh instead of being applied. Later active-screen hints do not replace a
+valid window-local choice.
 
 Typed lifecycle operations create, rename, activate and close Screens. Typed
 `ScreenOp`s request splits, tabs, pane closure and split resizing, followed by an

@@ -69,7 +69,24 @@ impl WorkspaceRefresh {
             return model.catalog_in_flight.is_none();
         }
         (model.catalog_dirty && model.catalog_in_flight.is_none())
-            || model.models.values().any(|screen| screen.resync_pending)
+            || model
+                .models
+                .values()
+                .any(|screen| screen.resync_pending || screen.metadata_pending)
+    }
+    /// A host source observes every change through the coherent refresh of
+    /// all its opened Screens, because only that orders a pane's removal from
+    /// one Screen with its arrival in another. A Screen whose session metadata
+    /// alone changed is read by itself while the source's routes are settled;
+    /// `apply_snapshot` turns that read into the coherent refresh when it
+    /// shows a change of layout or routes.
+    fn needs_coherent(&self, model: &SourceWorkspace) -> bool {
+        if !self.needs_flush(model) {
+            return false;
+        }
+        let structural = (model.catalog_dirty && model.catalog_in_flight.is_none())
+            || model.models.values().any(|screen| screen.resync_pending);
+        structural || !model.metadata_reads_admissible()
     }
     pub(crate) fn observation_pending(&self, model: &SourceWorkspace) -> bool {
         self.batch.is_some()
@@ -96,7 +113,7 @@ impl WorkspaceRefresh {
         }
         if self.batch.is_none()
             && ((model.reconciling && model.catalog_dirty)
-                || (model.kind() == SourceKind::Remote && self.needs_flush(model)))
+                || (model.kind() == SourceKind::Remote && self.needs_coherent(model)))
         {
             self.begin(model)?;
         }
@@ -119,6 +136,7 @@ impl WorkspaceRefresh {
                         client.resync(info.id.as_str())?;
                         if let Some(screen) = model.models.get_mut(info.id.as_str()) {
                             screen.resync_pending = false;
+                            screen.metadata_pending = false;
                         }
                         batch.requested.insert(info.id.to_string());
                     }
@@ -151,6 +169,7 @@ impl WorkspaceRefresh {
         model.catalog_dirty = false;
         for screen in model.models.values_mut() {
             screen.resync_pending = false;
+            screen.metadata_pending = false;
         }
         // Reconciliation remains unresolved, but quiescent. Another nudge can
         // restart reads; output and assessed whole-window close remain available.
@@ -294,7 +313,14 @@ impl WorkspaceRefresh {
                     .is_some_and(|owner| owner != id)
             })
         });
-        if !delta.removed.is_empty() || cross_owner || model.reconciling {
+        // A host Screen read alone for its metadata keeps its routes only when
+        // it shows the same layout and routes; anything else is observed
+        // through the coherent refresh, as every other host change is.
+        let host_changed = model.kind() == SourceKind::Remote
+            && (!delta.added.is_empty()
+                || !model.metadata_reads_admissible()
+                || !same_layout(existing, &next));
+        if !delta.removed.is_empty() || cross_owner || model.reconciling || host_changed {
             self.begin(model)?;
             return Ok(WorkspaceDelta {
                 snapshot_changed: true,
@@ -396,6 +422,34 @@ impl WorkspaceRefresh {
         Ok(())
     }
 }
+/// Whether two observations of a Screen have the same name, layout and panes
+/// with the same sessions, so that they differ at most in metadata.
+fn same_layout(old: &ScreenModel, new: &ScreenModel) -> bool {
+    let (Some(old), Some(new)) = (old.server_snapshot(), new.server_snapshot()) else {
+        return false;
+    };
+    let layout = |screen: &ScreenState| {
+        serde_json::to_value((&screen.name, &screen.root, &screen.floating)).ok()
+    };
+    let sessions = |screen: &ScreenState| -> HashMap<String, Option<String>> {
+        screen
+            .panes
+            .iter()
+            .map(|(pane, state)| {
+                (
+                    pane.to_string(),
+                    state.session_id.as_ref().map(ToString::to_string),
+                )
+            })
+            .collect()
+    };
+    let old_layout = layout(old);
+    old_layout.is_some()
+        && old_layout == layout(new)
+        && sessions(old) == sessions(new)
+        && old.sessions.len() == new.sessions.len()
+        && old.sessions.keys().all(|id| new.sessions.contains_key(id))
+}
 fn catalog(event: &Value, model: &SourceWorkspace) -> io::Result<Catalog> {
     let limit = if model.kind() == SourceKind::Local {
         model.limits.screens
@@ -467,8 +521,9 @@ fn commit(
         // apply_screen confirms a still-applicable local move. An unmatched
         // old move cannot remain a permanent admission lock after this fence.
         screen.pending_move = None;
-        // Preserve resync_pending: a metadata nudge may have arrived after this
-        // Screen's collected observation and still needs one fresh read.
+        // Preserve resync_pending and metadata_pending: a nudge may have
+        // arrived after this Screen's collected observation and still needs
+        // one fresh read.
         for (pane, session) in &screen.pane_sessions {
             if old_routes.get(pane) == Some(session) && ready.contains(session) {
                 screen.ready_sessions.insert(session.clone());

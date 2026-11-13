@@ -252,6 +252,10 @@ pub struct ScreenModel {
     session_panes: HashMap<String, String>,
     ready_sessions: HashSet<String>,
     resync_pending: bool,
+    /// Only the session metadata of this Screen (a program's title, working
+    /// directory or foreground process) changed on a host: one read of this
+    /// Screen settles it unless that read shows more (see `catalog/refresh`).
+    metadata_pending: bool,
     /// Per viewer pane, the process that waits for its review: the wait's
     /// ID and the waiting pane's title. A snapshot carries it; the typed
     /// record never reads it back.
@@ -281,6 +285,7 @@ impl ScreenModel {
             session_panes: HashMap::new(),
             ready_sessions: HashSet::new(),
             resync_pending: false,
+            metadata_pending: false,
             review_waits: HashMap::new(),
         }
     }
@@ -1174,9 +1179,10 @@ impl ScreenModel {
     }
 
     fn flush_resync(&mut self, client: &Client) -> io::Result<()> {
-        if self.resync_pending {
+        if self.resync_pending || self.metadata_pending {
             client.resync(self.screen_id())?;
             self.resync_pending = false;
+            self.metadata_pending = false;
         }
         Ok(())
     }

@@ -1202,7 +1202,11 @@ impl SourceRuntime {
                             model.mark_catalog_dirty();
                         }
                         if let Some(id) = id {
-                            model.mark_screen_dirty(id);
+                            if json["reason"] == "session_metadata" {
+                                model.mark_screen_metadata_dirty(id);
+                            } else {
+                                model.mark_screen_dirty(id);
+                            }
                         }
                     }
                 }
@@ -1410,8 +1414,8 @@ impl SourceRuntime {
             self.pending_resize.clear();
             // A shown pane that keeps its session keeps this connection's
             // size report until the window's next visibility says otherwise:
-            // a host refreshes for every title change of a program, and a
-            // `hide` here would hand the PTY to another connection's size
+            // a host refreshes for every layout operation of any client, and
+            // a `hide` here would hand the PTY to another connection's size
             // and back. Panes no longer displayed are hidden by `reconcile`;
             // a pane whose route changed hides the session it showed.
             for route in &delta.removed {
@@ -2298,7 +2302,7 @@ mod tests {
     }
 
     /// A program's title change makes the host publish the pane's metadata,
-    /// and the host source refreshes its routes for it while nobody touches
+    /// and the host source reads the pane's Screen again while nobody touches
     /// the window. With `other_viewer`, a second connection shows the session
     /// at another size and is idle, so the PTY follows this window's report
     /// only as long as the window keeps it.
@@ -2444,6 +2448,11 @@ mod tests {
                     Some(initial.screen_id.clone()),
                 ));
         }
+        let revision = host
+            .mux_store
+            .get_screen(&initial.screen_id.as_str().into())
+            .unwrap()
+            .revision;
         pump_reporting(
             &mut source,
             &mut window,
@@ -2453,11 +2462,21 @@ mod tests {
             (&pane, 50, 30),
             "the title's refresh",
             |source, window, _| {
-                window.source(id).unwrap().route_generation() > before
+                window
+                    .source(id)
+                    .unwrap()
+                    .screen(&initial.screen_id)
+                    .and_then(|screen| screen.snapshot())
+                    .is_some_and(|snapshot| snapshot.revision >= revision)
                     && !source.observation_pending(window)
             },
         )
         .await;
+        assert_eq!(
+            window.source(id).unwrap().route_generation(),
+            before,
+            "a title change keeps the host source's routes"
+        );
         source
             .command(&mut window, input(b"PING\n".to_vec()))
             .unwrap();
@@ -2491,6 +2510,297 @@ mod tests {
     #[tokio::test]
     async fn host_metadata_refresh_keeps_the_size_report_of_a_shown_pane() {
         host_metadata_refresh_leaves_pane_sizes_alone(true).await;
+    }
+
+    /// The reads a host source asks its connection for, as their answers
+    /// arrive, and the nudges that ask for them.
+    #[derive(Debug, Default)]
+    struct Reads {
+        catalogs: usize,
+        snapshots: HashMap<String, usize>,
+        metadata_nudges: HashMap<String, usize>,
+    }
+
+    impl Reads {
+        fn see(&mut self, json: &serde_json::Value) {
+            match json["type"].as_str() {
+                Some("mux.workspace_snapshot") => self.catalogs += 1,
+                Some("mux.screen_snapshot") => {
+                    if let Some(screen) = json["screen"]["id"].as_str() {
+                        *self.snapshots.entry(screen.to_owned()).or_default() += 1;
+                    }
+                }
+                Some("mux.nudge") if json["reason"] == "session_metadata" => {
+                    if let Some(screen) = json["screenId"].as_str() {
+                        *self.metadata_nudges.entry(screen.to_owned()).or_default() += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        fn snapshots_of(&self, screen: &str) -> usize {
+            self.snapshots.get(screen).copied().unwrap_or_default()
+        }
+    }
+
+    /// [`pump_until`], counting the source's reads in `reads`.
+    async fn pump_counting(
+        source: &mut SourceRuntime,
+        window: &mut WindowWorkspace,
+        output: &mut HashMap<String, Vec<u8>>,
+        reads: &mut Reads,
+        what: &str,
+        mut done: impl FnMut(&SourceRuntime, &WindowWorkspace, &HashMap<String, Vec<u8>>) -> bool,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                source.reconcile(window).unwrap();
+                if done(source, window, output) {
+                    break;
+                }
+                let event = source.client.next_event().await.unwrap().unwrap();
+                if let Some(chunk) = event.output() {
+                    output
+                        .entry(chunk.session_id.to_owned())
+                        .or_default()
+                        .extend_from_slice(chunk.bytes);
+                }
+                if let Some(json) = event.json() {
+                    reads.see(json);
+                }
+                source.event(window, Box::new(event)).unwrap();
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}: {reads:?}"));
+    }
+
+    /// A program that animates its title on a host makes the host nudge the
+    /// pane's Screen with `session_metadata` for every change. The host source
+    /// reads that Screen alone and keeps its routes; a layout change, also one
+    /// that arrives with a metadata nudge, still refreshes every opened Screen
+    /// coherently.
+    #[tokio::test]
+    async fn host_title_changes_read_only_their_screen_and_keep_the_routes() {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let host = runtime.state.clone();
+        let service = crate::EmbeddedService::from_runtime(runtime);
+        let client = service.connect().await.unwrap();
+        let shown = client.create_screen("Screen 1").unwrap();
+        let hidden = client.create_screen("Screen 2").unwrap();
+        let mut window = WindowWorkspace::new(uuid::Uuid::new_v4());
+        window
+            .ui_test_screen_order_fixture(&[(&shown.screen_id, "Local")], None)
+            .unwrap();
+        let id = window
+            .admit_remote(window.lifecycle_token(), "title.test")
+            .unwrap();
+        window.test_bind_remote_client(id, &client);
+        let token = window.source(id).unwrap().source_token();
+        window.confirm_ready(token).unwrap();
+        let target = window.host(id).unwrap().action_target().clone();
+        let mut source = SourceRuntime::new(client, token);
+        let mut output = HashMap::new();
+        let mut reads = Reads::default();
+        pump_counting(
+            &mut source,
+            &mut window,
+            &mut output,
+            &mut reads,
+            "the host catalog",
+            |source, window, _| {
+                window
+                    .source(id)
+                    .unwrap()
+                    .live_catalog()
+                    .is_some_and(|catalog| catalog.len() == 2)
+                    && !source.observation_pending(window)
+            },
+        )
+        .await;
+        window.host_mut(&target).unwrap().catalog = crate::workspace::CatalogState::Ready;
+        let shown_key = window.source(id).unwrap().screen_key(&shown.screen_id);
+        let hidden_key = window.source(id).unwrap().screen_key(&hidden.screen_id);
+        window.open_existing(token, &hidden_key).unwrap();
+        window.open_existing(token, &shown_key).unwrap();
+        if window.shown_key().as_ref() != Some(&shown_key) {
+            window.select(window.lifecycle_token(), &shown_key).unwrap();
+        }
+        let attached = |count: usize| {
+            move |source: &SourceRuntime, window: &WindowWorkspace, _: &HashMap<_, _>| {
+                let routes = window.source(id).unwrap().routes();
+                routes.len() == count
+                    && routes
+                        .iter()
+                        .all(|route| source.attached.contains(&route.session_id))
+                    && !source.observation_pending(window)
+            }
+        };
+        pump_counting(
+            &mut source,
+            &mut window,
+            &mut output,
+            &mut reads,
+            "both panes",
+            attached(2),
+        )
+        .await;
+        let model = window.source(id).unwrap();
+        let session = model.session_for(&shown.pane_id).unwrap().to_owned();
+        let title = |window: &WindowWorkspace| {
+            window
+                .source(id)
+                .unwrap()
+                .screen(&shown.screen_id)
+                .and_then(|screen| screen.snapshot())
+                .and_then(|snapshot| snapshot.sessions.get(&session.as_str().into()))
+                .and_then(|entry| entry.display_title.clone())
+        };
+
+        // What the host's pane observer does, about every 500 ms, while a
+        // program in the shown pane animates its title: store the metadata,
+        // then nudge the Screen. Each title is waited for, so every nudge is
+        // read on its own, as when the observer's reads are apart.
+        let metadata = |session: &str, title: &str, exited: bool| {
+            splitty_core::mux::Op::UpdateSessionMetadata {
+                session_id: session.into(),
+                display_title: title.into(),
+                cwd: String::new(),
+                busy: !exited,
+                exited,
+                exit_code: exited.then_some(0),
+                close: exited,
+            }
+        };
+        let nudge = |screen: &str| {
+            splitty_core::protocol::ServerEvent::mux_nudge(
+                "session_metadata".into(),
+                Some(screen.to_owned()),
+            )
+        };
+        let before = window.source(id).unwrap().route_generation();
+        reads = Reads::default();
+        let titles = ["Working", "Working.", "Working..", "Working..."];
+        for step in titles {
+            host.mux_store
+                .dispatch(metadata(&session, step, false))
+                .unwrap();
+            host.client_state.notify_tx.send(&nudge(&shown.screen_id));
+            pump_counting(
+                &mut source,
+                &mut window,
+                &mut output,
+                &mut reads,
+                "the title",
+                |source, window, _| {
+                    title(window).as_deref() == Some(step) && !source.observation_pending(window)
+                },
+            )
+            .await;
+        }
+        eprintln!("title burst: {reads:?}");
+        assert_eq!(
+            window.source(id).unwrap().route_generation(),
+            before,
+            "title changes keep the routes"
+        );
+        assert_eq!(reads.catalogs, 0, "no catalog read: {reads:?}");
+        assert_eq!(
+            reads.snapshots_of(&shown.screen_id),
+            titles.len(),
+            "one read of the Screen per nudge: {reads:?}"
+        );
+        assert_eq!(
+            reads.snapshots_of(&hidden.screen_id),
+            0,
+            "no read of another Screen: {reads:?}"
+        );
+        assert_eq!(window.source(id).unwrap().routes().len(), 2);
+
+        // Another connection splits the shown pane: a layout operation.
+        let other = service.connect().await.unwrap();
+        other
+            .submit_screen_op(
+                &shown.screen_id,
+                &splitty_core::mux::ScreenOp::SplitPane {
+                    pane_id: shown.pane_id.as_str().into(),
+                    axis: Axis::Horizontal,
+                    new_pane_index: None,
+                    new_pane_id: None,
+                    resulting_sizes: None,
+                    cwd: None,
+                    shell_profile_id: None,
+                },
+            )
+            .unwrap();
+        let before = window.source(id).unwrap().route_generation();
+        reads = Reads::default();
+        pump_counting(
+            &mut source,
+            &mut window,
+            &mut output,
+            &mut reads,
+            "the split",
+            attached(3),
+        )
+        .await;
+        eprintln!("external split: {reads:?}");
+        assert!(window.source(id).unwrap().route_generation() > before);
+        assert!(reads.catalogs >= 2, "fenced by two catalogs: {reads:?}");
+        assert!(reads.snapshots_of(&hidden.screen_id) >= 1, "{reads:?}");
+
+        // The new pane's program exits and the host closes its pane on exit,
+        // as its observer does, with a metadata nudge: the read of the Screen
+        // shows the layout change.
+        let model = window.source(id).unwrap();
+        let split = model
+            .routes()
+            .into_iter()
+            .find(|route| {
+                route.pane_id != shown.pane_id
+                    && model.screen_for(&route.pane_id) == Some(shown.screen_id.as_str())
+            })
+            .unwrap();
+        let before = model.route_generation();
+        reads = Reads::default();
+        let effects = host
+            .mux_store
+            .dispatch(metadata(&split.session_id, "exited", true))
+            .unwrap();
+        host.client_state
+            .effect_runner
+            .execute(effects, &host.client_state.env)
+            .await;
+        host.client_state.notify_tx.send(&nudge(&shown.screen_id));
+        pump_counting(
+            &mut source,
+            &mut window,
+            &mut output,
+            &mut reads,
+            "the closed pane",
+            |source, window, _| {
+                window
+                    .source(id)
+                    .unwrap()
+                    .session_for(&split.pane_id)
+                    .is_none()
+                    && !source.observation_pending(window)
+            },
+        )
+        .await;
+        eprintln!("close on exit: {reads:?}");
+        assert!(window.source(id).unwrap().route_generation() > before);
+        assert!(reads.catalogs >= 2, "fenced by two catalogs: {reads:?}");
+        assert!(reads.snapshots_of(&hidden.screen_id) >= 1, "{reads:?}");
+        assert_eq!(window.source(id).unwrap().routes().len(), 2);
+
+        drop(other);
+        source.client.finish().await.unwrap();
+        service.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(path);
     }
 
     /// A window whose source drives a connection to the test service as a
