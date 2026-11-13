@@ -1148,7 +1148,7 @@ interface ProgramStatusRecord {
  * Exactly a marked event carries `notice` ("notification-notices-v1"): kind
  * "program-status", warning for `blocked`, success for `done`, error for
  * `error`, setting "programStatus", titled with the screen (its name, else
- * "Screen <n>" by the catalog), the state in words and the record's `msg`,
+ * "Unnamed Screen"), the state in words and the record's `msg`,
  * else its `title`.
  *
  * Only servers whose mux.welcome lists "program-status-v1" send it. Not a

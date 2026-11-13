@@ -10,7 +10,7 @@ New Screens are named "Screen N" in four places: the server (for a create withou
 - `create_screen` with `onlyIfEmpty: true` is applied only to a workspace without Screens; otherwise it is refused with `mux.op_failed` and nothing changes. Both clients send their first Screen this way, so windows that start together end with exactly one; the window whose create was refused drops its own Screen and shows the server's.
 - Both clients omit the name of a new Screen when the server announces the capability and show the server's name once it arrives; the web client resyncs its new Screen to learn it, and takes the names of local Screens from their snapshots. The web client no longer renames pending host Screens: the host picks the name when it creates the Screen.
 - Against a server without the capability a client sends "Screen N", the smallest positive N no Screen of that server uses as far as the window knows, computed when the create goes out.
-- No positional fallback label: a Screen the server reports without a name shows as "Unnamed Screen" in both clients, a Screen whose creation is pending as "New Screen" (web) or "Creating Screen…" (native).
+- No positional fallback label: a Screen the server reports without a name shows as "Unnamed Screen" in both clients and in the titles of the server's program status notices, a Screen whose creation is pending as "New Screen" (web) or "Creating Screen…" (native).
 
 Out of scope: rename and its validation, IDs, the placement of new Screens, the native window's empty page and "New Screen" action (unchanged apart from omitting the name).
 
@@ -21,7 +21,7 @@ None.
 
 ### Modified Capabilities
 - `workspace-model`: the first Screen of an empty workspace (`onlyIfEmpty`).
-- `mux-protocol`: the `screen-names-v1` capability, server-chosen names in both clients, the first Screen with `onlyIfEmpty` in Client Resynchronization, older-server behavior.
+- `mux-protocol`: the `screen-names-v1` capability, server-chosen names in both clients, the first Screen with `onlyIfEmpty` in Client Resynchronization, older-server behavior; notice titles name an unnamed Screen without its position.
 - `remote-screens`: Screen Default Names Per Host come from the host, not from the window.
 
 ## Impact

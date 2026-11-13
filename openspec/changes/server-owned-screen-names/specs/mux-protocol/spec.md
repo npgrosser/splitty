@@ -31,6 +31,44 @@ A client MUST treat the server's workspace state as authoritative after connecti
 - **WHEN** a server without `screen-names-v1` ignores `onlyIfEmpty` and two windows start together against its empty workspace
 - **THEN** each window's initial screen is created, as before
 
+### Requirement: Classified Notification Events
+The server SHALL attach `notice` to every `process.finished`, `process.idle` and `session.exited` event and to every `program_status.changed` event marked `notify`, and to no other `program_status.changed` (shapes in `docs/protocol.ts`). A notice SHALL carry `kind`, `severity` (`info`, `success`, `warning` or `error`), a plain-text `title`, `setting` when a `notifications.*` switch besides `enabled` governs it, and `suppressed` when no window should notify:
+
+- `process.finished`: kind `process.finished`, `info`, `<process> finished`, setting `processFinished`.
+- `process.idle`: kind `process.idle`, `info`, `<process> is waiting` or `Command finished`; suppressed `program-status` while the session holds a root program status record.
+- `session.exited`: with exit code 0 kind `session.exited`, `info`, `<process> exited`, setting `processExited`; otherwise kind `session.crashed`, `error`, `<process> failed`, setting `processCrashed`, where `<process>` is `session` when none is known; suppressed `user-initiated` when `userInitiated` is true.
+- `program_status.changed`: kind `program-status`, `warning` for `blocked`, `success` for `done`, `error` for `error`, setting `programStatus`; the title names the screen (its name, else `Unnamed Screen`, never a label by its place) followed by the state in words and the record's `msg`, else its `title`.
+
+A session SHALL exit user-initiated when the server closed it while its program was still running: on a connection's `close` or when its pane or screen was closed.
+
+#### Scenario: Process finished
+- **WHEN** a streamed session's foreground program `cargo` ends and the shell is in the foreground again
+- **THEN** every connection receives `process.finished` with a notice of kind `process.finished`, severity `info`, title `cargo finished` and setting `processFinished`
+
+#### Scenario: Session failed
+- **WHEN** a streamed session's program exits with code 1 by itself
+- **THEN** its `session.exited` carries a notice of kind `session.crashed`, severity `error`, setting `processCrashed` and no `suppressed`
+
+#### Scenario: Pane closed by the user
+- **WHEN** a pane is closed while a connection streams its session and the session's shell still runs
+- **THEN** the `session.exited` for it has `userInitiated` true and its notice is suppressed `user-initiated`
+
+#### Scenario: Waiting program that reports its status
+- **WHEN** a session holds a `working` root record and its shell integration reports that a command finished
+- **THEN** its `process.idle` carries a notice suppressed `program-status`
+
+#### Scenario: Blocked program
+- **WHEN** the root record of a session on the screen named `build` changes to `blocked` with the kind `permission` and the message `Run tests?`, and the change is marked `notify`
+- **THEN** the event carries a notice of kind `program-status`, severity `warning`, setting `programStatus` and title `build: Waiting for permission: Run tests?`
+
+#### Scenario: Unmarked status change
+- **WHEN** a `program_status.changed` is not marked `notify`
+- **THEN** it carries no notice
+
+#### Scenario: Status of an unnamed screen
+- **WHEN** a marked `blocked` change comes from a session on a screen without a name, second in the catalog
+- **THEN** its notice's title starts with `Unnamed Screen: `, not with `Screen 2: `
+
 ## ADDED Requirements
 
 ### Requirement: Server-Chosen Screen Names

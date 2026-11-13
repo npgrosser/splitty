@@ -130,9 +130,8 @@ impl Watching {
         let (catalog, _) = client_state.mux_store.workspace_catalog();
         self.screen_labels = catalog
             .into_iter()
-            .enumerate()
-            .map(|(index, info)| {
-                let label = screen_label(info.name.as_deref(), index);
+            .map(|info| {
+                let label = screen_label(info.name.as_deref());
                 (info.id.to_string(), label)
             })
             .collect();

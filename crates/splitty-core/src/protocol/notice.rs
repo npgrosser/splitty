@@ -160,12 +160,13 @@ impl Notice {
     }
 }
 
-/// A screen's label in a notice: its name, else `Screen <n>` by its place
-/// (from 0) in the catalog.
-pub fn screen_label(name: Option<&str>, index: usize) -> String {
+/// A screen's label in a notice: its name, else "Unnamed Screen", never a
+/// label by position that could repeat a real screen's name (`mux-protocol`,
+/// Server-Chosen Screen Names).
+pub fn screen_label(name: Option<&str>) -> String {
     name.map(|name| plain_text(name, MAX_TITLE_CHARS))
         .filter(|name| !name.is_empty())
-        .unwrap_or_else(|| format!("Screen {}", index + 1))
+        .unwrap_or_else(|| "Unnamed Screen".to_owned())
 }
 
 /// The state in words, followed by the record's `msg`, else its `title`.
@@ -298,9 +299,9 @@ mod tests {
             Notice::process_finished("a\u{1b}[31m\u{202e}b").title,
             "a[31mb finished"
         );
-        assert_eq!(screen_label(None, 1), "Screen 2");
-        assert_eq!(screen_label(Some(""), 0), "Screen 1");
-        assert_eq!(screen_label(Some("api"), 4), "api");
+        assert_eq!(screen_label(None), "Unnamed Screen");
+        assert_eq!(screen_label(Some("")), "Unnamed Screen");
+        assert_eq!(screen_label(Some("api")), "api");
     }
 
     #[test]

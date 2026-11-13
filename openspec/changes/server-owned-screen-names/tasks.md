@@ -6,6 +6,7 @@
 - [x] 1.2 Session and HTTP `create_screen` take `onlyIfEmpty: true`; `mux.welcome` lists `screen-names-v1`
 - [x] 1.3 Tests (unit, reducer): first screen on an empty workspace named Screen 1; refused on a workspace with a screen, unchanged and without effects; two in a row leave one
 - [x] 1.4 Tests (in-process, mux handler): the welcome lists the capability; a refused first-screen create yields `mux.op_failed` to its sender
+- [x] 1.5 Program status notices title an unnamed Screen "Unnamed Screen" instead of by its place; unit test
 
 ## 2. Native client
 
