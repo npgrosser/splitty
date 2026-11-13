@@ -33,7 +33,13 @@ pub(super) struct SourceRuntime {
     closed_sessions: HashSet<String>,
     pending_hide: HashSet<String>,
     pending_resize: HashSet<String>,
+    /// Sessions whose next size report follows their attach: only that
+    /// report asks the server to redraw at an unchanged size. Any later one
+    /// would make full-screen programs repaint for a layout change elsewhere.
+    redraw_pending: HashSet<String>,
     activity_pending: bool,
+    /// The size the window last reported for each session's pane, in the
+    /// current route generation. A session without one is not reported.
     sizes: HashMap<String, (u16, u16)>,
     refresh_error: Option<String>,
     control_error: Option<String>,
@@ -61,6 +67,7 @@ impl SourceRuntime {
             closed_sessions: HashSet::new(),
             pending_hide: HashSet::new(),
             pending_resize: HashSet::new(),
+            redraw_pending: HashSet::new(),
             activity_pending: false,
             sizes: HashMap::new(),
             refresh_error: None,
@@ -1162,6 +1169,7 @@ impl SourceRuntime {
                             model.observe_attached(event.connection_id, session)
                         }) {
                             self.attached.insert(session.to_owned());
+                            self.redraw_pending.insert(session.to_owned());
                             self.activity_pending = true;
                             if model
                                 .as_ref()
@@ -1183,6 +1191,7 @@ impl SourceRuntime {
                 Some("closed") => {
                     if let Some(session) = json["sessionId"].as_str() {
                         self.attached.remove(session);
+                        self.redraw_pending.remove(session);
                         self.editors.session_closed(
                             &self.client,
                             source,
@@ -1405,6 +1414,8 @@ impl SourceRuntime {
                 .retain(|session, _| desired_sessions.contains(session));
             self.pending_resize
                 .retain(|session| desired_sessions.contains(session));
+            self.redraw_pending
+                .retain(|session| desired_sessions.contains(session));
             self.desired_visible.retain(|pane| {
                 model.screen_for(pane) == model.shown_screen_id()
                     && model.session_for(pane).is_some()
@@ -1423,6 +1434,7 @@ impl SourceRuntime {
                             self.attached.remove(&session);
                             self.pending_hide.remove(&session);
                             self.pending_resize.remove(&session);
+                            self.redraw_pending.remove(&session);
                             self.sizes.remove(&session);
                         }
                         Err(error) => {
@@ -1499,11 +1511,19 @@ impl SourceRuntime {
                     if self.attached.contains(session)
                         && (!self.visible.contains(pane) || self.pending_resize.contains(session))
                     {
-                        let (cols, rows) = self.sizes.get(session).copied().unwrap_or((80, 24));
-                        match self.client.resize(session, cols, rows, true) {
+                        // A pane is reported at its measured size only. After a
+                        // route refresh the window measures every shown pane
+                        // again; a placeholder sent before that would resize
+                        // the PTY there and back.
+                        let Some(&(cols, rows)) = self.sizes.get(session) else {
+                            continue;
+                        };
+                        let redraw = self.redraw_pending.contains(session);
+                        match self.client.resize(session, cols, rows, redraw) {
                             Ok(()) => {
                                 self.visible.insert(pane.clone());
                                 self.pending_resize.remove(session);
+                                self.redraw_pending.remove(session);
                             }
                             Err(error) => {
                                 pending_error
@@ -1824,6 +1844,317 @@ mod tests {
         );
         assert!(screens.iter().any(|screen| screen["id"] == created));
         drop(catalog);
+        source.client.finish().await.unwrap();
+        service.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    /// Drive the source as the worker does (reconcile, then one event) until
+    /// `done`, collecting each session's terminal output.
+    async fn pump_until(
+        source: &mut SourceRuntime,
+        window: &mut WindowWorkspace,
+        output: &mut HashMap<String, Vec<u8>>,
+        what: &str,
+        mut done: impl FnMut(&SourceRuntime, &WindowWorkspace, &HashMap<String, Vec<u8>>) -> bool,
+    ) {
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                source.reconcile(window).unwrap();
+                if done(source, window, output) {
+                    break;
+                }
+                let event = source.client.next_event().await.unwrap().unwrap();
+                if let Some(chunk) = event.output() {
+                    output
+                        .entry(chunk.session_id.to_owned())
+                        .or_default()
+                        .extend_from_slice(chunk.bytes);
+                }
+                source.event(window, Box::new(event)).unwrap();
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    fn contains(haystack: &[u8], needle: &[u8]) -> bool {
+        haystack.windows(needle.len()).any(|part| part == needle)
+    }
+
+    /// What the window sends after a route refresh: the shown panes, then
+    /// each pane's measured size, as separate commands.
+    fn report_layout(
+        source: &mut SourceRuntime,
+        window: &mut WindowWorkspace,
+        id: SourceId,
+        screen: &ScreenKey,
+        sizes: &[(&str, u16, u16)],
+    ) {
+        let model = window.source(id).unwrap();
+        let token = model.source_token();
+        let generation = model.route_generation();
+        let routes: Vec<_> = sizes
+            .iter()
+            .map(|(pane, cols, rows)| {
+                let session = model.session_for(pane).unwrap().to_owned();
+                (TerminalToken::new(token, pane, &session), *cols, *rows)
+            })
+            .collect();
+        source
+            .command(
+                window,
+                Command::new(
+                    token,
+                    CommandKind::Visible {
+                        screen: Some(screen.clone()),
+                        route_generation: generation,
+                        panes: sizes.iter().map(|(pane, ..)| (*pane).to_owned()).collect(),
+                    },
+                ),
+            )
+            .unwrap();
+        source.reconcile(window).unwrap();
+        for (route, cols, rows) in routes {
+            source
+                .command(
+                    window,
+                    Command::new(
+                        token,
+                        CommandKind::ResizePane {
+                            route,
+                            screen: screen.clone(),
+                            route_generation: generation,
+                            cols,
+                            rows,
+                        },
+                    ),
+                )
+                .unwrap();
+            source.reconcile(window).unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn host_layout_refresh_leaves_a_pane_of_unchanged_size_alone() {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let service = crate::EmbeddedService::from_runtime(runtime);
+        let client = service.connect().await.unwrap();
+        let initial = client.create_screen("Screen 1").unwrap();
+        let mut window = WindowWorkspace::new(uuid::Uuid::new_v4());
+        window
+            .ui_test_screen_order_fixture(&[(&initial.screen_id, "Local")], None)
+            .unwrap();
+        let id = window
+            .admit_remote(window.lifecycle_token(), "layout.test")
+            .unwrap();
+        window.test_bind_remote_client(id, &client);
+        let token = window.source(id).unwrap().source_token();
+        window.confirm_ready(token).unwrap();
+        let target = window.host(id).unwrap().action_target().clone();
+        let mut source = SourceRuntime::new(client, token);
+        let mut output = HashMap::new();
+        pump_until(
+            &mut source,
+            &mut window,
+            &mut output,
+            "the host catalog",
+            |source, window, _| {
+                window
+                    .source(id)
+                    .unwrap()
+                    .live_catalog()
+                    .is_some_and(|catalog| !catalog.is_empty())
+                    && !source.observation_pending(window)
+            },
+        )
+        .await;
+        window.host_mut(&target).unwrap().catalog = crate::workspace::CatalogState::Ready;
+        let screen = window.source(id).unwrap().screen_key(&initial.screen_id);
+        window.open_existing(token, &screen).unwrap();
+        if window.shown_key().as_ref() != Some(&screen) {
+            window.select(window.lifecycle_token(), &screen).unwrap();
+        }
+        assert_eq!(
+            window.source(id).unwrap().kind(),
+            SourceKind::Remote,
+            "every layout operation refreshes a host source's routes"
+        );
+        let attached = |count: usize| {
+            move |source: &SourceRuntime, window: &WindowWorkspace, _: &HashMap<_, _>| {
+                let model = window.source(id).unwrap();
+                let routes = model.routes();
+                routes.len() == count
+                    && routes
+                        .iter()
+                        .all(|route| source.attached.contains(&route.session_id))
+                    && !source.observation_pending(window)
+            }
+        };
+        pump_until(
+            &mut source,
+            &mut window,
+            &mut output,
+            "the first pane",
+            attached(1),
+        )
+        .await;
+        let pane_a = initial.pane_id.clone();
+        source
+            .command(
+                &mut window,
+                Command::new(
+                    token,
+                    CommandKind::Split {
+                        screen: screen.clone(),
+                        pane: pane_a.clone(),
+                        axis: Axis::Horizontal,
+                    },
+                ),
+            )
+            .unwrap();
+        pump_until(
+            &mut source,
+            &mut window,
+            &mut output,
+            "the split",
+            attached(2),
+        )
+        .await;
+        let model = window.source(id).unwrap();
+        let pane_b = model
+            .routes()
+            .into_iter()
+            .find(|route| route.pane_id != pane_a)
+            .unwrap();
+        report_layout(
+            &mut source,
+            &mut window,
+            id,
+            &screen,
+            &[(&pane_a, 50, 30), (&pane_b.pane_id, 50, 30)],
+        );
+        // A program that prints each SIGWINCH it gets, then each input line.
+        let watcher = br#"exec sh -c 'trap "printf \"W%sH_%s\\n\" INC \"\$(stty size)\"" WINCH; printf "RE%sY\\n" AD; while :; do read -r line && printf "GOT_%s\\n" "$line"; done'"#;
+        let input = |bytes: Vec<u8>| {
+            Command::new(
+                token,
+                CommandKind::Input {
+                    route: TerminalToken::new(token, &pane_b.pane_id, &pane_b.session_id),
+                    bytes,
+                },
+            )
+        };
+        source
+            .command(&mut window, input([&watcher[..], b"\n"].concat()))
+            .unwrap();
+        let session_b = pane_b.session_id.clone();
+        pump_until(
+            &mut source,
+            &mut window,
+            &mut output,
+            "the watcher",
+            |_, _, output| {
+                output
+                    .get(&session_b)
+                    .is_some_and(|bytes| contains(bytes, b"READY"))
+            },
+        )
+        .await;
+        output.remove(&session_b);
+
+        // Splitting the other pane changes nothing about this one's size.
+        source
+            .command(
+                &mut window,
+                Command::new(
+                    token,
+                    CommandKind::Split {
+                        screen: screen.clone(),
+                        pane: pane_a.clone(),
+                        axis: Axis::Vertical,
+                    },
+                ),
+            )
+            .unwrap();
+        pump_until(
+            &mut source,
+            &mut window,
+            &mut output,
+            "the second split",
+            attached(3),
+        )
+        .await;
+        let model = window.source(id).unwrap();
+        let pane_c = model
+            .routes()
+            .into_iter()
+            .find(|route| route.pane_id != pane_a && route.pane_id != pane_b.pane_id)
+            .unwrap();
+        report_layout(
+            &mut source,
+            &mut window,
+            id,
+            &screen,
+            &[
+                (&pane_a, 50, 15),
+                (&pane_c.pane_id, 50, 14),
+                (&pane_b.pane_id, 50, 30),
+            ],
+        );
+        source
+            .command(&mut window, input(b"FIRST\n".to_vec()))
+            .unwrap();
+        pump_until(
+            &mut source,
+            &mut window,
+            &mut output,
+            "the first line",
+            |_, _, output| {
+                output
+                    .get(&session_b)
+                    .is_some_and(|bytes| contains(bytes, b"GOT_FIRST"))
+            },
+        )
+        .await;
+        let seen = String::from_utf8_lossy(&output[&session_b]).into_owned();
+        assert!(
+            !seen.contains("WINCH_"),
+            "a pane whose size did not change got SIGWINCH: {seen:?}"
+        );
+
+        // A real change of its size still reaches the PTY.
+        report_layout(
+            &mut source,
+            &mut window,
+            id,
+            &screen,
+            &[
+                (&pane_a, 50, 15),
+                (&pane_c.pane_id, 50, 14),
+                (&pane_b.pane_id, 50, 29),
+            ],
+        );
+        source
+            .command(&mut window, input(b"SECOND\n".to_vec()))
+            .unwrap();
+        pump_until(
+            &mut source,
+            &mut window,
+            &mut output,
+            "the second line",
+            |_, _, output| {
+                output
+                    .get(&session_b)
+                    .is_some_and(|bytes| contains(bytes, b"GOT_SECOND"))
+            },
+        )
+        .await;
+        let seen = String::from_utf8_lossy(&output[&session_b]).into_owned();
+        assert!(seen.contains("WINCH_29 50"), "{seen:?}");
         source.client.finish().await.unwrap();
         service.close().await.unwrap();
         let _ = std::fs::remove_dir_all(path);

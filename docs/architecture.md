@@ -324,6 +324,11 @@ size measurement. Each binding owns its pending resize slot, so an obsolete
 closure cannot overwrite a newer measurement. Queue retries retain the original
 capture and discard stale sizes instead of attaching current authority to old
 dimensions. Connection or session replacement revokes the old executable view.
+The worker reports a session only at a size its view measured in the current
+route generation, never a placeholder, and sets `redraw` only on the first
+report after an attach. A host source refreshes its routes after every layout
+operation, so its views report again at unchanged sizes; those reports leave
+the PTY, and the programs in it, alone.
 
 The native Drawer is a view of that ordered catalog, not a second workspace
 store. Relative Screen commands resolve the latest local selection on the
