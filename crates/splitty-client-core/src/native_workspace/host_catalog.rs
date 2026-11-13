@@ -1,13 +1,16 @@
 //! Keeps the local service's last observed Screens of each host in step with
 //! the host's live catalog. The service stores a host's Screens when a
-//! connection to it becomes ready. A Screen that leaves the host afterwards,
-//! terminated or closed with its last pane, is reported here, so that the
-//! host's next connection does not list it again while it is not ready yet.
+//! connection to it becomes ready. While the host stays ready, its live
+//! catalog is reported here whenever it differs from what the service holds:
+//! a new Screen, a rename, or a Screen that left the host, terminated or
+//! closed with its last pane, so that the host's next connection does not
+//! list it again while it is not ready yet.
 //!
-//! Only removals are reported. A live catalog has no pane counts, so a Screen
-//! the service has not stored yet is left to the next ready connection.
+//! A live catalog has no pane counts. The report sends none, and the service
+//! keeps the counts it has stored (`hub-host-state-v1`); a service without
+//! that rule is sent nothing.
 use crate::workspace::{CatalogState, SourceStatus, WindowWorkspace};
-use splitty_core::native_api::directory::{Directory, DirectoryScreen};
+use splitty_core::native_api::directory::{Directory, ObservedScreen};
 use std::{collections::HashMap, io};
 use uuid::Uuid;
 
@@ -17,28 +20,36 @@ const MAX_NAME: usize = 200;
 /// What was reported per host, for the connection whose catalog it reflects.
 #[derive(Default)]
 pub(super) struct HostCatalogReports {
-    sent: HashMap<String, (Uuid, Vec<DirectoryScreen>)>,
+    /// The service keeps stored pane counts for a report without them.
+    enabled: bool,
+    sent: HashMap<String, (Uuid, Vec<ObservedScreen>)>,
 }
 impl HostCatalogReports {
-    /// Report, through `send`, each ready host whose live catalog no longer
-    /// lists a Screen that `directory` keeps for it. A report is not repeated
+    pub(super) fn new(enabled: bool) -> Self {
+        Self {
+            enabled,
+            sent: HashMap::new(),
+        }
+    }
+    /// Report, through `send`, each ready host whose live catalog differs
+    /// from the Screens `directory` keeps for it. A report is not repeated
     /// for the same connection while the directory has not caught up.
     pub(super) fn sync(
         &mut self,
         window: &WindowWorkspace,
         directory: Option<&Directory>,
-        mut send: impl FnMut(&str, &[DirectoryScreen]) -> io::Result<()>,
+        mut send: impl FnMut(&str, &[ObservedScreen]) -> io::Result<()>,
     ) {
         self.sent.retain(|target, _| {
             window
                 .hosts()
                 .any(|host| host.action_target().target() == target)
         });
-        let Some(directory) = directory else {
+        let Some(directory) = directory.filter(|_| self.enabled) else {
             return;
         };
         for host in window.hosts() {
-            // Only a current, complete readback says which Screens are gone.
+            // Only a current, complete readback says which Screens there are.
             if host.status() != SourceStatus::Ready || host.catalog_state() != CatalogState::Ready {
                 continue;
             }
@@ -49,6 +60,7 @@ impl HostCatalogReports {
             let Some(live) = source.live_catalog() else {
                 continue;
             };
+            // A host the service keeps nothing for is hidden or not stored yet.
             let Some(stored) = directory
                 .hosts
                 .iter()
@@ -56,30 +68,29 @@ impl HostCatalogReports {
             else {
                 continue;
             };
-            let current: HashMap<&str, &Option<String>> = live
+            // The service refuses a whole report with a longer name.
+            let screens: Vec<_> = live
                 .iter()
-                .map(|screen| (screen.id.as_str(), &screen.name))
+                .map(|screen| {
+                    ObservedScreen::new(
+                        screen.id.as_str(),
+                        screen
+                            .name
+                            .as_ref()
+                            .map(|name| name.chars().take(MAX_NAME).collect()),
+                        None,
+                    )
+                })
                 .collect();
-            if stored
-                .screens
-                .iter()
-                .all(|screen| current.contains_key(screen.id.as_str()))
+            if stored.screens.len() == screens.len()
+                && stored
+                    .screens
+                    .iter()
+                    .zip(&screens)
+                    .all(|(stored, live)| stored.id == live.id && stored.name == live.name)
             {
                 continue;
             }
-            // The stored order and pane counts, under the live names.
-            let screens: Vec<_> = stored
-                .screens
-                .iter()
-                .filter_map(|screen| {
-                    let name = current.get(screen.id.as_str())?;
-                    // The service refuses a whole report with a longer name.
-                    let name = name
-                        .as_ref()
-                        .map(|name| name.chars().take(MAX_NAME).collect());
-                    Some(DirectoryScreen::new(screen.id.clone(), name, screen.panes))
-                })
-                .collect();
             let report = (source.connection_id(), screens);
             if self.sent.get(action.target()) == Some(&report) {
                 continue;
@@ -94,7 +105,7 @@ impl HostCatalogReports {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use splitty_core::native_api::directory::DirectoryHost;
+    use splitty_core::native_api::directory::{DirectoryHost, DirectoryScreen};
 
     const HOST: &str = "one.test";
 
@@ -139,7 +150,7 @@ mod tests {
     #[test]
     fn a_screen_that_left_the_host_leaves_its_last_observation() {
         let (mut window, id, directory) = opened(&["work", "build"]);
-        let mut memory = HostCatalogReports::default();
+        let mut memory = HostCatalogReports::new(true);
         assert!(
             reports(&mut memory, &window, &directory).is_empty(),
             "the stored Screens are the live ones"
@@ -172,13 +183,13 @@ mod tests {
     }
 
     #[test]
-    fn the_report_keeps_stored_pane_counts_and_takes_live_names() {
+    fn the_report_is_the_live_catalog_without_pane_counts() {
         let (mut window, id, _) = opened(&["work", "build"]);
         let directory = stored(&[("work", 3), ("build", 1), ("gone", 4)]);
-        let mut memory = HostCatalogReports::default();
+        let mut memory = HostCatalogReports::new(true);
         let mut sent = Vec::new();
         window
-            .ui_test_remote_catalog(id, &["work", "build"])
+            .ui_test_remote_catalog(id, &["work", "build", "new"])
             .unwrap();
         memory.sync(&window, Some(&directory), |target, screens| {
             sent.push((target.to_owned(), screens.to_vec()));
@@ -189,17 +200,40 @@ mod tests {
             [(
                 HOST.to_owned(),
                 vec![
-                    DirectoryScreen::new("work", Some("work".into()), 3),
-                    DirectoryScreen::new("build", Some("build".into()), 1),
+                    ObservedScreen::new("work", Some("work".into()), None),
+                    ObservedScreen::new("build", Some("build".into()), None),
+                    ObservedScreen::new("new", Some("new".into()), None),
                 ]
-            )]
+            )],
+            "a removal, a new Screen; the service keeps the counts"
         );
+    }
+
+    #[test]
+    fn a_rename_on_the_host_is_reported() {
+        let (window, _, _) = opened(&["work"]);
+        let mut renamed = DirectoryHost::new(HOST);
+        renamed.screens = vec![DirectoryScreen::new("work", Some("old".into()), 2)];
+        let directory = Directory::new(Vec::new(), vec![renamed]);
+        let mut memory = HostCatalogReports::new(true);
+        assert_eq!(
+            reports(&mut memory, &window, &directory),
+            [(HOST.to_owned(), vec!["work".to_owned()])]
+        );
+    }
+
+    #[test]
+    fn a_service_without_the_rule_is_sent_nothing() {
+        let (mut window, id, directory) = opened(&["work", "build"]);
+        window.ui_test_remote_catalog(id, &["build"]).unwrap();
+        let mut memory = HostCatalogReports::default();
+        assert!(reports(&mut memory, &window, &directory).is_empty());
     }
 
     #[test]
     fn an_unconfirmed_terminate_and_a_detach_keep_the_screen() {
         let (mut window, id, directory) = opened(&["work", "build"]);
-        let mut memory = HostCatalogReports::default();
+        let mut memory = HostCatalogReports::new(true);
         // A terminate the host has not confirmed, or one it refused, leaves
         // the Screen in the live catalog.
         window.source_mut(id).unwrap().mark_catalog_dirty();
@@ -221,7 +255,7 @@ mod tests {
     #[test]
     fn nothing_is_reported_without_a_ready_catalog_or_a_stored_directory() {
         let (mut window, id, directory) = opened(&["work"]);
-        let mut memory = HostCatalogReports::default();
+        let mut memory = HostCatalogReports::new(true);
         window.ui_test_remote_catalog(id, &[]).unwrap();
         let mut called = false;
         memory.sync(&window, None, |_, _| {

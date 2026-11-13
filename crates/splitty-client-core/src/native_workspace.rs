@@ -718,6 +718,18 @@ fn supports_ssh_prompts(welcome: &serde_json::Value) -> bool {
         })
 }
 
+/// The local hub writes remembered Screens per host and takes observations
+/// without pane counts.
+fn supports_host_state(welcome: &serde_json::Value) -> bool {
+    welcome["capabilities"]
+        .as_array()
+        .is_some_and(|capabilities| {
+            capabilities.iter().any(|capability| {
+                capability.as_str() == Some(splitty_core::native_api::HOST_STATE_CAPABILITY)
+            })
+        })
+}
+
 fn supports_host_directory(welcome: &serde_json::Value) -> bool {
     welcome["capabilities"]
         .as_array()
@@ -1890,6 +1902,7 @@ async fn run_service_with_presence(
                         let welcome=!local.welcomed && json["type"]=="mux.welcome";
                         let supports_hub=welcome && supports_host_directory(json);
                         let notifies_prompts=welcome && supports_ssh_prompts(json);
+                        let host_state=welcome && supports_host_state(json);
                         if json["type"]=="settings.changed" {
                             if let Some(reader)=&mut settings { if let Err(error)=reader.settings_changed(event.connection_id) {publish(&updates,Update::AppearanceError {connection:event.connection_id,reason:error.to_string()},&stop).await?;} }
                         }
@@ -1909,7 +1922,8 @@ async fn run_service_with_presence(
                                 publish(&updates,Update::HostDirectory(HubUpdate { connection_id:local.client.connection_id(),generation:1,state:HostDirectoryState::Loading {previous:None} }),&stop).await?;
                             } else {publish(&updates,Update::HostDirectory(HubUpdate::unavailable(local.client.connection_id())),&stop).await?;}
                             ports=Some(PortsClient::new(&service,window.lifecycle_token(),supports_hub));
-                            if supports_hub {remembered=Some(remembered::RuntimeRemembered::new(&service));}
+                            if supports_hub {remembered=Some(remembered::RuntimeRemembered::new(&service,host_state));}
+                            host_reports=host_catalog::HostCatalogReports::new(host_state);
                             if supports_hub {shares=Some(shares::RuntimeShares::new(&service));}
                             // Only a local hub runs `ssh`, so only one asks.
                             if supports_hub {prompts=Some(ssh_prompts::RuntimeSshPrompts::new(&service,notifies_prompts));}

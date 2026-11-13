@@ -44,15 +44,24 @@ impl HostUpdateOffer {
         if !update.keeps_sessions
             || value["daemon"]["keepsSessions"] != true
             || !valid_version(version)
+            || update
+                .to_version
+                .as_deref()
+                .is_some_and(|to| !valid_version(to))
         {
             return Err(invalid());
         }
         let lease = budget
-            .reserve(std::mem::size_of::<Self>() + version.len(), false)
+            .reserve(
+                std::mem::size_of::<Self>()
+                    + version.len()
+                    + update.to_version.as_ref().map_or(0, String::len),
+                false,
+            )
             .map_err(io::Error::other)?;
         Ok(Some(Arc::new(lease.charge(Self {
             from_version: version.into(),
-            to_version: None,
+            to_version: update.to_version,
             legacy_sessions: None,
         }))))
     }
@@ -79,11 +88,16 @@ fn invalid() -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, "Invalid host update offer")
 }
 
+/// The hub's plan for an ordinary update. An available one keeps every
+/// session; `toVersion` is the version the host gets (older hubs omit it, and
+/// the backend's version stands in).
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct Availability {
     available: bool,
     keeps_sessions: bool,
+    #[serde(default)]
+    to_version: Option<String>,
 }
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -119,12 +133,19 @@ pub(super) fn from_failure(
         return Ok(None);
     };
     let version = version.ok_or_else(invalid)?;
-    if !valid_version(&version) || !update.keeps_sessions || keeps != Some(true) {
+    if !valid_version(&version)
+        || !update.keeps_sessions
+        || keeps != Some(true)
+        || update
+            .to_version
+            .as_deref()
+            .is_some_and(|to| !valid_version(to))
+    {
         return Err(invalid());
     }
     Ok(Some(HostUpdateOffer {
         from_version: version,
-        to_version: None,
+        to_version: update.to_version,
         legacy_sessions: None,
     }))
 }
@@ -345,7 +366,25 @@ mod tests {
             .unwrap()
             .unwrap();
         assert_eq!(offer.from_version(), "not-a-semver-policy-input");
-        assert!(offer.to_version().is_none());
+        assert!(
+            offer.to_version().is_none(),
+            "an older hub names no version"
+        );
+        let named = json!({"daemon":{"version":"0.1.0","keepsSessions":true},"update":{"available":true,"keepsSessions":true,"toVersion":"0.4.0"}});
+        let named = HostUpdateOffer::from_ready(&named, &budget)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            named.to_version(),
+            Some("0.4.0"),
+            "the hub names the replacement"
+        );
+        assert_eq!(
+            named.legacy_sessions(),
+            None,
+            "an ordinary update, not a migration"
+        );
+        drop(named);
         assert!(budget.used() > 0);
         drop(offer);
         assert_eq!(budget.used(), 0);
@@ -354,6 +393,7 @@ mod tests {
             json!({"daemon":{"version":"x".repeat(65),"keepsSessions":true},"update":{"available":true,"keepsSessions":true}}),
             json!({"daemon":{"version":"0.1.0","keepsSessions":true},"update":{"available":true,"keepsSessions":false}}),
             json!({"update":{"available":"true","keepsSessions":true}}),
+            json!({"daemon":{"version":"0.1.0","keepsSessions":true},"update":{"available":true,"keepsSessions":true,"toVersion":""}}),
         ] {
             assert!(HostUpdateOffer::from_ready(&value, &budget).is_err());
             assert_eq!(budget.used(), 0);

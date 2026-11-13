@@ -183,6 +183,16 @@ mod tests {
                 assert_eq!(budget.used(), 0);
             }
         }
+        // The hub's plan names the version the host gets.
+        let mut named = base.clone();
+        named["update"] = json!({"available":true,"keepsSessions":true,"toVersion":"0.4.0"});
+        let diagnostic =
+            HostDiagnostic::from_closed(&closed(named.to_string(), false), &budget).unwrap();
+        let offer = diagnostic.update_offer.as_ref().unwrap();
+        assert_eq!(offer.to_version(), Some("0.4.0"));
+        assert_eq!(offer.legacy_sessions(), None);
+        drop(diagnostic);
+        assert_eq!(budget.used(), 0);
     }
 
     #[test]

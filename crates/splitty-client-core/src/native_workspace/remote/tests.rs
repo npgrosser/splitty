@@ -2120,7 +2120,8 @@ async fn a_terminated_host_screen_leaves_the_stored_directory() {
         .unwrap();
     let (mut remotes, id, token) =
         opened_host_screen(&service, &mut window, client, &ids.screen_id).await;
-    let mut reports = super::super::host_catalog::HostCatalogReports::default();
+    // The service keeps stored pane counts (`hub-host-state-v1`).
+    let mut reports = super::super::host_catalog::HostCatalogReports::new(true);
     let mut sent = 0;
     reports.sync(&window, Some(&hub.directory()), |_, _| {
         sent += 1;

@@ -1,11 +1,15 @@
 //! The remote Screens a window has open, kept by the local service across
-//! restarts (`remoteScreens.get` and `remoteScreens.update`). A write
-//! replaces the Screens of the hosts it names and keeps every other host's
-//! as the service holds them, so a host closed here stays remembered.
+//! restarts (`remoteScreens.get` and `remoteScreens.updateHost`). Each write
+//! names one host, and the service replaces only that host's Screens, so
+//! another window's hosts and a host closed here stay remembered. A service
+//! without `hub-host-state-v1` is only read.
 use super::valid_target;
 use crate::api_stream::{decode, ApiStream};
 use serde::{Deserialize, Serialize};
-use splitty_core::native_api::Operation;
+use splitty_core::native_api::{
+    remembered::{HostScreen, HostScreens},
+    Operation,
+};
 use std::{future::Future, io, pin::Pin, sync::Arc, time::Duration};
 use tokio::time::Instant;
 
@@ -107,6 +111,9 @@ type Job = Pin<Box<dyn Future<Output = (ApiStream, io::Result<Vec<RememberedScre
 /// per-host replacements. Nothing here connects a host.
 pub(crate) struct RememberedClient {
     stream: Option<ApiStream>,
+    /// The service writes one host at a time (`hub-host-state-v1`); without
+    /// it the list is only read.
+    writes: bool,
     job: Option<Job>,
     known: Option<Arc<RememberedScreens>>,
     /// Per host, the Screens to remember instead of the stored ones.
@@ -119,9 +126,10 @@ pub(crate) struct RememberedClient {
     broken: bool,
 }
 impl RememberedClient {
-    pub(crate) fn new(stream: impl Into<ApiStream>) -> Self {
+    pub(crate) fn new(stream: impl Into<ApiStream>, writes: bool) -> Self {
         Self {
             stream: Some(stream.into()),
+            writes,
             job: None,
             known: None,
             edits: Vec::new(),
@@ -152,7 +160,7 @@ impl RememberedClient {
     }
     /// Remember exactly `screens` for `target`; an empty list forgets it.
     pub(crate) fn set(&mut self, target: &str, screens: Vec<RememberedScreen>) {
-        if self.broken || self.settled(target, &screens) {
+        if !self.writes || self.broken || self.settled(target, &screens) {
             return;
         }
         self.edits.retain(|(host, _)| host != target);
@@ -293,31 +301,43 @@ async fn read(client: &mut ApiStream) -> io::Result<Vec<RememberedScreen>> {
     checked(client, &reply)
 }
 
-/// Replace the Screens of the edited hosts in the list the service holds now.
+/// Have the service replace the Screens of each edited host, one host per
+/// request; the list it returns last is the one it holds.
 async fn write(client: &mut ApiStream, edits: &[Edit]) -> io::Result<Vec<RememberedScreen>> {
-    let mut screens = read(client).await?;
-    for (target, replacement) in edits {
-        // A host keeps its place among the others.
-        let at = screens
-            .iter()
-            .position(|screen| &screen.target == target)
-            .unwrap_or(screens.len());
-        screens.retain(|screen| &screen.target != target);
-        screens.splice(at..at, replacement.iter().cloned());
+    let mut stored = None;
+    for (target, screens) in edits {
+        let body = serde_json::to_value(host_screens(target, screens))?;
+        let reply = client
+            .request(
+                Operation::RemoteScreensUpdateHost,
+                serde_json::Map::from_iter([("body".into(), body)]),
+            )
+            .await
+            .map_err(|_| lost())?;
+        stored = Some(checked(client, &reply)?);
     }
-    screens.truncate(MAX_SCREENS);
-    let body = serde_json::to_value(Document {
-        version: FORMAT,
-        screens,
-    })?;
-    let reply = client
-        .request(
-            Operation::RemoteScreensUpdate,
-            serde_json::Map::from_iter([("body".into(), body)]),
-        )
-        .await
-        .map_err(|_| lost())?;
-    checked(client, &reply)
+    match stored {
+        Some(stored) => Ok(stored),
+        None => read(client).await,
+    }
+}
+
+/// The body for one host: a closed host's Screens are all closed.
+fn host_screens(target: &str, screens: &[RememberedScreen]) -> HostScreens {
+    let closed = !screens.is_empty() && screens.iter().all(|screen| screen.closed);
+    HostScreens::new(
+        target,
+        screens
+            .iter()
+            .take(MAX_SCREENS)
+            .map(|screen| {
+                let mut entry = HostScreen::new(screen.screen_id.clone(), screen.name.clone());
+                entry.position = screen.position;
+                entry
+            })
+            .collect(),
+        closed,
+    )
 }
 
 #[cfg(all(test, unix))]
@@ -372,25 +392,22 @@ mod tests {
         let (api, task, dir) = scripted_operations(
             vec![
                 (200, document(&stored), false),
-                (200, document(&stored), false),
                 (200, document(&written), false),
             ],
             None,
             None,
             Some(vec![
                 ("remoteScreens.get", json!({})),
-                ("remoteScreens.get", json!({})),
                 (
-                    "remoteScreens.update",
-                    json!({"body": {"version": 1, "screens": [
-                        {"target": "vm1", "screenId": "s2", "name": "api"},
-                        {"target": "vm2", "screenId": "x"},
+                    "remoteScreens.updateHost",
+                    json!({"body": {"target": "vm1", "screens": [
+                        {"screenId": "s2", "name": "api"},
                     ]}}),
                 ),
             ]),
         )
         .await;
-        let mut client = RememberedClient::new(api);
+        let mut client = RememberedClient::new(api, true);
         let list = next(&mut client).await;
         assert_eq!(list.count("vm1"), 2);
         assert_eq!(list.count("vm2"), 1);
@@ -422,22 +439,20 @@ mod tests {
         let (api, task, dir) = scripted_operations(
             vec![
                 (200, document(&[("vm1", "s1"), ("vm1", "s2")]), false),
-                (200, document(&[("vm1", "s1"), ("vm1", "s2")]), false),
                 (200, r#"{"version":2,"screens":[]}"#.into(), false),
             ],
             None,
             None,
             Some(vec![
                 ("remoteScreens.get", json!({})),
-                ("remoteScreens.get", json!({})),
                 (
-                    "remoteScreens.update",
-                    json!({"body": {"version": 1, "screens": [{"target": "vm1", "screenId": "s2"}]}}),
+                    "remoteScreens.updateHost",
+                    json!({"body": {"target": "vm1", "screens": [{"screenId": "s2"}]}}),
                 ),
             ]),
         )
         .await;
-        let mut client = RememberedClient::new(api);
+        let mut client = RememberedClient::new(api, true);
         assert_eq!(next(&mut client).await.count("vm1"), 2);
         client.retain("vm1", |id| id == "s2");
         assert_eq!(client.edits.len(), 1);
@@ -453,6 +468,40 @@ mod tests {
         assert!(client.retry_at.is_some(), "the write is tried again later");
         assert_eq!(client.edits.len(), 1);
         client.edits.clear();
+        client.finish().await.unwrap();
+        task.await.unwrap();
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_closed_host_is_written_as_closed() {
+        let closed = [RememberedScreen::new("vm1", "a", Some("api")).closed()];
+        assert_eq!(
+            serde_json::to_value(host_screens("vm1", &closed)).unwrap(),
+            json!({"target": "vm1", "screens": [{"screenId": "a", "name": "api"}], "closed": true})
+        );
+        assert_eq!(
+            serde_json::to_value(host_screens("vm1", &[])).unwrap(),
+            json!({"target": "vm1", "screens": []}),
+            "an empty list forgets the host"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_service_without_host_writes_is_only_read() {
+        let (api, task, dir) = scripted_operations(
+            vec![(200, document(&[("vm1", "s1")]), false)],
+            None,
+            None,
+            Some(vec![("remoteScreens.get", json!({}))]),
+        )
+        .await;
+        let mut client = RememberedClient::new(api, false);
+        assert_eq!(next(&mut client).await.count("vm1"), 1);
+        client.set("vm1", Vec::new());
+        client.set("vm2", vec![RememberedScreen::new("vm2", "x", None)]);
+        client.retain("vm1", |_| false);
+        assert!(client.edits.is_empty(), "nothing is written");
         client.finish().await.unwrap();
         task.await.unwrap();
         std::fs::remove_dir_all(dir).unwrap();

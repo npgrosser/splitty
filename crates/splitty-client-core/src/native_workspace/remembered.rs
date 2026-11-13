@@ -16,15 +16,18 @@ pub(super) struct RuntimeRemembered<'a> {
     setup_context: Option<splitty_transport::queue::Context>,
     client: Option<RememberedClient>,
     memory: OpenScreenMemory,
+    /// The service writes one host at a time (`hub-host-state-v1`).
+    writes: bool,
 }
 impl<'a> RuntimeRemembered<'a> {
-    pub(super) fn new(service: &'a crate::owned_service::OwnedService) -> Self {
+    pub(super) fn new(service: &'a crate::owned_service::OwnedService, writes: bool) -> Self {
         let context = splitty_transport::queue::Context::default();
         Self {
             setup: Some(Box::pin(service.api_stream_with_context(context.clone()))),
             setup_context: Some(context),
             client: None,
             memory: OpenScreenMemory::default(),
+            writes,
         }
     }
     /// The list whenever the service returns a different one.
@@ -40,7 +43,10 @@ impl<'a> RuntimeRemembered<'a> {
             let result = setup.await;
             self.setup = None;
             self.setup_context = None;
-            self.client = result.ok().map(RememberedClient::new);
+            let writes = self.writes;
+            self.client = result
+                .ok()
+                .map(|stream| RememberedClient::new(stream, writes));
         }
     }
     /// The host leaves the window with its Screens still remembered.
@@ -70,7 +76,11 @@ impl<'a> RuntimeRemembered<'a> {
             context.close();
         }
         if let Some(setup) = self.setup.take() {
-            self.client = setup.await.ok().map(RememberedClient::new);
+            let writes = self.writes;
+            self.client = setup
+                .await
+                .ok()
+                .map(|stream| RememberedClient::new(stream, writes));
         }
         match self.client.take() {
             Some(client) => client.finish().await,
