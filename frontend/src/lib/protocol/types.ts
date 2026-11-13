@@ -105,7 +105,9 @@ export type IncomingMessage =
   | ViewerReviewAnswer
   // Mux messages
   | { type: "mux.op"; screenId: string; op: MuxOperation }
-  | { type: "mux.resync"; screenId: string };
+  | { type: "mux.resync"; screenId: string }
+  // The ordered screen catalog (`workspace-catalog-v1`), answered by `mux.workspace_snapshot`.
+  | { type: "mux.workspace_resync" };
 
 // --- Server -> Client: Base Types ---
 
@@ -234,6 +236,7 @@ export interface NotificationMessage extends ServerEvent {
 
 export interface MuxWelcome extends ServerEvent { type: "mux.welcome"; clientId: string; screens: ScreenInfo[]; serverMode?: "embedded" | "daemon"; capabilities?: string[] }
 export interface MuxScreenSnapshot extends ServerEvent { type: "mux.screen_snapshot"; screen: ScreenState }
+export interface MuxWorkspaceSnapshot extends ServerEvent { type: "mux.workspace_snapshot"; screens: ScreenInfo[]; activeScreenId: string | null }
 export interface MuxNudge extends ServerEvent { type: "mux.nudge"; reason: string; screenId?: string }
 export interface MuxPaneSpawned extends ServerEvent { type: "mux.pane_spawned"; paneId: string; sessionId: string; shellProfileId?: string; shellProfileFallbackReason?: "missing" | "disabled" | "unavailable" }
 export interface MuxOpFailed extends ServerEvent { type: "mux.op_failed"; op: string; screenId?: string; paneId?: string; error: string }
@@ -293,6 +296,7 @@ export type OutgoingMessage =
   | { type: "mux.close_assessed"; requestId: string; assessment?: CloseAssessment; error?: string }
   | MuxWelcome
   | MuxScreenSnapshot
+  | MuxWorkspaceSnapshot
   | MuxNudge
   | MuxPaneSpawned
   | MuxOpFailed
@@ -552,7 +556,7 @@ export type MuxOperation =
   // The window's grid after a drag; only the panes the root layout holds (`arrange-panes`).
   | { type: "arrange_panes"; root: Arrangement }
   | { type: "select_tab"; paneId: string }
-  | { type: "create_screen"; screenId?: string; name?: string; newPaneId?: string; shellProfileId?: string }
+  | { type: "create_screen"; screenId?: string; name?: string; newPaneId?: string; shellProfileId?: string; onlyIfEmpty?: boolean }
   | { type: "close_screen"; screenId: string }
   | { type: "set_active_screen"; screenId: string }
   | { type: "rename_screen"; screenId: string; name: string }

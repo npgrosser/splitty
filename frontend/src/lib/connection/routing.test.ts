@@ -95,6 +95,7 @@ async function world(): Promise<World> {
   const startup = new ScreenStartup(localIds(), {
     localScreenIds: localIds,
     createLocalScreen: (id) => startupLog.push(`create ${id}`),
+    nameLocalScreen: (id, name) => startupLog.push(`name ${id} ${name}`),
     removeLocalScreen: (id) => startupLog.push(`remove ${id}`),
     resync: (id) => { startupLog.push(`resync ${id}`); local.conn.mux.resync(id); },
     startFresh: (id) => startupLog.push(`fresh ${id}`),

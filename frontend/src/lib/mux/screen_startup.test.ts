@@ -8,9 +8,10 @@ function harness(initial: string[] = ["screen-1"]) {
   const fx: StartupEffects = {
     localScreenIds: () => [...local],
     createLocalScreen: (id) => { local.push(id); log.push(`create-local ${id}`); },
+    nameLocalScreen: (id, name) => log.push(`name ${id} ${name}`),
     removeLocalScreen: (id) => { local.splice(local.indexOf(id), 1); log.push(`remove-local ${id}`); },
     resync: (id) => log.push(`resync ${id}`),
-    startFresh: (id) => log.push(`create_screen ${id}`),
+    startFresh: (id, first) => log.push(`create_screen ${id}${first ? " first" : ""}`),
   };
   const startup = new ScreenStartup(initial, fx);
   const created = () => log.filter((l) => l.startsWith("create_screen"));
@@ -79,14 +80,64 @@ describe("ScreenStartup", () => {
     expect(created()).toEqual([]);
 
     startup.welcome([]);
-    expect(created()).toEqual(["create_screen screen-1"]);
+    expect(created()).toEqual(["create_screen screen-1 first"]);
   });
 
   it("starts the placeholder when its view gets ready after an empty welcome", () => {
     const { startup, created } = harness();
     startup.welcome([]);
     startup.viewReady("screen-1");
-    expect(created()).toEqual(["create_screen screen-1"]);
+    expect(created()).toEqual(["create_screen screen-1 first"]);
+  });
+
+  // mux-protocol, Two windows start against an empty workspace.
+  it("drops a refused first screen once the server's screen arrives", () => {
+    const { startup, local, created } = harness();
+    startup.viewReady("screen-1");
+    startup.welcome([]);
+    startup.createRefused("screen-1");
+    expect(local).toEqual(["screen-1"]);
+    startup.nudge("screen-other");
+    startup.snapshot("screen-other", "Screen 1");
+    expect(local).toEqual(["screen-other"]);
+    expect(created()).toEqual(["create_screen screen-1 first"]);
+  });
+
+  it("drops a refused first screen at once when the server's screen is already shown", () => {
+    const { startup, local } = harness();
+    startup.viewReady("screen-1");
+    startup.welcome([]);
+    startup.snapshot("screen-other", "Screen 1");
+    startup.createRefused("screen-1");
+    expect(local).toEqual(["screen-other"]);
+  });
+
+  it("keeps a first screen whose shell failed: the server has it", () => {
+    const { startup, local } = harness();
+    startup.viewReady("screen-1");
+    startup.welcome([]);
+    startup.createRefused("screen-1");
+    startup.snapshot("screen-1", "Screen 1");
+    startup.snapshot("screen-2", "Screen 2");
+    expect(local).toEqual(["screen-1", "screen-2"]);
+  });
+
+  it("ignores a refused create of any screen but the first", () => {
+    const { startup, local } = harness();
+    startup.viewReady("screen-1");
+    startup.welcome([{ id: "screen-1", name: "Screen 1" }]);
+    local.push("screen-2");
+    startup.viewReady("screen-2");
+    startup.createRefused("screen-2");
+    startup.snapshot("screen-1", "Screen 1");
+    expect(local).toEqual(["screen-1", "screen-2"]);
+  });
+
+  it("takes the name the server reports for a local screen", () => {
+    const { startup, log } = harness();
+    startup.welcome([{ id: "screen-1" }]);
+    startup.snapshot("screen-1", "Screen 1");
+    expect(log).toContain("name screen-1 Screen 1");
   });
 
   it("sends nothing before the welcome", () => {
@@ -111,7 +162,7 @@ describe("ScreenStartup", () => {
     startup.snapshot("screen-z", "from another client");
     startup.viewReady("screen-z");
     expect(local).toContain("screen-z");
-    expect(created()).toEqual(["create_screen screen-1"]);
+    expect(created()).toEqual(["create_screen screen-1 first"]);
   });
 
   it("still starts screens the user creates after the welcome", () => {

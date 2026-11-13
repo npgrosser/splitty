@@ -59,6 +59,8 @@ export class PaneSpawnRejectedError extends Error {
 }
 
 export const CLOSE_ASSESSMENT_CAPABILITY = "close-assessment-v1";
+/** The server names new screens and takes `onlyIfEmpty` (`mux-protocol`, Server-Chosen Screen Names). */
+export const SCREEN_NAMES_CAPABILITY = "screen-names-v1";
 
 export class MuxClient {
   /** From the last `mux.welcome`. */
@@ -79,6 +81,8 @@ export class MuxClient {
   templates = false;
   /** Whether the server says what a close would end (`mux-protocol`, Close Assessment). */
   closeAssessments = false;
+  /** Whether the server names screens created without a name (`mux-protocol`, Server-Chosen Screen Names). */
+  screenNames = false;
   private readonly earlySpawns = new Map<string, string | Error>();
   private readonly templatePanes = new Map<string, readonly string[]>();
   private readonly extractions = new Map<string, { resolve: (template: Template) => void; reject: (error: Error) => void }>();
@@ -96,6 +100,7 @@ export class MuxClient {
   private handlers: MuxHandlers = {};
   private readonly waiters = new Map<string, PaneSpawnedWaiter>();
   private readonly failureListeners = new Set<(failure: OpFailure) => void>();
+  private readonly workspaceListeners = new Set<(screens: ScreenInfo[]) => void>();
   private unsubscribes: (() => void)[];
 
   constructor(private readonly socket: ConnSocket) {
@@ -108,6 +113,7 @@ export class MuxClient {
         this.templatePanes.clear();
         for (const request of this.extractions.values()) request.reject(new Error("Connection ended during template extraction"));
         this.closeAssessments = false;
+        this.screenNames = false;
         for (const request of this.assessments.values()) request.reject(new Error("Connection ended during the close assessment"));
         this.disconnectedOnce = true;
         this.heldCreateScreens.length = 0;
@@ -177,6 +183,21 @@ export class MuxClient {
     this.socket.send({ type: "mux.resync", screenId });
   }
 
+  /**
+   * Ask for the ordered screen list with the names the server gave
+   * (`mux.workspace_resync`), after the ops this client sent before.
+   * Servers with `screen-names-v1` answer it.
+   */
+  requestWorkspace(): void {
+    this.socket.send({ type: "mux.workspace_resync" });
+  }
+
+  /** Called with every `mux.workspace_snapshot`'s screens. Returns the removal. */
+  onWorkspace(listener: (screens: ScreenInfo[]) => void): () => void {
+    this.workspaceListeners.add(listener);
+    return () => this.workspaceListeners.delete(listener);
+  }
+
   /** Called for every op of this client the server rejects. Returns the removal. */
   onOpFailed(listener: (failure: OpFailure) => void): () => void {
     this.failureListeners.add(listener);
@@ -219,6 +240,7 @@ export class MuxClient {
     this.unsubscribes = [];
     this.handlers = {};
     this.failureListeners.clear();
+    this.workspaceListeners.clear();
     this.earlySpawns.clear();
     this.templatePanes.clear();
     for (const request of this.extractions.values()) request.reject(Error("Connection disposed"));
@@ -242,6 +264,7 @@ export class MuxClient {
         this.templates = Array.isArray(msg.capabilities) && msg.capabilities.includes("server-templates-v1");
         this.annotations = Array.isArray(msg.capabilities) && msg.capabilities.includes(ANNOTATIONS_CAPABILITY);
         this.closeAssessments = Array.isArray(msg.capabilities) && msg.capabilities.includes(CLOSE_ASSESSMENT_CAPABILITY);
+        this.screenNames = Array.isArray(msg.capabilities) && msg.capabilities.includes(SCREEN_NAMES_CAPABILITY);
         this.welcomed = true;
         this.handlers.onWelcome?.(this.clientId ?? "", screens);
         for (const { screenId, op } of this.heldCreateScreens.splice(0)) {
@@ -253,6 +276,12 @@ export class MuxClient {
       case "mux.screen_snapshot": {
         const screen = screenState(msg.screen);
         if (screen) this.handlers.onSnapshot?.(screen);
+        break;
+      }
+
+      case "mux.workspace_snapshot": {
+        const screens = screenList(msg.screens);
+        for (const listener of [...this.workspaceListeners]) listener(screens);
         break;
       }
 
@@ -344,8 +373,22 @@ export function newTabOp(paneId: string, newPaneId: string, cwd?: string, shellP
   return { type: "new_tab", paneId, newPaneId, cwd, shellProfileId };
 }
 
-export function createScreenOp(screenId: string, name?: string, initialPaneId?: string, shellProfileId?: string): MuxOperation {
-  return { type: "create_screen", screenId, name, newPaneId: initialPaneId, shellProfileId };
+/**
+ * `create_screen`; without `name` the server names it. `onlyIfEmpty`: the
+ * workspace's first screen, refused once the workspace has one
+ * (`workspace-model`, First Screen of an Empty Workspace).
+ */
+export function createScreenOp(
+  screenId: string,
+  name?: string,
+  initialPaneId?: string,
+  shellProfileId?: string,
+  options?: { onlyIfEmpty?: boolean },
+): MuxOperation {
+  return {
+    type: "create_screen", screenId, name, newPaneId: initialPaneId, shellProfileId,
+    ...(options?.onlyIfEmpty ? { onlyIfEmpty: true } : {}),
+  };
 }
 
 /** A viewer pane `newPaneId` for `source`, placed next to `paneId` (`viewer-panes`, Opening A Viewer). */

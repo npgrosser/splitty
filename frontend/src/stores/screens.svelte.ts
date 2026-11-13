@@ -10,35 +10,56 @@ export interface Screen {
   conn: ConnKey;
   /** The screen's id on its server; the same as `id` for a local screen. */
   wireId: string;
+  /**
+   * `name` is this window's placeholder until the screen's server reports
+   * the name it gave the screen; it is never sent (`mux-protocol`,
+   * Server-Chosen Screen Names).
+   */
+  provisional?: boolean;
 }
 
-function localScreen(id: string, name: string): Screen {
-  return { id, name, conn: "local", wireId: id };
-}
+/** The label of a new screen until its server names it. */
+export const PLACEHOLDER_NAME = "New Screen";
 
-const DEFAULT_NAME = /^Screen \d+$/;
-
-/** Whether `name` is one {@link nextScreenName} gives, not one the user chose. */
-export function isDefaultScreenName(name: string): boolean {
-  return DEFAULT_NAME.test(name);
+function localScreen(id: string, name?: string): Screen {
+  return name === undefined
+    ? { id, name: PLACEHOLDER_NAME, conn: "local", wireId: id, provisional: true }
+    : { id, name, conn: "local", wireId: id };
 }
 
 /**
- * The name of a new screen: "Screen N" with the lowest positive N that no
- * screen of this connection uses, nor a name in `alsoTaken` (the host's
- * screens the window does not show). Each host and local start at Screen 1.
+ * The name a server without `screen-names-v1` gets for a new screen: "Screen
+ * N" with the lowest positive N that no named screen of this connection uses,
+ * nor a name in `alsoTaken` (the host's screens the window does not show).
  */
 export function nextScreenName(conn: ConnKey = "local", alsoTaken: Iterable<string> = []): string {
-  const taken = new Set([...screens.filter((v) => v.conn === conn).map((v) => v.name), ...alsoTaken]);
+  const own = screens.filter((v) => v.conn === conn && !v.provisional).map((v) => v.name);
+  const taken = new Set([...own, ...alsoTaken]);
   let n = 1;
   while (taken.has(`Screen ${n}`)) n++;
   return `Screen ${n}`;
 }
 
+/**
+ * The `name` a `create_screen` (or a move to a new screen) carries for the
+ * screen `id`: none for a placeholder when the server names screens; for an
+ * older server, a placeholder gets {@link nextScreenName} now and keeps it.
+ */
+export function nameToSend(id: string, serverNames: boolean, alsoTaken: Iterable<string> = []): string | undefined {
+  const screen = screens.find((v) => v.id === id);
+  if (!screen) return undefined;
+  if (!screen.provisional) return screen.name;
+  if (serverNames) return undefined;
+  const name = nextScreenName(screen.conn, alsoTaken);
+  setScreenName(id, name);
+  return name;
+}
+
 // ── Module State ──
 
-// Ids are random (lib/ids.ts); names are not unique keys.
-const defaultScreen = localScreen(newScreenId(), "Screen 1");
+// Ids are random (lib/ids.ts); names are not unique keys. The first screen is
+// a placeholder until the first welcome (lib/mux/screen_startup.ts).
+const defaultScreen = localScreen(newScreenId());
 let screens = $state<Screen[]>([defaultScreen]);
 let activeId = $state(defaultScreen.id);
 /** The order of the host groups the user arranged, by SSH target (remote-hosts, Host Group Order). */
@@ -94,7 +115,7 @@ export function setHostOrder(order: string[]): void {
 export function createScreen(name?: string, id?: string, options?: { activate?: boolean; after?: string }): Screen {
   const existing = id === undefined ? undefined : screens.find((v) => v.id === id);
   if (existing) return existing;
-  const v = localScreen(id ?? newScreenId(), name ?? nextScreenName());
+  const v = localScreen(id ?? newScreenId(), name);
   const after = options?.after === undefined ? -1 : screens.findIndex((s) => s.id === options.after);
   screens = after < 0 ? [...screens, v] : [...screens.slice(0, after + 1), v, ...screens.slice(after + 1)];
   if (options?.activate !== false || !screens.some(s => s.id === activeId)) activeId = v.id;
@@ -104,8 +125,8 @@ export function createScreen(name?: string, id?: string, options?: { activate?: 
 
 /**
  * Add a screen of a host's connection (`remote-screens`) under a random key of
- * its own. `wireId` is the screen's id on the host; without a `name` it gets
- * the next free "Screen N". It is placed after the screen `after`, or at `index`
+ * its own. `wireId` is the screen's id on the host; without a `name` it shows
+ * a placeholder until the host names it. It is placed after the screen `after`, or at `index`
  * (a remembered screen's position), by default at the end, and becomes active
  * unless `activate` is false.
  */
@@ -114,7 +135,9 @@ export function addRemoteScreen(
   wireId: string,
   options?: { name?: string; after?: string; index?: number; activate?: boolean },
 ): Screen {
-  const screen: Screen = { id: newRemoteScreenKey(), name: options?.name ?? nextScreenName(conn), conn, wireId };
+  const screen: Screen = options?.name === undefined
+    ? { id: newRemoteScreenKey(), name: PLACEHOLDER_NAME, conn, wireId, provisional: true }
+    : { id: newRemoteScreenKey(), name: options.name, conn, wireId };
   let at = screens.length;
   if (options?.after !== undefined) {
     const after = screens.findIndex((v) => v.id === options.after);
@@ -131,8 +154,8 @@ export function addRemoteScreen(
 /** Take a name the screen's server reports; nothing is sent back. */
 export function setScreenName(id: string, name: string): void {
   const screen = screens.find((v) => v.id === id);
-  if (!screen || !name || screen.name === name) return;
-  screens = screens.map((v) => (v.id === id ? { ...v, name } : v));
+  if (!screen || !name || (screen.name === name && !screen.provisional)) return;
+  screens = screens.map((v) => (v.id === id ? { id: v.id, name, conn: v.conn, wireId: v.wireId } : v));
   notify();
 }
 
@@ -150,7 +173,7 @@ export function removeScreen(id: string): void {
 export function renameScreen(id: string, name: string): void {
   const screen = screens.find((v) => v.id === id);
   if (!screen) return;
-  const renamed = { ...screen, name };
+  const renamed: Screen = { id: screen.id, name, conn: screen.conn, wireId: screen.wireId };
   screens = screens.map((v) => (v.id === id ? renamed : v));
   notify();
   hooks.onRename?.(renamed, name);

@@ -30,6 +30,8 @@ import type { ServerConnection } from "../connection/server_connection.ts";
 /** A screen of the window as the sync sees it. */
 export interface RemoteScreenRef extends ScreenRef {
   readonly name: string;
+  /** The name is the window's placeholder until the host names the screen. */
+  readonly provisional?: boolean;
 }
 
 export interface RemoteSyncEffects {
@@ -127,8 +129,8 @@ export class RemoteScreenSync implements ScreenSyncPolicy {
    * The host is about to have the screen `wireId` (a pane moves into it): a
    * view of it is built from its snapshot and never flagged missing.
    */
-  adopt(wireId: string, name: string): void {
-    this.known.set(wireId, { id: wireId, name, panes: 1 });
+  adopt(wireId: string, name?: string): void {
+    this.known.set(wireId, { id: wireId, name: name ?? wireId, panes: 1 });
     this.fx.changed();
   }
 
@@ -260,11 +262,12 @@ export class RemoteScreenSync implements ScreenSyncPolicy {
     const entry = this.pending.get(key);
     if (!entry || !entry.viewReady || !this.welcomed) return;
     if (!entry.decided && this.available().length > 0) return;
-    const screen = this.own().find((s) => s.id === key);
     this.pending.delete(key);
-    if (!screen) return;
-    this.known.set(screen.wireId, { id: screen.wireId, name: screen.name || screen.wireId, panes: 1 });
+    if (!this.own().some((s) => s.id === key)) return;
+    // Sent first: an older host gets its name only now.
     this.fx.startFresh(key);
+    const screen = this.own().find((s) => s.id === key);
+    if (screen) this.known.set(screen.wireId, { id: screen.wireId, name: screen.provisional ? screen.wireId : screen.name, panes: 1 });
     this.fx.changed();
   }
 }

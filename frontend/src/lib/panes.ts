@@ -10,7 +10,7 @@ import {
   type ViewerPanelParams,
 } from "./viewer/panel.ts";
 import { arrangementSlots } from "../layout/arrangement.ts";
-import { getScreens } from "../stores/screens.svelte.ts";
+import { nameToSend } from "../stores/screens.svelte.ts";
 
 /**
  * Add a terminal pane to the screen whose layout is `api` and register it with
@@ -39,6 +39,9 @@ export function addTerminalPane(
     /** Spawn the PTY from the client instead of letting the server do it.
      *  For panes the mux model can't express (templates with commands). */
     directSpawn?: boolean;
+    /** Only the server starts its shell: no direct spawn when the op that
+     *  creates it is refused (a first screen another window made first). */
+    serverSpawnOnly?: boolean;
   },
 ): string | undefined {
   const binding = bindingForApi(api);
@@ -96,7 +99,8 @@ export function addTerminalPane(
     component: "terminal",
     title: "",
     position,
-    params: { command, dir, root, restoreMode, shellProfileId, existingSessionId, muxManaged },
+    params: { command, dir, root, restoreMode, shellProfileId, existingSessionId, muxManaged,
+      ...(options?.serverSpawnOnly ? { serverSpawnOnly: true } : {}) },
     renderer: "always" as const,
     inactive: options?.inactive,
     ...(options?.floating ? { floating: options.floating } : {}),
@@ -108,9 +112,10 @@ export function addTerminalPane(
       // First pane of an otherwise empty screen (watermark) — there is no pane
       // to split off, so re-create the screen around this one. A server that
       // removed the screen with its last pane creates it anew, under the name
-      // it has in this window.
-      const name = getScreens().find((screen) => screen.id === binding.key)?.name;
+      // it has in this window, or names it when the window has none yet.
+      const name = nameToSend(binding.key, binding.conn.mux.screenNames);
       binding.sendOp(createScreenOp(binding.wireId, name, id, shellProfileId));
+      if (name === undefined) binding.conn.mux.requestWorkspace();
     } else if (direction) {
       binding.sendOp(splitOp(refPaneId, id, direction, dir, shellProfileId));
     } else {

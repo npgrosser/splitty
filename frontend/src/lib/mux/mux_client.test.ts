@@ -29,6 +29,31 @@ describe("MuxClient", () => {
     expect(socket.sentOfType("mux.op").map((m) => m.screenId)).toEqual(["screen-x", "screen-a", "screen-b"]);
   });
 
+  // mux-protocol, Server-Chosen Screen Names and Client Resynchronization.
+  it("knows whether the server names screens and builds a first screen's create", () => {
+    socket.message({ type: "mux.welcome", clientId: "c1", screens: [], capabilities: ["screen-names-v1"] });
+    expect(mux.screenNames).toBe(true);
+    expect(createScreenOp("s", undefined, "p", undefined, { onlyIfEmpty: true }))
+      .toEqual({ type: "create_screen", screenId: "s", name: undefined, newPaneId: "p", shellProfileId: undefined, onlyIfEmpty: true });
+    expect(createScreenOp("s", undefined, "p")).not.toHaveProperty("onlyIfEmpty");
+    socket.drop();
+    expect(mux.screenNames).toBe(false);
+    welcome();
+    expect(mux.screenNames).toBe(false);
+  });
+
+  it("hands the names of a workspace snapshot to its listeners", () => {
+    welcome();
+    const seen: ScreenInfo[][] = [];
+    const off = mux.onWorkspace((screens) => seen.push(screens));
+    mux.requestWorkspace();
+    expect(socket.sentOfType("mux.workspace_resync")).toHaveLength(1);
+    socket.message({ type: "mux.workspace_snapshot", screens: [{ id: "s1", name: "Screen 1" }, { id: 7 }], activeScreenId: null });
+    off();
+    socket.message({ type: "mux.workspace_snapshot", screens: [], activeScreenId: null });
+    expect(seen).toEqual([[{ id: "s1", name: "Screen 1" }]]);
+  });
+
   it("discards create_screen while disconnected instead of replaying it on the next welcome", () => {
     welcome();
     socket.drop();

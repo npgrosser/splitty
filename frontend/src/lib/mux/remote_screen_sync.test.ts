@@ -166,6 +166,23 @@ describe("RemoteScreenSync", () => {
     expect(resyncs(r)).toEqual(["screen-new"]);
   });
 
+  // remote-screens, Screen Default Names Per Host: the host names a new
+  // screen; the catalog never records the window's placeholder as its name.
+  it("records the host's name of a new screen, not the placeholder", () => {
+    const r = rig();
+    const screen = { id: "rs-new", name: "New Screen", conn: "host:vm1" as const, wireId: "screen-new", provisional: true };
+    r.screens.push(screen);
+    r.sync.addNew("rs-new");
+    r.sync.viewReady("rs-new");
+    r.sync.ready([]);
+    welcome(r, []);
+    expect(r.sync.catalog()).toEqual([{ id: "screen-new", name: "screen-new", panes: 1 }]);
+
+    r.screens[r.screens.indexOf(screen)] = { id: "rs-new", name: "Screen 1", conn: "host:vm1", wireId: "screen-new" };
+    r.sync.updateOpen("rs-new");
+    expect(r.sync.catalog()).toEqual([{ id: "screen-new", name: "Screen 1", panes: 1 }]);
+  });
+
   it("waits for the answer to the reopen offer before creating a new screen", () => {
     const r = rig();
     r.screens.push({ id: "rs-new", name: "Screen 2", conn: "host:vm1", wireId: "screen-new" });

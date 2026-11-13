@@ -22,7 +22,7 @@
   import { addTerminalPane } from "../../lib/panes.ts";
   import {
     getScreens, getActiveScreenId, getHostOrder, setHostOrder, createScreen, removeScreen, addRemoteScreen, setScreenName,
-    isDefaultScreenName, nextScreenName,
+    nameToSend, nextScreenName,
     setActiveScreen, setScreenMuxHooks, subscribe as subscribeScreens,
     type Screen as ScreenData,
   } from "../../stores/screens.svelte.ts";
@@ -110,6 +110,7 @@
   const startup = new ScreenStartup(localScreenIds(), {
     localScreenIds,
     createLocalScreen: (id, name) => { createScreen(name, id, { activate: false }); },
+    nameLocalScreen: setScreenName,
     removeLocalScreen: (id) => {
       removeScreen(id);
       forgetScreen(id);
@@ -302,15 +303,22 @@
 
   /** First terminal pane of a screen the server does not know. create_screen
    *  carries the pane, so no split op for it. A host's screen gets no local
-   *  shell profile: the host starts its own default shell. */
-  function startFreshScreen(key: string) {
+   *  shell profile: the host starts its own default shell. The server names
+   *  the screen (`mux-protocol`, Server-Chosen Screen Names); an older one
+   *  gets the next free name the window knows of. `first`: the window's first
+   *  screen of an empty workspace, refused once another window made one; its
+   *  pane then must not start a shell of its own. */
+  function startFreshScreen(key: string, first = false) {
     const api = views.api(key);
     const binding = views.binding(key);
     if (!api || !binding) return;
-    const paneId = addTerminalPane(api, { skipMuxNotify: true });
-    if (binding.conn.kind !== "local") avoidHostNames(binding.conn.key, key);
-    const screen = getScreens().find((s) => s.id === key);
-    binding.sendOp(createScreenOp(binding.wireId, screen?.name, paneId));
+    const paneId = addTerminalPane(api, { skipMuxNotify: true, serverSpawnOnly: first });
+    const onHost = binding.conn.kind === "local" ? [] : (remoteSyncs.get(binding.conn.key)?.catalog() ?? [])
+      .filter((s) => s.id !== binding.wireId)
+      .map((s) => s.name);
+    const name = nameToSend(key, binding.conn.mux.screenNames, onHost);
+    binding.sendOp(createScreenOp(binding.wireId, name, paneId, undefined, { onlyIfEmpty: first }));
+    if (name === undefined) binding.conn.mux.requestWorkspace();
   }
 
   function handleScreenEmpty(key: string) {
@@ -349,10 +357,11 @@
     if (targetKey !== null && (!existing || existing.conn !== source.conn)) return;
 
     const wireId = existing?.wireId ?? newScreenId();
-    const name = existing?.name ?? nextScreenName(source.conn);
+    // The server names the new screen; an older one gets the next free name.
+    const name = existing ? existing.name : conn.mux.screenNames ? undefined : nextScreenName(source.conn);
     conn.mux.sendOp(source.wireId, existing
       ? { type: "move_pane_to_screen", paneId, targetScreenId: wireId }
-      : { type: "move_pane_to_screen", paneId, targetScreenId: wireId, createScreen: true, screenName: name });
+      : { type: "move_pane_to_screen", paneId, targetScreenId: wireId, createScreen: true, ...(name !== undefined ? { screenName: name } : {}) });
 
     // Let go of it here without ending it: no close_pane, a detach instead of a close.
     binding.handOver(paneId, binding.sessionForPane(paneId)?.id);
@@ -375,26 +384,8 @@
 
   // ── Remote Screens ──
 
-  /**
-   * A new screen named before its host was reached may carry the default name
-   * of a screen the host has: it takes the next free one. Names the user gave
-   * stay. `creating`: the screen whose `create_screen` goes out now.
-   */
-  function avoidHostNames(key: ConnKey, creating?: string) {
-    const sync = remoteSyncs.get(key);
-    const onHost = sync?.catalog();
-    if (!sync || !onHost) return;
-    for (const screen of getScreens()) {
-      if (screen.conn !== key || (screen.id !== creating && !sync.isPending(screen.id))) continue;
-      if (!isDefaultScreenName(screen.name)) continue;
-      const others = onHost.filter((s) => s.id !== screen.wireId).map((s) => s.name);
-      if (others.includes(screen.name)) setScreenName(screen.id, nextScreenName(key, others));
-    }
-  }
-
   /** Hand what a host's screen sync knows to the store the UI reads. */
   function publishHostScreens(key: ConnKey, sync: RemoteScreenSync) {
-    avoidHostNames(key);
     const flags: Record<string, RemoteScreenFlags> = {};
     for (const s of getScreens()) {
       if (s.conn !== key) continue;
@@ -499,12 +490,8 @@
     // A host that failed or went offline gets another attempt with the new screen.
     const socket = remoteSocketFor(key);
     if (socket?.state.phase === "failed" || socket?.state.phase === "offline") socket.retry();
-    // Not the name of a screen the host has, as far as the window knows.
-    const onHost = [
-      ...availableScreens(key),
-      ...(directory.entries().find((h) => h.target === target)?.screens ?? []),
-    ].map((s) => s.name);
-    const screen = addRemoteScreen(key, newScreenId(), { name: nextScreenName(key, onHost) });
+    // Named by the host once it creates it (remote-screens, Screen Default Names Per Host).
+    const screen = addRemoteScreen(key, newScreenId());
     remoteSyncs.get(key)?.addNew(screen.id);
     if (direct) remoteSyncs.get(key)?.decide(screen.id);
   }
@@ -867,7 +854,19 @@
           remoteSyncs.delete(conn.key);
         });
       }
+      // The names the server gave this window's new screens (`mux-protocol`,
+      // Server-Chosen Screen Names); a host's catalog learns them too.
+      cleanups.push(conn.mux.onWorkspace((listed) => {
+        for (const entry of listed) {
+          const screen = getScreens().find((s) => s.conn === conn.key && s.wireId === entry.id);
+          if (!screen || !entry.name) continue;
+          setScreenName(screen.id, entry.name);
+          remoteSyncs.get(conn.key)?.updateOpen(screen.id);
+        }
+      }));
       cleanups.push(conn.mux.onOpFailed(failure => {
+        // Another window created the workspace's first screen (mux-protocol, Client Resynchronization).
+        if (failure.op === "create_screen" && conn.kind === "local" && failure.screenId) startup.createRefused(failure.screenId);
         if (failure.op !== "apply_template") return;
         toast.error(failure.error);
         const key = `${conn.key}/${failure.screenId}`;

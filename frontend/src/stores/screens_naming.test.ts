@@ -24,38 +24,43 @@ describe("default screen names", () => {
     store.createScreen("moved", "screen-moved", { activate: false, after: first });
     expect(store.getScreens().map((s) => s.id)).toEqual([first, "screen-moved", "screen-last"]);
   });
-  it("starts fresh local screens at Screen 1", () => {
-    expect(store.getScreens().map((s) => s.name)).toEqual(["Screen 1"]);
-    expect(store.createScreen().name).toBe("Screen 2");
-  });
-
-  it("numbers local and each remote host independently", () => {
-    store.createScreen();
-    expect(store.addRemoteScreen("host:vm1", "a").name).toBe("Screen 1");
-    expect(store.addRemoteScreen("host:vm2", "a").name).toBe("Screen 1");
-    expect(store.addRemoteScreen("host:vm1", "b").name).toBe("Screen 2");
-    expect(store.createScreen().name).toBe("Screen 3");
-    expect(store.addRemoteScreen("host:vm2", "b").name).toBe("Screen 2");
-  });
-
-  it("reuses the lowest number a closed screen freed within its connection", () => {
-    const remote = store.addRemoteScreen("host:vm1", "a");
-    store.addRemoteScreen("host:vm1", "b");
+  // mux-protocol, Server-Chosen Screen Names: a new screen shows a placeholder
+  // that is never sent, until its server names it.
+  it("gives new screens a placeholder until their server names them", () => {
+    const first = store.getScreens()[0];
+    expect(first).toMatchObject({ name: store.PLACEHOLDER_NAME, provisional: true });
     const local = store.createScreen();
-    store.createScreen();
+    const remote = store.addRemoteScreen("host:vm1", "a");
+    expect(local.provisional).toBe(true);
+    expect(remote).toMatchObject({ name: store.PLACEHOLDER_NAME, provisional: true });
+    expect(store.nameToSend(local.id, true)).toBeUndefined();
 
-    store.removeScreen(remote.id);
-    expect(store.addRemoteScreen("host:vm1", "c").name).toBe("Screen 1");
-    store.removeScreen(local.id);
-    expect(store.createScreen().name).toBe("Screen 2");
+    store.setScreenName(local.id, "Screen 2");
+    const named = store.getScreens().find((s) => s.id === local.id)!;
+    expect(named.name).toBe("Screen 2");
+    expect(named.provisional).toBeUndefined();
+    expect(store.nameToSend(local.id, true)).toBe("Screen 2");
   });
 
-  it("skips unopened names known on the same host", () => {
-    store.addRemoteScreen("host:vm1", "a");
-    store.addRemoteScreen("host:vm2", "a", { name: "Screen 3" });
-    expect(store.nextScreenName("host:vm1", ["Screen 2", "Screen 4"])).toBe("Screen 3");
-    expect(store.nextScreenName("host:vm2", ["Screen 1", "Screen 2"])).toBe("Screen 4");
-    expect(store.nextScreenName()).toBe("Screen 2");
+  it("names a placeholder for an older server when its create goes out", () => {
+    store.setScreenName(store.getScreens()[0].id, "Screen 1");
+    const local = store.createScreen();
+    expect(store.nameToSend(local.id, false)).toBe("Screen 2");
+    expect(store.getScreens().find((s) => s.id === local.id)).toMatchObject({ name: "Screen 2" });
+    // Placeholders reserve no name; known names on the same host do.
+    store.addRemoteScreen("host:vm1", "pending");
+    const remote = store.addRemoteScreen("host:vm1", "b");
+    expect(store.nameToSend(remote.id, false, ["Screen 1", "Screen 3"])).toBe("Screen 2");
+    expect(store.nextScreenName("host:vm2")).toBe("Screen 1");
+  });
+
+  it("keeps a name the user gave or a template brought", () => {
+    const named = store.createScreen("Work");
+    expect(named.provisional).toBeUndefined();
+    expect(store.nameToSend(named.id, true)).toBe("Work");
+    const remote = store.addRemoteScreen("host:vm1", "a");
+    store.renameScreen(remote.id, "Logs");
+    expect(store.nameToSend(remote.id, true)).toBe("Logs");
   });
 
   it("preserves restored and custom names, including the old Default name", () => {
@@ -67,7 +72,7 @@ describe("default screen names", () => {
     store.addRemoteScreen("host:vm1", "named", { name: "Logs" });
 
     expect(store.getScreens().map((s) => s.name)).toEqual(["Default", "Work", "Screen 7", "Logs"]);
-    expect(store.createScreen().name).toBe("Screen 1");
-    expect(store.addRemoteScreen("host:vm1", "new").name).toBe("Screen 1");
+    expect(store.nextScreenName()).toBe("Screen 1");
+    expect(store.nextScreenName("host:vm1")).toBe("Screen 1");
   });
 });
