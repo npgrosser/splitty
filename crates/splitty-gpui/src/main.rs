@@ -297,6 +297,10 @@ fn main() -> anyhow::Result<()> {
     if let Some(result) = splitty_client_core::embedded::askpass_helper() {
         return result.map_err(Into::into);
     }
+    // An askpass call meant for an earlier version: exit unanswered.
+    if startup::stale_askpass_call(|key| std::env::var_os(key)) {
+        std::process::exit(1);
+    }
     if let Some(code) = offscreen::subprocess_exit() {
         std::process::exit(code);
     }

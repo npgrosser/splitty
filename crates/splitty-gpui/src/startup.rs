@@ -15,6 +15,16 @@ pub struct Options {
 #[cfg(any(target_os = "windows", test))]
 pub mod wsl;
 
+/// Compatibility guard. Earlier versions ran this executable as OpenSSH's
+/// askpass dialog when started with `SPLITTY_SSH_ASKPASS=1`, and processes
+/// they started (a long-running terminal multiplexer, an older CLI) may still
+/// name it as their askpass program. Such a call must not open a second app:
+/// it exits at once without a window and without an answer, so ssh treats
+/// the question as unanswered. `var` reads the environment.
+pub fn stale_askpass_call(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> bool {
+    var("SPLITTY_SSH_ASKPASS").is_some_and(|value| value == "1")
+}
+
 static WSL_DISTRO: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 /// Records the WSL distribution the local backend runs in.
@@ -138,8 +148,28 @@ fn assign(target: &mut Option<String>, value: String, flag: &str) -> anyhow::Res
 
 #[cfg(test)]
 mod tests {
-    use super::Options;
+    use super::{stale_askpass_call, Options};
     use splitty_client_core::owned_service::LocalBackend;
+
+    #[test]
+    fn an_askpass_call_of_an_earlier_version_is_recognised() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.into())
+            }
+        };
+        assert!(stale_askpass_call(env(&[("SPLITTY_SSH_ASKPASS", "1")])));
+        assert!(stale_askpass_call(env(&[
+            ("SPLITTY_SSH_ASKPASS", "1"),
+            ("SSH_ASKPASS_PROMPT", "confirm"),
+        ])));
+        assert!(!stale_askpass_call(env(&[])));
+        assert!(!stale_askpass_call(env(&[("SPLITTY_SSH_ASKPASS", "0")])));
+        assert!(!stale_askpass_call(env(&[("SPLITTY_SSH_ASKPASS", "")])));
+    }
 
     fn parse(args: &[&str], windows: bool) -> anyhow::Result<Options> {
         Options::parse(args.iter().map(|arg| (*arg).to_owned()), windows, false)

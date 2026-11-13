@@ -221,7 +221,10 @@ capability is polled once a second until it refuses a read. The window
 closes those whose question went; closing a dialog cancels its question. On
 Linux and macOS the app executable is also the askpass helper the embedded
 service starts (`embedded::askpass_helper`, first thing in `main`); the WSL
-backend's helper is its own `splitty`. The Windows route has not been run on
+backend's helper is its own `splitty`. Started with `SPLITTY_SSH_ASKPASS=1`,
+the askpass call of an earlier version that ran its own dialog, the
+executable exits with status 1 and no window (`startup::stale_askpass_call`).
+The Windows route has not been run on
 Windows yet (SPP-1 in `openspec/open-decisions.md`).
 
 ## PTY size
