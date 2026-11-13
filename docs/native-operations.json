@@ -554,6 +554,18 @@
       "deadlineMs": 30000
     },
     {
+      "operation": "remoteScreens.updateHost",
+      "method": "PUT",
+      "path": "/api/remote/screens/host",
+      "scope": "localHub",
+      "arguments": [
+        "body"
+      ],
+      "maxBodyBytes": 1048576,
+      "cancellation": "mutation",
+      "deadlineMs": 30000
+    },
+    {
       "operation": "catalog.get",
       "method": "GET",
       "path": "/api/remote/catalog",

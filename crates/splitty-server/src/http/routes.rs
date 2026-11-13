@@ -12,7 +12,7 @@ use axum::{
     extract::{rejection::JsonRejection, Path, Query, State, WebSocketUpgrade},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, RequestExt, Router,
 };
 use serde_json::{json, Value};
@@ -41,6 +41,7 @@ pub(crate) fn api_routes_with(hub: Arc<Hub>) -> Router<AppState> {
     let host_order_hub = hub.clone();
     let updating_host_order_hub = hub.clone();
     let remembering_hub = hub.clone();
+    let remembering_host_hub = hub.clone();
     let catalog_hub = hub.clone();
     let updating_catalog_hub = hub.clone();
     let listing_hub = hub.clone();
@@ -127,6 +128,12 @@ pub(crate) fn api_routes_with(hub: Arc<Hub>) -> Router<AppState> {
                     remember_screens(&remembering_hub, document)
                 },
             ),
+        )
+        .route(
+            "/api/remote/screens/host",
+            put(move |Json(document): Json<Value>| async move {
+                operations::remember_host_screens(&remembering_host_hub, document).into_response()
+            }),
         )
         .route(
             "/api/remote/catalog",

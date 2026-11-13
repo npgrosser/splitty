@@ -82,6 +82,9 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 /// the ports that appear on hosts with `remote.autoForwardPorts` itself, so
 /// a client keeps no automatic forwarding of its own.
 pub const AUTO_FORWARD_CAPABILITY: &str = "hub-auto-forward-v1";
+/// Remembered Screens written per host and observations without pane counts
+/// (`remoteScreens.updateHost`, `hub.catalog.observe`).
+pub use splitty_core::native_api::HOST_STATE_CAPABILITY;
 
 /// The close code of a relaying socket whose host side ended. The client
 /// treats it like a dropped connection and reconnects.
@@ -452,6 +455,24 @@ impl Hub {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         remembered::write(&self.config_dir, &remembered)?;
         Ok(remembered)
+    }
+
+    /// Replace the remembered Screens of one host with those a client sent,
+    /// for `PUT /api/remote/screens/host`, and return the stored list. The
+    /// other hosts' entries stay as they are.
+    pub fn remember_host_screens(
+        &self,
+        document: serde_json::Value,
+    ) -> Result<Remembered, RememberError> {
+        let host = remembered::check_host(document)?;
+        let _writing = self
+            .remembering
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut stored = remembered::read(&self.config_dir);
+        remembered::replace_host(&mut stored, &host);
+        remembered::write(&self.config_dir, &stored)?;
+        Ok(stored)
     }
 
     /// The last observed host directories, for `GET /api/remote/catalog`.
@@ -1341,15 +1362,12 @@ mod tests {
                     keeps_sessions: true,
                     started: true
                 },
-                update: failure::UpdateAvailability {
-                    available: splitty_remote::tunnel::older("0.1.0", VERSION),
-                    keeps_sessions: true
-                },
+                update: failure::UpdateAvailability::decided(true, true),
                 screens: &screens,
             }),
             serde_json::json!({
                 "type": "remote.ready",
-                "update": {"available": splitty_remote::tunnel::older("0.1.0", VERSION), "keepsSessions": true},
+                "update": {"available": true, "keepsSessions": true, "toVersion": VERSION},
                 "target": "user@vm1",
                 "daemon": {"version": "0.1.0", "protocol": 1, "keepsSessions": true, "started": true},
                 "screens": [{"id": "s1", "name": "api", "panes": 3}, {"id": "s2", "panes": 1}],
@@ -1384,6 +1402,11 @@ mod tests {
                 "keepsSessions": true,
                 "screens": [{"id": "s1", "panes": 2}],
             })
+        );
+        // The plan names no version the host does not get.
+        assert_eq!(
+            serde_json::to_value(failure::UpdateAvailability::decided(false, true)).unwrap(),
+            serde_json::json!({"available": false, "keepsSessions": true})
         );
     }
 }

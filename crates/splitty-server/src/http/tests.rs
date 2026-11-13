@@ -242,6 +242,7 @@ async fn the_hubs_routes_are_not_on_the_control_socket() {
         ("PUT", HOST_ORDER),
         ("GET", SCREENS),
         ("PUT", SCREENS),
+        ("PUT", SCREENS_HOST),
         ("GET", CATALOG),
         ("PUT", CATALOG),
         ("GET", PREFERENCES),
@@ -277,6 +278,7 @@ const HOST_PREFERENCES: &str = "/api/remote/host-preferences";
 const HOST_ORDER: &str = "/api/remote/host-order";
 
 const SCREENS: &str = "/api/remote/screens";
+const SCREENS_HOST: &str = "/api/remote/screens/host";
 const CATALOG: &str = "/api/remote/catalog";
 
 /// An `/api` request as the CLI sends it: the process token, no `Origin`.
@@ -391,6 +393,81 @@ async fn remembered_screens_are_kept_in_the_configuration_directory() {
         exchange(&router, api("GET", SCREENS, None)).await,
         (StatusCode::OK, empty)
     );
+}
+
+/// remote-screens, Remembered Remote Screens: `PUT /api/remote/screens/host`
+/// changes one host's entries and leaves the other hosts' entries and their
+/// `closed` marks as they are; a body without the shape changes nothing.
+#[tokio::test]
+async fn a_host_write_keeps_the_other_hosts_screens() {
+    let dir = tempfile::tempdir().expect("dir");
+    let host = ScriptedHost::new(dir.path());
+    let state = state(ADDR, dir.path());
+    let router = router(&state, hub(&host, dir.path()));
+    let stored = json!({"version": 1, "screens": [
+        {"target": "vm1", "screenId": "a"},
+        {"target": "vm3", "screenId": "c", "closed": true},
+    ]});
+    assert_eq!(
+        exchange(&router, api("PUT", SCREENS, Some(&stored)))
+            .await
+            .0,
+        StatusCode::OK
+    );
+    let expected = json!({"version": 1, "screens": [
+        {"target": "vm1", "screenId": "a"},
+        {"target": "vm3", "screenId": "c", "closed": true},
+        {"target": "vm2", "screenId": "b", "name": "api", "position": 2},
+    ]});
+    assert_eq!(
+        exchange(
+            &router,
+            api(
+                "PUT",
+                SCREENS_HOST,
+                Some(&json!({"target": "vm2", "screens": [{"screenId": "b", "name": "api", "position": 2}]}))
+            )
+        )
+        .await,
+        (StatusCode::OK, expected.clone())
+    );
+    let (refused, body) = exchange(
+        &router,
+        api(
+            "PUT",
+            SCREENS_HOST,
+            Some(&json!({"target": "vm1", "screens": [{"screenId": "a"}, {"screenId": "a"}]})),
+        ),
+    )
+    .await;
+    assert_eq!(refused, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(
+        exchange(&router, api("GET", SCREENS, None)).await,
+        (StatusCode::OK, expected)
+    );
+    assert_eq!(
+        exchange(
+            &router,
+            api(
+                "PUT",
+                SCREENS_HOST,
+                Some(&json!({"target": "vm1", "screens": []}))
+            )
+        )
+        .await
+        .1["screens"],
+        json!([
+            {"target": "vm3", "screenId": "c", "closed": true},
+            {"target": "vm2", "screenId": "b", "name": "api", "position": 2},
+        ])
+    );
+    let mut request = api(
+        "PUT",
+        SCREENS_HOST,
+        Some(&json!({"target": "vm2", "screens": []})),
+    );
+    request.headers_mut().remove("authorization");
+    assert_eq!(status(&router, request).await, StatusCode::UNAUTHORIZED);
 }
 
 /// remote-screens, Remembered Remote Screens: the authentication of the other
@@ -551,7 +628,7 @@ async fn remote_catalog_rejects_invalid_updates_without_writing() {
     }
     for screen in [
         json!({"id": "s1", "panes": 1, "extra": true}),
-        json!({"id": "s1"}),
+        // `{"id": "s1"}` without `panes` keeps a stored count (hub-host-state-v1).
         json!({"panes": 1}),
         json!({"id": 3, "panes": 1}),
         json!({"id": "", "panes": 1}),
@@ -562,7 +639,6 @@ async fn remote_catalog_rejects_invalid_updates_without_writing() {
         json!({"id": "s1", "panes": 1.5}),
         json!({"id": "s1", "panes": 1.0}),
         json!({"id": "s1", "panes": "1"}),
-        json!({"id": "s1", "panes": null}),
         json!({"id": "s1", "panes": true}),
     ] {
         refused.push(json!({"target": "vm1", "screens": [screen]}));

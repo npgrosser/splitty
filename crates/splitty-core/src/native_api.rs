@@ -5,6 +5,7 @@
 //! Domain validation is performed by the shared operation after admission.
 
 pub mod directory;
+pub mod remembered;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -14,6 +15,12 @@ use std::time::Duration;
 pub const MAX_API_BODY: usize = 1024 * 1024;
 pub const MAX_JOB_BODY: usize = 128 * 1024;
 pub const MAX_SESSION_FRAME: usize = 16 * 1024 * 1024;
+
+/// Announced in `mux.welcome` on local main connections by a local service
+/// whose hub writes remembered remote Screens per host
+/// (`remoteScreens.updateHost`) and takes directory observations without
+/// pane counts.
+pub const HOST_STATE_CAPABILITY: &str = "hub-host-state-v1";
 
 /// Assigned by the service connector/broker, not deserialized from the wire.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -155,6 +162,7 @@ operations! {
     HostOrderUpdate, "hostOrder.update", "PUT", "/api/remote/host-order", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary;
     RemoteScreensGet, "remoteScreens.get", "GET", "/api/remote/screens", LocalHub, [], MAX_API_BODY, Read, Ordinary;
     RemoteScreensUpdate, "remoteScreens.update", "PUT", "/api/remote/screens", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary;
+    RemoteScreensUpdateHost, "remoteScreens.updateHost", "PUT", "/api/remote/screens/host", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary;
     CatalogGet, "catalog.get", "GET", "/api/remote/catalog", LocalHub, [], MAX_API_BODY, Read, Ordinary;
     CatalogUpdate, "catalog.update", "PUT", "/api/remote/catalog", LocalHub, ["body"], MAX_API_BODY, Mutation, Ordinary;
     ForwardList, "forward.list", "GET", "/api/remote/forwards", LocalHub, [], MAX_API_BODY, Read, Ordinary;

@@ -184,12 +184,19 @@ impl Code {
     }
 }
 
-/// Hub-owned comparison; metadata never grants permission to replace a daemon.
+/// The hub's plan for an ordinary update of a host's daemon: whether one is
+/// available, whether the daemon's sessions outlive it, and the version it
+/// gets. An available update keeps every session, so it ends nothing; the
+/// window shows this plan and compares no versions itself. Metadata never
+/// grants permission to replace a daemon.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UpdateAvailability {
     pub available: bool,
     pub keeps_sessions: bool,
+    /// The version the daemon gets: this hub's, whenever `available`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to_version: Option<&'static str>,
 }
 
 impl UpdateAvailability {
@@ -197,8 +204,8 @@ impl UpdateAvailability {
         daemon: &splitty_remote::handshake::RunningDaemon,
         replacement_version: &str,
     ) -> Self {
-        Self {
-            available: matches!(
+        Self::decided(
+            matches!(
                 splitty_remote::tunnel::update_plan(
                     daemon,
                     "",
@@ -207,7 +214,17 @@ impl UpdateAvailability {
                 ),
                 splitty_remote::tunnel::UpdatePlan::Update
             ),
-            keeps_sessions: daemon.keeps_sessions,
+            daemon.keeps_sessions,
+        )
+    }
+
+    /// The plan for a decision already taken; `available` implies that the
+    /// daemon keeps its sessions (`update_plan`).
+    pub(super) fn decided(available: bool, keeps_sessions: bool) -> Self {
+        Self {
+            available,
+            keeps_sessions,
+            to_version: available.then_some(super::VERSION),
         }
     }
 }
@@ -499,10 +516,10 @@ impl HubError {
                 };
                 Failure {
                     version: Some(version.clone()),
-                    update: Some(UpdateAvailability {
-                        available: *update_available,
-                        keeps_sessions: *keeps_sessions,
-                    }),
+                    update: Some(UpdateAvailability::decided(
+                        *update_available,
+                        *keeps_sessions,
+                    )),
                     protocol: Some(*protocol),
                     keeps_sessions: Some(*keeps_sessions),
                     screens: Some(screens.clone()),

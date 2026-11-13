@@ -11,9 +11,18 @@ use splitty_core::template::TemplateStore;
 use std::collections::HashMap;
 
 pub(crate) fn remember_screens(hub: &Hub, document: Value) -> Reply {
+    remembered_reply(hub.remember_screens(document))
+}
+
+/// One host's remembered Screens have the error contract of the whole list.
+pub(crate) fn remember_host_screens(hub: &Hub, document: Value) -> Reply {
+    remembered_reply(hub.remember_host_screens(document))
+}
+
+fn remembered_reply(result: Result<crate::hub::Remembered, crate::hub::RememberError>) -> Reply {
     use crate::hub::RememberError;
 
-    match hub.remember_screens(document) {
+    match result {
         Ok(remembered) => Payload(remembered).into_reply(),
         Err(error @ RememberError::Invalid(_)) => (
             StatusCode::BAD_REQUEST,

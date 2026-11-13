@@ -272,9 +272,24 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
         .as_array()
         .unwrap()
         .contains(&json!(crate::hub::AUTO_FORWARD_CAPABILITY)));
-    for (index, screens) in [json!([{"id":"s1","name":"Renamed","panes":2}]), json!([])]
-        .into_iter()
-        .enumerate()
+    assert!(welcome["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(splitty_core::native_api::HOST_STATE_CAPABILITY)));
+    // An observation without pane counts keeps the stored ones.
+    for (index, (screens, stored)) in [
+        (
+            json!([{"id":"s1","name":"Renamed","panes":2}]),
+            json!([{"id":"s1","name":"Renamed","panes":2}]),
+        ),
+        (
+            json!([{"id":"s1","name":"Again"},{"id":"s2"}]),
+            json!([{"id":"s1","name":"Again","panes":2}]),
+        ),
+        (json!([]), json!([])),
+    ]
+    .into_iter()
+    .enumerate()
     {
         observer
             .sender
@@ -303,7 +318,7 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
         assert_eq!(native.hosts[0].target, "vm1");
         assert_eq!(
             native.hosts[0].screens.len(),
-            screens.as_array().unwrap().len()
+            stored.as_array().unwrap().len()
         );
         assert_eq!(serde_json::to_value(&native).unwrap(), native_wire);
         let router = crate::http::build_router(state.clone());
@@ -313,7 +328,7 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
         let http: Directory = serde_json::from_value(http_wire.clone()).unwrap();
         assert_eq!(http, native);
         assert_eq!(http_wire, native_wire);
-        assert_eq!(http_wire["hosts"][0]["screens"], screens);
+        assert_eq!(http_wire["hosts"][0]["screens"], stored);
         assert!(
             host.asked().is_empty(),
             "passive reads must not open a host"
@@ -335,6 +350,10 @@ async fn hub_observations_notify_other_local_clients_and_respect_assigned_author
         .as_array()
         .unwrap()
         .contains(&json!(crate::hub::AUTO_FORWARD_CAPABILITY)));
+    assert!(!remote_welcome["capabilities"]
+        .as_array()
+        .unwrap()
+        .contains(&json!(splitty_core::native_api::HOST_STATE_CAPABILITY)));
     state.hub.set_host_order(json!({"order":["vm1"]})).unwrap();
     assert!(
         tokio::time::timeout(Duration::from_millis(50), async {
@@ -520,6 +539,9 @@ async fn framed_native_welcomes_before_replies_and_enforces_the_fixed_role_catal
                 Operation::HostOrderUpdate => json!({"order":["vm2","vm1"]}),
                 Operation::RemoteScreensUpdate => {
                     json!({"version":1,"screens":[{"target":"vm2","screenId":"forbidden"}]})
+                }
+                Operation::RemoteScreensUpdateHost => {
+                    json!({"target":"vm2","screens":[{"screenId":"forbidden"}]})
                 }
                 Operation::CatalogUpdate => {
                     json!({"target":"vm1","screens":[{"id":"forbidden","panes":2}]})
@@ -1465,6 +1487,10 @@ async fn framed_host_catalog_and_saved_forward_intents_preserve_passive_and_stop
         (
             "remoteScreens.update",
             json!({"version":1,"screens":[{"target":"vm1","screenId":"s1"}]}),
+        ),
+        (
+            "remoteScreens.updateHost",
+            json!({"target":"vm2","screens":[{"screenId":"s2"}],"closed":true}),
         ),
         (
             "catalog.update",

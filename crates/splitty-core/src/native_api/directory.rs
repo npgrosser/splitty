@@ -1,7 +1,8 @@
 //! The passive local host-directory response shared by native and HTTP clients.
 //!
-//! These records describe an API response. Host preferences, SSH discovery and
-//! the persisted catalog retain their own types and validation in their owners.
+//! These records describe an API response, and [`ObservedScreen`] a client's
+//! observation of a host's Screens. Host preferences, SSH discovery and the
+//! persisted catalog retain their own types and validation in their owners.
 
 use serde::{Deserialize, Serialize};
 
@@ -66,6 +67,30 @@ pub struct DirectoryScreen {
 
 impl DirectoryScreen {
     pub fn new(id: impl Into<String>, name: Option<String>, panes: u64) -> Self {
+        Self {
+            id: id.into(),
+            name,
+            panes,
+        }
+    }
+}
+
+/// A Screen in an observation of a host's Screens (`hub.catalog.observe`).
+/// Without `panes` the hub keeps the count it has stored for the Screen
+/// (`hub-host-state-v1`).
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[non_exhaustive]
+pub struct ObservedScreen {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panes: Option<u64>,
+}
+
+impl ObservedScreen {
+    pub fn new(id: impl Into<String>, name: Option<String>, panes: Option<u64>) -> Self {
         Self {
             id: id.into(),
             name,

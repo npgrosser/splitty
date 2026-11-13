@@ -1,11 +1,15 @@
 //! The remote screens a client shows, remembered across restarts:
 //! `remote-screens.json` in the server's configuration directory, which
-//! `GET` and `PUT /api/remote/screens` read and replace.
+//! `GET` and `PUT /api/remote/screens` read and replace, and
+//! `PUT /api/remote/screens/host` changes for one host.
 //!
 //! The list belongs to the server, not to a browser profile, so every window
 //! on the machine sees the same one, and the desktop apps keep it with an
 //! embedded server too. The server only keeps it: when a screen connects and
 //! where it is shown is the client's business.
+//!
+//! A window writes the hosts it shows one by one ([`replace_host`]), so two
+//! windows that show different hosts never undo each other's entries.
 //!
 //! A list a client sends is checked as a whole and refused when one entry is
 //! wrong. A file read back is checked entry by entry, like the recent hosts:
@@ -153,6 +157,76 @@ pub fn check(document: serde_json::Value) -> Result<Remembered, RememberError> {
     Ok(remembered)
 }
 
+/// The one host's Screens a client sent, if they have the shape: a valid
+/// target, ids and names within their caps, each id once, at most
+/// [`MAX_SCREENS`].
+pub fn check_host(
+    document: serde_json::Value,
+) -> Result<splitty_core::native_api::remembered::HostScreens, RememberError> {
+    let invalid = RememberError::Invalid;
+    let host: splitty_core::native_api::remembered::HostScreens = serde_json::from_value(document)
+        .map_err(|error| invalid(format!("not the remote screens of a host: {error}")))?;
+    if host.screens.len() > MAX_SCREENS {
+        return Err(invalid(format!(
+            "{} screens; at most {MAX_SCREENS} are remembered",
+            host.screens.len()
+        )));
+    }
+    for (index, screen) in host.screens.iter().enumerate() {
+        check_screen(&entry(&host.target, screen, host.closed))
+            .map_err(|reason| invalid(format!("screens[{index}]: {reason}")))?;
+        if host.screens[..index]
+            .iter()
+            .any(|seen| seen.screen_id == screen.screen_id)
+        {
+            return Err(invalid(format!(
+                "screens[{index}]: screen {:?} is listed twice",
+                screen.screen_id
+            )));
+        }
+    }
+    // An empty list forgets a host; it, too, names only a valid one.
+    check_target(&host.target).map_err(invalid)?;
+    Ok(host)
+}
+
+/// `remembered` with the entries of `host.target` replaced by `host`'s, in
+/// the place of the host's first entry (a new host goes last). An empty list
+/// forgets the host. At most [`MAX_SCREENS`] entries are kept.
+pub fn replace_host(
+    remembered: &mut Remembered,
+    host: &splitty_core::native_api::remembered::HostScreens,
+) {
+    let screens = &mut remembered.screens;
+    let at = screens
+        .iter()
+        .position(|screen| screen.target == host.target)
+        .unwrap_or(screens.len());
+    screens.retain(|screen| screen.target != host.target);
+    let at = at.min(screens.len());
+    screens.splice(
+        at..at,
+        host.screens
+            .iter()
+            .map(|screen| entry(&host.target, screen, host.closed)),
+    );
+    screens.truncate(MAX_SCREENS);
+}
+
+fn entry(
+    target: &str,
+    screen: &splitty_core::native_api::remembered::HostScreen,
+    closed: bool,
+) -> RememberedScreen {
+    RememberedScreen {
+        target: target.into(),
+        screen_id: screen.screen_id.clone(),
+        name: screen.name.clone(),
+        position: screen.position,
+        closed,
+    }
+}
+
 /// Replace the list in `config_dir`, owner-only and atomically.
 pub fn write(config_dir: &Path, remembered: &Remembered) -> io::Result<()> {
     let mut text = serde_json::to_vec_pretty(remembered)?;
@@ -163,16 +237,7 @@ pub fn write(config_dir: &Path, remembered: &Remembered) -> io::Result<()> {
 /// Why `screen` cannot be remembered. The target must be valid as it is:
 /// it is used as the client sent it.
 fn check_screen(screen: &RememberedScreen) -> Result<(), String> {
-    match SshTarget::parse(&screen.target) {
-        Ok(target) if target.as_str() == screen.target => {}
-        Ok(_) => {
-            return Err(format!(
-                "the target {:?} has blanks around it",
-                screen.target
-            ))
-        }
-        Err(error) => return Err(error.to_string()),
-    }
+    check_target(&screen.target)?;
     let id = screen.screen_id.chars().count();
     if id == 0 || id > MAX_ID {
         return Err(format!("the screen id must have 1 to {MAX_ID} characters"));
@@ -185,6 +250,14 @@ fn check_screen(screen: &RememberedScreen) -> Result<(), String> {
         return Err(format!("the name has more than {MAX_NAME} characters"));
     }
     Ok(())
+}
+
+fn check_target(target: &str) -> Result<(), String> {
+    match SshTarget::parse(target) {
+        Ok(parsed) if parsed.as_str() == target => Ok(()),
+        Ok(_) => Err(format!("the target {target:?} has blanks around it")),
+        Err(error) => Err(error.to_string()),
+    }
 }
 
 #[cfg(test)]
@@ -302,6 +375,107 @@ mod tests {
             reason(json!({"version": 1, "screens": too_many})),
             "201 screens; at most 200 are remembered"
         );
+    }
+
+    #[test]
+    fn a_host_write_replaces_only_that_host_in_its_place() {
+        let host = |document: serde_json::Value| check_host(document).expect("the shape");
+        let mut remembered = Remembered {
+            version: FORMAT,
+            screens: vec![
+                screen("vm1", "a"),
+                RememberedScreen {
+                    closed: true,
+                    ..screen("vm2", "b")
+                },
+                screen("vm1", "c"),
+                screen("vm3", "d"),
+            ],
+        };
+        replace_host(
+            &mut remembered,
+            &host(json!({"target": "vm1", "screens": [
+                {"screenId": "e", "name": "api", "position": 4},
+            ]})),
+        );
+        assert_eq!(
+            serde_json::to_value(&remembered.screens).unwrap(),
+            json!([
+                {"target": "vm1", "screenId": "e", "name": "api", "position": 4},
+                {"target": "vm2", "screenId": "b", "closed": true},
+                {"target": "vm3", "screenId": "d"},
+            ]),
+            "the other hosts and their closed marks stay"
+        );
+        replace_host(
+            &mut remembered,
+            &host(json!({"target": "vm3", "screens": [{"screenId": "d"}], "closed": true})),
+        );
+        replace_host(
+            &mut remembered,
+            &host(json!({"target": "vm4", "screens": [{"screenId": "f"}]})),
+        );
+        replace_host(
+            &mut remembered,
+            &host(json!({"target": "vm2", "screens": []})),
+        );
+        assert_eq!(
+            serde_json::to_value(&remembered.screens).unwrap(),
+            json!([
+                {"target": "vm1", "screenId": "e", "name": "api", "position": 4},
+                {"target": "vm3", "screenId": "d", "closed": true},
+                {"target": "vm4", "screenId": "f"},
+            ]),
+            "closed marks a host's screens, a new host goes last, an empty list forgets"
+        );
+
+        let full: Vec<_> = (0..MAX_SCREENS)
+            .map(|n| screen("vm1", &format!("s{n}")))
+            .collect();
+        remembered.screens = full;
+        replace_host(
+            &mut remembered,
+            &host(json!({"target": "vm2", "screens": [{"screenId": "x"}]})),
+        );
+        assert_eq!(remembered.screens.len(), MAX_SCREENS);
+    }
+
+    #[test]
+    fn host_writes_without_the_shape_are_refused() {
+        let reason = |document: serde_json::Value| match check_host(document) {
+            Err(RememberError::Invalid(reason)) => reason,
+            other => panic!("not refused: {other:?}"),
+        };
+        for (document, expected) in [
+            (json!({"screens": []}), "not the remote screens of a host"),
+            (
+                json!({"target": "vm1", "screens": [], "version": 1}),
+                "not the remote screens",
+            ),
+            (
+                json!({"target": "vm1", "screens": [{"target": "vm1", "screenId": "s"}]}),
+                "not the remote screens",
+            ),
+            (
+                json!({"target": "-oProxyCommand=x", "screens": []}),
+                "starts with a dash",
+            ),
+            (
+                json!({"target": " vm1", "screens": []}),
+                "has blanks around it",
+            ),
+            (
+                json!({"target": "vm1", "screens": [{"screenId": ""}]}),
+                "screens[0]: the screen id must have 1 to 256 characters",
+            ),
+            (
+                json!({"target": "vm1", "screens": [{"screenId": "s"}, {"screenId": "s"}]}),
+                "screens[1]: screen \"s\" is listed twice",
+            ),
+        ] {
+            let reason = reason(document.clone());
+            assert!(reason.contains(expected), "{document}: {reason}");
+        }
     }
 
     #[test]

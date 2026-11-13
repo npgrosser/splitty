@@ -152,6 +152,7 @@ impl State {
             },
             Operation::RemoteScreensGet => Payload(hub.remembered_screens()).into_reply(),
             Operation::RemoteScreensUpdate => op::remember_screens(hub, body),
+            Operation::RemoteScreensUpdateHost => op::remember_host_screens(hub, body),
             Operation::HostDirectory => Payload(hub.directory()).into_reply(),
             Operation::SshPrompts => Payload(splitty_remote::askpass::prompts()).into_reply(),
             Operation::SshAnswer => Payload(

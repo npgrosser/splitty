@@ -8,6 +8,7 @@ use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
+use splitty_core::native_api::directory::ObservedScreen;
 use splitty_remote::hosts;
 use splitty_remote::ssh::SshTarget;
 
@@ -52,11 +53,13 @@ pub struct CatalogScreen {
     pub panes: u64,
 }
 
+/// An observation of a host's Screens as they are now. A Screen without
+/// `panes` keeps the count stored for it, and is left out while none is.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CatalogUpdate {
     target: String,
-    screens: Vec<CatalogScreen>,
+    screens: Vec<ObservedScreen>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -91,7 +94,13 @@ pub fn read(config_dir: &Path) -> Catalog {
         let Ok(host) = serde_json::from_value::<HostCatalog>(row) else {
             continue;
         };
-        if check_host(&host.target, &host.screens).is_ok()
+        if check_host(
+            &host.target,
+            host.screens
+                .iter()
+                .map(|screen| (screen.id.as_str(), screen.name.as_deref())),
+        )
+        .is_ok()
             && !catalog.hosts.iter().any(|seen| seen.target == host.target)
         {
             catalog.hosts.push(host);
@@ -126,7 +135,14 @@ fn write(config_dir: &Path, catalog: &Catalog) -> io::Result<()> {
 pub fn check(document: serde_json::Value) -> Result<CatalogUpdate, CatalogError> {
     let update: CatalogUpdate = serde_json::from_value(document)
         .map_err(|error| CatalogError::Invalid(format!("not a host screen directory: {error}")))?;
-    check_host(&update.target, &update.screens).map_err(CatalogError::Invalid)?;
+    check_host(
+        &update.target,
+        update
+            .screens
+            .iter()
+            .map(|screen| (screen.id.as_str(), screen.name.as_deref())),
+    )
+    .map_err(CatalogError::Invalid)?;
     Ok(update)
 }
 
@@ -140,15 +156,37 @@ pub fn update(config_dir: &Path, update: CatalogUpdate) -> Result<HostCatalog, C
     {
         return Err(CatalogError::Hidden);
     }
+    let mut catalog = read(config_dir);
+    let stored = catalog
+        .hosts
+        .iter()
+        .find(|host| host.target == update.target);
+    let screens = update
+        .screens
+        .into_iter()
+        .filter_map(|screen| {
+            let panes = screen.panes.or_else(|| {
+                stored?
+                    .screens
+                    .iter()
+                    .find(|known| known.id == screen.id)
+                    .map(|known| known.panes)
+            })?;
+            Some(CatalogScreen {
+                id: screen.id,
+                name: screen.name,
+                panes,
+            })
+        })
+        .collect();
     let host = HostCatalog {
         target: update.target,
         last_seen: SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(io::Error::other)?
             .as_secs(),
-        screens: update.screens,
+        screens,
     };
-    let mut catalog = read(config_dir);
     catalog.hosts.retain(|old| old.target != host.target);
     catalog.hosts.insert(0, host.clone());
     catalog.hosts.truncate(MAX_HOSTS);
@@ -156,7 +194,11 @@ pub fn update(config_dir: &Path, update: CatalogUpdate) -> Result<HostCatalog, C
     Ok(host)
 }
 
-fn check_host(target: &str, screens: &[CatalogScreen]) -> Result<(), String> {
+/// Why a host's Screens, as `(id, name)`, cannot be stored.
+fn check_host<'a>(
+    target: &str,
+    screens: impl ExactSizeIterator<Item = (&'a str, Option<&'a str>)> + Clone,
+) -> Result<(), String> {
     let parsed = SshTarget::parse(target).map_err(|error| error.to_string())?;
     if parsed.as_str() != target {
         return Err(format!("the target {target:?} has blanks around it"));
@@ -164,27 +206,20 @@ fn check_host(target: &str, screens: &[CatalogScreen]) -> Result<(), String> {
     if screens.len() > MAX_SCREENS {
         return Err(format!("at most {MAX_SCREENS} screens per host"));
     }
-    for (index, screen) in screens.iter().enumerate() {
-        let length = screen.id.chars().count();
+    for (index, (id, name)) in screens.clone().enumerate() {
+        let length = id.chars().count();
         if length == 0 || length > MAX_ID {
             return Err(format!(
                 "screens[{index}]: the screen id must have 1 to {MAX_ID} characters"
             ));
         }
-        if screen
-            .name
-            .as_ref()
-            .is_some_and(|name| name.chars().count() > MAX_NAME)
-        {
+        if name.is_some_and(|name| name.chars().count() > MAX_NAME) {
             return Err(format!(
                 "screens[{index}]: the name has more than {MAX_NAME} characters"
             ));
         }
-        if screens[..index].iter().any(|seen| seen.id == screen.id) {
-            return Err(format!(
-                "screens[{index}]: screen {:?} is listed twice",
-                screen.id
-            ));
+        if screens.clone().take(index).any(|(seen, _)| seen == id) {
+            return Err(format!("screens[{index}]: screen {id:?} is listed twice"));
         }
     }
     Ok(())
@@ -225,6 +260,28 @@ mod tests {
             json!({"version": 1, "hosts": [host("vm1"), host("vm3")]}),
         );
         assert_eq!(fs::read(dir.path().join(FILE)).expect("file"), text);
+    }
+
+    #[test]
+    fn an_observation_without_pane_counts_keeps_the_stored_ones() {
+        let dir = tempfile::tempdir().expect("dir");
+        let observe = |document: serde_json::Value| {
+            update(dir.path(), check(document).expect("the shape")).expect("stored")
+        };
+        observe(json!({"target": "vm1", "screens": [
+            {"id": "s1", "name": "api", "panes": 3}, {"id": "s3", "panes": 2},
+        ]}));
+        let stored = observe(json!({"target": "vm1", "screens": [
+            {"id": "s1", "name": "web"}, {"id": "s2"}, {"id": "s3", "panes": 5},
+        ]}));
+        assert_eq!(
+            serde_json::to_value(&stored.screens).unwrap(),
+            json!([{"id": "s1", "name": "web", "panes": 3}, {"id": "s3", "panes": 5}]),
+            "renamed with its count kept; a screen without any count is left out"
+        );
+        let other = observe(json!({"target": "vm2", "screens": [{"id": "s1"}]}));
+        assert!(other.screens.is_empty(), "counts are per host");
+        assert!(check(json!({"target": "vm1", "screens": [{"id": "s1", "panes": -1}]})).is_err());
     }
 
     #[test]
