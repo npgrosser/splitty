@@ -200,7 +200,7 @@ Native settings mutations SHALL be identified with their local connection and re
 - **AND** owned pending work is cancelled and joined without changing another service
 
 ### Requirement: Independent Native Terminal Palette
-The native workspace SHALL choose the terminal palette in this order: the palette `terminal.theme` names; while that is `default`, the palette `terminal.themeDark` or `terminal.themeLight` names for the mode of the shown UI theme; while that is `default` too, the palette with the UI theme's identifier, ignoring `-`; otherwise the default palette of that mode. The service SHALL store `terminal.themeDark` and `terminal.themeLight` with the default `default`. A named palette SHALL be used while the selected UI theme stays in use for chrome. Palette-only changes SHALL update existing and future terminals without recreating sessions, losing terminal history, or changing native terminal font metrics.
+The native workspace SHALL choose the terminal palette by the rule of Terminal Palette Choice, with the mode of the UI theme it shows, and SHALL look the chosen name up in its own catalog; for the UI theme's own palette it SHALL take the palette with the UI theme's identifier, ignoring `-`, otherwise the default palette of that mode. The service SHALL store `terminal.themeDark` and `terminal.themeLight` with the default `default`. A named palette SHALL be used while the selected UI theme stays in use for chrome. Palette-only changes SHALL update existing and future terminals without recreating sessions, losing terminal history, or changing native terminal font metrics.
 
 #### Scenario: Separate terminal choice
 - **WHEN** the user chooses an available terminal palette different from the UI theme
@@ -263,3 +263,22 @@ A server's settings SHALL hold `notifications.programStatus`, a boolean that def
 #### Scenario: Switch turned off
 - **WHEN** a user turns off `notifications.programStatus` and a pane the user is not watching becomes `blocked`
 - **THEN** the window adds no notification and the pane's tab shows that it is blocked
+
+### Requirement: Terminal Palette Choice
+Every window SHALL choose the name of its terminal palette by one rule, the server's: the palette `terminal.theme` names; while that is `default`, the palette `terminal.themeDark` or `terminal.themeLight` names for the mode of the shown UI theme; while that is `default` too, the UI theme's own palette. An empty name SHALL count as `default`. `theme.get` and `GET /api/home/theme` SHALL apply this rule to the server's stored terminal settings for the UI theme they answer with, by that theme's mode: the answer's `terminal` colors SHALL be those of the server's theme with the chosen name, and its `terminalPalette` SHALL name the theme they come from; where the rule chooses the UI theme's own palette, or the server has no theme of the chosen name, they SHALL be the answered theme's own colors and `terminalPalette` its identifier. The web window SHALL show the `terminal` colors of that answer and SHALL ask for it again when `terminal.theme`, `terminal.themeDark` or `terminal.themeLight` changes. Each client SHALL look the chosen name up in its own themes, so a name only the other client has SHALL show the UI theme's palette; stored settings SHALL NOT change for it.
+
+#### Scenario: Named palette in the web window
+- **WHEN** `terminal.theme` is `splitty-light` and the web window shows the UI theme `splitty-dark`
+- **THEN** the theme answer for `splitty-dark` carries the chrome colors of `splitty-dark`, the terminal colors of `splitty-light` and `terminalPalette` `splitty-light`, and the web window's terminals show them
+
+#### Scenario: Palette by the UI theme's mode
+- **WHEN** `terminal.theme` is `default`, `terminal.themeDark` is `splitty-retro` and `terminal.themeLight` is `splitty-light`, and the answered UI theme is dark
+- **THEN** the answer carries the terminal colors of `splitty-retro`, and for a light UI theme those of `splitty-light`
+
+#### Scenario: Palette the server does not have
+- **WHEN** `terminal.theme` names a palette that only the native catalog has
+- **THEN** the theme answer carries the UI theme's own terminal colors and its identifier as `terminalPalette`, and the setting keeps its value
+
+#### Scenario: Palette change reaches open terminals
+- **WHEN** another window changes `terminal.theme`
+- **THEN** the web window asks for the theme again and its open terminals take the new colors without recreating sessions
