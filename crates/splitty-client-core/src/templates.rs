@@ -170,6 +170,7 @@ pub(crate) fn validate(template: &Template) -> io::Result<()> {
         pane_ids,
         root: String::new(),
         create_screen: true,
+        replace_confirmed: false,
     };
     splitty_core::mux::project_template(&request).map_err(io::Error::other)?;
     Ok(())

@@ -13,6 +13,7 @@
 
 #![allow(clippy::collapsible_match)]
 
+mod close_assessment;
 pub mod effect_runner;
 mod effects;
 mod grid;
@@ -29,6 +30,10 @@ pub use templates::{
     TEMPLATE_CAPABILITY,
 };
 
+pub use close_assessment::{
+    assess_close, CloseAssessment, CloseLoss, CloseScope, CLOSE_ASSESSMENT_CAPABILITY,
+    CLOSE_SCOPE_LIMIT,
+};
 pub use effects::Effect;
 pub use grid::{find_neighbor, project_grid, PaneRect};
 pub use ops::{Arrangement, Direction, Op, ScreenOp, ViewerPlacement};
@@ -78,6 +83,9 @@ pub enum MuxError {
 
     #[error("screen {0} already exists")]
     ScreenExists(ScreenId),
+
+    #[error("replacing screen {0} needs replaceConfirmed")]
+    ReplaceNotConfirmed(ScreenId),
 
     #[error("node {0} not found")]
     NodeNotFound(NodeId),

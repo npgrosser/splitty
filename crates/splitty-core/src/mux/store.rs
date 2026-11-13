@@ -122,6 +122,15 @@ impl Store {
         Some(screen)
     }
 
+    /// What closing `scope` would end, read under the lock without a copy of
+    /// the workspace (`mux-protocol`, Close Assessment).
+    pub fn assess_close(
+        &self,
+        scope: &super::CloseScope,
+    ) -> Result<super::CloseAssessment, MuxError> {
+        super::assess_close(&self.state.read().unwrap(), scope)
+    }
+
     /// Get a clone of the full workspace state.
     pub fn get_workspace_state(&self) -> WorkspaceState {
         self.state.read().unwrap().clone()

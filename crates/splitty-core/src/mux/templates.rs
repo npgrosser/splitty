@@ -21,6 +21,10 @@ pub struct ApplyTemplate {
     pub root: String,
     #[serde(default)]
     pub create_screen: bool,
+    /// The user agreed to replacing an existing screen's panes and sessions
+    /// (`templates`, Confirmed Screen Replacement).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub replace_confirmed: bool,
 }
 
 fn invalid(message: impl Into<String>) -> MuxError {
@@ -139,6 +143,11 @@ pub(super) fn apply_template(
     }
     if !request.create_screen && old.is_none() {
         return Err(MuxError::ScreenNotFound(id));
+    }
+    if old.is_some_and(|screen| !screen.panes.is_empty() || !screen.sessions.is_empty())
+        && !request.replace_confirmed
+    {
+        return Err(MuxError::ReplaceNotConfirmed(id));
     }
     for pane_id in projection.pane_ids() {
         if state
@@ -612,6 +621,7 @@ mod tests {
         );
         let mut replacement = request();
         replacement.create_screen = false;
+        replacement.replace_confirmed = true;
         replacement.pane_ids.clear();
         let effects = store
             .dispatch(Op::ApplyTemplate {
@@ -631,6 +641,44 @@ mod tests {
     }
 
     #[test]
+    fn replacing_a_screen_needs_the_confirmation_flag() {
+        let store = Store::new();
+        store
+            .dispatch(Op::ApplyTemplate {
+                screen_id: "screen".into(),
+                request: Box::new(request()),
+            })
+            .unwrap();
+        let before = serde_json::to_value(store.get_workspace_state()).unwrap();
+        let mut replacement = request();
+        replacement.create_screen = false;
+        replacement.pane_ids.clear();
+        assert!(matches!(
+            store.dispatch(Op::ApplyTemplate {
+                screen_id: "screen".into(),
+                request: Box::new(replacement.clone()),
+            }),
+            Err(MuxError::ReplaceNotConfirmed(_))
+        ));
+        assert_eq!(
+            serde_json::to_value(store.get_workspace_state()).unwrap(),
+            before
+        );
+        // The wire field is camelCase and absent when false.
+        let wire = serde_json::to_value(&replacement).unwrap();
+        assert!(wire.get("replaceConfirmed").is_none());
+        let mut wire = wire;
+        wire["replaceConfirmed"] = json!(true);
+        let confirmed: ApplyTemplate = serde_json::from_value(wire).unwrap();
+        assert!(store
+            .dispatch(Op::ApplyTemplate {
+                screen_id: "screen".into(),
+                request: Box::new(confirmed),
+            })
+            .is_ok());
+    }
+
+    #[test]
     fn template_rejection_is_atomic_for_collisions_duplicates_missing_and_unused_panes() {
         let store = Store::new();
         store
@@ -643,6 +691,7 @@ mod tests {
         for invalid in 0..7 {
             let mut r = request();
             r.create_screen = false;
+            r.replace_confirmed = true;
             r.pane_ids.clear();
             match invalid {
                 0 => {
@@ -704,6 +753,7 @@ mod tests {
             for value in values {
                 let mut r = request();
                 r.create_screen = false;
+                r.replace_confirmed = true;
                 r.pane_ids.clear();
                 let bounds = &mut r.template.floating[0].bounds;
                 *match component {
@@ -727,6 +777,7 @@ mod tests {
         }
         let mut r = request();
         r.create_screen = false;
+        r.replace_confirmed = true;
         r.pane_ids.clear();
         let bounds = &mut r.template.floating[0].bounds;
         bounds.x = -2.0;

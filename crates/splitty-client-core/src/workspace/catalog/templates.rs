@@ -252,6 +252,7 @@ impl SourceWorkspace {
             pane_ids,
             root,
             create_screen,
+            replace_confirmed: false,
         };
         let projection = mux::project_template(&request).map_err(io::Error::other)?;
         let display_name = if create_screen {
@@ -346,6 +347,8 @@ impl SourceWorkspace {
         // A transient charged command copy keeps the captured review immutable.
         let _scratch = plan.draft.reserve_copy()?;
         let mut request = plan.request.clone();
+        // Checked above: an existing Screen is replaced only after the review.
+        request.replace_confirmed = plan.impact.is_some();
         if choice == TemplateApplyChoice::LayoutOnly {
             request.template.retain_commands(|_| false);
         }

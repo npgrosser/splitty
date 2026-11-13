@@ -113,6 +113,7 @@ impl MuxHandler {
             capabilities.push(splitty_core::protocol::INPUT_BYTES_CAPABILITY.into());
             capabilities.push(splitty_core::protocol::upload::CAPABILITY.into());
             capabilities.push(splitty_core::protocol::PROGRAM_STATUS_CAPABILITY.into());
+            capabilities.push(splitty_core::mux::CLOSE_ASSESSMENT_CAPABILITY.into());
         }
         self.send_event(&event).await;
     }
@@ -146,6 +147,35 @@ impl MuxHandler {
                 };
                 if let Err(error) = self.sender.try_send_json(&response) {
                     tracing::debug!(%error, "template extraction response not queued");
+                }
+            }
+            Some("mux.assess_close") => {
+                // Read-only and answered to this connection only, after the
+                // operations it sent before (`mux-protocol`, Close Assessment).
+                let request_id = value.get("requestId").and_then(Value::as_str).unwrap_or("");
+                let result = value
+                    .get("scope")
+                    .cloned()
+                    .ok_or_else(|| "missing scope".to_owned())
+                    .and_then(|scope| {
+                        serde_json::from_value::<splitty_core::mux::CloseScope>(scope)
+                            .map_err(|error| format!("invalid scope: {error}"))
+                    })
+                    .and_then(|scope| {
+                        self.store
+                            .assess_close(&scope)
+                            .map_err(|error| error.to_string())
+                    });
+                let response = match result {
+                    Ok(assessment) => serde_json::json!({
+                        "type":"mux.close_assessed", "requestId":request_id, "assessment":assessment
+                    }),
+                    Err(error) => serde_json::json!({
+                        "type":"mux.close_assessed", "requestId":request_id, "error":error
+                    }),
+                };
+                if let Err(error) = self.sender.try_send_json(&response) {
+                    tracing::debug!(%error, "close assessment response not queued");
                 }
             }
             Some(codec::MSG_MUX_OP) => {
@@ -806,7 +836,7 @@ mod tests {
         handler
             .handle_value(
                 serde_json::json!({"type":"mux.op","screenId":"screen","op":{
-                    "type":"apply_template","paneIds":{"a":"replacement"},
+                    "type":"apply_template","paneIds":{"a":"replacement"},"replaceConfirmed":true,
                     "template":{"name":"Replacement","panes":{"a":{}},"layout":{"slot":"a"}}
                 }}),
             )
@@ -861,6 +891,94 @@ mod tests {
         assert_eq!(events[0]["type"], "mux.nudge");
         assert_eq!(events[0]["screenId"], "empty");
         assert!(sent.try_recv().is_err(), "no sender nudge");
+    }
+
+    /// mux-protocol, Close Assessment, and templates, Confirmed Screen
+    /// Replacement: the welcome announces the assessment, the answer goes to
+    /// its window only with its request ID, a malformed scope is answered with
+    /// an error, and a replacement without `replaceConfirmed` is refused.
+    #[tokio::test]
+    async fn a_close_assessment_answers_its_window_and_a_replacement_needs_confirmation() {
+        let seed = Store::new();
+        seed.dispatch(Op::CreateScreen {
+            name: None,
+            screen_id: Some(ScreenId::from("screen-1")),
+            new_pane_id: Some(PaneId::from("p1")),
+            shell_profile_id: None,
+        })
+        .expect("screen");
+        seed.dispatch_screen(&ScreenId::from("screen-1"), serde_json::from_value(serde_json::json!({"type":"split_pane", "paneId":"p1", "axis":"horizontal", "newPaneId":"p2"})).expect("split")).expect("split applied");
+        let mut state = seed.get_workspace_state();
+        let screen = state.screens.get_mut(&ScreenId::from("screen-1")).unwrap();
+        for (pane, busy, text) in [("p1", true, ""), ("p2", false, "notes")] {
+            let session = screen.panes[&PaneId::from(pane)]
+                .session_id
+                .clone()
+                .unwrap();
+            let entry = screen.sessions.get_mut(&session).unwrap();
+            entry.status = splitty_core::mux::SessionStatus::Running;
+            entry.busy = busy;
+            entry.scratchpad = text.into();
+        }
+        let store = Arc::new(Store::with_state(state));
+        let others = Default::default();
+        let (handler, mut sent) = window(&store, "window", &others);
+        handler.send_welcome().await;
+        assert!(next_text(&mut sent)["capabilities"]
+            .as_array()
+            .is_some_and(|all| all.iter().any(|c| c == "close-assessment-v1")));
+
+        assert!(handler.try_handle(r#"{"type":"mux.assess_close","requestId":"r1","scope":{"kind":"panes","screenId":"screen-1","paneIds":["p1","p2"]}}"#).await);
+        let answer = next_text(&mut sent);
+        assert_eq!(answer["type"], "mux.close_assessed");
+        assert_eq!(answer["requestId"], "r1");
+        let assessment = &answer["assessment"];
+        assert_eq!(assessment["confirm"], true);
+        assert_eq!(assessment["running"], 1);
+        assert_eq!(assessment["scratchpads"], 1);
+        assert_eq!(assessment["entries"][0]["paneId"], "p1");
+        assert_eq!(assessment["entries"][1]["paneId"], "p2");
+        assert_eq!(assessment["entries"][1]["scratchpad"], true);
+
+        assert!(
+            handler
+                .try_handle(
+                    r#"{"type":"mux.assess_close","requestId":"r2","scope":{"kind":"workspace"}}"#
+                )
+                .await
+        );
+        assert_eq!(next_text(&mut sent)["assessment"]["running"], 1);
+
+        assert!(
+            handler
+                .try_handle(
+                    r#"{"type":"mux.assess_close","requestId":"r3","scope":{"kind":"bogus"}}"#
+                )
+                .await
+        );
+        let malformed = next_text(&mut sent);
+        assert_eq!(malformed["requestId"], "r3");
+        assert!(malformed["error"].as_str().is_some());
+        assert!(malformed.get("assessment").is_none());
+
+        let replace = serde_json::json!({"type":"mux.op","screenId":"screen-1","op":{
+            "type":"apply_template","paneIds":{"a":"new"},
+            "template":{"name":"T","panes":{"a":{}},"layout":{"slot":"a"}}
+        }});
+        assert!(handler.try_handle(&replace.to_string()).await);
+        let refused = next_text(&mut sent);
+        assert_eq!(refused["type"], "mux.op_failed");
+        assert_eq!(refused["op"], "apply_template");
+        assert!(refused["error"]
+            .as_str()
+            .is_some_and(|error| error.contains("replaceConfirmed")));
+        let screen = store.get_screen(&ScreenId::from("screen-1")).unwrap();
+        assert!(screen.panes.contains_key(&PaneId::from("p1")));
+        assert!(!screen.panes.contains_key(&PaneId::from("new")));
+        assert!(
+            others.lock().unwrap().is_empty(),
+            "answers reach no other window"
+        );
     }
 
     /// A reloading client's `create_screen` for a screen the server already

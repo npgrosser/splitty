@@ -273,6 +273,7 @@ pub const SESSION_OPERATIONS: &[&str] = &[
     "mux.resync",
     "mux.workspace_resync",
     "mux.extract_template",
+    "mux.assess_close",
     "editor.register",
     "editor.result",
     "file.register",
