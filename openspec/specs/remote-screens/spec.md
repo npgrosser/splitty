@@ -20,7 +20,6 @@ Before the relay the hub SHALL send only these application text messages:
 
 After `remote.ready`, the hub SHALL send no application message of its own; transport negotiation/liveness is outside this application stream. When the connection to the host ends, it SHALL close the WebSocket with code 4001 or the native stream with the equivalent host-lost reason. When the socket closes, it SHALL end its `ssh` process. Each socket SHALL use an SSH connection of its own. Once `remote.ready` is sent, the server SHALL record the target as a recent host (see `remote-hosts`, Known Hosts).
 
-
 The ready message SHALL include `update: {available, keepsSessions}`. Every hub error SHALL include `retryable`; the client SHALL use this classification when present and retain legacy classification only for older hubs. After readiness the hub SHALL validate and persist the handshake directory without interpreting relayed frames. Invalid or unwritable cache data SHALL not fail an otherwise usable connection.
 
 #### Scenario: Connect a host without Splitty
@@ -104,7 +103,7 @@ When a host's connection drops after `remote.ready`, the client SHALL mark that 
 - **THEN** `vm1`'s screens show "reconnecting…" and then their content again, with the output written in the meantime
 
 ### Requirement: Collapse And Terminate
-Closing a remote screen SHALL detach it without a question: the screen leaves the open list, its panes are detached, and its sessions keep running on the host. Terminating a remote screen SHALL be a separate action that ends its panes and their processes on the host (`close_screen`), and the client SHALL ask for confirmation before the first terminate. Quitting the app or closing the window SHALL only detach remote screens, and remote sessions SHALL NOT count as running processes that block quitting.
+Closing a remote screen SHALL detach it without a question: the screen leaves the open list, its panes are detached, and its sessions keep running on the host. Terminating a remote screen SHALL be a separate action that ends its panes and their processes on the host (`close_screen`), and the client SHALL ask for confirmation before the first terminate. Closing the last pane of a remote screen ends that screen on its host as it does for a local one (see `workspace-model`, Closing a Pane): the screen SHALL leave the open list, and where a host of an earlier version keeps it without panes, the native window SHALL end it there with `close_screen` once the close of the pane it requested is confirmed. A remote screen without panes that a window shows SHALL accept a new terminal as a local one does. Quitting the app or closing the window SHALL only detach remote screens, and remote sessions SHALL NOT count as running processes that block quitting.
 
 #### Scenario: Collapse
 - **WHEN** the user closes a remote screen with the default action
@@ -113,6 +112,14 @@ Closing a remote screen SHALL detach it without a question: the screen leaves th
 #### Scenario: Terminate
 - **WHEN** the user terminates a remote screen and confirms
 - **THEN** the host ends the screen's panes and their processes
+
+#### Scenario: Last pane of a remote screen
+- **WHEN** the user closes the only pane of a remote screen of `vm1`
+- **THEN** `vm1` no longer has that screen, it leaves the open list, and the window shows another screen
+
+#### Scenario: New terminal in a remote screen without panes
+- **WHEN** a remote screen of a host of an earlier version shows no panes after its last process exited, and the user starts a terminal in it
+- **THEN** the host starts the terminal in that screen, which keeps its ID and name
 
 ### Requirement: Reopen Offer
 When the user creates a screen on a host whose `remote.ready` lists screens that the window does not show, the client SHALL first offer to open those screens, each with its name and number of panes, or to create a new screen. Choosing New Screen explicitly within a host directory SHALL count as choosing creation and SHALL skip that offer.
@@ -165,7 +172,6 @@ The client SHALL retain host groups for recently connected hosts even when they 
 `/ws/remote` SHALL accept `update=1`; an authorized native main host connection SHALL support the corresponding explicit intent. A client SHALL request it only after the user confirms the versions and keeper-session behavior. An older native daemon may be updated only with verified instance identity, session keepers and the matching installed replacement. An eligible legacy daemon SHALL use Confirmed Legacy Daemon Migration instead. A missing replacement, newer daemon, absent session keepers or blocked legacy migration SHALL stop nothing and return an actionable failure. No update SHALL deliberately end sessions.
 
 The intent SHALL apply to one connection attempt and be consumed before a potentially mutating command; reconnect and ambiguous completion SHALL NOT replay it. Successful replacement SHALL report update progress and require a fresh handshake for the intended native daemon. A daemon already running the intended version SHALL remain running. Migration offers SHALL be structured metadata rather than inferred from message text; blocked legacy migration SHALL use `migration_unavailable` and SHALL NOT offer an ordinary update that cannot succeed.
-
 
 The hub SHALL report ordinary update availability only when the daemon version has lower SemVer precedence than its own version, accepting one optional `v` prefix and ignoring build metadata. Unknown versions SHALL not imply an available update. Availability SHALL also require the verified instance, session preservation and matching prepared replacement required by the shared replacement plan. The window SHALL use this metadata, including the keeper behavior, rather than comparing versions itself. This metadata SHALL never bypass the replacement checks above.
 
@@ -243,7 +249,6 @@ The experimental native workspace SHALL retain observations for the exact curren
 - **THEN** it is listed without being resumed automatically
 - **AND** a later explicit link click resumes using the saved local port, preserving the link's scheme, path, query and fragment, or reports the saved-port conflict without opening that URL
 
-
 #### Scenario: Native observation belongs to one connection
 - **WHEN** a native host reconnects or a delayed `ports.changed` belongs to its previous connection
 - **THEN** the replacement has no current observation until its own valid list arrives, and the delayed list cannot populate it
@@ -275,7 +280,6 @@ The local server SHALL persist the last observed screen directory per host separ
 Hidden hosts SHALL be excluded from catalog reads. An update for a hidden host SHALL return 409 without storing its observation.
 
 The file `remote-catalog.json` SHALL be written atomically with mode 0600 in the private configuration directory. It SHALL keep at most 20 host entries, each with at most 200 screens. Targets SHALL be valid and canonical, screen ids unique per host with 1–256 characters, names at most 200 characters, and pane counts nonnegative integers. Invalid writes and unknown fields SHALL be rejected without modifying the saved directory. Missing or corrupt files SHALL read as empty. The endpoints SHALL require the ordinary API authentication and origin checks and SHALL NOT be exposed on the control socket.
-
 
 After successful host readiness the hub SHALL store the handshake screen directory through the same validation and hidden-host rules. A local client MAY report later directory observations using `hub.catalog.observe` with `{target,screens}`; admitted observations SHALL be processed in connection order and SHALL never connect a host. Persistence and invalidation SHALL be handled by the hub; legacy PUT remains available.
 
@@ -610,7 +614,6 @@ The experimental native main workspace SHALL offer manual and detected outbound 
 - **WHEN** opening succeeds but the separately requested Remember operation fails
 - **THEN** the live mapping remains visible and usable, the failed save is reported separately, and the client does not claim the preference was saved
 
-
 ### Requirement: Native Forwarding Request Ownership
 Native forwarding requests SHALL retain the assigned local owner, exact mapping and request identity with bounded admission. Slow work for one mapping SHALL NOT block terminal delivery, host metadata, passive reads or admitted work for unrelated mappings. Unsubmitted work SHALL be discarded on owner shutdown, submitted work SHALL retain cleanup ownership, and no mutation SHALL be replayed after an uncertain result.
 
@@ -624,7 +627,6 @@ Native forwarding requests SHALL retain the assigned local owner, exact mapping 
 - **THEN** obsolete results cannot affect the replacement, unsent mutations and browser continuations are discarded, and owned cleanup finishes without resubmitting work
 - **AND** the client does not treat loss of a caller as proof that a service-owned forward stopped
 
-
 ### Requirement: Native Forwarding Reconciliation
 Native active and saved forwarding reads SHALL preserve their independent last-good values on failure and refresh passively on supported `hub.changed` notifications. Read invalidation SHALL NOT erase a valid mutation acknowledgement. Superseded snapshots SHALL NOT overwrite newer state, and reconciliation after an uncertain mutation SHALL report effective state without claiming that lost request succeeded.
 
@@ -635,7 +637,6 @@ Native active and saved forwarding reads SHALL preserve their independent last-g
 #### Scenario: Native lost reply and partial read failure
 - **WHEN** a mutation's reply is lost and either its active or saved refresh fails
 - **THEN** the request remains explicitly uncertain, each successfully read resource updates while the other's last-good state remains distinguishable, and no mutation is replayed
-
 
 ### Requirement: Native Forwarded Browser Activation
 Native browser opening for a remote loopback link SHALL require a deliberate captured source action, a validated opening acknowledgement and subsequent passive confirmation of the same up mapping. Only the admitted HTTP(S) scheme, path, query and fragment SHALL survive replacement with `localhost` and the confirmed local port. Browser consent SHALL be separately revocable and SHALL NOT follow a replacement terminal or owner. These checks do not reserve the listener across OS browser dispatch.
@@ -654,7 +655,6 @@ Native browser opening for a remote loopback link SHALL require a deliberate cap
 - **WHEN** another client stops a mapping and passive reconciliation observes that stop before browser dispatch
 - **THEN** the observed absent or changed mapping prevents browser dispatch from the old request
 - **AND** verification does not repeat the opening mutation to undo the Stop
-
 
 ### Requirement: Native Forwarded Browser Endpoint Scope
 Native desktop opening SHALL reuse the validated HTTP(S) opener and confirmed localhost mapping contract. A reproduced mismatch between the service's forwarding endpoint and the desktop browser endpoint SHALL be corrected or the affected opening path SHALL be unavailable with an explanation. Backend forwarding success alone SHALL NOT be reported as observed browser reachability, and the client SHALL NOT fall back to the original remote loopback URL.

@@ -197,7 +197,7 @@ An optional scripted-content probe SHALL run only an explicit local fixture. Its
 
 ### Requirement: Native Local Screen Workflow
 
-The experimental native desktop SHALL render each local screen from the assigned service's authoritative screen snapshot. Creating a split or tab, closing a pane and resizing a split SHALL use existing mux operations and preserve the service's ownership of terminal sessions. Selecting a tab SHALL change the window-local presentation state and, when the service announces `tab-select-v1`, SHALL persist the choice through `select_tab` as `mux-protocol` requires, without changing another window's shown tab. Unchanged panes SHALL retain their terminal view and session attachment across layout updates. Input and output SHALL remain scoped to the pane's assigned session and current connection generation. The local development workspace SHALL retain the isolated application lifetime rather than modifying an unrelated service's workspace.
+The experimental native desktop SHALL render each local screen from the assigned service's authoritative screen snapshot. Creating a split or tab, closing a pane and resizing a split SHALL use existing mux operations and preserve the service's ownership of terminal sessions. Selecting a tab SHALL change the window-local presentation state and, when the service announces `tab-select-v1`, SHALL persist the choice through `select_tab` as `mux-protocol` requires, without changing another window's shown tab. Unchanged panes SHALL retain their terminal view and session attachment across layout updates. Input and output SHALL remain scoped to the pane's assigned session and current connection generation. The local development workspace SHALL retain the isolated application lifetime rather than modifying an unrelated service's workspace. A screen the service removes with its last pane SHALL leave the window like a closed screen. Where a service of an earlier version keeps that screen without panes, the window SHALL close it with `close_screen` once the close of the pane it requested is confirmed; a screen without panes that the window only observes SHALL stay and SHALL offer one action that starts a terminal in it. A window without any screen SHALL offer one action that creates a screen.
 
 #### Scenario: Split and add a tab
 - **WHEN** a user splits a terminal and adds a tab in one of the resulting groups
@@ -213,8 +213,20 @@ The experimental native desktop SHALL render each local screen from the assigned
 - **THEN** the service applies the existing close semantics and the window removes only views absent from the resulting authoritative snapshot
 - **AND** output or queued input for the closed pane cannot be routed to another pane
 
+#### Scenario: Close the final pane of a screen
+- **WHEN** a user closes the only pane of a screen while the window holds another screen
+- **THEN** the screen leaves the window and the window shows another screen, chosen as after a closed screen
+
+#### Scenario: Close the final pane of the only screen
+- **WHEN** a user closes the only pane of the window's only screen
+- **THEN** the window shows no screen and offers to create one
+
+#### Scenario: Service of an earlier version keeps the screen
+- **WHEN** a user closes the only pane of a screen and the service confirms the close with the screen still listed, without panes
+- **THEN** the window sends `close_screen` for that screen and it leaves the window
+
 #### Scenario: New terminal after closing the final pane
-- **WHEN** the local screen has no panes and the user creates a terminal
+- **WHEN** the shown screen has no panes, as a service of an earlier version keeps it after a process exited, and the user creates a terminal
 - **THEN** the service recreates the screen with its existing ID and name and owns the new terminal session
 
 ### Requirement: Native Local Screen Catalog and Selection

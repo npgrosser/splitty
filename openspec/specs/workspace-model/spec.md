@@ -119,7 +119,7 @@ On `create_screen` the server SHALL create a screen whose root layout is a singl
 - **AND** the active screen is unchanged
 
 #### Scenario: Re-create a screen that ran empty
-- **WHEN** `create_screen` names screen `s1`, whose last pane was closed, with `newPaneId` `p9`
+- **WHEN** `create_screen` names screen `s1`, which a workspace saved by an earlier version holds without any pane, with `newPaneId` `p9`
 - **THEN** `s1` holds the single pane `p9` with a new session
 - **AND** `s1` keeps its name and its place in the screen order
 
@@ -127,6 +127,10 @@ On `create_screen` the server SHALL create a screen whose root layout is a singl
 - **WHEN** `create_screen` names screen `s1`, which has two panes with running sessions
 - **THEN** the op is rejected with a "screen already exists" error
 - **AND** `s1`, its panes and its sessions remain exactly as before
+
+#### Scenario: Create under the ID of a removed screen
+- **WHEN** `create_screen` names screen `s1`, which was removed with its last pane, with the name "Logs" and `newPaneId` `p9`
+- **THEN** a new screen `s1` named "Logs" holds the single pane `p9` at the end of the screen order
 
 ### Requirement: Screen Closing
 On `close_screen` the server SHALL remove the screen, end every session belonging to it, and remove it from the screen order. If the closed screen was active, the first screen remaining in the order SHALL become active, or no screen when none remains.
@@ -210,7 +214,7 @@ The session of a pane created by `split_pane` or `new_tab` SHALL start in the op
 - **THEN** the new terminal's session starts in `/home/me/app` with the default shell profile
 
 ### Requirement: Closing a Pane
-On `close_pane` the server SHALL require that the pane exists in the root layout or in a floating entry, SHALL end the pane's session when it has one, and SHALL remove the pane from the model. If the pane's slot holds other panes, only the pane SHALL be removed from the stack. Otherwise the slot SHALL be removed from its parent split, whose sizes become `resultingSizes` or equal fractions, and a split left with a single child SHALL be replaced by that child. Closing the last pane of the root layout SHALL leave the screen with an empty root slot. Closing the last pane of a floating entry SHALL remove the floating entry.
+On `close_pane` the server SHALL require that the pane exists in the root layout or in a floating entry, SHALL end the pane's session when it has one, and SHALL remove the pane from the model. If the pane's slot holds other panes, only the pane SHALL be removed from the stack. Otherwise the slot SHALL be removed from its parent split, whose sizes become `resultingSizes` or equal fractions, and a split left with a single child SHALL be replaced by that child. Closing the last pane of a floating entry SHALL remove the floating entry. Closing the last pane of the root layout while a floating entry still holds a pane SHALL leave the screen with an empty root slot. Closing the last pane of a screen, counting terminal, viewer and job panes in the root layout and in floating entries, SHALL remove the screen with the same op, as `close_screen` removes it: it leaves the screen order, and the first screen of the remaining order becomes active when it was the active one. This holds for the last screen of the workspace as well, which then has no screens.
 
 #### Scenario: Close one side of a split
 - **WHEN** `close_pane` is applied to one pane of a two-slot split
@@ -218,8 +222,21 @@ On `close_pane` the server SHALL require that the pane exists in the root layout
 - **AND** the closed pane's session is ended
 
 #### Scenario: Close the last pane of a screen
-- **WHEN** `close_pane` is applied to the only pane of a screen
-- **THEN** the screen still exists with an empty root slot and no panes
+- **WHEN** `close_pane` is applied to the only pane of screen `s1` while screen `s2` exists
+- **THEN** the pane's session is ended and `s1` no longer exists or appears in the screen order
+- **AND** `s2` is unchanged and is the active screen if `s1` was
+
+#### Scenario: Close the last pane of the last screen
+- **WHEN** `close_pane` is applied to the only pane of the workspace's only screen
+- **THEN** the workspace has no screens and no active screen
+
+#### Scenario: A floating or viewer pane keeps its screen
+- **WHEN** the last pane of a screen's root layout is closed while a floating entry holds a pane, or the last terminal is closed while a viewer pane remains
+- **THEN** the screen still exists with its remaining pane
+
+#### Scenario: Close screen after its last pane
+- **WHEN** a client of an earlier version sends `close_screen` for a screen the server already removed with its last pane
+- **THEN** the op is rejected as for any unknown screen and the workspace is unchanged
 
 #### Scenario: Close an unknown pane
 - **WHEN** `close_pane` names a pane the screen does not contain
@@ -464,11 +481,12 @@ The `apply_template` operation SHALL register a complete terminal layout atomica
 - **AND** invalid templates or colliding IDs leave all workspace state unchanged
 
 ### Requirement: Server Close On Exit
-The owning server SHALL apply its close_on_exit setting to ordinary terminal panes without requiring a client: always closes any exit, graceful only a known zero exit, never retains. Managed job panes SHALL retain their outcome. Automatic closure SHALL use the normal pane closing behavior, retaining an empty screen.
+The owning server SHALL apply its close_on_exit setting to ordinary terminal panes without requiring a client: always closes any exit, graceful only a known zero exit, never retains. Managed job panes SHALL retain their outcome. Automatic closure SHALL use the normal pane closing behavior: a screen whose last pane closes this way is removed with it (see Closing a Pane), and connected clients SHALL receive a `mux.nudge` without a `screenId` for the changed set of screens.
 
 #### Scenario: Unattended exit
 - **WHEN** an ordinary pane exits successfully while no client is attached and close_on_exit is graceful
-- **THEN** its pane and session are removed and its empty screen remains
+- **THEN** its pane and session are removed
+- **AND** its screen is removed with it when that pane was the screen's last, and remains with its other panes otherwise
 
 #### Scenario: Retained outcomes
 - **WHEN** an ordinary pane fails under graceful, exits under never, or a managed job exits under any policy
