@@ -53,6 +53,10 @@ Keep temporary fixture paths short enough for Unix sockets.
   (`native_workspace/host_catalog.rs`), so a reconnect does not list them while
   the host is not ready. Only removals are reported: a live catalog has no
   pane counts.
+- Ports: the window shows detected ports, forwards and saved rules and starts
+  forwards only on explicit actions. `remote.autoForwardPorts` is the
+  service's (`hub-auto-forward-v1`, `splitty_server::hub::auto_forward`); the
+  window has no automatic forwarding of its own.
 - One captured local/remote rename editor: double-click/F2/context menu;
   Enter/Blur commit, Escape cancels. Names change only after canonical readback.
   Hover actions have a fixed lane, preserving title hitboxes and a full tooltip.

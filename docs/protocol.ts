@@ -1005,7 +1005,7 @@ interface MuxWelcome extends ServerEvent {
    * remove_replies and mark_sent, viewer.review_answer, and the endpoints
    * under /api/viewer; a window offers none of them without it.
    */
-  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1" and "ssh-prompts-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1", "screen-names-v1", "template-names-v1" and "scratchpad-versions-v1"; absent on old servers
+  capabilities?: string[]; // includes "workspace-catalog-v1", "screen-placement-v1", "hub-host-decisions-v1", "ssh-prompts-v1" and "hub-auto-forward-v1" (local main connections only), "server-templates-v1", "serverDerivedPaneState", "managed-jobs-v1", "editor-open-v1", "file-offer-v1", "upload-control-v1", "pty-size-v1", "scratchpad-v1", "layout-arrange-v1", "tab-select-v1", "tab-placement-v1", "viewer-v1", "viewer-annotations-v1", "program-status-v1", "close-assessment-v1", "notification-notices-v1", "screen-names-v1", "template-names-v1" and "scratchpad-versions-v1"; absent on old servers
 }
 
 /** Summary of a screen (sent in mux.welcome — NOT the full state). */
@@ -1112,8 +1112,9 @@ interface ListeningPort {
  * server checks every 2 seconds while a client is connected.
  *
  * Linux only: other servers never send it. Not a mux.* message. Through the
- * hub (section 10) it is one of the host daemon's relayed messages. A client
- * ignores server messages of a type it does not know.
+ * hub (section 10) it is one of the host daemon's relayed messages; a hub that
+ * announces hub-auto-forward-v1 also reads it there, for remote.autoForwardPorts
+ * (see HubChanged). A client ignores server messages of a type it does not know.
  */
 interface PortsChanged extends ServerEvent {
   type: "ports.changed";
@@ -3245,6 +3246,15 @@ interface HubDirectory {
 /** Sent only on the local service connection; no application frames are
  * injected into a host relay after remote.ready. Refresh passive reads. */
 interface HubChanged { type: "hub.changed" }
+
+/** hub-auto-forward-v1 (local main connections): with remote.autoForwardPorts
+ * on, the hub forwards a port that appears in a host's ports.changed after
+ * the first list of a relay, as an automatic request (a paused saved rule
+ * stays paused, a saved local port is kept, nothing is remembered), once for
+ * all relays of the host while one runs, and once per port and process. The
+ * forward shows up in GET /api/remote/forwards and is announced by
+ * hub.changed; there is no message of its own. A client sends no automatic
+ * POST; without the capability nothing is forwarded automatically. */
 /** ssh-prompts-v1: the questions OpenSSH asks the local service's askpass
  * helper (passwords, key passphrases, host key confirmations).
  * GET /api/remote/ssh-prompts (native ssh.prompts.get, localHub only) lists
