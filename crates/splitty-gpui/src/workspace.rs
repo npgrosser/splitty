@@ -2159,16 +2159,8 @@ impl Workspace {
         if model.has_pending_create() {
             return;
         }
-        let used: HashSet<_> = model
-            .screens()
-            .iter()
-            .filter_map(|screen| screen.name.as_deref())
-            .collect();
-        let name = (1..=model.screens().len() + 1)
-            .map(|number| format!("Screen {number}"))
-            .find(|name| !used.contains(name.as_str()))
-            .unwrap_or_else(|| "Screen".into());
-        self.send_captured(model.source_token(), Command::CreateScreen(name), cx);
+        // The service names it (`mux-protocol`, Server-Chosen Screen Names).
+        self.send_captured(model.source_token(), Command::CreateScreen(None), cx);
     }
     fn switch_screen_key(
         &mut self,
@@ -4761,7 +4753,7 @@ impl Workspace {
                     self.finish_smoke(false, cx);
                     return;
                 }
-                self.send(Command::CreateScreen("Native Smoke 2".into()), cx);
+                self.send(Command::CreateScreen(Some("Native Smoke 2".into())), cx);
                 self.smoke_stage = 10;
             }
             10 if model.screens().len() == 2

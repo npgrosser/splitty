@@ -743,7 +743,11 @@ impl SourceRuntime {
                 unreachable!("close is handled before normal commands")
             }
             CommandKind::CreateScreen(name) => {
-                let result = model.create_screen(&self.client, &name).map(|ids| {
+                let result = match name {
+                    Some(name) => model.create_screen(&self.client, &name),
+                    None => model.create_default_screen(&self.client),
+                }
+                .map(|ids| {
                     self.select_created = Some(ids.screen_id);
                 });
                 if result.is_ok() {
@@ -1041,6 +1045,11 @@ impl SourceRuntime {
                                 .any(|cap| cap == mux::CLOSE_ASSESSMENT_CAPABILITY)
                         }),
                     );
+                    workspace.set_screen_names_supported(
+                        json["capabilities"].as_array().is_some_and(|caps| {
+                            caps.iter().any(|cap| cap == mux::SCREEN_NAMES_CAPABILITY)
+                        }),
+                    );
                     workspace.set_tab_selection_supported(supports_tab_selection);
                     workspace.set_program_status_supported(
                         json["capabilities"].as_array().is_some_and(|caps| {
@@ -1177,7 +1186,10 @@ impl SourceRuntime {
                             && model.catalog_initialized()
                             && model.screens().is_empty()
                         {
-                            match model.create_screen(&self.client, "Screen 1") {
+                            // Another window may create it first; its catalog
+                            // then drops this one (`mux-protocol`, Client
+                            // Resynchronization).
+                            match model.create_first_screen(&self.client) {
                                 Ok(_) => delta.snapshot_changed = true,
                                 Err(error) => out.push(Update::Status(format!(
                                     "Initial screen not created: {error}"

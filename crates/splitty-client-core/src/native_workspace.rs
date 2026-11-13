@@ -281,7 +281,8 @@ pub enum CommandKind {
         request_id: uuid::Uuid,
         pinned: bool,
     },
-    CreateScreen(String),
+    /// A new local Screen, named by its service when the name is `None`.
+    CreateScreen(Option<String>),
     SwitchScreen(ScreenKey),
     MoveScreen {
         screen: ScreenKey,
@@ -3024,7 +3025,7 @@ mod close_tests {
         commands
             .send(Command::new(
                 scope,
-                CommandKind::CreateScreen("must not run".into()),
+                CommandKind::CreateScreen(Some("must not run".into())),
             ))
             .await
             .unwrap();

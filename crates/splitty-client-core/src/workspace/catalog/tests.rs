@@ -53,6 +53,22 @@ fn remote_rename_requires_an_open_live_reference_and_ready_source() {
     local.ready = false;
     assert!(local.validate_screen_rename("same").is_err());
 }
+/// mux-protocol, Server-Chosen Screen Names, Older server: the smallest
+/// "Screen N" no Screen of the catalog uses; never a position.
+#[test]
+fn an_older_service_gets_the_smallest_free_default_name() {
+    let mut model = model(&["a"]);
+    model.catalog_in_flight = Some(model.mutation);
+    model
+        .apply_catalog(
+            model.connection_id,
+            &json!({"type":"mux.workspace_snapshot", "screens":[
+                {"id":"a","name":"Screen 1"},{"id":"b","name":""},{"id":"c","name":"Screen 3"}
+            ]}),
+        )
+        .unwrap();
+    assert_eq!(model.fallback_screen_name(), "Screen 2");
+}
 fn snapshot(id: &str, panes: &[&str]) -> Value {
     json!({"type":"mux.screen_snapshot", "screen":{"id":id,"revision":1,
         "root":{"type":"slot","id":format!("slot-{id}"),"paneIds":panes,"activePaneId":panes.first()},
@@ -664,6 +680,8 @@ mod service {
         client: Client,
         model: SourceWorkspace,
         output: HashMap<String, Vec<u8>>,
+        /// First Screens the service refused because another window's came first.
+        refused: Vec<String>,
     }
     impl Window {
         async fn next(&mut self) {
@@ -704,6 +722,15 @@ mod service {
                     );
                     WorkspaceDelta::default()
                 }
+                Some("mux.op_failed")
+                    if value["op"] == "create_screen"
+                        && value["error"] == "the workspace already has screens" =>
+                {
+                    self.refused
+                        .push(value["screenId"].as_str().unwrap_or_default().to_owned());
+                    self.model.mark_catalog_dirty();
+                    WorkspaceDelta::default()
+                }
                 Some("mux.op_failed") => panic!("unexpected rejected operation: {value}"),
                 _ => WorkspaceDelta::default(),
             };
@@ -739,6 +766,79 @@ mod service {
         }
     }
 
+    async fn welcomed_window(service: &EmbeddedService) -> Window {
+        let mut client = service.connect().await.unwrap();
+        let welcome = loop {
+            let event = client.next_event().await.unwrap().unwrap();
+            if let Some(json) = event.json().filter(|json| json["type"] == "mux.welcome") {
+                break json.clone();
+            }
+        };
+        let mut model = SourceWorkspace::new(client.connection_id());
+        model.set_catalog_supported(true);
+        model.set_screen_names_supported(
+            welcome["capabilities"]
+                .as_array()
+                .is_some_and(|all| all.iter().any(|c| c == "screen-names-v1")),
+        );
+        model.mark_catalog_dirty();
+        let mut window = Window {
+            client,
+            model,
+            output: HashMap::new(),
+            refused: Vec::new(),
+        };
+        window
+            .until(|window| window.model.catalog_initialized())
+            .await;
+        window
+    }
+
+    /// mux-protocol, Client Resynchronization, Two windows start against an
+    /// empty workspace: both send their first Screen, the service keeps one,
+    /// names it, and the other window's catalog drops its own.
+    #[tokio::test]
+    async fn two_windows_starting_together_share_one_first_screen() {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let service = EmbeddedService::isolated();
+        let mut a = welcomed_window(&service).await;
+        let mut b = welcomed_window(&service).await;
+        assert!(a.model.screens().is_empty() && b.model.screens().is_empty());
+        let first_a = a.model.create_first_screen(&a.client).unwrap();
+        let first_b = b.model.create_first_screen(&b.client).unwrap();
+        a.until(|window| window.ready(&first_a) || !window.refused.is_empty())
+            .await;
+        b.until(|window| window.ready(&first_b) || !window.refused.is_empty())
+            .await;
+        let (winner, loser, kept) = if a.refused.is_empty() {
+            (&mut a, &mut b, first_a)
+        } else {
+            (&mut b, &mut a, first_b)
+        };
+        assert!(winner.refused.is_empty());
+        assert_eq!(loser.refused.len(), 1);
+        loser
+            .until(|window| {
+                !window.model.has_pending_create()
+                    && window.model.screens().len() == 1
+                    && window.model.screens()[0].id.as_str() == kept.screen_id
+            })
+            .await;
+        assert_eq!(loser.model.screens()[0].name.as_deref(), Some("Screen 1"));
+        assert_eq!(
+            loser.model.shown_screen_id(),
+            Some(kept.screen_id.as_str()),
+            "the loser shows the service's Screen"
+        );
+        winner
+            .until(|window| window.model.screens().len() == 1)
+            .await;
+        assert_eq!(winner.model.screens()[0].name.as_deref(), Some("Screen 1"));
+        service.close().await.unwrap();
+    }
+
     #[tokio::test]
     async fn local_screens_keep_live_sessions_through_switch_rename_close_and_reopen() {
         if !splitty_core::pty::testing::pty_available() {
@@ -763,6 +863,7 @@ mod service {
             client,
             model,
             output: HashMap::new(),
+            refused: Vec::new(),
         };
         window
             .until(|window| window.model.catalog_initialized())
@@ -991,6 +1092,7 @@ mod service {
             client,
             model,
             output: HashMap::new(),
+            refused: Vec::new(),
         };
         window
             .until(|window| window.model.catalog_initialized())

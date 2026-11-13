@@ -309,14 +309,37 @@ impl Client {
         self.submit_create_screen(ids, None)
     }
 
-    fn submit_create_screen(&self, ids: &ScreenIds, name: Option<&str>) -> io::Result<()> {
+    /// The first Screen of an empty workspace (`onlyIfEmpty`): a service with
+    /// any Screen refuses it with `mux.op_failed`.
+    pub(crate) fn create_first_screen_with_ids(
+        &self,
+        ids: &ScreenIds,
+        name: Option<&str>,
+    ) -> io::Result<()> {
+        self.submit_screen_creation(ids, name, true)
+    }
+
+    pub(crate) fn submit_create_screen(
+        &self,
+        ids: &ScreenIds,
+        name: Option<&str>,
+    ) -> io::Result<()> {
+        self.submit_screen_creation(ids, name, false)
+    }
+
+    fn submit_screen_creation(
+        &self,
+        ids: &ScreenIds,
+        name: Option<&str>,
+        only_if_empty: bool,
+    ) -> io::Result<()> {
         if name.is_some_and(|name| name.len() > 256) {
             return Err(invalid("screen name too long"));
         }
         identifier(&ids.screen_id)?;
         identifier(&ids.pane_id)?;
         self.command(name.map_or(0, str::len), || {
-            create_screen_message(ids, name)
+            create_screen_message(ids, name, only_if_empty)
         })
     }
 
@@ -814,10 +837,13 @@ fn observe_attachment(
     }
 }
 
-fn create_screen_message(ids: &ScreenIds, name: Option<&str>) -> Value {
+fn create_screen_message(ids: &ScreenIds, name: Option<&str>, only_if_empty: bool) -> Value {
     let mut op = json!({"type":"create_screen", "screenId":ids.screen_id, "newPaneId":ids.pane_id});
     if let Some(name) = name {
         op["name"] = json!(name);
+    }
+    if only_if_empty {
+        op["onlyIfEmpty"] = json!(true);
     }
     json!({"type":"mux.op", "screenId":"", "op":op})
 }
@@ -834,10 +860,16 @@ mod tests {
             pane_id: "pane".into(),
         };
         let expected = json!({"type":"mux.op","screenId":"","op":{"type":"create_screen","screenId":"screen","newPaneId":"pane"}});
-        assert_eq!(create_screen_message(&ids, None), expected);
-        let mut named = expected;
+        assert_eq!(create_screen_message(&ids, None, false), expected);
+        let mut named = expected.clone();
         named["op"]["name"] = json!("Local name");
-        assert_eq!(create_screen_message(&ids, Some("Local name")), named);
+        assert_eq!(
+            create_screen_message(&ids, Some("Local name"), false),
+            named
+        );
+        let mut first = expected;
+        first["op"]["onlyIfEmpty"] = json!(true);
+        assert_eq!(create_screen_message(&ids, None, true), first);
     }
 
     #[test]

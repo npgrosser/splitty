@@ -130,7 +130,7 @@ async fn worker_transfers_existing_new_and_external_screens_without_reattach_or_
     commands
         .send(Command::new(
             scope,
-            CommandKind::CreateScreen("Target".into()),
+            CommandKind::CreateScreen(Some("Target".into())),
         ))
         .await
         .unwrap();

@@ -86,6 +86,7 @@ pub struct SourceWorkspace {
     templates_supported: bool,
     viewers_supported: bool,
     close_assessments_supported: bool,
+    screen_names_supported: bool,
     template_failures: HashMap<String, (String, String)>,
     reconciling: bool,
     route_generation: u64,
@@ -307,6 +308,15 @@ impl SourceWorkspace {
     pub(crate) fn set_close_assessments_supported(&mut self, value: bool) {
         self.close_assessments_supported = value;
     }
+    /// Whether this connection's service names new Screens (`screen-names-v1`).
+    pub(crate) fn set_screen_names_supported(&mut self, value: bool) {
+        self.screen_names_supported = value;
+    }
+    /// Whether the local Screen `id` was created here and its service has not
+    /// confirmed it yet.
+    pub fn is_creating(&self, id: &str) -> bool {
+        self.pending_screens.contains_key(id)
+    }
 
     pub fn new(connection_id: Uuid) -> Self {
         Self {
@@ -335,6 +345,7 @@ impl SourceWorkspace {
             templates_supported: false,
             viewers_supported: false,
             close_assessments_supported: false,
+            screen_names_supported: false,
             template_failures: HashMap::new(),
             reconciling: false,
             route_generation: 0,
@@ -1056,6 +1067,41 @@ impl SourceWorkspace {
     }
 
     pub fn create_screen(&mut self, client: &Client, name: &str) -> io::Result<ScreenIds> {
+        self.create_local_screen(client, Some(name), false)
+    }
+
+    /// A new Screen named by its service (`mux-protocol`, Server-Chosen
+    /// Screen Names); a service without `screen-names-v1` gets the smallest
+    /// free "Screen N" of the catalog.
+    pub fn create_default_screen(&mut self, client: &Client) -> io::Result<ScreenIds> {
+        self.create_local_screen(client, None, false)
+    }
+
+    /// The first Screen of an empty workspace: the service refuses it once
+    /// another window created one, and the next catalog drops it here.
+    pub fn create_first_screen(&mut self, client: &Client) -> io::Result<ScreenIds> {
+        self.create_local_screen(client, None, true)
+    }
+
+    /// The name an older service gets for a new Screen.
+    fn fallback_screen_name(&self) -> String {
+        let used: HashSet<&str> = self
+            .catalog
+            .iter()
+            .filter_map(|screen| screen.name.as_deref())
+            .collect();
+        (1..)
+            .map(|number| format!("Screen {number}"))
+            .find(|name| !used.contains(name.as_str()))
+            .expect("a finite catalog leaves a free number")
+    }
+
+    fn create_local_screen(
+        &mut self,
+        client: &Client,
+        name: Option<&str>,
+        first: bool,
+    ) -> io::Result<ScreenIds> {
         self.require_local()?;
         self.require_routes_settled()?;
         self.check_connection(client)?;
@@ -1077,7 +1123,15 @@ impl SourceWorkspace {
         screen.set_tab_selection_supported(self.tab_selection_supported);
         screen.resync_pending = true;
         self.models.insert(ids.screen_id.clone(), screen);
-        if let Err(error) = client.create_screen_with_ids(&ids, name) {
+        let fallback =
+            (name.is_none() && !self.screen_names_supported).then(|| self.fallback_screen_name());
+        let name = name.or(fallback.as_deref());
+        let submitted = if first {
+            client.create_first_screen_with_ids(&ids, name)
+        } else {
+            client.submit_create_screen(&ids, name)
+        };
+        if let Err(error) = submitted {
             self.models.remove(&ids.screen_id);
             return Err(error);
         }

@@ -75,7 +75,7 @@ async fn foreign_source_envelopes_cannot_create_split_select_input_or_enqueue_se
     let zoom_request = Uuid::new_v4();
     let settings_request = Uuid::new_v4();
     for kind in [
-        CommandKind::CreateScreen("foreign".into()),
+        CommandKind::CreateScreen(Some("foreign".into())),
         CommandKind::Split {
             screen: model.screen_key(screen),
             pane: route.pane_id().into(),
@@ -392,7 +392,7 @@ fn absent_or_rewrapped_authority_never_admits_a_non_lifecycle_intent() {
     let current = SourceWorkspace::new(Uuid::new_v4());
     let missing = Command {
         source: None,
-        kind: CommandKind::CreateScreen("x".into()),
+        kind: CommandKind::CreateScreen(Some("x".into())),
     };
     assert!(missing.validate_source(current.source_token()).is_err());
     let foreign = SourceWorkspace::new(Uuid::new_v4());

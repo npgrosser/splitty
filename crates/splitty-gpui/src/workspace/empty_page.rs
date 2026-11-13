@@ -211,7 +211,10 @@ mod tests {
             window.simulate_click(action.center(), Modifiers::default());
             let command = receiver.try_recv().expect("a Screen is requested");
             assert_eq!(command.source_token(), Some(local));
-            assert!(matches!(command.kind(), Command::CreateScreen(name) if name == "Screen 1"));
+            assert!(
+                matches!(command.kind(), Command::CreateScreen(None)),
+                "named by the service"
+            );
             assert!(receiver.try_recv().is_err(), "requested once");
         });
     }

@@ -2814,9 +2814,18 @@ impl Workspace {
                     && !editing;
                 let hover_transition =
                     Transition::new(Duration::from_millis(80)).easing(Easing::Ease);
+                // Never a label by position: it could repeat a real Screen's
+                // name (`mux-protocol`, Server-Chosen Screen Names).
                 let label = entry.name().map(super::hosts::display).unwrap_or_else(|| {
                     if !remote {
-                        return format!("Screen {}", index + 1);
+                        let creating = window_model
+                            .source(key.source_id())
+                            .is_some_and(|source| source.is_creating(key.screen_id()));
+                        return if creating {
+                            "Creating Screen…".into()
+                        } else {
+                            "Unnamed Screen".into()
+                        };
                     }
                     match window_model
                         .source(key.source_id())

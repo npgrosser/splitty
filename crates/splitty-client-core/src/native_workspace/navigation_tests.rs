@@ -178,7 +178,7 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
     commands
         .send(Command::new(
             scope,
-            CommandKind::CreateScreen("Second".into()),
+            CommandKind::CreateScreen(Some("Second".into())),
         ))
         .await
         .unwrap();
@@ -190,7 +190,7 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
     commands
         .send(Command::new(
             scope,
-            CommandKind::CreateScreen("Third".into()),
+            CommandKind::CreateScreen(Some("Third".into())),
         ))
         .await
         .unwrap();
@@ -291,7 +291,7 @@ async fn worker_steps_latest_screen_and_hovered_group_without_retargeting() {
     commands
         .send(Command::new(
             scope,
-            CommandKind::CreateScreen("Fourth".into()),
+            CommandKind::CreateScreen(Some("Fourth".into())),
         ))
         .await
         .unwrap();

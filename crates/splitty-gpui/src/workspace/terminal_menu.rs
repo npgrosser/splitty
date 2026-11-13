@@ -492,15 +492,14 @@ impl Workspace {
         let mut choices: Vec<_> = model
             .screens()
             .iter()
-            .enumerate()
-            .filter(|(_, screen)| screen.id.as_str() != current_screen)
-            .map(|(index, screen)| {
+            .filter(|screen| screen.id.as_str() != current_screen)
+            .map(|screen| {
                 let label = screen
                     .name
                     .as_deref()
                     .filter(|name| !name.is_empty())
                     .map(hosts::display)
-                    .unwrap_or_else(|| format!("Screen {}", index + 1));
+                    .unwrap_or_else(|| "Unnamed Screen".to_owned());
                 (TransferChoice::Existing(screen.id.to_string()), label)
             })
             .collect();
