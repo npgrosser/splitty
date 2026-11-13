@@ -149,7 +149,16 @@ mod tests {
     }
     #[test]
     fn pressure_rejects_replacement_before_copying() {
-        let budget = ConnectionBudget::default();
+        // Saturate a private process budget, not the one shared by the other
+        // tests of this binary.
+        let budget = ConnectionBudget::new(
+            splitty_transport::budget::ProcessBudget::new(
+                splitty_transport::wire::CONNECTION_BYTES,
+                splitty_transport::wire::CONNECTION_CONTROL_BYTES,
+            ),
+            splitty_transport::wire::CONNECTION_BYTES,
+            splitty_transport::wire::CONNECTION_CONTROL_BYTES,
+        );
         let mut source = SourceWorkspace::new(Uuid::new_v4());
         let held = budget
             .reserve(

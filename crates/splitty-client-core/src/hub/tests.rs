@@ -224,7 +224,7 @@ pub(crate) mod fake_peer {
             assert!(peer.recv().await.is_none(), "unexpected automatic retry");
             peer.finish().await.unwrap();
         });
-        let api = Connector::default().local(&info).await.unwrap();
+        let api = Connector::isolated().local(&info).await.unwrap();
         (api.into(), task, dir)
     }
 

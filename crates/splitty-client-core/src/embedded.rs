@@ -20,7 +20,7 @@ impl EmbeddedService {
         Self {
             runtime: Some(runtime),
             control: None,
-            connector: Connector::default(),
+            connector: connector(),
             scratch: None,
         }
     }
@@ -51,7 +51,7 @@ impl EmbeddedService {
         Self {
             runtime: Some(runtime),
             control: Some(control),
-            connector: Connector::default(),
+            connector: connector(),
             scratch: Some(scratch),
         }
     }
@@ -72,8 +72,7 @@ impl EmbeddedService {
     }
 
     pub(crate) async fn api_stream(&self) -> io::Result<crate::api_stream::ApiStream> {
-        self.api_stream_with_context(splitty_transport::queue::Context::default())
-            .await
+        self.api_stream_with_context(self.connector.context()).await
     }
 
     pub(crate) async fn api_stream_with_context(
@@ -109,7 +108,7 @@ impl EmbeddedService {
         Self {
             runtime: Some(runtime),
             control: Some(control),
-            connector: Connector::default(),
+            connector: connector(),
             scratch: None,
         }
     }
@@ -158,6 +157,20 @@ impl EmbeddedService {
         tokio::spawn(async move { shutdown(runtime, control, scratch).await })
             .await
             .map_err(io::Error::other)?
+    }
+}
+
+/// A service's streams share the process-wide admission and byte budget. The
+/// unit tests of this crate run many services concurrently in one process, so
+/// there each service gets its own limits and cannot exhaust another test's.
+fn connector() -> Connector {
+    #[cfg(test)]
+    {
+        Connector::isolated()
+    }
+    #[cfg(not(test))]
+    {
+        Connector::default()
     }
 }
 

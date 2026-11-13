@@ -384,7 +384,7 @@ fn own_settings_event_before_ack_requires_fresh_read_without_uncertainty() {
             let (service, path) = crate::appearance::local::tests::fixture_writing_to(
                 splitty_core::config::config_path(),
             );
-            let connector = Connector::default();
+            let connector = Connector::isolated();
             let session = connector
                 .embedded(service.state.clone(), Role::Main)
                 .await

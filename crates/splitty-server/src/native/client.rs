@@ -3,7 +3,7 @@
 use crate::service::catalog::{Operation, Role};
 use splitty_transport::{
     admission,
-    budget::Charged,
+    budget::{Charged, ConnectionBudget, ProcessBudget},
     negotiation,
     peer::{Incoming, Peer, Sender},
     queue,
@@ -156,24 +156,55 @@ pub struct Pending {
 }
 
 /// One trusted connector shares these quota keys across every stream it opens.
+/// Its streams count against the process-wide admission and byte budget,
+/// except for a connector made by `isolated()`.
 pub struct Connector {
     backend: Arc<admission::Backend>,
     domain: Arc<admission::Domain>,
     server_domain: Arc<admission::Domain>,
+    admission: Arc<admission::Admission>,
+    process: Arc<ProcessBudget>,
 }
 impl Default for Connector {
     fn default() -> Self {
-        Self {
-            backend: admission::Backend::new(),
-            domain: admission::Domain::new(),
-            server_domain: admission::Domain::new(),
-        }
+        Self::with_limits(admission::Admission::global(), ProcessBudget::global())
     }
 }
 
 impl Connector {
+    fn with_limits(admission: Arc<admission::Admission>, process: Arc<ProcessBudget>) -> Self {
+        Self {
+            backend: admission::Backend::new(),
+            domain: admission::Domain::new(),
+            server_domain: admission::Domain::new(),
+            admission,
+            process,
+        }
+    }
+
+    /// A connector with its own admission and byte budget, each at the
+    /// process-wide limits. For in-process test services: the tests of one
+    /// binary run concurrently and would otherwise exhaust each other's
+    /// process-wide quota. Production keeps `Connector::default()`, so all
+    /// streams of a process share one set of limits.
+    pub fn isolated() -> Self {
+        Self::with_limits(
+            Arc::new(admission::Admission::default()),
+            ProcessBudget::new(wire::PROCESS_BYTES, wire::PROCESS_CONTROL_BYTES),
+        )
+    }
+
+    /// A new owner context charged to this connector's process byte budget.
+    pub fn context(&self) -> queue::Context {
+        queue::Context::new(ConnectionBudget::new(
+            self.process.clone(),
+            wire::CONNECTION_BYTES,
+            wire::CONNECTION_CONTROL_BYTES,
+        ))
+    }
+
     pub fn admit(&self) -> io::Result<Pending> {
-        self.admit_context(queue::Context::default())
+        self.admit_context(self.context())
     }
 
     /// The native owner supplies the same context used for IPC delivery and
@@ -185,7 +216,7 @@ impl Connector {
                 "native owner closed",
             ));
         }
-        let admission = admission::Admission::global();
+        let admission = &self.admission;
         let carrier = admission.carrier().map_err(super::busy)?;
         let opening = admission
             .begin(admission::Assignment::new(
@@ -228,7 +259,7 @@ impl Connector {
                 "native owner closed",
             ));
         }
-        let admission = admission::Admission::global();
+        let admission = &self.admission;
         let server_carrier = admission.carrier().map_err(super::busy)?;
         let server_opening = admission
             .begin(admission::Assignment::new(
@@ -251,7 +282,7 @@ impl Connector {
         };
         // Exactly one service task per admitted stream. It owns its capacity
         // and pipe charge until cleanup of admitted operations is complete.
-        let server_context = queue::Context::default();
+        let server_context = self.context();
         let task_context = server_context.clone();
         let task = tokio::spawn(async move {
             let _pipe_bytes = pipe_bytes;
@@ -332,7 +363,7 @@ impl Connector {
                 "native owner closed",
             ));
         }
-        let admission = admission::Admission::global();
+        let admission = &self.admission;
         let server_carrier = admission.carrier().map_err(super::busy)?;
         let server_opening = admission
             .begin(admission::Assignment::new(
@@ -352,7 +383,7 @@ impl Connector {
         let (client, server) = tokio::io::duplex(64 * 1024);
         let (read, write) = tokio::io::split(client);
         let (mut server_read, mut server_write) = tokio::io::split(server);
-        let server_context = queue::Context::default();
+        let server_context = self.context();
         let task_context = server_context.clone();
         let task = tokio::spawn(async move {
             let _pipe_bytes = pipe_bytes;
@@ -627,6 +658,48 @@ impl futures::Sink<tokio_tungstenite::tungstenite::Message> for SessionSink {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn an_isolated_connector_charges_its_own_admission_and_byte_budget() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = crate::service::runtime::build(
+            "embedded",
+            None,
+            Arc::new(splitty_core::pty::terminal::LocalTerminals),
+            &directory.path().join("control.sock"),
+        );
+        assert!(Arc::ptr_eq(
+            &Connector::default().admission,
+            &admission::Admission::global()
+        ));
+        let connector = Connector::isolated();
+        assert!(!Arc::ptr_eq(
+            &connector.admission,
+            &admission::Admission::global()
+        ));
+        let client = connector
+            .embedded(runtime.state.clone(), Role::Main)
+            .await
+            .unwrap();
+        // Both ends of the embedded pipe hold a carrier and a stream slot.
+        let counts = connector.admission.counts();
+        assert_eq!((counts.carriers, counts.streams), (2, 2));
+        let budget = client.sender().context().budget;
+        assert!(Arc::ptr_eq(&budget.process, &connector.process));
+        assert!(connector.process.used() > 0);
+        client.finish().await.unwrap();
+        assert_eq!(
+            connector.admission.counts(),
+            admission::Counts {
+                carriers: 0,
+                streams: 0,
+                opening: 0,
+                workers: 0
+            }
+        );
+        assert_eq!(connector.process.used(), 0);
+        runtime.close().await.unwrap();
+    }
 
     #[cfg(unix)]
     #[tokio::test]

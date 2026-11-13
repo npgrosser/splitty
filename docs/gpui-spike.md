@@ -2259,7 +2259,10 @@ tests that assume Linux key semantics:
 `keys_follow_modes_and_leave_printable_commits_to_platform` (Option is not
 Alt) and `focused_pty_keeps_tab_bytes_while_find_and_controls_traverse` (find
 is Cmd+F). In `splitty-client-core`, 45 tests fail on macOS before these
-changes, mostly with "Not a directory" from test paths. Two document and
-palette tests fail only under parallel load, with "transport byte budget
-exhausted", and pass alone. Input methods, dead keys and the clipboard are
+changes, mostly with "Not a directory" from test paths. Document and palette
+tests used to fail under parallel load with "transport byte budget
+exhausted": the crate's test services shared the process-wide stream
+admission (16 concurrent openings, 128 streams), whose exhaustion reports
+that message. Each test service now has its own limits
+(`Connector::isolated()`). Input methods, dead keys and the clipboard are
 not verified on macOS, and the look was checked by eye.

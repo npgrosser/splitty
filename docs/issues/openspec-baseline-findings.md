@@ -553,8 +553,14 @@ that area touches them.
   `hub_tests::pending_failed_hub_read_does_not_block_settings_or_terminal_output` and
   `ports_tests::ports_slow_start_keeps_terminal_host_writes_and_passive_reads_responsive` ("Ports worker deadline:
   Elapsed") fail in most runs of `cargo test -p splitty-client-core --lib native_workspace`, also with every
-  inherited `SPLITTY_*` variable removed. Not investigated further: shared state between the tests or deadlines too
-  short under load.
+  inherited `SPLITTY_*` variable removed. **Mostly fixed (2026-11-13):** the crate's test services shared the
+  process-wide stream admission of `splitty_transport::admission` (16 concurrent openings, 128 streams); a native
+  workspace test alone holds up to 13 streams and 8 openings, so parallel tests exhausted it, and the rejected
+  stream reported "transport byte budget exhausted" (admission reuses the byte budget's error). Every service and
+  connector in the crate's unit tests now has its own admission and byte budget (`Connector::isolated()`);
+  production connectors keep the process-wide limits. No permit outlived its test. Still seen afterwards, in 3 of
+  10 full runs: `worker_maximize_filters_stale_visibility_and_size_reports_without_losing_output` (same assertion)
+  and once `pending_failed_hub_read_does_not_block_settings_or_terminal_output` (deadline); not investigated.
 - **Fixed (2026-11-12): `splitty-remote`'s SSH option tests depended on the environment.** `askpass_program()` in
   `crates/splitty-remote/src/ssh.rs` falls back to `SPLITTY_ASKPASS_PROGRAM`, which the desktop app sets for the
   processes it starts, its terminal panes included; run from such a pane, four tests saw `BatchMode=no` and failed.

@@ -51,7 +51,7 @@ pub(super) async fn begin(reader: &mut LocalServiceClient) {
 async fn feature_generations_are_fair_and_os_changes_do_not_reload_profiles() {
     let (service, path) = fixture();
     *service.state.shell_profiles.write().unwrap() = profiles();
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();
@@ -106,7 +106,7 @@ async fn feature_generations_are_fair_and_os_changes_do_not_reload_profiles() {
 async fn profile_limits_are_atomic_and_failure_does_not_poison_appearance() {
     let (service, path) = fixture();
     *service.state.shell_profiles.write().unwrap() = profiles();
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();
@@ -176,7 +176,7 @@ async fn profile_limits_are_atomic_and_failure_does_not_poison_appearance() {
 async fn cancelled_profile_read_retains_client_and_shutdown_releases_allocations() {
     let (service, path) = fixture();
     *service.state.shell_profiles.write().unwrap() = profiles();
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();
@@ -221,7 +221,7 @@ async fn cancelled_profile_read_retains_client_and_shutdown_releases_allocations
 #[tokio::test]
 async fn malformed_profile_json_is_charged_and_rejected() {
     let (service, path) = fixture();
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();
@@ -244,7 +244,7 @@ async fn malformed_profile_json_is_charged_and_rejected() {
 #[tokio::test]
 async fn backend_version_is_owner_bound_coalesced_and_independent_of_settings() {
     let (service, path) = fixture();
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();
@@ -275,7 +275,7 @@ async fn backend_version_is_owner_bound_coalesced_and_independent_of_settings() 
 #[tokio::test]
 async fn notification_settings_read_is_owned_coalesced_and_refreshes_independently() {
     let (service, path) = fixture();
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();

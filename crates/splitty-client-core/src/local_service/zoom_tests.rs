@@ -170,7 +170,7 @@ async fn scripted_tail(
         }
         peer.finish().await.unwrap();
     });
-    let client = Connector::default().local(&info).await.unwrap();
+    let client = Connector::isolated().local(&info).await.unwrap();
     (client.into(), task, dir)
 }
 async fn next(client: &mut LocalServiceClient) -> LocalServiceUpdate {
@@ -492,7 +492,7 @@ async fn rejected_and_malformed_write_replies_are_distinct() {
 async fn capacity_owner_saturation_and_pending_cancel_are_bounded() {
     let (service, path) = crate::appearance::local::tests::fixture();
     service.state.config.write().unwrap().appearance.zoom = 3.0;
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();

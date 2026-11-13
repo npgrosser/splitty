@@ -155,7 +155,7 @@ fn fixed_and_automatic_theme_names_use_only_local_preference() {
 #[tokio::test]
 async fn reads_keep_allocations_charged_and_session_events_separate() {
     let (service, path) = fixture();
-    let connector = Connector::default();
+    let connector = Connector::isolated();
     let session = connector
         .embedded(service.state.clone(), Role::Main)
         .await
@@ -221,7 +221,7 @@ async fn reads_keep_allocations_charged_and_session_events_separate() {
 async fn cancelled_poll_retains_read_and_refresh_discards_superseded_generation() {
     let (service, path) = fixture();
     service.state.config.write().unwrap().drawer.sidebar_width = 260;
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();
@@ -247,7 +247,7 @@ async fn cancelled_poll_retains_read_and_refresh_discards_superseded_generation(
 #[tokio::test]
 async fn finish_cancels_pending_request_and_releases_the_owned_stream() {
     let (service, path) = fixture();
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();
@@ -322,7 +322,7 @@ async fn drawer_snapshot_restores_service_values_without_writing() {
         config.drawer.sidebar_width = 280;
         config.appearance.font_size = 19;
     }
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();
@@ -353,7 +353,7 @@ async fn drawer_snapshot_restores_service_values_without_writing() {
 async fn read_error_is_reported_once_and_explicit_refresh_recovers() {
     let (service, path) = fixture();
     service.state.config.write().unwrap().appearance.font_family = "x".repeat(4097);
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();
@@ -386,7 +386,7 @@ async fn read_error_is_reported_once_and_explicit_refresh_recovers() {
 async fn editor_reads_service_defaults_and_limits_without_writes() {
     use crate::settings::{SettingsField as F, SettingsValue as V};
     let (service, path) = fixture();
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();
@@ -440,7 +440,7 @@ async fn editor_reads_service_defaults_and_limits_without_writes() {
 async fn terminal_palette_names_pass_through_unresolved() {
     let (service, path) = fixture();
     service.state.config.write().unwrap().terminal.theme = "splitty-light".into();
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();
@@ -483,7 +483,7 @@ async fn terminal_palette_names_pass_through_unresolved() {
 #[tokio::test]
 async fn superseded_read_does_not_replace_current_palette_name() {
     let (service, path) = fixture();
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(service.state.clone(), Role::Main)
         .await
         .unwrap();

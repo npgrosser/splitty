@@ -59,7 +59,7 @@ async fn library_save_load_overwrite_delete_uses_reviewed_content_and_fair_setti
         .template_store
         .save("source", &template())
         .unwrap();
-    let api = Connector::default()
+    let api = Connector::isolated()
         .embedded(runtime.state.clone(), Role::Main)
         .await
         .unwrap();
