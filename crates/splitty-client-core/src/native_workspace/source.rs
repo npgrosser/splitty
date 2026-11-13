@@ -1346,10 +1346,20 @@ impl SourceRuntime {
         if delta.coherent_refresh {
             // Geometry belongs to the new route generation. The UI
             // must measure/report again, even when its grid is equal.
-            self.desired_visible.clear();
             self.sizes.clear();
             self.pending_resize.clear();
-            self.pending_hide.extend(self.attached.iter().cloned());
+            // A shown pane that keeps its session keeps this connection's
+            // size report until the window's next visibility says otherwise:
+            // a host refreshes for every title change of a program, and a
+            // `hide` here would hand the PTY to another connection's size
+            // and back. Panes no longer displayed are hidden by `reconcile`;
+            // a pane whose route changed hides the session it showed.
+            for route in &delta.removed {
+                if self.visible.remove(&route.pane_id) {
+                    self.pending_hide.insert(route.session_id.clone());
+                }
+                self.desired_visible.remove(&route.pane_id);
+            }
         }
         if let Some(result) = delta.template {
             out.push(Update::TemplateApply(result));
@@ -2158,6 +2168,244 @@ mod tests {
         source.client.finish().await.unwrap();
         service.close().await.unwrap();
         let _ = std::fs::remove_dir_all(path);
+    }
+
+    /// [`pump_until`], reporting `pane` (its id and size) as shown again
+    /// after every route refresh, as the window measures its panes then.
+    #[allow(clippy::too_many_arguments)]
+    async fn pump_reporting(
+        source: &mut SourceRuntime,
+        window: &mut WindowWorkspace,
+        output: &mut HashMap<String, Vec<u8>>,
+        id: SourceId,
+        screen: &ScreenKey,
+        pane: (&str, u16, u16),
+        what: &str,
+        mut done: impl FnMut(&SourceRuntime, &WindowWorkspace, &HashMap<String, Vec<u8>>) -> bool,
+    ) {
+        let mut reported = window.source(id).unwrap().route_generation();
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            loop {
+                source.reconcile(window).unwrap();
+                if done(source, window, output) {
+                    break;
+                }
+                let event = source.client.next_event().await.unwrap().unwrap();
+                if let Some(chunk) = event.output() {
+                    output
+                        .entry(chunk.session_id.to_owned())
+                        .or_default()
+                        .extend_from_slice(chunk.bytes);
+                }
+                source.event(window, Box::new(event)).unwrap();
+                let generation = window.source(id).unwrap().route_generation();
+                if generation != reported && !source.observation_pending(window) {
+                    // The worker acts on the refresh before the window's
+                    // measurement of the new routes reaches it.
+                    source.reconcile(window).unwrap();
+                    report_layout(source, window, id, screen, &[pane]);
+                    reported = generation;
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("timed out waiting for {what}"));
+    }
+
+    /// A program's title change makes the host publish the pane's metadata,
+    /// and the host source refreshes its routes for it while nobody touches
+    /// the window. With `other_viewer`, a second connection shows the session
+    /// at another size and is idle, so the PTY follows this window's report
+    /// only as long as the window keeps it.
+    async fn host_metadata_refresh_leaves_pane_sizes_alone(other_viewer: bool) {
+        if !splitty_core::pty::testing::pty_available() {
+            return;
+        }
+        let (runtime, path) = crate::appearance::local::tests::fixture();
+        let host = runtime.state.clone();
+        let service = crate::EmbeddedService::from_runtime(runtime);
+        let client = service.connect().await.unwrap();
+        let initial = client.create_screen("Screen 1").unwrap();
+        let mut window = WindowWorkspace::new(uuid::Uuid::new_v4());
+        window
+            .ui_test_screen_order_fixture(&[(&initial.screen_id, "Local")], None)
+            .unwrap();
+        let id = window
+            .admit_remote(window.lifecycle_token(), "metadata.test")
+            .unwrap();
+        window.test_bind_remote_client(id, &client);
+        let token = window.source(id).unwrap().source_token();
+        window.confirm_ready(token).unwrap();
+        let target = window.host(id).unwrap().action_target().clone();
+        let mut source = SourceRuntime::new(client, token);
+        let mut output = HashMap::new();
+        pump_until(
+            &mut source,
+            &mut window,
+            &mut output,
+            "the host catalog",
+            |source, window, _| {
+                window
+                    .source(id)
+                    .unwrap()
+                    .live_catalog()
+                    .is_some_and(|catalog| !catalog.is_empty())
+                    && !source.observation_pending(window)
+            },
+        )
+        .await;
+        window.host_mut(&target).unwrap().catalog = crate::workspace::CatalogState::Ready;
+        let screen = window.source(id).unwrap().screen_key(&initial.screen_id);
+        window.open_existing(token, &screen).unwrap();
+        if window.shown_key().as_ref() != Some(&screen) {
+            window.select(window.lifecycle_token(), &screen).unwrap();
+        }
+        let pane = initial.pane_id.clone();
+        pump_until(
+            &mut source,
+            &mut window,
+            &mut output,
+            "the pane",
+            |source, window, _| {
+                let model = window.source(id).unwrap();
+                model.routes().len() == 1
+                    && source.attached.contains(&model.routes()[0].session_id)
+                    && !source.observation_pending(window)
+            },
+        )
+        .await;
+        let session = window.source(id).unwrap().routes()[0].session_id.clone();
+        report_layout(&mut source, &mut window, id, &screen, &[(&pane, 50, 30)]);
+
+        let mut other = None;
+        if other_viewer {
+            let mut viewer = service.connect().await.unwrap();
+            viewer.attach(&session).unwrap();
+            let mut sizes = 0;
+            tokio::time::timeout(std::time::Duration::from_secs(15), async {
+                while sizes < 2 {
+                    let event = viewer.next_event().await.unwrap().unwrap();
+                    match event.json().and_then(|json| json["type"].as_str()) {
+                        Some("attached") => {
+                            viewer.resize(&session, 60, 20, false).unwrap();
+                            viewer.idle().unwrap();
+                            // Answered once the idle before it counts.
+                            viewer.resize(&session, 60, 20, false).unwrap();
+                        }
+                        Some("size") => sizes += 1,
+                        _ => {}
+                    }
+                }
+            })
+            .await
+            .expect("the other viewer's size");
+            other = Some(viewer);
+        }
+
+        // A program that prints each SIGWINCH it gets, then each input line.
+        let watcher = br#"exec sh -c 'trap "printf \"W%sH_%s\\n\" INC \"\$(stty size)\"" WINCH; printf "RE%sY\\n" AD; while :; do read -r line && printf "GOT_%s\\n" "$line"; done'"#;
+        let input = |bytes: Vec<u8>| {
+            Command::new(
+                token,
+                CommandKind::Input {
+                    route: TerminalToken::new(token, &pane, &session),
+                    bytes,
+                },
+            )
+        };
+        source
+            .command(&mut window, input([&watcher[..], b"\n"].concat()))
+            .unwrap();
+        let seen = |needle: &'static [u8]| {
+            let session = session.clone();
+            move |_: &SourceRuntime, _: &WindowWorkspace, output: &HashMap<String, Vec<u8>>| {
+                output
+                    .get(&session)
+                    .is_some_and(|bytes| contains(bytes, needle))
+            }
+        };
+        pump_reporting(
+            &mut source,
+            &mut window,
+            &mut output,
+            id,
+            &screen,
+            (&pane, 50, 30),
+            "the watcher",
+            seen(b"READY"),
+        )
+        .await;
+        output.remove(&session);
+        let before = window.source(id).unwrap().route_generation();
+
+        // What the host's pane observer does when the program changes the
+        // terminal title, as such programs do in bursts while they wait.
+        for title in ["Working", "Working.", "Working.."] {
+            host.mux_store
+                .dispatch(splitty_core::mux::Op::UpdateSessionMetadata {
+                    session_id: session.as_str().into(),
+                    display_title: title.into(),
+                    cwd: String::new(),
+                    busy: true,
+                    exited: false,
+                    exit_code: None,
+                    close: false,
+                })
+                .unwrap();
+            host.client_state
+                .notify_tx
+                .send(&splitty_core::protocol::ServerEvent::mux_nudge(
+                    "session_metadata".into(),
+                    Some(initial.screen_id.clone()),
+                ));
+        }
+        pump_reporting(
+            &mut source,
+            &mut window,
+            &mut output,
+            id,
+            &screen,
+            (&pane, 50, 30),
+            "the title's refresh",
+            |source, window, _| {
+                window.source(id).unwrap().route_generation() > before
+                    && !source.observation_pending(window)
+            },
+        )
+        .await;
+        source
+            .command(&mut window, input(b"PING\n".to_vec()))
+            .unwrap();
+        pump_reporting(
+            &mut source,
+            &mut window,
+            &mut output,
+            id,
+            &screen,
+            (&pane, 50, 30),
+            "the next line",
+            seen(b"GOT_PING"),
+        )
+        .await;
+        let seen = String::from_utf8_lossy(&output[&session]).into_owned();
+        assert!(
+            !seen.contains("WINCH_"),
+            "a refresh for a title change resized the PTY: {seen:?}"
+        );
+        drop(other);
+        source.client.finish().await.unwrap();
+        service.close().await.unwrap();
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    #[tokio::test]
+    async fn host_metadata_refresh_leaves_a_pane_of_unchanged_size_alone() {
+        host_metadata_refresh_leaves_pane_sizes_alone(false).await;
+    }
+
+    #[tokio::test]
+    async fn host_metadata_refresh_keeps_the_size_report_of_a_shown_pane() {
+        host_metadata_refresh_leaves_pane_sizes_alone(true).await;
     }
 
     #[tokio::test]

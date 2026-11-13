@@ -327,8 +327,12 @@ dimensions. Connection or session replacement revokes the old executable view.
 The worker reports a session only at a size its view measured in the current
 route generation, never a placeholder, and sets `redraw` only on the first
 report after an attach. A host source refreshes its routes after every layout
-operation, so its views report again at unchanged sizes; those reports leave
-the PTY, and the programs in it, alone.
+operation and every metadata nudge (a program's title, working directory or
+foreground process changed), so its views report again at unchanged sizes;
+those reports leave the PTY, and the programs in it, alone. A refresh does not
+`hide` a shown pane that keeps its session: the connection's last report stands
+until the window's visibility for the new routes arrives, so another connection
+showing the session at a different size never gets the PTY in between.
 
 The native Drawer is a view of that ordered catalog, not a second workspace
 store. Relative Screen commands resolve the latest local selection on the
