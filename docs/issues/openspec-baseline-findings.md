@@ -590,6 +590,11 @@ that area touches them.
   production connectors keep the process-wide limits. No permit outlived its test. Still seen afterwards, in 3 of
   10 full runs: `worker_maximize_filters_stale_visibility_and_size_reports_without_losing_output` (same assertion)
   and once `pending_failed_hub_read_does_not_block_settings_or_terminal_output` (deadline); not investigated.
+  Seen again on 2026-11-14 in the static release build: both in one of 12 runs of the crate's unit tests, and
+  `workspace::catalog::tests::service::maximized_projection_withdraws_only_hidden_size_claim_and_restores_measured_size`
+  once in three workspace runs (no event within the 10 s of `Window::next`). Not investigated; one candidate is
+  that the maximize tests let two clients claim a terminal's size without fixing the order in which the service
+  reads them.
 - **Fixed (2026-11-12): `splitty-remote`'s SSH option tests depended on the environment.** `askpass_program()` in
   `crates/splitty-remote/src/ssh.rs` falls back to `SPLITTY_ASKPASS_PROGRAM`, which the desktop app sets for the
   processes it starts, its terminal panes included; run from such a pane, four tests saw `BatchMode=no` and failed.
