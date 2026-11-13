@@ -18,7 +18,6 @@ use axum::{
 use serde_json::{json, Value};
 
 use super::AppState;
-use crate::embed::FrontendAssets;
 use crate::hub::Hub;
 use crate::service::operations::{self, MuxOpRequest, SessionSendRequest};
 use crate::service::review;
@@ -788,10 +787,9 @@ pub async fn serve_frontend(
 
     // Serve non-index static assets by exact path
     if !path.is_empty() && path != "index.html" {
-        if let Some(file) = FrontendAssets::get(path) {
-            let mime = mime_guess::from_path(path).first_or_octet_stream();
+        if let Some(file) = crate::embed::asset(path) {
             let mut response = (StatusCode::OK, file.data.into_owned()).into_response();
-            apply_headers(&mut response, mime.as_ref(), &headers);
+            apply_headers(&mut response, &file.content_type, &headers);
             return response;
         }
     }

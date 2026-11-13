@@ -132,8 +132,11 @@ cargo build --locked --release -p splitty-gpui
 The script also accepts `--prefix` with an absolute path. An existing prefix
 that is not a matching bootstrap build is rejected; choose a new prefix.
 The GPUI build verifies the installed 1.0.0 headers and static archive before
-linking. On Linux and macOS the app links the server, which embeds
-`frontend/dist`: build the frontend first.
+linking. On Linux and macOS the app links the server without the web frontend
+(client-core turns off the server's default `web-assets` feature), so
+`cargo build -p splitty-gpui` needs no `frontend/dist`. Cargo unifies features
+per build: built together with `splitty-server` or the whole workspace, the
+server embeds the frontend for both, and `frontend/dist` must exist.
 
 ### Browser UI
 
@@ -162,8 +165,9 @@ release does; the Windows executable is built without them, because it reaches
 hosts through its WSL backend.
 
 Every build needs the pinned terminal library
-([above](#native-terminal-library-for-gpui)); the Linux and macOS builds need
-`frontend/dist`.
+([above](#native-terminal-library-for-gpui)). The app alone needs no
+`frontend/dist`; the `splitty` command (`splitty-server` with its default
+`web-assets` feature) embeds it and needs the frontend built first.
 
 ### Linux
 

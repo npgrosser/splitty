@@ -13,6 +13,13 @@ path = "src/lib.rs"
 name = "splitty"
 path = "src/main.rs"
 
+[features]
+default = ["web-assets"]
+# Embeds frontend/dist, which `splitty serve` and the browser gateways serve.
+# The native client links the server without it and builds without the
+# frontend; Cargo turns it on again when one build also selects this crate.
+web-assets = ["dep:rust-embed", "dep:mime_guess"]
+
 [dependencies]
 splitty-core = { path = "../splitty-core" }
 splitty-transport = { path = "../splitty-transport" }
@@ -45,8 +52,8 @@ http = "1"
 hyper = { version = "1", features = ["server", "client", "http1"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 tower = { version = "0.5", features = ["util"] }
-rust-embed = { version = "8", features = ["interpolate-folder-path"] }
-mime_guess = "2"
+rust-embed = { version = "8", features = ["interpolate-folder-path"], optional = true }
+mime_guess = { version = "2", optional = true }
 open = "5"
 # `splitty download` of a folder: deflate only, through flate2's pure-Rust
 # backend (already in the tree), and the archive's own directory.

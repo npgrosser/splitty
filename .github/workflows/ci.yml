@@ -217,7 +217,8 @@ jobs:
           prefix=$(python3 scripts/bootstrap-libghostty-vt.py --check)
           echo "GHOSTTY_VT_DIR=$prefix" >> "$GITHUB_ENV"
 
-      # The app links the server, which embeds frontend/dist.
+      # The splitty command built beside the app embeds frontend/dist (and,
+      # built in the same cargo invocation, so does the app's server).
       - name: Build frontend
         working-directory: frontend
         run: pnpm install --frozen-lockfile && pnpm build

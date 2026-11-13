@@ -136,21 +136,6 @@ jobs:
           sha256sum -c splitty-wsl-x86_64.tar.gz.sha256 splitty-wsl-aarch64.tar.gz.sha256
           splitty-darwin-aarch64.tar.gz.sha256 splitty-darwin-x86_64.tar.gz.sha256
 
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
-        with:
-          version: 11
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
-
-      # The server linked into the native app embeds the frontend's assets.
-      - name: Build frontend
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile && pnpm build
-
       # rpmbuild packs the rpm; the rest is what the native app builds
       # against (docs/gpui-spike.md).
       - name: Install rpm tooling and native app build libraries
@@ -186,8 +171,9 @@ jobs:
           tar -xzf payloads/splitty-wsl-x86_64.tar.gz -C payloads/x86_64
           payloads/x86_64/splitty --version
 
-      # One executable with the server linked in; it carries the servers for
-      # remote hosts named by SPLITTY_REMOTE_PAYLOAD_*.
+      # One executable with the server linked in, without the web frontend
+      # (no frontend/dist needed); it carries the servers for remote hosts
+      # named by SPLITTY_REMOTE_PAYLOAD_*.
       - name: Build native app
         env:
           SPLITTY_COMMIT: ${{ github.sha }}
@@ -278,16 +264,6 @@ jobs:
           tar -xzf splitty-${{ matrix.server }}.tar.gz -C ${{ matrix.server }}
           ${{ matrix.server }}/splitty --version
 
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
-        with:
-          version: 11
-
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: frontend/pnpm-lock.yaml
-
       - uses: dtolnay/rust-toolchain@89b12181fb390509a0842a86cc55eeb8eb928c1d # stable
         with:
           toolchain: stable
@@ -299,11 +275,6 @@ jobs:
           key: release-macos-${{ matrix.arch }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
 
-      # The server linked into the native app embeds the frontend's assets.
-      - name: Build frontend
-        working-directory: frontend
-        run: pnpm install --frozen-lockfile && pnpm build
-
       - name: Build pinned native terminal library
         run: |
           prefix=$(python3 scripts/bootstrap-libghostty-vt.py --check --prefix "$RUNNER_TEMP/splitty-ghostty-vt")
@@ -311,7 +282,7 @@ jobs:
 
       # For this runner's architecture: the terminal library is built for
       # the host. It carries the servers for remote hosts named
-      # by SPLITTY_REMOTE_PAYLOAD_*.
+      # by SPLITTY_REMOTE_PAYLOAD_*; it embeds no web frontend.
       - name: Build native app
         env:
           SPLITTY_COMMIT: ${{ github.sha }}

@@ -1,16 +1,45 @@
-//! Embeds the compiled frontend SPA assets using `rust_embed` and provides
-//! `themed_index_html()` which injects the resolved Splitty theme colors into
-//! the `index.html` placeholders before serving.
+//! The compiled frontend SPA assets, embedded with `rust_embed` when the
+//! `web-assets` feature is on (the default), and `themed_index_html()`, which
+//! injects the resolved Splitty theme colors into the `index.html`
+//! placeholders before serving. Without the feature there are no assets and
+//! every page request finds none, as with an empty `frontend/dist`.
 
-use rust_embed::Embed;
+use std::borrow::Cow;
 
-#[derive(Embed)]
+#[cfg(feature = "web-assets")]
+#[derive(rust_embed::Embed)]
 #[folder = "../../frontend/dist"]
-pub struct FrontendAssets;
+struct FrontendAssets;
+
+/// A file of the frontend build.
+pub struct Asset {
+    pub data: Cow<'static, [u8]>,
+    pub content_type: String,
+}
+
+/// The file at `path` of the frontend build, if it was embedded.
+#[cfg(feature = "web-assets")]
+pub fn asset(path: &str) -> Option<Asset> {
+    let file = FrontendAssets::get(path)?;
+    let content_type = mime_guess::from_path(path)
+        .first_or_octet_stream()
+        .to_string();
+    Some(Asset {
+        data: file.data,
+        content_type,
+    })
+}
+
+/// The file at `path` of the frontend build: none, since this build embeds
+/// no frontend.
+#[cfg(not(feature = "web-assets"))]
+pub fn asset(_path: &str) -> Option<Asset> {
+    None
+}
 
 /// Returns index.html with Splitty theme colors injected.
 pub fn themed_index_html() -> Option<Vec<u8>> {
-    let file = FrontendAssets::get("index.html")?;
+    let file = asset("index.html")?;
     let html = String::from_utf8_lossy(&file.data);
 
     let config = splitty_core::config::load();

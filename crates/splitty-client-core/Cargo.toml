@@ -23,8 +23,9 @@ base64 = "0.22"
 dirs = "6"
 url = "2.5.8"
 
+# The embedded service on Linux and macOS; without the web frontend it serves.
 [target.'cfg(not(target_os = "windows"))'.dependencies]
-splitty-server = { path = "../splitty-server" }
+splitty-server = { path = "../splitty-server", default-features = false }
 
 [target.'cfg(not(target_os = "windows"))'.dev-dependencies]
 splitty-core = { path = "../splitty-core", features = ["testing"] }

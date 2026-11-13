@@ -271,8 +271,8 @@ vulnerabilities privately through
 
 ## Building from source
 
-You need Rust (stable), Node.js 24 with pnpm (the server embeds the assets
-built in `frontend/`), Python 3 and a C toolchain for the terminal library and,
+You need Rust (stable), Node.js 24 with pnpm (the `splitty` command embeds the
+assets built in `frontend/`; the desktop app alone does not), Python 3 and a C toolchain for the terminal library and,
 on Linux, the development packages listed in
 [Development](docs/development.md#the-native-app).
 

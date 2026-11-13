@@ -2,7 +2,7 @@
 //! Splitty terminal multiplexer.
 //!
 //! - [`control`] — local Unix-socket control channel for processes running in a pane.
-//! - [`embed`] — embeds the compiled frontend assets via `rust_embed` and injects theme colors.
+//! - [`embed`] — the compiled frontend assets (embedded with the `web-assets` feature) and their themed `index.html`.
 //! - [`host`] — what the binary does on a remote host for a client over SSH: the handshake and the bridge.
 //! - [`http`] — HTTP router, middleware (auth, CORS, localhost guard), reverse proxy, and REST API routes.
 //! - [`hub`] — the remote screen hub: `/ws/remote` relays a host daemon's WebSocket over SSH.

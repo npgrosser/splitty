@@ -17,9 +17,10 @@ checkout and confirm its reported root. Build prerequisites and platform setup
 are in [development](development.md#running-from-source) and the
 [GPUI runbook](gpui-spike.md#build-and-run).
 
-A new checkout needs generated frontend assets even for client-core tests,
-because the embedded service includes the server's asset embed. Prepare them
-before Rust compilation:
+Client-core and the native app build without the frontend: they link the server
+without its `web-assets` feature. The workspace tests (`cargo test --workspace`)
+also build `splitty-server` itself, which embeds `frontend/dist`, and the
+architecture check needs LikeC4. Prepare both before Rust compilation:
 
 ```sh
 pnpm install --dir frontend

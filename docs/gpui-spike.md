@@ -59,8 +59,10 @@ export LIBRARY_PATH="$deps/prefix/usr/lib/x86_64-linux-gnu${LIBRARY_PATH:+:$LIBR
 export LD_LIBRARY_PATH="$deps/prefix/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 ```
 
-On a clean checkout, first build the existing frontend assets as described in
-[development](development.md); the reused service crate still embeds them:
+The app builds without the frontend: client-core links the service crate without
+its `web-assets` feature. A build that also selects `splitty-server` (the
+`splitty` command, the workspace) embeds them; build them first as described in
+[development](development.md):
 
 ```sh
 pnpm --dir frontend install --frozen-lockfile
@@ -392,7 +394,7 @@ Appearance font size and family apply to workspace chrome, matching the web
 client. Empty/zero overrides use resolved UI theme defaults. The supported size
 range is 8–24 px; a CSS font list selects an available concrete family or a native
 UI generic. Terminal typography uses the web client's bundled terminal font
-(JetBrainsMono Nerd Font Mono, read from the embedded frontend assets) at a
+(JetBrainsMono Nerd Font Mono, compiled in from `frontend/public`) at a
 14 px baseline, with rows as tall as the font's ascent and descent; see
 [web look alignment](#macos-preview-and-web-look-alignment-2026-11-09). A
 proportional UI font therefore does not alter terminal cells. Display zoom
