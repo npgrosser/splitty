@@ -40,9 +40,10 @@ Splitty does **not** defend against:
 The [connection diagrams](docs/networking.md) show the runtime paths, listeners
 and lifetime boundaries summarized here.
 
-- Desktop-local connections use in-process IPC or app-owned child pipes. They
-  start no UI TCP listener, read no browser credential, and never adopt an
-  independently started daemon or its keeper sessions.
+- The app's local connections use in-process channels (Linux, macOS) or the
+  pipes of its own `wsl.exe` child (Windows). They start no UI TCP listener,
+  read no browser credential, and never adopt an independently started daemon
+  or its keeper sessions.
 - Explicit daemons accept UI clients on a private owner-only Unix socket.
   Endpoint paths reject symlinks, stale cleanup checks identity, and both ends
   verify peer ownership (`crates/splitty-server/src/native/endpoint.rs`).
@@ -110,9 +111,9 @@ Implementation and regressions: `crates/splitty-server/src/host/migration.rs`,
 
 ## Credentials
 
-These credentials belong to the explicit browser gateway. Packaged desktop
-windows use native-assigned document proofs and backend handles instead;
-remote hosts supply data, never executable UI.
+These credentials belong to the explicit browser gateway. The app uses none of
+them; the Tauri shell's packaged pages use native-assigned document proofs and
+backend handles instead. Remote hosts supply data, never executable UI.
 
 | Credential | Held by | Lifetime | Readable by page script |
 |---|---|---|---|
@@ -155,14 +156,29 @@ isolation.
   `app_document_carries_baseline_security_headers`,
   `static_assets_carry_the_security_headers`).
 
-## Desktop shell
+## Desktop app
 
-Splitty never renders foreign web content. The Tauri shell around the web
-frontend decides every navigation and every new-window request natively,
-whatever code in the page asked for it: exact packaged entries and
-parent-owned popouts stay in Splitty,
-other `http(s)` URLs open in the system browser, and every other scheme
-(`file:`, `javascript:`, OS protocol handlers) is dropped.
+The app draws its own interface and runs no browser engine: there is no page
+script, and nothing a host or a program in a pane sends is run as UI code.
+
+- **Viewer panes** render Markdown and HTML as text and layout only: no
+  scripts, nothing loaded, and their links open nothing
+  (`crates/splitty-gpui/src/workspace/viewer.rs`).
+- **Links in terminals** open only as bounded absolute `http(s)` URLs, and only
+  on a click; every other scheme is dropped
+  (`crates/splitty-client-core/src/external_links.rs`, with unit tests).
+- **Editor and folder hand-offs** that a process in a pane requests open only
+  after **Open** in the window's notice; preferences choose an editor but never
+  allow a launch (`crates/splitty-client-core/src/native_workspace/editors.rs`).
+
+### Tauri shell (from source)
+
+The Tauri shell around the web frontend, which is not released, never renders
+foreign web content. It decides every navigation and every new-window request
+natively, whatever code in the page asked for it: exact packaged entries and
+parent-owned popouts stay in Splitty, other `http(s)` URLs open in the system
+browser, and every other scheme (`file:`, `javascript:`, OS protocol handlers)
+is dropped.
 
 - **Tauri** (`crates/splitty-tauri/src/navigation.rs`, with unit tests). Custom
   commands are declared in an app manifest and granted to packaged main and
@@ -180,8 +196,8 @@ other `http(s)` URLs open in the system browser, and every other scheme
   parsing. Shutdown cancels and reaps only owned commands and the app's helper,
   never the distribution or unrelated WSL work.
 
-Native byte and admission limits include retained application buffers and
-encoded IPC output. Tauri output owns its source chunk and encoding reservations
+In the Tauri shell, native byte and admission limits include retained
+application buffers and encoded IPC output. Tauri output owns its source chunk and encoding reservations
 until evaluation completion or callback destruction; renderer consumption is a
 separate credit. A document check prevents stale output entering a replacement
 page. Closed renderer connections retain their slots until pending invokes settle.
@@ -193,29 +209,27 @@ storage before validation. Native role checks still restrict its authority, but
 separate remote windows do not guarantee availability of other windows sharing
 the desktop process. This does not relax frame/body limits, transport accounting
 or connection/worker admission. Actual platform isolation and resource checks
-are tracked separately from unit coverage. Linux full UI checks cover assets, binary terminal traffic,
-heartbeat, independent daemon lifetime and absence of app/WebKit TCP listeners.
-Full UI runs also exercise the revised output carrier and parent-owned popout
-cleanup on macOS and Windows/WSL, including WSL with localhost forwarding
-disabled. Fresh Windows sibling/slow-consumer checks also pass the strict
-app/SSH listener inventory, admission recovery and owned-process cleanup. Linux
-Main/two-Remote isolation and receipt-pressure checks pass with zero final
-resource counters; the integrated macOS fixtures now pass these checks too.
-The macOS core acceptance checks now pass after separate Bash startup and PTY
-test corrections. The framework limitation above is an explicit boundary of the
-memory contract. One platform's result does not
-establish another's behavior. The [verification record](openspec/changes/native-client-transports/verification.md)
-distinguishes these current runs from excluded historical evidence.
+of the shell on Linux, macOS and Windows/WSL are tracked separately from unit
+coverage; one platform's result does not establish another's behavior. The
+[verification record](openspec/changes/native-client-transports/verification.md)
+lists which runs passed.
 
 ## Terminal output
 
 - **Clipboard (OSC 52).** Reads are always denied; writes are off unless
-  `terminal.allowOsc52Write` is enabled; payloads over 64 KiB are dropped
-  (`frontend/src/lib/terminal/clipboard_policy.test.ts`).
-- **Links** are scheme-checked in the UI (`openExternalTarget`) and enforced again
-  by the Tauri shell, because a renderer library can bypass the UI.
+  `terminal.allowOsc52Write` is enabled; payloads over 64 KiB are dropped. In
+  the app: `crates/splitty-gpui/src/terminal_engine.rs` (tests
+  `clipboard_writes_are_refused_until_allowed_and_reads_always`,
+  `clipboard_writes_are_bounded_valid_live_and_for_the_standard_clipboard`);
+  in the browser UI: `frontend/src/lib/terminal/clipboard_policy.test.ts`.
+- **Links** are scheme-checked: in the app by
+  `crates/splitty-client-core/src/external_links.rs`; in the browser UI by
+  `openExternalTarget`, and again by the Tauri shell, because a renderer
+  library can bypass the UI.
 - **Templates** that carry commands show them and need confirmation before
-  anything runs (`frontend/src/lib/template_guard.test.ts`).
+  anything runs: in the app **Run displayed commands**
+  (`crates/splitty-gpui/src/workspace/templates.rs`), in the browser UI
+  `frontend/src/lib/template_guard.test.ts`.
 
 ## Local files and the control socket
 
@@ -280,11 +294,11 @@ See [managed terminal jobs](docs/cli-jobs.md) for setup and lifetime semantics.
 
 - Processes of your own user are not isolated from Splitty (see the threat
   model).
-- `style-src` allows `'unsafe-inline'`, because xterm.js and dockview inject
-  style elements at runtime. There is no HTML injection point, and scripts stay
+- In the browser UI, `style-src` allows `'unsafe-inline'`, because xterm.js and
+  dockview inject style elements at runtime. There is no HTML injection point, and scripts stay
   restricted to `'self'`.
 - A token passed with `--token` is visible in the process list; prefer the
   token file.
 - `splitty serve --open` hands the bootstrap URL to the system's URL opener, so
   it briefly appears in that process's arguments. On a machine shared with
-  other users, use the desktop app instead.
+  other users, use the app instead.
