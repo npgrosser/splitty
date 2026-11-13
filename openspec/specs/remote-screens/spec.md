@@ -20,7 +20,7 @@ Before the relay the hub SHALL send only these application text messages:
 
 After `remote.ready`, the hub SHALL send no application message of its own; transport negotiation/liveness is outside this application stream. When the connection to the host ends, it SHALL close the WebSocket with code 4001 or the native stream with the equivalent host-lost reason. When the socket closes, it SHALL end its `ssh` process. Each socket SHALL use an SSH connection of its own. Once `remote.ready` is sent, the server SHALL record the target as a recent host (see `remote-hosts`, Known Hosts).
 
-The ready message SHALL include `update: {available, keepsSessions}`. Every hub error SHALL include `retryable`; the client SHALL use this classification when present and retain legacy classification only for older hubs. After readiness the hub SHALL validate and persist the handshake directory without interpreting relayed frames. Invalid or unwritable cache data SHALL not fail an otherwise usable connection.
+The ready message SHALL include `update: {available, keepsSessions, toVersion?}`, the hub's update plan for the host (see Host Update); `toVersion` is the version the host's daemon gets and SHALL be present whenever `available` is true. Every hub error SHALL include `retryable`; the client SHALL use this classification when present and retain legacy classification only for older hubs. After readiness the hub SHALL validate and persist the handshake directory without interpreting relayed frames. Invalid or unwritable cache data SHALL not fail an otherwise usable connection.
 
 #### Scenario: Connect a host without Splitty
 - **WHEN** a client opens `/ws/remote?target=vm1` with a valid ticket and `vm1` has no Splitty
@@ -41,6 +41,10 @@ The ready message SHALL include `update: {available, keepsSessions}`. Every hub 
 #### Scenario: Ready from a daemon that keeps its sessions
 - **WHEN** a client opens `/ws/remote` for a host whose daemon keeps its sessions
 - **THEN** its `remote.ready` carries `keepsSessions` true in `daemon`
+
+#### Scenario: Ready from an older host that can be updated
+- **WHEN** a client opens `/ws/remote` for a host whose daemon keeps its sessions and runs an older version that the hub can replace
+- **THEN** its `remote.ready` carries `update` with `available` and `keepsSessions` true and `toVersion` the hub's own version
 
 #### Scenario: Authoritative retry classification
 - **WHEN** a reconnect fails and the hub reports `retryable: false`
@@ -133,9 +137,11 @@ When the user creates a screen on a host whose `remote.ready` lists screens that
 - **THEN** a new screen is created on that host, and its existing screens remain unchanged
 
 ### Requirement: Remembered Remote Screens
-The server SHALL keep the client's list of open remote screens in `remote-screens.json` in its configuration directory, written atomically with mode 0600. The file holds `{"version": 1, "screens": [{"target", "screenId", "name"?, "position"?}]}`, each target valid (see `access-control`, Remote Access Through SSH Tunnel), each (target, screenId) once. `GET /api/remote/screens` SHALL return the list, empty when the file is missing or unreadable. `PUT /api/remote/screens` SHALL replace it and SHALL reject a body that does not have that shape. Both routes have the authentication of the other `/api` routes and are not served on the control socket.
+The server SHALL keep the client's list of open remote screens in `remote-screens.json` in its configuration directory, written atomically with mode 0600. The file holds `{"version": 1, "screens": [{"target", "screenId", "name"?, "position"?, "closed"?}]}`, each target valid (see `access-control`, Remote Access Through SSH Tunnel), each (target, screenId) once; `closed` marks the screens of a host that was closed in a window, offered again but not reopened at start. `GET /api/remote/screens` SHALL return the list, empty when the file is missing or unreadable. `PUT /api/remote/screens` SHALL replace it and SHALL reject a body that does not have that shape; it remains for older clients. Both routes have the authentication of the other `/api` routes and are not served on the control socket.
 
-A client SHALL write the list after every change to its remote screens. On start, it SHALL restore the saved references and order, displayed within their host groups as described by Remote Screens In The Window. The saved position format SHALL remain compatible with existing mixed lists. It SHALL connect a remembered screen's host only when the screen becomes visible, when that host is connected anyway, or, once at the window's start, when the setting `remote.reconnectHosts` lists the host. A remembered screen that its host no longer has SHALL be shown as missing, with an action to remove it.
+`PUT /api/remote/screens/host` (native `remoteScreens.updateHost`) SHALL take `{"target", "screens": [{"screenId", "name"?, "position"?}], "closed"?}` and replace only that host's entries, in the place the host's first entry had in the list (a new host at the end), with `closed` on each entry when the body sets it. An empty `screens` SHALL forget the host. The hub SHALL apply the replacement to the list it holds under its own lock, so that writes for different hosts never undo each other, keep at most 200 entries, reject a body that does not have the shape without changing the list, and return the stored list. A local service supporting it SHALL announce `hub-host-state-v1` in `mux.welcome` on local main connections.
+
+A client SHALL write, after every change to its remote screens, the entries of each host whose screens it shows or showed, with `remoteScreens.updateHost`, and SHALL NOT replace the entries of other hosts. A host whose last screen leaves the window SHALL be forgotten, unless the window closed the host, which keeps its screens as `closed`. Without `hub-host-state-v1` a client SHALL NOT write the list; it still reads it and brings its screens back. On start, it SHALL restore the saved references and order, except `closed` entries, displayed within their host groups as described by Remote Screens In The Window. The saved position format SHALL remain compatible with existing mixed lists. It SHALL connect a remembered screen's host only when the screen becomes visible, when that host is connected anyway, or, once at the window's start, when the setting `remote.reconnectHosts` lists the host. A remembered screen that its host no longer has SHALL be shown as missing, with an action to remove it.
 
 #### Scenario: Restart
 - **WHEN** the window shows a remote screen of `vm1` and the app is restarted
@@ -148,6 +154,18 @@ A client SHALL write the list after every change to its remote screens. On start
 #### Scenario: Host reconnected at start
 - **WHEN** `remote.reconnectHosts` lists `vm1` but not `vm2`, and a window starts with remembered screens of both
 - **THEN** the window connects `vm1` at once and brings back its screens, while `vm2` stays unconnected until the user opens one of its screens
+
+#### Scenario: Two windows with different hosts
+- **WHEN** the native window shows screens of `vm1` and a web window shows screens of `vm2`, and each writes its screens
+- **THEN** the list holds the screens of both hosts, and a `closed` mark the native window wrote for `vm3` stays
+
+#### Scenario: A closed host is not reopened
+- **WHEN** the list holds `closed` screens of `vm1` and a window starts
+- **THEN** the window does not bring them back or connect `vm1` for them
+
+#### Scenario: Older local service
+- **WHEN** a client's local service does not announce `hub-host-state-v1`
+- **THEN** the client brings back the remembered screens and writes no change to the list
 
 ### Requirement: Screens On Hosts
 The client SHALL retain host groups for recently connected hosts even when they have no open screens and are disconnected. It SHALL show the last observed names and pane counts of unopened screens, marking disconnected observations as last seen rather than live. Expanding a disconnected host SHALL connect and refresh its directory without creating a screen. Opening an existing screen SHALL add a reference to it; it SHALL NOT recreate a screen missing on the host. The group SHALL also offer creation of a new screen. Reading the directory at startup SHALL NOT connect its hosts.
@@ -179,6 +197,8 @@ The intent SHALL apply to one connection attempt and be consumed before a potent
 
 The hub SHALL report ordinary update availability only when the daemon version has lower SemVer precedence than its own version, accepting one optional `v` prefix and ignoring build metadata. Unknown versions SHALL not imply an available update. Availability SHALL also require the verified instance, session preservation and matching prepared replacement required by the shared replacement plan. The window SHALL use this metadata, including the keeper behavior, rather than comparing versions itself. This metadata SHALL never bypass the replacement checks above.
 
+The `update` metadata in `remote.ready` and in an `incompatible` `remote.error` SHALL be the whole plan for an ordinary update: `available`, `keepsSessions`, and `toVersion` when available. An available update SHALL keep every session of the host, so it ends no screen and no pane; the connection drops for a moment. A window SHALL offer an ordinary update only when `available` and `keepsSessions` are both true, SHALL name `toVersion` as the version the host gets, and SHALL NOT count or name screens or panes that end. With a hub that sends no `toVersion` the window SHALL name its local server's version instead.
+
 #### Scenario: Update a compatible older host
 - **WHEN** a user confirms updating an older native daemon with keepers and a matching replacement
 - **THEN** the instance-bound update preserves keeper sessions and connects to the freshly verified replacement
@@ -198,6 +218,14 @@ The hub SHALL report ordinary update availability only when the daemon version h
 #### Scenario: Newer or unparseable host version
 - **WHEN** the daemon version is newer, equal in precedence, or unparseable
 - **THEN** update availability is false and the window offers no ordinary update
+
+#### Scenario: Confirming an update
+- **WHEN** the hub reports `update` with `available` and `keepsSessions` true and `toVersion` `0.4.0` for `vm1`
+- **THEN** the window asks to update `vm1` to `0.4.0`, says that its sessions keep running and names no screens or panes that end
+
+#### Scenario: Availability without kept sessions
+- **WHEN** a hub reports `available` true with `keepsSessions` false
+- **THEN** the window offers no ordinary update
 
 ### Requirement: Port Forwards Through The Hub
 The server SHALL offer forwards from a local port to a port of a host:
@@ -297,15 +325,19 @@ A local service that forwards automatically SHALL announce `hub-auto-forward-v1`
 - **THEN** no port is forwarded automatically, the setting stays editable, and the client sends no automatic request in its place
 
 ### Requirement: Host Screen Directory Cache
-The local server SHALL persist the last observed screen directory per host separately from the remembered open-screen list. `GET /api/remote/catalog` SHALL return `{version:1,hosts:[{target,lastSeen,screens:[{id,name?,panes}]}]}`. `PUT /api/remote/catalog` SHALL accept `{target,screens}`, replace only that host's directory and return its stored entry with `lastSeen` in Unix seconds. A successful empty list SHALL replace a previous nonempty one. These APIs SHALL neither connect nor send commands to a remote host.
+The local server SHALL persist the last observed screen directory per host separately from the remembered open-screen list. `GET /api/remote/catalog` SHALL return `{version:1,hosts:[{target,lastSeen,screens:[{id,name?,panes}]}]}`. `PUT /api/remote/catalog` SHALL accept `{target,screens}`, replace only that host's directory and return its stored entry with `lastSeen` in Unix seconds. A successful empty list SHALL replace a previous nonempty one. The catalog routes remain for older clients; current clients report through `hub.catalog.observe` and read `remote.directory.get`. These APIs SHALL neither connect nor send commands to a remote host.
 
 Hidden hosts SHALL be excluded from catalog reads. An update for a hidden host SHALL return 409 without storing its observation.
 
 The file `remote-catalog.json` SHALL be written atomically with mode 0600 in the private configuration directory. It SHALL keep at most 20 host entries, each with at most 200 screens. Targets SHALL be valid and canonical, screen ids unique per host with 1–256 characters, names at most 200 characters, and pane counts nonnegative integers. Invalid writes and unknown fields SHALL be rejected without modifying the saved directory. Missing or corrupt files SHALL read as empty. The endpoints SHALL require the ordinary API authentication and origin checks and SHALL NOT be exposed on the control socket.
 
-After successful host readiness the hub SHALL store the handshake screen directory through the same validation and hidden-host rules. A local client MAY report later directory observations using `hub.catalog.observe` with `{target,screens}`; admitted observations SHALL be processed in connection order and SHALL never connect a host. Persistence and invalidation SHALL be handled by the hub; legacy PUT remains available.
+After successful host readiness the hub SHALL store the handshake screen directory through the same validation and hidden-host rules. A local client MAY report later directory observations using `hub.catalog.observe` with `{target,screens}`; admitted observations SHALL be processed in connection order and SHALL never connect a host. Persistence and invalidation SHALL be handled by the hub; legacy PUT remains available and follows the same rule.
 
-While a host is connected, the native workspace SHALL report its stored directory without the screens that a valid live catalog of the current connection no longer lists, such as a screen terminated from the window once the host confirmed it, or one that closed with its last pane. A later connection to the host SHALL therefore not list such a screen while it is being established. A terminate the host has not confirmed or has refused, and a detached screen, SHALL leave the stored directory unchanged.
+An observation lists the host's screens as they are now. A hub announcing `hub-host-state-v1` SHALL accept a screen without `panes`: it SHALL keep the pane count it has stored for that screen, and SHALL leave a screen it has stored no count for out of the directory until an observation gives one. A client that knows pane counts SHALL send them.
+
+While a host is connected and its live catalog of the current connection is complete, the native workspace SHALL report that catalog, without pane counts, whenever it differs from the last report for the connection: new screens, renames and screens that left the host, such as a screen terminated from the window once the host confirmed it, or one that closed with its last pane. A later connection to the host SHALL therefore not list such a screen while it is being established. A terminate the host has not confirmed or has refused, and a detached screen, SHALL leave the stored directory unchanged. Without `hub-host-state-v1` the native workspace SHALL report nothing.
+
+A web window SHALL keep no host directory of its own: with a hub that does not announce `hub-host-decisions-v1` it shows no last observed screens and writes no catalog.
 
 #### Scenario: Host directories survive a local restart
 - **WHEN** directories for `vm1` and `vm2` are saved and `vm1` is updated
@@ -335,6 +367,14 @@ While a host is connected, the native workspace SHALL report its stored director
 - **WHEN** the native window terminates a screen on `vm1`, the host confirms it, and `vm1` later reconnects
 - **THEN** the host's last observed screens do not include it while the connection is being established
 - **AND** an unconfirmed or refused terminate and a detach leave the screen listed
+
+#### Scenario: Observation without pane counts
+- **WHEN** the hub has stored `s1` with three panes for `vm1` and an observation lists `s1` renamed and a new `s2`, both without `panes`
+- **THEN** the stored directory lists `s1` under its new name with three panes and does not list `s2` until an observation gives its pane count
+
+#### Scenario: Web window with an older hub
+- **WHEN** a web window's local server does not announce `hub-host-decisions-v1`
+- **THEN** the window shows no last observed screens and sends no catalog write
 
 ### Requirement: Screen Default Names Per Host
 A new screen SHALL get its default name `Screen N` from the server that holds it, using the smallest unused positive integer among that server's screens, so local screens and each remote host count independently and a host's screens the window does not show reserve their names. The window SHALL create a host's screen without a name when the host announces `screen-names-v1` (see `mux-protocol`, Server-Chosen Screen Names). Existing server, restored and user-selected names SHALL remain unchanged; names on another host SHALL NOT affect a host's choice.
